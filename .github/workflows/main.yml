@@ -1,0 +1,37 @@
+name: Run Cargo Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        feature-combination:
+          - "--features compacting,thread-safe"
+          - "--features simple-generation,thread-safe"
+          - "--features simple-mark-and-sweep,thread-safe"
+          - "--features compacting"
+          - "--features simple-generation"
+          - "--features simple-mark-and-sweep"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Run tests with features
+        run: cargo test ${{ matrix.feature-combination }}
