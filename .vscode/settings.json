@@ -1,0 +1,6 @@
+{
+    "liquid.format.enable": false,
+    "rust-analyzer.linkedProjects": [
+        "./asm/Cargo.toml"
+    ]
+}
