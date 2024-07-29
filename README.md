@@ -1,5 +1,7 @@
 # Beagle
 
+![Cargo Tests](https://github.com/jimmyhmiller/beagle/actions/workflows/main.yml/badge.svg)
+
 This is the very beginnings of a dynamically typed, functional programming language I am building. It aims to be a modern, fast, multithreaded, dynamically typed langauge, compiling straight to machine code on the fly rather than using a VM. Currently it is in a very Proof of Concept stage with many things not working. The things that do work, only work on macos arm64.
 
 Currently it has the following things, all at the very beginnings and chock full of bugs. But with some solid foundations to continue on.
@@ -38,3 +40,7 @@ This codebase originally existed [here](https://github.com/jimmyhmiller/PlayGrou
 * Decide if I want to support kabab-case
 * Continuations?
 * Make closures better
+* Floats
+* Decimals
+* Enums
+* Pattern Matching
