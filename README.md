@@ -38,5 +38,3 @@ This codebase originally existed [here](https://github.com/jimmyhmiller/PlayGrou
 * Decide if I want to support kabab-case
 * Continuations?
 * Make closures better
-* Make empty functions work
-* Add parenthesis for grouping

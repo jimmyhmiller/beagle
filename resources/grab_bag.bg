@@ -173,6 +173,10 @@ fn simpleFunctionWithLocals() {
     x + y
 }
 
+fn math_with_parens() {
+    (1 + 2) * 3
+}
+
 fn main() {
     println(simpleFunctionWithLocals())
     println(testGc(8))
@@ -184,6 +188,7 @@ fn main() {
     println(range(0, 10))
     println(a())
     println(b())
+    println(math_with_parens())
 }
 
 
@@ -237,4 +242,5 @@ fn main() {
 // Range { start: 0, end: 10 }
 // 42
 // 42
+// 9
 // null
