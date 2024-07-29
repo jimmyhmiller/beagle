@@ -545,6 +545,12 @@ impl Parser {
                 self.consume();
                 self.parse_atom(min_precedence)
             }
+            Token::OpenParen => {
+                self.consume();
+                let result = self.parse_expression(0);
+                self.expect_close_paren();
+                result
+            }
             _ => panic!(
                 "Expected atom {} at line {}",
                 self.get_token_repr(),
@@ -684,6 +690,7 @@ impl Parser {
     fn parse_block(&mut self) -> Vec<Ast> {
         self.expect_open_curly();
         let mut result = Vec::new();
+        self.skip_whitespace();
         while !self.at_end() && !self.is_close_curly() {
             if let Some(elem) = self.parse_expression(0) {
                 result.push(elem);
@@ -996,6 +1003,29 @@ fn test_parse2() {
         } else {
             print(\"Hello World!!!!\")
         }
+    }",
+    ));
+
+    let ast = parser.parse();
+    println!("{:#?}", ast);
+}
+
+#[test]
+fn test_parens() {
+    let mut parser = Parser::new(String::from(
+        "(2 + 2) * 3 - (2 * 4)",
+    ));
+
+    let ast = parser.parse();
+    println!("{:#?}", ast);
+}
+
+#[test]
+fn test_empty_function() {
+    let mut parser = Parser::new(String::from(
+        "
+    fn empty(n) {
+       
     }",
     ));
 
