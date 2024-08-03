@@ -370,9 +370,9 @@ impl<'a> AstCompiler<'a> {
 
                 let compiler_pointer_reg = self.ir.assign_new(self.compiler.get_compiler_ptr());
 
-                let allocate_struct = self.compiler.find_function("allocate_struct").unwrap();
-                let allocate_struct = self.compiler.get_function_pointer(allocate_struct).unwrap();
-                let allocate_struct = self.ir.assign_new(allocate_struct);
+                let allocate = self.compiler.find_function("allocate").unwrap();
+                let allocate = self.compiler.get_function_pointer(allocate).unwrap();
+                let allocate = self.ir.assign_new(allocate);
 
                 // Shift size left one so we can use it to mark
                 let size_reg = self.ir.assign_new(struct_type.size() + 1);
@@ -380,7 +380,7 @@ impl<'a> AstCompiler<'a> {
                 // TODO: I need store the struct type here, so I know things about what data is here.
 
                 let struct_ptr = self.ir.call_builtin(
-                    allocate_struct.into(),
+                    allocate.into(),
                     vec![compiler_pointer_reg.into(), size_reg.into(), stack_pointer],
                 );
 
@@ -402,7 +402,7 @@ impl<'a> AstCompiler<'a> {
                 }
 
                 self.ir
-                    .tag(struct_ptr.into(), BuiltInTypes::Struct.get_tag())
+                    .tag(struct_ptr.into(), BuiltInTypes::HeapObject.get_tag())
             }
             Ast::PropertyAccess { object, property } => {
                 let object = self.call_compile(object.as_ref());

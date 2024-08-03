@@ -1159,7 +1159,7 @@ fn parse_struct_style_enum() {
                 direction
                 speed
             },
-            stop { time, location}
+            stop { time, location }
         }
     };
     println!("{:#?}", ast);

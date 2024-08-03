@@ -125,7 +125,7 @@ pub unsafe extern "C" fn print_value<Alloc: Allocator>(
     0b111
 }
 
-extern "C" fn allocate_struct<Alloc: Allocator>(
+extern "C" fn allocate<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,
     value: usize,
     stack_pointer: usize,
@@ -134,7 +134,7 @@ extern "C" fn allocate_struct<Alloc: Allocator>(
     let runtime = unsafe { &mut *runtime };
 
     runtime
-        .allocate(value, stack_pointer, BuiltInTypes::Struct)
+        .allocate(value, stack_pointer, BuiltInTypes::HeapObject)
         .unwrap()
 }
 
@@ -403,8 +403,8 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         .compiler
         .add_builtin_function("print", print_value::<Alloc> as *const u8, false)?;
     runtime.compiler.add_builtin_function(
-        "allocate_struct",
-        allocate_struct::<Alloc> as *const u8,
+        "allocate",
+        allocate::<Alloc> as *const u8,
         true,
     )?;
     // TODO: Probably needs true

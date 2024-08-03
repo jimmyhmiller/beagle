@@ -33,11 +33,6 @@ pub struct Function {
     number_of_locals: usize,
 }
 
-#[derive(Debug)]
-struct HeapObject<'a> {
-    size: usize,
-    data: &'a [u8],
-}
 
 #[derive(Debug, Clone)]
 pub struct Struct {
@@ -181,6 +176,9 @@ pub enum AllocateAction {
 pub trait Allocator {
     fn new() -> Self;
 
+
+    // TODO: I probably want something like kind, but not actually kind
+    // I might need to allocate things differently based on type
     fn allocate(
         &mut self,
         bytes: usize,
@@ -636,7 +634,9 @@ impl Compiler {
                     Some(repr)
                 }
             }
-            BuiltInTypes::Struct => {
+            BuiltInTypes::HeapObject => {
+                // TODO: Once I change the setup for heap objects
+                // I need to figure out what kind of heap object I have
                 unsafe {
                     let value = BuiltInTypes::untag(value);
                     let pointer = value as *const u8;
@@ -653,31 +653,6 @@ impl Compiler {
                     let type_id = BuiltInTypes::untag(type_id);
                     let struct_value = self.structs.get_by_id(type_id as usize);
                     Some(self.get_struct_repr(struct_value?, data[8..].to_vec(), depth + 1)?)
-                }
-            }
-            BuiltInTypes::Array => {
-                unsafe {
-                    let value = BuiltInTypes::untag(value);
-                    let pointer = value as *const u8;
-                    // get first 8 bytes as size le encoded
-                    let size = *(pointer as *const usize) >> 1;
-                    let pointer = pointer.add(8);
-                    let data = std::slice::from_raw_parts(pointer, size);
-                    let heap_object = HeapObject { size, data };
-
-                    let mut repr = "[".to_string();
-                    for i in 0..heap_object.size {
-                        let value = &heap_object.data[i * 8..i * 8 + 8];
-                        let mut bytes = [0u8; 8];
-                        bytes.copy_from_slice(value);
-                        let value = usize::from_le_bytes(bytes);
-                        repr.push_str(&self.get_repr(value, depth + 1)?);
-                        if i != heap_object.size - 1 {
-                            repr.push_str(", ");
-                        }
-                    }
-                    repr.push(']');
-                    Some(repr)
                 }
             }
         }

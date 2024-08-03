@@ -8,8 +8,7 @@ pub enum BuiltInTypes {
     Bool,
     Function,
     Closure,
-    Struct,
-    Array,
+    HeapObject,
     Null,
 }
 
@@ -32,8 +31,7 @@ impl BuiltInTypes {
             BuiltInTypes::Bool => 0b011,
             BuiltInTypes::Function => 0b100,
             BuiltInTypes::Closure => 0b101,
-            BuiltInTypes::Struct => 0b110,
-            BuiltInTypes::Array => 0b111,
+            BuiltInTypes::HeapObject => 0b110,
             BuiltInTypes::Null => 0b111,
         }
     }
@@ -53,8 +51,7 @@ impl BuiltInTypes {
             0b011 => BuiltInTypes::Bool,
             0b100 => BuiltInTypes::Function,
             0b101 => BuiltInTypes::Closure,
-            0b110 => BuiltInTypes::Struct,
-            0b111 => BuiltInTypes::Array,
+            0b110 => BuiltInTypes::HeapObject,
             _ => panic!("Invalid tag"),
         }
     }
@@ -66,8 +63,7 @@ impl BuiltInTypes {
             BuiltInTypes::String => false,
             BuiltInTypes::Bool => true,
             BuiltInTypes::Function => false,
-            BuiltInTypes::Struct => false,
-            BuiltInTypes::Array => false,
+            BuiltInTypes::HeapObject => false,
             BuiltInTypes::Closure => false,
             BuiltInTypes::Null => true,
         }
@@ -101,8 +97,7 @@ impl BuiltInTypes {
             BuiltInTypes::Bool => false,
             BuiltInTypes::Function => false,
             BuiltInTypes::Closure => true,
-            BuiltInTypes::Struct => true,
-            BuiltInTypes::Array => false,
+            BuiltInTypes::HeapObject => true,
             BuiltInTypes::Null => false,
         }
     }
@@ -117,8 +112,7 @@ fn tag_and_untag() {
         BuiltInTypes::Bool,
         BuiltInTypes::Function,
         BuiltInTypes::Closure,
-        BuiltInTypes::Struct,
-        BuiltInTypes::Array,
+        BuiltInTypes::HeapObject,
     ];
     for kind in kinds.iter() {
         let value = 123;
