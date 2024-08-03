@@ -1,28 +1,28 @@
 #![allow(clippy::match_like_matches_macro)]
 #![allow(clippy::missing_safety_doc)]
+use crate::machine_code::arm_codegen::{SP, X0, X1, X10, X2, X3, X4};
 use crate::parser::Parser;
 use arm::LowLevelArm;
-use types::BuiltInTypes;
-use crate::machine_code::arm_codegen::{SP, X0, X1, X10, X2, X3, X4};
 use bincode::{config::standard, Decode, Encode};
 use clap::{command, Parser as ClapParser};
-use runtime::{Allocator, DefaultPrinter, Printer, Runtime, StackMapDetails, TestPrinter};
 #[allow(unused)]
 use gc::{
     compacting::CompactingHeap, mutex_allocator::MutexAllocator,
     simple_generation::SimpleGeneration, simple_mark_and_sweep::SimpleMarkSweepHeap,
 };
+use runtime::{Allocator, DefaultPrinter, Printer, Runtime, StackMapDetails, TestPrinter};
+use types::BuiltInTypes;
 
 use std::{error::Error, mem, slice::from_raw_parts, thread, time::Instant};
 
 mod arm;
 pub mod ast;
 pub mod common;
-pub mod runtime;
 mod gc;
 pub mod ir;
-pub mod parser;
 pub mod machine_code;
+pub mod parser;
+pub mod runtime;
 mod types;
 
 #[derive(Debug, Encode, Decode)]

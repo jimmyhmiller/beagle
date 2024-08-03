@@ -3,7 +3,8 @@ use std::error::Error;
 use mmap_rs::{MmapMut, MmapOptions};
 
 use crate::{
-    runtime::{AllocateAction, Allocator, AllocatorOptions, StackMap, STACK_SIZE}, types::BuiltInTypes,
+    runtime::{AllocateAction, Allocator, AllocatorOptions, StackMap, STACK_SIZE},
+    types::BuiltInTypes,
 };
 
 use super::simple_mark_and_sweep::SimpleMarkSweepHeap;

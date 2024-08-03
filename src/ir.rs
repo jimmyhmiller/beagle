@@ -40,7 +40,6 @@ impl Value {
     }
 }
 
-
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct VirtualRegister {
     argument: Option<usize>,

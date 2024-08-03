@@ -2,7 +2,10 @@ use ir::{Ir, Value, VirtualRegister};
 use std::collections::HashMap;
 
 use crate::{
-    arm::LowLevelArm, ir::{self, Condition}, runtime::{Compiler, Struct}, types::BuiltInTypes
+    arm::LowLevelArm,
+    ir::{self, Condition},
+    runtime::{Compiler, Struct},
+    types::BuiltInTypes,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +20,14 @@ pub enum Ast {
         body: Vec<Ast>,
     },
     Struct {
+        name: String,
+        fields: Vec<Ast>,
+    },
+    Enum {
+        name: String,
+        variants: Vec<Ast>,
+    },
+    EnumVariant {
         name: String,
         fields: Vec<Ast>,
     },
@@ -61,7 +72,6 @@ pub enum Ast {
     // TODO: Should I have both identifier and variable?
     // When should I have them?
     Identifier(String),
-    Variable(String),
     String(String),
     True,
     False,
@@ -74,6 +84,11 @@ pub enum Ast {
         property: Box<Ast>,
     },
     Null,
+    EnumCreation {
+        name: Box<Ast>,
+        variant: Box<Ast>,
+        fields: Vec<(String, Ast)>,
+    },
 }
 
 impl Ast {
@@ -308,6 +323,24 @@ impl<'a> AstCompiler<'a> {
                 // A concept I don't yet have
                 Value::Null
             }
+            Ast::Enum {
+                name: _,
+                variants: _,
+            } => {
+                // TODO: This should probably return the enum value
+                // A concept I don't yet have
+                Value::Null
+            }
+            Ast::EnumVariant { name: _, fields: _ } => {
+                panic!("Shouldn't get here")
+            }
+            Ast::EnumCreation {
+                name: _,
+                variant: _,
+                fields: _,
+            } => {
+                panic!("Shouldn't get here")
+            }
             Ast::StructCreation { name, fields } => {
                 let field_results = fields
                     .iter()
@@ -501,15 +534,12 @@ impl<'a> AstCompiler<'a> {
                 }
             }
             Ast::NumberLiteral(n) => Value::SignedConstant(n as isize),
-            Ast::Variable(name) => {
+            Ast::Identifier(name) => {
                 let reg = &self.get_variable_alloc_free_variable(&name);
                 reg.into()
             }
-            Ast::Identifier(_) => {
-                todo!()
-            }
             Ast::Let(name, value) => {
-                if let Ast::Variable(name) = name.as_ref() {
+                if let Ast::Identifier(name) = name.as_ref() {
                     self.not_tail_position();
                     let value = self.call_compile(&value);
                     self.not_tail_position();
@@ -849,6 +879,12 @@ impl<'a> AstCompiler<'a> {
                         })
                         .collect(),
                 });
+            }
+            Ast::Enum {
+                name: _,
+                variants: _,
+            } => {
+                // self.compiler.add_enum(name.clone(), variants.clone());
             }
             Ast::Let(_, _) => todo!(),
             _ => {}

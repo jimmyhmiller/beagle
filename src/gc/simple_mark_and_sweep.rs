@@ -1,5 +1,8 @@
 use crate::{
-    debugger, runtime::{AllocateAction, Allocator, AllocatorOptions, StackMap, STACK_SIZE}, types::BuiltInTypes, Data, Message
+    debugger,
+    runtime::{AllocateAction, Allocator, AllocatorOptions, StackMap, STACK_SIZE},
+    types::BuiltInTypes,
+    Data, Message,
 };
 use mmap_rs::{MmapMut, MmapOptions};
 use std::error::Error;
