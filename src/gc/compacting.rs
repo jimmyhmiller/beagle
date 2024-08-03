@@ -3,7 +3,8 @@ use std::{error::Error, mem};
 use mmap_rs::{MmapMut, MmapOptions};
 
 use crate::{
-    runtime::{AllocateAction, Allocator, AllocatorOptions, StackMap, STACK_SIZE}, types::BuiltInTypes,
+    runtime::{AllocateAction, Allocator, AllocatorOptions, StackMap, STACK_SIZE},
+    types::BuiltInTypes,
 };
 
 struct Segment {

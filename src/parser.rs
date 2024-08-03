@@ -38,6 +38,7 @@ pub enum Token {
     Null,
     Let,
     Struct,
+    Enum,
     Comment((usize, usize)),
     Spaces((usize, usize)),
     String((usize, usize)),
@@ -125,6 +126,11 @@ impl Tokenizer {
 
     pub fn current_byte(&self, input_bytes: &[u8]) -> u8 {
         input_bytes[self.position]
+    }
+
+    pub fn next_n_bytes<'a>(&'a self, n: usize, input_bytes: &'a [u8]) -> &[u8] {
+        // truncate if n is too large
+        &input_bytes[self.position..std::cmp::min(self.position + n, input_bytes.len())]
     }
 
     pub fn is_space(&self, input_bytes: &[u8]) -> bool {
@@ -246,6 +252,7 @@ impl Tokenizer {
             b"null" => Token::Null,
             b"let" => Token::Let,
             b"struct" => Token::Struct,
+            b"enum" => Token::Enum,
             b"." => Token::Dot,
             _ => Token::Atom((start, self.position)),
         }
@@ -395,6 +402,12 @@ impl Parser {
         }
     }
 
+    pub fn print_tokens(&self) {
+        for token in &self.tokens {
+            println!("{:?}", token);
+        }
+    }
+
     pub fn parse(&mut self) -> Ast {
         Ast::Program {
             elements: self.parse_elements(),
@@ -462,7 +475,7 @@ impl Parser {
             let rhs = self.parse_expression(next_min_precedence)?;
             // println!("rhs {:?}", rhs);
 
-            lhs = self.compose_binary_op(lhs.clone(), current_token, rhs);
+            lhs = self.compose_binary_op(lhs.clone(), current_token, rhs, min_precedence);
             // println!("lhs composed {:?}", lhs);
             self.skip_whitespace();
         }
@@ -480,6 +493,10 @@ impl Parser {
                 self.move_to_next_atom();
                 Some(self.parse_struct())
             }
+            Token::Enum => {
+                self.move_to_next_atom();
+                Some(self.parse_enum())
+            }
             Token::If => {
                 self.move_to_next_non_whitespace();
                 Some(self.parse_if())
@@ -489,6 +506,11 @@ impl Parser {
                 let name = String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap();
                 // TODO: Make better
                 self.move_to_next_non_whitespace();
+                // I probably don't want to do this forever
+                // But for right now I'm assuming that all double colon
+                // Identifiers are creating enums
+                // I really need to start thinking about namespacing
+                // and if I want double colon for that.
                 if self.is_open_paren() {
                     Some(self.parse_call(name))
                 }
@@ -497,7 +519,7 @@ impl Parser {
                 else if self.is_open_curly() && min_precedence == 0 {
                     Some(self.parse_struct_creation(name))
                 } else {
-                    Some(Ast::Variable(name))
+                    Some(Ast::Identifier(name))
                 }
             }
             Token::String((start, end)) => {
@@ -539,7 +561,7 @@ impl Parser {
                 self.expect_equal();
                 self.move_to_next_non_whitespace();
                 let value = self.parse_expression(0).unwrap();
-                Some(Ast::Let(Box::new(Ast::Variable(name)), Box::new(value)))
+                Some(Ast::Let(Box::new(Ast::Identifier(name)), Box::new(value)))
             }
             Token::NewLine | Token::Spaces(_) | Token::Comment(_) => {
                 self.consume();
@@ -552,7 +574,7 @@ impl Parser {
                 result
             }
             _ => panic!(
-                "Expected atom {} at line {}",
+                "Expected atom, got {} at line {}",
                 self.get_token_repr(),
                 self.current_line
             ),
@@ -588,6 +610,21 @@ impl Parser {
         let fields = self.parse_struct_fields();
         self.expect_close_curly();
         Ast::Struct { name, fields }
+    }
+
+    fn parse_enum(&mut self) -> Ast {
+        let name = match self.current_token() {
+            Token::Atom((start, end)) => {
+                // Gross
+                String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
+            }
+            _ => panic!("Expected enum name"),
+        };
+        self.move_to_next_non_whitespace();
+        self.expect_open_curly();
+        let variants = self.parse_enum_variants();
+        self.expect_close_curly();
+        Ast::Enum { name, variants }
     }
 
     fn consume(&mut self) {
@@ -659,6 +696,42 @@ impl Parser {
                 Ast::Identifier(name)
             }
             _ => panic!("Expected field name got {:?}", self.current_token()),
+        }
+    }
+
+    fn parse_enum_variants(&mut self) -> Vec<Ast> {
+        let mut result = Vec::new();
+        self.skip_whitespace();
+        while !self.at_end() && !self.is_close_curly() {
+            result.push(self.parse_enum_variant());
+            self.skip_whitespace();
+        }
+        result
+    }
+
+    fn parse_enum_variant(&mut self) -> Ast {
+        // We need to parse enum variants that are just a name
+        // and enum variants that are struct like
+
+        match self.current_token() {
+            Token::Atom((start, end)) => {
+                // Gross
+                let name = String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap();
+                self.consume();
+                self.skip_whitespace();
+                if self.is_open_curly() {
+                    self.consume();
+                    let fields = self.parse_struct_fields();
+                    self.expect_close_curly();
+                    Ast::EnumVariant { name, fields }
+                } else {
+                    Ast::EnumVariant {
+                        name,
+                        fields: Vec::new(),
+                    }
+                }
+            }
+            _ => panic!("Expected variant name got {:?}", self.current_token()),
         }
     }
 
@@ -771,6 +844,13 @@ impl Parser {
 
     fn parse_struct_creation(&mut self, name: String) -> Ast {
         self.expect_open_curly();
+        let fields = self.parse_struct_fields_creations();
+
+        self.expect_close_curly();
+        Ast::StructCreation { name, fields }
+    }
+
+    fn parse_struct_fields_creations(&mut self) -> Vec<(String, Ast)> {
         let mut fields = Vec::new();
         while !self.at_end() && !self.is_close_curly() {
             if let Some(field) = self.parse_struct_field_creation() {
@@ -779,9 +859,7 @@ impl Parser {
                 break;
             }
         }
-
-        self.expect_close_curly();
-        Ast::StructCreation { name, fields }
+        fields
     }
 
     fn parse_struct_field_creation(&mut self) -> Option<(String, Ast)> {
@@ -859,7 +937,13 @@ impl Parser {
         }
     }
 
-    fn compose_binary_op(&self, lhs: Ast, current_token: Token, rhs: Ast) -> Ast {
+    fn compose_binary_op(
+        &mut self,
+        lhs: Ast,
+        current_token: Token,
+        rhs: Ast,
+        min_precedence: usize,
+    ) -> Ast {
         match current_token {
             Token::LessThanOrEqual => Ast::Condition {
                 operator: crate::ir::Condition::LessThanOrEqual,
@@ -908,14 +992,26 @@ impl Parser {
                 right: Box::new(rhs),
             },
             Token::Dot => {
-                assert!(matches!(rhs, Ast::Variable(_)));
+                assert!(matches!(rhs, Ast::Identifier(_)));
                 let rhs = match rhs {
-                    Ast::Variable(name) => Ast::Identifier(name),
-                    _ => panic!("Not a variable"),
+                    Ast::Identifier(name) => Ast::Identifier(name),
+                    _ => panic!("Not an identifier"),
                 };
-                Ast::PropertyAccess {
-                    object: Box::new(lhs),
-                    property: Box::new(rhs),
+
+                if self.is_open_curly() && min_precedence == 0 {
+                    self.expect_open_curly();
+                    let fields = self.parse_struct_fields_creations();
+                    self.expect_close_curly();
+                    Ast::EnumCreation {
+                        name: Box::new(lhs),
+                        variant: Box::new(rhs),
+                        fields,
+                    }
+                } else {
+                    Ast::PropertyAccess {
+                        object: Box::new(lhs),
+                        property: Box::new(rhs),
+                    }
                 }
             }
             _ => panic!("Not a binary operator"),
@@ -1012,9 +1108,7 @@ fn test_parse2() {
 
 #[test]
 fn test_parens() {
-    let mut parser = Parser::new(String::from(
-        "(2 + 2) * 3 - (2 * 4)",
-    ));
+    let mut parser = Parser::new(String::from("(2 + 2) * 3 - (2 * 4)"));
 
     let ast = parser.parse();
     println!("{:#?}", ast);
@@ -1036,18 +1130,56 @@ fn test_empty_function() {
 #[macro_export]
 macro_rules! parse {
     ($($t:tt)*) => {
-        Parser::new(stringify!($($t)*).to_string()).parse()
+        {
+            let mut parser = Parser::new(stringify!($($t)*).to_string());
+            parser.print_tokens();
+            parser.parse()
+        }
      };
 }
 
-pub fn fib() -> Ast {
-    parse! {
-        fn fib(n) {
-            if n <= 1 {
-                n
-            } else {
-                fib(n - 1) + fib(n - 2)
-            }
+#[test]
+fn parse_simple_enum() {
+    let ast = parse! {
+        enum Color {
+            red
+            green
+            blue
         }
-    }
+    };
+    println!("{:#?}", ast);
+}
+
+#[test]
+fn parse_struct_style_enum() {
+    let ast = parse! {
+        enum Action {
+            pause,
+            run {
+                direction
+                speed
+            },
+            stop { time, location}
+        }
+    };
+    println!("{:#?}", ast);
+}
+
+#[test]
+fn parse_enum_creation_simple() {
+    let ast = parse! {
+        let action = Action.run
+    };
+    println!("{:#?}", ast);
+}
+
+#[test]
+fn parse_enum_creation_complex() {
+    let ast = parse! {
+        let action = Action.run {
+            direction: 1
+            speed: 2
+        }
+    };
+    println!("{:#?}", ast);
 }

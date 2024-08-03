@@ -17,7 +17,8 @@ use crate::{
     debugger,
     ir::{StringValue, Value},
     CommandLineArguments, Data, Message, __pause,
-    parser::Parser, types::BuiltInTypes,
+    parser::Parser,
+    types::BuiltInTypes,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -960,14 +961,15 @@ impl<Alloc: Allocator> Runtime<Alloc> {
     }
 
     pub fn gc(&mut self, stack_pointer: usize) {
-
         if self.memory.threads.len() == 1 {
             // If there is only one thread, that is us
             // that means nothing else could spin up a thread in the mean time
             // so there is no need to lock anything
-            self.memory
-                .heap
-                .gc(&self.memory.stack_map, &[(self.get_stack_base(), stack_pointer)], self.get_allocate_options());
+            self.memory.heap.gc(
+                &self.memory.stack_map,
+                &[(self.get_stack_base(), stack_pointer)],
+                self.get_allocate_options(),
+            );
             return;
         }
 
