@@ -576,9 +576,14 @@ impl LowLevelArm {
         });
     }
 
-    pub fn pop_from_stack(&mut self, reg: Register, offset: i32) {
+    pub fn pop_from_stack_indexed(&mut self, reg: Register, offset: i32) {
         self.increment_stack_size(-1);
         self.load_from_stack(reg, -(offset + self.max_locals + 1))
+    }
+
+    pub fn pop_from_stack(&mut self, reg: Register) {
+        self.increment_stack_size(-1);
+        self.load_from_stack(reg, -(self.max_locals + self.stack_size + 1))
     }
 
     pub fn load_local(&mut self, destination: Register, offset: i32) {

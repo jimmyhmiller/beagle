@@ -233,6 +233,8 @@ impl SimpleMarkSweepHeap {
     }
 
     fn add_free(&mut self, entry: FreeListEntry) {
+
+        assert!(entry.size <= self.space.segments[entry.segment].size, "Size is too big");
         // TODO: If a whole segment is free
         // I need a fast path where I don't have to update free list
 
@@ -421,6 +423,9 @@ impl SimpleMarkSweepHeap {
                             offset,
                             size: (data >> 1) + 8,
                         };
+                        // We have no defined hard cap yet.
+                        // but this is probably a bug
+                        assert!(entry.size < 1000);
                         let mut entered = false;
                         for current_entry in free_entries.iter_mut().rev() {
                             if current_entry.segment == entry.segment

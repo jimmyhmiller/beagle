@@ -195,9 +195,14 @@ pub unsafe extern "C" fn new_thread<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,
     function: usize,
 ) -> usize {
-    let runtime = unsafe { &mut *runtime };
-    runtime.new_thread(function);
-    BuiltInTypes::null_value() as usize
+    #[cfg(feature = "thread-safe")] {
+        let runtime = unsafe { &mut *runtime };
+        runtime.new_thread(function);
+        BuiltInTypes::null_value() as usize
+    }
+    #[cfg(not(feature = "thread-safe"))] {
+        panic!("Threads are not supported in this build");
+    }
 }
 
 pub unsafe extern "C" fn __pause<Alloc: Allocator>(
@@ -251,7 +256,7 @@ fn compile_trampoline<Alloc: Allocator>(runtime: &mut Runtime<Alloc>) {
 
     lang.call(X10);
     // lang.breakpoint();
-    lang.pop_from_stack(X10, 0);
+    lang.pop_from_stack_indexed(X10, 0);
     lang.mov_reg(SP, X10);
     for (i, reg) in lang
         .canonical_volatile_registers
@@ -313,6 +318,12 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         let source = std::fs::read_to_string(path)?;
         if !source.contains("// Expect") {
             continue;
+        }
+        #[cfg(not(feature = "thread-safe"))]
+        {
+            if source.contains("// thread-safe") {
+                continue;
+            }
         }
         println!("Running test: {}", path);
         let args = CommandLineArguments {

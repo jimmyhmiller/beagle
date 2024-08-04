@@ -1050,7 +1050,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
     ) -> Result<usize, Box<dyn Error>> {
         let len = 8 + 8 + 8 + free_variables.len() * 8;
         // TODO: Stack pointer should be passed in
-        let heap_pointer = self.allocate(len, 0, BuiltInTypes::Closure)?;
+        let heap_pointer = self.allocate(len / 8, 0, BuiltInTypes::Closure)?;
         let pointer = heap_pointer as *mut u8;
         let num_free = free_variables.len();
         let function_definition = self
@@ -1065,7 +1065,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         let function = function.to_le_bytes();
 
         let free_variables = free_variables.iter().flat_map(|v| v.to_le_bytes());
-        let buffer = unsafe { from_raw_parts_mut(pointer, len) };
+        let buffer = unsafe { from_raw_parts_mut(pointer.add(8), len) };
         // write function pointer
         for (index, byte) in function.iter().enumerate() {
             buffer[index] = *byte;

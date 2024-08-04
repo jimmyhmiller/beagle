@@ -631,13 +631,13 @@ impl<'a> AstCompiler<'a> {
         //     ree_variables: *const Value,
         // }
         let closure_register = self.ir.untag(closure_register.into());
-        let function_pointer = self.ir.load_from_memory(closure_register, 0);
+        let function_pointer = self.ir.load_from_memory(closure_register, 1);
 
         self.ir.assign(function_register, function_pointer);
 
         // TODO: I need to fix how these are stored on the stack
 
-        let num_free_variables = self.ir.load_from_memory(closure_register, 1);
+        let num_free_variables = self.ir.load_from_memory(closure_register, 2);
         let num_free_variables = self.ir.tag(num_free_variables, BuiltInTypes::Int.get_tag());
         // for each variable I need to push them onto the stack after the prelude
         let loop_start = self.ir.label("loop_start");
@@ -651,7 +651,7 @@ impl<'a> AstCompiler<'a> {
             counter,
             num_free_variables,
         );
-        let free_variable_offset = self.ir.add(counter, Value::SignedConstant(3));
+        let free_variable_offset = self.ir.add(counter, Value::SignedConstant(4));
         let free_variable_offset = self.ir.mul(free_variable_offset, Value::SignedConstant(8));
         // TODO: This needs to change based on counter
         let free_variable_offset = self.ir.untag(free_variable_offset);
@@ -660,7 +660,7 @@ impl<'a> AstCompiler<'a> {
             .heap_load_with_reg_offset(closure_register, free_variable_offset);
 
         let free_variable_offset = self.ir.sub(num_free_variables, counter);
-        let num_local = self.ir.load_from_memory(closure_register, 2);
+        let num_local = self.ir.load_from_memory(closure_register, 3);
         let num_local = self.ir.tag(num_local, BuiltInTypes::Int.get_tag());
         let free_variable_offset = self.ir.add(free_variable_offset, num_local);
         // // TODO: Make this better

@@ -865,7 +865,7 @@ impl Ir {
                     let register = alloc.allocate_register(index, dest, lang);
                     lang.mov_reg(register, lang.ret_reg());
                     for (index, register) in out_live_call_registers.iter().enumerate() {
-                        lang.pop_from_stack(*register, index as i32);
+                        lang.pop_from_stack_indexed(*register, index as i32);
                     }
                 }
                 Instruction::TailRecurse(dest, args) => {
@@ -920,8 +920,8 @@ impl Ir {
                     let dest = dest.try_into().unwrap();
                     let register = alloc.allocate_register(index, dest, lang);
                     lang.mov_reg(register, lang.ret_reg());
-                    for (index, register) in out_live_call_registers.iter().enumerate() {
-                        lang.pop_from_stack(*register, index as i32);
+                    for register in out_live_call_registers.iter().rev() {
+                        lang.pop_from_stack(*register);
                     }
                 }
                 Instruction::Compare(dest, a, b, condition) => {
@@ -1093,7 +1093,7 @@ impl Ir {
                 Instruction::PopStack(val) => {
                     let val = val.try_into().unwrap();
                     let val = alloc.allocate_register(index, val, lang);
-                    lang.pop_from_stack(val, 0);
+                    lang.pop_from_stack_indexed(val, 0);
                 }
                 Instruction::LoadFreeVariable(dest, free_variable) => {
                     let dest = dest.try_into().unwrap();

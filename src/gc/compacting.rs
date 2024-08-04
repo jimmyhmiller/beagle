@@ -340,6 +340,9 @@ impl CompactingHeap {
         }
 
         let size = *(pointer as *const usize) >> 1;
+        // TODO: We don't have a hard limit on obejct size
+        // right now. But anything this big is probably a mistake
+        assert!(size < 1000);
         let data = std::slice::from_raw_parts(pointer as *const u8, size + 8);
         let new_pointer = self.to_space.copy_data_to_offset(data);
         debug_assert!(new_pointer % 8 == 0, "Pointer is not aligned");
