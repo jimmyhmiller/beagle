@@ -11,17 +11,17 @@
             "cargo": {
                 "args": [
                     "build",
-                    "--release",
+                    // "--release",
                     "--bin=main",
                     "--package=main",
-                    "--features=compacting"
+                    "--features=simple-mark-and-sweep,thread-safe"
                 ],
                 "filter": {
                     "name": "main",
                     "kind": "bin"
                 }
             },
-            "args": ["resources/grab_bag.bg"],
+            "args": ["resources/thread.bg"],
             "cwd": "${workspaceFolder}"
         },
         {

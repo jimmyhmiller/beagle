@@ -65,15 +65,13 @@ fn call_function() {
 
 fn swap_counter_in_many_threads(counter, n) {
     let f = fn() {
-        let y = counter;
+        swap!(counter, fn(x) { x + 1 })
     };
 
-    // TODO: This errors out because n is no longer a number
-    // it is somehow counter.
-    // It seems to have something to do with the closure capturing
-    // the counter variable
-    println(n)
-    println(n - 1)
+    if n > 0 {
+        thread(f);
+        swap_counter_in_many_threads(counter, n - 1)
+    }
 }
 
 // You can see that thing get's replaced by one of these nodes
@@ -81,7 +79,7 @@ fn swap_counter_in_many_threads(counter, n) {
 fn main() {
 
     let counter = atom(0);
-    // swap_counter_in_many_threads(counter, 10)
+    swap_counter_in_many_threads(counter, 10)
     call_function()
     swap!(counter, fn(x) { x + 1 })
     call_function()
@@ -120,4 +118,7 @@ fn main() {
     "done"
 }
 
-// TODO: This breaks with compacting gc
+// thread-safe
+// Expect
+// 22
+// done
