@@ -4,7 +4,7 @@ use mmap_rs::{MmapMut, MmapOptions};
 
 use crate::{
     runtime::{AllocateAction, Allocator, AllocatorOptions, StackMap, STACK_SIZE},
-    types::BuiltInTypes,
+    types::{BuiltInTypes, HeapObject},
 };
 
 use super::simple_mark_and_sweep::SimpleMarkSweepHeap;
@@ -91,7 +91,7 @@ impl Space {
         false
     }
 
-    fn write_object(&mut self, segment_offset: usize, offset: usize, shifted_size: usize) -> usize {
+    fn write_object(&mut self, segment_offset: usize, offset: usize, shifted_size: usize) -> *const u8 {
         let memory = &mut self.segments[segment_offset].memory;
 
         let buffer = &mut memory[offset..offset + 8];
@@ -99,7 +99,7 @@ impl Space {
         // write the size of the object to the first 8 bytes
         buffer[..shifted_size.to_le_bytes().len()].copy_from_slice(&shifted_size.to_le_bytes());
 
-        buffer.as_ptr() as usize
+        buffer.as_ptr()
     }
 
     fn increment_current_offset(&mut self, size: usize) {
@@ -132,7 +132,7 @@ impl Space {
         false
     }
 
-    fn allocate(&mut self, bytes: usize) -> Result<usize, Box<dyn Error>> {
+    fn allocate(&mut self, bytes: usize) -> Result<*const u8, Box<dyn Error>> {
         let segment = self.segments.get_mut(self.segment_offset).unwrap();
         let mut offset = segment.offset;
         let size = (bytes + 1) * 8;
@@ -146,7 +146,7 @@ impl Space {
         let shifted_size = (bytes * 8) << 1;
         let pointer = self.write_object(self.segment_offset, offset, shifted_size);
         self.increment_current_offset(size);
-        assert!(pointer % 8 == 0, "Pointer is not aligned");
+        assert!(pointer as usize % 8 == 0, "Pointer is not aligned");
         Ok(pointer)
     }
 
@@ -161,7 +161,7 @@ impl Space {
 pub struct SimpleGeneration {
     young: Space,
     old: SimpleMarkSweepHeap,
-    copied: Vec<usize>,
+    copied: Vec<HeapObject>,
     gc_count: usize,
     full_gc_frequency: usize,
     // TODO: This may not be the most efficient way
@@ -306,17 +306,12 @@ impl SimpleGeneration {
             new_roots.push(self.copy(*root));
         }
 
-        while let Some(object) = self.copied.pop() {
-            let object = object as *mut u8;
-            let size: usize = *(object as *const usize) >> 1;
-            let marked = size & 1 == 1;
-            if marked {
+        while let Some(mut object) = self.copied.pop() {
+            if object.marked() {
                 panic!("We are copying to this space, nothing should be marked");
             }
 
-            let data = std::slice::from_raw_parts_mut(object.add(8) as *mut usize, size / 8);
-
-            for datum in data.iter_mut() {
+            for datum in object.get_fields_mut() {
                 if BuiltInTypes::is_heap_pointer(*datum) {
                     *datum = self.copy(*datum);
                 }
@@ -352,7 +347,7 @@ impl SimpleGeneration {
         let size = *(pointer as *const usize) >> 1;
         let data = std::slice::from_raw_parts(pointer as *const u8, size + 8);
         let new_pointer = self.old.copy_data_to_offset(data);
-        debug_assert!(new_pointer % 8 == 0, "Pointer is not aligned");
+        debug_assert!(new_pointer as usize % 8 == 0, "Pointer is not aligned");
         // update header of original object to now be the forwarding pointer
         let tagged_new = BuiltInTypes::get_kind(root).tag(new_pointer as isize) as usize;
 
@@ -377,7 +372,7 @@ impl SimpleGeneration {
         *pointer.cast::<usize>() = tagged_new;
         let size = *(untagged as *const usize) >> 1;
         debug_assert!(size % 8 == 0 && size < 100);
-        self.copied.push(new_pointer as usize);
+        self.copied.push(HeapObject::from_untagged(new_pointer));
         tagged_new
     }
 

@@ -191,6 +191,7 @@ pub unsafe extern "C" fn gc_add_root<Alloc: Allocator>(
     BuiltInTypes::null_value() as usize
 }
 
+#[allow(unused)]
 pub unsafe extern "C" fn new_thread<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,
     function: usize,

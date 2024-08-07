@@ -169,7 +169,7 @@ pub struct AllocatorOptions {
 }
 
 pub enum AllocateAction {
-    Allocated(usize),
+    Allocated(*const u8),
     Gc,
 }
 
@@ -919,12 +919,12 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         let result = self.memory.heap.allocate(bytes, kind, options);
 
         match result {
-            Ok(AllocateAction::Allocated(value)) => Ok(value),
+            Ok(AllocateAction::Allocated(value)) => Ok(value as usize),
             Ok(AllocateAction::Gc) => {
                 self.gc(stack_pointer);
                 let result = self.memory.heap.allocate(bytes, kind, options);
                 if let Ok(AllocateAction::Allocated(result)) = result {
-                    Ok(result)
+                    Ok(result as usize)
                 } else {
                     self.memory.heap.grow(options);
                     // TODO: Detect loop here

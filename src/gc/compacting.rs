@@ -4,7 +4,7 @@ use mmap_rs::{MmapMut, MmapOptions};
 
 use crate::{
     runtime::{AllocateAction, Allocator, AllocatorOptions, StackMap, STACK_SIZE},
-    types::BuiltInTypes,
+    types::{BuiltInTypes, HeapObject},
 };
 
 struct Segment {
@@ -48,7 +48,7 @@ struct ObjectIterator {
 }
 
 impl Iterator for ObjectIterator {
-    type Item = *const u8;
+    type Item = HeapObject;
 
     fn next(&mut self) -> Option<Self::Item> {
         let space = unsafe { &*self.space };
@@ -64,10 +64,11 @@ impl Iterator for ObjectIterator {
             return None;
         }
         let pointer = unsafe { segment.memory.as_ptr().add(self.offset) };
-        let size = unsafe { *pointer.cast::<usize>() };
+        let object = HeapObject::from_untagged(pointer);
+        let size = object.full_size();
 
-        self.offset += (size >> 1) + 8;
-        Some(pointer)
+        self.offset += size;
+        Some(object)
     }
 }
 
@@ -86,7 +87,7 @@ impl Space {
         &self,
         segment_index: usize,
         offset: usize,
-    ) -> impl Iterator<Item = *const u8> {
+    ) -> impl Iterator<Item = HeapObject> {
         ObjectIterator {
             space: self,
             segment_index,
@@ -122,7 +123,7 @@ impl Space {
         pointer
     }
 
-    fn write_object(&mut self, segment_offset: usize, offset: usize, shifted_size: usize) -> usize {
+    fn write_object(&mut self, segment_offset: usize, offset: usize, shifted_size: usize) -> *const u8 {
         let memory = &mut self.segments[segment_offset].memory;
 
         let buffer = &mut memory[offset..offset + 8];
@@ -130,7 +131,7 @@ impl Space {
         // write the size of the object to the first 8 bytes
         buffer[..shifted_size.to_le_bytes().len()].copy_from_slice(&shifted_size.to_le_bytes());
 
-        buffer.as_ptr() as usize
+        buffer.as_ptr()
     }
 
     fn increment_current_offset(&mut self, size: usize) {
@@ -163,7 +164,7 @@ impl Space {
         false
     }
 
-    fn allocate(&mut self, bytes: usize) -> Result<usize, Box<dyn Error>> {
+    fn allocate(&mut self, bytes: usize) -> Result<*const u8, Box<dyn Error>> {
         let segment = self.segments.get_mut(self.segment_offset).unwrap();
         let mut offset = segment.offset;
         let size = (bytes + 1) * 8;
@@ -177,7 +178,7 @@ impl Space {
         let shifted_size = (bytes * 8) << 1;
         let pointer = self.write_object(self.segment_offset, offset, shifted_size);
         self.increment_current_offset(size);
-        assert!(pointer % 8 == 0, "Pointer is not aligned");
+        assert!(pointer as usize % 8 == 0, "Pointer is not aligned");
         Ok(pointer)
     }
 
@@ -298,19 +299,14 @@ impl CompactingHeap {
             new_roots.push(self.copy_using_cheneys_algorithm(*root));
         }
 
-        for object in self
+        for mut object in self
             .to_space
             .object_iter_from_position(start_segment, start_offset)
         {
-            let size: usize = *(object as *const usize) >> 1;
-            let marked = size & 1 == 1;
-            if marked {
+            if object.marked() {
                 panic!("We are copying to this space, nothing should be marked");
             }
-
-            let data = std::slice::from_raw_parts_mut(object.add(8) as *mut usize, size / 8);
-
-            for datum in data.iter_mut() {
+            for datum in object.get_fields_mut() {
                 if BuiltInTypes::is_heap_pointer(*datum) {
                     *datum = self.copy_using_cheneys_algorithm(*datum);
                 }

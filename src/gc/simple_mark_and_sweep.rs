@@ -1,7 +1,7 @@
 use crate::{
     debugger,
     runtime::{AllocateAction, Allocator, AllocatorOptions, StackMap, STACK_SIZE},
-    types::BuiltInTypes,
+    types::{BuiltInTypes, HeapObject},
     Data, Message,
 };
 use mmap_rs::{MmapMut, MmapOptions};
@@ -196,7 +196,7 @@ impl SimpleMarkSweepHeap {
         offset: usize,
         shifted_size: usize,
         data: Option<&[u8]>,
-    ) -> usize {
+    ) -> *const u8 {
         let memory = &mut self.space.segments[segment_offset].memory;
         let unshifted_size = shifted_size >> 1;
         let buffer = &mut memory[offset..offset + unshifted_size + 8];
@@ -209,7 +209,7 @@ impl SimpleMarkSweepHeap {
             buffer[..8].copy_from_slice(&shifted_size.to_le_bytes());
         }
 
-        buffer.as_ptr() as usize
+        buffer.as_ptr()
     }
 
     fn free_are_disjoint(entry1: &FreeListEntry, entry2: &FreeListEntry) -> bool {
@@ -313,7 +313,7 @@ impl SimpleMarkSweepHeap {
             unsafe { std::slice::from_raw_parts(stack_begin as *const usize, STACK_SIZE / 8) };
         let stack = &stack[stack.len() - num_64_till_end..];
 
-        let mut to_mark: Vec<usize> = Vec::with_capacity(128);
+        let mut to_mark: Vec<HeapObject> = Vec::with_capacity(128);
 
         let mut i = 0;
         while i < stack.len() {
@@ -343,7 +343,7 @@ impl SimpleMarkSweepHeap {
                             println!("Not aligned");
                         }
                         // println!("Pushing mark 0x{:?}", stack[j]);
-                        to_mark.push(*slot);
+                        to_mark.push(HeapObject::from_tagged(*slot));
                     }
                 }
                 continue;
@@ -351,31 +351,15 @@ impl SimpleMarkSweepHeap {
             i += 1;
         }
 
-        while let Some(value) = to_mark.pop() {
-            let _tagged = value;
-            let untagged = BuiltInTypes::untag(value);
-            let pointer = untagged as *mut u8;
-            if pointer as usize % 8 != 0 {
-                panic!("Not aligned {:x}", pointer as usize);
+        while let Some(object) = to_mark.pop() {
+            if object.marked() {
+                continue;
             }
-            unsafe {
-                let mut data: usize = *pointer.cast::<usize>();
-                // check right most bit
-                if (data & 1) == 1 {
-                    continue;
-                }
-                data |= 1;
-                *pointer.cast::<usize>() = data;
 
-                // println!("Marking 0x{:x}", tagged);
+            object.mark();
 
-                let size = *(pointer as *const usize) >> 1;
-                let data = std::slice::from_raw_parts(pointer.add(8) as *const usize, size / 8);
-                for datum in data.iter() {
-                    if BuiltInTypes::is_heap_pointer(*datum) {
-                        to_mark.push(*datum)
-                    }
-                }
+            for object in object.get_heap_references() {
+                to_mark.push(object);
             }
         }
     }
@@ -411,17 +395,15 @@ impl SimpleMarkSweepHeap {
                 }
                 unsafe {
                     let pointer = pointer.add(offset);
-                    let mut data: usize = *pointer.cast::<usize>();
+                    let object = HeapObject::from_untagged(pointer);
 
-                    // check right most bit
-                    if (data & 1) == 1 {
-                        // println!("marked!");
-                        data &= !1;
+                    if object.marked() {
+                        object.unmark()
                     } else {
                         let entry = FreeListEntry {
                             segment: segment_index,
                             offset,
-                            size: (data >> 1) + 8,
+                            size: object.full_size(),
                         };
                         // We have no defined hard cap yet.
                         // but this is probably a bug
@@ -450,8 +432,7 @@ impl SimpleMarkSweepHeap {
                         // println!("Found garbage!");
                     }
 
-                    *pointer.cast::<usize>() = data;
-                    let size = (data >> 1) + 8;
+                    let size = object.full_size();
                     debug_assert!(size > 8, "Size is less than 8");
                     // println!("size: {}", size);
                     offset += size;
@@ -554,7 +535,7 @@ impl SimpleMarkSweepHeap {
         Ok(AllocateAction::Allocated(pointer))
     }
 
-    pub fn copy_data_to_offset(&mut self, data: &[u8]) -> isize {
+    pub fn copy_data_to_offset(&mut self, data: &[u8]) -> *const u8 {
         // TODO: I could amortize this by copying lazily and coalescing
         // the copies together if they are continuouss
         let pointer = self
@@ -562,7 +543,7 @@ impl SimpleMarkSweepHeap {
             .unwrap();
 
         if let AllocateAction::Allocated(pointer) = pointer {
-            pointer as isize
+            pointer
         } else {
             panic!("Failed to allocate");
         }

@@ -1,3 +1,5 @@
+
+
 // I don't know if this is actually the setup I want
 // But I want get some stuff down there
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -122,4 +124,101 @@ fn tag_and_untag() {
         assert_eq!(kind, &BuiltInTypes::get_kind(tagged as usize));
         assert_eq!(value as usize, BuiltInTypes::untag(tagged as usize));
     }
+}
+
+pub struct HeapObject {
+    pointer: usize,
+    tagged: bool,
+}
+
+// TODO: Implement methods for writing the header of the heap object
+// make sure we always use this representation everywhere so we can
+// change things in one place
+impl HeapObject {
+    pub fn from_tagged(pointer: usize) -> Self {
+        assert!(pointer as usize % 8 != 0);
+        assert!(BuiltInTypes::is_heap_pointer(pointer));
+        HeapObject { pointer, tagged: true }
+    }
+
+    pub fn from_untagged(pointer: *const u8) -> Self {
+        assert!(pointer as usize % 8 == 0);
+        HeapObject { pointer: pointer as usize, tagged: false }
+    }
+
+    pub fn untagged(&self) -> usize {
+        if self.tagged {
+            BuiltInTypes::untag(self.pointer)
+        } else {
+            self.pointer
+        }
+    }
+
+    pub fn mark(&self) {
+        let untagged = self.untagged();
+        let  pointer = untagged as *mut usize;
+        let mut data: usize = unsafe { *pointer.cast::<usize>() };
+        // check right most bit
+        if (data & 1) != 1 {
+            data |= 1;
+        }
+        unsafe { *pointer.cast::<usize>() = data };
+    }
+
+    pub fn marked(&self) -> bool {
+        let untagged = self.untagged();
+        let pointer = untagged as *mut isize;
+        let data: usize = unsafe { *pointer.cast::<usize>() };
+        data & 1 == 1
+    }
+
+    pub fn fields_size(&self) -> usize {
+        let untagged = self.untagged();
+        let pointer = untagged as *mut isize;
+        let data: usize = unsafe { *pointer.cast::<usize>() };
+        data >> 1
+    }
+
+    pub fn get_fields(&self) -> &[usize] {
+        let size = self.fields_size();
+        let untagged = self.untagged();
+        let pointer = untagged as *mut usize;
+        let pointer = unsafe { pointer.add(1) };
+        unsafe { std::slice::from_raw_parts(pointer, size / 8) }
+    }
+
+    pub fn get_heap_references<'a>(&'a self) -> impl Iterator<Item = HeapObject> + 'a  {
+        let fields = self.get_fields();
+        fields.iter()
+            .filter(|x| BuiltInTypes::is_heap_pointer(**x))
+            .map(|&pointer| HeapObject::from_tagged(pointer))
+    }
+
+    pub fn get_fields_mut(&mut self) -> &mut [usize] {
+        let size = self.fields_size();
+        let untagged = self.untagged();
+        let pointer = untagged as *mut usize;
+        let pointer = unsafe { pointer.add(1) };
+        unsafe { std::slice::from_raw_parts_mut(pointer, size / 8) }
+    }
+    
+    pub fn unmark(&self) {
+        let untagged = self.untagged();
+        let pointer = untagged as *mut usize;
+        let mut data: usize = unsafe { *pointer.cast::<usize>() };
+        // check right most bit
+        if (data & 1) == 1 {
+            data &= !1;
+        }
+        unsafe { *pointer.cast::<usize>() = data };
+    }
+    
+    pub fn full_size(&self) -> usize {
+        self.fields_size() + self.header_size()
+    }
+    
+    fn header_size(&self) -> usize {
+        8
+    }
+
 }
