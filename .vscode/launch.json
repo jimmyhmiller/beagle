@@ -12,16 +12,17 @@
                 "args": [
                     "build",
                     // "--release",
+                    "--profile=release-with-debug",
                     "--bin=main",
                     "--package=main",
-                    "--features=simple-mark-and-sweep,thread-safe"
+                    "--features=compacting,thread-safe"
                 ],
                 "filter": {
                     "name": "main",
                     "kind": "bin"
                 }
             },
-            "args": ["resources/thread.bg"],
+            "args": ["resources/binary_tree.bg"],
             "cwd": "${workspaceFolder}"
         },
         {
