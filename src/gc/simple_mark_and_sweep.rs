@@ -1,7 +1,7 @@
 use crate::{
     debugger,
     runtime::{AllocateAction, Allocator, AllocatorOptions, StackMap, STACK_SIZE},
-    types::{BuiltInTypes, HeapObject},
+    types::{BuiltInTypes, HeapObject, Word},
     Data, Message,
 };
 use mmap_rs::{MmapMut, MmapOptions};
@@ -87,7 +87,7 @@ impl Allocator for SimpleMarkSweepHeap {
         _options: AllocatorOptions,
     ) -> Result<AllocateAction, Box<dyn Error>> {
         if self.can_allocate(bytes) {
-            self.allocate_inner(bytes, 0, None)
+            self.allocate_inner(Word::from_word(bytes), 0, None)
         } else {
             Ok(AllocateAction::Gc)
         }
@@ -194,22 +194,21 @@ impl SimpleMarkSweepHeap {
         &mut self,
         segment_offset: usize,
         offset: usize,
-        shifted_size: usize,
+        size: Word,
         data: Option<&[u8]>,
     ) -> *const u8 {
+        assert!(offset % 8 == 0, "Offset is not aligned");
         let memory = &mut self.space.segments[segment_offset].memory;
-        let unshifted_size = shifted_size >> 1;
-        let buffer = &mut memory[offset..offset + unshifted_size + 8];
-        if data.is_some() {
-            let data = data.unwrap();
-            assert!(buffer.len() == data.len(), "Data length is not correct");
-            buffer[..].copy_from_slice(data);
-        } else {
-            // write the size of the object to the first 8 bytes
-            buffer[..8].copy_from_slice(&shifted_size.to_le_bytes());
-        }
+        let pointer = memory.as_ptr();
+        let pointer = unsafe { pointer.add(offset) };
+        let mut object = HeapObject::from_untagged(pointer);
 
-        buffer.as_ptr()
+        if let Some(data) = data {
+            object.write_full_object(data);
+        } else {
+            object.write_header(size);
+        }
+        pointer
     }
 
     fn free_are_disjoint(entry1: &FreeListEntry, entry2: &FreeListEntry) -> bool {
@@ -233,8 +232,10 @@ impl SimpleMarkSweepHeap {
     }
 
     fn add_free(&mut self, entry: FreeListEntry) {
-
-        assert!(entry.size <= self.space.segments[entry.segment].size, "Size is too big");
+        assert!(
+            entry.size <= self.space.segments[entry.segment].size,
+            "Size is too big"
+        );
         // TODO: If a whole segment is free
         // I need a fast path where I don't have to update free list
 
@@ -466,7 +467,7 @@ impl SimpleMarkSweepHeap {
 
     fn allocate_inner(
         &mut self,
-        bytes: usize,
+        size: Word,
         depth: usize,
         data: Option<&[u8]>,
     ) -> Result<AllocateAction, Box<dyn Error>> {
@@ -474,22 +475,17 @@ impl SimpleMarkSweepHeap {
             panic!("Too deep");
         }
 
-        let size = (bytes + 1) * 8;
-        let shifted_size = (bytes * 8) << 1;
+        let size_bytes = size.to_bytes() + 8;
 
-        if self.current_offset() + size < self.current_segment_size() {
-            let pointer = self.write_object(
-                self.space.segment_offset,
-                self.current_offset(),
-                shifted_size,
-                data,
-            );
-            self.increment_current_offset(size);
+        if self.current_offset() + size_bytes < self.current_segment_size() {
+            let pointer =
+                self.write_object(self.space.segment_offset, self.current_offset(), size, data);
+            self.increment_current_offset(size_bytes);
             return Ok(AllocateAction::Allocated(pointer));
         }
 
-        if self.switch_to_available_segment(size) {
-            return self.allocate_inner(bytes, depth + 1, data);
+        if self.switch_to_available_segment(size_bytes) {
+            return self.allocate_inner(size, depth + 1, data);
         }
 
         debug_assert!(
@@ -501,37 +497,37 @@ impl SimpleMarkSweepHeap {
             .free_list
             .iter_mut()
             .enumerate()
-            .find(|(_, x)| x.size >= size);
+            .find(|(_, x)| x.size >= size_bytes);
 
         if spot.is_none() {
-            if self.switch_to_available_segment(size) {
-                return self.allocate_inner(bytes, depth + 1, data);
+            if self.switch_to_available_segment(size_bytes) {
+                return self.allocate_inner(size, depth + 1, data);
             }
 
             spot = self
                 .free_list
                 .iter_mut()
                 .enumerate()
-                .find(|(_, x)| x.size >= size);
+                .find(|(_, x)| x.size >= size_bytes);
 
             if spot.is_none() {
                 // TODO: I should consider gc rather than growing here
-                self.switch_or_create_segments(size);
-                return self.allocate_inner(bytes, depth + 1, data);
+                self.switch_or_create_segments(size_bytes);
+                return self.allocate_inner(size, depth + 1, data);
             }
         }
 
         let (spot_index, spot) = spot.unwrap();
 
         let mut spot_clone = *spot;
-        spot_clone.size = size;
-        spot.size -= size;
-        spot.offset += size;
+        spot_clone.size = size_bytes;
+        spot.size -= size_bytes;
+        spot.offset += size_bytes;
         if spot.size == 0 {
             self.free_list.remove(spot_index);
         }
 
-        let pointer = self.write_object(spot_clone.segment, spot_clone.offset, shifted_size, data);
+        let pointer = self.write_object(spot_clone.segment, spot_clone.offset, size, data);
         Ok(AllocateAction::Allocated(pointer))
     }
 
@@ -539,7 +535,7 @@ impl SimpleMarkSweepHeap {
         // TODO: I could amortize this by copying lazily and coalescing
         // the copies together if they are continuouss
         let pointer = self
-            .allocate_inner(data.len() / 8 - 1, 0, Some(data))
+            .allocate_inner(Word::from_bytes(data.len() - 8), 0, Some(data))
             .unwrap();
 
         if let AllocateAction::Allocated(pointer) = pointer {

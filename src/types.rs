@@ -1,5 +1,3 @@
-
-
 // I don't know if this is actually the setup I want
 // But I want get some stuff down there
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -136,14 +134,20 @@ pub struct HeapObject {
 // change things in one place
 impl HeapObject {
     pub fn from_tagged(pointer: usize) -> Self {
-        assert!(pointer as usize % 8 != 0);
+        assert!(pointer % 8 != 0);
         assert!(BuiltInTypes::is_heap_pointer(pointer));
-        HeapObject { pointer, tagged: true }
+        HeapObject {
+            pointer,
+            tagged: true,
+        }
     }
 
     pub fn from_untagged(pointer: *const u8) -> Self {
         assert!(pointer as usize % 8 == 0);
-        HeapObject { pointer: pointer as usize, tagged: false }
+        HeapObject {
+            pointer: pointer as usize,
+            tagged: false,
+        }
     }
 
     pub fn untagged(&self) -> usize {
@@ -156,7 +160,7 @@ impl HeapObject {
 
     pub fn mark(&self) {
         let untagged = self.untagged();
-        let  pointer = untagged as *mut usize;
+        let pointer = untagged as *mut usize;
         let mut data: usize = unsafe { *pointer.cast::<usize>() };
         // check right most bit
         if (data & 1) != 1 {
@@ -187,9 +191,10 @@ impl HeapObject {
         unsafe { std::slice::from_raw_parts(pointer, size / 8) }
     }
 
-    pub fn get_heap_references<'a>(&'a self) -> impl Iterator<Item = HeapObject> + 'a  {
+    pub fn get_heap_references(&self) -> impl Iterator<Item = HeapObject> + '_ {
         let fields = self.get_fields();
-        fields.iter()
+        fields
+            .iter()
             .filter(|x| BuiltInTypes::is_heap_pointer(**x))
             .map(|&pointer| HeapObject::from_tagged(pointer))
     }
@@ -201,7 +206,7 @@ impl HeapObject {
         let pointer = unsafe { pointer.add(1) };
         unsafe { std::slice::from_raw_parts_mut(pointer, size / 8) }
     }
-    
+
     pub fn unmark(&self) {
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
@@ -212,13 +217,50 @@ impl HeapObject {
         }
         unsafe { *pointer.cast::<usize>() = data };
     }
-    
+
     pub fn full_size(&self) -> usize {
         self.fields_size() + self.header_size()
     }
-    
+
     fn header_size(&self) -> usize {
         8
     }
 
+    pub fn write_header(&mut self, field_size: Word) {
+        assert!(field_size.to_bytes() % 8 == 0);
+        assert!(field_size.to_bytes() != 0);
+        let untagged = self.untagged();
+        let pointer = untagged as *mut usize;
+        // TODO: Don't mulitply so that we just store
+        // words and can represent the size of the object
+        // in a more compact way
+        let data = field_size.to_bytes() << 1;
+        assert!(data > 8);
+        unsafe { *pointer.cast::<usize>() = data };
+    }
+
+    pub fn write_full_object(&mut self, data: &[u8]) {
+        unsafe {
+            let untagged = self.untagged();
+            let pointer = untagged as *mut u8;
+            std::ptr::copy_nonoverlapping(data.as_ptr(), pointer, data.len());
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct Word(usize);
+
+impl Word {
+    pub fn to_bytes(self) -> usize {
+        self.0 * 8
+    }
+
+    pub fn from_word(size: usize) -> Word {
+        Word(size)
+    }
+
+    pub fn from_bytes(len: usize) -> Word {
+        Word(len / 8)
+    }
 }
