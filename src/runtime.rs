@@ -33,7 +33,6 @@ pub struct Function {
     number_of_locals: usize,
 }
 
-
 #[derive(Debug, Clone)]
 pub struct Struct {
     pub name: String,
@@ -175,7 +174,6 @@ pub enum AllocateAction {
 
 pub trait Allocator {
     fn new() -> Self;
-
 
     // TODO: I probably want something like kind, but not actually kind
     // I might need to allocate things differently based on type

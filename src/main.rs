@@ -196,12 +196,14 @@ pub unsafe extern "C" fn new_thread<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,
     function: usize,
 ) -> usize {
-    #[cfg(feature = "thread-safe")] {
+    #[cfg(feature = "thread-safe")]
+    {
         let runtime = unsafe { &mut *runtime };
         runtime.new_thread(function);
         BuiltInTypes::null_value() as usize
     }
-    #[cfg(not(feature = "thread-safe"))] {
+    #[cfg(not(feature = "thread-safe"))]
+    {
         panic!("Threads are not supported in this build");
     }
 }
@@ -414,11 +416,9 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     runtime
         .compiler
         .add_builtin_function("print", print_value::<Alloc> as *const u8, false)?;
-    runtime.compiler.add_builtin_function(
-        "allocate",
-        allocate::<Alloc> as *const u8,
-        true,
-    )?;
+    runtime
+        .compiler
+        .add_builtin_function("allocate", allocate::<Alloc> as *const u8, true)?;
     // TODO: Probably needs true
     runtime.compiler.add_builtin_function(
         "make_closure",

@@ -123,7 +123,12 @@ impl Space {
         pointer
     }
 
-    fn write_object(&mut self, segment_offset: usize, offset: usize, shifted_size: usize) -> *const u8 {
+    fn write_object(
+        &mut self,
+        segment_offset: usize,
+        offset: usize,
+        shifted_size: usize,
+    ) -> *const u8 {
         let memory = &mut self.segments[segment_offset].memory;
 
         let buffer = &mut memory[offset..offset + 8];
