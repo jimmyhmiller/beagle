@@ -18,7 +18,7 @@ use crate::{
     ir::{StringValue, Value},
     CommandLineArguments, Data, Message, __pause,
     parser::Parser,
-    types::BuiltInTypes,
+    types::{BuiltInTypes, HeapObject},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -635,23 +635,11 @@ impl Compiler {
             BuiltInTypes::HeapObject => {
                 // TODO: Once I change the setup for heap objects
                 // I need to figure out what kind of heap object I have
-                unsafe {
-                    let value = BuiltInTypes::untag(value);
-                    let pointer = value as *const u8;
-
-                    if pointer as usize % 8 != 0 {
-                        panic!("Not aligned");
-                    }
-                    // get first 8 bytes as size le encoded
-                    let size = *(pointer as *const usize) >> 1;
-                    let pointer = pointer.add(8);
-                    let data = std::slice::from_raw_parts(pointer, size);
-                    // type id is the first 8 bytes of data
-                    let type_id = usize::from_le_bytes(data[0..8].try_into().unwrap());
-                    let type_id = BuiltInTypes::untag(type_id);
-                    let struct_value = self.structs.get_by_id(type_id as usize);
-                    Some(self.get_struct_repr(struct_value?, data[8..].to_vec(), depth + 1)?)
-                }
+                let object = HeapObject::from_tagged(value);
+                // TODO: abstract over this (memory-layout)
+                let type_id = BuiltInTypes::untag(object.get_field(0));
+                let struct_value = self.structs.get_by_id(type_id as usize);
+                Some(self.get_struct_repr(struct_value?, &object.get_fields()[1..], depth + 1)?)
             }
         }
     }
@@ -750,7 +738,7 @@ impl Compiler {
     fn get_struct_repr(
         &self,
         struct_value: &Struct,
-        to_vec: Vec<u8>,
+        fields: &[usize],
         depth: usize,
     ) -> Option<String> {
         // It should look like this
@@ -760,10 +748,7 @@ impl Compiler {
         for (index, field) in struct_value.fields.iter().enumerate() {
             repr.push_str(field);
             repr.push_str(": ");
-            let value = &to_vec[index * 8..index * 8 + 8];
-            let mut bytes = [0u8; 8];
-            bytes.copy_from_slice(value);
-            let value = usize::from_le_bytes(bytes);
+            let value = fields[index];
             repr.push_str(&self.get_repr(value, depth + 1)?);
             if index != struct_value.fields.len() - 1 {
                 repr.push_str(", ");

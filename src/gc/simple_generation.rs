@@ -42,36 +42,6 @@ struct Space {
     segment_size: usize,
 }
 
-struct ObjectIterator {
-    space: *const Space,
-    segment_index: usize,
-    offset: usize,
-}
-
-impl Iterator for ObjectIterator {
-    type Item = *const u8;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let space = unsafe { &*self.space };
-        if self.offset >= space.segments[self.segment_index].offset {
-            self.segment_index += 1;
-            self.offset = 0;
-        }
-        if self.segment_index == space.segments.len() {
-            return None;
-        }
-        let segment = &space.segments[self.segment_index];
-        if segment.offset == 0 {
-            return None;
-        }
-        let pointer = unsafe { segment.memory.as_ptr().add(self.offset) };
-        let size = unsafe { *pointer.cast::<usize>() };
-
-        self.offset += (size >> 1) + 8;
-        Some(pointer)
-    }
-}
-
 impl Space {
     fn new(segment_size: usize) -> Self {
         let space = vec![Segment::new(segment_size)];
@@ -91,12 +61,7 @@ impl Space {
         false
     }
 
-    fn write_object(
-        &mut self,
-        segment_offset: usize,
-        offset: usize,
-        size: Word,
-    ) -> *const u8 {
+    fn write_object(&mut self, segment_offset: usize, offset: usize, size: Word) -> *const u8 {
         let memory = &mut self.segments[segment_offset].memory;
         let mut heap_object = HeapObject::from_untagged(unsafe { memory.as_ptr().add(offset) });
         heap_object.write_header(size);
@@ -322,21 +287,16 @@ impl SimpleGeneration {
         new_roots
     }
 
-    // TODO: Finish this
     unsafe fn copy(&mut self, root: usize) -> usize {
-        // I could make this check the memory range.
-        // In the original it does. But I don't think I have to?
+        let heap_object = HeapObject::from_tagged(root);
 
-        let untagged = BuiltInTypes::untag(root);
-        let pointer = untagged as *mut u8;
-
-        if !self.young.contains(pointer) {
+        if !self.young.contains(heap_object.get_pointer()) {
             return root;
         }
 
-        // If it is marked, we have copied it already
-        // the first 8 bytes are a tagged forward pointer
-        let first_field = *(pointer.add(8).cast::<usize>());
+        // If the first field points into the old generation, we can just return the pointer
+        // because this is a forwarding pointer.
+        let first_field = heap_object.get_field(0);
         if BuiltInTypes::is_heap_pointer(first_field) {
             let untagged_data = BuiltInTypes::untag(first_field);
             if !self.young.contains(untagged_data as *const u8) {
@@ -345,8 +305,7 @@ impl SimpleGeneration {
             }
         }
 
-        let size = *(pointer as *const usize) >> 1;
-        let data = std::slice::from_raw_parts(pointer as *const u8, size + 8);
+        let data = heap_object.get_full_object_data();
         let new_pointer = self.old.copy_data_to_offset(data);
         debug_assert!(new_pointer as usize % 8 == 0, "Pointer is not aligned");
         // update header of original object to now be the forwarding pointer
@@ -354,11 +313,8 @@ impl SimpleGeneration {
 
         for (old, young) in self.additional_roots.iter() {
             if root == *young {
-                let untagged = BuiltInTypes::untag(*old);
-                let object = untagged as *mut u8;
-                let size: usize = *(object as *const usize) >> 1;
-
-                let data = std::slice::from_raw_parts_mut(object.add(8) as *mut usize, size / 8);
+                let mut object = HeapObject::from_tagged(*old);
+                let data = object.get_fields_mut();
 
                 for datum in data.iter_mut() {
                     if datum == young {
@@ -367,12 +323,7 @@ impl SimpleGeneration {
                 }
             }
         }
-        let untagged = BuiltInTypes::untag(root);
-        let pointer = untagged as *mut u8;
-        let pointer = pointer.add(8);
-        *pointer.cast::<usize>() = tagged_new;
-        let size = *(untagged as *const usize) >> 1;
-        debug_assert!(size % 8 == 0 && size < 100);
+        heap_object.write_field(0, tagged_new);
         self.copied.push(HeapObject::from_untagged(new_pointer));
         tagged_new
     }

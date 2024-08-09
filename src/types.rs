@@ -129,8 +129,7 @@ pub struct HeapObject {
     tagged: bool,
 }
 
-const SIZE_SHIFT : usize = 1;
-
+const SIZE_SHIFT: usize = 1;
 
 // TODO: Implement methods for writing the header of the heap object
 // make sure we always use this representation everywhere so we can
@@ -256,7 +255,7 @@ impl HeapObject {
             std::ptr::copy_nonoverlapping(data.as_ptr(), pointer, data.len());
         }
     }
-    
+
     pub fn get_pointer(&self) -> *const u8 {
         let untagged = self.untagged();
         untagged as *const u8
@@ -268,8 +267,8 @@ impl HeapObject {
         let pointer = unsafe { pointer.add(arg as usize + Self::header_size() / 8) };
         unsafe { *pointer = tagged_new };
     }
-    
-    pub fn get_field(&self, arg: i32) -> usize {
+
+    pub fn get_field(&self, arg: usize) -> usize {
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
         let pointer = unsafe { pointer.add(arg as usize + Self::header_size() / 8) };
