@@ -123,15 +123,10 @@ impl Space {
         pointer
     }
 
-    fn write_object(
-        &mut self,
-        segment_offset: usize,
-        offset: usize,
-        size: Word,
-    ) -> *const u8 {
+    fn write_object(&mut self, segment_offset: usize, offset: usize, size: Word) -> *const u8 {
         let memory = &mut self.segments[segment_offset].memory;
 
-        let mut heap_object = HeapObject::from_untagged(unsafe { memory.as_ptr().add(offset)});
+        let mut heap_object = HeapObject::from_untagged(unsafe { memory.as_ptr().add(offset) });
         heap_object.write_header(size);
 
         heap_object.get_pointer()
@@ -320,7 +315,6 @@ impl CompactingHeap {
     }
 
     unsafe fn copy_using_cheneys_algorithm(&mut self, root: usize) -> usize {
-
         let heap_object = HeapObject::from_tagged(root);
 
         // if the first field is in the to space, we have already
