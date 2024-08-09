@@ -136,17 +136,17 @@ impl Space {
     fn allocate(&mut self, words: usize) -> Result<*const u8, Box<dyn Error>> {
         let segment = self.segments.get_mut(self.segment_offset).unwrap();
         let mut offset = segment.offset;
-        let size = (words + 1) * 8;
-        if offset + size > segment.size {
+        let size = Word::from_word(words);
+        let full_size = size.to_bytes() + HeapObject::header_size();
+        if offset + full_size > segment.size {
             self.segment_offset += 1;
             if self.segment_offset == self.segments.len() {
                 self.segments.push(Segment::new(self.segment_size));
             }
             offset = 0;
         }
-        let size = Word::from_word(size);
         let pointer = self.write_object(self.segment_offset, offset, size);
-        self.increment_current_offset(size.to_bytes());
+        self.increment_current_offset(full_size);
         assert!(pointer as usize % 8 == 0, "Pointer is not aligned");
         Ok(pointer)
     }
