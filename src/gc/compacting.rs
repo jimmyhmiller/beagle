@@ -4,7 +4,7 @@ use mmap_rs::{MmapMut, MmapOptions};
 
 use crate::{
     runtime::{AllocateAction, Allocator, AllocatorOptions, StackMap, STACK_SIZE},
-    types::{BuiltInTypes, HeapObject},
+    types::{BuiltInTypes, HeapObject, Word},
 };
 
 struct Segment {
@@ -127,16 +127,14 @@ impl Space {
         &mut self,
         segment_offset: usize,
         offset: usize,
-        shifted_size: usize,
+        size: Word,
     ) -> *const u8 {
         let memory = &mut self.segments[segment_offset].memory;
 
-        let buffer = &mut memory[offset..offset + 8];
+        let mut heap_object = HeapObject::from_untagged(unsafe { memory.as_ptr().add(offset)});
+        heap_object.write_header(size);
 
-        // write the size of the object to the first 8 bytes
-        buffer[..shifted_size.to_le_bytes().len()].copy_from_slice(&shifted_size.to_le_bytes());
-
-        buffer.as_ptr()
+        heap_object.get_pointer()
     }
 
     fn increment_current_offset(&mut self, size: usize) {
@@ -169,20 +167,20 @@ impl Space {
         false
     }
 
-    fn allocate(&mut self, bytes: usize) -> Result<*const u8, Box<dyn Error>> {
+    fn allocate(&mut self, words: usize) -> Result<*const u8, Box<dyn Error>> {
         let segment = self.segments.get_mut(self.segment_offset).unwrap();
         let mut offset = segment.offset;
-        let size = (bytes + 1) * 8;
-        if offset + size > segment.size {
+        let size = Word::from_word(words);
+        let full_size = size.to_bytes() + HeapObject::header_size();
+        if offset + full_size > segment.size {
             self.segment_offset += 1;
             if self.segment_offset == self.segments.len() {
                 self.segments.push(Segment::new(self.segment_size));
             }
             offset = 0;
         }
-        let shifted_size = (bytes * 8) << 1;
-        let pointer = self.write_object(self.segment_offset, offset, shifted_size);
-        self.increment_current_offset(size);
+        let pointer = self.write_object(self.segment_offset, offset, size);
+        self.increment_current_offset(full_size);
         assert!(pointer as usize % 8 == 0, "Pointer is not aligned");
         Ok(pointer)
     }

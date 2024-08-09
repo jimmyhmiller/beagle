@@ -129,6 +129,9 @@ pub struct HeapObject {
     tagged: bool,
 }
 
+const SIZE_SHIFT : usize = 1;
+
+
 // TODO: Implement methods for writing the header of the heap object
 // make sure we always use this representation everywhere so we can
 // change things in one place
@@ -180,7 +183,7 @@ impl HeapObject {
         let untagged = self.untagged();
         let pointer = untagged as *mut isize;
         let data: usize = unsafe { *pointer.cast::<usize>() };
-        data >> 1
+        data >> SIZE_SHIFT
     }
 
     pub fn get_fields(&self) -> &[usize] {
@@ -219,10 +222,10 @@ impl HeapObject {
     }
 
     pub fn full_size(&self) -> usize {
-        self.fields_size() + self.header_size()
+        self.fields_size() + Self::header_size()
     }
 
-    fn header_size(&self) -> usize {
+    pub fn header_size() -> usize {
         8
     }
 
@@ -234,7 +237,7 @@ impl HeapObject {
         // TODO: Don't mulitply so that we just store
         // words and can represent the size of the object
         // in a more compact way
-        let data = field_size.to_bytes() << 1;
+        let data = field_size.to_bytes() << SIZE_SHIFT;
         assert!(data > 8);
         unsafe { *pointer.cast::<usize>() = data };
     }
@@ -245,6 +248,25 @@ impl HeapObject {
             let pointer = untagged as *mut u8;
             std::ptr::copy_nonoverlapping(data.as_ptr(), pointer, data.len());
         }
+    }
+    
+    pub fn get_pointer(&self) -> *const u8 {
+        let untagged = self.untagged();
+        untagged as *const u8
+    }
+    
+    pub fn first_field(&self) -> usize {
+        let untagged = self.untagged();
+        let pointer = untagged as *mut usize;
+        let pointer = unsafe { pointer.add(1) };
+        pointer as usize
+    }
+    
+    pub fn write_field(&self, arg: i32, tagged_new: usize) {
+        let untagged = self.untagged();
+        let pointer = untagged as *mut usize;
+        let pointer = unsafe { pointer.add(arg as usize) };
+        unsafe { *pointer = tagged_new };
     }
 }
 
