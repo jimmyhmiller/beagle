@@ -190,8 +190,15 @@ impl HeapObject {
         let size = self.fields_size();
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
-        let pointer = unsafe { pointer.add(1) };
+        let pointer = unsafe { pointer.add(Self::header_size() / 8) };
         unsafe { std::slice::from_raw_parts(pointer, size / 8) }
+    }
+
+    pub fn get_full_object_data(&self) -> &[u8] {
+        let size = self.full_size();
+        let untagged = self.untagged();
+        let pointer = untagged as *mut u8;
+        unsafe { std::slice::from_raw_parts(pointer, size) }
     }
 
     pub fn get_heap_references(&self) -> impl Iterator<Item = HeapObject> + '_ {
@@ -254,19 +261,19 @@ impl HeapObject {
         let untagged = self.untagged();
         untagged as *const u8
     }
-    
-    pub fn first_field(&self) -> usize {
-        let untagged = self.untagged();
-        let pointer = untagged as *mut usize;
-        let pointer = unsafe { pointer.add(1) };
-        pointer as usize
-    }
-    
+
     pub fn write_field(&self, arg: i32, tagged_new: usize) {
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
-        let pointer = unsafe { pointer.add(arg as usize) };
+        let pointer = unsafe { pointer.add(arg as usize + Self::header_size() / 8) };
         unsafe { *pointer = tagged_new };
+    }
+    
+    pub fn get_field(&self, arg: i32) -> usize {
+        let untagged = self.untagged();
+        let pointer = untagged as *mut usize;
+        let pointer = unsafe { pointer.add(arg as usize + Self::header_size() / 8) };
+        unsafe { *pointer }
     }
 }
 

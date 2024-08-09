@@ -319,17 +319,13 @@ impl CompactingHeap {
         new_roots
     }
 
-    // TODO: Finish this
     unsafe fn copy_using_cheneys_algorithm(&mut self, root: usize) -> usize {
-        // I could make this check the memory range.
-        // In the original it does. But I don't think I have to?
 
-        let untagged = BuiltInTypes::untag(root);
-        let pointer = untagged as *mut u8;
+        let heap_object = HeapObject::from_tagged(root);
 
-        // If it is marked, we have copied it already
-        // the first 8 bytes are a tagged forward pointer
-        let first_field = *(pointer.add(8).cast::<usize>());
+        // if the first field is in the to space, we have already
+        // copied this object. This is now the forwarding pointer.
+        let first_field = heap_object.get_field(0);
         if BuiltInTypes::is_heap_pointer(first_field) {
             let untagged_data = BuiltInTypes::untag(first_field);
             if self.to_space.contains(untagged_data as *const u8) {
@@ -337,22 +333,12 @@ impl CompactingHeap {
                 return first_field;
             }
         }
-
-        let size = *(pointer as *const usize) >> 1;
-        // TODO: We don't have a hard limit on obejct size
-        // right now. But anything this big is probably a mistake
-        assert!(size < 1000);
-        let data = std::slice::from_raw_parts(pointer as *const u8, size + 8);
+        let data = heap_object.get_full_object_data();
         let new_pointer = self.to_space.copy_data_to_offset(data);
         debug_assert!(new_pointer % 8 == 0, "Pointer is not aligned");
         // update header of original object to now be the forwarding pointer
         let tagged_new = BuiltInTypes::get_kind(root).tag(new_pointer as isize) as usize;
-        let untagged = BuiltInTypes::untag(root);
-        let pointer = untagged as *mut u8;
-        let pointer = pointer.add(8);
-        *pointer.cast::<usize>() = tagged_new;
-        let size = *(untagged as *const usize) >> 1;
-        assert!(size % 8 == 0 && size < 100);
+        heap_object.write_field(0, tagged_new);
         tagged_new
     }
 
