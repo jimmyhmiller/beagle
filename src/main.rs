@@ -302,6 +302,8 @@ pub struct CommandLineArguments {
     all_tests: bool,
     #[clap(long, default_value = "false")]
     test: bool,
+    #[clap(long, default_value = "false")]
+    debug: bool,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -337,6 +339,7 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             gc_always: args.gc_always,
             all_tests: false,
             test: true,
+            debug: args.debug,
         };
         main_inner(args)?;
     }
@@ -454,7 +457,9 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         .add_builtin_function("__pause", __pause::<Alloc> as *const u8, true)?;
 
     let beginnings_of_standard_library = include_str!("../resources/std.bg");
-    runtime.compiler.compile(beginnings_of_standard_library)?;
+    runtime
+        .compiler
+        .compile("std.bg", beginnings_of_standard_library)?;
 
     let mut parser = Parser::new(source);
     let ast = parser.parse();
@@ -463,7 +468,10 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     }
 
     let compile_time = Instant::now();
-    runtime.compiler.compile_ast(ast)?;
+
+    // TODO: Need better name for top_level
+    // It should really be the top level of a namespace
+    let top_level = runtime.compiler.compile_ast(&program, ast)?;
 
     runtime.compiler.check_functions();
     if args.show_times {
@@ -476,12 +484,29 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     runtime.memory.stack_map = runtime.compiler.stack_map.clone();
 
     let time = Instant::now();
-    let f = runtime.get_function0("main");
-    let result = f();
+    if let Some(top_level) = top_level {
+        if let Some(f) = runtime.get_function0(&top_level) {
+            f();
+        } else {
+            panic!(
+                "We are supposed to have top level, but didn't find the function {}",
+                top_level
+            );
+        }
+    }
+
+    if let Some(f) = runtime.get_function0("main") {
+        let result = f();
+        runtime.println(result as usize);
+    } else {
+        if args.debug {
+            println!("No main function");
+        }
+    }
+
     if args.show_times {
         println!("Time {:?}", time.elapsed());
     }
-    runtime.println(result as usize);
 
     if has_expect {
         let source = std::fs::read_to_string(program)?;
@@ -534,6 +559,7 @@ fn try_all_examples() -> Result<(), Box<dyn Error>> {
         gc_always: false,
         all_tests: true,
         test: false,
+        debug: false,
     };
     run_all_tests(args)?;
     Ok(())

@@ -276,10 +276,7 @@ impl HeapObject {
         let pointer = unsafe { pointer.add(arg as usize + Self::header_size() / 8) };
         unsafe { *pointer }
     }
-
-    
 }
-
 
 impl Ir {
     pub fn write_type_id(&mut self, struct_pointer: VirtualRegister, type_id: usize) {
@@ -298,8 +295,6 @@ impl Ir {
         }
     }
 }
-
-
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Word(usize);
