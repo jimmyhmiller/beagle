@@ -1,0 +1,15 @@
+let x = 2
+
+println(x)
+
+fn main() {
+    println("Hello, world!")
+    // TODO: this prints function...
+    // println(x)
+    "done"
+}
+
+// Expect
+// 2
+// Hello, world!
+// done

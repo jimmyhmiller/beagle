@@ -1,0 +1,31 @@
+enum Action {
+    run { speed },
+    stop,
+}
+
+fn main() {
+    let action = Action.run { speed: 5 }
+
+    if action.speed >= 3 {
+        println("Fast")
+    }
+    println(action)
+    println(action.speed)
+
+    // TOOD: How do I represent this?
+    // It is a property access. So I need Action to exist
+    // in the scope. What is action? I guess it is type enum?
+    // If I print Action itself, what does it return?
+    // I need a "global" (or really namespace) environment for this.
+    // let stop = Action.stop
+
+    // println(stop)
+
+    "done"
+}
+
+// Expect
+// Fast
+// Action.run { speed: 5 }
+// 5
+// done

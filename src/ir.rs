@@ -26,6 +26,7 @@ pub enum Value {
     Pointer(usize),
     Local(usize),
     FreeVariable(usize),
+    GlobalVariable(usize),
     True,
     False,
     Null,
@@ -802,6 +803,11 @@ impl Ir {
                             -((*free_variable + self.num_locals + 1) as i32),
                         );
                     }
+                    Value::GlobalVariable(_global_variable) => {
+                        // let register = alloc.allocate_register(index, *dest, lang);
+                        // lang.load_global(register, *global_variable as i32);
+                        todo!();
+                    }
                     Value::Null => {
                         let register = alloc.allocate_register(index, *dest, lang);
                         lang.mov_64(register, 0b111_isize);
@@ -1013,6 +1019,10 @@ impl Ir {
                             -((*free_variable + self.num_locals + 1) as i32),
                         );
                         lang.jump(exit);
+                    }
+                    Value::GlobalVariable(_global_variable) => {
+                        // lang.load_global(lang.ret_reg(), *global_variable as i32);
+                        todo!();
                     }
                 },
                 Instruction::HeapLoad(dest, ptr, offset) => {
@@ -1354,5 +1364,9 @@ impl Ir {
             free_variable,
             free_variable_offset,
         ));
+    }
+
+    pub(crate) fn load_global(&self, _reg: VirtualRegister, _id: usize) -> Value {
+        todo!()
     }
 }

@@ -265,20 +265,14 @@ impl<Alloc: Allocator> Memory<Alloc> {
 }
 
 pub enum EnumVariant {
-    StructVariant {
-        name: String,
-        fields: Vec<String>,
-    },
-    StaticVariant {
-        name: String,
-    },
+    StructVariant { name: String, fields: Vec<String> },
+    StaticVariant { name: String },
 }
 
 pub struct Enum {
     pub name: String,
     pub variants: Vec<EnumVariant>,
 }
-
 
 struct EnumManager {
     name_to_id: HashMap<String, usize>,
@@ -686,16 +680,33 @@ impl Compiler {
         }
     }
 
-    pub fn compile(&mut self, code: &str) -> Result<(), Box<dyn Error>> {
+    pub fn compile(&mut self, file_name: &str, code: &str) -> Result<(), Box<dyn Error>> {
         let mut parser = Parser::new(code.to_string());
         let ast = parser.parse();
-        self.compile_ast(ast)?;
+        let top_level = self.compile_ast(file_name, ast)?;
+        assert!(top_level.is_none());
         Ok(())
     }
 
-    pub fn compile_ast(&mut self, ast: crate::ast::Ast) -> Result<(), Box<dyn Error>> {
-        ast.compile(self);
-        Ok(())
+    pub fn compile_ast(
+        &mut self,
+        file_name: &str,
+        ast: crate::ast::Ast,
+    ) -> Result<Option<String>, Box<dyn Error>> {
+        let mut ir = ast.compile(self);
+        if ast.has_top_level() {
+            let arm = LowLevelArm::new();
+            let error_fn_pointer = self.find_function("throw_error").unwrap();
+            let error_fn_pointer = self.get_function_pointer(error_fn_pointer).unwrap();
+
+            let compiler_ptr = self.get_compiler_ptr() as usize;
+            let mut arm = ir.compile(arm, error_fn_pointer, compiler_ptr);
+            let max_locals = arm.max_locals as usize;
+            let function_name = format!("__{}_top_level", file_name);
+            self.upsert_function(Some(&function_name), &mut arm, max_locals)?;
+            return Ok(Some(function_name));
+        }
+        Ok(None)
     }
 
     pub fn get_trampoline(&self) -> fn(u64, u64) -> u64 {
@@ -1209,13 +1220,8 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         }
     }
 
-    pub fn get_function_base(&self, name: &str) -> (u64, u64, fn(u64, u64) -> u64) {
-        let function = self
-            .compiler
-            .functions
-            .iter()
-            .find(|f| f.name == name)
-            .unwrap_or_else(|| panic!("Can't find function named {}", name));
+    pub fn get_function_base(&self, name: &str) -> Option<(u64, u64, fn(u64, u64) -> u64)> {
+        let function = self.compiler.functions.iter().find(|f| f.name == name)?;
         let jump_table_offset = function.jump_table_offset;
         let offset = &self.compiler.jump_table.as_ref().unwrap()
             [jump_table_offset * 8..jump_table_offset * 8 + 8];
@@ -1226,26 +1232,28 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         let trampoline = self.compiler.get_trampoline();
         let stack_pointer = self.get_stack_base();
 
-        (stack_pointer as u64, start as u64, trampoline)
+        Some((stack_pointer as u64, start as u64, trampoline))
     }
 
-    pub fn get_function0(&self, name: &str) -> Box<dyn Fn() -> u64> {
-        let (stack_pointer, start, trampoline) = self.get_function_base(name);
-        Box::new(move || trampoline(stack_pointer, start))
+    pub fn get_function0(&self, name: &str) -> Option<Box<dyn Fn() -> u64>> {
+        let (stack_pointer, start, trampoline) = self.get_function_base(name)?;
+        Some(Box::new(move || trampoline(stack_pointer, start)))
     }
 
     #[allow(unused)]
-    fn get_function1(&self, name: &str) -> Box<dyn Fn(u64) -> u64> {
-        let (stack_pointer, start, trampoline_start) = self.get_function_base(name);
+    fn get_function1(&self, name: &str) -> Option<Box<dyn Fn(u64) -> u64>> {
+        let (stack_pointer, start, trampoline_start) = self.get_function_base(name)?;
         let f: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
-        Box::new(move |arg1| f(stack_pointer, start, arg1))
+        Some(Box::new(move |arg1| f(stack_pointer, start, arg1)))
     }
 
     #[allow(unused)]
-    fn get_function2(&self, name: &str) -> Box<dyn Fn(u64, u64) -> u64> {
-        let (stack_pointer, start, trampoline_start) = self.get_function_base(name);
+    fn get_function2(&self, name: &str) -> Option<Box<dyn Fn(u64, u64) -> u64>> {
+        let (stack_pointer, start, trampoline_start) = self.get_function_base(name)?;
         let f: fn(u64, u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
-        Box::new(move |arg1, arg2| f(stack_pointer, start, arg1, arg2))
+        Some(Box::new(move |arg1, arg2| {
+            f(stack_pointer, start, arg1, arg2)
+        }))
     }
 
     // TODO: Allocate/gc need to change to work with this

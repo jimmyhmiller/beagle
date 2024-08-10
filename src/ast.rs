@@ -117,6 +117,15 @@ impl Ast {
         ast_compiler.compile()
     }
 
+    pub fn has_top_level(&self) -> bool {
+        self.nodes().iter().any(|node| {
+            !matches!(
+                node,
+                Ast::Function { .. } | Ast::Struct { .. } | Ast::Enum { .. }
+            )
+        })
+    }
+
     pub fn nodes(&self) -> &Vec<Ast> {
         match self {
             Ast::Program { elements } => elements,
@@ -137,6 +146,8 @@ pub enum VariableLocation {
     Register(VirtualRegister),
     Local(usize),
     FreeVariable(usize),
+    // The usize here is a string constant
+    GlobalVariable(usize),
 }
 
 impl From<&VariableLocation> for Value {
@@ -145,6 +156,7 @@ impl From<&VariableLocation> for Value {
             VariableLocation::Register(reg) => Value::Register(*reg),
             VariableLocation::Local(index) => Value::Local(*index),
             VariableLocation::FreeVariable(index) => Value::FreeVariable(*index),
+            VariableLocation::GlobalVariable(name) => Value::GlobalVariable(name.clone()),
         }
     }
 }
@@ -312,7 +324,7 @@ impl<'a> AstCompiler<'a> {
                 self.ir = old_ir;
 
                 if self.has_free_variables() {
-                    return self.compile_closure(function_pointer)
+                    return self.compile_closure(function_pointer);
                 }
 
                 let function = self.ir.function(Value::Function(function_pointer));
@@ -758,8 +770,15 @@ impl<'a> AstCompiler<'a> {
                     self.ir.load_local(reg, index);
                     self.ir.push_to_stack(reg.into());
                 }
+                VariableLocation::GlobalVariable(id) => {
+                    let reg = self.ir.volatile_register();
+                    self.ir.load_global(reg, id);
+                    self.ir.push_to_stack(reg.into());
+                }
                 VariableLocation::FreeVariable(_) => {
-                    panic!("We are trying to find this variable concretely and found a free variable")
+                    panic!(
+                        "We are trying to find this variable concretely and found a free variable"
+                    )
                 }
             }
         }
@@ -913,50 +932,14 @@ impl<'a> AstCompiler<'a> {
                         .collect(),
                 });
             }
-            Ast::Enum {
-                name,
-                variants,
-            } => {
-
+            Ast::Enum { name, variants } => {
                 let enum_repr = Enum {
                     name: name.clone(),
                     variants: variants
                         .iter()
-                        .map(|variant| {
-                            match variant {
-                            
-                                Ast::EnumVariant { name, fields } => {
-                                    let fields = fields
-                                        .iter()
-                                        .map(|field| {
-                                            if let Ast::Identifier(name) = field {
-                                                name.clone()
-                                            } else {
-                                                panic!("Expected identifier got {:?}", field)
-                                            }
-                                        })
-                                        .collect();
-                                    EnumVariant::StructVariant {
-                                        name: name.clone(),
-                                        fields,
-                                    }
-                                }
-                                Ast::EnumStaticVariant { name } => {
-                                    EnumVariant::StaticVariant { name: name.clone() }
-                                }
-                                _ => panic!("Expected enum variant got {:?}", variant)
-                            }
-                        })
-                        .collect(),
-                };
-
-                self.compiler.add_enum(enum_repr);
-                for variant in variants.iter() {
-                    match variant {
-                        Ast::EnumVariant { name: variant_name, fields } => {
-                            self.compiler.add_struct(Struct {
-                                name: format!("{}.{}", name, variant_name),
-                                fields: fields
+                        .map(|variant| match variant {
+                            Ast::EnumVariant { name, fields } => {
+                                let fields = fields
                                     .iter()
                                     .map(|field| {
                                         if let Ast::Identifier(name) = field {
@@ -965,17 +948,47 @@ impl<'a> AstCompiler<'a> {
                                             panic!("Expected identifier got {:?}", field)
                                         }
                                     })
-                                    .collect(),
-                            })
-                        }
+                                    .collect();
+                                EnumVariant::StructVariant {
+                                    name: name.clone(),
+                                    fields,
+                                }
+                            }
+                            Ast::EnumStaticVariant { name } => {
+                                EnumVariant::StaticVariant { name: name.clone() }
+                            }
+                            _ => panic!("Expected enum variant got {:?}", variant),
+                        })
+                        .collect(),
+                };
+
+                self.compiler.add_enum(enum_repr);
+                for variant in variants.iter() {
+                    match variant {
+                        Ast::EnumVariant {
+                            name: variant_name,
+                            fields,
+                        } => self.compiler.add_struct(Struct {
+                            name: format!("{}.{}", name, variant_name),
+                            fields: fields
+                                .iter()
+                                .map(|field| {
+                                    if let Ast::Identifier(name) = field {
+                                        name.clone()
+                                    } else {
+                                        panic!("Expected identifier got {:?}", field)
+                                    }
+                                })
+                                .collect(),
+                        }),
                         Ast::EnumStaticVariant { name: _ } => {
                             // Do I need to do anything?
                         }
-                        _ => panic!("Expected enum variant got {:?}", variant)
+                        _ => panic!("Expected enum variant got {:?}", variant),
                     }
                 }
             }
-            Ast::Let(_, _) => todo!(),
+            Ast::Let(_, _) => {}
             _ => {}
         }
     }
