@@ -725,10 +725,7 @@ impl Parser {
                     self.expect_close_curly();
                     Ast::EnumVariant { name, fields }
                 } else {
-                    Ast::EnumVariant {
-                        name,
-                        fields: Vec::new(),
-                    }
+                    Ast::EnumStaticVariant { name }
                 }
             }
             _ => panic!("Expected variant name got {:?}", self.current_token()),
@@ -1003,8 +1000,14 @@ impl Parser {
                     let fields = self.parse_struct_fields_creations();
                     self.expect_close_curly();
                     Ast::EnumCreation {
-                        name: Box::new(lhs),
-                        variant: Box::new(rhs),
+                        name: match lhs {
+                            Ast::Identifier(name) => name,
+                            _ => panic!("Not an identifier"),
+                        },
+                        variant: match rhs {
+                            Ast::Identifier(name) => name,
+                            _ => panic!("Not an identifier"),
+                        },
                         fields,
                     }
                 } else {

@@ -264,6 +264,47 @@ impl<Alloc: Allocator> Memory<Alloc> {
     }
 }
 
+pub enum EnumVariant {
+    StructVariant {
+        name: String,
+        fields: Vec<String>,
+    },
+    StaticVariant {
+        name: String,
+    },
+}
+
+pub struct Enum {
+    pub name: String,
+    pub variants: Vec<EnumVariant>,
+}
+
+
+struct EnumManager {
+    name_to_id: HashMap<String, usize>,
+    enums: Vec<Enum>,
+}
+
+impl EnumManager {
+    fn new() -> Self {
+        Self {
+            name_to_id: HashMap::new(),
+            enums: Vec::new(),
+        }
+    }
+
+    fn insert(&mut self, e: Enum) {
+        let id = self.enums.len();
+        self.name_to_id.insert(e.name.clone(), id);
+        self.enums.push(e);
+    }
+
+    fn get(&self, name: &str) -> Option<&Enum> {
+        let id = self.name_to_id.get(name)?;
+        self.enums.get(*id)
+    }
+}
+
 pub struct Compiler {
     code_offset: usize,
     code_memory: Option<Mmap>,
@@ -272,6 +313,7 @@ pub struct Compiler {
     // Do I need this offset?
     jump_table_offset: usize,
     structs: StructManager,
+    enums: EnumManager,
     functions: Vec<Function>,
     string_constants: Vec<StringValue>,
     #[allow(unused)]
@@ -731,6 +773,14 @@ impl Compiler {
         self.structs.insert(s.name.clone(), s);
     }
 
+    pub fn add_enum(&mut self, e: Enum) {
+        self.enums.insert(e);
+    }
+
+    pub fn get_enum(&self, name: &str) -> Option<&Enum> {
+        self.enums.get(name)
+    }
+
     pub fn get_struct(&self, name: &str) -> Option<(usize, &Struct)> {
         self.structs.get(name)
     }
@@ -828,6 +878,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
                 ),
                 jump_table_offset: 0,
                 structs: StructManager::new(),
+                enums: EnumManager::new(),
                 functions: Vec::new(),
                 string_constants: vec![],
                 command_line_arguments: command_line_arguments.clone(),

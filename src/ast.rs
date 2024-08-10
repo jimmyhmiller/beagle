@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use crate::{
     arm::LowLevelArm,
     ir::{self, Condition},
-    runtime::{Compiler, Struct},
+    runtime::{Compiler, Enum, EnumVariant, Struct},
     types::BuiltInTypes,
 };
 
@@ -30,6 +30,9 @@ pub enum Ast {
     EnumVariant {
         name: String,
         fields: Vec<Ast>,
+    },
+    EnumStaticVariant {
+        name: String,
     },
     If {
         condition: Box<Ast>,
@@ -85,8 +88,8 @@ pub enum Ast {
     },
     Null,
     EnumCreation {
-        name: Box<Ast>,
-        variant: Box<Ast>,
+        name: String,
+        variant: String,
         fields: Vec<(String, Ast)>,
     },
 }
@@ -308,8 +311,8 @@ impl<'a> AstCompiler<'a> {
 
                 self.ir = old_ir;
 
-                if let Some(value) = self.compile_closure(function_pointer) {
-                    return value;
+                if self.has_free_variables() {
+                    return self.compile_closure(function_pointer)
                 }
 
                 let function = self.ir.function(Value::Function(function_pointer));
@@ -334,12 +337,60 @@ impl<'a> AstCompiler<'a> {
             Ast::EnumVariant { name: _, fields: _ } => {
                 panic!("Shouldn't get here")
             }
-            Ast::EnumCreation {
-                name: _,
-                variant: _,
-                fields: _,
-            } => {
+            Ast::EnumStaticVariant { name: _ } => {
                 panic!("Shouldn't get here")
+            }
+            Ast::EnumCreation {
+                name,
+                variant,
+                fields,
+            } => {
+                let field_results = fields
+                    .iter()
+                    .map(|field| {
+                        self.not_tail_position();
+                        self.call_compile(&field.1)
+                    })
+                    .collect::<Vec<_>>();
+
+                let (struct_id, struct_type) = self
+                    .compiler
+                    .get_struct(&format!("{}.{}", name, variant))
+                    .unwrap_or_else(|| panic!("Struct not found {}", name));
+
+                for field in fields.iter() {
+                    let mut found = false;
+                    for defined_field in struct_type.fields.iter() {
+                        if &field.0 == defined_field {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        panic!("Struct field not defined {}", field.0);
+                    }
+                }
+
+                let compiler_pointer_reg = self.ir.assign_new(self.compiler.get_compiler_ptr());
+
+                let allocate = self.compiler.find_function("allocate").unwrap();
+                let allocate = self.compiler.get_function_pointer(allocate).unwrap();
+                let allocate = self.ir.assign_new(allocate);
+
+                let size_reg = self.ir.assign_new(struct_type.size() + 1);
+                let stack_pointer = self.ir.get_stack_pointer_imm(0);
+
+                let struct_ptr = self.ir.call_builtin(
+                    allocate.into(),
+                    vec![compiler_pointer_reg.into(), size_reg.into(), stack_pointer],
+                );
+
+                let struct_pointer = self.ir.assign_new(struct_ptr);
+                self.ir.write_type_id(struct_pointer, struct_id);
+                self.ir.write_fields(struct_pointer, &field_results);
+
+                self.ir
+                    .tag(struct_pointer.into(), BuiltInTypes::HeapObject.get_tag())
             }
             Ast::StructCreation { name, fields } => {
                 let field_results = fields
@@ -374,35 +425,20 @@ impl<'a> AstCompiler<'a> {
                 let allocate = self.compiler.get_function_pointer(allocate).unwrap();
                 let allocate = self.ir.assign_new(allocate);
 
-                // Shift size left one so we can use it to mark
                 let size_reg = self.ir.assign_new(struct_type.size() + 1);
                 let stack_pointer = self.ir.get_stack_pointer_imm(0);
-                // TODO: I need store the struct type here, so I know things about what data is here.
 
                 let struct_ptr = self.ir.call_builtin(
                     allocate.into(),
                     vec![compiler_pointer_reg.into(), size_reg.into(), stack_pointer],
                 );
 
-                // TODO: I want a better way to make clear the structure here.
-                // Maybe I just make a struct and have a way of generating code
-                // based on that struct?
-
-                let struct_ptr = self.ir.assign_new(struct_ptr);
-                let mut offset = 1;
-                self.ir.heap_store_offset(
-                    struct_ptr,
-                    Value::SignedConstant(struct_id as isize),
-                    offset,
-                );
-                offset += 1;
-
-                for (i, reg) in field_results.iter().enumerate() {
-                    self.ir.heap_store_offset(struct_ptr, *reg, offset + i);
-                }
+                let struct_pointer = self.ir.assign_new(struct_ptr);
+                self.ir.write_type_id(struct_pointer, struct_id);
+                self.ir.write_fields(struct_pointer, &field_results);
 
                 self.ir
-                    .tag(struct_ptr.into(), BuiltInTypes::HeapObject.get_tag())
+                    .tag(struct_pointer.into(), BuiltInTypes::HeapObject.get_tag())
             }
             Ast::PropertyAccess { object, property } => {
                 let object = self.call_compile(object.as_ref());
@@ -688,75 +724,72 @@ impl<'a> AstCompiler<'a> {
         self.ir.call(function_register.into(), args)
     }
 
-    fn compile_closure(&mut self, function_pointer: usize) -> Option<Value> {
-        if self.has_free_variables() {
-            // When I get those free variables, I'd need to
-            // make sure that the variables they refer to are
-            // heap allocated. How am I going to do that?
-            // I actually probably need to think about this more
-            // If they are already heap allocated, then I just
-            // store the pointer. If they are immutable variables,
-            // I just take the value
-            // If they are mutable, then I'd need to heap allocate
-            // but maybe I just heap allocate all mutable variables?
-            // What about functions that change overtime?
-            // Not 100% sure about all of this
-            let label = self.ir.label("closure");
+    fn compile_closure(&mut self, function_pointer: usize) -> Value {
+        // When I get those free variables, I'd need to
+        // make sure that the variables they refer to are
+        // heap allocated. How am I going to do that?
+        // I actually probably need to think about this more
+        // If they are already heap allocated, then I just
+        // store the pointer. If they are immutable variables,
+        // I just take the value
+        // If they are mutable, then I'd need to heap allocate
+        // but maybe I just heap allocate all mutable variables?
+        // What about functions that change overtime?
+        // Not 100% sure about all of this
+        let label = self.ir.label("closure");
 
-            // self.ir.breakpoint();
-            // get a pointer to the start of the free variables on the stack
-            let free_variable_pointer = self.ir.get_current_stack_position();
+        // self.ir.breakpoint();
+        // get a pointer to the start of the free variables on the stack
+        let free_variable_pointer = self.ir.get_current_stack_position();
 
-            self.ir.write_label(label);
-            for free_variable in self.get_current_env().free_variables.clone().iter() {
-                let variable = self
-                    .get_variable(free_variable)
-                    .unwrap_or_else(|| panic!("Can't find variable {}", free_variable));
-                // we are now going to push these variables onto the stack
+        self.ir.write_label(label);
+        for free_variable in self.get_current_env().free_variables.clone().iter() {
+            let variable = self
+                .get_variable(free_variable)
+                .unwrap_or_else(|| panic!("Can't find variable {}", free_variable));
+            // we are now going to push these variables onto the stack
 
-                match variable {
-                    VariableLocation::Register(reg) => {
-                        self.ir.push_to_stack(reg.into());
-                    }
-                    VariableLocation::Local(index) => {
-                        let reg = self.ir.volatile_register();
-                        self.ir.load_local(reg, index);
-                        self.ir.push_to_stack(reg.into());
-                    }
-                    VariableLocation::FreeVariable(_) => {
-                        panic!("We are trying to find this variable concretely and found a free variable")
-                    }
+            match variable {
+                VariableLocation::Register(reg) => {
+                    self.ir.push_to_stack(reg.into());
+                }
+                VariableLocation::Local(index) => {
+                    let reg = self.ir.volatile_register();
+                    self.ir.load_local(reg, index);
+                    self.ir.push_to_stack(reg.into());
+                }
+                VariableLocation::FreeVariable(_) => {
+                    panic!("We are trying to find this variable concretely and found a free variable")
                 }
             }
-            // load count of free variables
-            let num_free = self.get_current_env().free_variables.len();
-
-            let num_free = Value::SignedConstant(num_free as isize);
-            let num_free_reg = self.ir.volatile_register();
-            self.ir.assign(num_free_reg, num_free);
-            // Call make_closure
-            let make_closure = self.compiler.find_function("make_closure").unwrap();
-            let make_closure = self.compiler.get_function_pointer(make_closure).unwrap();
-            let make_closure_reg = self.ir.volatile_register();
-            self.ir.assign(make_closure_reg, make_closure);
-            let function_pointer_reg = self.ir.volatile_register();
-            self.ir.assign(function_pointer_reg, function_pointer);
-
-            let compiler_pointer_reg = self.ir.assign_new(self.compiler.get_compiler_ptr());
-
-            let closure = self.ir.call(
-                make_closure_reg.into(),
-                vec![
-                    compiler_pointer_reg.into(),
-                    function_pointer_reg.into(),
-                    num_free_reg.into(),
-                    free_variable_pointer,
-                ],
-            );
-            self.pop_environment();
-            return Some(closure);
         }
-        None
+        // load count of free variables
+        let num_free = self.get_current_env().free_variables.len();
+
+        let num_free = Value::SignedConstant(num_free as isize);
+        let num_free_reg = self.ir.volatile_register();
+        self.ir.assign(num_free_reg, num_free);
+        // Call make_closure
+        let make_closure = self.compiler.find_function("make_closure").unwrap();
+        let make_closure = self.compiler.get_function_pointer(make_closure).unwrap();
+        let make_closure_reg = self.ir.volatile_register();
+        self.ir.assign(make_closure_reg, make_closure);
+        let function_pointer_reg = self.ir.volatile_register();
+        self.ir.assign(function_pointer_reg, function_pointer);
+
+        let compiler_pointer_reg = self.ir.assign_new(self.compiler.get_compiler_ptr());
+
+        let closure = self.ir.call(
+            make_closure_reg.into(),
+            vec![
+                compiler_pointer_reg.into(),
+                function_pointer_reg.into(),
+                num_free_reg.into(),
+                free_variable_pointer,
+            ],
+        );
+        self.pop_environment();
+        return closure;
     }
 
     fn find_or_insert_local(&mut self, name: &str) -> usize {
@@ -881,10 +914,66 @@ impl<'a> AstCompiler<'a> {
                 });
             }
             Ast::Enum {
-                name: _,
-                variants: _,
+                name,
+                variants,
             } => {
-                // self.compiler.add_enum(name.clone(), variants.clone());
+
+                let enum_repr = Enum {
+                    name: name.clone(),
+                    variants: variants
+                        .iter()
+                        .map(|variant| {
+                            match variant {
+                            
+                                Ast::EnumVariant { name, fields } => {
+                                    let fields = fields
+                                        .iter()
+                                        .map(|field| {
+                                            if let Ast::Identifier(name) = field {
+                                                name.clone()
+                                            } else {
+                                                panic!("Expected identifier got {:?}", field)
+                                            }
+                                        })
+                                        .collect();
+                                    EnumVariant::StructVariant {
+                                        name: name.clone(),
+                                        fields,
+                                    }
+                                }
+                                Ast::EnumStaticVariant { name } => {
+                                    EnumVariant::StaticVariant { name: name.clone() }
+                                }
+                                _ => panic!("Expected enum variant got {:?}", variant)
+                            }
+                        })
+                        .collect(),
+                };
+
+                self.compiler.add_enum(enum_repr);
+                for variant in variants.iter() {
+                    match variant {
+                        Ast::EnumVariant { name: variant_name, fields } => {
+                            self.compiler.add_struct(Struct {
+                                name: format!("{}.{}", name, variant_name),
+                                fields: fields
+                                    .iter()
+                                    .map(|field| {
+                                        if let Ast::Identifier(name) = field {
+                                            name.clone()
+                                        } else {
+                                            panic!("Expected identifier got {:?}", field)
+                                        }
+                                    })
+                                    .collect(),
+                            })
+                        }
+                        Ast::EnumStaticVariant { name: _ } => {
+                            // Do I need to do anything?
+                        }
+                        _ => panic!("Expected enum variant got {:?}", variant)
+                    }
+                }
             }
             Ast::Let(_, _) => todo!(),
             _ => {}
