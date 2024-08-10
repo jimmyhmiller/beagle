@@ -22,7 +22,7 @@
                     "kind": "bin"
                 }
             },
-            "args": ["resources/binary_tree.bg"],
+            "args": ["resources/enum.bg"],
             "cwd": "${workspaceFolder}"
         },
         {

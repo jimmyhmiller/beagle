@@ -1,3 +1,5 @@
+use crate::ir::{Ir, Value, VirtualRegister};
+
 // I don't know if this is actually the setup I want
 // But I want get some stuff down there
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -274,7 +276,30 @@ impl HeapObject {
         let pointer = unsafe { pointer.add(arg as usize + Self::header_size() / 8) };
         unsafe { *pointer }
     }
+
+    
 }
+
+
+impl Ir {
+    pub fn write_type_id(&mut self, struct_pointer: VirtualRegister, type_id: usize) {
+        let offset = 1;
+        self.heap_store_offset(
+            struct_pointer,
+            Value::SignedConstant(type_id as isize),
+            offset,
+        );
+    }
+
+    pub fn write_fields(&mut self, struct_pointer: VirtualRegister, fields: &[Value]) {
+        let offset = 2;
+        for (i, field) in fields.iter().enumerate() {
+            self.heap_store_offset(struct_pointer, *field, offset + i);
+        }
+    }
+}
+
+
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Word(usize);
