@@ -146,20 +146,18 @@ pub enum VariableLocation {
     Register(VirtualRegister),
     Local(usize),
     FreeVariable(usize),
-    // The usize here is a string constant
-    GlobalVariable(usize),
+    NamespaceVariable(usize, usize),
 }
 
-impl From<&VariableLocation> for Value {
-    fn from(location: &VariableLocation) -> Self {
-        match location {
-            VariableLocation::Register(reg) => Value::Register(*reg),
-            VariableLocation::Local(index) => Value::Local(*index),
-            VariableLocation::FreeVariable(index) => Value::FreeVariable(*index),
-            VariableLocation::GlobalVariable(name) => Value::GlobalVariable(name.clone()),
-        }
-    }
-}
+// impl From<&VariableLocation> for Value {
+//     fn from(location: &VariableLocation) -> Self {
+//         match location {
+//             VariableLocation::Register(reg) => Value::Register(*reg),
+//             VariableLocation::Local(index) => Value::Local(*index),
+//             VariableLocation::FreeVariable(index) => Value::FreeVariable(*index),
+//         }
+//     }
+// }
 
 #[derive(Debug, Clone)]
 pub struct Context {
@@ -584,19 +582,33 @@ impl<'a> AstCompiler<'a> {
             Ast::NumberLiteral(n) => Value::SignedConstant(n as isize),
             Ast::Identifier(name) => {
                 let reg = &self.get_variable_alloc_free_variable(&name);
-                reg.into()
+                self.resolve_variable(reg)
             }
             Ast::Let(name, value) => {
                 if let Ast::Identifier(name) = name.as_ref() {
-                    self.not_tail_position();
-                    let value = self.call_compile(&value);
-                    self.not_tail_position();
-                    let reg = self.ir.volatile_register();
-                    self.ir.assign(reg, value);
-                    let local_index = self.find_or_insert_local(name);
-                    self.ir.store_local(local_index, reg);
-                    self.insert_variable(name.to_string(), VariableLocation::Local(local_index));
-                    reg.into()
+
+                    if self.environment_stack.len() == 1 {
+                        self.not_tail_position();
+                        let value = self.call_compile(&value);
+                        self.not_tail_position();
+                        let reg = self.ir.volatile_register();
+                        self.ir.assign(reg, value);
+                        let namespace_id = self.compiler.current_namespace_id();
+                        let reserved_namespace_slot = self.compiler.reserve_namespace_slot(name);
+                        self.store_namespaced_variable(Value::RawValue(reserved_namespace_slot), reg);
+                        self.insert_variable(name.to_string(), VariableLocation::NamespaceVariable(namespace_id, reserved_namespace_slot));
+                        reg.into()
+                    } else {
+                        self.not_tail_position();
+                        let value = self.call_compile(&value);
+                        self.not_tail_position();
+                        let reg = self.ir.volatile_register();
+                        self.ir.assign(reg, value);
+                        let local_index = self.find_or_insert_local(name);
+                        self.ir.store_local(local_index, reg);
+                        self.insert_variable(name.to_string(), VariableLocation::Local(local_index));
+                        reg.into()
+                    }
                 } else {
                     panic!("Expected variable")
                 }
@@ -659,7 +671,8 @@ impl<'a> AstCompiler<'a> {
         let function_register = self.ir.volatile_register();
 
         let closure_register = self.ir.volatile_register();
-        self.ir.assign(closure_register, &function);
+        let function = self.resolve_variable(&function);
+        self.ir.assign(closure_register, function);
         // Check if the tag is a closure
         let tag = self.ir.get_tag(closure_register.into());
         let closure_tag = BuiltInTypes::Closure.get_tag();
@@ -731,7 +744,7 @@ impl<'a> AstCompiler<'a> {
         self.ir.extend_register_life(counter.into());
         self.ir.extend_register_life(closure_register);
         self.ir.write_label(call_function);
-        self.ir.assign(function_register, &function);
+        self.ir.assign(function_register, function);
         self.ir.write_label(skip_load_function);
         self.ir.call(function_register.into(), args)
     }
@@ -770,10 +783,8 @@ impl<'a> AstCompiler<'a> {
                     self.ir.load_local(reg, index);
                     self.ir.push_to_stack(reg.into());
                 }
-                VariableLocation::GlobalVariable(id) => {
-                    let reg = self.ir.volatile_register();
-                    self.ir.load_global(reg, id);
-                    self.ir.push_to_stack(reg.into());
+                VariableLocation::NamespaceVariable(namespace, slot) => {
+                    self.resolve_variable(&VariableLocation::NamespaceVariable(namespace, slot));
                 }
                 VariableLocation::FreeVariable(_) => {
                     panic!(
@@ -836,9 +847,20 @@ impl<'a> AstCompiler<'a> {
             .cloned()
     }
 
+    fn get_variable_in_stack(&self, name: &str) -> Option<VariableLocation> {
+        // start by looking in current environment
+        // if it is not there, look in the top level environment
+        if let Some(variable) = self.environment_stack.last().unwrap().variables.get(name) {
+            Some(variable.clone())
+        } else {
+            self.environment_stack.first().unwrap().variables.get(name).cloned()
+        }
+
+    }
+
     fn get_variable_alloc_free_variable(&mut self, name: &str) -> VariableLocation {
         // TODO: Should walk the environment stack
-        if let Some(variable) = self.environment_stack.last().unwrap().variables.get(name) {
+        if let Some(variable) = self.get_variable_in_stack(name) {
             variable.clone()
         } else {
             let current_env = self.environment_stack.last_mut().unwrap();
@@ -1038,6 +1060,24 @@ impl<'a> AstCompiler<'a> {
                 Value::Null
             }
             _ => panic!("Unknown inline primitive function {}", name),
+        }
+    }
+    
+    fn store_namespaced_variable(&mut self, slot: Value, reg: VirtualRegister) {
+        let slot = self.ir.assign_new(slot);
+        self.call_builtin("update_binding", vec![slot.into(), reg.into()]);
+    }
+    
+    fn resolve_variable(&mut self, reg: &VariableLocation) -> Value {
+        match reg {
+            VariableLocation::Register(reg) => Value::Register(*reg),
+            VariableLocation::Local(index) => Value::Local(*index),
+            VariableLocation::FreeVariable(index) => Value::FreeVariable(*index),
+            VariableLocation::NamespaceVariable(namespace, slot) => {
+                let slot = self.ir.assign_new(Value::RawValue(*slot));
+                let namespace = self.ir.assign_new(Value::RawValue(*namespace));
+                self.call_builtin("get_binding", vec![namespace.into(), slot.into()])
+            }
         }
     }
 }
