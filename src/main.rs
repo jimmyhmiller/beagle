@@ -208,6 +208,18 @@ pub unsafe extern "C" fn new_thread<Alloc: Allocator>(
     }
 }
 
+pub unsafe extern "C" fn update_binding<Alloc: Allocator>(runtime: *mut Runtime<Alloc>, namespace_slot: usize, value: usize) -> usize {
+    let runtime = unsafe { &mut *runtime };
+    runtime.compiler.update_binding(namespace_slot, value);
+    BuiltInTypes::null_value() as usize
+}
+
+pub unsafe extern "C" fn get_binding<Alloc: Allocator>(runtime: *mut Runtime<Alloc>, namespace: usize, slot: usize) -> usize {
+    let runtime = unsafe { &mut *runtime };
+    let value = runtime.compiler.get_binding(namespace, slot);
+    value
+}
+
 pub unsafe extern "C" fn __pause<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,
     stack_pointer: usize,
@@ -455,6 +467,18 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     runtime
         .compiler
         .add_builtin_function("__pause", __pause::<Alloc> as *const u8, true)?;
+
+    runtime.compiler.add_builtin_function(
+        "update_binding",
+        update_binding::<Alloc> as *const u8,
+        false,
+    )?;
+
+    runtime.compiler.add_builtin_function(
+        "get_binding",
+        get_binding::<Alloc> as *const u8,
+        false,
+    )?;
 
     let beginnings_of_standard_library = include_str!("../resources/std.bg");
     runtime

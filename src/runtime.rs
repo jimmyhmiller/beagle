@@ -224,6 +224,15 @@ impl ThreadState {
     }
 }
 
+
+struct Namespace {
+    name: String,
+    ids: Vec<String>,
+    bindings: HashMap<String, usize>,
+    #[allow(unused)]
+    aliases: HashMap<String, String>,
+}
+
 pub struct Runtime<Alloc: Allocator> {
     pub compiler: Compiler,
     pub memory: Memory<Alloc>,
@@ -299,6 +308,71 @@ impl EnumManager {
     }
 }
 
+struct NamespaceManager {
+    namespaces: Vec<Mutex<Namespace>>,
+    current_namespace: usize,
+}
+
+impl NamespaceManager {
+    fn new() -> Self {
+        Self {
+            namespaces: vec![Mutex::new(Namespace {
+                name: "global".to_string(),
+                ids: vec![],
+                bindings: HashMap::new(),
+                aliases: HashMap::new(),
+            })],
+            current_namespace: 0,
+        }
+    }
+
+    #[allow(unused)]
+    fn add_namespace(&mut self, name: &str) {
+        self.namespaces.push(Mutex::new(Namespace {
+            name: name.to_string(),
+            ids: vec![],
+            bindings: HashMap::new(),
+            aliases: HashMap::new(),
+        }));
+    }
+
+    #[allow(unused)]
+    fn get_namespace(&self, name: &str) -> Option<&Mutex<Namespace>> {
+        self.namespaces.iter().find(|n| n.lock().unwrap().name == name)
+    }
+
+    fn get_current_namespace(&self) -> &Mutex<Namespace> {
+        self.namespaces.get(self.current_namespace).unwrap()
+    }
+
+    #[allow(unused)]
+    fn set_current_namespace(&mut self, name: &str) {
+        let index = self
+            .namespaces
+            .iter()
+            .position(|n| n.lock().unwrap().name == name)
+            .unwrap();
+        self.current_namespace = index;
+    }
+    
+    fn add_binding(&self, name: &str, pointer: usize) -> usize {
+        let mut namespace = self.get_current_namespace().lock().unwrap();
+        if namespace.bindings.contains_key(name) {
+            namespace.bindings.insert(name.to_string(), pointer);
+            return namespace.ids.iter().position(|n| n == name).unwrap()
+        }
+        namespace.bindings.insert(name.to_string(), pointer);
+        namespace.ids.push(name.to_string());
+        namespace.ids.len() - 1
+    }
+
+    #[allow(unused)]
+    fn find_binding_id(&self, name: &str) -> Option<usize> {
+        let namespace = self.get_current_namespace().lock().unwrap();
+        namespace.ids.iter().position(|n| n == name)
+    }
+}
+
 pub struct Compiler {
     code_offset: usize,
     code_memory: Option<Mmap>,
@@ -310,6 +384,7 @@ pub struct Compiler {
     enums: EnumManager,
     functions: Vec<Function>,
     string_constants: Vec<StringValue>,
+    namespaces: NamespaceManager,
     #[allow(unused)]
     command_line_arguments: CommandLineArguments,
     pub compiler_pointer: Option<*const Compiler>,
@@ -385,12 +460,13 @@ impl Compiler {
             is_defined: true,
             number_of_locals: 0,
         });
+        let pointer = Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
+        self.namespaces.add_binding(name, pointer);
         debugger(Message {
             kind: "builtin_function".to_string(),
             data: Data::BuiltinFunction {
                 name: name.to_string(),
-                pointer: Self::get_function_pointer(self, self.functions.last().unwrap().clone())
-                    .unwrap(),
+                pointer,
             },
         });
         Ok(self.functions.len() - 1)
@@ -409,6 +485,7 @@ impl Compiler {
             for (index, function) in self.functions.iter_mut().enumerate() {
                 if function.name == name.unwrap() {
                     function_pointer = self.overwrite_function(index, bytes)?;
+                    self.namespaces.add_binding(name.unwrap(), function_pointer);
                     already_defined = true;
                     break;
                 }
@@ -500,6 +577,9 @@ impl Compiler {
         let jump_table_offset = self.add_jump_table_entry(index, function_pointer)?;
 
         self.functions[index].jump_table_offset = jump_table_offset;
+        if let Some(name) = name {
+            self.namespaces.add_binding(name, function_pointer);
+        }
         Ok(function_pointer)
     }
 
@@ -781,11 +861,22 @@ impl Compiler {
     }
 
     pub fn add_struct(&mut self, s: Struct) {
-        self.structs.insert(s.name.clone(), s);
+        let name = s.name.clone();
+        self.structs.insert(name.clone(), s);
+        // TODO: I need a "Struct" object that I can add here
+        // What I mean by this is a kind of meta object
+        // if you define a struct like this:
+        // struct Point { x y }
+        // and then you say let x = Point
+        // x is a struct object that describes the struct Point
+        self.namespaces.add_binding(&name, 0);
     }
 
     pub fn add_enum(&mut self, e: Enum) {
+        let name = e.name.clone();
         self.enums.insert(e);
+        // See comment about structs above
+        self.namespaces.add_binding(&name, 0);
     }
 
     pub fn get_enum(&self, name: &str) -> Option<&Enum> {
@@ -851,6 +942,27 @@ impl Compiler {
             _ => false,
         }
     }
+    
+    pub fn reserve_namespace_slot(&self, name: &str) -> usize {
+        self.namespaces.add_binding(name, BuiltInTypes::null_value() as usize)
+    }
+    
+    pub fn current_namespace_id(&self) -> usize {
+        self.namespaces.current_namespace
+    }
+    
+    pub fn update_binding(&mut self, namespace_slot: usize, value: usize)  {
+        let mut namespace = self.namespaces.get_current_namespace().lock().unwrap();
+        let name = namespace.ids.get(namespace_slot).unwrap().clone();
+        namespace.bindings.insert(name, value);
+    }
+    
+    pub fn get_binding(&self, namespace: usize, slot: usize) -> usize {
+        let namespace = self.namespaces.namespaces.get(namespace).unwrap();
+        let namespace = namespace.lock().unwrap();
+        let name = namespace.ids.get(slot).unwrap();
+        *namespace.bindings.get(name).unwrap()
+    }
 }
 
 impl fmt::Debug for Compiler {
@@ -890,6 +1002,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
                 jump_table_offset: 0,
                 structs: StructManager::new(),
                 enums: EnumManager::new(),
+                namespaces: NamespaceManager::new(),
                 functions: Vec::new(),
                 string_constants: vec![],
                 command_line_arguments: command_line_arguments.clone(),

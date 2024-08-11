@@ -5,11 +5,12 @@ println(x)
 fn main() {
     println("Hello, world!")
     // TODO: this prints function...
-    // println(x)
+    println(x)
     "done"
 }
 
 // Expect
 // 2
 // Hello, world!
+// 2
 // done
