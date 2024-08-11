@@ -1,3 +1,5 @@
+namespace countdown
+
 fn count_down(x) {
     println(x)
     if x == 0 {

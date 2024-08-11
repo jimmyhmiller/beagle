@@ -1,3 +1,6 @@
+// TODO: I want to do beagle.core or beagle::core or beagle:core.
+// Need to make this work in the language
+namespace beagle_core;
 
 // This may seem weird
 // but we need our runtime to know

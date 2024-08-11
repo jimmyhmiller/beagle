@@ -326,14 +326,22 @@ impl NamespaceManager {
         }
     }
 
-    #[allow(unused)]
-    fn add_namespace(&mut self, name: &str) {
+    fn add_namespace(&mut self, name: &str) -> usize {
+        let position = self
+            .namespaces
+            .iter()
+            .position(|n| n.lock().unwrap().name == name);
+        if let Some(position) = position {
+            return position;
+        }
+
         self.namespaces.push(Mutex::new(Namespace {
             name: name.to_string(),
             ids: vec![],
             bindings: HashMap::new(),
             aliases: HashMap::new(),
         }));
+        self.namespaces.len() - 1
     }
 
     #[allow(unused)]
@@ -962,6 +970,24 @@ impl Compiler {
         let namespace = namespace.lock().unwrap();
         let name = namespace.ids.get(slot).unwrap();
         *namespace.bindings.get(name).unwrap()
+    }
+    
+    pub fn reserve_namespace(&mut self, name: String) -> usize {
+        self.namespaces.add_namespace(name.as_str())
+    }
+    
+    pub fn set_current_namespace(&mut self, namespace: usize) {
+        self.namespaces.current_namespace = namespace;
+    }
+    
+    pub fn find_binding(&self, current_namespace_id: usize, name: &str) -> Option<usize> {
+        let namespace = self.namespaces.namespaces.get(current_namespace_id).unwrap();
+        let namespace = namespace.lock().unwrap();
+        namespace.ids.iter().position(|n| n == name)
+    }
+    
+    pub fn global_namespace_id(&self) -> usize {
+        0
     }
 }
 
