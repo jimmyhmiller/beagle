@@ -92,6 +92,7 @@ pub enum Ast {
         variant: String,
         fields: Vec<(String, Ast)>,
     },
+    Namespace { name: String },
 }
 
 impl Ast {
@@ -121,7 +122,7 @@ impl Ast {
         self.nodes().iter().any(|node| {
             !matches!(
                 node,
-                Ast::Function { .. } | Ast::Struct { .. } | Ast::Enum { .. }
+                Ast::Function { .. } | Ast::Struct { .. } | Ast::Enum { .. } | Ast::Namespace { .. }
             )
         })
     }
@@ -449,6 +450,12 @@ impl<'a> AstCompiler<'a> {
 
                 self.ir
                     .tag(struct_pointer.into(), BuiltInTypes::HeapObject.get_tag())
+            }
+            Ast::Namespace { name } => {
+                let namespace_id = self.compiler.reserve_namespace(name);
+                let namespace_id = Value::RawValue(namespace_id);
+                let namespace_id = self.ir.assign_new(namespace_id);
+                self.call_builtin("set_current_namespace", vec![namespace_id.into()])
             }
             Ast::PropertyAccess { object, property } => {
                 let object = self.call_compile(object.as_ref());
@@ -848,12 +855,21 @@ impl<'a> AstCompiler<'a> {
     }
 
     fn get_variable_in_stack(&self, name: &str) -> Option<VariableLocation> {
-        // start by looking in current environment
-        // if it is not there, look in the top level environment
+        // Let's look in the current environment
+        // Then we will look in the current namespace
+        // then we will look in the global namespace
         if let Some(variable) = self.environment_stack.last().unwrap().variables.get(name) {
             Some(variable.clone())
         } else {
-            self.environment_stack.first().unwrap().variables.get(name).cloned()
+            if let Some(slot) =  self.compiler.find_binding(self.compiler.current_namespace_id(), name) {
+                Some(VariableLocation::NamespaceVariable(self.compiler.current_namespace_id(), slot))
+            } else {
+                if let Some(slot) = self.compiler.find_binding(self.compiler.global_namespace_id(), name) {
+                    Some(VariableLocation::NamespaceVariable(self.compiler.global_namespace_id(), slot))
+                } else {
+                    None
+                }
+            }
         }
 
     }
@@ -908,7 +924,7 @@ impl<'a> AstCompiler<'a> {
 
     fn call_builtin(&mut self, arg: &str, args: Vec<Value>) -> Value {
         let mut args = args;
-        let function = self.compiler.find_function(arg).unwrap();
+        let function = self.compiler.find_function(arg).expect(&format!("could not find function {}", arg));
         assert!(function.is_builtin);
         let function = self.compiler.get_function_pointer(function).unwrap();
         let function = self.ir.assign_new(function);
@@ -1011,6 +1027,10 @@ impl<'a> AstCompiler<'a> {
                 }
             }
             Ast::Let(_, _) => {}
+            Ast::Namespace { name } => {
+                let namespace_id = self.compiler.reserve_namespace(name.clone());
+                self.compiler.set_current_namespace(namespace_id);
+            }
             _ => {}
         }
     }

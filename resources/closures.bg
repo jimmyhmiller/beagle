@@ -1,3 +1,5 @@
+namespace closures
+
 fn closure_1() {
     let y = fn thing() {
         42

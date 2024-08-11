@@ -1,3 +1,5 @@
+namespace comparisons
+
 fn main() {
     // primitive_breakpoint!();
     if true {

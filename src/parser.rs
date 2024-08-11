@@ -48,6 +48,7 @@ pub enum Token {
     // like fn and stuff
     Atom((usize, usize)),
     Never,
+    Namespace,
 }
 impl Token {
     fn is_binary_operator(&self) -> bool {
@@ -254,6 +255,7 @@ impl Tokenizer {
             b"struct" => Token::Struct,
             b"enum" => Token::Enum,
             b"." => Token::Dot,
+            b"namespace" => Token::Namespace,
             _ => Token::Atom((start, self.position)),
         }
     }
@@ -500,6 +502,10 @@ impl Parser {
             Token::If => {
                 self.move_to_next_non_whitespace();
                 Some(self.parse_if())
+            }
+            Token::Namespace => {
+                self.move_to_next_non_whitespace();
+                Some(self.parse_namespace())
             }
             Token::Atom((start, end)) => {
                 // Gross
@@ -825,6 +831,18 @@ impl Parser {
         self.tokens[self.position + 1]
     }
 
+    fn parse_namespace(&mut self) -> Ast {
+        let name = match self.current_token() {
+            Token::Atom((start, end)) => {
+                // Gross
+                String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
+            }
+            _ => panic!("Expected namespace name"),
+        };
+        self.consume();
+        Ast::Namespace { name }
+    }
+
     fn parse_call(&mut self, name: String) -> Ast {
         self.expect_open_paren();
         let mut args = Vec::new();
@@ -1064,6 +1082,7 @@ impl Parser {
         let mut parser = Parser::new(source);
         Ok(parser.parse())
     }
+    
 }
 
 #[test]

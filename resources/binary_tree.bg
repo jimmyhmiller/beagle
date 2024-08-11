@@ -1,3 +1,5 @@
+namespace binary_tree
+
 fn math_max(a, b) {
     if a > b {
         a

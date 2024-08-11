@@ -220,6 +220,12 @@ pub unsafe extern "C" fn get_binding<Alloc: Allocator>(runtime: *mut Runtime<All
     value
 }
 
+pub unsafe extern "C" fn set_current_namespace<Alloc: Allocator>(runtime: *mut Runtime<Alloc>, namespace: usize) -> usize {
+    let runtime = unsafe { &mut *runtime };
+    runtime.compiler.set_current_namespace(namespace);
+    BuiltInTypes::null_value() as usize
+}
+
 pub unsafe extern "C" fn __pause<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,
     stack_pointer: usize,
@@ -477,6 +483,12 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     runtime.compiler.add_builtin_function(
         "get_binding",
         get_binding::<Alloc> as *const u8,
+        false,
+    )?;
+
+    runtime.compiler.add_builtin_function(
+        "set_current_namespace",
+        set_current_namespace::<Alloc> as *const u8,
         false,
     )?;
 
