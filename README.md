@@ -35,7 +35,8 @@ This codebase originally existed [here](https://github.com/jimmyhmiller/PlayGrou
 * Do I want clap?
 * Guard on arithemtic (Started)
 * import/export
-* Namespaces
+* Namespaces (Started)
+* Functions right now are global rather than namespaced
 * Data structures
 * Decide if I want to support kabab-case
 * Continuations?

@@ -208,19 +208,30 @@ pub unsafe extern "C" fn new_thread<Alloc: Allocator>(
     }
 }
 
-pub unsafe extern "C" fn update_binding<Alloc: Allocator>(runtime: *mut Runtime<Alloc>, namespace_slot: usize, value: usize) -> usize {
+pub unsafe extern "C" fn update_binding<Alloc: Allocator>(
+    runtime: *mut Runtime<Alloc>,
+    namespace_slot: usize,
+    value: usize,
+) -> usize {
     let runtime = unsafe { &mut *runtime };
     runtime.compiler.update_binding(namespace_slot, value);
     BuiltInTypes::null_value() as usize
 }
 
-pub unsafe extern "C" fn get_binding<Alloc: Allocator>(runtime: *mut Runtime<Alloc>, namespace: usize, slot: usize) -> usize {
+pub unsafe extern "C" fn get_binding<Alloc: Allocator>(
+    runtime: *mut Runtime<Alloc>,
+    namespace: usize,
+    slot: usize,
+) -> usize {
     let runtime = unsafe { &mut *runtime };
     let value = runtime.compiler.get_binding(namespace, slot);
     value
 }
 
-pub unsafe extern "C" fn set_current_namespace<Alloc: Allocator>(runtime: *mut Runtime<Alloc>, namespace: usize) -> usize {
+pub unsafe extern "C" fn set_current_namespace<Alloc: Allocator>(
+    runtime: *mut Runtime<Alloc>,
+    namespace: usize,
+) -> usize {
     let runtime = unsafe { &mut *runtime };
     runtime.compiler.set_current_namespace(namespace);
     BuiltInTypes::null_value() as usize

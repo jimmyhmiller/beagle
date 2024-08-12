@@ -832,13 +832,24 @@ impl Parser {
     }
 
     fn parse_namespace(&mut self) -> Ast {
-        let name = match self.current_token() {
-            Token::Atom((start, end)) => {
-                // Gross
-                String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
+        // namespaces can be names with dots
+        // so beagle.core is a valid namespace
+
+        let mut name = String::new();
+        while !self.at_end() && (self.is_atom() || self.is_dot()) {
+            match self.current_token() {
+                Token::Dot => {
+                    name.push('.');
+                }
+                Token::Atom((start, end)) => {
+                    name.push_str(
+                        &String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap(),
+                    );
+                }
+                _ => panic!("Expected atom"),
             }
-            _ => panic!("Expected namespace name"),
-        };
+            self.consume();
+        }
         self.consume();
         Ast::Namespace { name }
     }
@@ -1082,7 +1093,10 @@ impl Parser {
         let mut parser = Parser::new(source);
         Ok(parser.parse())
     }
-    
+
+    fn is_dot(&self) -> bool {
+        self.current_token() == Token::Dot
+    }
 }
 
 #[test]

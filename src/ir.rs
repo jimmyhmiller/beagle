@@ -1355,5 +1355,4 @@ impl Ir {
             free_variable_offset,
         ));
     }
-    
 }
