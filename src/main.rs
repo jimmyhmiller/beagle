@@ -444,10 +444,10 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     runtime
         .compiler
-        .add_builtin_function("println", println_value::<Alloc> as *const u8, false)?;
+        .add_builtin_function("beagle.core/println", println_value::<Alloc> as *const u8, false)?;
     runtime
         .compiler
-        .add_builtin_function("print", print_value::<Alloc> as *const u8, false)?;
+        .add_builtin_function("beagle.core/print", print_value::<Alloc> as *const u8, false)?;
     runtime
         .compiler
         .add_builtin_function("allocate", allocate::<Alloc> as *const u8, true)?;
@@ -472,7 +472,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         .add_builtin_function("assert!", placeholder as *const u8, false)?;
     runtime
         .compiler
-        .add_builtin_function("gc", gc::<Alloc> as *const u8, true)?;
+        .add_builtin_function("beagle.core/gc", gc::<Alloc> as *const u8, true)?;
     runtime.compiler.add_builtin_function(
         "gc_add_root",
         gc_add_root::<Alloc> as *const u8,
@@ -480,7 +480,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     )?;
     runtime
         .compiler
-        .add_builtin_function("thread", new_thread::<Alloc> as *const u8, false)?;
+        .add_builtin_function("beagle.core/thread", new_thread::<Alloc> as *const u8, false)?;
     runtime
         .compiler
         .add_builtin_function("__pause", __pause::<Alloc> as *const u8, true)?;
@@ -541,8 +541,8 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             );
         }
     }
-
-    if let Some(f) = runtime.get_function0("main") {
+    let fully_qualified_main = runtime.compiler.current_namespace_name() + "/main";
+    if let Some(f) = runtime.get_function0(&fully_qualified_main) {
         let result = f();
         runtime.println(result as usize);
     } else {

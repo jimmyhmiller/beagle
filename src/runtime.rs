@@ -821,7 +821,7 @@ impl Compiler {
         Value::StringConstantPtr(offset)
     }
 
-    pub(crate) fn find_function(&self, name: &str) -> Option<Function> {
+    pub fn find_function(&self, name: &str) -> Option<Function> {
         self.functions.iter().find(|f| f.name == name).cloned()
     }
 
@@ -925,11 +925,12 @@ impl Compiler {
             self.functions.iter().filter(|f| !f.is_defined).collect();
         if !undefined_functions.is_empty() {
             panic!(
-                "Undefined functions: {:?}",
+                "Undefined functions: {:?} only have functions {:#?}",
                 undefined_functions
                     .iter()
                     .map(|f| f.name.clone())
-                    .collect::<Vec<String>>()
+                    .collect::<Vec<String>>(),
+                self.functions.iter().map(|f| f.name.clone()).collect::<Vec<String>>()
             );
         }
     }
@@ -995,6 +996,17 @@ impl Compiler {
 
     pub fn global_namespace_id(&self) -> usize {
         0
+    }
+    
+    pub fn current_namespace_name(&self) -> String {
+        self.namespaces
+            .namespaces
+            .get(self.namespaces.current_namespace)
+            .unwrap()
+            .lock()
+            .unwrap()
+            .name
+            .clone()
     }
 }
 
@@ -1406,7 +1418,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
     pub fn new_thread(&mut self, f: usize) {
         let trampoline = self.compiler.get_trampoline();
         let trampoline: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline) };
-        let call_fn = self.compiler.get_function_by_name("__call_fn").unwrap();
+        let call_fn = self.compiler.get_function_by_name("beagle.core/__call_fn").unwrap();
         let function_pointer = self.compiler.get_pointer(call_fn).unwrap();
 
         let new_stack = MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap();
