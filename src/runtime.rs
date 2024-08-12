@@ -224,7 +224,6 @@ impl ThreadState {
     }
 }
 
-
 struct Namespace {
     name: String,
     ids: Vec<String>,
@@ -346,7 +345,9 @@ impl NamespaceManager {
 
     #[allow(unused)]
     fn get_namespace(&self, name: &str) -> Option<&Mutex<Namespace>> {
-        self.namespaces.iter().find(|n| n.lock().unwrap().name == name)
+        self.namespaces
+            .iter()
+            .find(|n| n.lock().unwrap().name == name)
     }
 
     fn get_current_namespace(&self) -> &Mutex<Namespace> {
@@ -362,12 +363,12 @@ impl NamespaceManager {
             .unwrap();
         self.current_namespace = index;
     }
-    
+
     fn add_binding(&self, name: &str, pointer: usize) -> usize {
         let mut namespace = self.get_current_namespace().lock().unwrap();
         if namespace.bindings.contains_key(name) {
             namespace.bindings.insert(name.to_string(), pointer);
-            return namespace.ids.iter().position(|n| n == name).unwrap()
+            return namespace.ids.iter().position(|n| n == name).unwrap();
         }
         namespace.bindings.insert(name.to_string(), pointer);
         namespace.ids.push(name.to_string());
@@ -468,7 +469,8 @@ impl Compiler {
             is_defined: true,
             number_of_locals: 0,
         });
-        let pointer = Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
+        let pointer =
+            Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
         self.namespaces.add_binding(name, pointer);
         debugger(Message {
             kind: "builtin_function".to_string(),
@@ -950,42 +952,47 @@ impl Compiler {
             _ => false,
         }
     }
-    
+
     pub fn reserve_namespace_slot(&self, name: &str) -> usize {
-        self.namespaces.add_binding(name, BuiltInTypes::null_value() as usize)
+        self.namespaces
+            .add_binding(name, BuiltInTypes::null_value() as usize)
     }
-    
+
     pub fn current_namespace_id(&self) -> usize {
         self.namespaces.current_namespace
     }
-    
-    pub fn update_binding(&mut self, namespace_slot: usize, value: usize)  {
+
+    pub fn update_binding(&mut self, namespace_slot: usize, value: usize) {
         let mut namespace = self.namespaces.get_current_namespace().lock().unwrap();
         let name = namespace.ids.get(namespace_slot).unwrap().clone();
         namespace.bindings.insert(name, value);
     }
-    
+
     pub fn get_binding(&self, namespace: usize, slot: usize) -> usize {
         let namespace = self.namespaces.namespaces.get(namespace).unwrap();
         let namespace = namespace.lock().unwrap();
         let name = namespace.ids.get(slot).unwrap();
         *namespace.bindings.get(name).unwrap()
     }
-    
+
     pub fn reserve_namespace(&mut self, name: String) -> usize {
         self.namespaces.add_namespace(name.as_str())
     }
-    
+
     pub fn set_current_namespace(&mut self, namespace: usize) {
         self.namespaces.current_namespace = namespace;
     }
-    
+
     pub fn find_binding(&self, current_namespace_id: usize, name: &str) -> Option<usize> {
-        let namespace = self.namespaces.namespaces.get(current_namespace_id).unwrap();
+        let namespace = self
+            .namespaces
+            .namespaces
+            .get(current_namespace_id)
+            .unwrap();
         let namespace = namespace.lock().unwrap();
         namespace.ids.iter().position(|n| n == name)
     }
-    
+
     pub fn global_namespace_id(&self) -> usize {
         0
     }

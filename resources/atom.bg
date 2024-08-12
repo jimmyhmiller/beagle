@@ -6,7 +6,7 @@ struct MyPointerStruct {
 }
 
 fn create_atom() {
-    let s = MyPointerStruct { x: 1, y: 2};
+    let s = MyPointerStruct { x: 1, y: 2 };
     // TODO: Don't create atoms this way
     let new_atom = atom(s)
     println(new_atom);

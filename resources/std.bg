@@ -1,6 +1,6 @@
 // TODO: I want to do beagle.core or beagle::core or beagle:core.
 // Need to make this work in the language
-namespace beagle_core;
+namespace beagle.core;
 
 // This may seem weird
 // but we need our runtime to know
@@ -8,7 +8,6 @@ namespace beagle_core;
 // or a regular function
 // this makes that idea simple
 fn __call_fn(f) { f() }
-
 
 struct Atom {
     value

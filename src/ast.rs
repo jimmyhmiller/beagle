@@ -92,7 +92,9 @@ pub enum Ast {
         variant: String,
         fields: Vec<(String, Ast)>,
     },
-    Namespace { name: String },
+    Namespace {
+        name: String,
+    },
 }
 
 impl Ast {
@@ -122,7 +124,10 @@ impl Ast {
         self.nodes().iter().any(|node| {
             !matches!(
                 node,
-                Ast::Function { .. } | Ast::Struct { .. } | Ast::Enum { .. } | Ast::Namespace { .. }
+                Ast::Function { .. }
+                    | Ast::Struct { .. }
+                    | Ast::Enum { .. }
+                    | Ast::Namespace { .. }
             )
         })
     }
@@ -593,7 +598,6 @@ impl<'a> AstCompiler<'a> {
             }
             Ast::Let(name, value) => {
                 if let Ast::Identifier(name) = name.as_ref() {
-
                     if self.environment_stack.len() == 1 {
                         self.not_tail_position();
                         let value = self.call_compile(&value);
@@ -602,8 +606,17 @@ impl<'a> AstCompiler<'a> {
                         self.ir.assign(reg, value);
                         let namespace_id = self.compiler.current_namespace_id();
                         let reserved_namespace_slot = self.compiler.reserve_namespace_slot(name);
-                        self.store_namespaced_variable(Value::RawValue(reserved_namespace_slot), reg);
-                        self.insert_variable(name.to_string(), VariableLocation::NamespaceVariable(namespace_id, reserved_namespace_slot));
+                        self.store_namespaced_variable(
+                            Value::RawValue(reserved_namespace_slot),
+                            reg,
+                        );
+                        self.insert_variable(
+                            name.to_string(),
+                            VariableLocation::NamespaceVariable(
+                                namespace_id,
+                                reserved_namespace_slot,
+                            ),
+                        );
                         reg.into()
                     } else {
                         self.not_tail_position();
@@ -613,7 +626,10 @@ impl<'a> AstCompiler<'a> {
                         self.ir.assign(reg, value);
                         let local_index = self.find_or_insert_local(name);
                         self.ir.store_local(local_index, reg);
-                        self.insert_variable(name.to_string(), VariableLocation::Local(local_index));
+                        self.insert_variable(
+                            name.to_string(),
+                            VariableLocation::Local(local_index),
+                        );
                         reg.into()
                     }
                 } else {
@@ -861,17 +877,28 @@ impl<'a> AstCompiler<'a> {
         if let Some(variable) = self.environment_stack.last().unwrap().variables.get(name) {
             Some(variable.clone())
         } else {
-            if let Some(slot) =  self.compiler.find_binding(self.compiler.current_namespace_id(), name) {
-                Some(VariableLocation::NamespaceVariable(self.compiler.current_namespace_id(), slot))
+            if let Some(slot) = self
+                .compiler
+                .find_binding(self.compiler.current_namespace_id(), name)
+            {
+                Some(VariableLocation::NamespaceVariable(
+                    self.compiler.current_namespace_id(),
+                    slot,
+                ))
             } else {
-                if let Some(slot) = self.compiler.find_binding(self.compiler.global_namespace_id(), name) {
-                    Some(VariableLocation::NamespaceVariable(self.compiler.global_namespace_id(), slot))
+                if let Some(slot) = self
+                    .compiler
+                    .find_binding(self.compiler.global_namespace_id(), name)
+                {
+                    Some(VariableLocation::NamespaceVariable(
+                        self.compiler.global_namespace_id(),
+                        slot,
+                    ))
                 } else {
                     None
                 }
             }
         }
-
     }
 
     fn get_variable_alloc_free_variable(&mut self, name: &str) -> VariableLocation {
@@ -924,7 +951,10 @@ impl<'a> AstCompiler<'a> {
 
     fn call_builtin(&mut self, arg: &str, args: Vec<Value>) -> Value {
         let mut args = args;
-        let function = self.compiler.find_function(arg).expect(&format!("could not find function {}", arg));
+        let function = self
+            .compiler
+            .find_function(arg)
+            .expect(&format!("could not find function {}", arg));
         assert!(function.is_builtin);
         let function = self.compiler.get_function_pointer(function).unwrap();
         let function = self.ir.assign_new(function);
@@ -1082,12 +1112,12 @@ impl<'a> AstCompiler<'a> {
             _ => panic!("Unknown inline primitive function {}", name),
         }
     }
-    
+
     fn store_namespaced_variable(&mut self, slot: Value, reg: VirtualRegister) {
         let slot = self.ir.assign_new(slot);
         self.call_builtin("update_binding", vec![slot.into(), reg.into()]);
     }
-    
+
     fn resolve_variable(&mut self, reg: &VariableLocation) -> Value {
         match reg {
             VariableLocation::Register(reg) => Value::Register(*reg),
