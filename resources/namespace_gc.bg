@@ -1,0 +1,17 @@
+namespace test.gc.in.namespaces
+
+
+struct HeapThing {
+    x
+    y
+    z
+}
+
+let global_thing = HeapThing { x: 1, y: 2, z: 3 }
+
+fn main() {
+    gc()
+    gc()
+    let local_thing = HeapThing { x: 4, y: 5, z: 6 }
+    println(global_thing)
+}
