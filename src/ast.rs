@@ -318,9 +318,8 @@ impl<'a> AstCompiler<'a> {
 
                 let mut code = self.ir.compile(lang, error_fn_pointer, compiler_ptr);
 
-                let full_function_name = name.map(|name| {
-                    self.compiler.current_namespace_name() + "/" + &name
-                });
+                let full_function_name =
+                    name.map(|name| self.compiler.current_namespace_name() + "/" + &name);
                 let function_pointer = self
                     .compiler
                     .upsert_function(full_function_name.as_deref(), &mut code, self.ir.num_locals)
@@ -661,17 +660,16 @@ impl<'a> AstCompiler<'a> {
     }
 
     fn compile_standard_function_call(&mut self, name: String, mut args: Vec<Value>) -> Value {
-
         let full_function_name = self.compiler.current_namespace_name() + "/" + &name;
-        
-
 
         // TODO: I shouldn't just assume the function will exist
         // unless I have a good plan for dealing with when it doesn't
         let mut function = self.compiler.find_function(&full_function_name);
 
         if function.is_none() {
-            function = self.compiler.find_function(&format!("beagle.core/{}", name));
+            function = self
+                .compiler
+                .find_function(&format!("beagle.core/{}", name));
         }
         let function = function.expect(&format!("Could not find function {}", name));
 
@@ -992,9 +990,7 @@ impl<'a> AstCompiler<'a> {
             } => {
                 if let Some(name) = name {
                     let full_function_name = self.compiler.current_namespace_name() + "/" + name;
-                    self.compiler
-                        .reserve_function(&full_function_name)
-                        .unwrap();
+                    self.compiler.reserve_function(&full_function_name).unwrap();
                 } else {
                     panic!("Why do we have a top level function without a name? Is that allowed?");
                 }

@@ -1,11 +1,12 @@
 use crate::{
     debugger,
-    runtime::{AllocateAction, Allocator, AllocatorOptions, StackMap, STACK_SIZE},
     types::{BuiltInTypes, HeapObject, Word},
     Data, Message,
 };
 use mmap_rs::{MmapMut, MmapOptions};
 use std::error::Error;
+
+use super::{AllocateAction, Allocator, AllocatorOptions, StackMap, STACK_SIZE};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 struct FreeListEntry {
@@ -117,6 +118,16 @@ impl Allocator for SimpleMarkSweepHeap {
         // Maybe we should do something though?
         // I guess this could be useful for c stuff,
         // but for right now I'm not going to do anything.
+    }
+
+    fn add_namespace_root(&mut self, namespace_id: usize, root: usize) {
+        todo!()
+    }
+
+    fn get_namespace_relocations(&self, _namespace_id: usize) -> Vec<(usize, usize)> {
+        // Simple mark and sweep doesn't relocate
+        // so we don't have any relocations
+        vec![]
     }
 }
 

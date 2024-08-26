@@ -2,10 +2,9 @@ use std::{error::Error, mem};
 
 use mmap_rs::{MmapMut, MmapOptions};
 
-use crate::{
-    runtime::{AllocateAction, Allocator, AllocatorOptions, StackMap, STACK_SIZE},
-    types::{BuiltInTypes, HeapObject, Word},
-};
+use crate::types::{BuiltInTypes, HeapObject, Word};
+
+use super::{AllocateAction, Allocator, AllocatorOptions, StackMap, STACK_SIZE};
 
 struct Segment {
     memory: MmapMut,
@@ -266,8 +265,16 @@ impl Allocator for CompactingHeap {
         // but for right now I'm not going to do anything.
     }
 
+    fn add_namespace_root(&mut self, namespace_id: usize, root: usize) {
+        todo!();
+    }
+
     fn grow(&mut self, _options: AllocatorOptions) {
         self.from_space.resize();
+    }
+
+    fn get_namespace_relocations(&self, namespace_id: usize) -> Vec<(usize, usize)> {
+        todo!();
     }
 }
 

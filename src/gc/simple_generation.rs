@@ -2,12 +2,12 @@ use std::error::Error;
 
 use mmap_rs::{MmapMut, MmapOptions};
 
-use crate::{
-    runtime::{AllocateAction, Allocator, AllocatorOptions, StackMap, STACK_SIZE},
-    types::{BuiltInTypes, HeapObject, Word},
-};
+use crate::types::{BuiltInTypes, HeapObject, Word};
 
-use super::simple_mark_and_sweep::SimpleMarkSweepHeap;
+use super::{
+    simple_mark_and_sweep::SimpleMarkSweepHeap, AllocateAction, Allocator, AllocatorOptions,
+    StackMap, STACK_SIZE,
+};
 
 struct Segment {
     memory: MmapMut,
@@ -136,6 +136,8 @@ pub struct SimpleGeneration {
     // There should be very few atoms
     // But I will probably want to revist this
     additional_roots: Vec<(usize, usize)>,
+    namespace_roots: Vec<(usize, usize)>,
+    relocated_namespace_roots: Vec<(usize, Vec<(usize, usize)>)>,
     atomic_pause: [u8; 8],
 }
 
@@ -156,6 +158,8 @@ impl Allocator for SimpleGeneration {
             gc_count,
             full_gc_frequency,
             additional_roots: vec![],
+            namespace_roots: vec![],
+            relocated_namespace_roots: vec![],
             atomic_pause: [0; 8],
         }
     }
@@ -199,6 +203,19 @@ impl Allocator for SimpleGeneration {
     fn get_pause_pointer(&self) -> usize {
         self.atomic_pause.as_ptr() as usize
     }
+
+    fn add_namespace_root(&mut self, namespace_id: usize, root: usize) {
+        self.namespace_roots.push((namespace_id, root));
+    }
+
+    fn get_namespace_relocations(&self, namespace_id: usize) -> Vec<(usize, usize)> {
+        for (id, roots) in self.relocated_namespace_roots.iter() {
+            if *id == namespace_id {
+                return roots.clone();
+            }
+        }
+        vec![]
+    }
 }
 
 impl SimpleGeneration {
@@ -228,6 +245,7 @@ impl SimpleGeneration {
             let new_roots = new_roots
                 .into_iter()
                 .chain(self.additional_roots.iter().map(|x| &x.1).copied())
+                .chain(self.namespace_roots.iter().map(|x| &x.1).copied())
                 .collect();
             let new_roots = unsafe { self.copy_all(new_roots) };
             let stack_buffer = get_live_stack(*stack_base, *stack_pointer);
@@ -320,6 +338,24 @@ impl SimpleGeneration {
                     if datum == young {
                         *datum = tagged_new;
                     }
+                }
+            }
+        }
+        for (namespace_id, old_root) in self.namespace_roots.iter() {
+            if root == *old_root {
+                // check if namespace_id is in relocated_namespace_roots
+                // if it is add to list, otherwise create a new list
+                let mut found = false;
+                for (id, roots) in self.relocated_namespace_roots.iter_mut() {
+                    if *id == *namespace_id {
+                        roots.push((*old_root, tagged_new));
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    self.relocated_namespace_roots
+                        .push((*namespace_id, vec![(*old_root, tagged_new)]));
                 }
             }
         }

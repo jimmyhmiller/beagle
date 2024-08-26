@@ -10,7 +10,8 @@ use gc::{
     compacting::CompactingHeap, mutex_allocator::MutexAllocator,
     simple_generation::SimpleGeneration, simple_mark_and_sweep::SimpleMarkSweepHeap,
 };
-use runtime::{Allocator, DefaultPrinter, Printer, Runtime, StackMapDetails, TestPrinter};
+use gc::{Allocator, StackMapDetails};
+use runtime::{DefaultPrinter, Printer, Runtime, TestPrinter};
 use types::BuiltInTypes;
 
 use std::{error::Error, mem, slice::from_raw_parts, thread, time::Instant};
@@ -442,12 +443,16 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         .compiler
         .set_pause_atom_ptr(runtime.pause_atom_ptr());
 
-    runtime
-        .compiler
-        .add_builtin_function("beagle.core/println", println_value::<Alloc> as *const u8, false)?;
-    runtime
-        .compiler
-        .add_builtin_function("beagle.core/print", print_value::<Alloc> as *const u8, false)?;
+    runtime.compiler.add_builtin_function(
+        "beagle.core/println",
+        println_value::<Alloc> as *const u8,
+        false,
+    )?;
+    runtime.compiler.add_builtin_function(
+        "beagle.core/print",
+        print_value::<Alloc> as *const u8,
+        false,
+    )?;
     runtime
         .compiler
         .add_builtin_function("allocate", allocate::<Alloc> as *const u8, true)?;
@@ -478,9 +483,11 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         gc_add_root::<Alloc> as *const u8,
         false,
     )?;
-    runtime
-        .compiler
-        .add_builtin_function("beagle.core/thread", new_thread::<Alloc> as *const u8, false)?;
+    runtime.compiler.add_builtin_function(
+        "beagle.core/thread",
+        new_thread::<Alloc> as *const u8,
+        false,
+    )?;
     runtime
         .compiler
         .add_builtin_function("__pause", __pause::<Alloc> as *const u8, true)?;
