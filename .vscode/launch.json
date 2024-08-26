@@ -22,7 +22,7 @@
                     "kind": "bin"
                 }
             },
-            "args": ["resources/enum_test.bg"],
+            "args": ["resources/namespace_gc.bg"],
             "cwd": "${workspaceFolder}"
         },
         {

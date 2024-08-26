@@ -13,5 +13,8 @@ fn main() {
     gc()
     gc()
     let local_thing = HeapThing { x: 4, y: 5, z: 6 }
+    // error: global_thing is now local_thing because
+    // we don't count it as live because we don't walk
+    // namespaces for roots
     println(global_thing)
 }

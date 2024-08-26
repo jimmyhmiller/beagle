@@ -9,7 +9,6 @@ use std::{
     vec,
 };
 
-use bincode::{Decode, Encode};
 use mmap_rs::{Mmap, MmapMut, MmapOptions};
 
 use crate::{
@@ -17,6 +16,7 @@ use crate::{
     debugger,
     ir::{StringValue, Value},
     CommandLineArguments, Data, Message, __pause,
+    gc::{AllocateAction, Allocator, AllocatorOptions, StackMap, StackMapDetails, STACK_SIZE},
     parser::Parser,
     types::{BuiltInTypes, HeapObject},
 };
@@ -74,39 +74,6 @@ impl StructManager {
     }
 }
 
-#[derive(Debug, Encode, Decode, Clone)]
-pub struct StackMapDetails {
-    pub number_of_locals: usize,
-    pub current_stack_size: usize,
-    pub max_stack_size: usize,
-}
-
-pub const STACK_SIZE: usize = 1024 * 1024 * 32;
-
-#[derive(Debug, Clone)]
-pub struct StackMap {
-    details: Vec<(usize, StackMapDetails)>,
-}
-
-impl StackMap {
-    fn new() -> Self {
-        Self { details: vec![] }
-    }
-
-    pub fn find_stack_data(&self, pointer: usize) -> Option<&StackMapDetails> {
-        for (key, value) in self.details.iter() {
-            if *key == pointer.saturating_sub(4) {
-                return Some(value);
-            }
-        }
-        None
-    }
-
-    fn extend(&mut self, translated_stack_map: Vec<(usize, StackMapDetails)>) {
-        self.details.extend(translated_stack_map);
-    }
-}
-
 pub trait Printer {
     fn print(&mut self, value: String);
     fn println(&mut self, value: String);
@@ -158,50 +125,6 @@ impl Printer for TestPrinter {
     fn get_output(&self) -> Vec<String> {
         self.output.clone()
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct AllocatorOptions {
-    pub gc: bool,
-    pub print_stats: bool,
-    pub gc_always: bool,
-}
-
-pub enum AllocateAction {
-    Allocated(*const u8),
-    Gc,
-}
-
-pub trait Allocator {
-    fn new() -> Self;
-
-    // TODO: I probably want something like kind, but not actually kind
-    // I might need to allocate things differently based on type
-    fn allocate(
-        &mut self,
-        bytes: usize,
-        kind: BuiltInTypes,
-        options: AllocatorOptions,
-    ) -> Result<AllocateAction, Box<dyn Error>>;
-    fn gc(
-        &mut self,
-        stack_map: &StackMap,
-        stack_pointers: &[(usize, usize)],
-        options: AllocatorOptions,
-    );
-
-    fn grow(&mut self, options: AllocatorOptions);
-    fn gc_add_root(&mut self, old: usize, young: usize);
-
-    fn get_pause_pointer(&self) -> usize {
-        0
-    }
-
-    fn register_thread(&mut self, _thread_id: ThreadId) {}
-
-    // TODO: I think this won't work because of my read write lock
-    // I probably need to change that.
-    fn register_parked_thread(&mut self, _thread_id: ThreadId, _stack_pointer: usize) {}
 }
 
 pub struct ThreadState {
@@ -930,7 +853,10 @@ impl Compiler {
                     .iter()
                     .map(|f| f.name.clone())
                     .collect::<Vec<String>>(),
-                self.functions.iter().map(|f| f.name.clone()).collect::<Vec<String>>()
+                self.functions
+                    .iter()
+                    .map(|f| f.name.clone())
+                    .collect::<Vec<String>>()
             );
         }
     }
@@ -997,7 +923,7 @@ impl Compiler {
     pub fn global_namespace_id(&self) -> usize {
         0
     }
-    
+
     pub fn current_namespace_name(&self) -> String {
         self.namespaces
             .namespaces
@@ -1418,7 +1344,10 @@ impl<Alloc: Allocator> Runtime<Alloc> {
     pub fn new_thread(&mut self, f: usize) {
         let trampoline = self.compiler.get_trampoline();
         let trampoline: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline) };
-        let call_fn = self.compiler.get_function_by_name("beagle.core/__call_fn").unwrap();
+        let call_fn = self
+            .compiler
+            .get_function_by_name("beagle.core/__call_fn")
+            .unwrap();
         let function_pointer = self.compiler.get_pointer(call_fn).unwrap();
 
         let new_stack = MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap();
