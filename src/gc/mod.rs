@@ -1,4 +1,4 @@
-use std::{error::Error, path::Iter, thread::ThreadId};
+use std::{error::Error, thread::ThreadId};
 
 use bincode::{Decode, Encode};
 
@@ -21,6 +21,12 @@ pub const STACK_SIZE: usize = 1024 * 1024 * 32;
 #[derive(Debug, Clone)]
 pub struct StackMap {
     details: Vec<(usize, StackMapDetails)>,
+}
+
+impl Default for StackMap {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StackMap {
@@ -76,7 +82,7 @@ pub trait Allocator {
     fn gc_add_root(&mut self, old: usize, young: usize);
     fn add_namespace_root(&mut self, namespace_id: usize, root: usize);
     // TODO: Get rid of allocation
-    fn get_namespace_relocations(&self, namespace_id: usize) -> Vec<(usize, usize)>;
+    fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)>;
 
     fn get_pause_pointer(&self) -> usize {
         0

@@ -273,7 +273,7 @@ impl HeapObject {
     pub fn get_field(&self, arg: usize) -> usize {
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
-        let pointer = unsafe { pointer.add(arg as usize + Self::header_size() / 8) };
+        let pointer = unsafe { pointer.add(arg + Self::header_size() / 8) };
         unsafe { *pointer }
     }
 }

@@ -195,6 +195,46 @@ impl<Alloc: Allocator> Memory<Alloc> {
     }
 }
 
+impl<Alloc: Allocator> Allocator for Memory<Alloc> {
+    fn new() -> Self {
+        unimplemented!("Not going to use this");
+    }
+
+    fn allocate(
+        &mut self,
+        bytes: usize,
+        kind: BuiltInTypes,
+        options: AllocatorOptions,
+    ) -> Result<AllocateAction, Box<dyn Error>> {
+        self.heap.allocate(bytes, kind, options)
+    }
+
+    fn gc(
+        &mut self,
+        stack_map: &StackMap,
+        stack_pointers: &[(usize, usize)],
+        options: AllocatorOptions,
+    ) {
+        self.heap.gc(stack_map, stack_pointers, options);
+    }
+
+    fn grow(&mut self, options: AllocatorOptions) {
+        self.heap.grow(options)
+    }
+
+    fn gc_add_root(&mut self, old: usize, young: usize) {
+        self.heap.gc_add_root(old, young)
+    }
+
+    fn add_namespace_root(&mut self, namespace_id: usize, root: usize) {
+        self.heap.add_namespace_root(namespace_id, root)
+    }
+
+    fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)> {
+        self.heap.get_namespace_relocations()
+    }
+}
+
 pub enum EnumVariant {
     StructVariant { name: String, fields: Vec<String> },
     StaticVariant { name: String },
@@ -687,7 +727,7 @@ impl Compiler {
                 let object = HeapObject::from_tagged(value);
                 // TODO: abstract over this (memory-layout)
                 let type_id = BuiltInTypes::untag(object.get_field(0));
-                let struct_value = self.structs.get_by_id(type_id as usize);
+                let struct_value = self.structs.get_by_id(type_id);
                 Some(self.get_struct_repr(struct_value?, &object.get_fields()[1..], depth + 1)?)
             }
         }
@@ -1074,6 +1114,29 @@ impl<Alloc: Allocator> Runtime<Alloc> {
                 &[(self.get_stack_base(), stack_pointer)],
                 self.get_allocate_options(),
             );
+
+            // TODO: This whole thing is awful.
+            // I should be passing around the slot so I can just update the binding directly.
+            let relocations = self.memory.get_namespace_relocations();
+            for (namespace, values) in relocations {
+                for (old, new) in values {
+                    for (_, value) in self
+                        .compiler
+                        .namespaces
+                        .namespaces
+                        .get_mut(namespace)
+                        .unwrap()
+                        .get_mut()
+                        .unwrap()
+                        .bindings
+                        .iter_mut()
+                    {
+                        if *value == old {
+                            *value = new;
+                        }
+                    }
+                }
+            }
             return;
         }
 
@@ -1304,6 +1367,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn get_function_base(&self, name: &str) -> Option<(u64, u64, fn(u64, u64) -> u64)> {
         let function = self.compiler.functions.iter().find(|f| f.name == name)?;
         let jump_table_offset = function.jump_table_offset;

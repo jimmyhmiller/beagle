@@ -200,6 +200,8 @@ impl Space {
 pub struct CompactingHeap {
     from_space: Space,
     to_space: Space,
+    namespace_roots: Vec<(usize, usize)>,
+    namespace_relocations: Vec<(usize, Vec<(usize, usize)>)>,
 }
 
 impl Allocator for CompactingHeap {
@@ -210,6 +212,8 @@ impl Allocator for CompactingHeap {
         Self {
             from_space,
             to_space,
+            namespace_roots: vec![],
+            namespace_relocations: vec![],
         }
     }
 
@@ -266,15 +270,17 @@ impl Allocator for CompactingHeap {
     }
 
     fn add_namespace_root(&mut self, namespace_id: usize, root: usize) {
-        todo!();
+        self.namespace_roots.push((namespace_id, root));
     }
 
     fn grow(&mut self, _options: AllocatorOptions) {
         self.from_space.resize();
     }
 
-    fn get_namespace_relocations(&self, namespace_id: usize) -> Vec<(usize, usize)> {
-        todo!();
+    fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)> {
+        let mut relocations = vec![];
+        mem::swap(&mut self.namespace_relocations, &mut relocations);
+        relocations
     }
 }
 
@@ -302,6 +308,21 @@ impl CompactingHeap {
         let mut new_roots = vec![];
         for root in roots.iter() {
             new_roots.push(self.copy_using_cheneys_algorithm(*root));
+        }
+
+        for (namespace_id, namespace_root) in self.namespace_roots.clone().iter() {
+            let new_pointer = self.copy_using_cheneys_algorithm(*namespace_root);
+            // if namespace exists, push, otherwise create
+            let namespace = self
+                .namespace_relocations
+                .iter_mut()
+                .find(|(id, _)| *id == *namespace_id);
+            if let Some((_, relocations)) = namespace {
+                relocations.push((*namespace_root, new_pointer));
+            } else {
+                self.namespace_relocations
+                    .push((*namespace_id, vec![(*namespace_root, new_pointer)]));
+            }
         }
 
         for mut object in self
@@ -338,7 +359,7 @@ impl CompactingHeap {
         let new_pointer = self.to_space.copy_data_to_offset(data);
         debug_assert!(new_pointer % 8 == 0, "Pointer is not aligned");
         // update header of original object to now be the forwarding pointer
-        let tagged_new = BuiltInTypes::get_kind(root).tag(new_pointer as isize) as usize;
+        let tagged_new = BuiltInTypes::get_kind(root).tag(new_pointer) as usize;
         heap_object.write_field(0, tagged_new);
         tagged_new
     }

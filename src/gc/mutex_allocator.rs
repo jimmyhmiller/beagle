@@ -57,7 +57,10 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         drop(lock)
     }
 
-    fn get_namespace_relocations(&self, namespace_id: usize) -> Vec<(usize, usize)> {
-        todo!();
+    fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)> {
+        let lock = self.mutex.lock().unwrap();
+        let result = self.alloc.get_namespace_relocations();
+        drop(lock);
+        result
     }
 }
