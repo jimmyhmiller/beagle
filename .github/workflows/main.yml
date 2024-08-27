@@ -34,4 +34,4 @@ jobs:
           override: true
 
       - name: Run tests with features
-        run: cargo test ${{ matrix.feature-combination }}
+        run: RUST_BACKTRACE=1 cargo test ${{ matrix.feature-combination }}
