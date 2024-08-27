@@ -73,7 +73,7 @@ impl Space {
 pub struct SimpleMarkSweepHeap {
     space: Space,
     free_list: Vec<FreeListEntry>,
-    // TODO: This isn't thread safe
+    namespace_roots: Vec<(usize, usize)>,
 }
 
 impl Allocator for SimpleMarkSweepHeap {
@@ -121,10 +121,10 @@ impl Allocator for SimpleMarkSweepHeap {
     }
 
     fn add_namespace_root(&mut self, namespace_id: usize, root: usize) {
-        todo!()
+        self.namespace_roots.push((namespace_id, root));
     }
 
-    fn get_namespace_relocations(&self, _namespace_id: usize) -> Vec<(usize, usize)> {
+    fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)> {
         // Simple mark and sweep doesn't relocate
         // so we don't have any relocations
         vec![]
@@ -146,6 +146,7 @@ impl SimpleMarkSweepHeap {
                 scale_factor: 1,
             },
             free_list: vec![],
+            namespace_roots: vec![],
         }
     }
 
@@ -326,6 +327,10 @@ impl SimpleMarkSweepHeap {
         let stack = &stack[stack.len() - num_64_till_end..];
 
         let mut to_mark: Vec<HeapObject> = Vec::with_capacity(128);
+
+        for (_, root) in self.namespace_roots.iter() {
+            to_mark.push(HeapObject::from_tagged(*root));
+        }
 
         let mut i = 0;
         while i < stack.len() {

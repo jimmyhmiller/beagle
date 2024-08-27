@@ -671,7 +671,7 @@ impl<'a> AstCompiler<'a> {
                 .compiler
                 .find_function(&format!("beagle.core/{}", name));
         }
-        let function = function.expect(&format!("Could not find function {}", name));
+        let function = function.unwrap_or_else(|| panic!("Could not find function {}", name));
 
         let builtin = function.is_builtin;
         let needs_stack_pointer = function.needs_stack_pointer;
@@ -853,7 +853,7 @@ impl<'a> AstCompiler<'a> {
             ],
         );
         self.pop_environment();
-        return closure;
+        closure
     }
 
     fn find_or_insert_local(&mut self, name: &str) -> usize {
@@ -887,28 +887,21 @@ impl<'a> AstCompiler<'a> {
         // then we will look in the global namespace
         if let Some(variable) = self.environment_stack.last().unwrap().variables.get(name) {
             Some(variable.clone())
+        } else if let Some(slot) = self
+            .compiler
+            .find_binding(self.compiler.current_namespace_id(), name)
+        {
+            Some(VariableLocation::NamespaceVariable(
+                self.compiler.current_namespace_id(),
+                slot,
+            ))
         } else {
-            if let Some(slot) = self
+            self
                 .compiler
-                .find_binding(self.compiler.current_namespace_id(), name)
-            {
-                Some(VariableLocation::NamespaceVariable(
-                    self.compiler.current_namespace_id(),
+                .find_binding(self.compiler.global_namespace_id(), name).map(|slot| VariableLocation::NamespaceVariable(
+                    self.compiler.global_namespace_id(),
                     slot,
                 ))
-            } else {
-                if let Some(slot) = self
-                    .compiler
-                    .find_binding(self.compiler.global_namespace_id(), name)
-                {
-                    Some(VariableLocation::NamespaceVariable(
-                        self.compiler.global_namespace_id(),
-                        slot,
-                    ))
-                } else {
-                    None
-                }
-            }
         }
     }
 
@@ -965,7 +958,7 @@ impl<'a> AstCompiler<'a> {
         let function = self
             .compiler
             .find_function(arg)
-            .expect(&format!("could not find function {}", arg));
+            .unwrap_or_else(|| panic!("could not find function {}", arg));
         assert!(function.is_builtin);
         let function = self.compiler.get_function_pointer(function).unwrap();
         let function = self.ir.assign_new(function);

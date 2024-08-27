@@ -18,3 +18,7 @@ fn main() {
     // namespaces for roots
     println(global_thing)
 }
+
+// Expect
+// HeapThing { x: 1, y: 2, z: 3 }
+// null

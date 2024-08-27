@@ -215,6 +215,8 @@ pub unsafe extern "C" fn update_binding<Alloc: Allocator>(
     value: usize,
 ) -> usize {
     let runtime = unsafe { &mut *runtime };
+    let namespace_id = runtime.compiler.current_namespace_id();
+    runtime.memory.add_namespace_root(namespace_id, value);
     runtime.compiler.update_binding(namespace_slot, value);
     BuiltInTypes::null_value() as usize
 }
@@ -225,8 +227,8 @@ pub unsafe extern "C" fn get_binding<Alloc: Allocator>(
     slot: usize,
 ) -> usize {
     let runtime = unsafe { &mut *runtime };
-    let value = runtime.compiler.get_binding(namespace, slot);
-    value
+    
+    runtime.compiler.get_binding(namespace, slot)
 }
 
 pub unsafe extern "C" fn set_current_namespace<Alloc: Allocator>(
@@ -552,10 +554,8 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     if let Some(f) = runtime.get_function0(&fully_qualified_main) {
         let result = f();
         runtime.println(result as usize);
-    } else {
-        if args.debug {
-            println!("No main function");
-        }
+    } else if args.debug {
+        println!("No main function");
     }
 
     if args.show_times {

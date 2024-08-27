@@ -1,4 +1,4 @@
-use std::error::Error;
+use std::{error::Error};
 
 use mmap_rs::{MmapMut, MmapOptions};
 
@@ -208,13 +208,9 @@ impl Allocator for SimpleGeneration {
         self.namespace_roots.push((namespace_id, root));
     }
 
-    fn get_namespace_relocations(&self, namespace_id: usize) -> Vec<(usize, usize)> {
-        for (id, roots) in self.relocated_namespace_roots.iter() {
-            if *id == namespace_id {
-                return roots.clone();
-            }
-        }
-        vec![]
+    fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)> {
+        
+        std::mem::take(&mut self.relocated_namespace_roots)
     }
 }
 
