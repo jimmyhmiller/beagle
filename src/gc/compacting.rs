@@ -310,8 +310,10 @@ impl CompactingHeap {
             new_roots.push(self.copy_using_cheneys_algorithm(*root));
         }
 
+        let mut new_namespace_roots = vec![];
         for (namespace_id, namespace_root) in self.namespace_roots.clone().iter() {
             let new_pointer = self.copy_using_cheneys_algorithm(*namespace_root);
+            new_namespace_roots.push((*namespace_id, new_pointer));
             // if namespace exists, push, otherwise create
             let namespace = self
                 .namespace_relocations
@@ -324,6 +326,7 @@ impl CompactingHeap {
                     .push((*namespace_id, vec![(*namespace_root, new_pointer)]));
             }
         }
+        self.namespace_roots = new_namespace_roots;
 
         for mut object in self
             .to_space

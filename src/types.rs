@@ -199,6 +199,7 @@ impl HeapObject {
         let size = self.full_size();
         let untagged = self.untagged();
         let pointer = untagged as *mut u8;
+        assert!(pointer as usize % 8 == 0);
         unsafe { std::slice::from_raw_parts(pointer, size) }
     }
 

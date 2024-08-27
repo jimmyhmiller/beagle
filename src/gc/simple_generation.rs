@@ -1,4 +1,4 @@
-use std::{error::Error};
+use std::error::Error;
 
 use mmap_rs::{MmapMut, MmapOptions};
 
@@ -209,7 +209,6 @@ impl Allocator for SimpleGeneration {
     }
 
     fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)> {
-        
         std::mem::take(&mut self.relocated_namespace_roots)
     }
 }
@@ -337,7 +336,7 @@ impl SimpleGeneration {
                 }
             }
         }
-        for (namespace_id, old_root) in self.namespace_roots.iter() {
+        for (namespace_id, old_root) in self.namespace_roots.iter_mut() {
             if root == *old_root {
                 // check if namespace_id is in relocated_namespace_roots
                 // if it is add to list, otherwise create a new list
@@ -354,6 +353,7 @@ impl SimpleGeneration {
                         .push((*namespace_id, vec![(*old_root, tagged_new)]));
                 }
             }
+            *old_root = tagged_new;
         }
         heap_object.write_field(0, tagged_new);
         self.copied.push(HeapObject::from_untagged(new_pointer));

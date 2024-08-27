@@ -896,12 +896,11 @@ impl<'a> AstCompiler<'a> {
                 slot,
             ))
         } else {
-            self
-                .compiler
-                .find_binding(self.compiler.global_namespace_id(), name).map(|slot| VariableLocation::NamespaceVariable(
-                    self.compiler.global_namespace_id(),
-                    slot,
-                ))
+            self.compiler
+                .find_binding(self.compiler.global_namespace_id(), name)
+                .map(|slot| {
+                    VariableLocation::NamespaceVariable(self.compiler.global_namespace_id(), slot)
+                })
         }
     }
 

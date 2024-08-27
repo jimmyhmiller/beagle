@@ -71,6 +71,7 @@ enum Data {
 
 trait Serialize {
     fn to_binary(&self) -> Vec<u8>;
+    #[allow(unused)]
     fn from_binary(data: &[u8]) -> Self;
 }
 
@@ -227,7 +228,7 @@ pub unsafe extern "C" fn get_binding<Alloc: Allocator>(
     slot: usize,
 ) -> usize {
     let runtime = unsafe { &mut *runtime };
-    
+
     runtime.compiler.get_binding(namespace, slot)
 }
 
