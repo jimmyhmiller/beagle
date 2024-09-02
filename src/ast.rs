@@ -126,7 +126,7 @@ impl Ast {
                 node,
                 Ast::Function { .. }
                     | Ast::Struct { .. }
-                    | Ast::Enum { .. }
+                    // | Ast::Enum { .. }
                     | Ast::Namespace { .. }
             )
         })
@@ -344,10 +344,40 @@ impl<'a> AstCompiler<'a> {
                 // A concept I don't yet have
                 Value::Null
             }
-            Ast::Enum {
-                name: _,
-                variants: _,
-            } => {
+            Ast::Enum { name, variants } => {
+                let mut struct_fields: Vec<(String, Ast)> = vec![];
+                for variant in variants.iter() {
+                    match variant {
+                        Ast::EnumVariant { name, fields: _ } => {
+                            // TODO: These should be functions??
+                            // Maybe I should have a concept of a struct/data creator
+                            // that gets called with named arguments like that?
+                            // I'm not sure
+                            // I think my whole setup here is janky. But I want things working first
+                            struct_fields.push((name.clone(), Ast::Null));
+                        }
+                        Ast::EnumStaticVariant { name: variant_name } => {
+                            struct_fields.push((
+                                variant_name.clone(),
+                                Ast::StructCreation {
+                                    name: format!("{}.{}", name, variant_name),
+                                    fields: vec![],
+                                },
+                            ));
+                        }
+                        _ => panic!("Shouldn't get here"),
+                    }
+                }
+                let value = self.call_compile(&Ast::StructCreation {
+                    name: name.clone(),
+                    fields: struct_fields,
+                });
+                let namespace_id = self
+                    .compiler
+                    .find_binding(self.compiler.current_namespace_id(), &name)
+                    .unwrap();
+                let value_reg = self.ir.assign_new(value);
+                self.store_namespaced_variable(Value::RawValue(namespace_id), value_reg);
                 // TODO: This should probably return the enum value
                 // A concept I don't yet have
                 Value::Null
@@ -1032,6 +1062,18 @@ impl<'a> AstCompiler<'a> {
                         .collect(),
                 };
 
+                self.compiler.add_struct(Struct {
+                    name: name.to_string(),
+                    fields: variants
+                        .iter()
+                        .map(|variant| match variant {
+                            Ast::EnumVariant { name, fields: _ } => name.clone(),
+                            Ast::EnumStaticVariant { name } => name.clone(),
+                            _ => panic!("Expected enum variant got {:?}", variant),
+                        })
+                        .collect(),
+                });
+
                 self.compiler.add_enum(enum_repr);
                 for variant in variants.iter() {
                     match variant {
@@ -1051,8 +1093,11 @@ impl<'a> AstCompiler<'a> {
                                 })
                                 .collect(),
                         }),
-                        Ast::EnumStaticVariant { name: _ } => {
-                            // Do I need to do anything?
+                        Ast::EnumStaticVariant { name: variant_name } => {
+                            self.compiler.add_struct(Struct {
+                                name: format!("{}.{}", name, variant_name),
+                                fields: vec![],
+                            });
                         }
                         _ => panic!("Expected enum variant got {:?}", variant),
                     }

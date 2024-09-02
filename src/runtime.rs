@@ -835,6 +835,7 @@ impl Compiler {
 
     pub fn add_struct(&mut self, s: Struct) {
         let name = s.name.clone();
+        // TODO: Namespace these
         self.structs.insert(name.clone(), s);
         // TODO: I need a "Struct" object that I can add here
         // What I mean by this is a kind of meta object
@@ -869,6 +870,9 @@ impl Compiler {
         // It should look like this
         // struct_name { field1: value1, field2: value2 }
         let mut repr = struct_value.name.clone();
+        if struct_value.fields.is_empty() {
+            return Some(repr);
+        }
         repr.push_str(" { ");
         for (index, field) in struct_value.fields.iter().enumerate() {
             repr.push_str(field);
