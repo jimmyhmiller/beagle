@@ -13,15 +13,11 @@ fn main() {
     }
     println(action)
     println(action.speed)
+    println(Action.stop)
 
-    // TOOD: How do I represent this?
-    // It is a property access. So I need Action to exist
-    // in the scope. What is action? I guess it is type enum?
-    // If I print Action itself, what does it return?
-    // I need a "global" (or really namespace) environment for this.
-    // let stop = Action.stop
-
-    // println(stop)
+    // Need to figure out the proper setup for the enum
+    // object itself.
+    // println(Action)
 
     "done"
 }
@@ -30,4 +26,5 @@ fn main() {
 // Fast
 // Action.run { speed: 5 }
 // 5
+// Action.stop
 // done
