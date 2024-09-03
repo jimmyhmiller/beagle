@@ -8,7 +8,7 @@ use crate::{
     types::BuiltInTypes,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Ast {
     Program {
         elements: Vec<Ast>,
@@ -71,7 +71,8 @@ pub enum Ast {
         args: Vec<Ast>,
     },
     Let(Box<Ast>, Box<Ast>),
-    NumberLiteral(i64),
+    IntegerLiteral(i64),
+    FloatLiteral(f64),
     // TODO: Should I have both identifier and variable?
     // When should I have them?
     Identifier(String),
@@ -623,7 +624,33 @@ impl<'a> AstCompiler<'a> {
                     self.compile_standard_function_call(name, args)
                 }
             }
-            Ast::NumberLiteral(n) => Value::SignedConstant(n as isize),
+            Ast::IntegerLiteral(n) => Value::SignedConstant(n as isize),
+            Ast::FloatLiteral(n) => {
+                // floats are heap allocated
+                // Sadly I have to do this to avoid loss of percision
+                let allocate = self.compiler.find_function("allocate").unwrap();
+                let allocate = self.compiler.get_function_pointer(allocate).unwrap();
+                let allocate = self.ir.assign_new(allocate);
+
+                let compiler_pointer_reg = self.ir.assign_new(self.compiler.get_compiler_ptr());
+
+                let size_reg = self.ir.assign_new(1);
+                let stack_pointer = self.ir.get_stack_pointer_imm(0);
+
+                let float_pointer = self.ir.call_builtin(
+                    allocate.into(),
+                    vec![compiler_pointer_reg.into(), size_reg.into(), stack_pointer],
+                );
+
+                let float_pointer = self.ir.assign_new(float_pointer);
+                self.ir.write_small_object_header(float_pointer);
+                self.ir.write_float(float_pointer, n);
+
+                
+                self
+                    .ir
+                    .tag(float_pointer.into(), BuiltInTypes::Float.get_tag())
+            }
             Ast::Identifier(name) => {
                 let reg = &self.get_variable_alloc_free_variable(&name);
                 self.resolve_variable(reg)
@@ -1181,7 +1208,7 @@ impl<'a> AstCompiler<'a> {
 
 impl From<i64> for Ast {
     fn from(val: i64) -> Self {
-        Ast::NumberLiteral(val)
+        Ast::IntegerLiteral(val)
     }
 }
 

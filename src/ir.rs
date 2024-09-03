@@ -108,6 +108,7 @@ pub enum Instruction {
     AtomicLoad(Value, Value),
     AtomicStore(Value, Value),
     CompareAndSwap(Value, Value, Value),
+    StoreFloat(Value, Value, f64),
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -251,6 +252,9 @@ impl Instruction {
             }
             Instruction::LoadFalse(a) => {
                 get_register!(a)
+            }
+            Instruction::StoreFloat(a, b, _) => {
+                get_registers!(a, b)
             }
             Instruction::LoadLocal(a, b) => {
                 get_registers!(a, b)
@@ -710,10 +714,39 @@ impl Ir {
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, lang);
 
-                    lang.guard_integer(dest, a, after_return);
-                    lang.guard_integer(dest, b, after_return);
+                    let float_add = lang.new_label("float_add");
+                    let exit = lang.new_label("exit");
+                    lang.guard_integer(dest, a, float_add);
+                    lang.guard_integer(dest, b, float_add);
 
-                    lang.add(dest, a, b)
+                    lang.add(dest, a, b);
+                    lang.jump(exit);
+
+                    lang.write_label(float_add);
+
+                    lang.breakpoint();
+                    lang.load_from_heap(a, a, 0);
+                    lang.load_from_heap(b, b, 0);
+                    // lang.breakpoint();
+                    lang.fmov(a, a);
+                    lang.fmov(b, b);
+                    lang.fadd(dest, a, b);
+
+                    // TODO: I need to allocate here
+                    // Because I added a float and floats are boxed
+                    // so I need to create a new one.
+                    // This might be the wrong level to do this work.
+                    // I might want to do this at the IR level first
+                    // have the lower level here be add_int and add_float and stuff
+                    // Obviously in the future I want to be smart about boxing and unboxing
+
+                    // lang.breakpoint();
+
+                    lang.write_label(exit);
+
+                    // TODO: If it isn't an integer, I need to check if its a float
+                    // If it is I should do float add here
+                    //
                 }
                 Instruction::Mul(dest, a, b) => {
                     let a = a.try_into().unwrap();
@@ -834,6 +867,15 @@ impl Ir {
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, lang);
                     lang.mov_64(dest, BuiltInTypes::construct_boolean(false));
+                }
+                Instruction::StoreFloat(dest, temp, value) => {
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, lang);
+                    let temp = temp.try_into().unwrap();
+                    let temp = alloc.allocate_register(index, temp, lang);
+                    lang.mov_64(temp, value.to_bits() as isize);
+                    // The header is the first field, so offset is 1
+                    lang.store_on_heap(dest, temp, 1)
                 }
                 Instruction::Recurse(dest, args) => {
                     // TODO: Clean up duplication
@@ -1354,5 +1396,14 @@ impl Ir {
             free_variable,
             free_variable_offset,
         ));
+    }
+
+    pub fn write_float(&mut self, float_pointer: VirtualRegister, n: f64) {
+        let temp_register = self.volatile_register();
+        self.instructions.push(Instruction::StoreFloat(
+            float_pointer.into(),
+            temp_register.into(),
+            n,
+        ))
     }
 }
