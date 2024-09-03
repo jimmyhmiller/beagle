@@ -88,6 +88,11 @@ impl BuiltInTypes {
         }
     }
 
+    pub fn construct_float(x: f64) -> isize {
+        let value = x.to_bits() as isize;
+        BuiltInTypes::Float.tag(value)
+    }
+
     pub fn tag_size() -> i32 {
         3
     }
@@ -95,7 +100,7 @@ impl BuiltInTypes {
     pub fn is_heap_pointer(value: usize) -> bool {
         match BuiltInTypes::get_kind(value) {
             BuiltInTypes::Int => false,
-            BuiltInTypes::Float => false,
+            BuiltInTypes::Float => true,
             BuiltInTypes::String => false,
             BuiltInTypes::Bool => false,
             BuiltInTypes::Function => false,
@@ -131,7 +136,7 @@ pub struct HeapObject {
     tagged: bool,
 }
 
-const SIZE_SHIFT: usize = 1;
+const SIZE_SHIFT: usize = 2;
 
 // TODO: Implement methods for writing the header of the heap object
 // make sure we always use this representation everywhere so we can
@@ -181,6 +186,9 @@ impl HeapObject {
     }
 
     pub fn fields_size(&self) -> usize {
+        if self.is_small_object() {
+            return 8;
+        }
         let untagged = self.untagged();
         let pointer = untagged as *mut isize;
         let data: usize = unsafe { *pointer.cast::<usize>() };
@@ -212,6 +220,9 @@ impl HeapObject {
     }
 
     pub fn get_fields_mut(&mut self) -> &mut [usize] {
+        if self.is_small_object() {
+            return &mut [];
+        }
         let size = self.fields_size();
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
@@ -277,6 +288,14 @@ impl HeapObject {
         let pointer = unsafe { pointer.add(arg + Self::header_size() / 8) };
         unsafe { *pointer }
     }
+
+    fn is_small_object(&self) -> bool {
+        let untagged = self.untagged();
+        let pointer = untagged as *mut usize;
+        let data: usize = unsafe { *pointer.cast::<usize>() };
+        // we only want to check the second to last bit, if it is one, it is a small object
+        (data & 0b10) == 0b10
+    }
 }
 
 impl Ir {
@@ -294,6 +313,14 @@ impl Ir {
         for (i, field) in fields.iter().enumerate() {
             self.heap_store_offset(struct_pointer, *field, offset + i);
         }
+    }
+
+    pub fn write_small_object_header(&mut self, small_object_pointer: VirtualRegister) {
+        // We are going to set the least significant bits to 0b10
+        // The 1 bit there will tell us that this object doesn't
+        // have a size field, it is just a single 8 byte object following the header
+        let offset = 0;
+        self.heap_store_offset(small_object_pointer, Value::RawValue(0b10), offset);
     }
 }
 

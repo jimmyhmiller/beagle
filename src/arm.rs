@@ -1022,4 +1022,25 @@ impl LowLevelArm {
             self.store_local(null_register, local_offset)
         }
     }
+
+    pub fn fmov(&mut self, a: Register, b: Register) {
+        // sf == 1 && ftype == 01 && rmode == 00 && opcode == 111
+        self.instructions.push(ArmAsm::FmovFloatGen {
+            sf: a.sf(),
+            ftype: 0b01,
+            rmode: 0b00,
+            opcode: 0b111,
+            rn: b,
+            rd: a,
+        });
+    }
+
+    pub fn fadd(&mut self, dest: Register, a: Register, b: Register) {
+        self.instructions.push(ArmAsm::FaddFloat {
+            ftype: 0b01,
+            rm: b,
+            rn: a,
+            rd: dest,
+        });
+    }
 }

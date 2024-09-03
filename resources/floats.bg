@@ -1,0 +1,14 @@
+namespace floats
+
+let my_float = 3.14159
+let my_int = 2
+
+fn main() {
+    gc()
+    gc()
+    println(my_float)
+    let my_int2 = my_int + 1
+    let my_float2 = my_float + 1.0
+    println(my_int2)
+    println(my_float2)
+}

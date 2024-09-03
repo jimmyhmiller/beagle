@@ -36,12 +36,12 @@ This codebase originally existed [here](https://github.com/jimmyhmiller/PlayGrou
 * Guard on arithemtic (Started)
 * import/export
 * Namespaces (Started)
-* Functions right now are global rather than namespaced
+* Functions right now are global rather than namespaced (Started)
 * Data structures
 * Decide if I want to support kabab-case
 * Continuations?
 * Make closures better
-* Floats
+* Floats (started)
 * Decimals
-* Enums
+* Enums (started)
 * Pattern Matching

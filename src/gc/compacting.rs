@@ -312,6 +312,9 @@ impl CompactingHeap {
 
         let mut new_namespace_roots = vec![];
         for (namespace_id, namespace_root) in self.namespace_roots.clone().iter() {
+            if !BuiltInTypes::is_heap_pointer(*namespace_root) {
+                continue;
+            }
             let new_pointer = self.copy_using_cheneys_algorithm(*namespace_root);
             new_namespace_roots.push((*namespace_id, new_pointer));
             // if namespace exists, push, otherwise create

@@ -544,6 +544,47 @@ pub enum ArmAsm {
         rn: Register,
         rd: Register,
     },
+    /// FMOV (register) -- A64
+    /// Floating-point Move register without conversion
+    /// FMOV  <Hd>, <Hn>
+    /// FMOV  <Sd>, <Sn>
+    /// FMOV  <Dd>, <Dn>
+    FmovFloat {
+        ftype: i32,
+        rn: Register,
+        rd: Register,
+    },
+    /// FMOV (general) -- A64
+    /// Floating-point Move to or from general-purpose register without conversion
+    /// FMOV  <Wd>, <Hn>
+    /// FMOV  <Xd>, <Hn>
+    /// FMOV  <Hd>, <Wn>
+    /// FMOV  <Sd>, <Wn>
+    /// FMOV  <Wd>, <Sn>
+    /// FMOV  <Hd>, <Xn>
+    /// FMOV  <Dd>, <Xn>
+    /// FMOV  <Vd>.D[1], <Xn>
+    /// FMOV  <Xd>, <Dn>
+    /// FMOV  <Xd>, <Vn>.D[1]
+    FmovFloatGen {
+        sf: i32,
+        ftype: i32,
+        rmode: i32,
+        opcode: i32,
+        rn: Register,
+        rd: Register,
+    },
+    /// FADD (scalar) -- A64
+    /// Floating-point Add (scalar)
+    /// FADD  <Hd>, <Hn>, <Hm>
+    /// FADD  <Sd>, <Sn>, <Sm>
+    /// FADD  <Dd>, <Dn>, <Dm>
+    FaddFloat {
+        ftype: i32,
+        rm: Register,
+        rn: Register,
+        rd: Register,
+    },
 }
 #[derive(Debug)]
 pub enum LdpGenSelector {
@@ -978,6 +1019,35 @@ impl ArmAsm {
                     | (*shift as u32) << 22
                     | rm << 16
                     | truncate_imm::<_, 6>(*imm6) << 10
+                    | rn << 5
+                    | rd << 0
+            }
+            ArmAsm::FmovFloat { ftype, rn, rd } => {
+                0b0_0_0_11110_00_1_0000_00_10000_00000_00000
+                    | (*ftype as u32) << 22
+                    | rn << 5
+                    | rd << 0
+            }
+            ArmAsm::FmovFloatGen {
+                sf,
+                ftype,
+                rmode,
+                opcode,
+                rn,
+                rd,
+            } => {
+                0b0_0_0_11110_00_1_00_000_000000_00000_00000
+                    | (*sf as u32) << 31
+                    | (*ftype as u32) << 22
+                    | (*rmode as u32) << 19
+                    | (*opcode as u32) << 16
+                    | rn << 5
+                    | rd << 0
+            }
+            ArmAsm::FaddFloat { ftype, rm, rn, rd } => {
+                0b0_0_0_11110_00_1_00000_001_0_10_00000_00000
+                    | (*ftype as u32) << 22
+                    | rm << 16
                     | rn << 5
                     | rd << 0
             }

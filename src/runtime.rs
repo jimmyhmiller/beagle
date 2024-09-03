@@ -664,7 +664,7 @@ impl Compiler {
     }
 
     pub fn get_repr(&self, value: usize, depth: usize) -> Option<String> {
-        if depth > 1000 {
+        if depth > 10 {
             return Some("...".to_string());
         }
         let tag = BuiltInTypes::get_kind(value);
@@ -674,7 +674,12 @@ impl Compiler {
                 let value = BuiltInTypes::untag(value);
                 Some(value.to_string())
             }
-            BuiltInTypes::Float => todo!(),
+            BuiltInTypes::Float => {
+                let value = BuiltInTypes::untag(value);
+                let value = value as *const f64;
+                let value = unsafe { *value.add(1) };
+                Some(value.to_string())
+            }
             BuiltInTypes::String => {
                 let value = BuiltInTypes::untag(value);
                 let string = &self.string_constants[value];

@@ -539,7 +539,13 @@ impl Parser {
                 // Gross
                 let value = String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap();
                 self.consume();
-                Some(Ast::NumberLiteral(value.parse::<i64>().unwrap()))
+                Some(Ast::IntegerLiteral(value.parse::<i64>().unwrap()))
+            }
+            Token::Float((start, end)) => {
+                // Gross
+                let value = String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap();
+                self.consume();
+                Some(Ast::FloatLiteral(value.parse::<f64>().unwrap()))
             }
             Token::True => {
                 self.consume();
