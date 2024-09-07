@@ -102,7 +102,10 @@ impl Ast {
     pub fn compile(&self, compiler: &mut Compiler) -> Ir {
         let mut ast_compiler = AstCompiler {
             ast: self.clone(),
-            ir: Ir::new(),
+            ir: Ir::new(
+                compiler.get_compiler_ptr() as usize,
+                compiler.allocate_fn_pointer(),
+            ),
             name: None,
             compiler,
             context: vec![],
@@ -245,7 +248,10 @@ impl<'a> AstCompiler<'a> {
 
         self.tail_position();
         self.call_compile(&Box::new(self.ast.clone()));
-        let mut ir = Ir::new();
+        let mut ir = Ir::new(
+            self.compiler.get_compiler_ptr() as usize,
+            self.compiler.allocate_fn_pointer(),
+        );
         std::mem::swap(&mut ir, &mut self.ir);
         ir
     }
@@ -261,7 +267,13 @@ impl<'a> AstCompiler<'a> {
             }
             Ast::Function { name, args, body } => {
                 self.create_new_environment();
-                let old_ir = std::mem::replace(&mut self.ir, Ir::new());
+                let old_ir = std::mem::replace(
+                    &mut self.ir,
+                    Ir::new(
+                        self.compiler.get_compiler_ptr() as usize,
+                        self.compiler.allocate_fn_pointer(),
+                    ),
+                );
                 self.name = name.clone();
                 for (index, arg) in args.iter().enumerate() {
                     let reg = self.ir.arg(index);
@@ -546,7 +558,7 @@ impl<'a> AstCompiler<'a> {
                 let left = self.call_compile(&left);
                 self.not_tail_position();
                 let right = self.call_compile(&right);
-                self.ir.add(left, right)
+                self.ir.add_any(left, right)
             }
             Ast::Sub { left, right } => {
                 self.not_tail_position();
@@ -644,11 +656,9 @@ impl<'a> AstCompiler<'a> {
 
                 let float_pointer = self.ir.assign_new(float_pointer);
                 self.ir.write_small_object_header(float_pointer);
-                self.ir.write_float(float_pointer, n);
+                self.ir.write_float_literal(float_pointer, n);
 
-                
-                self
-                    .ir
+                self.ir
                     .tag(float_pointer.into(), BuiltInTypes::Float.get_tag())
             }
             Ast::Identifier(name) => {

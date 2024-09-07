@@ -380,6 +380,11 @@ impl Compiler {
         self.compiler_pointer.unwrap()
     }
 
+    pub fn allocate_fn_pointer(&mut self) -> usize {
+        let allocate_fn_pointer = self.find_function("allocate").unwrap();
+        self.get_function_pointer(allocate_fn_pointer).unwrap()
+    }
+
     pub fn set_compiler_lock_pointer(&mut self, pointer: *const Compiler) {
         self.compiler_pointer = Some(pointer);
     }

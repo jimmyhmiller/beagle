@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::arm::FmovDirection;
 use crate::machine_code::arm_codegen::{Register, X0, X1};
 
 use crate::types::BuiltInTypes;
@@ -109,6 +110,10 @@ pub enum Instruction {
     AtomicStore(Value, Value),
     CompareAndSwap(Value, Value, Value),
     StoreFloat(Value, Value, f64),
+    GuardInt(Value, Value, Label),
+    FmovGeneralToFloat(Value, Value),
+    FmovFloatToGeneral(Value, Value),
+    Fadd(Value, Value, Value),
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -170,6 +175,18 @@ impl Instruction {
             }
             Instruction::Assign(a, b) => {
                 get_registers!(a, b)
+            }
+            Instruction::GuardInt(a, b, _) => {
+                get_registers!(a, b)
+            }
+            Instruction::FmovGeneralToFloat(a, b) => {
+                get_registers!(a, b)
+            }
+            Instruction::FmovFloatToGeneral(a, b) => {
+                get_registers!(a, b)
+            }
+            Instruction::Fadd(a, b, c) => {
+                get_registers!(a, b, c)
             }
             Instruction::Recurse(a, args) => {
                 let mut result: Vec<VirtualRegister> =
@@ -344,16 +361,12 @@ pub struct Ir {
     label_names: Vec<String>,
     label_locations: HashMap<usize, usize>,
     pub num_locals: usize,
-}
-
-impl Default for Ir {
-    fn default() -> Self {
-        Self::new()
-    }
+    compiler_pointer: usize,
+    allocate_fn_pointer: usize,
 }
 
 impl Ir {
-    pub fn new() -> Self {
+    pub fn new(compiler_pointer: usize, allocate_fn_pointer: usize) -> Self {
         Self {
             register_index: 0,
             instructions: vec![],
@@ -361,6 +374,8 @@ impl Ir {
             label_names: vec![],
             label_locations: HashMap::new(),
             num_locals: 0,
+            compiler_pointer,
+            allocate_fn_pointer,
         }
     }
 
@@ -425,6 +440,44 @@ impl Ir {
         self.instructions
             .push(Instruction::Sub(result.into(), a.into(), b.into()));
         Value::Register(result)
+    }
+
+    pub fn add_any<A, B>(&mut self, a: A, b: B) -> Value
+    where
+        A: Into<Value>,
+        B: Into<Value>,
+    {
+        let register = self.volatile_register();
+        let a = self.assign_new(a.into());
+        let b = self.assign_new(b.into());
+        let add_float = self.label("add_float");
+        let after_add = self.label("after_add");
+        self.breakpoint();
+        self.guard_int(a, add_float);
+        self.guard_int(b, add_float);
+        self.add(a, b);
+        self.jump(after_add);
+        self.write_label(add_float);
+        // TODO: Add guard float
+        let a = self.untag(a.into());
+        let b = self.untag(b.into());
+        let a = self.load_from_heap(a, 1);
+        let b = self.load_from_heap(b, 1);
+        let a = self.fmov_general_to_float(a);
+        let b = self.fmov_general_to_float(b);
+        let result = self.fadd(a, b);
+        let result = self.fmov_float_to_general(result);
+        // Allocate and store
+        let size_reg = self.assign_new(1);
+        let float_pointer = self.allocate(size_reg.into());
+        let float_pointer = self.assign_new(float_pointer);
+        self.write_small_object_header(float_pointer);
+        self.heap_store_offset(float_pointer, result, 1);
+        let tagged = self.tag(float_pointer.into(), BuiltInTypes::Float.get_tag());
+        self.assign(register, tagged);
+
+        self.write_label(after_add);
+        Value::Register(register)
     }
 
     pub fn add<A, B>(&mut self, a: A, b: B) -> Value
@@ -714,23 +767,26 @@ impl Ir {
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, lang);
 
-                    let float_add = lang.new_label("float_add");
-                    let exit = lang.new_label("exit");
-                    lang.guard_integer(dest, a, float_add);
-                    lang.guard_integer(dest, b, float_add);
-
                     lang.add(dest, a, b);
-                    lang.jump(exit);
 
-                    lang.write_label(float_add);
+                    // // TODO: Fix this
+                    // let float_add = lang.new_label("float_add");
+                    // let exit = lang.new_label("exit");
+                    // lang.guard_integer(dest, a, float_add);
+                    // lang.guard_integer(dest, b, float_add);
 
-                    lang.breakpoint();
-                    lang.load_from_heap(a, a, 0);
-                    lang.load_from_heap(b, b, 0);
+                    // lang.add(dest, a, b);
+                    // lang.jump(exit);
+
+                    // lang.write_label(float_add);
+
                     // lang.breakpoint();
-                    lang.fmov(a, a);
-                    lang.fmov(b, b);
-                    lang.fadd(dest, a, b);
+                    // lang.load_from_heap(a, a, 0);
+                    // lang.load_from_heap(b, b, 0);
+                    // // lang.breakpoint();
+                    // lang.fmov(a, a, FmovDirection::FromGeneralToFloat);
+                    // lang.fmov(b, b, FmovDirection::FromGeneralToFloat);
+                    // lang.fadd(dest, a, b);
 
                     // TODO: I need to allocate here
                     // Because I added a float and floats are boxed
@@ -742,7 +798,7 @@ impl Ir {
 
                     // lang.breakpoint();
 
-                    lang.write_label(exit);
+                    // lang.write_label(exit);
 
                     // TODO: If it isn't an integer, I need to check if its a float
                     // If it is I should do float add here
@@ -783,6 +839,36 @@ impl Ir {
                     lang.shift_left(dest, dest, BuiltInTypes::tag_size());
                     lang.shift_left(a, a, BuiltInTypes::tag_size());
                     lang.shift_left(b, b, BuiltInTypes::tag_size());
+                }
+                Instruction::GuardInt(dest, value, label) => {
+                    let value = value.try_into().unwrap();
+                    let value = alloc.allocate_register(index, value, lang);
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, lang);
+                    lang.guard_integer(dest, value, ir_label_to_lang_label[label]);
+                }
+                Instruction::FmovGeneralToFloat(dest, src) => {
+                    let src = src.try_into().unwrap();
+                    let src = alloc.allocate_register(index, src, lang);
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, lang);
+                    lang.fmov(dest, src, FmovDirection::FromGeneralToFloat);
+                }
+                Instruction::FmovFloatToGeneral(dest, src) => {
+                    let src = src.try_into().unwrap();
+                    let src = alloc.allocate_register(index, src, lang);
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, lang);
+                    lang.fmov(dest, src, FmovDirection::FromFloatToGeneral);
+                }
+                Instruction::Fadd(dest, a, b) => {
+                    let a = a.try_into().unwrap();
+                    let a = alloc.allocate_register(index, a, lang);
+                    let b = b.try_into().unwrap();
+                    let b = alloc.allocate_register(index, b, lang);
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, lang);
+                    lang.fadd(dest, a, b);
                 }
                 Instruction::Assign(dest, val) => match val {
                     Value::Register(virt_reg) => {
@@ -1398,12 +1484,52 @@ impl Ir {
         ));
     }
 
-    pub fn write_float(&mut self, float_pointer: VirtualRegister, n: f64) {
+    pub fn write_float_literal(&mut self, float_pointer: VirtualRegister, n: f64) {
         let temp_register = self.volatile_register();
         self.instructions.push(Instruction::StoreFloat(
             float_pointer.into(),
             temp_register.into(),
             n,
         ))
+    }
+
+    fn guard_int(&mut self, a: VirtualRegister, add_float: Label) {
+        let dest = self.volatile_register();
+        self.instructions
+            .push(Instruction::GuardInt(dest.into(), a.into(), add_float));
+    }
+
+    fn load_from_heap(&mut self, value: Value, arg: i32) -> Value {
+        let dest = self.volatile_register().into();
+        self.instructions
+            .push(Instruction::HeapLoad(dest, value, arg));
+        dest
+    }
+
+    fn fmov_general_to_float(&mut self, source: Value) -> Value {
+        let dest = self.volatile_register().into();
+        self.instructions
+            .push(Instruction::FmovGeneralToFloat(dest, source));
+        dest
+    }
+
+    fn fmov_float_to_general(&mut self, source: Value) -> Value {
+        let dest = self.volatile_register().into();
+        self.instructions
+            .push(Instruction::FmovFloatToGeneral(dest, source));
+        dest
+    }
+
+    fn fadd(&mut self, a: Value, b: Value) -> Value {
+        let dest = self.volatile_register().into();
+        self.instructions.push(Instruction::Fadd(dest, a, b));
+        dest
+    }
+
+    fn allocate(&mut self, size: Value) -> Value {
+        let compiler_pointer = self.assign_new(Value::Pointer(self.compiler_pointer));
+        let stack_pointer = self.get_stack_pointer_imm(0);
+        let f = self.assign_new(Value::Function(self.allocate_fn_pointer));
+        self.call_builtin(f.into(), vec![compiler_pointer.into(), size, stack_pointer])
     }
 }

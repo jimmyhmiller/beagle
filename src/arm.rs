@@ -11,6 +11,11 @@ use std::collections::HashMap;
 
 use crate::{common::Label, debugger, ir::Condition, Data, Message};
 
+pub enum FmovDirection {
+    FromGeneralToFloat,
+    FromFloatToGeneral,
+}
+
 pub fn mov_imm(destination: Register, input: u16) -> ArmAsm {
     ArmAsm::Movz {
         sf: destination.sf(),
@@ -670,12 +675,12 @@ impl LowLevelArm {
         });
     }
 
-    pub fn guard_integer(&mut self, dest: Register, a: Register, after_return: Label) {
+    pub fn guard_integer(&mut self, dest: Register, a: Register, jump: Label) {
         // TODO: I need to have some way of signaling
         // that this is a type error;
         self.and(dest, a, 0b111);
         self.compare(dest, ZERO_REGISTER);
-        self.jump_not_equal(after_return);
+        self.jump_not_equal(jump);
     }
 
     pub fn new_label(&mut self, name: &str) -> Label {
@@ -1023,13 +1028,17 @@ impl LowLevelArm {
         }
     }
 
-    pub fn fmov(&mut self, a: Register, b: Register) {
+    pub fn fmov(&mut self, a: Register, b: Register, direction: FmovDirection) {
         // sf == 1 && ftype == 01 && rmode == 00 && opcode == 111
+
         self.instructions.push(ArmAsm::FmovFloatGen {
             sf: a.sf(),
             ftype: 0b01,
             rmode: 0b00,
-            opcode: 0b111,
+            opcode: match direction {
+                FmovDirection::FromGeneralToFloat => 0b111,
+                FmovDirection::FromFloatToGeneral => 0b110,
+            },
             rn: b,
             rd: a,
         });
