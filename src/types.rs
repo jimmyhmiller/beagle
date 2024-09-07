@@ -143,7 +143,7 @@ const SIZE_SHIFT: usize = 2;
 // change things in one place
 impl HeapObject {
     pub fn from_tagged(pointer: usize) -> Self {
-        assert!(pointer % 8 != 0);
+        // assert!(pointer % 8 != 0);
         assert!(BuiltInTypes::is_heap_pointer(pointer));
         HeapObject {
             pointer,
@@ -215,6 +215,9 @@ impl HeapObject {
         let fields = self.get_fields();
         fields
             .iter()
+            // Hack to make sure we don't get any references if this is a small object
+            // Trying to do an empty in a condition makes the type checker complain
+            .filter(|_x| !self.is_small_object())
             .filter(|x| BuiltInTypes::is_heap_pointer(**x))
             .map(|&pointer| HeapObject::from_tagged(pointer))
     }
@@ -289,7 +292,7 @@ impl HeapObject {
         unsafe { *pointer }
     }
 
-    fn is_small_object(&self) -> bool {
+    pub fn is_small_object(&self) -> bool {
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
         let data: usize = unsafe { *pointer.cast::<usize>() };

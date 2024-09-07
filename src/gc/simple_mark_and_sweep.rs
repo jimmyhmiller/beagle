@@ -329,6 +329,9 @@ impl SimpleMarkSweepHeap {
         let mut to_mark: Vec<HeapObject> = Vec::with_capacity(128);
 
         for (_, root) in self.namespace_roots.iter() {
+            if !BuiltInTypes::is_heap_pointer(*root) {
+                continue;
+            }
             to_mark.push(HeapObject::from_tagged(*root));
         }
 

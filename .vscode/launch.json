@@ -15,7 +15,7 @@
                     // "--profile=release-with-debug",
                     "--bin=main",
                     "--package=main",
-                    "--features=compacting,thread-safe"
+                    "--features=simple-mark-and-sweep,thread-safe"
                 ],
                 "filter": {
                     "name": "main",
