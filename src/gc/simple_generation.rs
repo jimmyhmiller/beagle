@@ -240,9 +240,9 @@ impl SimpleGeneration {
             let new_roots = new_roots
                 .into_iter()
                 .chain(self.additional_roots.iter().map(|x| &x.1).copied())
-                .chain(self.namespace_roots.iter().map(|x| &x.1).copied())
                 .collect();
             let new_roots = unsafe { self.copy_all(new_roots) };
+            unsafe { self.copy_all(self.namespace_roots.iter().map(|x| &x.1).filter(|x| BuiltInTypes::is_heap_pointer(**x)).copied().collect()) };
             let stack_buffer = get_live_stack(*stack_base, *stack_pointer);
             for (i, (stack_offset, _)) in roots.iter().enumerate() {
                 debug_assert!(
@@ -310,7 +310,7 @@ impl SimpleGeneration {
         // If the first field points into the old generation, we can just return the pointer
         // because this is a forwarding pointer.
         let first_field = heap_object.get_field(0);
-        if BuiltInTypes::is_heap_pointer(first_field) {
+        if !heap_object.is_small_object() && BuiltInTypes::is_heap_pointer(first_field) {
             let untagged_data = BuiltInTypes::untag(first_field);
             if !self.young.contains(untagged_data as *const u8) {
                 debug_assert!(untagged_data % 8 == 0, "Pointer is not aligned");

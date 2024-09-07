@@ -447,15 +447,16 @@ impl Ir {
         A: Into<Value>,
         B: Into<Value>,
     {
-        let register = self.volatile_register();
+        let result_register = self.volatile_register();
         let a = self.assign_new(a.into());
         let b = self.assign_new(b.into());
         let add_float = self.label("add_float");
         let after_add = self.label("after_add");
-        self.breakpoint();
+        // self.breakpoint();
         self.guard_int(a, add_float);
         self.guard_int(b, add_float);
-        self.add(a, b);
+        let result = self.add(a, b);
+        self.assign(result_register, result);
         self.jump(after_add);
         self.write_label(add_float);
         // TODO: Add guard float
@@ -474,10 +475,10 @@ impl Ir {
         self.write_small_object_header(float_pointer);
         self.heap_store_offset(float_pointer, result, 1);
         let tagged = self.tag(float_pointer.into(), BuiltInTypes::Float.get_tag());
-        self.assign(register, tagged);
+        self.assign(result_register, tagged);
 
         self.write_label(after_add);
-        Value::Register(register)
+        Value::Register(result_register)
     }
 
     pub fn add<A, B>(&mut self, a: A, b: B) -> Value
