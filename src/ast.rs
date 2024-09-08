@@ -565,21 +565,21 @@ impl<'a> AstCompiler<'a> {
                 let left = self.call_compile(&left);
                 self.not_tail_position();
                 let right = self.call_compile(&right);
-                self.ir.sub(left, right)
+                self.ir.sub_any(left, right)
             }
             Ast::Mul { left, right } => {
                 self.not_tail_position();
                 let left = self.call_compile(&left);
                 self.not_tail_position();
                 let right = self.call_compile(&right);
-                self.ir.mul(left, right)
+                self.ir.mul_any(left, right)
             }
             Ast::Div { left, right } => {
                 self.not_tail_position();
                 let left = self.call_compile(&left);
                 self.not_tail_position();
                 let right = self.call_compile(&right);
-                self.ir.div(left, right)
+                self.ir.div_any(left, right)
             }
             Ast::Recurse { args } | Ast::TailRecurse { args } => {
                 let args = args
@@ -813,7 +813,7 @@ impl<'a> AstCompiler<'a> {
             counter,
             num_free_variables,
         );
-        let free_variable_offset = self.ir.add(counter, Value::SignedConstant(4));
+        let free_variable_offset = self.ir.add_int(counter, Value::SignedConstant(4));
         let free_variable_offset = self.ir.mul(free_variable_offset, Value::SignedConstant(8));
         // TODO: This needs to change based on counter
         let free_variable_offset = self.ir.untag(free_variable_offset);
@@ -821,10 +821,10 @@ impl<'a> AstCompiler<'a> {
             .ir
             .heap_load_with_reg_offset(closure_register, free_variable_offset);
 
-        let free_variable_offset = self.ir.sub(num_free_variables, counter);
+        let free_variable_offset = self.ir.sub_int(num_free_variables, counter);
         let num_local = self.ir.load_from_memory(closure_register, 3);
         let num_local = self.ir.tag(num_local, BuiltInTypes::Int.get_tag());
-        let free_variable_offset = self.ir.add(free_variable_offset, num_local);
+        let free_variable_offset = self.ir.add_int(free_variable_offset, num_local);
         // // TODO: Make this better
         let free_variable_offset = self.ir.mul(free_variable_offset, Value::SignedConstant(-8));
         let free_variable_offset = self.ir.untag(free_variable_offset);
@@ -837,7 +837,7 @@ impl<'a> AstCompiler<'a> {
 
         let label = self.ir.label("increment_counter");
         self.ir.write_label(label);
-        let counter_increment = self.ir.add(Value::SignedConstant(1), counter);
+        let counter_increment = self.ir.add_int(Value::SignedConstant(1), counter);
         self.ir.assign(counter, counter_increment);
 
         self.ir.jump(loop_start);
@@ -1156,7 +1156,7 @@ impl<'a> AstCompiler<'a> {
                 let pointer = args[0];
                 let untagged = self.ir.untag(pointer);
                 // TODO: I need a raw add that doesn't check for tags
-                let offset = self.ir.add(untagged, Value::RawValue(16));
+                let offset = self.ir.add_int(untagged, Value::RawValue(16));
                 let reg = self.ir.volatile_register();
                 self.ir.atomic_load(reg.into(), offset)
             }
@@ -1164,7 +1164,7 @@ impl<'a> AstCompiler<'a> {
                 let pointer = args[0];
                 let untagged = self.ir.untag(pointer);
                 // TODO: I need a raw add that doesn't check for tags
-                let offset = self.ir.add(untagged, Value::RawValue(16));
+                let offset = self.ir.add_int(untagged, Value::RawValue(16));
                 let value = args[1];
                 self.call_builtin("gc_add_root", vec![pointer, value]);
                 self.ir.atomic_store(offset, value);
@@ -1174,7 +1174,7 @@ impl<'a> AstCompiler<'a> {
                 // self.ir.breakpoint();
                 let pointer = args[0];
                 let untagged = self.ir.untag(pointer);
-                let offset = self.ir.add(untagged, Value::RawValue(16));
+                let offset = self.ir.add_int(untagged, Value::RawValue(16));
                 let expected = args[1];
                 let new = args[2];
                 let expected_and_result = self.ir.assign_new_force(expected);

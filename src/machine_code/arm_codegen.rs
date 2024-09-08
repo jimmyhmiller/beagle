@@ -585,6 +585,39 @@ pub enum ArmAsm {
         rn: Register,
         rd: Register,
     },
+    /// FSUB (scalar) -- A64
+    /// Floating-point Subtract (scalar)
+    /// FSUB  <Hd>, <Hn>, <Hm>
+    /// FSUB  <Sd>, <Sn>, <Sm>
+    /// FSUB  <Dd>, <Dn>, <Dm>
+    FsubFloat {
+        ftype: i32,
+        rm: Register,
+        rn: Register,
+        rd: Register,
+    },
+    /// FMUL (scalar) -- A64
+    /// Floating-point Multiply (scalar)
+    /// FMUL  <Hd>, <Hn>, <Hm>
+    /// FMUL  <Sd>, <Sn>, <Sm>
+    /// FMUL  <Dd>, <Dn>, <Dm>
+    FmulFloat {
+        ftype: i32,
+        rm: Register,
+        rn: Register,
+        rd: Register,
+    },
+    /// FDIV (scalar) -- A64
+    /// Floating-point Divide (scalar)
+    /// FDIV  <Hd>, <Hn>, <Hm>
+    /// FDIV  <Sd>, <Sn>, <Sm>
+    /// FDIV  <Dd>, <Dn>, <Dm>
+    FdivFloat {
+        ftype: i32,
+        rm: Register,
+        rn: Register,
+        rd: Register,
+    },
 }
 #[derive(Debug)]
 pub enum LdpGenSelector {
@@ -1046,6 +1079,27 @@ impl ArmAsm {
             }
             ArmAsm::FaddFloat { ftype, rm, rn, rd } => {
                 0b0_0_0_11110_00_1_00000_001_0_10_00000_00000
+                    | (*ftype as u32) << 22
+                    | rm << 16
+                    | rn << 5
+                    | rd << 0
+            }
+            ArmAsm::FsubFloat { ftype, rm, rn, rd } => {
+                0b0_0_0_11110_00_1_00000_001_1_10_00000_00000
+                    | (*ftype as u32) << 22
+                    | rm << 16
+                    | rn << 5
+                    | rd << 0
+            }
+            ArmAsm::FmulFloat { ftype, rm, rn, rd } => {
+                0b0_0_0_11110_00_1_00000_0_000_10_00000_00000
+                    | (*ftype as u32) << 22
+                    | rm << 16
+                    | rn << 5
+                    | rd << 0
+            }
+            ArmAsm::FdivFloat { ftype, rm, rn, rd } => {
+                0b0_0_0_11110_00_1_00000_0001_10_00000_00000
                     | (*ftype as u32) << 22
                     | rm << 16
                     | rn << 5
