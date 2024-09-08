@@ -1,22 +1,43 @@
 namespace floats
 
 let my_float = 3.14159
-let my_int = 2
+let my_int = 3
 
 fn main() {
     gc()
-    // gc()
+    gc()
+    println(my_int)
     println(my_float)
     let my_float2 = my_float + 1.0
+    let my_float3 = my_float2 - 1.0
+    let my_float4 = my_float3 * 2.0
+    let my_float5 = my_float4 / 2.0
     let my_int2 = my_int + 1
-
+    let my_int3 = my_int2 - 1
+    let my_int4 = my_int3 * 2
+    let my_int5 = my_int4 / 2
+    gc()
+    gc()
     println(my_int2)
     println(my_float2)
+    println(my_int3)
+    println(my_float3)
+    println(my_int4)
+    println(my_float4)
+    println(my_int5)
+    println(my_float5)
     "done"
 }
 
 // Expect
-// 3.14159
 // 3
+// 3.14159
+// 4
 // 4.14159
+// 3
+// 3.14159
+// 6
+// 6.28318
+// 3
+// 3.14159
 // done

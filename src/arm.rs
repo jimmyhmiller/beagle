@@ -683,12 +683,27 @@ impl LowLevelArm {
         self.jump_not_equal(jump);
     }
 
+    pub fn guard_float(&mut self, dest: Register, a: Register, jump: Label) {
+        // floats are tagged with 0b001
+        self.and(dest, a, 0b111);
+        let temp_reg = self.volatile_register();
+        self.mov_64(temp_reg, 0b001);
+        self.free_register(temp_reg);
+        self.compare(dest, temp_reg);
+        self.jump_not_equal(jump);
+    }
+
     pub fn new_label(&mut self, name: &str) -> Label {
         self.labels.push(name.to_string());
         Label {
             index: self.get_label_index(),
         }
     }
+    
+    pub fn register_label_name(&mut self, name: &str) {
+        self.labels.push(name.to_string());
+    }
+
     pub fn write_label(&mut self, label: Label) {
         self.label_locations
             .insert(label.index, self.instructions.len());
@@ -1051,5 +1066,41 @@ impl LowLevelArm {
             rn: a,
             rd: dest,
         });
+    }
+
+    pub fn fsub(&mut self, dest: Register, a: Register, b: Register) {
+        self.instructions.push(ArmAsm::FsubFloat {
+            ftype: 0b01,
+            rm: b,
+            rn: a,
+            rd: dest,
+        });
+    }
+
+    pub fn fmul(&mut self, dest: Register, a: Register, b: Register) {
+        self.instructions.push(ArmAsm::FmulFloat {
+            ftype: 0b01,
+            rm: b,
+            rn: a,
+            rd: dest,
+        });
+    }
+
+    pub fn fdiv(&mut self, dest: Register, a: Register, b: Register) {
+        self.instructions.push(ArmAsm::FdivFloat {
+            ftype: 0b01,
+            rm: b,
+            rn: a,
+            rd: dest,
+        });
+    }
+    
+    pub fn get_label_by_name(&self, arg: &str) -> Label {
+        self.labels
+            .iter()
+            .enumerate()
+            .find(|(_, label)| *label == arg)
+            .map(|(index, _)| Label { index })
+            .expect("Could not find label")
     }
 }
