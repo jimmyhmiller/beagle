@@ -515,7 +515,6 @@ impl Ir {
         self.write_label(after_add);
         Value::Register(result_register)
     }
-    
 
     pub fn add_any<A, B>(&mut self, a: A, b: B) -> Value
     where
@@ -525,7 +524,7 @@ impl Ir {
         self.math_any(a, b, Self::add_int::<Value, Value>, Self::add_float)
     }
 
-    pub fn add_int<A, B>(&mut self, a: A, b: B,) -> Value
+    pub fn add_int<A, B>(&mut self, a: A, b: B) -> Value
     where
         A: Into<Value>,
         B: Into<Value>,
@@ -1615,7 +1614,7 @@ impl Ir {
         let f = self.assign_new(Value::Function(self.allocate_fn_pointer));
         self.call_builtin(f.into(), vec![compiler_pointer.into(), size, stack_pointer])
     }
-    
+
     fn insert_label(&mut self, name: &str, label: Label) -> usize {
         let index = self.labels.len();
         assert!(index == label.index);
