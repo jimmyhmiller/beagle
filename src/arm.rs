@@ -699,7 +699,7 @@ impl LowLevelArm {
             index: self.get_label_index(),
         }
     }
-    
+
     pub fn register_label_name(&mut self, name: &str) {
         self.labels.push(name.to_string());
     }
@@ -1094,7 +1094,7 @@ impl LowLevelArm {
             rd: dest,
         });
     }
-    
+
     pub fn get_label_by_name(&self, arg: &str) -> Label {
         self.labels
             .iter()

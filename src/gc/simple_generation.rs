@@ -242,7 +242,16 @@ impl SimpleGeneration {
                 .chain(self.additional_roots.iter().map(|x| &x.1).copied())
                 .collect();
             let new_roots = unsafe { self.copy_all(new_roots) };
-            unsafe { self.copy_all(self.namespace_roots.iter().map(|x| &x.1).filter(|x| BuiltInTypes::is_heap_pointer(**x)).copied().collect()) };
+            unsafe {
+                self.copy_all(
+                    self.namespace_roots
+                        .iter()
+                        .map(|x| &x.1)
+                        .filter(|x| BuiltInTypes::is_heap_pointer(**x))
+                        .copied()
+                        .collect(),
+                )
+            };
             let stack_buffer = get_live_stack(*stack_base, *stack_pointer);
             for (i, (stack_offset, _)) in roots.iter().enumerate() {
                 debug_assert!(
