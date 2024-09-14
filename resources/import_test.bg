@@ -1,0 +1,7 @@
+namespace import_test
+import "fib" as fib
+
+fn main() {
+    println(fib/fib(10))
+    "done"
+}

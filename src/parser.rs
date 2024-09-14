@@ -49,6 +49,8 @@ pub enum Token {
     Atom((usize, usize)),
     Never,
     Namespace,
+    Import,
+    As,
 }
 impl Token {
     fn is_binary_operator(&self) -> bool {
@@ -256,6 +258,8 @@ impl Tokenizer {
             b"enum" => Token::Enum,
             b"." => Token::Dot,
             b"namespace" => Token::Namespace,
+            b"import" => Token::Import,
+            b"as" => Token::As,
             _ => Token::Atom((start, self.position)),
         }
     }
@@ -507,6 +511,10 @@ impl Parser {
                 self.move_to_next_non_whitespace();
                 Some(self.parse_namespace())
             }
+            Token::Import => {
+                self.move_to_next_non_whitespace();
+                Some(self.parse_import())
+            }
             Token::Atom((start, end)) => {
                 // Gross
                 let name = String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap();
@@ -675,6 +683,39 @@ impl Parser {
         }
     }
 
+    fn expect_string(&mut self) -> String {
+        self.skip_whitespace();
+        match self.current_token() {
+            Token::String((start, end)) => {
+                self.consume();
+                // Gross
+                String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
+            }
+            _ => panic!("Expected string got {:?}", self.get_token_repr()),
+        }
+    }
+
+    fn expect_atom(&mut self) -> String {
+        self.skip_whitespace();
+        match self.current_token() {
+            Token::Atom((start, end)) => {
+                self.consume();
+                // Gross
+                String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
+            }
+            _ => panic!("Expected atom got {:?}", self.get_token_repr()),
+        }
+    }
+
+    fn expect_as(&mut self) {
+        self.skip_whitespace();
+        if self.is_as() {
+            self.consume();
+        } else {
+            panic!("Expected at got {:?}", self.get_token_repr());
+        }
+    }
+
     fn is_open_paren(&self) -> bool {
         self.current_token() == Token::OpenParen
     }
@@ -822,6 +863,13 @@ impl Parser {
         }
     }
 
+    fn is_as(&self) -> bool {
+        match self.current_token() {
+            Token::As => true,
+            _ => false,
+        }
+    }
+
     fn current_token(&self) -> Token {
         if self.position >= self.tokens.len() {
             // TODO: Maybe bad idea
@@ -858,6 +906,13 @@ impl Parser {
         }
         self.consume();
         Ast::Namespace { name }
+    }
+
+    fn parse_import(&mut self) -> Ast {
+        let library_name = self.expect_string();
+        self.expect_as();
+        let alias = Box::new(Ast::Identifier(self.expect_atom()));
+        Ast::Import { library_name, alias }
     }
 
     fn parse_call(&mut self, name: String) -> Ast {
@@ -914,6 +969,9 @@ impl Parser {
     fn get_token_repr(&self) -> String {
         match self.current_token() {
             Token::Atom((start, end)) => {
+                String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
+            }
+            Token::String((start, end)) => {
                 String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
             }
             Token::Integer((start, end)) => {
@@ -1103,6 +1161,9 @@ impl Parser {
     fn is_dot(&self) -> bool {
         self.current_token() == Token::Dot
     }
+
+
+
 }
 
 #[test]
