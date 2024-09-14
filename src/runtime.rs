@@ -988,6 +988,22 @@ impl Compiler {
             .name
             .clone()
     }
+    
+    pub fn add_alias(&self, namespace_name: String, alias: String) {
+        // TODO: I really need to get rid of this mutex business
+        let find_namespace = self.namespaces.namespaces.iter().find(|n| {
+            n.lock().unwrap().name == namespace_name
+        });
+
+        if let Some(namespace) = find_namespace {
+            let mut namespace = namespace.lock().unwrap();
+            namespace.aliases.insert(alias, namespace_name);
+        } else {
+            panic!("We need to implement loading namespaces based on imports");
+            // We can maybe do that on the first pass, we gather all the imports
+            // and then we push them into an ordered queue of what to load first?
+        }
+    }
 }
 
 impl fmt::Debug for Compiler {

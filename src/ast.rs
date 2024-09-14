@@ -96,6 +96,7 @@ pub enum Ast {
     Namespace {
         name: String,
     },
+    Import { library_name: String, alias: Box<Ast> },
 }
 
 impl Ast {
@@ -147,6 +148,14 @@ impl Ast {
         match self {
             Ast::Function { name, .. } => name.clone(),
             _ => panic!("Only works on function"),
+        }
+    }
+
+    pub fn get_string(&self) -> &str {
+        match self {
+            Ast::String(str) => str,
+            Ast::Identifier(str) => str,
+            _ => panic!("Expected string"),
         }
     }
 }
@@ -506,6 +515,10 @@ impl<'a> AstCompiler<'a> {
                 let namespace_id = Value::RawValue(namespace_id);
                 let namespace_id = self.ir.assign_new(namespace_id);
                 self.call_builtin("set_current_namespace", vec![namespace_id.into()])
+            }
+            Ast::Import { library_name, alias } => {
+                self.compiler.add_alias(library_name, (*alias).get_string().to_string());
+                Value::Null
             }
             Ast::PropertyAccess { object, property } => {
                 let object = self.call_compile(object.as_ref());
