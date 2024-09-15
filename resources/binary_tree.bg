@@ -22,9 +22,7 @@ struct TreeNode {
     right
 }
 
-fn main() {
-    // TODO: Make it so I can take arguments from cli
-    let depth = 18
+fn parameterizedTree(depth) {
     let maxDepth = math_max(6, depth)
 
     let stretchDepth = maxDepth + 1
@@ -36,6 +34,10 @@ fn main() {
 
     let longLivedTree = bottomUpTree(maxDepth)
     loopThroughDepths(4, maxDepth, longLivedTree)
+}
+
+fn main() {
+    parameterizedTree(18)
 }
 
 fn loopThroughDepths(depth, maxDepth, longLivedTree) {

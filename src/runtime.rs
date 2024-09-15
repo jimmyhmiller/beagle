@@ -152,7 +152,7 @@ struct Namespace {
     ids: Vec<String>,
     bindings: HashMap<String, usize>,
     #[allow(unused)]
-    aliases: HashMap<String, String>,
+    aliases: HashMap<String, usize>,
 }
 
 pub struct Runtime<Alloc: Allocator> {
@@ -272,6 +272,8 @@ impl EnumManager {
 
 struct NamespaceManager {
     namespaces: Vec<Mutex<Namespace>>,
+    namespace_names: HashMap<String, usize>,
+    id_to_name: HashMap<usize, String>,
     current_namespace: usize,
 }
 
@@ -284,6 +286,8 @@ impl NamespaceManager {
                 bindings: HashMap::new(),
                 aliases: HashMap::new(),
             })],
+            namespace_names: HashMap::new(),
+            id_to_name: HashMap::new(),
             current_namespace: 0,
         }
     }
@@ -303,28 +307,28 @@ impl NamespaceManager {
             bindings: HashMap::new(),
             aliases: HashMap::new(),
         }));
+        let id = self.namespaces.len() - 1;
+        self.namespace_names.insert(name.to_string(), id);
+        self.id_to_name.insert(id, name.to_string());
         self.namespaces.len() - 1
     }
 
     #[allow(unused)]
     fn get_namespace(&self, name: &str) -> Option<&Mutex<Namespace>> {
-        self.namespaces
-            .iter()
-            .find(|n| n.lock().unwrap().name == name)
+        let position = self.namespace_names.get(name)?;
+        self.namespaces.get(*position)
+    }
+
+    fn get_namespace_id(&self, name: &str) -> Option<usize> {
+        self.namespace_names.get(name).cloned()
     }
 
     fn get_current_namespace(&self) -> &Mutex<Namespace> {
         self.namespaces.get(self.current_namespace).unwrap()
     }
 
-    #[allow(unused)]
-    fn set_current_namespace(&mut self, name: &str) {
-        let index = self
-            .namespaces
-            .iter()
-            .position(|n| n.lock().unwrap().name == name)
-            .unwrap();
-        self.current_namespace = index;
+    fn set_current_namespace(&mut self, id: usize) {
+        self.current_namespace = id;
     }
 
     fn add_binding(&self, name: &str, pointer: usize) -> usize {
@@ -342,6 +346,10 @@ impl NamespaceManager {
     fn find_binding_id(&self, name: &str) -> Option<usize> {
         let namespace = self.get_current_namespace().lock().unwrap();
         namespace.ids.iter().position(|n| n == name)
+    }
+    
+    fn get_namespace_name(&self, id: usize) -> Option<String> {
+        self.id_to_name.get(&id).cloned()
     }
 }
 
@@ -743,15 +751,40 @@ impl Compiler {
         }
     }
 
-    pub fn compile(&mut self, file_name: &str, code: &str) -> Result<(), Box<dyn Error>> {
+    pub fn compile(&mut self, file_name: &str) -> Result<Option<String>, Box<dyn Error>> {
+        if self.command_line_arguments.verbose {
+            println!("Compiling {:?}", file_name);
+        }
+        let parse_time = std::time::Instant::now();
+        let code = std::fs::read_to_string(file_name).expect(&format!("Could not find file {:?}", file_name));
         let mut parser = Parser::new(code.to_string());
         let ast = parser.parse();
+        if self.command_line_arguments.show_times {
+            println!("Parse time: {:?}", parse_time.elapsed());
+        }
+
+        self.compile_dependencies(&ast)?;
+
         let top_level = self.compile_ast(file_name, ast)?;
-        assert!(top_level.is_none());
+
+        if self.command_line_arguments.verbose {
+            println!("Done compiling {:?}", file_name);
+        }
+        Ok(top_level)
+    }
+
+    fn compile_dependencies(
+        &mut self,
+        ast: &crate::ast::Ast,
+    ) -> Result<(), Box<dyn Error>> {
+        for import in ast.imports() {
+            self.compile(&self.get_file_name_from_import(import))?;
+        }
+
         Ok(())
     }
 
-    pub fn compile_ast(
+    fn compile_ast(
         &mut self,
         file_name: &str,
         ast: crate::ast::Ast,
@@ -961,7 +994,7 @@ impl Compiler {
     }
 
     pub fn set_current_namespace(&mut self, namespace: usize) {
-        self.namespaces.current_namespace = namespace;
+        self.namespaces.set_current_namespace(namespace);
     }
 
     pub fn find_binding(&self, current_namespace_id: usize, name: &str) -> Option<usize> {
@@ -988,21 +1021,40 @@ impl Compiler {
             .name
             .clone()
     }
+
+    fn get_current_namespace(&self) -> &Mutex<Namespace> {
+        self.namespaces.namespaces.get(self.namespaces.current_namespace).unwrap()
+    }
     
     pub fn add_alias(&self, namespace_name: String, alias: String) {
         // TODO: I really need to get rid of this mutex business
-        let find_namespace = self.namespaces.namespaces.iter().find(|n| {
-            n.lock().unwrap().name == namespace_name
-        });
+        let namespace_id = self.namespaces.get_namespace_id(namespace_name.as_str()).unwrap();
 
-        if let Some(namespace) = find_namespace {
-            let mut namespace = namespace.lock().unwrap();
-            namespace.aliases.insert(alias, namespace_name);
-        } else {
-            panic!("We need to implement loading namespaces based on imports");
-            // We can maybe do that on the first pass, we gather all the imports
-            // and then we push them into an ordered queue of what to load first?
+        let current_namespace = self.get_current_namespace();
+        let mut namespace = current_namespace.lock().unwrap();
+        namespace.aliases.insert(alias, namespace_id);
+    
+    }
+    
+    fn get_file_name_from_import(&self, import: crate::ast::Ast) -> String {
+        // TODO: I need to think about namespaces vs file paths
+        match import {
+            crate::ast::Ast::Import { library_name, .. } => {
+                let replaced = library_name.to_string().replace("\"", "");
+                // TODO: FIX THIS!
+                format!("resources/{}.bg", replaced)
+            },
+            _ => panic!("Not an import"),
         }
+    }
+    
+    pub fn get_namespace_from_alias(&self, alias: &str) -> Option<String> {
+        let current_namespace = self.get_current_namespace();
+        let namespace = current_namespace.lock().unwrap();
+        let id = namespace.aliases.get(alias)?;
+        let namespace_name = self.namespaces.get_namespace_name(*id)?;
+        return Some(namespace_name);
+    
     }
 }
 

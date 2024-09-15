@@ -1,7 +1,6 @@
 #![allow(clippy::match_like_matches_macro)]
 #![allow(clippy::missing_safety_doc)]
 use crate::machine_code::arm_codegen::{SP, X0, X1, X10, X2, X3, X4};
-use crate::parser::Parser;
 use arm::LowLevelArm;
 use bincode::{config::standard, Decode, Encode};
 use clap::{command, Parser as ClapParser};
@@ -337,6 +336,8 @@ pub struct CommandLineArguments {
     test: bool,
     #[clap(long, default_value = "false")]
     debug: bool,
+    #[clap(long, default_value = "false")]
+    verbose: bool,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -373,6 +374,7 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             all_tests: false,
             test: true,
             debug: args.debug,
+            verbose: args.verbose,
         };
         main_inner(args)?;
     }
@@ -389,7 +391,6 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
     let program = args.program.clone().unwrap();
-    let parse_time = Instant::now();
     let source = std::fs::read_to_string(program.clone())?;
     // TODO: This is very ad-hoc
     // I should make it real functionality later
@@ -513,22 +514,15 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         false,
     )?;
 
-    let beginnings_of_standard_library = include_str!("../resources/std.bg");
     runtime
         .compiler
-        .compile("std.bg", beginnings_of_standard_library)?;
-
-    let mut parser = Parser::new(source);
-    let ast = parser.parse();
-    if args.show_times {
-        println!("Parse time {:?}", parse_time.elapsed());
-    }
+        .compile("resources/std.bg")?;
 
     let compile_time = Instant::now();
 
     // TODO: Need better name for top_level
     // It should really be the top level of a namespace
-    let top_level = runtime.compiler.compile_ast(&program, ast)?;
+    let top_level = runtime.compiler.compile(&program)?;
 
     runtime.compiler.check_functions();
     if args.show_times {
@@ -615,6 +609,7 @@ fn try_all_examples() -> Result<(), Box<dyn Error>> {
         all_tests: true,
         test: false,
         debug: false,
+        verbose: false,
     };
     run_all_tests(args)?;
     Ok(())

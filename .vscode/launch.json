@@ -22,7 +22,7 @@
                     "kind": "bin"
                 }
             },
-            "args": ["resources/import_test.bg"],
+            "args": ["resources/binary_tree_benchmark.bg"],
             "cwd": "${workspaceFolder}"
         },
         {

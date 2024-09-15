@@ -1,0 +1,6 @@
+namespace binary_tree_benchmark
+import "binary_tree" as tree
+
+fn main() {
+    tree/parameterizedTree(21)
+}

@@ -151,12 +151,20 @@ impl Ast {
         }
     }
 
-    pub fn get_string(&self) -> &str {
+    pub fn get_string(&self) -> String {
         match self {
-            Ast::String(str) => str,
-            Ast::Identifier(str) => str,
+            Ast::String(str) => str.replace("\"", ""),
+            Ast::Identifier(str) => str.to_string(),
             _ => panic!("Expected string"),
         }
+    }
+    
+    pub fn imports(&self) -> Vec<Ast> {
+        self.nodes()
+            .iter()
+            .filter(|node| matches!(node, Ast::Import { .. }))
+            .cloned()
+            .collect()
     }
 }
 
@@ -740,7 +748,16 @@ impl<'a> AstCompiler<'a> {
     }
 
     fn compile_standard_function_call(&mut self, name: String, mut args: Vec<Value>) -> Value {
-        let full_function_name = self.compiler.current_namespace_name() + "/" + &name;
+        // TODO: resolve aliases
+        let full_function_name = if name.contains("/") {
+            let parts: Vec<&str> = name.split("/").collect();
+            let alias = parts[0];
+            let name = parts[1];
+            let namespace = self.compiler.get_namespace_from_alias(alias).expect(&format!("Can't find alias {}", alias).as_str());
+            namespace + "/" + name
+        } else {
+            self.compiler.current_namespace_name() + "/" + &name
+        };
 
         // TODO: I shouldn't just assume the function will exist
         // unless I have a good plan for dealing with when it doesn't
