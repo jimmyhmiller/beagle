@@ -689,7 +689,7 @@ impl Parser {
             Token::String((start, end)) => {
                 self.consume();
                 // Gross
-                String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
+                String::from_utf8(self.source[start+1..end-1].as_bytes().to_vec()).unwrap()
             }
             _ => panic!("Expected string got {:?}", self.get_token_repr()),
         }
