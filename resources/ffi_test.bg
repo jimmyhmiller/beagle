@@ -1,0 +1,8 @@
+namespace ffi_test
+
+
+fn main() {
+    let lib = load_library("/opt/homebrew/lib/libSDL2-2.0.0.dylib")
+
+    println(lib)
+}

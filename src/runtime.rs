@@ -9,6 +9,7 @@ use std::{
     vec,
 };
 
+use libloading::Library;
 use mmap_rs::{Mmap, MmapMut, MmapOptions};
 
 use crate::{
@@ -158,6 +159,7 @@ struct Namespace {
 pub struct Runtime<Alloc: Allocator> {
     pub compiler: Compiler,
     pub memory: Memory<Alloc>,
+    pub libraries: Vec<Library>,
     command_line_arguments: CommandLineArguments,
     pub printer: Box<dyn Printer>,
     // TODO: I don't have any code that looks at u8, just always u64
@@ -1056,6 +1058,11 @@ impl Compiler {
         return Some(namespace_name);
     
     }
+    
+    pub fn get_string(&self, value: usize) -> String {
+        let value = BuiltInTypes::untag(value);
+        self.string_constants[value].str.clone()
+    }
 }
 
 impl fmt::Debug for Compiler {
@@ -1114,6 +1121,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
                 command_line_arguments,
                 stack_map: StackMap::new(),
             },
+            libraries: vec![],
             is_paused: AtomicUsize::new(0),
             gc_lock: Mutex::new(()),
             thread_state: Arc::new((
@@ -1526,5 +1534,10 @@ impl<Alloc: Allocator> Runtime<Alloc> {
 
     pub fn get_pause_atom(&self) -> usize {
         self.memory.heap.get_pause_pointer()
+    }
+    
+    pub fn add_library(&mut self, lib: libloading::Library) -> usize {
+        self.libraries.push(lib);
+        self.libraries.len() - 1
     }
 }

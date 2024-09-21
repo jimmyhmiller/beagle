@@ -270,6 +270,22 @@ pub unsafe extern "C" fn __pause<Alloc: Allocator>(
     BuiltInTypes::null_value() as usize
 }
 
+pub unsafe extern "C" fn load_library<Alloc: Allocator>(runtime: *mut Runtime<Alloc>, name: usize) -> usize {
+    let runtime = unsafe { &mut *runtime };
+    let string = &runtime.compiler.get_string(name);
+    let lib = libloading::Library::new(string).unwrap();
+    let id = runtime.add_library(lib);
+
+    let call_fn = runtime
+        .compiler
+        .get_function_by_name("beagle.core/__make_lib_struct")
+        .unwrap();
+    let function_pointer = runtime.compiler.get_pointer(call_fn).unwrap(); 
+    let function : fn(usize) -> usize = std::mem::transmute(function_pointer);
+    function(id)
+}
+
+
 fn compile_trampoline<Alloc: Allocator>(runtime: &mut Runtime<Alloc>) {
     let mut lang = LowLevelArm::new();
     // lang.breakpoint();
@@ -443,6 +459,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     runtime
         .compiler
         .set_compiler_lock_pointer(&runtime.compiler as *const _);
+
     runtime
         .compiler
         .set_pause_atom_ptr(runtime.pause_atom_ptr());
@@ -452,11 +469,13 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         println_value::<Alloc> as *const u8,
         false,
     )?;
+
     runtime.compiler.add_builtin_function(
         "beagle.core/print",
         print_value::<Alloc> as *const u8,
         false,
     )?;
+
     runtime
         .compiler
         .add_builtin_function("allocate", allocate::<Alloc> as *const u8, true)?;
@@ -466,32 +485,45 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         make_closure::<Alloc> as *const u8,
         false,
     )?;
+
     runtime.compiler.add_builtin_function(
         "property_access",
         property_access::<Alloc> as *const u8,
         false,
     )?;
+
     runtime.compiler.add_builtin_function(
         "throw_error",
         throw_error::<Alloc> as *const u8,
         false,
     )?;
+
     runtime
         .compiler
         .add_builtin_function("assert!", placeholder as *const u8, false)?;
+
     runtime
         .compiler
         .add_builtin_function("beagle.core/gc", gc::<Alloc> as *const u8, true)?;
+
     runtime.compiler.add_builtin_function(
         "gc_add_root",
         gc_add_root::<Alloc> as *const u8,
         false,
     )?;
+
     runtime.compiler.add_builtin_function(
         "beagle.core/thread",
         new_thread::<Alloc> as *const u8,
         false,
     )?;
+
+    runtime.compiler.add_builtin_function(
+        "beagle.core/load_library",
+        load_library::<Alloc> as *const u8,
+        false,
+    )?;
+
     runtime
         .compiler
         .add_builtin_function("__pause", __pause::<Alloc> as *const u8, true)?;
