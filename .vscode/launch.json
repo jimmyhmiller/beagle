@@ -22,7 +22,7 @@
                     "kind": "bin"
                 }
             },
-            "args": ["resources/binary_tree_benchmark.bg"],
+            "args": ["resources/vector.bg"],
             "cwd": "${workspaceFolder}"
         },
         {

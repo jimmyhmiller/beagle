@@ -46,3 +46,24 @@ fn atom(value) {
     // TODO: Allow punning
     Atom { value: value }
 }
+
+
+// Probably should move this stuff to an ffi namespace
+struct Library {
+    id
+}
+
+fn __make_lib_struct(id) {
+    Library { id: id }
+}
+
+// If I'm going to make this work, I'm going to need arrays...
+
+// enum Type {
+//     U32,
+//     I32,
+//     Pointer,
+//     MutablePointer,
+//     String,
+//     Void,
+// }
