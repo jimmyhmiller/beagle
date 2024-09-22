@@ -1,0 +1,13 @@
+namespace arrays
+import "beagle.builtin" as builtin
+
+fn allocate_array(size) {
+    builtin/allocate(size)
+}
+
+fn main() {
+    let pointer = allocate_array(10)
+    // I need to tell the system this is an array
+    // I need to tell my printing system how to print it
+    // If I stick with standard layout, it should just work with gc
+}

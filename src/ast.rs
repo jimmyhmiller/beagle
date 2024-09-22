@@ -472,7 +472,7 @@ impl<'a> AstCompiler<'a> {
 
                 let struct_ptr = self.ir.call_builtin(
                     allocate.into(),
-                    vec![compiler_pointer_reg.into(), size_reg.into(), stack_pointer],
+                    vec![compiler_pointer_reg.into(), stack_pointer, size_reg.into()],
                 );
 
                 let struct_pointer = self.ir.assign_new(struct_ptr);
@@ -524,7 +524,7 @@ impl<'a> AstCompiler<'a> {
 
                 let struct_ptr = self.ir.call_builtin(
                     allocate.into(),
-                    vec![compiler_pointer_reg.into(), size_reg.into(), stack_pointer],
+                    vec![compiler_pointer_reg.into(), stack_pointer, size_reg.into()],
                 );
 
                 let struct_pointer = self.ir.assign_new(struct_ptr);
@@ -706,7 +706,7 @@ impl<'a> AstCompiler<'a> {
 
                 let float_pointer = self.ir.call_builtin(
                     allocate.into(),
-                    vec![compiler_pointer_reg.into(), size_reg.into(), stack_pointer],
+                    vec![compiler_pointer_reg.into(), stack_pointer, size_reg.into(),],
                 );
 
                 let float_pointer = self.ir.assign_new(float_pointer);

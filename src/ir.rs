@@ -1614,7 +1614,7 @@ impl Ir {
         let compiler_pointer = self.assign_new(Value::Pointer(self.compiler_pointer));
         let stack_pointer = self.get_stack_pointer_imm(0);
         let f = self.assign_new(Value::Function(self.allocate_fn_pointer));
-        self.call_builtin(f.into(), vec![compiler_pointer.into(), size, stack_pointer])
+        self.call_builtin(f.into(), vec![compiler_pointer.into(), stack_pointer, size])
     }
 
     fn insert_label(&mut self, name: &str, label: Label) -> usize {

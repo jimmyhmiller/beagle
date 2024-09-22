@@ -128,8 +128,8 @@ pub unsafe extern "C" fn print_value<Alloc: Allocator>(
 
 extern "C" fn allocate<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,
-    value: usize,
     stack_pointer: usize,
+    value: usize,
 ) -> usize {
     let value = BuiltInTypes::untag(value);
     let runtime = unsafe { &mut *runtime };
