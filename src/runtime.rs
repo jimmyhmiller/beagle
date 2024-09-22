@@ -782,7 +782,7 @@ impl Compiler {
     fn compile_dependencies(&mut self, ast: &crate::ast::Ast) -> Result<(), Box<dyn Error>> {
         for import in ast.imports() {
             let (name, _alias) = self.extract_import(&import);
-            if name == "beagle.core" || name == "beagle.primitive" {
+            if name == "beagle.core" || name == "beagle.primitive" || name == "beagle.builtin" {
                 continue;
             }
             self.compile(&self.get_file_name_from_import(name))?;
