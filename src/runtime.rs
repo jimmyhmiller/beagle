@@ -349,7 +349,7 @@ impl NamespaceManager {
         let namespace = self.get_current_namespace().lock().unwrap();
         namespace.ids.iter().position(|n| n == name)
     }
-    
+
     fn get_namespace_name(&self, id: usize) -> Option<String> {
         self.id_to_name.get(&id).cloned()
     }
@@ -758,7 +758,8 @@ impl Compiler {
             println!("Compiling {:?}", file_name);
         }
         let parse_time = std::time::Instant::now();
-        let code = std::fs::read_to_string(file_name).expect(&format!("Could not find file {:?}", file_name));
+        let code = std::fs::read_to_string(file_name)
+            .expect(&format!("Could not find file {:?}", file_name));
         let mut parser = Parser::new(code.to_string());
         let ast = parser.parse();
         if self.command_line_arguments.show_times {
@@ -775,10 +776,7 @@ impl Compiler {
         Ok(top_level)
     }
 
-    fn compile_dependencies(
-        &mut self,
-        ast: &crate::ast::Ast,
-    ) -> Result<(), Box<dyn Error>> {
+    fn compile_dependencies(&mut self, ast: &crate::ast::Ast) -> Result<(), Box<dyn Error>> {
         for import in ast.imports() {
             self.compile(&self.get_file_name_from_import(import))?;
         }
@@ -1025,19 +1023,24 @@ impl Compiler {
     }
 
     fn get_current_namespace(&self) -> &Mutex<Namespace> {
-        self.namespaces.namespaces.get(self.namespaces.current_namespace).unwrap()
+        self.namespaces
+            .namespaces
+            .get(self.namespaces.current_namespace)
+            .unwrap()
     }
-    
+
     pub fn add_alias(&self, namespace_name: String, alias: String) {
         // TODO: I really need to get rid of this mutex business
-        let namespace_id = self.namespaces.get_namespace_id(namespace_name.as_str()).unwrap();
+        let namespace_id = self
+            .namespaces
+            .get_namespace_id(namespace_name.as_str())
+            .unwrap();
 
         let current_namespace = self.get_current_namespace();
         let mut namespace = current_namespace.lock().unwrap();
         namespace.aliases.insert(alias, namespace_id);
-    
     }
-    
+
     fn get_file_name_from_import(&self, import: crate::ast::Ast) -> String {
         // TODO: I need to think about namespaces vs file paths
         match import {
@@ -1045,20 +1048,19 @@ impl Compiler {
                 let replaced = library_name.to_string().replace("\"", "");
                 // TODO: FIX THIS!
                 format!("resources/{}.bg", replaced)
-            },
+            }
             _ => panic!("Not an import"),
         }
     }
-    
+
     pub fn get_namespace_from_alias(&self, alias: &str) -> Option<String> {
         let current_namespace = self.get_current_namespace();
         let namespace = current_namespace.lock().unwrap();
         let id = namespace.aliases.get(alias)?;
         let namespace_name = self.namespaces.get_namespace_name(*id)?;
         return Some(namespace_name);
-    
     }
-    
+
     pub fn get_string(&self, value: usize) -> String {
         let value = BuiltInTypes::untag(value);
         self.string_constants[value].str.clone()
@@ -1535,7 +1537,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
     pub fn get_pause_atom(&self) -> usize {
         self.memory.heap.get_pause_pointer()
     }
-    
+
     pub fn add_library(&mut self, lib: libloading::Library) -> usize {
         self.libraries.push(lib);
         self.libraries.len() - 1

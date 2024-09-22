@@ -96,7 +96,10 @@ pub enum Ast {
     Namespace {
         name: String,
     },
-    Import { library_name: String, alias: Box<Ast> },
+    Import {
+        library_name: String,
+        alias: Box<Ast>,
+    },
 }
 
 impl Ast {
@@ -158,7 +161,7 @@ impl Ast {
             _ => panic!("Expected string"),
         }
     }
-    
+
     pub fn imports(&self) -> Vec<Ast> {
         self.nodes()
             .iter()
@@ -471,23 +474,24 @@ impl<'a> AstCompiler<'a> {
                     .tag(struct_pointer.into(), BuiltInTypes::HeapObject.get_tag())
             }
             Ast::StructCreation { name, fields } => {
-                let field_results = fields
-                    .iter()
-                    .map(|field| {
-                        self.not_tail_position();
-                        self.call_compile(&field.1)
-                    })
-                    .collect::<Vec<_>>();
+                for field in fields.iter() {
+                    self.not_tail_position();
+                    let value = self.call_compile(&field.1);
+                    let reg = self.ir.assign_new(value);
+                    self.ir.push_to_stack(reg.into());
+                }
 
                 let (struct_id, struct_type) = self
                     .compiler
                     .get_struct(&name)
                     .unwrap_or_else(|| panic!("Struct not found {}", name));
 
+                let mut field_order: Vec<usize> = vec![];
                 for field in fields.iter() {
                     let mut found = false;
-                    for defined_field in struct_type.fields.iter() {
+                    for (i, defined_field) in struct_type.fields.iter().enumerate() {
                         if &field.0 == defined_field {
+                            field_order.push(i);
                             found = true;
                             break;
                         }
@@ -513,7 +517,11 @@ impl<'a> AstCompiler<'a> {
 
                 let struct_pointer = self.ir.assign_new(struct_ptr);
                 self.ir.write_type_id(struct_pointer, struct_id);
-                self.ir.write_fields(struct_pointer, &field_results);
+
+                for field in field_order.iter().rev() {
+                    let reg = self.ir.pop_from_stack();
+                    self.ir.write_field(struct_pointer, *field, reg);
+                }
 
                 self.ir
                     .tag(struct_pointer.into(), BuiltInTypes::HeapObject.get_tag())
@@ -524,8 +532,12 @@ impl<'a> AstCompiler<'a> {
                 let namespace_id = self.ir.assign_new(namespace_id);
                 self.call_builtin("set_current_namespace", vec![namespace_id.into()])
             }
-            Ast::Import { library_name, alias } => {
-                self.compiler.add_alias(library_name, (*alias).get_string().to_string());
+            Ast::Import {
+                library_name,
+                alias,
+            } => {
+                self.compiler
+                    .add_alias(library_name, (*alias).get_string().to_string());
                 Value::Null
             }
             Ast::PropertyAccess { object, property } => {
@@ -753,7 +765,10 @@ impl<'a> AstCompiler<'a> {
             let parts: Vec<&str> = name.split("/").collect();
             let alias = parts[0];
             let name = parts[1];
-            let namespace = self.compiler.get_namespace_from_alias(alias).expect(&format!("Can't find alias {}", alias).as_str());
+            let namespace = self
+                .compiler
+                .get_namespace_from_alias(alias)
+                .expect(&format!("Can't find alias {}", alias).as_str());
             namespace + "/" + name
         } else {
             self.compiler.current_namespace_name() + "/" + &name

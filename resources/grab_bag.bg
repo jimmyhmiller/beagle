@@ -177,6 +177,18 @@ fn math_with_parens() {
     (1 + 2) * 3
 }
 
+fn log(x) {
+    println(x)
+    x
+}
+
+fn structs_dont_care_about_order() {
+    OtherStruct {
+        y: log(2),
+        x: log(1)
+    }
+}
+
 fn main() {
     println(simpleFunctionWithLocals())
     println(testGc(8))
@@ -189,6 +201,7 @@ fn main() {
     println(a())
     println(b())
     println(math_with_parens())
+    println(structs_dont_care_about_order())
 }
 
 
@@ -243,4 +256,7 @@ fn main() {
 // 42
 // 42
 // 9
+// 2
+// 1
+// OtherStruct { x: 1, y: 2 }
 // null

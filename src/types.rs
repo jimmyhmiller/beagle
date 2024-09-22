@@ -318,6 +318,11 @@ impl Ir {
         }
     }
 
+    pub fn write_field(&mut self, struct_pointer: VirtualRegister, index: usize, field: Value) {
+        let offset = 2;
+        self.heap_store_offset(struct_pointer, field, offset + index);
+    }
+
     pub fn write_small_object_header(&mut self, small_object_pointer: VirtualRegister) {
         // We are going to set the least significant bits to 0b10
         // The 1 bit there will tell us that this object doesn't

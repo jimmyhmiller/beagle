@@ -71,7 +71,7 @@ pub trait Allocator {
         kind: BuiltInTypes,
         options: AllocatorOptions,
     ) -> Result<AllocateAction, Box<dyn Error>>;
-    
+
     fn gc(
         &mut self,
         stack_map: &StackMap,
