@@ -281,7 +281,7 @@ struct NamespaceManager {
 
 impl NamespaceManager {
     fn new() -> Self {
-        Self {
+        let mut s = Self {
             namespaces: vec![Mutex::new(Namespace {
                 name: "global".to_string(),
                 ids: vec![],
@@ -291,7 +291,10 @@ impl NamespaceManager {
             namespace_names: HashMap::new(),
             id_to_name: HashMap::new(),
             current_namespace: 0,
-        }
+        };
+        s.add_namespace("beagle.primitive");
+        s.add_namespace("beagle.builtin");
+        s
     }
 
     fn add_namespace(&mut self, name: &str) -> usize {
@@ -391,7 +394,7 @@ impl Compiler {
     }
 
     pub fn allocate_fn_pointer(&mut self) -> usize {
-        let allocate_fn_pointer = self.find_function("allocate").unwrap();
+        let allocate_fn_pointer = self.find_function("beagle.builtin/allocate").unwrap();
         self.get_function_pointer(allocate_fn_pointer).unwrap()
     }
 
@@ -778,9 +781,12 @@ impl Compiler {
 
     fn compile_dependencies(&mut self, ast: &crate::ast::Ast) -> Result<(), Box<dyn Error>> {
         for import in ast.imports() {
-            self.compile(&self.get_file_name_from_import(import))?;
+            let (name, _alias) = self.extract_import(&import);
+            if name == "beagle.core" || name == "beagle.primitive" {
+                continue;
+            }
+            self.compile(&self.get_file_name_from_import(name))?;
         }
-
         Ok(())
     }
 
@@ -792,7 +798,7 @@ impl Compiler {
         let mut ir = ast.compile(self);
         if ast.has_top_level() {
             let arm = LowLevelArm::new();
-            let error_fn_pointer = self.find_function("throw_error").unwrap();
+            let error_fn_pointer = self.find_function("beagle.builtin/throw_error").unwrap();
             let error_fn_pointer = self.get_function_pointer(error_fn_pointer).unwrap();
 
             let compiler_ptr = self.get_compiler_ptr() as usize;
@@ -828,6 +834,11 @@ impl Compiler {
     }
 
     pub fn find_function(&self, name: &str) -> Option<Function> {
+        assert!(
+            name.contains("/"),
+            "Function name should contain /: {:?}",
+            name
+        );
         self.functions.iter().find(|f| f.name == name).cloned()
     }
 
@@ -957,14 +968,7 @@ impl Compiler {
     }
 
     pub fn is_inline_primitive_function(&self, name: &str) -> bool {
-        match name {
-            "primitive_deref"
-            | "primitive_swap!"
-            | "primitive_reset!"
-            | "primitive_compare_and_swap!"
-            | "primitive_breakpoint!" => true,
-            _ => false,
-        }
+        name.starts_with("beagle.primitive/")
     }
 
     pub fn reserve_namespace_slot(&self, name: &str) -> usize {
@@ -1034,23 +1038,16 @@ impl Compiler {
         let namespace_id = self
             .namespaces
             .get_namespace_id(namespace_name.as_str())
-            .unwrap();
+            .expect(format!("Could not find namespace {}", namespace_name).as_str());
 
         let current_namespace = self.get_current_namespace();
         let mut namespace = current_namespace.lock().unwrap();
         namespace.aliases.insert(alias, namespace_id);
     }
 
-    fn get_file_name_from_import(&self, import: crate::ast::Ast) -> String {
-        // TODO: I need to think about namespaces vs file paths
-        match import {
-            crate::ast::Ast::Import { library_name, .. } => {
-                let replaced = library_name.to_string().replace("\"", "");
-                // TODO: FIX THIS!
-                format!("resources/{}.bg", replaced)
-            }
-            _ => panic!("Not an import"),
-        }
+    /// TODO: Temporary please fix
+    fn get_file_name_from_import(&self, import_name: String) -> String {
+        format!("resources/{}.bg", import_name)
     }
 
     pub fn get_namespace_from_alias(&self, alias: &str) -> Option<String> {
@@ -1064,6 +1061,20 @@ impl Compiler {
     pub fn get_string(&self, value: usize) -> String {
         let value = BuiltInTypes::untag(value);
         self.string_constants[value].str.clone()
+    }
+
+    fn extract_import(&self, import: &crate::ast::Ast) -> (String, String) {
+        match import {
+            crate::ast::Ast::Import {
+                library_name,
+                alias,
+            } => {
+                let library_name = library_name.to_string().replace("\"", "");
+                let alias = alias.as_ref().get_string();
+                (library_name, alias)
+            }
+            _ => panic!("Not an import"),
+        }
     }
 }
 

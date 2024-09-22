@@ -478,38 +478,43 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         false,
     )?;
 
-    runtime
-        .compiler
-        .add_builtin_function("allocate", allocate::<Alloc> as *const u8, true)?;
+    runtime.compiler.add_builtin_function(
+        "beagle.builtin/allocate",
+        allocate::<Alloc> as *const u8,
+        true,
+    )?;
+
     // TODO: Probably needs true
     runtime.compiler.add_builtin_function(
-        "make_closure",
+        "beagle.builtin/make_closure",
         make_closure::<Alloc> as *const u8,
         false,
     )?;
 
     runtime.compiler.add_builtin_function(
-        "property_access",
+        "beagle.builtin/property_access",
         property_access::<Alloc> as *const u8,
         false,
     )?;
 
     runtime.compiler.add_builtin_function(
-        "throw_error",
+        "beagle.builtin/throw_error",
         throw_error::<Alloc> as *const u8,
         false,
     )?;
 
-    runtime
-        .compiler
-        .add_builtin_function("assert!", placeholder as *const u8, false)?;
+    runtime.compiler.add_builtin_function(
+        "beagle.builtin/assert!",
+        placeholder as *const u8,
+        false,
+    )?;
 
     runtime
         .compiler
         .add_builtin_function("beagle.core/gc", gc::<Alloc> as *const u8, true)?;
 
     runtime.compiler.add_builtin_function(
-        "gc_add_root",
+        "beagle.builtin/gc_add_root",
         gc_add_root::<Alloc> as *const u8,
         false,
     )?;
@@ -526,24 +531,26 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         false,
     )?;
 
-    runtime
-        .compiler
-        .add_builtin_function("__pause", __pause::<Alloc> as *const u8, true)?;
+    runtime.compiler.add_builtin_function(
+        "beagle.builtin/__pause",
+        __pause::<Alloc> as *const u8,
+        true,
+    )?;
 
     runtime.compiler.add_builtin_function(
-        "update_binding",
+        "beagle.builtin/update_binding",
         update_binding::<Alloc> as *const u8,
         false,
     )?;
 
     runtime.compiler.add_builtin_function(
-        "get_binding",
+        "beagle.builtin/get_binding",
         get_binding::<Alloc> as *const u8,
         false,
     )?;
 
     runtime.compiler.add_builtin_function(
-        "set_current_namespace",
+        "beagle.builtin/set_current_namespace",
         set_current_namespace::<Alloc> as *const u8,
         false,
     )?;

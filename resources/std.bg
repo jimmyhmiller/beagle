@@ -1,6 +1,7 @@
 // TODO: I want to do beagle.core or beagle::core or beagle:core.
 // Need to make this work in the language
 namespace beagle.core;
+import "beagle.primitive" as primitive
 
 // This may seem weird
 // but we need our runtime to know
@@ -18,7 +19,7 @@ struct Atom {
 
 fn deref(atom) {
     // assert!(atom is Atom)
-    primitive_deref(atom)
+    primitive/deref(atom)
 }
 
 fn swap!(atom, f) {
@@ -34,12 +35,12 @@ fn swap!(atom, f) {
 
 fn reset!(atom, value) {
     // assert!(atom is Atom)
-    primitive_reset!(atom, value)
+    primitive/reset!(atom, value)
 }
 
 fn compare_and_swap!(atom, old, new) {
     // assert!(atom is Atom)
-    primitive_compare_and_swap!(atom, old, new)
+    primitive/compare_and_swap!(atom, old, new)
 }
 
 fn atom(value) {
@@ -59,11 +60,11 @@ fn __make_lib_struct(id) {
 
 // If I'm going to make this work, I'm going to need arrays...
 
-// enum Type {
-//     U32,
-//     I32,
-//     Pointer,
-//     MutablePointer,
-//     String,
-//     Void,
-// }
+enum Type {
+    U32,
+    I32,
+    Pointer,
+    MutablePointer,
+    String,
+    Void,
+}

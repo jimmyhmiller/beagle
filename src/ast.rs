@@ -319,7 +319,10 @@ impl<'a> AstCompiler<'a> {
                     );
                     let compiler_pointer_reg = self.ir.assign_new(self.compiler.get_compiler_ptr());
                     let stack_pointer = self.ir.get_stack_pointer_imm(0);
-                    let pause_function = self.compiler.get_function_by_name("__pause").unwrap();
+                    let pause_function = self
+                        .compiler
+                        .get_function_by_name("beagle.builtin/__pause")
+                        .unwrap();
                     let pause_function = self
                         .compiler
                         .get_function_pointer(pause_function.clone())
@@ -341,7 +344,10 @@ impl<'a> AstCompiler<'a> {
 
                 let lang = LowLevelArm::new();
 
-                let error_fn_pointer = self.compiler.find_function("throw_error").unwrap();
+                let error_fn_pointer = self
+                    .compiler
+                    .find_function("beagle.builtin/throw_error")
+                    .unwrap();
                 let error_fn_pointer = self
                     .compiler
                     .get_function_pointer(error_fn_pointer)
@@ -454,7 +460,10 @@ impl<'a> AstCompiler<'a> {
 
                 let compiler_pointer_reg = self.ir.assign_new(self.compiler.get_compiler_ptr());
 
-                let allocate = self.compiler.find_function("allocate").unwrap();
+                let allocate = self
+                    .compiler
+                    .find_function("beagle.builtin/allocate")
+                    .unwrap();
                 let allocate = self.compiler.get_function_pointer(allocate).unwrap();
                 let allocate = self.ir.assign_new(allocate);
 
@@ -503,7 +512,10 @@ impl<'a> AstCompiler<'a> {
 
                 let compiler_pointer_reg = self.ir.assign_new(self.compiler.get_compiler_ptr());
 
-                let allocate = self.compiler.find_function("allocate").unwrap();
+                let allocate = self
+                    .compiler
+                    .find_function("beagle.builtin/allocate")
+                    .unwrap();
                 let allocate = self.compiler.get_function_pointer(allocate).unwrap();
                 let allocate = self.ir.assign_new(allocate);
 
@@ -530,7 +542,10 @@ impl<'a> AstCompiler<'a> {
                 let namespace_id = self.compiler.reserve_namespace(name);
                 let namespace_id = Value::RawValue(namespace_id);
                 let namespace_id = self.ir.assign_new(namespace_id);
-                self.call_builtin("set_current_namespace", vec![namespace_id.into()])
+                self.call_builtin(
+                    "beagle.builtin/set_current_namespace",
+                    vec![namespace_id.into()],
+                )
             }
             Ast::Import {
                 library_name,
@@ -550,7 +565,10 @@ impl<'a> AstCompiler<'a> {
                 };
                 let constant_ptr = self.string_constant(property);
                 let constant_ptr = self.ir.assign_new(constant_ptr);
-                self.call_builtin("property_access", vec![object.into(), constant_ptr.into()])
+                self.call_builtin(
+                    "beagle.builtin/property_access",
+                    vec![object.into(), constant_ptr.into()],
+                )
             }
             Ast::If {
                 condition,
@@ -629,6 +647,7 @@ impl<'a> AstCompiler<'a> {
                 }
             }
             Ast::Call { name, args } => {
+                let name = self.get_qualified_function_name(&name);
                 if Some(name.clone()) == self.name {
                     if self.is_tail_position() {
                         return self.call_compile(&Ast::TailRecurse { args });
@@ -673,7 +692,10 @@ impl<'a> AstCompiler<'a> {
             Ast::FloatLiteral(n) => {
                 // floats are heap allocated
                 // Sadly I have to do this to avoid loss of percision
-                let allocate = self.compiler.find_function("allocate").unwrap();
+                let allocate = self
+                    .compiler
+                    .find_function("beagle.builtin/allocate")
+                    .unwrap();
                 let allocate = self.compiler.get_function_pointer(allocate).unwrap();
                 let allocate = self.ir.assign_new(allocate);
 
@@ -760,29 +782,12 @@ impl<'a> AstCompiler<'a> {
     }
 
     fn compile_standard_function_call(&mut self, name: String, mut args: Vec<Value>) -> Value {
-        // TODO: resolve aliases
-        let full_function_name = if name.contains("/") {
-            let parts: Vec<&str> = name.split("/").collect();
-            let alias = parts[0];
-            let name = parts[1];
-            let namespace = self
-                .compiler
-                .get_namespace_from_alias(alias)
-                .expect(&format!("Can't find alias {}", alias).as_str());
-            namespace + "/" + name
-        } else {
-            self.compiler.current_namespace_name() + "/" + &name
-        };
+        assert!(name.contains("/"));
 
         // TODO: I shouldn't just assume the function will exist
         // unless I have a good plan for dealing with when it doesn't
-        let mut function = self.compiler.find_function(&full_function_name);
+        let function = self.compiler.find_function(&name);
 
-        if function.is_none() {
-            function = self
-                .compiler
-                .find_function(&format!("beagle.core/{}", name));
-        }
         let function = function.unwrap_or_else(|| panic!("Could not find function {}", name));
 
         let builtin = function.is_builtin;
@@ -811,6 +816,33 @@ impl<'a> AstCompiler<'a> {
         } else {
             self.ir.call(function, args)
         }
+    }
+
+    fn get_qualified_function_name(&mut self, name: &String) -> String {
+        let full_function_name = if name.contains("/") {
+            let parts: Vec<&str> = name.split("/").collect();
+            let alias = parts[0];
+            let name = parts[1];
+            let namespace = self
+                .compiler
+                .get_namespace_from_alias(alias)
+                .expect(&format!("Can't find alias {}", alias).as_str());
+            namespace + "/" + name
+        } else if self.get_variable_in_stack(name).is_some() {
+            name.clone()
+        } else if self
+            .compiler
+            .find_function(&(self.compiler.current_namespace_name() + "/" + name))
+            .is_some()
+        {
+            self.compiler.current_namespace_name() + "/" + name
+        } else {
+            self.compiler
+                .find_function(&("beagle.core/".to_owned() + name))
+                .unwrap();
+            "beagle.core/".to_string() + name
+        };
+        full_function_name
     }
 
     fn compile_closure_call(&mut self, function: VariableLocation, args: Vec<Value>) -> Value {
@@ -946,7 +978,10 @@ impl<'a> AstCompiler<'a> {
         let num_free_reg = self.ir.volatile_register();
         self.ir.assign(num_free_reg, num_free);
         // Call make_closure
-        let make_closure = self.compiler.find_function("make_closure").unwrap();
+        let make_closure = self
+            .compiler
+            .find_function("beagle.builtin/make_closure")
+            .unwrap();
         let make_closure = self.compiler.get_function_pointer(make_closure).unwrap();
         let make_closure_reg = self.ir.volatile_register();
         self.ir.assign(make_closure_reg, make_closure);
@@ -1196,7 +1231,7 @@ impl<'a> AstCompiler<'a> {
 
     fn compile_inline_primitive_function(&mut self, name: &str, args: Vec<Value>) -> Value {
         match name {
-            "primitive_deref" => {
+            "beagle.primitive/deref" => {
                 // self.ir.breakpoint();
                 let pointer = args[0];
                 let untagged = self.ir.untag(pointer);
@@ -1205,17 +1240,17 @@ impl<'a> AstCompiler<'a> {
                 let reg = self.ir.volatile_register();
                 self.ir.atomic_load(reg.into(), offset)
             }
-            "primitive_reset!" => {
+            "beagle.primitive/reset!" => {
                 let pointer = args[0];
                 let untagged = self.ir.untag(pointer);
                 // TODO: I need a raw add that doesn't check for tags
                 let offset = self.ir.add_int(untagged, Value::RawValue(16));
                 let value = args[1];
-                self.call_builtin("gc_add_root", vec![pointer, value]);
+                self.call_builtin("beagle.builtin/gc_add_root", vec![pointer, value]);
                 self.ir.atomic_store(offset, value);
                 args[1]
             }
-            "primitive_compare_and_swap!" => {
+            "beagle.primitive/compare_and_swap!" => {
                 // self.ir.breakpoint();
                 let pointer = args[0];
                 let untagged = self.ir.untag(pointer);
@@ -1234,7 +1269,7 @@ impl<'a> AstCompiler<'a> {
                 self.ir.write_label(label);
                 result.into()
             }
-            "primitive_breakpoint!" => {
+            "beagle.primitive/breakpoint!" => {
                 self.ir.breakpoint();
                 Value::Null
             }
@@ -1244,7 +1279,10 @@ impl<'a> AstCompiler<'a> {
 
     fn store_namespaced_variable(&mut self, slot: Value, reg: VirtualRegister) {
         let slot = self.ir.assign_new(slot);
-        self.call_builtin("update_binding", vec![slot.into(), reg.into()]);
+        self.call_builtin(
+            "beagle.builtin/update_binding",
+            vec![slot.into(), reg.into()],
+        );
     }
 
     fn resolve_variable(&mut self, reg: &VariableLocation) -> Value {
@@ -1255,7 +1293,10 @@ impl<'a> AstCompiler<'a> {
             VariableLocation::NamespaceVariable(namespace, slot) => {
                 let slot = self.ir.assign_new(Value::RawValue(*slot));
                 let namespace = self.ir.assign_new(Value::RawValue(*namespace));
-                self.call_builtin("get_binding", vec![namespace.into(), slot.into()])
+                self.call_builtin(
+                    "beagle.builtin/get_binding",
+                    vec![namespace.into(), slot.into()],
+                )
             }
         }
     }
