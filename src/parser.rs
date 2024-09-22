@@ -831,7 +831,7 @@ impl Parser {
         if self.is_open_curly() {
             self.consume();
         } else {
-            panic!("Expected open curly {}", self.get_token_repr());
+            panic!("Expected open curly {} at line {}", self.get_token_repr(), self.current_line);
         }
     }
 
