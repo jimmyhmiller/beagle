@@ -270,7 +270,10 @@ pub unsafe extern "C" fn __pause<Alloc: Allocator>(
     BuiltInTypes::null_value() as usize
 }
 
-pub unsafe extern "C" fn load_library<Alloc: Allocator>(runtime: *mut Runtime<Alloc>, name: usize) -> usize {
+pub unsafe extern "C" fn load_library<Alloc: Allocator>(
+    runtime: *mut Runtime<Alloc>,
+    name: usize,
+) -> usize {
     let runtime = unsafe { &mut *runtime };
     let string = &runtime.compiler.get_string(name);
     let lib = libloading::Library::new(string).unwrap();
@@ -280,11 +283,10 @@ pub unsafe extern "C" fn load_library<Alloc: Allocator>(runtime: *mut Runtime<Al
         .compiler
         .get_function_by_name("beagle.core/__make_lib_struct")
         .unwrap();
-    let function_pointer = runtime.compiler.get_pointer(call_fn).unwrap(); 
-    let function : fn(usize) -> usize = std::mem::transmute(function_pointer);
+    let function_pointer = runtime.compiler.get_pointer(call_fn).unwrap();
+    let function: fn(usize) -> usize = std::mem::transmute(function_pointer);
     function(id)
 }
-
 
 fn compile_trampoline<Alloc: Allocator>(runtime: &mut Runtime<Alloc>) {
     let mut lang = LowLevelArm::new();
@@ -546,9 +548,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         false,
     )?;
 
-    runtime
-        .compiler
-        .compile("resources/std.bg")?;
+    runtime.compiler.compile("resources/std.bg")?;
 
     let compile_time = Instant::now();
 

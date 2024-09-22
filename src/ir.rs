@@ -1279,7 +1279,7 @@ impl Ir {
                 Instruction::PopStack(val) => {
                     let val = val.try_into().unwrap();
                     let val = alloc.allocate_register(index, val, lang);
-                    lang.pop_from_stack_indexed(val, 0);
+                    lang.pop_from_stack(val);
                 }
                 Instruction::LoadFreeVariable(dest, free_variable) => {
                     let dest = dest.try_into().unwrap();
@@ -1450,8 +1450,10 @@ impl Ir {
         self.instructions.push(Instruction::PushStack(reg));
     }
 
-    pub fn pop_from_stack(&mut self, reg: Value) {
+    pub fn pop_from_stack(&mut self) -> Value {
+        let reg = self.volatile_register().into();
         self.instructions.push(Instruction::PopStack(reg));
+        reg.into()
     }
 
     fn increment_locals(&mut self, index: usize) {

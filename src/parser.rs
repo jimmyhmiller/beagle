@@ -689,7 +689,7 @@ impl Parser {
             Token::String((start, end)) => {
                 self.consume();
                 // Gross
-                String::from_utf8(self.source[start+1..end-1].as_bytes().to_vec()).unwrap()
+                String::from_utf8(self.source[start + 1..end - 1].as_bytes().to_vec()).unwrap()
             }
             _ => panic!("Expected string got {:?}", self.get_token_repr()),
         }
@@ -831,7 +831,11 @@ impl Parser {
         if self.is_open_curly() {
             self.consume();
         } else {
-            panic!("Expected open curly {} at line {}", self.get_token_repr(), self.current_line);
+            panic!(
+                "Expected open curly {} at line {}",
+                self.get_token_repr(),
+                self.current_line
+            );
         }
     }
 
@@ -912,7 +916,10 @@ impl Parser {
         let library_name = self.expect_string();
         self.expect_as();
         let alias = Box::new(Ast::Identifier(self.expect_atom()));
-        Ast::Import { library_name, alias }
+        Ast::Import {
+            library_name,
+            alias,
+        }
     }
 
     fn parse_call(&mut self, name: String) -> Ast {
@@ -1161,9 +1168,6 @@ impl Parser {
     fn is_dot(&self) -> bool {
         self.current_token() == Token::Dot
     }
-
-
-
 }
 
 #[test]
