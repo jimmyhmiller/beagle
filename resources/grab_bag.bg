@@ -189,6 +189,25 @@ fn structs_dont_care_about_order() {
     }
 }
 
+
+fn tail_recursive(n, accum) {
+    if n == 0 {
+        accum
+    } else {
+        // This will blow the stack if we break tail recursion
+        let x = OtherStruct { x: 1, y: 2 }
+        let y = OtherStruct { x: 1, y: 2 }
+        let z = OtherStruct { x: 1, y: 2 }
+        let a = OtherStruct { x: 1, y: 2 }
+        let b = OtherStruct { x: 1, y: 2 }
+        let c = OtherStruct { x: 1, y: 2 }
+        let d = OtherStruct { x: 1, y: 2 }
+        let e = OtherStruct { x: 1, y: 2 }
+        tail_recursive(n - 1, accum + n)
+    }
+}
+
+
 fn main() {
     println(simpleFunctionWithLocals())
     println(testGc(8))
@@ -202,6 +221,7 @@ fn main() {
     println(b())
     println(math_with_parens())
     println(structs_dont_care_about_order())
+    println(tail_recursive(300000, 0))
 }
 
 
@@ -259,4 +279,5 @@ fn main() {
 // 2
 // 1
 // OtherStruct { x: 1, y: 2 }
+// 45000150000
 // null

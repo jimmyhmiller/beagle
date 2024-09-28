@@ -176,14 +176,17 @@ impl Header {
         }
     }
 
+    #[allow(unused)]
     fn type_id_offset() -> usize {
         7
     }
 
+    #[allow(unused)]
     fn type_data_offset() -> usize {
         3
     }
 
+    #[allow(unused)]
     fn size_offset() -> usize {
         5
     }
@@ -385,6 +388,7 @@ impl HeapObject {
         unsafe { *pointer }
     }
 
+    #[allow(unused)]
     pub fn get_type_id(&self) -> usize {
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
@@ -394,7 +398,11 @@ impl HeapObject {
     }
 
     pub fn get_struct_id(&self) -> usize {
-        self.get_field(0)
+        let untagged = self.untagged();
+        let pointer = untagged as *mut usize;
+        let header = unsafe { *pointer };
+        let header = Header::from_usize(header);
+        header.type_data as usize
     }
 
     pub fn is_small_object(&self) -> bool {
@@ -405,6 +413,7 @@ impl HeapObject {
         header.small
     }
 
+    #[allow(unused)]
     pub fn get_header(&self) -> Header {
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
@@ -415,6 +424,9 @@ impl HeapObject {
 
 impl Ir {
     pub fn write_struct_id(&mut self, struct_pointer: VirtualRegister, type_id: usize) {
+        // SOmething other than get_struct_id is reading this field...
+        // so I can't remove it yet
+        // Need to track that down.
         let offset = 1;
         self.heap_store_offset(
             struct_pointer,
@@ -424,9 +436,9 @@ impl Ir {
 
         // I need to understand this stuff better.
         // I really need to actually study some bit wise operations
-        // let mask = 0x000000FFFFFFFF;
+        let mask = 0x000000FFFFFFFF;
         // self.breakpoint();
-        // self.heap_store_byte_offset(struct_pointer, type_id, 0, Header::type_data_offset(), mask);
+        self.heap_store_byte_offset(struct_pointer, type_id, 0, Header::type_data_offset(), mask);
     }
 
     pub fn write_fields(&mut self, struct_pointer: VirtualRegister, fields: &[Value]) {
