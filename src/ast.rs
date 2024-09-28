@@ -278,7 +278,7 @@ impl<'a> AstCompiler<'a> {
     pub fn compile_to_ir(&mut self, ast: &Ast) -> Value {
         match ast.clone() {
             Ast::Program { elements } => {
-                let mut last = Value::SignedConstant(0);
+                let mut last = Value::TaggedConstant(0);
                 for ast in elements.iter() {
                     self.tail_position();
                     last = self.call_compile(ast);
@@ -476,7 +476,7 @@ impl<'a> AstCompiler<'a> {
                 );
 
                 let struct_pointer = self.ir.assign_new(struct_ptr);
-                self.ir.write_type_id(struct_pointer, struct_id);
+                self.ir.write_struct_id(struct_pointer, struct_id);
                 self.ir.write_fields(struct_pointer, &field_results);
 
                 self.ir
@@ -528,7 +528,7 @@ impl<'a> AstCompiler<'a> {
                 );
 
                 let struct_pointer = self.ir.assign_new(struct_ptr);
-                self.ir.write_type_id(struct_pointer, struct_id);
+                self.ir.write_struct_id(struct_pointer, struct_id);
 
                 for field in field_order.iter().rev() {
                     let reg = self.ir.pop_from_stack();
@@ -585,7 +585,7 @@ impl<'a> AstCompiler<'a> {
                 self.ir
                     .jump_if(then_label, Condition::Equal, condition, Value::True);
 
-                let mut else_result = Value::SignedConstant(0);
+                let mut else_result = Value::TaggedConstant(0);
                 for ast in else_.iter() {
                     else_result = self.call_compile(&Box::new(ast));
                 }
@@ -594,7 +594,7 @@ impl<'a> AstCompiler<'a> {
 
                 self.ir.write_label(then_label);
 
-                let mut then_result = Value::SignedConstant(0);
+                let mut then_result = Value::TaggedConstant(0);
                 for ast in then.iter() {
                     then_result = self.call_compile(&Box::new(ast));
                 }
@@ -688,7 +688,7 @@ impl<'a> AstCompiler<'a> {
                     self.compile_standard_function_call(name, args)
                 }
             }
-            Ast::IntegerLiteral(n) => Value::SignedConstant(n as isize),
+            Ast::IntegerLiteral(n) => Value::TaggedConstant(n as isize),
             Ast::FloatLiteral(n) => {
                 // floats are heap allocated
                 // Sadly I have to do this to avoid loss of percision
@@ -706,7 +706,7 @@ impl<'a> AstCompiler<'a> {
 
                 let float_pointer = self.ir.call_builtin(
                     allocate.into(),
-                    vec![compiler_pointer_reg.into(), stack_pointer, size_reg.into(),],
+                    vec![compiler_pointer_reg.into(), stack_pointer, size_reg.into()],
                 );
 
                 let float_pointer = self.ir.assign_new(float_pointer);
@@ -882,7 +882,7 @@ impl<'a> AstCompiler<'a> {
         let loop_start = self.ir.label("loop_start");
         let counter = self.ir.volatile_register();
         // self.ir.breakpoint();
-        self.ir.assign(counter, Value::SignedConstant(0));
+        self.ir.assign(counter, Value::TaggedConstant(0));
         self.ir.write_label(loop_start);
         self.ir.jump_if(
             skip_load_function,
@@ -890,8 +890,8 @@ impl<'a> AstCompiler<'a> {
             counter,
             num_free_variables,
         );
-        let free_variable_offset = self.ir.add_int(counter, Value::SignedConstant(4));
-        let free_variable_offset = self.ir.mul(free_variable_offset, Value::SignedConstant(8));
+        let free_variable_offset = self.ir.add_int(counter, Value::TaggedConstant(4));
+        let free_variable_offset = self.ir.mul(free_variable_offset, Value::TaggedConstant(8));
         // TODO: This needs to change based on counter
         let free_variable_offset = self.ir.untag(free_variable_offset);
         let free_variable = self
@@ -903,7 +903,7 @@ impl<'a> AstCompiler<'a> {
         let num_local = self.ir.tag(num_local, BuiltInTypes::Int.get_tag());
         let free_variable_offset = self.ir.add_int(free_variable_offset, num_local);
         // // TODO: Make this better
-        let free_variable_offset = self.ir.mul(free_variable_offset, Value::SignedConstant(-8));
+        let free_variable_offset = self.ir.mul(free_variable_offset, Value::TaggedConstant(-8));
         let free_variable_offset = self.ir.untag(free_variable_offset);
         let free_variable_slot_pointer = self.ir.get_stack_pointer_imm(2);
         self.ir.heap_store_with_reg_offset(
@@ -914,7 +914,7 @@ impl<'a> AstCompiler<'a> {
 
         let label = self.ir.label("increment_counter");
         self.ir.write_label(label);
-        let counter_increment = self.ir.add_int(Value::SignedConstant(1), counter);
+        let counter_increment = self.ir.add_int(Value::TaggedConstant(1), counter);
         self.ir.assign(counter, counter_increment);
 
         self.ir.jump(loop_start);
@@ -974,7 +974,7 @@ impl<'a> AstCompiler<'a> {
         // load count of free variables
         let num_free = self.get_current_env().free_variables.len();
 
-        let num_free = Value::SignedConstant(num_free as isize);
+        let num_free = Value::TaggedConstant(num_free as isize);
         let num_free_reg = self.ir.volatile_register();
         self.ir.assign(num_free_reg, num_free);
         // Call make_closure

@@ -19,7 +19,7 @@ pub enum Condition {
 #[derive(Debug, Copy, Clone)]
 pub enum Value {
     Register(VirtualRegister),
-    SignedConstant(isize),
+    TaggedConstant(isize),
     RawValue(usize),
     // TODO: Think of a better representation
     StringConstantPtr(usize),
@@ -56,7 +56,7 @@ impl From<VirtualRegister> for Value {
 
 impl From<usize> for Value {
     fn from(val: usize) -> Self {
-        Value::SignedConstant(val as isize)
+        Value::TaggedConstant(val as isize)
     }
 }
 
@@ -103,6 +103,7 @@ pub enum Instruction {
     GetTag(Value, Value),
     Untag(Value, Value),
     HeapStoreOffset(Value, Value, usize),
+    HeapStoreByteOffsetMasked(Value, Value, usize, usize, usize),
     CurrentStackPosition(Value),
     ExtendLifeTime(Value),
     HeapStoreOffsetReg(Value, Value, Value),
@@ -277,6 +278,9 @@ impl Instruction {
                 get_registers!(a, b)
             }
             Instruction::HeapStoreOffset(a, b, _) => {
+                get_registers!(a, b)
+            }
+            Instruction::HeapStoreByteOffsetMasked(a, b, _, _, _) => {
                 get_registers!(a, b)
             }
             Instruction::HeapStoreOffsetReg(a, b, c) => {
@@ -934,7 +938,7 @@ impl Ir {
                         let dest = alloc.allocate_register(index, *dest, lang);
                         lang.mov_reg(dest, register);
                     }
-                    Value::SignedConstant(i) => {
+                    Value::TaggedConstant(i) => {
                         let register = alloc.allocate_register(index, *dest, lang);
                         let tagged = BuiltInTypes::construct_int(*i);
                         lang.mov_64(register, tagged);
@@ -1158,7 +1162,7 @@ impl Ir {
                             lang.jump(exit);
                         }
                     }
-                    Value::SignedConstant(i) => {
+                    Value::TaggedConstant(i) => {
                         lang.mov_64(lang.ret_reg(), BuiltInTypes::construct_int(*i));
                         lang.jump(exit);
                     }
@@ -1254,6 +1258,26 @@ impl Ir {
                     let val = val.try_into().unwrap();
                     let val = alloc.allocate_register(index, val, lang);
                     lang.store_on_heap(ptr, val, *offset as i32);
+                }
+                Instruction::HeapStoreByteOffsetMasked(ptr, val, offset, byte_offset, mask) => {
+                    // We are trying to write to a specific byte in a word
+                    // We need to load the word, mask out the byte, or in the new value
+                    // and then store it back
+                    let ptr = ptr.try_into().unwrap();
+                    let ptr = alloc.allocate_register(index, ptr, lang);
+                    let val = val.try_into().unwrap();
+                    let val = alloc.allocate_register(index, val, lang);
+                    let dest = lang.volatile_register();
+                    // lang.breakpoint();
+                    lang.load_from_heap(dest, ptr, *offset as i32);
+                    let mask_register = lang.volatile_register();
+                    lang.mov_64(mask_register, *mask as isize);
+                    lang.and(dest, dest, mask_register);
+                    lang.free_register(mask_register);
+                    lang.shift_left(val, val, (byte_offset * 8) as i32);
+                    lang.or(dest, dest, val);
+                    lang.store_on_heap(ptr, dest, *offset as i32);
+                    lang.free_register(dest);
                 }
                 Instruction::HeapStoreOffsetReg(ptr, val, offset) => {
                     let ptr = ptr.try_into().unwrap();
@@ -1363,6 +1387,29 @@ impl Ir {
             source.into(),
             offset,
         ));
+    }
+
+    pub fn heap_store_byte_offset<A, B>(
+        &mut self,
+        dest: A,
+        value: B,
+        offset: usize,
+        byte_offset: usize,
+        mask: usize,
+    ) where
+        A: Into<Value>,
+        B: Into<Value>,
+    {
+        let source = self.assign_new(value.into());
+        let dest = self.assign_new(dest.into());
+        self.instructions
+            .push(Instruction::HeapStoreByteOffsetMasked(
+                dest.into(),
+                source.into(),
+                offset,
+                byte_offset,
+                mask,
+            ));
     }
 
     pub fn heap_load(&mut self, dest: Value, source: Value) -> Value {

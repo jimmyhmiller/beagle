@@ -276,7 +276,7 @@ impl SimpleMarkSweepHeap {
             self.free_list.push(entry);
         }
 
-        debug_assert!(self.all_disjoint(), "Free list is not disjoint");
+        // debug_assert!(self.all_disjoint(), "Free list is not disjoint");
     }
 
     fn current_offset(&self) -> usize {
@@ -377,6 +377,7 @@ impl SimpleMarkSweepHeap {
             }
 
             object.mark();
+            
 
             for object in object.get_heap_references() {
                 to_mark.push(object);

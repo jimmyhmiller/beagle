@@ -749,8 +749,8 @@ impl Compiler {
                 // I need to figure out what kind of heap object I have
                 let object = HeapObject::from_tagged(value);
                 // TODO: abstract over this (memory-layout)
-                let type_id = BuiltInTypes::untag(object.get_field(0));
-                let struct_value = self.structs.get_by_id(type_id);
+                let struct_id = BuiltInTypes::untag(object.get_struct_id());
+                let struct_value = self.structs.get_by_id(struct_id);
                 Some(self.get_struct_repr(struct_value?, &object.get_fields()[1..], depth + 1)?)
             }
         }
