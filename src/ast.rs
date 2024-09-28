@@ -648,7 +648,7 @@ impl<'a> AstCompiler<'a> {
             }
             Ast::Call { name, args } => {
                 let name = self.get_qualified_function_name(&name);
-                if Some(name.clone()) == self.name {
+                if Some(name.clone()) == self.own_fully_qualified_name() {
                     if self.is_tail_position() {
                         return self.call_compile(&Ast::TailRecurse { args });
                     } else {
@@ -1299,6 +1299,11 @@ impl<'a> AstCompiler<'a> {
                 )
             }
         }
+    }
+
+    fn own_fully_qualified_name(&self) -> Option<String> {
+        let name = self.name.as_ref()?;
+        Some(self.compiler.current_namespace_name() + "/" + name)
     }
 }
 
