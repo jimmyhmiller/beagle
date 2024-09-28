@@ -131,12 +131,102 @@ fn tag_and_untag() {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct Header {
+    type_id: u8,
+    type_data: u32,
+    size: u8,
+    small: bool,
+    marked: bool,
+}
+
+impl Header {
+    // | Byte 0 | Bytes 1-4     | Byte 5 | Byte 6  | Byte 7               |
+    // |--------|---------------|--------|---------|----------------------|
+    // | Type   | Type Metadata | Size   | Padding | Flag bits            |
+    // |        | (4 bytes)     |        |         | Small object (bit 1) |
+    // |        |               |        |         | Marked (bit 0)       |
+
+    fn to_usize(&self) -> usize {
+        let mut data: usize = 0;
+        data |= (self.type_id as usize) << 56;
+        data |= (self.type_data as usize) << 24;
+        data |= (self.size as usize) << 16;
+        if self.small {
+            data |= 0b10;
+        }
+        if self.marked {
+            data |= 0b1;
+        }
+        data
+    }
+
+    fn from_usize(data: usize) -> Self {
+        let _type = (data >> 56) as u8;
+        let type_data = (data >> 24) as u32;
+        let size = (data >> 16) as u8;
+        let small = (data & 0b10) == 0b10;
+        let marked = (data & 0b1) == 0b1;
+        Header {
+            type_id: _type,
+            type_data,
+            size,
+            small,
+            marked,
+        }
+    }
+
+    fn type_id_offset() -> usize {
+        7
+    }
+
+    fn type_data_offset() -> usize {
+        3
+    }
+
+    fn size_offset() -> usize {
+        5
+    }
+}
+
+#[test]
+fn header() {
+    let header = Header {
+        type_id: 0,
+        type_data: 0,
+        size: 0b0,
+        small: true,
+        marked: false,
+    };
+    let data = header.to_usize();
+    // println the binary representation of the data
+    println!("{:b}", data);
+    assert!((data & 0b10) == 0b10);
+
+    for t in 0..u8::MAX {
+        for s in 0..u8::MAX {
+            for sm in [true, false].iter() {
+                for m in [true, false].iter() {
+                    let header = Header {
+                        type_id: t,
+                        type_data: u32::MAX,
+                        size: s,
+                        small: *sm,
+                        marked: *m,
+                    };
+                    let data = header.to_usize();
+                    let new_header = Header::from_usize(data);
+                    assert_eq!(header, new_header);
+                }
+            }
+        }
+    }
+}
+
 pub struct HeapObject {
     pointer: usize,
     tagged: bool,
 }
-
-const SIZE_SHIFT: usize = 2;
 
 // TODO: Implement methods for writing the header of the heap object
 // make sure we always use this representation everywhere so we can
@@ -171,6 +261,7 @@ impl HeapObject {
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
         let mut data: usize = unsafe { *pointer.cast::<usize>() };
+
         // check right most bit
         if (data & 1) != 1 {
             data |= 1;
@@ -186,13 +277,11 @@ impl HeapObject {
     }
 
     pub fn fields_size(&self) -> usize {
-        if self.is_small_object() {
-            return 8;
-        }
         let untagged = self.untagged();
         let pointer = untagged as *mut isize;
         let data: usize = unsafe { *pointer.cast::<usize>() };
-        data >> SIZE_SHIFT
+        let header = Header::from_usize(data);
+        header.size as usize
     }
 
     pub fn get_fields(&self) -> &[usize] {
@@ -257,12 +346,16 @@ impl HeapObject {
         assert!(field_size.to_bytes() != 0);
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
-        // TODO: Don't mulitply so that we just store
-        // words and can represent the size of the object
-        // in a more compact way
-        let data = field_size.to_bytes() << SIZE_SHIFT;
-        assert!(data > 8);
-        unsafe { *pointer.cast::<usize>() = data };
+
+        let header = Header {
+            type_id: 0,
+            type_data: 0,
+            size: field_size.to_bytes() as u8,
+            small: false,
+            marked: false,
+        };
+
+        unsafe { *pointer.cast::<usize>() = header.to_usize() };
     }
 
     pub fn write_full_object(&mut self, data: &[u8]) {
@@ -292,23 +385,48 @@ impl HeapObject {
         unsafe { *pointer }
     }
 
+    pub fn get_type_id(&self) -> usize {
+        let untagged = self.untagged();
+        let pointer = untagged as *mut usize;
+        let header = unsafe { *pointer };
+        let header = Header::from_usize(header);
+        header.type_id as usize
+    }
+
+    pub fn get_struct_id(&self) -> usize {
+        self.get_field(0)
+    }
+
     pub fn is_small_object(&self) -> bool {
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
         let data: usize = unsafe { *pointer.cast::<usize>() };
-        // we only want to check the second to last bit, if it is one, it is a small object
-        (data & 0b10) == 0b10
+        let header = Header::from_usize(data);
+        header.small
+    }
+
+    pub fn get_header(&self) -> Header {
+        let untagged = self.untagged();
+        let pointer = untagged as *mut usize;
+        let data: usize = unsafe { *pointer.cast::<usize>() };
+        Header::from_usize(data)
     }
 }
 
 impl Ir {
-    pub fn write_type_id(&mut self, struct_pointer: VirtualRegister, type_id: usize) {
+    pub fn write_struct_id(&mut self, struct_pointer: VirtualRegister, type_id: usize) {
         let offset = 1;
         self.heap_store_offset(
             struct_pointer,
-            Value::SignedConstant(type_id as isize),
+            Value::TaggedConstant(type_id as isize),
             offset,
         );
+
+        // I need to understand this stuff better.
+        // I really need to actually study some bit wise operations
+        // let mask = 0x000000FFFFFFFF;
+        // self.breakpoint();
+        // self.heap_store_byte_offset(struct_pointer, type_id, 0, Header::type_data_offset(), mask);
     }
 
     pub fn write_fields(&mut self, struct_pointer: VirtualRegister, fields: &[Value]) {
@@ -327,8 +445,14 @@ impl Ir {
         // We are going to set the least significant bits to 0b10
         // The 1 bit there will tell us that this object doesn't
         // have a size field, it is just a single 8 byte object following the header
-        let offset = 0;
-        self.heap_store_offset(small_object_pointer, Value::RawValue(0b10), offset);
+        let header = Header {
+            type_id: 0,
+            type_data: 0,
+            size: 8,
+            small: true,
+            marked: false,
+        };
+        self.heap_store(small_object_pointer, Value::RawValue(header.to_usize()));
     }
 }
 

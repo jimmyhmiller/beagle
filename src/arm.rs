@@ -222,6 +222,17 @@ pub fn and_imm(destination: Register, a: Register, b: i32) -> ArmAsm {
     }
 }
 
+pub fn and(destination: Register, a: Register, b: Register) -> ArmAsm {
+    ArmAsm::AndLogShift {
+        sf: destination.sf(),
+        shift: 0,
+        rm: b,
+        imm6: 0,
+        rn: a,
+        rd: destination,
+    }
+}
+
 pub fn get_tag(destination: Register, value: Register) -> ArmAsm {
     ArmAsm::AndLogImm {
         sf: destination.sf(),
@@ -509,8 +520,14 @@ impl LowLevelArm {
     pub fn shift_left(&mut self, destination: Register, a: Register, b: i32) {
         self.instructions.push(shift_left(destination, a, b));
     }
-    pub fn and(&mut self, destination: Register, a: Register, b: i32) {
+    pub fn and_imm(&mut self, destination: Register, a: Register, b: i32) {
         self.instructions.push(and_imm(destination, a, b));
+    }
+    pub fn and(&mut self, destination: Register, a: Register, b: Register) {
+        self.instructions.push(and(destination, a, b));
+    }
+    pub fn or(&mut self, destination: Register, a: Register, b: Register) {
+        self.instructions.push(or(destination, a, b));
     }
     pub fn ret(&mut self) {
         self.instructions.push(ret());
@@ -678,14 +695,14 @@ impl LowLevelArm {
     pub fn guard_integer(&mut self, dest: Register, a: Register, jump: Label) {
         // TODO: I need to have some way of signaling
         // that this is a type error;
-        self.and(dest, a, 0b111);
+        self.and_imm(dest, a, 0b111);
         self.compare(dest, ZERO_REGISTER);
         self.jump_not_equal(jump);
     }
 
     pub fn guard_float(&mut self, dest: Register, a: Register, jump: Label) {
         // floats are tagged with 0b001
-        self.and(dest, a, 0b111);
+        self.and_imm(dest, a, 0b111);
         let temp_reg = self.volatile_register();
         self.mov_64(temp_reg, 0b001);
         self.free_register(temp_reg);

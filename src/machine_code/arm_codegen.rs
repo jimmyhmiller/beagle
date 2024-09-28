@@ -230,6 +230,18 @@ pub enum ArmAsm {
         rn: Register,
         rd: Register,
     },
+    /// AND (shifted register) -- A64
+    /// Bitwise AND (shifted register)
+    /// AND  <Wd>, <Wn>, <Wm>{, <shift> #<amount>}
+    /// AND  <Xd>, <Xn>, <Xm>{, <shift> #<amount>}
+    AndLogShift {
+        sf: i32,
+        shift: i32,
+        rm: Register,
+        imm6: i32,
+        rn: Register,
+        rd: Register,
+    },
     /// B.cond -- A64
     /// Branch conditionally
     /// B.<cond>  <label>
@@ -692,6 +704,22 @@ impl ArmAsm {
                     | (*n as u32) << 22
                     | (*immr as u32) << 16
                     | (*imms as u32) << 10
+                    | rn << 5
+                    | rd << 0
+            }
+            ArmAsm::AndLogShift {
+                sf,
+                shift,
+                rm,
+                imm6,
+                rn,
+                rd,
+            } => {
+                0b0_00_01010_00_0_00000_000000_00000_00000
+                    | (*sf as u32) << 31
+                    | (*shift as u32) << 22
+                    | rm << 16
+                    | truncate_imm::<_, 6>(*imm6) << 10
                     | rn << 5
                     | rd << 0
             }

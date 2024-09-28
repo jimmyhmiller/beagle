@@ -318,12 +318,15 @@ impl SimpleGeneration {
 
         // If the first field points into the old generation, we can just return the pointer
         // because this is a forwarding pointer.
-        let first_field = heap_object.get_field(0);
-        if !heap_object.is_small_object() && BuiltInTypes::is_heap_pointer(first_field) {
-            let untagged_data = BuiltInTypes::untag(first_field);
-            if !self.young.contains(untagged_data as *const u8) {
-                debug_assert!(untagged_data % 8 == 0, "Pointer is not aligned");
-                return first_field;
+
+        if !heap_object.is_small_object() {
+            let first_field = heap_object.get_field(0);
+            if BuiltInTypes::is_heap_pointer(first_field) {
+                let untagged_data = BuiltInTypes::untag(first_field);
+                if !self.young.contains(untagged_data as *const u8) {
+                    debug_assert!(untagged_data % 8 == 0, "Pointer is not aligned");
+                    return first_field;
+                }
             }
         }
 
