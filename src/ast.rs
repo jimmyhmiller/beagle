@@ -467,7 +467,7 @@ impl<'a> AstCompiler<'a> {
                 let allocate = self.compiler.get_function_pointer(allocate).unwrap();
                 let allocate = self.ir.assign_new(allocate);
 
-                let size_reg = self.ir.assign_new(struct_type.size() + 1);
+                let size_reg = self.ir.assign_new(struct_type.size());
                 let stack_pointer = self.ir.get_stack_pointer_imm(0);
 
                 let struct_ptr = self.ir.call_builtin(
@@ -519,7 +519,7 @@ impl<'a> AstCompiler<'a> {
                 let allocate = self.compiler.get_function_pointer(allocate).unwrap();
                 let allocate = self.ir.assign_new(allocate);
 
-                let size_reg = self.ir.assign_new(struct_type.size() + 1);
+                let size_reg = self.ir.assign_new(struct_type.size());
                 let stack_pointer = self.ir.get_stack_pointer_imm(0);
 
                 let struct_ptr = self.ir.call_builtin(
@@ -826,7 +826,7 @@ impl<'a> AstCompiler<'a> {
             let namespace = self
                 .compiler
                 .get_namespace_from_alias(alias)
-                .expect(&format!("Can't find alias {}", alias).as_str());
+                .unwrap_or_else(|| panic!("Can't find alias {}", alias));
             namespace + "/" + name
         } else if self.get_variable_in_stack(name).is_some() {
             name.clone()
@@ -1236,7 +1236,7 @@ impl<'a> AstCompiler<'a> {
                 let pointer = args[0];
                 let untagged = self.ir.untag(pointer);
                 // TODO: I need a raw add that doesn't check for tags
-                let offset = self.ir.add_int(untagged, Value::RawValue(16));
+                let offset = self.ir.add_int(untagged, Value::RawValue(8));
                 let reg = self.ir.volatile_register();
                 self.ir.atomic_load(reg.into(), offset)
             }
@@ -1244,7 +1244,7 @@ impl<'a> AstCompiler<'a> {
                 let pointer = args[0];
                 let untagged = self.ir.untag(pointer);
                 // TODO: I need a raw add that doesn't check for tags
-                let offset = self.ir.add_int(untagged, Value::RawValue(16));
+                let offset = self.ir.add_int(untagged, Value::RawValue(8));
                 let value = args[1];
                 self.call_builtin("beagle.builtin/gc_add_root", vec![pointer, value]);
                 self.ir.atomic_store(offset, value);
@@ -1254,7 +1254,7 @@ impl<'a> AstCompiler<'a> {
                 // self.ir.breakpoint();
                 let pointer = args[0];
                 let untagged = self.ir.untag(pointer);
-                let offset = self.ir.add_int(untagged, Value::RawValue(16));
+                let offset = self.ir.add_int(untagged, Value::RawValue(8));
                 let expected = args[1];
                 let new = args[2];
                 let expected_and_result = self.ir.assign_new_force(expected);

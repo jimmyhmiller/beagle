@@ -1,3 +1,4 @@
+use core::panic;
 use std::{error::Error, mem};
 
 use mmap_rs::{MmapMut, MmapOptions};
@@ -67,6 +68,9 @@ impl Iterator for ObjectIterator {
         let size = object.full_size();
 
         self.offset += size;
+        if self.offset % 8 != 0 {
+            panic!("Heap offset is not aligned");
+        }
         Some(object)
     }
 }
@@ -338,6 +342,9 @@ impl CompactingHeap {
             if object.marked() {
                 panic!("We are copying to this space, nothing should be marked");
             }
+            if object.is_small_object() {
+                continue;
+            }
             for datum in object.get_fields_mut() {
                 if BuiltInTypes::is_heap_pointer(*datum) {
                     *datum = self.copy_using_cheneys_algorithm(*datum);
@@ -353,12 +360,15 @@ impl CompactingHeap {
 
         // if the first field is in the to space, we have already
         // copied this object. This is now the forwarding pointer.
-        let first_field = heap_object.get_field(0);
-        if BuiltInTypes::is_heap_pointer(first_field) {
-            let untagged_data = BuiltInTypes::untag(first_field);
-            if self.to_space.contains(untagged_data as *const u8) {
-                debug_assert!(untagged_data % 8 == 0, "Pointer is not aligned");
-                return first_field;
+
+        if !heap_object.is_small_object() {
+            let first_field = heap_object.get_field(0);
+            if BuiltInTypes::is_heap_pointer(heap_object.get_field(0)) {
+                let untagged_data = BuiltInTypes::untag(first_field);
+                if self.to_space.contains(untagged_data as *const u8) {
+                    debug_assert!(untagged_data % 8 == 0, "Pointer is not aligned");
+                    return first_field;
+                }
             }
         }
         let data = heap_object.get_full_object_data();
