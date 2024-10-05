@@ -226,6 +226,8 @@ fn header() {
     }
 }
 
+// This feels odd now that I have a header object
+// I should think about a better way of representing this
 pub struct HeapObject {
     pointer: usize,
     tagged: bool,
@@ -284,6 +286,9 @@ impl HeapObject {
         let pointer = untagged as *mut isize;
         let data: usize = unsafe { *pointer.cast::<usize>() };
         let header = Header::from_usize(data);
+        if header.size % 8 != 0 {
+            panic!("Size is not aligned");
+        }
         header.size as usize
     }
 
@@ -346,9 +351,13 @@ impl HeapObject {
 
     pub fn write_header(&mut self, field_size: Word) {
         assert!(field_size.to_bytes() % 8 == 0);
-        assert!(field_size.to_bytes() != 0);
+        // assert!(field_size.to_bytes() != 0);
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
+
+        if field_size.to_bytes() % 8 != 0 {
+            panic!("Size is not aligned");
+        }
 
         let header = Header {
             type_id: 0,
@@ -424,15 +433,15 @@ impl HeapObject {
 
 impl Ir {
     pub fn write_struct_id(&mut self, struct_pointer: VirtualRegister, type_id: usize) {
-        // SOmething other than get_struct_id is reading this field...
-        // so I can't remove it yet
-        // Need to track that down.
-        let offset = 1;
-        self.heap_store_offset(
-            struct_pointer,
-            Value::TaggedConstant(type_id as isize),
-            offset,
-        );
+        // Until I eliminate the fact that things think this exists
+        // I need to write a zero in it so that nothing thinks it is a
+        // pointer and breaks
+        // let offset = 1;
+        // self.heap_store_offset(
+        //     struct_pointer,
+        //     Value::RawValue(0),
+        //     offset,
+        // );
 
         // I need to understand this stuff better.
         // I really need to actually study some bit wise operations
@@ -442,14 +451,14 @@ impl Ir {
     }
 
     pub fn write_fields(&mut self, struct_pointer: VirtualRegister, fields: &[Value]) {
-        let offset = 2;
+        let offset = 1;
         for (i, field) in fields.iter().enumerate() {
             self.heap_store_offset(struct_pointer, *field, offset + i);
         }
     }
 
     pub fn write_field(&mut self, struct_pointer: VirtualRegister, index: usize, field: Value) {
-        let offset = 2;
+        let offset = 1;
         self.heap_store_offset(struct_pointer, field, offset + index);
     }
 

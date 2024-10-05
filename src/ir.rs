@@ -1500,7 +1500,7 @@ impl Ir {
     pub fn pop_from_stack(&mut self) -> Value {
         let reg = self.volatile_register().into();
         self.instructions.push(Instruction::PopStack(reg));
-        reg.into()
+        reg
     }
 
     fn increment_locals(&mut self, index: usize) {

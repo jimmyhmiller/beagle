@@ -751,7 +751,7 @@ impl Compiler {
                 // TODO: abstract over this (memory-layout)
                 let struct_id = BuiltInTypes::untag(object.get_struct_id());
                 let struct_value = self.structs.get_by_id(struct_id);
-                Some(self.get_struct_repr(struct_value?, &object.get_fields()[1..], depth + 1)?)
+                Some(self.get_struct_repr(struct_value?, object.get_fields(), depth + 1)?)
             }
         }
     }
@@ -762,7 +762,7 @@ impl Compiler {
         }
         let parse_time = std::time::Instant::now();
         let code = std::fs::read_to_string(file_name)
-            .expect(&format!("Could not find file {:?}", file_name));
+            .unwrap_or_else(|_| panic!("Could not find file {:?}", file_name));
         let mut parser = Parser::new(code.to_string());
         let ast = parser.parse();
         if self.command_line_arguments.show_times {
@@ -857,34 +857,24 @@ impl Compiler {
     }
 
     pub fn property_access(&self, struct_pointer: usize, str_constant_ptr: usize) -> usize {
-        unsafe {
-            if BuiltInTypes::untag(struct_pointer) % 8 != 0 {
-                panic!("Not aligned");
-            }
-            let struct_pointer = BuiltInTypes::untag(struct_pointer);
-            let struct_pointer = struct_pointer as *const u8;
-            let size = *(struct_pointer as *const usize) >> 1;
-            let str_constant_ptr: usize = BuiltInTypes::untag(str_constant_ptr);
-            let string_value = &self.string_constants[str_constant_ptr];
-            let string = &string_value.str;
-            let struct_pointer = struct_pointer.add(8);
-            let data = std::slice::from_raw_parts(struct_pointer, size);
-            // type id is the first 8 bytes of data
-            let type_id = usize::from_le_bytes(data[0..8].try_into().unwrap());
-            let type_id = BuiltInTypes::untag(type_id);
-            let struct_value = self.structs.get_by_id(type_id as usize).unwrap();
-            let field_index = struct_value
-                .fields
-                .iter()
-                .position(|f| f == string)
-                .unwrap();
-            let field_index = (field_index + 1) * 8;
-            let field = &data[field_index..field_index + 8];
-            let mut bytes = [0u8; 8];
-            bytes.copy_from_slice(field);
-
-            usize::from_le_bytes(bytes)
+        if BuiltInTypes::untag(struct_pointer) % 8 != 0 {
+            panic!("Not aligned");
         }
+        let heap_object = HeapObject::from_tagged(struct_pointer);
+        let str_constant_ptr: usize = BuiltInTypes::untag(str_constant_ptr);
+        let string_value = &self.string_constants[str_constant_ptr];
+        let string = &string_value.str;
+        let struct_type_id = heap_object.get_struct_id();
+        let struct_type_id = BuiltInTypes::untag(struct_type_id);
+        let struct_value = self.structs.get_by_id(struct_type_id).unwrap();
+        let field_index = struct_value
+            .fields
+            .iter()
+            .position(|f| f == string)
+            .unwrap();
+        // Temporary +1 because I was writing size as the first field
+        // and I haven't changed that
+        heap_object.get_field(field_index)
     }
 
     pub fn add_struct(&mut self, s: Struct) {
@@ -1038,7 +1028,7 @@ impl Compiler {
         let namespace_id = self
             .namespaces
             .get_namespace_id(namespace_name.as_str())
-            .expect(format!("Could not find namespace {}", namespace_name).as_str());
+            .unwrap_or_else(|| panic!("Could not find namespace {}", namespace_name));
 
         let current_namespace = self.get_current_namespace();
         let mut namespace = current_namespace.lock().unwrap();
@@ -1055,7 +1045,7 @@ impl Compiler {
         let namespace = current_namespace.lock().unwrap();
         let id = namespace.aliases.get(alias)?;
         let namespace_name = self.namespaces.get_namespace_name(*id)?;
-        return Some(namespace_name);
+        Some(namespace_name)
     }
 
     pub fn get_string(&self, value: usize) -> String {
