@@ -475,7 +475,7 @@ impl<'a> AstCompiler<'a> {
                     vec![compiler_pointer_reg.into(), stack_pointer, size_reg.into()],
                 );
 
-                let struct_pointer = self.ir.assign_new(struct_ptr);
+                let struct_pointer = self.ir.untag(struct_ptr);
                 self.ir.write_struct_id(struct_pointer, struct_id);
                 self.ir.write_fields(struct_pointer, &field_results);
 
@@ -527,7 +527,7 @@ impl<'a> AstCompiler<'a> {
                     vec![compiler_pointer_reg.into(), stack_pointer, size_reg.into()],
                 );
 
-                let struct_pointer = self.ir.assign_new(struct_ptr);
+                let struct_pointer = self.ir.untag(struct_ptr);
                 self.ir.write_struct_id(struct_pointer, struct_id);
 
                 for field in field_order.iter().rev() {
@@ -694,7 +694,7 @@ impl<'a> AstCompiler<'a> {
                 // Sadly I have to do this to avoid loss of percision
                 let allocate = self
                     .compiler
-                    .find_function("beagle.builtin/allocate")
+                    .find_function("beagle.builtin/allocate_float")
                     .unwrap();
                 let allocate = self.compiler.get_function_pointer(allocate).unwrap();
                 let allocate = self.ir.assign_new(allocate);
@@ -709,7 +709,7 @@ impl<'a> AstCompiler<'a> {
                     vec![compiler_pointer_reg.into(), stack_pointer, size_reg.into()],
                 );
 
-                let float_pointer = self.ir.assign_new(float_pointer);
+                let float_pointer = self.ir.untag(float_pointer);
                 self.ir.write_small_object_header(float_pointer);
                 self.ir.write_float_literal(float_pointer, n);
 
@@ -826,7 +826,7 @@ impl<'a> AstCompiler<'a> {
             let namespace = self
                 .compiler
                 .get_namespace_from_alias(alias)
-                .unwrap_or_else(|| panic!("Can't find alias {}", alias));
+                .expect(format!("Can't find alias {}", alias).as_str());
             namespace + "/" + name
         } else if self.get_variable_in_stack(name).is_some() {
             name.clone()
@@ -1099,7 +1099,7 @@ impl<'a> AstCompiler<'a> {
         !current_env.free_variables.is_empty()
     }
 
-    fn call_builtin(&mut self, arg: &str, args: Vec<Value>) -> Value {
+    pub fn call_builtin(&mut self, arg: &str, args: Vec<Value>) -> Value {
         let mut args = args;
         let function = self
             .compiler
@@ -1229,53 +1229,7 @@ impl<'a> AstCompiler<'a> {
         }
     }
 
-    fn compile_inline_primitive_function(&mut self, name: &str, args: Vec<Value>) -> Value {
-        match name {
-            "beagle.primitive/deref" => {
-                // self.ir.breakpoint();
-                let pointer = args[0];
-                let untagged = self.ir.untag(pointer);
-                // TODO: I need a raw add that doesn't check for tags
-                let offset = self.ir.add_int(untagged, Value::RawValue(8));
-                let reg = self.ir.volatile_register();
-                self.ir.atomic_load(reg.into(), offset)
-            }
-            "beagle.primitive/reset!" => {
-                let pointer = args[0];
-                let untagged = self.ir.untag(pointer);
-                // TODO: I need a raw add that doesn't check for tags
-                let offset = self.ir.add_int(untagged, Value::RawValue(8));
-                let value = args[1];
-                self.call_builtin("beagle.builtin/gc_add_root", vec![pointer, value]);
-                self.ir.atomic_store(offset, value);
-                args[1]
-            }
-            "beagle.primitive/compare_and_swap!" => {
-                // self.ir.breakpoint();
-                let pointer = args[0];
-                let untagged = self.ir.untag(pointer);
-                let offset = self.ir.add_int(untagged, Value::RawValue(8));
-                let expected = args[1];
-                let new = args[2];
-                let expected_and_result = self.ir.assign_new_force(expected);
-                self.ir
-                    .compare_and_swap(expected_and_result.into(), new, offset);
-                // TODO: I should do a conditional move here instead of a jump
-                let label = self.ir.label("compare_and_swap");
-                let result = self.ir.assign_new(Value::True);
-                self.ir
-                    .jump_if(label, Condition::Equal, expected_and_result, expected);
-                self.ir.assign(result, Value::False);
-                self.ir.write_label(label);
-                result.into()
-            }
-            "beagle.primitive/breakpoint!" => {
-                self.ir.breakpoint();
-                Value::Null
-            }
-            _ => panic!("Unknown inline primitive function {}", name),
-        }
-    }
+
 
     fn store_namespaced_variable(&mut self, slot: Value, reg: VirtualRegister) {
         let slot = self.ir.assign_new(slot);

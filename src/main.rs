@@ -24,6 +24,7 @@ pub mod machine_code;
 pub mod parser;
 pub mod runtime;
 mod types;
+mod primitives;
 
 #[derive(Debug, Encode, Decode)]
 pub struct Message {
@@ -129,14 +130,35 @@ pub unsafe extern "C" fn print_value<Alloc: Allocator>(
 extern "C" fn allocate<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,
     stack_pointer: usize,
-    value: usize,
+    size: usize,
 ) -> usize {
-    let value = BuiltInTypes::untag(value);
+    let size = BuiltInTypes::untag(size);
     let runtime = unsafe { &mut *runtime };
 
-    runtime
-        .allocate(value, stack_pointer, BuiltInTypes::HeapObject)
-        .unwrap()
+    let result = runtime
+        .allocate(size, stack_pointer, BuiltInTypes::HeapObject)
+        .unwrap();
+
+    debug_assert!(BuiltInTypes::is_heap_pointer(result));
+    debug_assert!(BuiltInTypes::untag(result) % 8 == 0);
+    result
+}
+
+extern "C" fn allocate_float<Alloc: Allocator>(
+    runtime: *mut Runtime<Alloc>,
+    stack_pointer: usize,
+    size: usize,
+) -> usize {
+    let runtime = unsafe { &mut *runtime };
+    let value = BuiltInTypes::untag(size);
+
+    let result = runtime
+        .allocate(value, stack_pointer, BuiltInTypes::Float)
+        .unwrap();
+
+    debug_assert!(BuiltInTypes::get_kind(result) == BuiltInTypes::Float);
+    debug_assert!(BuiltInTypes::untag(result) % 8 == 0);
+    result
 }
 
 extern "C" fn make_closure<Alloc: Allocator>(
@@ -481,6 +503,12 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     runtime.compiler.add_builtin_function(
         "beagle.builtin/allocate",
         allocate::<Alloc> as *const u8,
+        true,
+    )?;
+
+    runtime.compiler.add_builtin_function(
+        "beagle.builtin/allocate_float",
+        allocate_float::<Alloc> as *const u8,
         true,
     )?;
 

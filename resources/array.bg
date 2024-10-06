@@ -1,5 +1,6 @@
-namespace arrays
+namespace raw_mutable_array
 import "beagle.builtin" as builtin
+import "beagle.primitive" as primitive
 
 fn allocate_array(size) {
     builtin/allocate(size)
@@ -7,6 +8,19 @@ fn allocate_array(size) {
 
 fn main() {
     let pointer = allocate_array(10)
+    primitive/write_type_id(pointer, 1)
+    primitive/write_field(pointer, 0, 42)
+    primitive/write_field(pointer, 1, 42)
+    primitive/write_field(pointer, 2, 42)
+    primitive/write_field(pointer, 3, 42)
+    primitive/write_field(pointer, 4, 42)
+    primitive/write_field(pointer, 5, 42)
+    primitive/write_field(pointer, 6, 42)
+    primitive/write_field(pointer, 7, 42)
+    primitive/write_field(pointer, 8, 42)
+    primitive/write_field(pointer, 9, 42)
+    println(primitive/read_field(pointer, 0))
+    // println(pointer)
     // I need to tell the system this is an array
     // I need to tell my printing system how to print it
     // If I stick with standard layout, it should just work with gc

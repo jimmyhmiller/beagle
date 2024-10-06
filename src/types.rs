@@ -1,4 +1,4 @@
-use crate::ir::{Ir, Value, VirtualRegister};
+use crate::ir::{Ir, Value};
 
 // I don't know if this is actually the setup I want
 // But I want get some stuff down there
@@ -181,7 +181,6 @@ impl Header {
         7
     }
 
-    #[allow(unused)]
     fn type_data_offset() -> usize {
         3
     }
@@ -238,7 +237,6 @@ pub struct HeapObject {
 // change things in one place
 impl HeapObject {
     pub fn from_tagged(pointer: usize) -> Self {
-        // assert!(pointer % 8 != 0);
         assert!(BuiltInTypes::is_heap_pointer(pointer));
         HeapObject {
             pointer,
@@ -286,6 +284,8 @@ impl HeapObject {
         let pointer = untagged as *mut isize;
         let data: usize = unsafe { *pointer.cast::<usize>() };
         let header = Header::from_usize(data);
+        // TODO: This is number of bytes, not number of fields
+        // so is this wrong?
         if header.size % 8 != 0 {
             panic!("Size is not aligned");
         }
@@ -351,7 +351,6 @@ impl HeapObject {
 
     pub fn write_header(&mut self, field_size: Word) {
         assert!(field_size.to_bytes() % 8 == 0);
-        // assert!(field_size.to_bytes() != 0);
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
 
@@ -432,37 +431,31 @@ impl HeapObject {
 }
 
 impl Ir {
-    pub fn write_struct_id(&mut self, struct_pointer: VirtualRegister, type_id: usize) {
-        // Until I eliminate the fact that things think this exists
-        // I need to write a zero in it so that nothing thinks it is a
-        // pointer and breaks
-        // let offset = 1;
-        // self.heap_store_offset(
-        //     struct_pointer,
-        //     Value::RawValue(0),
-        //     offset,
-        // );
-
+    pub fn write_struct_id(&mut self, struct_pointer: Value, type_id: usize) {
         // I need to understand this stuff better.
         // I really need to actually study some bit wise operations
         let mask = 0x000000FFFFFFFF;
-        // self.breakpoint();
         self.heap_store_byte_offset(struct_pointer, type_id, 0, Header::type_data_offset(), mask);
     }
 
-    pub fn write_fields(&mut self, struct_pointer: VirtualRegister, fields: &[Value]) {
+    pub fn write_type_id(&mut self, struct_pointer: Value, type_id: Value) {
+        let mask = 0xFF00000000000000;
+        self.heap_store_byte_offset(struct_pointer, type_id, 0, Header::type_id_offset(), mask);
+    }
+
+    pub fn write_fields(&mut self, struct_pointer: Value, fields: &[Value]) {
         let offset = 1;
         for (i, field) in fields.iter().enumerate() {
             self.heap_store_offset(struct_pointer, *field, offset + i);
         }
     }
 
-    pub fn write_field(&mut self, struct_pointer: VirtualRegister, index: usize, field: Value) {
+    pub fn write_field(&mut self, struct_pointer: Value, index: usize, field: Value) {
         let offset = 1;
         self.heap_store_offset(struct_pointer, field, offset + index);
     }
 
-    pub fn write_small_object_header(&mut self, small_object_pointer: VirtualRegister) {
+    pub fn write_small_object_header(&mut self, small_object_pointer: Value) {
         // We are going to set the least significant bits to 0b10
         // The 1 bit there will tell us that this object doesn't
         // have a size field, it is just a single 8 byte object following the header
