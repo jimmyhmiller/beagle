@@ -480,7 +480,7 @@ impl<'a> AstCompiler<'a> {
                 self.ir.write_fields(struct_pointer, &field_results);
 
                 self.ir
-                    .tag(struct_pointer.into(), BuiltInTypes::HeapObject.get_tag())
+                    .tag(struct_pointer, BuiltInTypes::HeapObject.get_tag())
             }
             Ast::StructCreation { name, fields } => {
                 for field in fields.iter() {
@@ -536,7 +536,7 @@ impl<'a> AstCompiler<'a> {
                 }
 
                 self.ir
-                    .tag(struct_pointer.into(), BuiltInTypes::HeapObject.get_tag())
+                    .tag(struct_pointer, BuiltInTypes::HeapObject.get_tag())
             }
             Ast::Namespace { name } => {
                 let namespace_id = self.compiler.reserve_namespace(name);
@@ -713,8 +713,7 @@ impl<'a> AstCompiler<'a> {
                 self.ir.write_small_object_header(float_pointer);
                 self.ir.write_float_literal(float_pointer, n);
 
-                self.ir
-                    .tag(float_pointer.into(), BuiltInTypes::Float.get_tag())
+                self.ir.tag(float_pointer, BuiltInTypes::Float.get_tag())
             }
             Ast::Identifier(name) => {
                 let reg = &self.get_variable_alloc_free_variable(&name);
@@ -826,7 +825,7 @@ impl<'a> AstCompiler<'a> {
             let namespace = self
                 .compiler
                 .get_namespace_from_alias(alias)
-                .expect(format!("Can't find alias {}", alias).as_str());
+                .unwrap_or_else(|| panic!("Can't find alias {}", alias));
             namespace + "/" + name
         } else if self.get_variable_in_stack(name).is_some() {
             name.clone()
@@ -1228,8 +1227,6 @@ impl<'a> AstCompiler<'a> {
             _ => {}
         }
     }
-
-
 
     fn store_namespaced_variable(&mut self, slot: Value, reg: VirtualRegister) {
         let slot = self.ir.assign_new(slot);
