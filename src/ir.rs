@@ -121,6 +121,8 @@ pub enum Instruction {
     SubFloat(Value, Value, Value),
     MulFloat(Value, Value, Value),
     DivFloat(Value, Value, Value),
+    ShiftRight(Value, Value, i32),
+    AndImm(Value, Value, i32),
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -206,6 +208,12 @@ impl Instruction {
             }
             Instruction::DivFloat(a, b, c) => {
                 get_registers!(a, b, c)
+            }
+            Instruction::ShiftRight(a, b, _) => {
+                get_registers!(a, b)
+            }
+            Instruction::AndImm(a, b, _) => {
+                get_registers!(a, b)
             }
             Instruction::Recurse(a, args) => {
                 let mut result: Vec<VirtualRegister> =
@@ -513,7 +521,7 @@ impl Ir {
         let float_pointer = self.untag(float_pointer);
         self.write_small_object_header(float_pointer);
         self.heap_store_offset(float_pointer, result, 1);
-        let tagged = self.tag(float_pointer.into(), BuiltInTypes::Float.get_tag());
+        let tagged = self.tag(float_pointer, BuiltInTypes::Float.get_tag());
         self.assign(result_register, tagged);
 
         self.write_label(after_add);
@@ -611,6 +619,20 @@ impl Ir {
         let b = self.assign_new(b.into());
         self.instructions
             .push(Instruction::JumpIf(label, condition, a.into(), b.into()));
+    }
+
+    pub fn shift_right(&mut self, a: Value, b: i32) -> Value {
+        let destination = self.volatile_register();
+        self.instructions
+            .push(Instruction::ShiftRight(destination.into(), a, b));
+        destination.into()
+    }
+
+    pub fn and_imm(&mut self, a: Value, b: i32) -> Value {
+        let destination = self.volatile_register();
+        self.instructions
+            .push(Instruction::AndImm(destination.into(), a, b));
+        destination.into()
     }
 
     pub fn assign<A>(&mut self, dest: VirtualRegister, val: A)
@@ -867,6 +889,20 @@ impl Ir {
                     lang.shift_left(dest, dest, BuiltInTypes::tag_size());
                     lang.shift_left(a, a, BuiltInTypes::tag_size());
                     lang.shift_left(b, b, BuiltInTypes::tag_size());
+                }
+                Instruction::ShiftRight(dest, value, shift) => {
+                    let value = value.try_into().unwrap();
+                    let value = alloc.allocate_register(index, value, lang);
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, lang);
+                    lang.shift_right(dest, value, *shift);
+                }
+                Instruction::AndImm(dest, value, imm) => {
+                    let value = value.try_into().unwrap();
+                    let value = alloc.allocate_register(index, value, lang);
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, lang);
+                    lang.and_imm(dest, value, *imm);
                 }
                 Instruction::GuardInt(dest, value, label) => {
                     let value = value.try_into().unwrap();
@@ -1389,7 +1425,7 @@ impl Ir {
         ));
     }
 
-    pub fn heap_store_byte_offset<A, B>(
+    pub fn heap_store_byte_offset_masked<A, B>(
         &mut self,
         dest: A,
         value: B,
@@ -1578,23 +1614,15 @@ impl Ir {
             .push(Instruction::ExtendLifeTime(register));
     }
 
-    pub fn heap_store_with_reg_offset(
-        &mut self,
-        pointer: Value,
-        value: Value,
-        offset: Value,
-    ) {
-        self.instructions.push(Instruction::HeapStoreOffsetReg(
-            pointer,
-            value,
-            offset,
-        ));
+    pub fn heap_store_with_reg_offset(&mut self, pointer: Value, value: Value, offset: Value) {
+        self.instructions
+            .push(Instruction::HeapStoreOffsetReg(pointer, value, offset));
     }
 
     pub fn write_float_literal(&mut self, float_pointer: Value, n: f64) {
         let temp_register = self.volatile_register();
         self.instructions.push(Instruction::StoreFloat(
-            float_pointer.into(),
+            float_pointer,
             temp_register.into(),
             n,
         ))
@@ -1612,7 +1640,7 @@ impl Ir {
             .push(Instruction::GuardFloat(dest.into(), a, add_float));
     }
 
-    fn load_from_heap(&mut self, value: Value, arg: i32) -> Value {
+    pub fn load_from_heap(&mut self, value: Value, arg: i32) -> Value {
         let dest = self.volatile_register().into();
         self.instructions
             .push(Instruction::HeapLoad(dest, value, arg));

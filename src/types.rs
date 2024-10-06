@@ -133,21 +133,21 @@ fn tag_and_untag() {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Header {
-    type_id: u8,
-    type_data: u32,
-    size: u8,
-    small: bool,
-    marked: bool,
+    pub type_id: u8,
+    pub type_data: u32,
+    pub size: u8,
+    pub small: bool,
+    pub marked: bool,
 }
 
 impl Header {
-    // | Byte 0 | Bytes 1-4     | Byte 5 | Byte 6  | Byte 7               |
-    // |--------|---------------|--------|---------|----------------------|
-    // | Type   | Type Metadata | Size   | Padding | Flag bits            |
-    // |        | (4 bytes)     |        |         | Small object (bit 1) |
-    // |        |               |        |         | Marked (bit 0)       |
+    // | Byte 7  | Bytes 3-6     | Byte 2 | Byte 1  | Byte 0               |
+    // |---------|---------------|--------|---------|----------------------|
+    // | Type    | Type Metadata | Size   | Padding | Flag bits            |
+    // |         | (4 bytes)     |        |         | Small object (bit 1) |
+    // |         |               |        |         | Marked (bit 0)       |
 
-    fn to_usize(&self) -> usize {
+    fn to_usize(self) -> usize {
         let mut data: usize = 0;
         data |= (self.type_id as usize) << 56;
         data |= (self.type_data as usize) << 24;
@@ -176,7 +176,6 @@ impl Header {
         }
     }
 
-    #[allow(unused)]
     fn type_id_offset() -> usize {
         7
     }
@@ -185,9 +184,8 @@ impl Header {
         3
     }
 
-    #[allow(unused)]
-    fn size_offset() -> usize {
-        5
+    pub fn size_offset() -> usize {
+        2
     }
 }
 
@@ -435,12 +433,25 @@ impl Ir {
         // I need to understand this stuff better.
         // I really need to actually study some bit wise operations
         let mask = 0x000000FFFFFFFF;
-        self.heap_store_byte_offset(struct_pointer, type_id, 0, Header::type_data_offset(), mask);
+        self.heap_store_byte_offset_masked(
+            struct_pointer,
+            type_id,
+            0,
+            Header::type_data_offset(),
+            mask,
+        );
     }
 
     pub fn write_type_id(&mut self, struct_pointer: Value, type_id: Value) {
-        let mask = 0xFF00000000000000;
-        self.heap_store_byte_offset(struct_pointer, type_id, 0, Header::type_id_offset(), mask);
+        let byte_offset = Header::type_id_offset();
+        let mask = !(0xFF << (byte_offset * 8));
+        self.heap_store_byte_offset_masked(
+            struct_pointer,
+            type_id,
+            0,
+            Header::type_id_offset(),
+            mask,
+        );
     }
 
     pub fn write_fields(&mut self, struct_pointer: Value, fields: &[Value]) {

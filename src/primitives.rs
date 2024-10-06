@@ -1,8 +1,8 @@
 use crate::{
     ast::AstCompiler,
-    ir::{Condition, Value}, types::Header,
+    ir::{Condition, Value},
+    types::Header,
 };
-
 
 // TODO: I'd rather this be on Ir I think?
 impl<'a> AstCompiler<'a> {
@@ -79,9 +79,26 @@ impl<'a> AstCompiler<'a> {
                 // self.ir.breakpoint();
                 self.ir.heap_load_with_reg_offset(pointer, field)
             }
+            "beagle.primitive/breakpoint" => {
+                self.ir.breakpoint();
+                Value::Null
+            }
             "beagle.primitive/size" => {
-               todo!();
-               // be able to get the size from the header
+                let pointer = args[0];
+                let pointer = self.ir.untag(pointer);
+                let header = self.ir.load_from_heap(pointer, 0);
+                // mask and shift so we get the size
+                let size_offset = Header::size_offset();
+                let value = self.ir.shift_right(header, (size_offset * 8) as i32);
+
+                self.ir.and_imm(value, 0x0000_0000_0000_FFFF)
+            }
+            "beagle.primitive/panic" => {
+                let message = args[0];
+                // print the message then call throw_error
+                self.call_builtin("beagle.core/println", vec![message]);
+                self.call_builtin("beagle.builtin/throw_error", vec![]);
+                Value::Null
             }
             _ => panic!("Unknown inline primitive function {}", name),
         }

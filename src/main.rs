@@ -22,9 +22,9 @@ mod gc;
 pub mod ir;
 pub mod machine_code;
 pub mod parser;
+mod primitives;
 pub mod runtime;
 mod types;
-mod primitives;
 
 #[derive(Debug, Encode, Decode)]
 pub struct Message {

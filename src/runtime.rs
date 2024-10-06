@@ -748,6 +748,22 @@ impl Compiler {
                 // TODO: Once I change the setup for heap objects
                 // I need to figure out what kind of heap object I have
                 let object = HeapObject::from_tagged(value);
+                let header = object.get_header();
+                if header.type_id != 0 {
+                    // This isn't a struct and right now
+                    // we don't have a print system for other types
+                    // so we are just going to print it like an array
+                    let fields = object.get_fields();
+                    let mut repr = "[ ".to_string();
+                    for (index, field) in fields.iter().enumerate() {
+                        repr.push_str(&self.get_repr(*field, depth + 1)?);
+                        if index != fields.len() - 1 {
+                            repr.push_str(", ");
+                        }
+                    }
+                    repr.push_str(" ]");
+                    return Some(repr);
+                }
                 // TODO: abstract over this (memory-layout)
                 let struct_id = BuiltInTypes::untag(object.get_struct_id());
                 let struct_value = self.structs.get_by_id(struct_id);
@@ -1185,7 +1201,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
                 assert!(value.is_aligned());
                 let value = kind.tag(value as isize);
                 Ok(value as usize)
-            },
+            }
             Ok(AllocateAction::Gc) => {
                 self.gc(stack_pointer);
                 let result = self.memory.heap.allocate(bytes, kind, options);

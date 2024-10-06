@@ -2,26 +2,111 @@ namespace raw_mutable_array
 import "beagle.builtin" as builtin
 import "beagle.primitive" as primitive
 
-fn allocate_array(size) {
+
+// TODO: I need an efficient way to copy an array
+
+fn allocate_array_unsafe(size) {
     builtin/allocate(size)
 }
 
-fn main() {
-    let pointer = allocate_array(10)
-    primitive/write_type_id(pointer, 1)
-    primitive/write_field(pointer, 0, 42)
-    primitive/write_field(pointer, 1, 42)
-    primitive/write_field(pointer, 2, 42)
-    primitive/write_field(pointer, 3, 42)
-    primitive/write_field(pointer, 4, 42)
-    primitive/write_field(pointer, 5, 42)
-    primitive/write_field(pointer, 6, 42)
-    primitive/write_field(pointer, 7, 42)
-    primitive/write_field(pointer, 8, 42)
-    primitive/write_field(pointer, 9, 42)
-    println(primitive/read_field(pointer, 0))
-    // println(pointer)
-    // I need to tell the system this is an array
-    // I need to tell my printing system how to print it
-    // If I stick with standard layout, it should just work with gc
+fn read_field_unsafe(pointer, index) {
+    primitive/read_field(pointer, index)
 }
+
+fn write_field_unsafe(pointer, index, value) {
+    primitive/write_field(pointer, index, value)
+}
+
+fn write_field(pointer, index, value) {
+    // TODO: I need || (or should it be "or")
+    if index < 0 {
+        primitive/panic("Index out of bounds")
+    }
+    if index >= primitive/size(pointer) {
+        primitive/panic("Index out of bounds")
+    }
+    write_field_unsafe(pointer, index, value)
+}
+
+fn read_field(pointer, index) {
+    if index < 0 {
+        primitive/panic("Index out of bounds")
+    }
+    if index >= primitive/size(pointer) {
+        primitive/panic("Index out of bounds")
+    }
+    read_field_unsafe(pointer, index)
+}
+
+fn new_array(size) {
+    if size < 0 {
+        primitive/panic("Negative size")
+    }
+    if size > 256 {
+        primitive/panic("Size too large")
+    }
+    let pointer = allocate_array_unsafe(size)
+    primitive/write_type_id(pointer, 1)
+    pointer
+}
+
+
+struct ExampleStruct {
+    value
+}
+
+fn allocate_array_and_return() {
+    let example_struct = ExampleStruct {
+        value: "Example Struct Value2"
+    }
+    let array = new_array(1)
+    write_field(array, 0, example_struct)
+    array
+}
+
+fn main() {
+    let pointer = new_array(10)
+    primitive/write_type_id(pointer, 1)
+    primitive/write_field(pointer, 0, 1)
+    primitive/write_field(pointer, 1, 2)
+    primitive/write_field(pointer, 2, 3)
+    primitive/write_field(pointer, 3, 4)
+    primitive/write_field(pointer, 4, 5)
+    primitive/write_field(pointer, 5, 6)
+    primitive/write_field(pointer, 6, 7)
+    primitive/write_field(pointer, 7, 8)
+    primitive/write_field(pointer, 8, 9)
+    primitive/write_field(pointer, 9, 10)
+    let my_array = allocate_array_and_return()
+    println(primitive/read_field(pointer, 0))
+    println(pointer)
+    println(primitive/size(pointer))
+
+    let example_struct = ExampleStruct {
+        value: "Example Struct Value"
+    }
+    let pointer = builtin/allocate(1)
+    primitive/write_type_id(pointer, 1)
+    primitive/write_field(pointer, 0, example_struct)
+    println(primitive/read_field(pointer, 0).value)
+    println(pointer)
+    gc()
+    gc()
+    gc()
+    println(pointer)
+    println(my_array)
+
+    read_field(pointer, 0)
+    
+    "done"
+}
+
+// Expect
+// 1
+// [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
+// 10
+// Example Struct Value
+// [ ExampleStruct { value: Example Struct Value } ]
+// [ ExampleStruct { value: Example Struct Value } ]
+// [ ExampleStruct { value: Example Struct Value2 } ]
+// done
