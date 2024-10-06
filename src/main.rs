@@ -11,7 +11,7 @@ use gc::{
 };
 use gc::{Allocator, StackMapDetails};
 use runtime::{DefaultPrinter, Printer, Runtime, TestPrinter};
-use types::BuiltInTypes;
+use types::{BuiltInTypes, HeapObject};
 
 use std::{error::Error, mem, slice::from_raw_parts, thread, time::Instant};
 
@@ -310,6 +310,21 @@ pub unsafe extern "C" fn load_library<Alloc: Allocator>(
     function(id)
 }
 
+pub unsafe extern "C" fn copy_object<Alloc: Allocator>(
+    runtime: *mut Runtime<Alloc>,
+    stack_pointer: usize,
+    object_pointer: usize,
+) -> usize {
+    let runtime = unsafe { &mut *runtime };
+    let object = HeapObject::from_tagged(object_pointer);
+    let header = object.get_header();
+    let size = header.size as usize / 8;
+    let kind = BuiltInTypes::get_kind(object_pointer);
+    let to_pointer = runtime.allocate(size, stack_pointer, kind).unwrap();
+    let mut to_object = HeapObject::from_tagged(to_pointer);
+    runtime.copy_object(object, &mut to_object).unwrap()
+}
+
 fn compile_trampoline<Alloc: Allocator>(runtime: &mut Runtime<Alloc>) {
     let mut lang = LowLevelArm::new();
     // lang.breakpoint();
@@ -509,6 +524,12 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     runtime.compiler.add_builtin_function(
         "beagle.builtin/allocate_float",
         allocate_float::<Alloc> as *const u8,
+        true,
+    )?;
+
+    runtime.compiler.add_builtin_function(
+        "beagle.builtin/copy_object",
+        copy_object::<Alloc> as *const u8,
         true,
     )?;
 
