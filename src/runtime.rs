@@ -1569,4 +1569,13 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         self.libraries.push(lib);
         self.libraries.len() - 1
     }
+
+    pub fn copy_object(
+        &mut self,
+        from_object: HeapObject,
+        to_object: &mut HeapObject,
+    ) -> Result<usize, Box<dyn Error>> {
+        from_object.copy_full_object(to_object);
+        Ok(to_object.tagged_pointer())
+    }
 }

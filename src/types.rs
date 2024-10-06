@@ -375,6 +375,11 @@ impl HeapObject {
         }
     }
 
+    pub fn copy_full_object(&self, to_object: &mut HeapObject) {
+        let data = self.get_full_object_data();
+        to_object.write_full_object(data);
+    }
+
     pub fn get_pointer(&self) -> *const u8 {
         let untagged = self.untagged();
         untagged as *const u8
@@ -425,6 +430,14 @@ impl HeapObject {
         let pointer = untagged as *mut usize;
         let data: usize = unsafe { *pointer.cast::<usize>() };
         Header::from_usize(data)
+    }
+
+    pub fn tagged_pointer(&self) -> usize {
+        if self.tagged {
+            self.pointer
+        } else {
+            panic!("Not tagged");
+        }
     }
 }
 
