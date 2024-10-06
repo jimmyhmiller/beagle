@@ -510,7 +510,7 @@ impl Ir {
         // Allocate and store
         let size_reg = self.assign_new(1);
         let float_pointer = self.allocate(size_reg.into());
-        let float_pointer = self.assign_new(float_pointer);
+        let float_pointer = self.untag(float_pointer);
         self.write_small_object_header(float_pointer);
         self.heap_store_offset(float_pointer, result, 1);
         let tagged = self.tag(float_pointer.into(), BuiltInTypes::Float.get_tag());
@@ -1580,18 +1580,18 @@ impl Ir {
 
     pub fn heap_store_with_reg_offset(
         &mut self,
-        free_variable_slot_pointer: Value,
-        free_variable: Value,
-        free_variable_offset: Value,
+        pointer: Value,
+        value: Value,
+        offset: Value,
     ) {
         self.instructions.push(Instruction::HeapStoreOffsetReg(
-            free_variable_slot_pointer,
-            free_variable,
-            free_variable_offset,
+            pointer,
+            value,
+            offset,
         ));
     }
 
-    pub fn write_float_literal(&mut self, float_pointer: VirtualRegister, n: f64) {
+    pub fn write_float_literal(&mut self, float_pointer: Value, n: f64) {
         let temp_register = self.volatile_register();
         self.instructions.push(Instruction::StoreFloat(
             float_pointer.into(),

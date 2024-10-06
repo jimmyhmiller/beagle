@@ -1181,16 +1181,25 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         let result = self.memory.heap.allocate(bytes, kind, options);
 
         match result {
-            Ok(AllocateAction::Allocated(value)) => Ok(value as usize),
+            Ok(AllocateAction::Allocated(value)) => {
+                assert!(value.is_aligned());
+                let value = kind.tag(value as isize);
+                Ok(value as usize)
+            },
             Ok(AllocateAction::Gc) => {
                 self.gc(stack_pointer);
                 let result = self.memory.heap.allocate(bytes, kind, options);
                 if let Ok(AllocateAction::Allocated(result)) = result {
+                    // tag
+                    assert!(result.is_aligned());
+                    let result = kind.tag(result as isize);
                     Ok(result as usize)
                 } else {
                     self.memory.heap.grow(options);
                     // TODO: Detect loop here
-                    self.allocate(bytes, stack_pointer, kind)
+                    let pointer = self.allocate(bytes, stack_pointer, kind)?;
+                    // If we went down this path, our pointer is already tagged
+                    Ok(pointer)
                 }
             }
             Err(e) => Err(e),
@@ -1336,6 +1345,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         let len = 8 + 8 + 8 + free_variables.len() * 8;
         // TODO: Stack pointer should be passed in
         let heap_pointer = self.allocate(len / 8, 0, BuiltInTypes::Closure)?;
+        let heap_pointer = BuiltInTypes::untag(heap_pointer);
         let pointer = heap_pointer as *mut u8;
         let num_free = free_variables.len();
         let function_definition = self

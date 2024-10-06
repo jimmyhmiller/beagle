@@ -15,14 +15,14 @@
                     // "--profile=release-with-debug",
                     "--bin=main",
                     "--package=main",
-                    "--features=compacting,thread-safe"
+                    "--features=simple-mark-and-sweep,thread-safe"
                 ],
                 "filter": {
                     "name": "main",
                     "kind": "bin"
                 }
             },
-            "args": ["resources/atom.bg"],
+            "args": ["resources/array.bg"],
             "cwd": "${workspaceFolder}"
         },
         {
