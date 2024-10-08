@@ -89,7 +89,7 @@ impl<'a> AstCompiler<'a> {
                 let header = self.ir.load_from_heap(pointer, 0);
                 // mask and shift so we get the size
                 let size_offset = Header::size_offset();
-                let value = self.ir.shift_right(header, (size_offset * 8) as i32);
+                let value = self.ir.shift_right_imm(header, (size_offset * 8) as i32);
 
                 self.ir.and_imm(value, 0x0000_0000_0000_FFFF)
             }

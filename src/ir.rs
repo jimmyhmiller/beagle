@@ -121,8 +121,14 @@ pub enum Instruction {
     SubFloat(Value, Value, Value),
     MulFloat(Value, Value, Value),
     DivFloat(Value, Value, Value),
-    ShiftRight(Value, Value, i32),
+    ShiftRightImm(Value, Value, i32),
     AndImm(Value, Value, i32),
+    ShiftLeft(Value, Value, Value),
+    ShiftRight(Value, Value, Value),
+    ShiftRightZero(Value, Value, Value),
+    And(Value, Value, Value),
+    Or(Value, Value, Value),
+    Xor(Value, Value, Value),
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -182,6 +188,24 @@ impl Instruction {
             Instruction::Div(a, b, c) => {
                 get_registers!(a, b, c)
             }
+            Instruction::ShiftLeft(a, b, c) => {
+                get_registers!(a, b, c)
+            }
+            Instruction::ShiftRight(a, b, c) => {
+                get_registers!(a, b, c)
+            }
+            Instruction::ShiftRightZero(a, b, c) => {
+                get_registers!(a, b, c)
+            }
+            Instruction::And(a, b, c) => {
+                get_registers!(a, b, c)
+            }
+            Instruction::Or(a, b, c) => {
+                get_registers!(a, b, c)
+            }
+            Instruction::Xor(a, b, c) => {
+                get_registers!(a, b, c)
+            }
             Instruction::Assign(a, b) => {
                 get_registers!(a, b)
             }
@@ -209,7 +233,7 @@ impl Instruction {
             Instruction::DivFloat(a, b, c) => {
                 get_registers!(a, b, c)
             }
-            Instruction::ShiftRight(a, b, _) => {
+            Instruction::ShiftRightImm(a, b, _) => {
                 get_registers!(a, b)
             }
             Instruction::AndImm(a, b, _) => {
@@ -621,17 +645,82 @@ impl Ir {
             .push(Instruction::JumpIf(label, condition, a.into(), b.into()));
     }
 
-    pub fn shift_right(&mut self, a: Value, b: i32) -> Value {
+    pub fn shift_right_imm(&mut self, a: Value, b: i32) -> Value {
+        let a = self.assign_new(a);
         let destination = self.volatile_register();
         self.instructions
-            .push(Instruction::ShiftRight(destination.into(), a, b));
+            .push(Instruction::ShiftRightImm(destination.into(), a.into(), b));
         destination.into()
     }
 
     pub fn and_imm(&mut self, a: Value, b: i32) -> Value {
+        let a = self.assign_new(a);
         let destination = self.volatile_register();
         self.instructions
-            .push(Instruction::AndImm(destination.into(), a, b));
+            .push(Instruction::AndImm(destination.into(), a.into(), b));
+        destination.into()
+    }
+
+    pub fn shift_left(&mut self, a: Value, b: Value) -> Value {
+        let a = self.assign_new(a);
+        let b = self.assign_new(b);
+        let destination = self.volatile_register();
+        self.instructions.push(Instruction::ShiftLeft(
+            destination.into(),
+            a.into(),
+            b.into(),
+        ));
+        destination.into()
+    }
+
+    pub fn shift_right(&mut self, a: Value, b: Value) -> Value {
+        let a = self.assign_new(a);
+        let b = self.assign_new(b);
+        let destination = self.volatile_register();
+        self.instructions.push(Instruction::ShiftRight(
+            destination.into(),
+            a.into(),
+            b.into(),
+        ));
+        destination.into()
+    }
+
+    pub fn shift_right_zero(&mut self, a: Value, b: Value) -> Value {
+        let a = self.assign_new(a);
+        let b = self.assign_new(b);
+        let destination = self.volatile_register();
+        self.instructions.push(Instruction::ShiftRightZero(
+            destination.into(),
+            a.into(),
+            b.into(),
+        ));
+        destination.into()
+    }
+
+    pub fn bitwise_and(&mut self, a: Value, b: Value) -> Value {
+        let a = self.assign_new(a);
+        let b = self.assign_new(b);
+        let destination = self.volatile_register();
+        self.instructions
+            .push(Instruction::And(destination.into(), a.into(), b.into()));
+        destination.into()
+    }
+
+    pub fn bitwise_or(&mut self, a: Value, b: Value) -> Value {
+        let a = self.assign_new(a);
+        let b = self.assign_new(b);
+        let destination = self.volatile_register();
+        self.instructions
+            .push(Instruction::Or(destination.into(), a.into(), b.into()));
+        destination.into()
+    }
+
+    pub fn bitwise_xor(&mut self, a: Value, b: Value) -> Value {
+        let a = self.assign_new(a);
+        let b = self.assign_new(b);
+        let destination = self.volatile_register();
+        self.instructions
+            .push(Instruction::Xor(destination.into(), a.into(), b.into()));
         destination.into()
     }
 
@@ -834,15 +923,13 @@ impl Ir {
 
                     lang.guard_integer(dest, a, self.after_return);
                     lang.guard_integer(dest, b, self.after_return);
-                    // TODO: I should instead use another register. But I can't mutate
-                    // things here. The other option is to put this in the Ir.
-                    // Which might be a good idea, but I don't love it.
-                    lang.shift_right(a, a, BuiltInTypes::tag_size());
-                    lang.shift_right(b, b, BuiltInTypes::tag_size());
+
+                    lang.shift_right_imm(a, a, BuiltInTypes::tag_size());
+                    lang.shift_right_imm(b, b, BuiltInTypes::tag_size());
                     lang.sub(dest, a, b);
-                    lang.shift_left(dest, dest, BuiltInTypes::tag_size());
-                    lang.shift_left(a, a, BuiltInTypes::tag_size());
-                    lang.shift_left(b, b, BuiltInTypes::tag_size());
+                    lang.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
+                    lang.shift_left_imm(a, a, BuiltInTypes::tag_size());
+                    lang.shift_left_imm(b, b, BuiltInTypes::tag_size());
                 }
                 Instruction::AddInt(dest, a, b) => {
                     let a = a.try_into().unwrap();
@@ -865,12 +952,12 @@ impl Ir {
                     lang.guard_integer(dest, a, self.after_return);
                     lang.guard_integer(dest, b, self.after_return);
 
-                    lang.shift_right(a, a, BuiltInTypes::tag_size());
-                    lang.shift_right(b, b, BuiltInTypes::tag_size());
+                    lang.shift_right_imm(a, a, BuiltInTypes::tag_size());
+                    lang.shift_right_imm(b, b, BuiltInTypes::tag_size());
                     lang.mul(dest, a, b);
-                    lang.shift_left(dest, dest, BuiltInTypes::tag_size());
-                    lang.shift_left(a, a, BuiltInTypes::tag_size());
-                    lang.shift_left(b, b, BuiltInTypes::tag_size());
+                    lang.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
+                    lang.shift_left_imm(a, a, BuiltInTypes::tag_size());
+                    lang.shift_left_imm(b, b, BuiltInTypes::tag_size());
                 }
                 Instruction::Div(dest, a, b) => {
                     let a = a.try_into().unwrap();
@@ -883,19 +970,22 @@ impl Ir {
                     lang.guard_integer(dest, a, self.after_return);
                     lang.guard_integer(dest, b, self.after_return);
 
-                    lang.shift_right(a, a, BuiltInTypes::tag_size());
-                    lang.shift_right(b, b, BuiltInTypes::tag_size());
+                    lang.shift_right_imm(a, a, BuiltInTypes::tag_size());
+                    lang.shift_right_imm(b, b, BuiltInTypes::tag_size());
                     lang.div(dest, a, b);
-                    lang.shift_left(dest, dest, BuiltInTypes::tag_size());
-                    lang.shift_left(a, a, BuiltInTypes::tag_size());
-                    lang.shift_left(b, b, BuiltInTypes::tag_size());
+                    lang.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
+                    lang.shift_left_imm(a, a, BuiltInTypes::tag_size());
+                    lang.shift_left_imm(b, b, BuiltInTypes::tag_size());
                 }
-                Instruction::ShiftRight(dest, value, shift) => {
+                Instruction::ShiftRightImm(dest, value, shift) => {
                     let value = value.try_into().unwrap();
                     let value = alloc.allocate_register(index, value, lang);
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, lang);
-                    lang.shift_right(dest, value, *shift);
+
+                    lang.guard_integer(dest, value, self.after_return);
+
+                    lang.shift_right_imm(dest, value, *shift);
                 }
                 Instruction::AndImm(dest, value, imm) => {
                     let value = value.try_into().unwrap();
@@ -903,6 +993,87 @@ impl Ir {
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, lang);
                     lang.and_imm(dest, value, *imm);
+                }
+                Instruction::ShiftLeft(dest, a, b) => {
+                    let a = a.try_into().unwrap();
+                    let a = alloc.allocate_register(index, a, lang);
+                    let b = b.try_into().unwrap();
+                    let b = alloc.allocate_register(index, b, lang);
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, lang);
+
+                    lang.guard_integer(dest, a, self.after_return);
+                    lang.guard_integer(dest, b, self.after_return);
+
+                    lang.shift_right_imm(a, a, BuiltInTypes::tag_size());
+                    lang.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    lang.shift_left(dest, a, b);
+                    lang.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
+                    lang.shift_left_imm(a, a, BuiltInTypes::tag_size());
+                    lang.shift_left_imm(b, b, BuiltInTypes::tag_size());
+                }
+                Instruction::ShiftRight(dest, a, b) => {
+                    let a = a.try_into().unwrap();
+                    let a = alloc.allocate_register(index, a, lang);
+                    let b = b.try_into().unwrap();
+                    let b = alloc.allocate_register(index, b, lang);
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, lang);
+
+                    lang.guard_integer(dest, a, self.after_return);
+                    lang.guard_integer(dest, b, self.after_return);
+
+                    lang.shift_right_imm(a, a, BuiltInTypes::tag_size());
+                    lang.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    lang.shift_right(dest, a, b);
+                    lang.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
+                    lang.shift_left_imm(a, a, BuiltInTypes::tag_size());
+                    lang.shift_left_imm(b, b, BuiltInTypes::tag_size());
+                }
+                Instruction::ShiftRightZero(dest, a, b) => {
+                    let a = a.try_into().unwrap();
+                    let a = alloc.allocate_register(index, a, lang);
+                    let b = b.try_into().unwrap();
+                    let b = alloc.allocate_register(index, b, lang);
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, lang);
+
+                    lang.guard_integer(dest, a, self.after_return);
+                    lang.guard_integer(dest, b, self.after_return);
+
+                    lang.shift_right_imm(a, a, BuiltInTypes::tag_size());
+                    lang.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    lang.shift_right_zero(dest, a, b);
+                    lang.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
+                    lang.shift_left_imm(a, a, BuiltInTypes::tag_size());
+                    lang.shift_left_imm(b, b, BuiltInTypes::tag_size());
+                }
+                Instruction::And(dest, a, b) => {
+                    let a = a.try_into().unwrap();
+                    let a = alloc.allocate_register(index, a, lang);
+                    let b = b.try_into().unwrap();
+                    let b = alloc.allocate_register(index, b, lang);
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, lang);
+                    lang.and(dest, a, b);
+                }
+                Instruction::Or(dest, a, b) => {
+                    let a = a.try_into().unwrap();
+                    let a = alloc.allocate_register(index, a, lang);
+                    let b = b.try_into().unwrap();
+                    let b = alloc.allocate_register(index, b, lang);
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, lang);
+                    lang.or(dest, a, b);
+                }
+                Instruction::Xor(dest, a, b) => {
+                    let a: VirtualRegister = a.try_into().unwrap();
+                    let a = alloc.allocate_register(index, a, lang);
+                    let b = b.try_into().unwrap();
+                    let b = alloc.allocate_register(index, b, lang);
+                    let dest = dest.try_into().unwrap();
+                    let dest = alloc.allocate_register(index, dest, lang);
+                    lang.xor(dest, a, b);
                 }
                 Instruction::GuardInt(dest, value, label) => {
                     let value = value.try_into().unwrap();
@@ -1136,7 +1307,7 @@ impl Ir {
                     // or unmasking or anything. Just straight up calling it
                     let function =
                         alloc.allocate_register(index, function.try_into().unwrap(), lang);
-                    lang.shift_right(function, function, BuiltInTypes::tag_size());
+                    lang.shift_right_imm(function, function, BuiltInTypes::tag_size());
                     if *builtin {
                         lang.call_builtin(function);
                     } else {
@@ -1310,7 +1481,7 @@ impl Ir {
                     lang.mov_64(mask_register, *mask as isize);
                     lang.and(dest, dest, mask_register);
                     lang.free_register(mask_register);
-                    lang.shift_left(val, val, (byte_offset * 8) as i32);
+                    lang.shift_left_imm(val, val, (byte_offset * 8) as i32);
                     lang.or(dest, dest, val);
                     lang.store_on_heap(ptr, dest, *offset as i32);
                     lang.free_register(dest);
@@ -1375,7 +1546,7 @@ impl Ir {
                     let value = alloc.allocate_register(index, value, lang);
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, lang);
-                    lang.shift_right(dest, value, BuiltInTypes::tag_size());
+                    lang.shift_right_imm(dest, value, BuiltInTypes::tag_size());
                 }
             }
         }

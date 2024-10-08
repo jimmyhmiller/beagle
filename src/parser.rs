@@ -36,6 +36,12 @@ pub enum Token {
     True,
     False,
     Null,
+    ShiftRight,
+    ShiftRightZero,
+    ShiftLeft,
+    BitWiseAnd,
+    BitWiseOr,
+    BitWiseXor,
     Let,
     Struct,
     Enum,
@@ -65,6 +71,12 @@ impl Token {
             | Token::Minus
             | Token::Mul
             | Token::Div
+            | Token::ShiftRight
+            | Token::ShiftRightZero
+            | Token::ShiftLeft
+            | Token::BitWiseAnd
+            | Token::BitWiseOr
+            | Token::BitWiseXor
             | Token::Dot => true,
             _ => false,
         }
@@ -250,6 +262,12 @@ impl Tokenizer {
             b"-" => Token::Minus,
             b"*" => Token::Mul,
             b"/" => Token::Div,
+            b">>" => Token::ShiftRight,
+            b">>>" => Token::ShiftRightZero,
+            b"<<" => Token::ShiftLeft,
+            b"&" => Token::BitWiseAnd,
+            b"|" => Token::BitWiseOr,
+            b"^" => Token::BitWiseXor,
             b"true" => Token::True,
             b"false" => Token::False,
             b"null" => Token::Null,
@@ -1088,6 +1106,30 @@ impl Parser {
                 left: Box::new(lhs),
                 right: Box::new(rhs),
             },
+            Token::ShiftLeft => Ast::ShiftLeft {
+                left: Box::new(lhs),
+                right: Box::new(rhs),
+            },
+            Token::ShiftRight => Ast::ShiftRight {
+                left: Box::new(lhs),
+                right: Box::new(rhs),
+            },
+            Token::ShiftRightZero => Ast::ShiftRightZero {
+                left: Box::new(lhs),
+                right: Box::new(rhs),
+            },
+            Token::BitWiseAnd => Ast::BitWiseAnd {
+                left: Box::new(lhs),
+                right: Box::new(rhs),
+            },
+            Token::BitWiseOr => Ast::BitWiseOr {
+                left: Box::new(lhs),
+                right: Box::new(rhs),
+            },
+            Token::BitWiseXor => Ast::BitWiseXor {
+                left: Box::new(lhs),
+                right: Box::new(rhs),
+            },
             Token::Dot => {
                 assert!(matches!(rhs, Ast::Identifier(_)));
                 let rhs = match rhs {
@@ -1117,7 +1159,7 @@ impl Parser {
                     }
                 }
             }
-            _ => panic!("Not a binary operator"),
+            _ => panic!("Exepcted binary op got {:?}", current_token),
         }
     }
 

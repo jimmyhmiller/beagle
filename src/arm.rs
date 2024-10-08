@@ -83,7 +83,7 @@ pub fn div(destination: Register, a: Register, b: Register) -> ArmAsm {
     }
 }
 
-fn shift_right(destination: Register, a: Register, b: i32) -> ArmAsm {
+fn shift_right_imm(destination: Register, a: Register, b: i32) -> ArmAsm {
     ArmAsm::LsrUbfm {
         sf: destination.sf(),
         rn: a,
@@ -94,7 +94,7 @@ fn shift_right(destination: Register, a: Register, b: i32) -> ArmAsm {
     }
 }
 
-fn shift_left(destination: Register, a: Register, b: i32) -> ArmAsm {
+fn shift_left_imm(destination: Register, a: Register, b: i32) -> ArmAsm {
     let immr = 64 - b;
     ArmAsm::LslUbfm {
         sf: destination.sf(),
@@ -103,6 +103,44 @@ fn shift_left(destination: Register, a: Register, b: i32) -> ArmAsm {
         n: destination.sf(),
         immr,
         imms: immr - 1,
+    }
+}
+
+fn shift_left(dest: Register, a: Register, b: Register) -> ArmAsm {
+    ArmAsm::LslLslv {
+        sf: dest.sf(),
+        rm: b,
+        rn: a,
+        rd: dest,
+    }
+}
+
+fn shift_right(dest: Register, a: Register, b: Register) -> ArmAsm {
+    ArmAsm::AsrAsrv {
+        sf: dest.sf(),
+        rm: b,
+        rn: a,
+        rd: dest,
+    }
+}
+
+fn xor(dest: Register, a: Register, b: Register) -> ArmAsm {
+    ArmAsm::EorLogShift {
+        sf: dest.sf(),
+        shift: 0,
+        rm: b,
+        rn: a,
+        rd: dest,
+        imm6: 0,
+    }
+}
+
+fn shift_right_zero(dest: Register, a: Register, b: Register) -> ArmAsm {
+    ArmAsm::LsrLsrv {
+        sf: dest.sf(),
+        rm: b,
+        rn: a,
+        rd: dest,
     }
 }
 
@@ -246,7 +284,7 @@ pub fn get_tag(destination: Register, value: Register) -> ArmAsm {
 
 pub fn tag_value(destination: Register, value: Register, tag: Register) -> Vec<ArmAsm> {
     vec![
-        shift_left(destination, value, BuiltInTypes::tag_size()),
+        shift_left_imm(destination, value, BuiltInTypes::tag_size()),
         or(destination, destination, tag),
     ]
 }
@@ -514,11 +552,11 @@ impl LowLevelArm {
     pub fn div(&mut self, destination: Register, a: Register, b: Register) {
         self.instructions.push(div(destination, a, b));
     }
-    pub fn shift_right(&mut self, destination: Register, a: Register, b: i32) {
-        self.instructions.push(shift_right(destination, a, b));
+    pub fn shift_right_imm(&mut self, destination: Register, a: Register, b: i32) {
+        self.instructions.push(shift_right_imm(destination, a, b));
     }
-    pub fn shift_left(&mut self, destination: Register, a: Register, b: i32) {
-        self.instructions.push(shift_left(destination, a, b));
+    pub fn shift_left_imm(&mut self, destination: Register, a: Register, b: i32) {
+        self.instructions.push(shift_left_imm(destination, a, b));
     }
     pub fn and_imm(&mut self, destination: Register, a: Register, b: i32) {
         self.instructions.push(and_imm(destination, a, b));
@@ -528,6 +566,18 @@ impl LowLevelArm {
     }
     pub fn or(&mut self, destination: Register, a: Register, b: Register) {
         self.instructions.push(or(destination, a, b));
+    }
+    pub fn shift_left(&mut self, dest: Register, a: Register, b: Register) {
+        self.instructions.push(shift_left(dest, a, b));
+    }
+    pub fn shift_right(&mut self, dest: Register, a: Register, b: Register) {
+        self.instructions.push(shift_right(dest, a, b));
+    }
+    pub fn xor(&mut self, dest: Register, a: Register, b: Register) {
+        self.instructions.push(xor(dest, a, b));
+    }
+    pub fn shift_right_zero(&mut self, dest: Register, a: Register, b: Register) {
+        self.instructions.push(shift_right_zero(dest, a, b));
     }
     pub fn ret(&mut self) {
         self.instructions.push(ret());
