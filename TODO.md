@@ -1,3 +1,4 @@
+* Negative Numbers
 * I think I should probably make namespaces not be a rust construct, but actually defined in the language. Meaning that namespaces would be normal heap objects. This would make gc much easier, as they wouldn't need to be so much of a special case. We might want to be able to say that they are objects that should go in the old generation or permanent or whatever. But having to have them be all separate is a bit awkward.
 * I've got some problem with enum and registers...
 * Need else if

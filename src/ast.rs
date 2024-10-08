@@ -100,6 +100,30 @@ pub enum Ast {
         library_name: String,
         alias: Box<Ast>,
     },
+    ShiftLeft {
+        left: Box<Ast>,
+        right: Box<Ast>,
+    },
+    ShiftRight {
+        left: Box<Ast>,
+        right: Box<Ast>,
+    },
+    ShiftRightZero {
+        left: Box<Ast>,
+        right: Box<Ast>,
+    },
+    BitWiseAnd {
+        left: Box<Ast>,
+        right: Box<Ast>,
+    },
+    BitWiseOr {
+        left: Box<Ast>,
+        right: Box<Ast>,
+    },
+    BitWiseXor {
+        left: Box<Ast>,
+        right: Box<Ast>,
+    },
 }
 
 impl Ast {
@@ -631,6 +655,48 @@ impl<'a> AstCompiler<'a> {
                 self.not_tail_position();
                 let right = self.call_compile(&right);
                 self.ir.div_any(left, right)
+            }
+            Ast::ShiftLeft { left, right } => {
+                self.not_tail_position();
+                let left = self.call_compile(&left);
+                self.not_tail_position();
+                let right = self.call_compile(&right);
+                self.ir.shift_left(left, right)
+            }
+            Ast::ShiftRight { left, right } => {
+                self.not_tail_position();
+                let left = self.call_compile(&left);
+                self.not_tail_position();
+                let right = self.call_compile(&right);
+                self.ir.shift_right(left, right)
+            }
+            Ast::ShiftRightZero { left, right } => {
+                self.not_tail_position();
+                let left = self.call_compile(&left);
+                self.not_tail_position();
+                let right = self.call_compile(&right);
+                self.ir.shift_right_zero(left, right)
+            }
+            Ast::BitWiseAnd { left, right } => {
+                self.not_tail_position();
+                let left = self.call_compile(&left);
+                self.not_tail_position();
+                let right = self.call_compile(&right);
+                self.ir.bitwise_and(left, right)
+            }
+            Ast::BitWiseOr { left, right } => {
+                self.not_tail_position();
+                let left = self.call_compile(&left);
+                self.not_tail_position();
+                let right = self.call_compile(&right);
+                self.ir.bitwise_or(left, right)
+            }
+            Ast::BitWiseXor { left, right } => {
+                self.not_tail_position();
+                let left = self.call_compile(&left);
+                self.not_tail_position();
+                let right = self.call_compile(&right);
+                self.ir.bitwise_xor(left, right)
             }
             Ast::Recurse { args } | Ast::TailRecurse { args } => {
                 let args = args

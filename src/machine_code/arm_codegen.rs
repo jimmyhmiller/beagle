@@ -359,6 +359,18 @@ pub enum ArmAsm {
         rn: Register,
         rt: Register,
     },
+    /// LSL (register) -- A64
+    /// Logical Shift Left (register)
+    /// LSL  <Wd>, <Wn>, <Wm>
+    /// LSLV <Wd>, <Wn>, <Wm>
+    /// LSL  <Xd>, <Xn>, <Xm>
+    /// LSLV <Xd>, <Xn>, <Xm>
+    LslLslv {
+        sf: i32,
+        rm: Register,
+        rn: Register,
+        rd: Register,
+    },
     /// LSL (immediate) -- A64
     /// Logical Shift Left (immediate)
     /// LSL  <Wd>, <Wn>, #<shift>
@@ -384,6 +396,42 @@ pub enum ArmAsm {
         n: i32,
         immr: i32,
         imms: i32,
+        rn: Register,
+        rd: Register,
+    },
+    /// LSR (register) -- A64
+    /// Logical Shift Right (register)
+    /// LSR  <Wd>, <Wn>, <Wm>
+    /// LSRV <Wd>, <Wn>, <Wm>
+    /// LSR  <Xd>, <Xn>, <Xm>
+    /// LSRV <Xd>, <Xn>, <Xm>
+    LsrLsrv {
+        sf: i32,
+        rm: Register,
+        rn: Register,
+        rd: Register,
+    },
+    /// ASR (register) -- A64
+    /// Arithmetic Shift Right (register)
+    /// ASR  <Wd>, <Wn>, <Wm>
+    /// ASRV <Wd>, <Wn>, <Wm>
+    /// ASR  <Xd>, <Xn>, <Xm>
+    /// ASRV <Xd>, <Xn>, <Xm>
+    AsrAsrv {
+        sf: i32,
+        rm: Register,
+        rn: Register,
+        rd: Register,
+    },
+    /// EOR (shifted register) -- A64
+    /// Bitwise Exclusive OR (shifted register)
+    /// EOR  <Wd>, <Wn>, <Wm>{, <shift> #<amount>}
+    /// EOR  <Xd>, <Xn>, <Xm>{, <shift> #<amount>}
+    EorLogShift {
+        sf: i32,
+        shift: i32,
+        rm: Register,
+        imm6: i32,
         rn: Register,
         rd: Register,
     },
@@ -861,6 +909,20 @@ impl ArmAsm {
                     | rn << 5
                     | rt << 0
             }
+            ArmAsm::LsrLsrv { sf, rm, rn, rd } => {
+                0b0_0_0_11010110_00000_0010_01_00000_00000
+                    | (*sf as u32) << 31
+                    | rm << 16
+                    | rn << 5
+                    | rd << 0
+            }
+            ArmAsm::AsrAsrv { sf, rm, rn, rd } => {
+                0b0_0_0_11010110_00000_0010_10_00000_00000
+                    | (*sf as u32) << 31
+                    | rm << 16
+                    | rn << 5
+                    | rd << 0
+            }
             ArmAsm::LslUbfm {
                 sf,
                 n,
@@ -877,6 +939,13 @@ impl ArmAsm {
                     | rn << 5
                     | rd << 0
             }
+            ArmAsm::LslLslv { sf, rm, rn, rd } => {
+                0b0_0_0_11010110_00000_0010_00_00000_00000
+                    | (*sf as u32) << 31
+                    | rm << 16
+                    | rn << 5
+                    | rd << 0
+            }
             ArmAsm::LsrUbfm {
                 sf,
                 n,
@@ -890,6 +959,22 @@ impl ArmAsm {
                     | (*n as u32) << 22
                     | (*immr as u32) << 16
                     | (*imms as u32) << 10
+                    | rn << 5
+                    | rd << 0
+            }
+            ArmAsm::EorLogShift {
+                sf,
+                shift,
+                rm,
+                imm6,
+                rn,
+                rd,
+            } => {
+                0b0_10_01010_00_0_00000_000000_00000_00000
+                    | (*sf as u32) << 31
+                    | (*shift as u32) << 22
+                    | rm << 16
+                    | truncate_imm::<_, 6>(*imm6) << 10
                     | rn << 5
                     | rd << 0
             }
