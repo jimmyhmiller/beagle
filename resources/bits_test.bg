@@ -1,4 +1,5 @@
 namespace bits_test
+import "beagle.primitive" as primitive
 
 fn main() {
     println(5 & 3);
@@ -10,8 +11,8 @@ fn main() {
     println(16 >> 2);
     println(16 << 2);
     println(16 >>> 2);
-    // println(-16 >> 2);
-    // println(-16 >>> 2);
+    println(-16 >> 2);
+    println(-16 >>> 2);
     "done"
 }
 
@@ -25,4 +26,6 @@ fn main() {
 // 4
 // 64
 // 4
+// -4
+// 1073741820
 // done

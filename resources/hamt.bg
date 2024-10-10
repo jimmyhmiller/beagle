@@ -1,0 +1,22 @@
+namespace hamt
+
+struct PersistentVector {
+    count
+    shift
+    root
+    tail
+}
+
+let EMPTY = PersistentVector(0, 5, None, None)
+
+fn tailOffset() {
+    if self.count < 32 {
+        0
+    } else {
+        ((self.count - 1) >>> 5) << 5
+    }
+}
+
+fn get(index) {
+    // I need to implement ||
+}

@@ -688,10 +688,7 @@ impl Compiler {
         let tag = BuiltInTypes::get_kind(value);
         match tag {
             BuiltInTypes::Null => Some("null".to_string()),
-            BuiltInTypes::Int => {
-                let value = BuiltInTypes::untag(value);
-                Some(value.to_string())
-            }
+            BuiltInTypes::Int => Some(BuiltInTypes::untag_isize(value as isize).to_string()),
             BuiltInTypes::Float => {
                 let value = BuiltInTypes::untag(value);
                 let value = value as *const f64;

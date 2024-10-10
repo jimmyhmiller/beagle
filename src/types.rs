@@ -42,6 +42,10 @@ impl BuiltInTypes {
         pointer >> 3
     }
 
+    pub fn untag_isize(pointer: isize) -> isize {
+        pointer >> 3
+    }
+
     pub fn get_kind(pointer: usize) -> Self {
         if pointer == Self::null_value() as usize {
             return BuiltInTypes::Null;
