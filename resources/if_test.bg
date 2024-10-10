@@ -1,0 +1,65 @@
+namespace if_test
+
+fn side_effect() {
+    println("side effect")
+    true
+}
+
+
+fn main() {
+    if true {
+        println(1)
+    }
+
+    if false {
+        println(false)
+    } else {
+        println(2)
+    }
+
+    if true && true {
+        println(3)
+    }
+
+    if true && false {
+        println(false)
+    } else {
+        println(4)
+    }
+
+    if false && true {
+        println(false)
+    } else {
+        println(5)
+    }
+
+    if true || true {
+        println(6)
+    }
+
+    if true || false {
+        println(7)
+    }
+
+    if false || true {
+        println(8)
+    }
+
+    if false || false {
+        println(false)
+    } else {
+        println(9)
+    }
+
+    if true || side_effect() {
+        println(10)
+    }
+
+    if false && side_effect() {
+        println(false)
+    } else {
+        println(11)
+    }
+
+}
+

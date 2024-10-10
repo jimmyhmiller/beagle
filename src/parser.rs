@@ -42,6 +42,7 @@ pub enum Token {
     BitWiseAnd,
     BitWiseOr,
     BitWiseXor,
+    Or,
     Let,
     Struct,
     Enum,
@@ -57,6 +58,7 @@ pub enum Token {
     Namespace,
     Import,
     As,
+    And,
 }
 impl Token {
     fn is_binary_operator(&self) -> bool {
@@ -77,6 +79,8 @@ impl Token {
             | Token::BitWiseAnd
             | Token::BitWiseOr
             | Token::BitWiseXor
+            | Token::Or
+            | Token::And
             | Token::Dot => true,
             _ => false,
         }
@@ -275,6 +279,8 @@ impl Tokenizer {
             b"&" => Token::BitWiseAnd,
             b"|" => Token::BitWiseOr,
             b"^" => Token::BitWiseXor,
+            b"||" => Token::Or,
+            b"&&" => Token::And,
             b"true" => Token::True,
             b"false" => Token::False,
             b"null" => Token::Null,
@@ -469,7 +475,7 @@ impl Parser {
             | Token::NotEqual
             | Token::GreaterThan
             | Token::GreaterThanOrEqual => (10, Associativity::Left),
-            Token::Plus | Token::Minus => (20, Associativity::Left),
+            Token::Plus | Token::Minus | Token::And | Token::Or => (20, Associativity::Left),
             Token::Mul | Token::Div => (30, Associativity::Left),
             // TODO: No idea what this should be
             Token::Dot => (40, Associativity::Left),
@@ -1134,6 +1140,14 @@ impl Parser {
                 right: Box::new(rhs),
             },
             Token::BitWiseXor => Ast::BitWiseXor {
+                left: Box::new(lhs),
+                right: Box::new(rhs),
+            },
+            Token::Or => Ast::Or {
+                left: Box::new(lhs),
+                right: Box::new(rhs),
+            },
+            Token::And => Ast::And {
                 left: Box::new(lhs),
                 right: Box::new(rhs),
             },
