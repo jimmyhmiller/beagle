@@ -84,7 +84,7 @@ pub fn div(destination: Register, a: Register, b: Register) -> ArmAsm {
 }
 
 fn shift_right_imm(destination: Register, a: Register, b: i32) -> ArmAsm {
-    ArmAsm::LsrUbfm {
+    ArmAsm::AsrSbfm {
         sf: destination.sf(),
         rn: a,
         rd: destination,
@@ -136,7 +136,7 @@ fn xor(dest: Register, a: Register, b: Register) -> ArmAsm {
 }
 
 fn shift_right_zero(dest: Register, a: Register, b: Register) -> ArmAsm {
-    ArmAsm::LsrLsrv {
+    ArmAsm::AsrAsrv {
         sf: dest.sf(),
         rm: b,
         rn: a,
@@ -246,8 +246,8 @@ impl TryFrom<u64> for BitmaskImmediate {
     }
 }
 
-pub fn and_imm(destination: Register, a: Register, b: i32) -> ArmAsm {
-    let immediate: Result<BitmaskImmediate, _> = (b as u64).try_into();
+pub fn and_imm(destination: Register, a: Register, b: u64) -> ArmAsm {
+    let immediate: Result<BitmaskImmediate, _> = (b).try_into();
     let immediate = immediate.unwrap();
 
     ArmAsm::AndLogImm {
@@ -558,7 +558,7 @@ impl LowLevelArm {
     pub fn shift_left_imm(&mut self, destination: Register, a: Register, b: i32) {
         self.instructions.push(shift_left_imm(destination, a, b));
     }
-    pub fn and_imm(&mut self, destination: Register, a: Register, b: i32) {
+    pub fn and_imm(&mut self, destination: Register, a: Register, b: u64) {
         self.instructions.push(and_imm(destination, a, b));
     }
     pub fn and(&mut self, destination: Register, a: Register, b: Register) {

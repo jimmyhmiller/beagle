@@ -122,7 +122,7 @@ pub enum Instruction {
     MulFloat(Value, Value, Value),
     DivFloat(Value, Value, Value),
     ShiftRightImm(Value, Value, i32),
-    AndImm(Value, Value, i32),
+    AndImm(Value, Value, u64),
     ShiftLeft(Value, Value, Value),
     ShiftRight(Value, Value, Value),
     ShiftRightZero(Value, Value, Value),
@@ -653,7 +653,7 @@ impl Ir {
         destination.into()
     }
 
-    pub fn and_imm(&mut self, a: Value, b: i32) -> Value {
+    pub fn and_imm(&mut self, a: Value, b: u64) -> Value {
         let a = self.assign_new(a);
         let destination = self.volatile_register();
         self.instructions
@@ -949,6 +949,7 @@ impl Ir {
                     let dest = dest.try_into().unwrap();
                     let dest = alloc.allocate_register(index, dest, lang);
 
+                    // lang.breakpoint();
                     lang.guard_integer(dest, a, self.after_return);
                     lang.guard_integer(dest, b, self.after_return);
 
@@ -1043,6 +1044,7 @@ impl Ir {
 
                     lang.shift_right_imm(a, a, BuiltInTypes::tag_size());
                     lang.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    lang.and_imm(a, a, 0xFFFFFFFF);
                     lang.shift_right_zero(dest, a, b);
                     lang.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
                     lang.shift_left_imm(a, a, BuiltInTypes::tag_size());

@@ -423,6 +423,20 @@ pub enum ArmAsm {
         rn: Register,
         rd: Register,
     },
+    /// ASR (immediate) -- A64
+    /// Arithmetic Shift Right (immediate)
+    /// ASR  <Wd>, <Wn>, #<shift>
+    /// SBFM <Wd>, <Wn>, #<shift>, #31
+    /// ASR  <Xd>, <Xn>, #<shift>
+    /// SBFM <Xd>, <Xn>, #<shift>, #63
+    AsrSbfm {
+        sf: i32,
+        n: i32,
+        immr: i32,
+        imms: i32,
+        rn: Register,
+        rd: Register,
+    },
     /// EOR (shifted register) -- A64
     /// Bitwise Exclusive OR (shifted register)
     /// EOR  <Wd>, <Wn>, <Wm>{, <shift> #<amount>}
@@ -920,6 +934,22 @@ impl ArmAsm {
                 0b0_0_0_11010110_00000_0010_10_00000_00000
                     | (*sf as u32) << 31
                     | rm << 16
+                    | rn << 5
+                    | rd << 0
+            }
+            ArmAsm::AsrSbfm {
+                sf,
+                n,
+                immr,
+                imms,
+                rn,
+                rd,
+            } => {
+                0b0_00_100110_0_000000_000000_00000_00000
+                    | (*sf as u32) << 31
+                    | (*n as u32) << 22
+                    | (*immr as u32) << 16
+                    | (*imms as u32) << 10
                     | rn << 5
                     | rd << 0
             }

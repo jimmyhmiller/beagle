@@ -97,6 +97,7 @@ static DOUBLE_QUOTE: u8 = b'"';
 static OPEN_PAREN: u8 = b'(';
 static CLOSE_PAREN: u8 = b')';
 static PERIOD: u8 = b'.';
+static NEGATIVE: u8 = b'-';
 
 #[derive(Debug, Clone)]
 pub struct Tokenizer {
@@ -206,7 +207,13 @@ impl Tokenizer {
     }
 
     pub fn is_valid_number_char(&mut self, input_bytes: &[u8]) -> bool {
-        self.current_byte(input_bytes) >= ZERO && self.current_byte(input_bytes) <= NINE
+        (self.current_byte(input_bytes) >= ZERO && self.current_byte(input_bytes) <= NINE)
+            || (self.current_byte(input_bytes) == PERIOD
+                && self.peek(input_bytes).unwrap() >= ZERO
+                && self.peek(input_bytes).unwrap() <= NINE)
+            || (self.current_byte(input_bytes) == NEGATIVE
+                && self.peek(input_bytes).unwrap() >= ZERO
+                && self.peek(input_bytes).unwrap() <= NINE)
     }
 
     pub fn parse_number(&mut self, input_bytes: &[u8]) -> Token {
@@ -820,7 +827,7 @@ impl Parser {
         if self.is_close_paren() {
             self.consume();
         } else {
-            panic!("Expected close paren");
+            panic!("Expected close paren got {:?}", self.current_token());
         }
     }
 
