@@ -42,8 +42,6 @@ fn new_array(size) {
     if size > 256 {
         primitive/panic("Size too large")
     }
-    print("Size:")
-    println(size)
     let array = allocate_array_unsafe(size)
     primitive/write_type_id(array, 1)
     array
@@ -158,6 +156,7 @@ fn main() {
 
 // Expect
 // 10
+// 0
 // [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
 // [ 42, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
 // 1
