@@ -1152,7 +1152,7 @@ impl Parser {
                 right: Box::new(rhs),
             },
             Token::Dot => {
-                assert!(matches!(rhs, Ast::Identifier(_)));
+                assert!(matches!(rhs, Ast::Identifier(_)), "Expected identifier got {:?}", rhs);
                 let rhs = match rhs {
                     Ast::Identifier(name) => Ast::Identifier(name),
                     _ => panic!("Not an identifier"),
@@ -1189,7 +1189,7 @@ impl Parser {
         if self.is_equal() {
             self.consume();
         } else {
-            panic!("Expected equal {:?}", self.get_token_repr());
+            panic!("Expected equal got {:?} on line {}", self.get_token_repr(), self.current_line);
         }
     }
 

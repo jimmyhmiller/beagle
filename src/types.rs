@@ -384,6 +384,11 @@ impl HeapObject {
         to_object.write_full_object(data);
     }
 
+    pub fn copy_object_except_header(&self, to_object: &mut HeapObject) {
+        let data = self.get_full_object_data();
+        to_object.write_fields(&data[Self::header_size()..]);
+    }
+
     pub fn get_pointer(&self) -> *const u8 {
         let untagged = self.untagged();
         untagged as *const u8
@@ -442,6 +447,13 @@ impl HeapObject {
         } else {
             panic!("Not tagged");
         }
+    }
+    
+    fn write_fields(&mut self, fields: &[u8])  {
+        let untagged = self.untagged();
+        let pointer = untagged as *mut u8;
+        let pointer = unsafe { pointer.add(Self::header_size()) };
+        unsafe { std::ptr::copy_nonoverlapping(fields.as_ptr(), pointer, fields.len()) };
     }
 }
 
