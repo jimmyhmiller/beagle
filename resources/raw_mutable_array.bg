@@ -42,6 +42,8 @@ fn new_array(size) {
     if size > 256 {
         primitive/panic("Size too large")
     }
+    print("Size:")
+    println(size)
     let array = allocate_array_unsafe(size)
     primitive/write_type_id(array, 1)
     array
@@ -57,6 +59,21 @@ fn copy_array(array) {
     new_array
 }
 
+
+fn unsafe_copy_from_array_to(from, to) {
+    builtin/copy_from_to_object(from, to)
+}
+
+fn copy_from_array_to(from, to) {
+    if count(from) > count(to) {
+        println(from)
+        println(to)
+        primitive/panic("Array from size must be less than or equal to array to size")
+    }
+    unsafe_copy_from_array_to(from, to)
+}
+
+
 fn allocate_array_and_return() {
     let example_struct = ExampleStruct {
         value: "Example Struct Value2"
@@ -64,6 +81,14 @@ fn allocate_array_and_return() {
     let array = new_array(1)
     write_field(array, 0, example_struct)
     array
+}
+
+fn count(array) {
+    if array == null {
+        0
+    } else {
+        primitive/size(array)
+    }
 }
 
 fn main() {
@@ -79,6 +104,10 @@ fn main() {
     primitive/write_field(array, 7, 8)
     primitive/write_field(array, 8, 9)
     primitive/write_field(array, 9, 10)
+
+
+    println(count(array))
+    println(count(null))
 
     let copied_array = copy_array(array)
     write_field(copied_array, 0, 42);
@@ -109,12 +138,26 @@ fn main() {
     println(array)
     println(my_array)
 
+
+    let my_small_array = new_array(1);
+    write_field(my_small_array, 0, 42)
+    
+    let my_larger_array = new_array(2);
+    write_field(my_larger_array, 0, 1)
+
+    copy_from_array_to(my_small_array, my_larger_array)
+    write_field(my_larger_array, 1, 44)
+    write_field(my_small_array, 0, 43)
+    println(my_small_array)
+    println(my_larger_array)
+
     read_field(array, 0)
     
     "done"
 }
 
 // Expect
+// 10
 // [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
 // [ 42, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
 // 1
@@ -124,4 +167,6 @@ fn main() {
 // [ ExampleStruct { value: Example Struct Value } ]
 // [ ExampleStruct { value: Example Struct Value } ]
 // [ ExampleStruct { value: Example Struct Value2 } ]
+// [ 43 ]
+// [ 42, 44 ]
 // done

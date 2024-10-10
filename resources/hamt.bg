@@ -1,7 +1,7 @@
 namespace hamt
-
 import "raw_mutable_array" as array
 import "beagle.primitive" as primitive
+
 
 struct PersistentVector {
     count
@@ -14,7 +14,7 @@ let EMPTY = PersistentVector {
     count: 0
     shift: 5
     root: null
-    tail: null
+    tail: array/new_array(0)
 }
 
 fn tailOffset(vec) {
@@ -25,15 +25,15 @@ fn tailOffset(vec) {
     }
 }
 
-
 fn get_node_at_level(node, index, level) {
     if level <= 0 {
         node
+    } else {
+        let sub_index = (index >>> level) & 31
+        let next_node = array/read_field(node, sub_index)
+        get_node_at_level(next_node, index, level - 5)
     }
-    let next_node = array/read_field(node (index >>> level) & 31)
-    get_node_at_level(next_node, index, level - 5)
 }
-
 
 fn get(vec, index) {
     if index < 0 || index >= vec.count {
@@ -41,7 +41,7 @@ fn get(vec, index) {
     }
 
     if index >= tailOffset(vec) {
-        array/read_field(vec.tail, index & 31) // 0x1f (hex literals?)
+        array/read_field(vec.tail, index & 31)
     } else {
         let node = get_node_at_level(vec.root, index, vec.shift)
         array/read_field(node, index & 31)
@@ -49,5 +49,139 @@ fn get(vec, index) {
 }
 
 fn push(vec, value) {
-   // TODO I need array count
+    if array/count(vec.tail) < 32 {
+        let new_tail = array/new_array(array/count(vec.tail) + 1)
+        println(array/count(vec.tail) + 1)
+        println(array/count(new_tail))
+        array/copy_from_array_to(vec.tail, new_tail)
+        array/write_field(new_tail, array/count(vec.tail), value)
+        PersistentVector {
+            count: vec.count + 1
+            shift: vec.shift
+            root: vec.root
+            tail: new_tail
+        }
+    } else {
+        let tail_node = vec.tail
+        let new_tail = array/new_array(1)
+        array/write_field(new_tail, 0, value)
+        let new_shift = vec.shift + 5
+
+        if ((vec.count >>> 5) > (1 << vec.shift)) {
+            let new_root_array = array/new_array(2)
+            array/write_field(new_root_array, 0, vec.root)
+            array/write_field(new_root_array, 1, new_path(vec.shift, tail_node))
+            let new_root = new_root_array
+             PersistentVector {
+                count: vec.count + 1
+                shift: new_shift
+                root: new_root
+                tail: new_tail
+            }
+        } else {
+            let new_root = push_tail(vec.shift, vec.root, tail_node, vec.count)
+            PersistentVector {
+                count: vec.count + 1
+                shift: new_shift
+                root: new_root
+                tail: new_tail
+            }
+        }
+    }
+}
+
+fn new_path(level, node) {
+    if level == 0 {
+        node
+    } else {
+        let path = array/new_array(1)
+        array/write_field(path, 0, new_path(level - 5, node))
+        path
+    }
+}
+
+fn push_tail(level, parent, tail_node, count) {
+    let new_parent = array/copy_array(parent)
+    let sub_index = ((count - 1) >>> level) & 31
+
+    if level == 5 {
+        array/write_field(new_parent, sub_index, tail_node)
+    } else {
+        let child = array/read_field(parent, sub_index)
+        if child != null {
+            let new_child = push_tail(level - 5, child, tail_node, count)
+            array/write_field(new_parent, sub_index, new_child)
+        } else {
+            array/write_field(new_parent, sub_index, new_path(level - 5, tail_node))
+        }
+    }
+    new_parent
+}
+
+fn assoc(vec, index, value) {
+    if index < 0 || index >= vec.count {
+        primitive/panic("Index out of bounds")
+    }
+
+    if index >= tailOffset(vec) {
+        let new_tail = array/copy_array(vec.tail)
+        array/write_field(new_tail, index & 31, value)
+        PersistentVector {
+            count: vec.count
+            shift: vec.shift
+            root: vec.root
+            tail: new_tail
+        }
+    } else {
+        let new_root = doAssoc(vec.shift, vec.root, index, value)
+        PersistentVector {
+            count: vec.count
+            shift: vec.shift
+            root: new_root
+            tail: vec.tail
+        }
+    }
+}
+
+fn doAssoc(level, node, index, value) {
+    let new_node = array/copy_array(node)
+    if level == 0 {
+        array/write_field(new_node, index & 31, value)
+    } else {
+        let sub_index = (index >>> level) & 31
+        let child = array/read_field(node, sub_index)
+        let new_child = doAssoc(level - 5, child, index, value)
+        array/write_field(new_node, sub_index, new_child)
+    }
+    new_node
+}
+
+
+fn fill_vec_n(vec, n, value) {
+    if n == 0 {
+        vec
+    } else {
+        let new_vec = push(vec, value)
+        fill_vec_n(new_vec, n - 1, value)
+    }
+}
+
+fn main() {
+    let vec = EMPTY
+    let vec2 = push(vec, 1)
+    let vec3 = push(vec2, 2)
+    let vec4 = push(vec3, 3)
+    let vec5 = assoc(vec4, 1, 4)
+    println(get(vec5, 0))
+    println(get(vec5, 1))
+    println(get(vec5, 2))
+    // This fails right now because of the fact that I store size tagged
+    // I need to fix that and try again
+    // This is largely taken from chatgpt, so it could be terribly wrong,
+    // but I can't test it till I fix how I store and retrieve size
+    let vec6 = fill_vec_n(EMPTY, 32, 42)
+    println(get(vec6, 0))
+    println(get(vec6, 1))
+    println(get(vec6, 2))
+
 }

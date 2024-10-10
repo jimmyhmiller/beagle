@@ -1,4 +1,5 @@
-* Negative Numbers
+* I need to write the size untagged or else I can't have things be >= 32 fields
+* Not a fan of how I'm dealing with dots in namespace names. I'm thinking I shouldn't have them at all
 * I think I should probably make namespaces not be a rust construct, but actually defined in the language. Meaning that namespaces would be normal heap objects. This would make gc much easier, as they wouldn't need to be so much of a special case. We might want to be able to say that they are objects that should go in the old generation or permanent or whatever. But having to have them be all separate is a bit awkward.
 * I've got some problem with enum and registers...
 * Need else if
@@ -7,3 +8,5 @@
 * Struct Ids should be stored untagged
 * Sizes should be stored unmultiplied
 * My quick and dirty thread-safe gc is slower even without multiple threads
+* Do I zero on allocation?
+* Code memory needs to be dynamic

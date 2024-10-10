@@ -1,7 +1,5 @@
 use crate::{
-    debugger,
-    types::{BuiltInTypes, HeapObject, Word},
-    Data, Message,
+    builtins::debugger, types::{BuiltInTypes, HeapObject, Word}, Data, Message
 };
 use mmap_rs::{MmapMut, MmapOptions};
 use std::error::Error;

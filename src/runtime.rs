@@ -13,13 +13,7 @@ use libloading::Library;
 use mmap_rs::{Mmap, MmapMut, MmapOptions};
 
 use crate::{
-    arm::LowLevelArm,
-    debugger,
-    ir::{StringValue, Value},
-    CommandLineArguments, Data, Message, __pause,
-    gc::{AllocateAction, Allocator, AllocatorOptions, StackMap, StackMapDetails, STACK_SIZE},
-    parser::Parser,
-    types::{BuiltInTypes, HeapObject},
+    arm::LowLevelArm, builtins::{__pause, debugger}, gc::{AllocateAction, Allocator, AllocatorOptions, StackMap, StackMapDetails, STACK_SIZE}, ir::{StringValue, Value}, parser::Parser, types::{BuiltInTypes, HeapObject}, CommandLineArguments, Data, Message
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1103,7 +1097,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
             command_line_arguments: command_line_arguments.clone(),
             compiler: Compiler {
                 code_memory: Some(
-                    MmapOptions::new(MmapOptions::page_size())
+                    MmapOptions::new(MmapOptions::page_size() * 10)
                         .unwrap()
                         .map()
                         .unwrap(),
@@ -1573,6 +1567,16 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         to_object: &mut HeapObject,
     ) -> Result<usize, Box<dyn Error>> {
         from_object.copy_full_object(to_object);
+        Ok(to_object.tagged_pointer())
+    }
+
+
+    pub fn copy_object_except_header(
+        &mut self,
+        from_object: HeapObject,
+        to_object: &mut HeapObject,
+    ) -> Result<usize, Box<dyn Error>> {
+        from_object.copy_object_except_header(to_object);
         Ok(to_object.tagged_pointer())
     }
 }
