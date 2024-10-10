@@ -1,5 +1,8 @@
 namespace hamt
 
+import "raw_mutable_array" as array
+import "beagle.primitive" as primitive
+
 struct PersistentVector {
     count
     shift
@@ -7,16 +10,44 @@ struct PersistentVector {
     tail
 }
 
-let EMPTY = PersistentVector(0, 5, None, None)
+let EMPTY = PersistentVector {
+    count: 0
+    shift: 5
+    root: null
+    tail: null
+}
 
-fn tailOffset() {
-    if self.count < 32 {
+fn tailOffset(vec) {
+    if vec.count < 32 {
         0
     } else {
-        ((self.count - 1) >>> 5) << 5
+        ((vec.count - 1) >>> 5) << 5
     }
 }
 
-fn get(index) {
-    // I need to implement ||
+
+fn get_node_at_level(node, index, level) {
+    if level <= 0 {
+        node
+    }
+    let next_node = array/read_field(node (index >>> level) & 31)
+    get_node_at_level(next_node, index, level - 5)
+}
+
+
+fn get(vec, index) {
+    if index < 0 || index >= vec.count {
+        primitive/panic("Index out of bounds")
+    }
+
+    if index >= tailOffset(vec) {
+        array/read_field(vec.tail, index & 31) // 0x1f (hex literals?)
+    } else {
+        let node = get_node_at_level(vec.root, index, vec.shift)
+        array/read_field(node, index & 31)
+    }
+}
+
+fn push(vec, value) {
+   // TODO I need array count
 }
