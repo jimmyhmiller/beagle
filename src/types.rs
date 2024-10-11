@@ -180,7 +180,7 @@ impl Header {
         }
     }
 
-    fn type_id_offset() -> usize {
+    pub fn type_id_offset() -> usize {
         7
     }
 
@@ -288,10 +288,10 @@ impl HeapObject {
         let header = Header::from_usize(data);
         // TODO: This is number of bytes, not number of fields
         // so is this wrong?
-        if header.size % 8 != 0 {
-            panic!("Size is not aligned");
-        }
-        header.size as usize
+        // if header.size % 8 != 0 {
+        //     panic!("Size is not aligned");
+        // }
+        header.size as usize * 8
     }
 
     pub fn get_fields(&self) -> &[usize] {
@@ -363,7 +363,7 @@ impl HeapObject {
         let header = Header {
             type_id: 0,
             type_data: 0,
-            size: field_size.to_bytes() as u8,
+            size: field_size.to_words() as u8,
             small: false,
             marked: false,
         };
@@ -449,7 +449,7 @@ impl HeapObject {
         }
     }
     
-    fn write_fields(&mut self, fields: &[u8])  {
+    pub fn write_fields(&mut self, fields: &[u8])  {
         let untagged = self.untagged();
         let pointer = untagged as *mut u8;
         let pointer = unsafe { pointer.add(Self::header_size()) };
@@ -483,6 +483,14 @@ impl Ir {
         );
     }
 
+    pub fn read_type_id(&mut self, struct_pointer: Value) -> Value {
+        let byte_offset = Header::type_id_offset();
+        let mask = !(0xFF << (byte_offset * 8));
+        let result = self.heap_load(struct_pointer);
+        let masked = self.and_imm(result, mask);
+        self.tag(masked, BuiltInTypes::Int.get_tag())
+    }
+
     pub fn write_fields(&mut self, struct_pointer: Value, fields: &[Value]) {
         let offset = 1;
         for (i, field) in fields.iter().enumerate() {
@@ -502,7 +510,7 @@ impl Ir {
         let header = Header {
             type_id: 0,
             type_data: 0,
-            size: 8,
+            size: 1,
             small: true,
             marked: false,
         };
@@ -524,5 +532,9 @@ impl Word {
 
     pub fn from_bytes(len: usize) -> Word {
         Word(len / 8)
+    }
+
+    pub fn to_words(self) -> usize {
+        self.0
     }
 }

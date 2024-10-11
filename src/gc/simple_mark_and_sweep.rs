@@ -451,7 +451,7 @@ impl SimpleMarkSweepHeap {
                     }
 
                     let size = object.full_size();
-                    debug_assert!(size > 8, "Size is less than 8");
+                    // debug_assert!(size > 8, "Size is less than 8");
                     // println!("size: {}", size);
                     offset += size;
                     offset = (offset + 7) & !7;

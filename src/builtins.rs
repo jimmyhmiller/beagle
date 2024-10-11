@@ -1,4 +1,4 @@
-use std::{error::Error, mem, slice::from_raw_parts, thread};
+use std::{error::Error, mem, slice::{self, from_raw_parts}, thread};
 
 use crate::{gc::Allocator, runtime::Runtime, types::{BuiltInTypes, HeapObject}, Message, Serialize};
 
@@ -78,6 +78,19 @@ extern "C" fn allocate_float<Alloc: Allocator>(
     debug_assert!(BuiltInTypes::get_kind(result) == BuiltInTypes::Float);
     debug_assert!(BuiltInTypes::untag(result) % 8 == 0);
     result
+}
+
+extern "C" fn fill_object_fields<Alloc: Allocator>(
+    _runtime: *mut Runtime<Alloc>,
+    object_pointer: usize,
+    value: usize
+) -> usize {
+    let mut object = HeapObject::from_tagged(object_pointer);
+    let data = vec![value; object.fields_size() / 8];
+    let byte_len = data.len() * std::mem::size_of::<usize>();
+    let data = unsafe { slice::from_raw_parts(data.as_ptr() as *const u8, byte_len) };
+    object.write_fields(data);
+    object.tagged_pointer()
 }
 
 extern "C" fn make_closure<Alloc: Allocator>(
@@ -237,7 +250,7 @@ pub unsafe extern "C" fn copy_object<Alloc: Allocator>(
     let runtime = unsafe { &mut *runtime };
     let object = HeapObject::from_tagged(object_pointer);
     let header = object.get_header();
-    let size = header.size as usize / 8;
+    let size = header.size as usize;
     let kind = BuiltInTypes::get_kind(object_pointer);
     let to_pointer = runtime.allocate(size, stack_pointer, kind).unwrap();
     let mut to_object = HeapObject::from_tagged(to_pointer);
@@ -288,6 +301,12 @@ impl<Alloc: Allocator> Runtime<Alloc> {
             "beagle.builtin/allocate_float",
             allocate_float::<Alloc> as *const u8,
             true,
+        )?;
+
+        self.compiler.add_builtin_function(
+            "beagle.builtin/fill_object_fields",
+            fill_object_fields::<Alloc> as *const u8,
+            false,
         )?;
     
         self.compiler.add_builtin_function(

@@ -1,7 +1,7 @@
 use crate::{
     ast::AstCompiler,
     ir::{Condition, Value},
-    types::Header,
+    types::{BuiltInTypes, Header},
 };
 
 // TODO: I'd rather this be on Ir I think?
@@ -58,6 +58,17 @@ impl<'a> AstCompiler<'a> {
                 self.ir.write_type_id(pointer, untagged_type_id);
                 Value::Null
             }
+            "beagle.primitive/read_type_id" => {
+                let pointer = args[0];
+                let pointer = self.ir.untag(pointer);
+                let header = self.ir.load_from_heap(pointer, 0);
+                // mask and shift so we get the size
+                let size_offset = Header::type_id_offset();
+                let value = self.ir.shift_right_imm(header, (size_offset * 8) as i32);
+
+                let value = self.ir.and_imm(value, 0x0000_0000_0000_FFFF);
+                self.ir.tag(value, BuiltInTypes::Int.get_tag())
+            }
             "beagle.primitive/write_field" => {
                 // self.ir.breakpoint();
                 let pointer = args[0];
@@ -91,7 +102,8 @@ impl<'a> AstCompiler<'a> {
                 let size_offset = Header::size_offset();
                 let value = self.ir.shift_right_imm(header, (size_offset * 8) as i32);
 
-                self.ir.and_imm(value, 0x0000_0000_0000_FFFF)
+                let value = self.ir.and_imm(value, 0x0000_0000_0000_FFFF);
+                self.ir.tag(value, BuiltInTypes::Int.get_tag())
             }
             "beagle.primitive/panic" => {
                 let message = args[0];
@@ -99,6 +111,13 @@ impl<'a> AstCompiler<'a> {
                 self.call_builtin("beagle.core/println", vec![message]);
                 self.call_builtin("beagle.builtin/throw_error", vec![]);
                 Value::Null
+            }
+            "beagle.primitive/is_object" => {
+                let pointer = args[0];
+                // check the tag of the pointer
+                let tag = self.ir.get_tag(pointer);
+                let heap_object_tag = self.ir.assign_new(Value::RawValue(BuiltInTypes::HeapObject.get_tag() as usize));
+                self.ir.compare(tag, heap_object_tag.into(), Condition::Equal)
             }
             _ => panic!("Unknown inline primitive function {}", name),
         }
