@@ -3,7 +3,8 @@ import "beagle.builtin" as builtin
 import "beagle.primitive" as primitive
 
 fn allocate_array_unsafe(size) {
-    builtin/allocate(size)
+    let array = builtin/allocate(size)
+    builtin/fill_object_fields(array, null)
 }
 
 fn read_field_unsafe(array, index) {
@@ -14,7 +15,21 @@ fn write_field_unsafe(array, index, value) {
     primitive/write_field(array, index, value)
 }
 
+fn is_array(array) {
+    // TODO: need to check if heap object first
+    primitive/is_object(array) && primitive/read_type_id(array) == 1
+}
+
+fn panic_if_not_array(message, array) {
+    if is_array(array) == false {
+        println(message)
+        println(array)
+        primitive/panic("Not an array")
+    }
+}
+
 fn write_field(array, index, value) {
+    panic_if_not_array("write", array)
     // TODO: I need || (or should it be "or")
     if index < 0 {
         primitive/panic("Index out of bounds")
@@ -26,6 +41,7 @@ fn write_field(array, index, value) {
 }
 
 fn read_field(array, index) {
+    panic_if_not_array("read", array)
     if index < 0 {
         primitive/panic("Index out of bounds")
     }
@@ -53,6 +69,10 @@ struct ExampleStruct {
 }
 
 fn copy_array(array) {
+    panic_if_not_array("copy", array)
+    if array == null {
+        primitive/panic("Array is null")
+    }
     let new_array = builtin/copy_object(array)
     new_array
 }
@@ -63,9 +83,9 @@ fn unsafe_copy_from_array_to(from, to) {
 }
 
 fn copy_from_array_to(from, to) {
+    panic_if_not_array("copy from", from)
+    panic_if_not_array("copy to", to)
     if count(from) > count(to) {
-        println(from)
-        println(to)
         primitive/panic("Array from size must be less than or equal to array to size")
     }
     unsafe_copy_from_array_to(from, to)
@@ -85,6 +105,7 @@ fn count(array) {
     if array == null {
         0
     } else {
+        panic_if_not_array("count", array)
         primitive/size(array)
     }
 }
@@ -102,6 +123,8 @@ fn main() {
     primitive/write_field(array, 7, 8)
     primitive/write_field(array, 8, 9)
     primitive/write_field(array, 9, 10)
+
+    println(is_array(array))
 
 
     println(count(array))
@@ -125,6 +148,8 @@ fn main() {
     let example_struct = ExampleStruct {
         value: "Example Struct Value"
     }
+    println(is_array(example_struct))
+
     let array = builtin/allocate(1)
     primitive/write_type_id(array, 1)
     primitive/write_field(array, 0, example_struct)
@@ -155,6 +180,7 @@ fn main() {
 }
 
 // Expect
+// true
 // 10
 // 0
 // [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
@@ -162,6 +188,7 @@ fn main() {
 // 1
 // [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
 // 10
+// false
 // Example Struct Value
 // [ ExampleStruct { value: Example Struct Value } ]
 // [ ExampleStruct { value: Example Struct Value } ]

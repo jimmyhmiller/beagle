@@ -833,7 +833,7 @@ impl Parser {
         if self.is_close_paren() {
             self.consume();
         } else {
-            panic!("Expected close paren got {:?}", self.current_token());
+            panic!("Expected close paren got {:?} on line {}", self.current_token(), self.current_line);
         }
     }
 

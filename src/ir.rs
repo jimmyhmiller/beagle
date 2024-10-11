@@ -1621,9 +1621,9 @@ impl Ir {
             ));
     }
 
-    pub fn heap_load(&mut self, dest: Value, source: Value) -> Value {
+    pub fn heap_load(&mut self, source: Value) -> Value {
         let source = self.assign_new(source);
-        let dest = self.assign_new(dest);
+        let dest = self.volatile_register();
         self.instructions
             .push(Instruction::HeapLoad(dest.into(), source.into(), 0));
         dest.into()

@@ -13,7 +13,7 @@ struct PersistentVector {
 let EMPTY = PersistentVector {
     count: 0
     shift: 5
-    root: null
+    root: array/new_array(0)
     tail: array/new_array(0)
 }
 
@@ -25,13 +25,15 @@ fn tailOffset(vec) {
     }
 }
 
-fn get_node_at_level(node, index, level) {
+fn get_node_for_level(node, level, index) {
+    // So I'm guessing my parsing code is parsing
+    // this incorrectly if I don't assign a variable...
+    let new_index = (index >>> level) & 31
     if level <= 0 {
         node
     } else {
-        let sub_index = (index >>> level) & 31
-        let next_node = array/read_field(node, sub_index)
-        get_node_at_level(next_node, index, level - 5)
+        let new_node = array/read_field(node, new_index)
+        get_node_for_level(new_node, level - 5, index)
     }
 }
 
@@ -43,18 +45,22 @@ fn get(vec, index) {
     if index >= tailOffset(vec) {
         array/read_field(vec.tail, index & 31)
     } else {
-        let node = get_node_at_level(vec.root, index, vec.shift)
+        let node = get_node_for_level(vec.root, vec.shift, index)
         array/read_field(node, index & 31)
     }
 }
 
 fn push(vec, value) {
-    if array/count(vec.tail) < 32 {
-        let new_tail = array/new_array(array/count(vec.tail) + 1)
-        println(array/count(vec.tail) + 1)
-        println(array/count(new_tail))
+    let tail_length = array/count(vec.tail)
+    if tail_length < 32 {
+        // Tail has space, create a new tail array with one extra slot
+        let new_tail_size = tail_length + 1
+        let new_tail = array/new_array(new_tail_size)
+        // Copy existing tail into new tail
         array/copy_from_array_to(vec.tail, new_tail)
-        array/write_field(new_tail, array/count(vec.tail), value)
+        // Add the new value
+        array/write_field(new_tail, tail_length, value)
+        // Return a new PersistentVector with the updated tail
         PersistentVector {
             count: vec.count + 1
             shift: vec.shift
@@ -62,27 +68,36 @@ fn push(vec, value) {
             tail: new_tail
         }
     } else {
+        // Tail is full, need to push into the tree
         let tail_node = vec.tail
+        // Start a new tail with the new value
         let new_tail = array/new_array(1)
         array/write_field(new_tail, 0, value)
-        let new_shift = vec.shift + 5
+        let cnt_shifted = vec.count >>> 5
+        let shifted_one = 1 << vec.shift
 
-        if ((vec.count >>> 5) > (1 << vec.shift)) {
-            let new_root_array = array/new_array(2)
+        if cnt_shifted > shifted_one {
+            // Need to create a new root and increase shift
+            let new_root_array = array/new_array(32)
             array/write_field(new_root_array, 0, vec.root)
-            array/write_field(new_root_array, 1, new_path(vec.shift, tail_node))
+            let new_path_node = new_path(vec, vec.shift, tail_node)
+            array/write_field(new_root_array, 1, new_path_node)
             let new_root = new_root_array
-             PersistentVector {
+            // Return a new PersistentVector with the increased shift and new root
+            PersistentVector {
                 count: vec.count + 1
-                shift: new_shift
+                shift: vec.shift + 5
                 root: new_root
                 tail: new_tail
             }
         } else {
-            let new_root = push_tail(vec.shift, vec.root, tail_node, vec.count)
+            // Insert into existing tree
+            
+            let new_root = push_tail(vec, vec.shift, vec.root, tail_node)
+            // Return a new PersistentVector with the same shift and the new root
             PersistentVector {
                 count: vec.count + 1
-                shift: new_shift
+                shift: vec.shift
                 root: new_root
                 tail: new_tail
             }
@@ -90,32 +105,83 @@ fn push(vec, value) {
     }
 }
 
-fn new_path(level, node) {
+fn new_path(vec, level, node) {
     if level == 0 {
         node
     } else {
-        let path = array/new_array(1)
-        array/write_field(path, 0, new_path(level - 5, node))
+        let path = array/new_array(32)
+        array/write_field(path, 0, new_path(vec, level - 5, node))
         path
     }
 }
 
-fn push_tail(level, parent, tail_node, count) {
-    let new_parent = array/copy_array(parent)
-    let sub_index = ((count - 1) >>> level) & 31
 
-    if level == 5 {
-        array/write_field(new_parent, sub_index, tail_node)
+fn print_array_summary_single_level(array, index) {
+    let count = array/count(array)
+    print("Array(")
+    print(count)
+    print(")")
+}
+
+
+fn print_array_summary(array, index) {
+
+    if array/is_array(array) == false {
+        print(" ")
+        print(array)
+        println(" ")
     } else {
-        let child = array/read_field(parent, sub_index)
-        if child != null {
-            let new_child = push_tail(level - 5, child, tail_node, count)
-            array/write_field(new_parent, sub_index, new_child)
+        let count = array/count(array)
+        if index == count {
+            println("")
         } else {
-            array/write_field(new_parent, sub_index, new_path(level - 5, tail_node))
+            let elem = array/read_field(array, index)
+            if array/is_array(elem) {
+                print_array_summary_single_level(elem, 0)
+                print(" ")
+                print_array_summary(array, index + 1)
+            } else {
+                print(" ")
+                print(elem)
+                print(" ")
+                print_array_summary(array, index + 1)
+            }
         }
     }
-    new_parent
+}
+
+fn push_tail(vec, level, parent, tail_node) {
+    let new_array = array/new_array(32)
+    if array/is_array(parent) == false {
+        primitive/panic("Parent is not an array")
+    }
+    let new_parent = array/copy_from_array_to(parent, new_array)
+    let sub_index = ((vec.count - 1) >>> level) & 31
+
+    // if vec.count == 7739424 {
+    //     println(sub_index)
+    //     println(level)
+    //     println(array/is_array(parent))
+    //     print_array_summary(parent, 0)
+    //     // println(vec)
+    // }
+
+
+    let updated_node = if level == 5 {
+        // Level is 5, insert the tail node here
+        array/write_field(new_parent, sub_index, tail_node)
+        new_parent
+    } else {
+        let child = array/read_field(parent, sub_index)
+        let new_child = if child != null {
+            push_tail(vec, level - 5, child, tail_node)
+        } else {
+            new_path(vec, level - 5, tail_node)
+        }
+        array/write_field(new_parent, sub_index, new_child)
+        new_parent
+    }
+    updated_node
 }
 
 fn assoc(vec, index, value) {
@@ -124,6 +190,7 @@ fn assoc(vec, index, value) {
     }
 
     if index >= tailOffset(vec) {
+        // Update the tail
         let new_tail = array/copy_array(vec.tail)
         array/write_field(new_tail, index & 31, value)
         PersistentVector {
@@ -133,7 +200,8 @@ fn assoc(vec, index, value) {
             tail: new_tail
         }
     } else {
-        let new_root = doAssoc(vec.shift, vec.root, index, value)
+        // Update the tree
+        let new_root = doAssoc(vec, vec.shift, vec.root, index, value)
         PersistentVector {
             count: vec.count
             shift: vec.shift
@@ -143,45 +211,75 @@ fn assoc(vec, index, value) {
     }
 }
 
-fn doAssoc(level, node, index, value) {
+fn doAssoc(vec, level, node, index, value) {
     let new_node = array/copy_array(node)
     if level == 0 {
         array/write_field(new_node, index & 31, value)
+        new_node
     } else {
         let sub_index = (index >>> level) & 31
         let child = array/read_field(node, sub_index)
-        let new_child = doAssoc(level - 5, child, index, value)
+        let new_child = doAssoc(vec, level - 5, child, index, value)
         array/write_field(new_node, sub_index, new_child)
+        new_node
     }
-    new_node
 }
 
 
-fn fill_vec_n(vec, n, value) {
-    if n == 0 {
+fn fill_vec_n(vec, i, n, ) {
+    // println(n)
+    if i == n {
         vec
     } else {
-        let new_vec = push(vec, value)
-        fill_vec_n(new_vec, n - 1, value)
+        // println(vec)
+        let new_vec = push(vec, i)
+        fill_vec_n(new_vec, i + 1, n)
     }
 }
 
-fn main() {
-    let vec = EMPTY
-    let vec2 = push(vec, 1)
-    let vec3 = push(vec2, 2)
-    let vec4 = push(vec3, 3)
-    let vec5 = assoc(vec4, 1, 4)
-    println(get(vec5, 0))
-    println(get(vec5, 1))
-    println(get(vec5, 2))
-    // This fails right now because of the fact that I store size tagged
-    // I need to fix that and try again
-    // This is largely taken from chatgpt, so it could be terribly wrong,
-    // but I can't test it till I fix how I store and retrieve size
-    let vec6 = fill_vec_n(EMPTY, 32, 42)
-    println(get(vec6, 0))
-    println(get(vec6, 1))
-    println(get(vec6, 2))
+fn get_and_verify(vec, index) {
+    let value = get(vec, index)
+    if value != index {
+        println("Error: Expected ")
+        println(index)
+        println(" but got ")
+        println(value)
+        primitive/panic("Value mismatch")
+    }
+    if index != vec.count - 1 {
+        get_and_verify(vec, index + 1)
+    } else {
+        "done"
+    }
+}
 
+
+fn main() {
+
+    // let vec = EMPTY
+    // let vec2 = push(vec, 1)
+    // let vec3 = push(vec2, 2)
+    // let vec4 = push(vec3, 3)
+    // let vec5 = assoc(vec4, 1, 4)
+    // println(get(vec5, 0))
+    // println(get(vec5, 1))
+    // println(get(vec5, 2))
+
+    // As soon as I do 10 million, it crashes
+    // not 100% sure why yet
+    let vec6 = fill_vec_n(EMPTY, 0, 1000000)
+    // println(vec6)
+    // println(array/read_field(vec6.root, 0))
+    get_and_verify(vec6, 0)
+    
+    // println(vec6)
+    // println("here!!!")
+    // println(vec6)
+    // TODO: get has a problem
+    // println(get(vec6, 0))
+    // let vec6 = assoc(vec6, 1, 99)
+    // println(get(vec6, 1))
+    // println(get(vec6, 2))
+    // println(get(vec6, 99))
+    "done"
 }
