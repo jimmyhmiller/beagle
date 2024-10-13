@@ -416,6 +416,7 @@ fn test_tokenizer1() {
 }
 
 pub struct Parser {
+    file_name: String,
     source: String,
     #[allow(dead_code)]
     tokenizer: Tokenizer,
@@ -425,18 +426,23 @@ pub struct Parser {
 }
 
 impl Parser {
-    pub fn new(source: String) -> Parser {
+    pub fn new(file_name: String, source: String) -> Parser {
         let mut tokenizer = Tokenizer::new();
         let input_bytes = source.as_bytes();
         // TODO: I is probably better not to parse all at once
         let tokens = tokenizer.parse_all(input_bytes);
         Parser {
+            file_name,
             source,
             tokenizer,
             position: 0,
             tokens,
             current_line: 1,
         }
+    }
+
+    pub fn current_location(&self) -> String {
+        format!("{}:{}", self.file_name, self.current_line)
     }
 
     pub fn print_tokens(&self) {
@@ -454,7 +460,7 @@ impl Parser {
     fn parse_elements(&mut self) -> Vec<Ast> {
         let mut result = Vec::new();
         while !self.at_end() {
-            if let Some(elem) = self.parse_expression(0) {
+            if let Some(elem) = self.parse_expression(0, true) {
                 result.push(elem);
             } else {
                 break;
@@ -476,7 +482,14 @@ impl Parser {
             | Token::GreaterThan
             | Token::GreaterThanOrEqual => (10, Associativity::Left),
             Token::Plus | Token::Minus | Token::And | Token::Or => (20, Associativity::Left),
-            Token::Mul | Token::Div => (30, Associativity::Left),
+            Token::Mul
+            | Token::Div
+            | Token::BitWiseAnd
+            | Token::BitWiseOr
+            | Token::BitWiseXor
+            | Token::ShiftLeft
+            | Token::ShiftRight
+            | Token::ShiftRightZero => (30, Associativity::Left),
             // TODO: No idea what this should be
             Token::Dot => (40, Associativity::Left),
             _ => (0, Associativity::Left),
@@ -485,12 +498,16 @@ impl Parser {
 
     // Based on
     // https://eli.thegreenplace.net/2012/08/02/parsing-expressions-by-precedence-climbing
-    fn parse_expression(&mut self, min_precedence: usize) -> Option<Ast> {
-        self.skip_whitespace();
+    fn parse_expression(&mut self, min_precedence: usize, should_skip: bool) -> Option<Ast> {
+        if should_skip {
+            self.skip_whitespace();
+        }
+        if self.at_end() {
+            return None;
+        }
         let mut lhs = self.parse_atom(min_precedence)?;
-        self.skip_whitespace();
-        // println!("lhs {:?}", lhs);
-        // println!("current_token {:?}", self.get_token_repr());
+
+        self.skip_spaces();
         loop {
             if self.at_end()
                 || !self.current_token().is_binary_operator()
@@ -509,12 +526,9 @@ impl Parser {
             };
 
             self.move_to_next_non_whitespace();
-            let rhs = self.parse_expression(next_min_precedence)?;
-            // println!("rhs {:?}", rhs);
+            let rhs = self.parse_expression(next_min_precedence, true)?;
 
             lhs = self.compose_binary_op(lhs.clone(), current_token, rhs, min_precedence);
-            // println!("lhs composed {:?}", lhs);
-            self.skip_whitespace();
         }
 
         Some(lhs)
@@ -550,7 +564,9 @@ impl Parser {
                 // Gross
                 let name = String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap();
                 // TODO: Make better
-                self.move_to_next_non_whitespace();
+                self.consume();
+                self.skip_spaces();
+                // self.move_to_next_non_whitespace();
                 // I probably don't want to do this forever
                 // But for right now I'm assuming that all double colon
                 // Identifiers are creating enums
@@ -611,7 +627,7 @@ impl Parser {
                 self.move_to_next_non_whitespace();
                 self.expect_equal();
                 self.move_to_next_non_whitespace();
-                let value = self.parse_expression(0).unwrap();
+                let value = self.parse_expression(0, true).unwrap();
                 Some(Ast::Let(Box::new(Ast::Identifier(name)), Box::new(value)))
             }
             Token::NewLine | Token::Spaces(_) | Token::Comment(_) => {
@@ -620,14 +636,14 @@ impl Parser {
             }
             Token::OpenParen => {
                 self.consume();
-                let result = self.parse_expression(0);
+                let result = self.parse_expression(0, true);
                 self.expect_close_paren();
                 result
             }
             _ => panic!(
                 "Expected atom, got {} at line {}",
                 self.get_token_repr(),
-                self.current_line
+                self.current_location()
             ),
         }
     }
@@ -692,9 +708,10 @@ impl Parser {
         }
     }
 
+    // TODO: Why the difference between this and skip?
     fn move_to_next_non_whitespace(&mut self) {
         self.consume();
-        while !self.at_end() && self.is_whitespace() {
+        while !self.at_end() && (self.is_space() || self.is_comment())  {
             self.consume();
         }
     }
@@ -711,6 +728,15 @@ impl Parser {
             self.consume();
         } else {
             panic!("Expected open paren {:?}", self.get_token_repr());
+        }
+    }
+
+    fn expect_comma(&mut self)  {
+        self.skip_whitespace();
+        if self.is_comma() {
+            self.consume();
+        } else {
+            panic!("Expected comma {:?}", self.get_token_repr());
         }
     }
 
@@ -751,6 +777,10 @@ impl Parser {
         self.current_token() == Token::OpenParen
     }
 
+    fn is_comma(&self) -> bool {
+        self.current_token() == Token::Comma
+    }
+
     fn parse_args(&mut self) -> Vec<String> {
         let mut result = Vec::new();
         self.skip_whitespace();
@@ -765,8 +795,13 @@ impl Parser {
         let mut result = Vec::new();
         self.skip_whitespace();
         while !self.at_end() && !self.is_close_curly() {
+            self.skip_spaces();
             result.push(self.parse_struct_field());
-            self.skip_whitespace();
+            self.skip_spaces();
+            if !self.is_close_curly() {
+                self.data_delimiter();
+            }
+            self.skip_spaces();
         }
         result
     }
@@ -779,7 +814,7 @@ impl Parser {
                 self.consume();
                 Ast::Identifier(name)
             }
-            _ => panic!("Expected field name got {:?}", self.current_token()),
+            _ => panic!("Expected field name got {:?} at {}", self.current_token(), self.current_location()),
         }
     }
 
@@ -802,17 +837,49 @@ impl Parser {
                 // Gross
                 let name = String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap();
                 self.consume();
-                self.skip_whitespace();
-                if self.is_open_curly() {
+                self.skip_spaces();
+                let result = if self.is_open_curly() {
                     self.consume();
                     let fields = self.parse_struct_fields();
                     self.expect_close_curly();
                     Ast::EnumVariant { name, fields }
                 } else {
                     Ast::EnumStaticVariant { name }
-                }
+                };
+                self.data_delimiter();
+                result
             }
-            _ => panic!("Expected variant name got {:?}", self.current_token()),
+            _ => panic!("Expected variant name got {:?} on line {}", self.current_token(), self.current_location()),
+        }
+    }
+
+    fn is_space(&self) -> bool {
+        match self.current_token() {
+            Token::Spaces(_) => true,
+            _ => false,
+        }
+    }
+
+    fn is_comment(&self) -> bool {
+        match self.current_token() {
+            Token::Comment(_) => true,
+            _ => false,
+        }
+    }
+
+    // TODO: Deal with tabs (People shouldn't use them though lol)
+    fn skip_spaces(&mut self) {
+        while !self.at_end() && (self.is_space() || self.is_comment()) {
+            self.consume();
+        }
+    }
+
+    fn data_delimiter(&mut self) {
+        self.skip_spaces();
+        if self.is_comma() || self.is_newline() {
+            self.consume();
+        } else {
+            panic!("Expected comma or new_line got {:?} at {}", self.get_token_repr(), self.current_location());
         }
     }
 
@@ -822,9 +889,13 @@ impl Parser {
                 // Gross
                 let name = String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap();
                 self.consume();
+                self.skip_whitespace();
+                if !self.is_close_paren() {
+                    self.expect_comma();
+                }
                 name
             }
-            _ => panic!("Expected arg got {:?}", self.current_token()),
+            _ => panic!("Expected arg got {:?} on line {}", self.current_token(), self.current_location()),
         }
     }
 
@@ -833,7 +904,11 @@ impl Parser {
         if self.is_close_paren() {
             self.consume();
         } else {
-            panic!("Expected close paren got {:?} on line {}", self.current_token(), self.current_line);
+            panic!(
+                "Expected close paren got {:?} on line {}",
+                self.current_token(),
+                self.current_location()
+            );
         }
     }
 
@@ -846,7 +921,7 @@ impl Parser {
         let mut result = Vec::new();
         self.skip_whitespace();
         while !self.at_end() && !self.is_close_curly() {
-            if let Some(elem) = self.parse_expression(0) {
+            if let Some(elem) = self.parse_expression(0, true) {
                 result.push(elem);
             } else {
                 break;
@@ -865,7 +940,7 @@ impl Parser {
             panic!(
                 "Expected open curly {} at line {}",
                 self.get_token_repr(),
-                self.current_line
+                self.current_location()
             );
         }
     }
@@ -886,7 +961,7 @@ impl Parser {
             panic!(
                 "Expected close curly got {:?} at line {}",
                 self.get_token_repr(),
-                self.current_line
+                self.current_location()
             );
         }
     }
@@ -957,8 +1032,12 @@ impl Parser {
         self.expect_open_paren();
         let mut args = Vec::new();
         while !self.at_end() && !self.is_close_paren() {
-            if let Some(arg) = self.parse_expression(0) {
+            if let Some(arg) = self.parse_expression(0, true) {
                 args.push(arg);
+                self.skip_whitespace();
+                if !self.is_close_paren() {
+                    self.expect_comma();
+                }
             } else {
                 break;
             }
@@ -994,10 +1073,13 @@ impl Parser {
                 // Gross
                 let name = String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap();
                 self.consume();
-                self.skip_whitespace();
+                self.skip_spaces();
                 self.expect_colon();
-                self.skip_whitespace();
-                let value = self.parse_expression(0).unwrap();
+                self.skip_spaces();
+                let value = self.parse_expression(0, false).unwrap();
+                if !self.is_close_curly() {
+                    self.data_delimiter();
+                }
                 Some((name, value))
             }
             _ => None,
@@ -1024,7 +1106,6 @@ impl Parser {
             Token::Spaces(_)
             | Token::NewLine
             | Token::Comment(_)
-            | Token::Comma
             | Token::SemiColon => true,
             _ => false,
         }
@@ -1037,7 +1118,7 @@ impl Parser {
     // but it's an expression
 
     fn parse_if(&mut self) -> Ast {
-        let condition = Box::new(self.parse_expression(1).unwrap());
+        let condition = Box::new(self.parse_expression(1, true).unwrap());
         let then = self.parse_block();
         self.move_to_next_non_whitespace();
         if self.is_else() {
@@ -1152,7 +1233,11 @@ impl Parser {
                 right: Box::new(rhs),
             },
             Token::Dot => {
-                assert!(matches!(rhs, Ast::Identifier(_)), "Expected identifier got {:?}", rhs);
+                assert!(
+                    matches!(rhs, Ast::Identifier(_)),
+                    "Expected identifier got {:?}",
+                    rhs
+                );
                 let rhs = match rhs {
                     Ast::Identifier(name) => Ast::Identifier(name),
                     _ => panic!("Not an identifier"),
@@ -1189,7 +1274,11 @@ impl Parser {
         if self.is_equal() {
             self.consume();
         } else {
-            panic!("Expected equal got {:?} on line {}", self.get_token_repr(), self.current_line);
+            panic!(
+                "Expected equal got {:?} on line {}",
+                self.get_token_repr(),
+                self.current_location()
+            );
         }
     }
 
@@ -1205,7 +1294,7 @@ impl Parser {
             panic!(
                 "Expected colon got {} at line {}",
                 self.get_token_repr(),
-                self.current_line
+                self.current_location()
             );
         }
     }
@@ -1224,13 +1313,15 @@ impl Parser {
 
     pub fn from_file(arg: &str) -> Result<Ast, std::io::Error> {
         let source = std::fs::read_to_string(arg)?;
-        let mut parser = Parser::new(source);
+        let mut parser = Parser::new(arg.to_string(), source);
         Ok(parser.parse())
     }
 
     fn is_dot(&self) -> bool {
         self.current_token() == Token::Dot
     }
+    
+
 }
 
 #[test]
@@ -1248,7 +1339,7 @@ fn test_tokenizer2() {
 
 #[test]
 fn test_parse() {
-    let mut parser = Parser::new(String::from(
+    let mut parser = Parser::new("test".to_string(), String::from(
         "
     fn hello() {
         print(\"Hello World!\")
@@ -1261,7 +1352,7 @@ fn test_parse() {
 
 #[test]
 fn test_parse2() {
-    let mut parser = Parser::new(String::from(
+    let mut parser = Parser::new("test".to_string(), String::from(
         "
     fn hello(x) {
         if x + 1 > 2 {
@@ -1278,7 +1369,7 @@ fn test_parse2() {
 
 #[test]
 fn test_parens() {
-    let mut parser = Parser::new(String::from("(2 + 2) * 3 - (2 * 4)"));
+    let mut parser = Parser::new("test".to_string(), String::from("(2 + 2) * 3 - (2 * 4)"));
 
     let ast = parser.parse();
     println!("{:#?}", ast);
@@ -1286,7 +1377,7 @@ fn test_parens() {
 
 #[test]
 fn test_empty_function() {
-    let mut parser = Parser::new(String::from(
+    let mut parser = Parser::new("test".to_string(), String::from(
         "
     fn empty(n) {
        
@@ -1297,25 +1388,31 @@ fn test_empty_function() {
     println!("{:#?}", ast);
 }
 
+
+// Kind of pointless sense I have to pass a string
+// stringify wasn't preserving new lines
+// and I've now made my language new line sensitive
+// for things like enums and structs
+// Not sure about that decision yet
 #[macro_export]
 macro_rules! parse {
-    ($($t:tt)*) => {
+    ($input:expr) => {
         {
-            let mut parser = Parser::new(stringify!($($t)*).to_string());
+            let mut parser = Parser::new("test".to_string(), $input.to_string());
             parser.print_tokens();
             parser.parse()
         }
      };
 }
-
 #[test]
 fn parse_simple_enum() {
+    
     let ast = parse! {
-        enum Color {
+        "enum Color {
             red
             green
             blue
-        }
+        }"
     };
     println!("{:#?}", ast);
 }
@@ -1323,14 +1420,14 @@ fn parse_simple_enum() {
 #[test]
 fn parse_struct_style_enum() {
     let ast = parse! {
-        enum Action {
+        "enum Action {
             pause,
             run {
                 direction
                 speed
             },
             stop { time, location }
-        }
+        }"
     };
     println!("{:#?}", ast);
 }
@@ -1338,7 +1435,7 @@ fn parse_struct_style_enum() {
 #[test]
 fn parse_enum_creation_simple() {
     let ast = parse! {
-        let action = Action.run
+        "let action = Action.run"
     };
     println!("{:#?}", ast);
 }
@@ -1346,10 +1443,30 @@ fn parse_enum_creation_simple() {
 #[test]
 fn parse_enum_creation_complex() {
     let ast = parse! {
-        let action = Action.run {
+        "let action = Action.run {
             direction: 1
             speed: 2
-        }
+        }"
+    };
+    println!("{:#?}", ast);
+}
+
+
+#[test]
+fn test_parsing_ast() {
+    let ast = parse! {
+        "array/read_field(node, (index >>> level) & 31)"
+    };
+    println!("{:#?}", ast);
+}
+
+#[test]
+fn parse_struct_creation() {
+    let ast = parse! {
+        "let z = TreeNode {
+            left: y
+            right: y
+        }"
     };
     println!("{:#?}", ast);
 }

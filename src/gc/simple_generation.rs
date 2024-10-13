@@ -1,4 +1,4 @@
-use std::error::Error;
+use std::{error::Error, sync::Once};
 
 use mmap_rs::{MmapMut, MmapOptions};
 
@@ -39,6 +39,7 @@ impl Segment {
 struct Space {
     segments: Vec<Segment>,
     segment_offset: usize,
+    #[allow(unused)]
     segment_size: usize,
 }
 
@@ -79,15 +80,15 @@ impl Space {
         );
     }
 
-    fn can_allocate(&mut self, size: usize) -> bool {
+    fn can_allocate(&mut self, size: Word) -> bool {
         let segment = self.segments.get(self.segment_offset).unwrap();
-        let current_segment = segment.offset + size + 8 < segment.size;
+        let current_segment = segment.offset + size.to_bytes() + HeapObject::header_size() < segment.size;
         if current_segment {
             return true;
         }
         while self.segment_offset < self.segments.len() {
             let segment = self.segments.get(self.segment_offset).unwrap();
-            if segment.offset + size + 8 < segment.size {
+            if segment.offset + size.to_bytes() + HeapObject::header_size() < segment.size {
                 return true;
             }
             self.segment_offset += 1;
@@ -98,17 +99,12 @@ impl Space {
         false
     }
 
-    fn allocate(&mut self, words: usize) -> Result<*const u8, Box<dyn Error>> {
+    fn allocate(&mut self, size: Word) -> Result<*const u8, Box<dyn Error>> {
         let segment = self.segments.get_mut(self.segment_offset).unwrap();
-        let mut offset = segment.offset;
-        let size = Word::from_word(words);
+        let offset = segment.offset;
         let full_size = size.to_bytes() + HeapObject::header_size();
         if offset + full_size > segment.size {
-            self.segment_offset += 1;
-            if self.segment_offset == self.segments.len() {
-                self.segments.push(Segment::new(self.segment_size));
-            }
-            offset = 0;
+           panic!("We should only be here if we think we can allocate: full_size: {}, offset: {}, segment.size: {}, diff {}", full_size, offset, segment.size, segment.size - offset);
         }
         let pointer = self.write_object(self.segment_offset, offset, size);
         self.increment_current_offset(full_size);
@@ -123,6 +119,8 @@ impl Space {
         self.segment_offset = 0;
     }
 }
+
+static WARN_MEMORY: Once = Once::new();
 
 pub struct SimpleGeneration {
     young: Space,
@@ -193,6 +191,11 @@ impl Allocator for SimpleGeneration {
     }
 
     fn grow(&mut self, options: AllocatorOptions) {
+        if cfg!(debug_assertions) {
+            if self.old.segment_count() > 1000 {
+                WARN_MEMORY.call_once(|| println!("Warning, memory growing dramatically"));
+            }
+        }
         self.old.grow(options);
     }
 
@@ -220,8 +223,9 @@ impl SimpleGeneration {
         _kind: BuiltInTypes,
         _options: AllocatorOptions,
     ) -> Result<AllocateAction, Box<dyn Error>> {
-        if self.young.can_allocate(bytes) {
-            Ok(AllocateAction::Allocated(self.young.allocate(bytes)?))
+        let size = Word::from_word(bytes);
+        if self.young.can_allocate(size) {
+            Ok(AllocateAction::Allocated(self.young.allocate(size)?))
         } else {
             Ok(AllocateAction::Gc)
         }

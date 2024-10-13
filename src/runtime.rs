@@ -770,8 +770,13 @@ impl Compiler {
         let parse_time = std::time::Instant::now();
         let code = std::fs::read_to_string(file_name)
             .unwrap_or_else(|_| panic!("Could not find file {:?}", file_name));
-        let mut parser = Parser::new(code.to_string());
+        let mut parser = Parser::new(file_name.to_string(), code.to_string());
         let ast = parser.parse();
+
+        if self.command_line_arguments.print_ast {
+            println!("{:#?}", ast);
+        }
+
         if self.command_line_arguments.show_times {
             println!("Parse time: {:?}", parse_time.elapsed());
         }

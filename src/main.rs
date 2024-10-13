@@ -142,6 +142,8 @@ pub struct CommandLineArguments {
     #[clap(long, default_value = "false")]
     show_gc_times: bool,
     #[clap(long, default_value = "false")]
+    print_ast: bool,
+    #[clap(long, default_value = "false")]
     no_gc: bool,
     #[clap(long, default_value = "false")]
     gc_always: bool,
@@ -184,6 +186,7 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             program: Some(path.to_string()),
             show_times: args.show_times,
             show_gc_times: args.show_gc_times,
+            print_ast: args.print_ast,
             no_gc: args.no_gc,
             gc_always: args.gc_always,
             all_tests: false,
@@ -349,6 +352,7 @@ fn try_all_examples() -> Result<(), Box<dyn Error>> {
         program: None,
         show_times: false,
         show_gc_times: false,
+        print_ast: false,
         no_gc: false,
         gc_always: false,
         all_tests: true,

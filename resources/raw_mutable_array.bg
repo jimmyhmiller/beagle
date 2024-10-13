@@ -110,6 +110,10 @@ fn count(array) {
     }
 }
 
+fn mod(a, b) {
+    a - (a / b) * b
+}
+
 fn main() {
     let array = new_array(10)
     primitive/write_type_id(array, 1)
