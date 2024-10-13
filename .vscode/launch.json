@@ -22,7 +22,7 @@
                     "kind": "bin"
                 }
             },
-            "args": ["resources/raw_mutable_array.bg"],
+            "args": ["resources/hamt.bg"],
             "cwd": "${workspaceFolder}"
         },
         {
