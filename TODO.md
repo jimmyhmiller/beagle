@@ -11,3 +11,5 @@
 * Do I zero on allocation?
 * Code memory needs to be dynamic
 * If I try to recursion multiple times in the same function (same code path), it fails. I think because of tail position calcalations
+* Implement https://github.com/torvalds/linux/blob/master/tools/perf/Documentation/jitdump-specification.txt
+* Technically speaking, my arrays are now mutable. So they should have write barriers for old generation.
