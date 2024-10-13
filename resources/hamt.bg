@@ -28,11 +28,10 @@ fn tailOffset(vec) {
 fn get_node_for_level(node, level, index) {
     // So I'm guessing my parsing code is parsing
     // this incorrectly if I don't assign a variable...
-    let new_index = (index >>> level) & 31
-    if level <= 0 {
+    if level == 0 {
         node
     } else {
-        let new_node = array/read_field(node, new_index)
+        let new_node = array/read_field(node, (index >>> level) & 31)
         get_node_for_level(new_node, level - 5, index)
     }
 }
@@ -77,6 +76,7 @@ fn push(vec, value) {
         let shifted_one = 1 << vec.shift
 
         if cnt_shifted > shifted_one {
+
             // Need to create a new root and increase shift
             let new_root_array = array/new_array(32)
             array/write_field(new_root_array, 0, vec.root)
@@ -157,15 +157,6 @@ fn push_tail(vec, level, parent, tail_node) {
     }
     let new_parent = array/copy_from_array_to(parent, new_array)
     let sub_index = ((vec.count - 1) >>> level) & 31
-
-    // if vec.count == 7739424 {
-    //     println(sub_index)
-    //     println(level)
-    //     println(array/is_array(parent))
-    //     print_array_summary(parent, 0)
-    //     // println(vec)
-    // }
-
 
     let updated_node = if level == 5 {
         // Level is 5, insert the tail node here
@@ -253,8 +244,27 @@ fn get_and_verify(vec, index) {
     }
 }
 
+fn make_vec_of_every_size_and_verify(n) {
+    if n == 0 {
+        "done"
+    } else {
+        println(n)
+        let vec = fill_vec_n(EMPTY, 0, n)
+        get_and_verify(vec, 0)
+        make_vec_of_every_size_and_verify(n - 1)
+    }
+}
+
 
 fn main() {
+
+    // TODO: Okay I think I've tracked this down to a gc/allocation bug
+    // This code seems to work fule with mark and sweep
+    // but fails with compacting and generational
+    // So it could be the moving
+    // it could be the size thing
+    // it could be something else,
+    // but I think the actual code *might* be working properly
 
     // let vec = EMPTY
     // let vec2 = push(vec, 1)
@@ -267,10 +277,15 @@ fn main() {
 
     // As soon as I do 10 million, it crashes
     // not 100% sure why yet
-    let vec6 = fill_vec_n(EMPTY, 0, 1000000)
-    // println(vec6)
+
+    // Okay, from what I can tell, I am one level too shallow
+    // let vec6 = fill_vec_n(EMPTY, 0, 10000000)
+    // get_and_verify(vec6, 0)
+
+    make_vec_of_every_size_and_verify(10000)
+    
     // println(array/read_field(vec6.root, 0))
-    get_and_verify(vec6, 0)
+    // get_and_verify(vec6, 0)
     
     // println(vec6)
     // println("here!!!")

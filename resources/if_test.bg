@@ -61,5 +61,35 @@ fn main() {
         println(11)
     }
 
+    let x = if true {
+        12
+    } else {
+        false
+    }
+    println(x)
+
+
+    let y = if false {
+        false
+    } else {
+        13
+    }
+    println(y)
+    "done"
 }
 
+// Expect
+// 1
+// 2
+// 3
+// 4
+// 5
+// 6
+// 7
+// 8
+// 9
+// 10
+// 11
+// 12
+// 13
+// done

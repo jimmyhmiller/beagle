@@ -102,11 +102,6 @@ impl Allocator for SimpleMarkSweepHeap {
     }
 
     fn grow(&mut self, _options: AllocatorOptions) {
-        // TODO: remove this bytes parameter placehodler
-        // It does too much right now
-        // It first tries to find a place to put the object
-        // only then does it add. So I'm using max so that it can
-        // never find a spot
         self.create_more_segments();
     }
 
@@ -146,6 +141,10 @@ impl SimpleMarkSweepHeap {
             free_list: vec![],
             namespace_roots: vec![],
         }
+    }
+
+    pub fn segment_count(&self) -> usize {
+        self.space.segments.len()
     }
 
     fn segment_pointer(&self, arg: usize) -> usize {
