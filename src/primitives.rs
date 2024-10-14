@@ -117,8 +117,11 @@ impl<'a> AstCompiler<'a> {
                 let pointer = args[0];
                 // check the tag of the pointer
                 let tag = self.ir.get_tag(pointer);
-                let heap_object_tag = self.ir.assign_new(Value::RawValue(BuiltInTypes::HeapObject.get_tag() as usize));
-                self.ir.compare(tag, heap_object_tag.into(), Condition::Equal)
+                let heap_object_tag = self
+                    .ir
+                    .assign_new(Value::RawValue(BuiltInTypes::HeapObject.get_tag() as usize));
+                self.ir
+                    .compare(tag, heap_object_tag.into(), Condition::Equal)
             }
             _ => panic!("Unknown inline primitive function {}", name),
         }

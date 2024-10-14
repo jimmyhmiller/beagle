@@ -1,5 +1,7 @@
 use crate::{
-    builtins::debugger, types::{BuiltInTypes, HeapObject, Word}, Data, Message
+    builtins::debugger,
+    types::{BuiltInTypes, HeapObject, Word},
+    Data, Message,
 };
 use mmap_rs::{MmapMut, MmapOptions};
 use std::error::Error;
@@ -105,9 +107,7 @@ impl Allocator for SimpleMarkSweepHeap {
         self.create_more_segments();
     }
 
-    fn gc_add_root(&mut self, _old: usize) {
-
-    }
+    fn gc_add_root(&mut self, _old: usize) {}
 
     fn add_namespace_root(&mut self, namespace_id: usize, root: usize) {
         self.namespace_roots.push((namespace_id, root));

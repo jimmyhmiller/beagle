@@ -124,8 +124,14 @@ pub enum Ast {
         left: Box<Ast>,
         right: Box<Ast>,
     },
-    And { left: Box<Ast>, right: Box<Ast> },
-    Or { left: Box<Ast>, right: Box<Ast> },
+    And {
+        left: Box<Ast>,
+        right: Box<Ast>,
+    },
+    Or {
+        left: Box<Ast>,
+        right: Box<Ast>,
+    },
 }
 
 impl Ast {
@@ -635,7 +641,8 @@ impl<'a> AstCompiler<'a> {
                 self.ir.assign(result_reg, Value::False);
                 let short_circuit = self.ir.label("short_circuit_and");
                 let left = self.call_compile(&left);
-                self.ir.jump_if(short_circuit, Condition::Equal, left, Value::False);
+                self.ir
+                    .jump_if(short_circuit, Condition::Equal, left, Value::False);
                 let right = self.call_compile(&right);
                 self.ir.assign(result_reg, right);
                 self.ir.write_label(short_circuit);
@@ -646,7 +653,8 @@ impl<'a> AstCompiler<'a> {
                 self.ir.assign(result_reg, Value::True);
                 let short_circuit = self.ir.label("short_circuit_or");
                 let left = self.call_compile(&left);
-                self.ir.jump_if(short_circuit, Condition::Equal, left, Value::True);
+                self.ir
+                    .jump_if(short_circuit, Condition::Equal, left, Value::True);
                 let right = self.call_compile(&right);
                 self.ir.assign(result_reg, right);
                 self.ir.write_label(short_circuit);
