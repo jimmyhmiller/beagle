@@ -263,13 +263,13 @@ fn make_vec_of_every_size_and_verify(n) {
 
 fn main() {
     let vec = EMPTY
-    // println(vec)
-    // gc()
-    // println(vec)
-    println(make_vec_of_every_size_and_verify(10000))
-    // gc()
-    // gc()
-    // println(make_vec_of_every_size_and_verify(1000))
+    println(vec)
+    gc()
+    println(vec)
+    println(make_vec_of_every_size_and_verify(1000))
+    gc()
+    gc()
+    println(make_vec_of_every_size_and_verify(1000))
     "done"
 }
 
