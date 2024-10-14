@@ -139,10 +139,9 @@ pub unsafe extern "C" fn gc<Alloc: Allocator>(
 pub unsafe extern "C" fn gc_add_root<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,
     old: usize,
-    young: usize,
 ) -> usize {
     let runtime = unsafe { &mut *runtime };
-    runtime.gc_add_root(old, young);
+    runtime.gc_add_root(old);
     BuiltInTypes::null_value() as usize
 }
 
@@ -248,6 +247,7 @@ pub unsafe extern "C" fn copy_object<Alloc: Allocator>(
     object_pointer: usize,
 ) -> usize {
     let runtime = unsafe { &mut *runtime };
+    // runtime.gc_add_root(object_pointer);
     let object = HeapObject::from_tagged(object_pointer);
     let header = object.get_header();
     let size = header.size as usize;
@@ -267,6 +267,8 @@ pub unsafe extern "C" fn copy_from_to_object<Alloc: Allocator>(
     if from == BuiltInTypes::null_value() as usize {
         return to;
     }
+    // runtime.gc_add_root(from);
+    // runtime.gc_add_root(to);
     let from = HeapObject::from_tagged(from);
     let mut to = HeapObject::from_tagged(to);
     runtime.copy_object_except_header(from, &mut to).unwrap();

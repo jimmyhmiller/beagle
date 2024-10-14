@@ -254,6 +254,17 @@ impl HeapObject {
         }
     }
 
+    pub fn try_from_tagged(pointer: usize) -> Option<Self> {
+        if BuiltInTypes::is_heap_pointer(pointer) {
+            Some(HeapObject {
+                pointer,
+                tagged: true,
+            })
+        } else {
+            None
+        }
+    }
+
     pub fn untagged(&self) -> usize {
         if self.tagged {
             BuiltInTypes::untag(self.pointer)

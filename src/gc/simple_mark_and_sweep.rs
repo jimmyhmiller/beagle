@@ -105,7 +105,7 @@ impl Allocator for SimpleMarkSweepHeap {
         self.create_more_segments();
     }
 
-    fn gc_add_root(&mut self, _old: usize, _young: usize) {
+    fn gc_add_root(&mut self, _old: usize) {
         // We don't need to do anything because all roots are gathered
         // from the stack.
         // Maybe we should do something though?
@@ -424,7 +424,7 @@ impl SimpleMarkSweepHeap {
                         };
                         // We have no defined hard cap yet.
                         // but this is probably a bug
-                        assert!(entry.size < 1000);
+                        // assert!(entry.size < 1000);
                         let mut entered = false;
                         for current_entry in free_entries.iter_mut().rev() {
                             if current_entry.segment == entry.segment

@@ -45,9 +45,9 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         drop(lock)
     }
 
-    fn gc_add_root(&mut self, old: usize, young: usize) {
+    fn gc_add_root(&mut self, old: usize) {
         let lock = self.mutex.lock().unwrap();
-        self.alloc.gc_add_root(old, young);
+        self.alloc.gc_add_root(old);
         drop(lock)
     }
 
