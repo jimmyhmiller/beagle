@@ -1,9 +1,11 @@
 use crate::{
-    builtins::debugger, machine_code::arm_codegen::{
+    builtins::debugger,
+    machine_code::arm_codegen::{
         ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector,
         StrImmGenSelector, SP, X0, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29, X30,
         ZERO_REGISTER,
-    }, types::BuiltInTypes
+    },
+    types::BuiltInTypes,
 };
 
 use std::collections::HashMap;

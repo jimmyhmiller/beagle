@@ -2,6 +2,7 @@ use core::fmt;
 use std::{
     collections::HashMap,
     error::Error,
+    io::Write,
     slice::from_raw_parts_mut,
     sync::{atomic::AtomicUsize, Arc, Condvar, Mutex, TryLockError},
     thread::{self, JoinHandle, Thread, ThreadId},
@@ -13,7 +14,13 @@ use libloading::Library;
 use mmap_rs::{Mmap, MmapMut, MmapOptions};
 
 use crate::{
-    arm::LowLevelArm, builtins::{__pause, debugger}, gc::{AllocateAction, Allocator, AllocatorOptions, StackMap, StackMapDetails, STACK_SIZE}, ir::{StringValue, Value}, parser::Parser, types::{BuiltInTypes, HeapObject}, CommandLineArguments, Data, Message
+    arm::LowLevelArm,
+    builtins::{__pause, debugger},
+    gc::{AllocateAction, Allocator, AllocatorOptions, StackMap, StackMapDetails, STACK_SIZE},
+    ir::{StringValue, Value},
+    parser::Parser,
+    types::{BuiltInTypes, HeapObject},
+    CommandLineArguments, Data, Message,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +33,7 @@ pub struct Function {
     pub needs_stack_pointer: bool,
     is_defined: bool,
     number_of_locals: usize,
+    size: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -413,6 +421,7 @@ impl Compiler {
             needs_stack_pointer: false,
             is_defined: true,
             number_of_locals: 0,
+            size: 0,
         });
         debugger(Message {
             kind: "foreign_function".to_string(),
@@ -443,6 +452,7 @@ impl Compiler {
             needs_stack_pointer,
             is_defined: true,
             number_of_locals: 0,
+            size: 0,
         });
         let pointer =
             Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
@@ -534,6 +544,7 @@ impl Compiler {
             needs_stack_pointer: false,
             is_defined: false,
             number_of_locals: 0,
+            size: 0,
         };
         self.functions.push(function.clone());
         Ok(function)
@@ -556,6 +567,7 @@ impl Compiler {
             needs_stack_pointer: false,
             is_defined: true,
             number_of_locals,
+            size: code.len(),
         });
         let function_pointer =
             Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
@@ -581,6 +593,7 @@ impl Compiler {
         let function_pointer = self.get_function_pointer(function_clone).unwrap();
         self.modify_jump_table_entry(jump_table_offset, function_pointer)?;
         let function = &mut self.functions[index];
+        function.size = code.len();
         function.is_defined = true;
         Ok(function_pointer)
     }
@@ -1575,7 +1588,6 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         Ok(to_object.tagged_pointer())
     }
 
-
     pub fn copy_object_except_header(
         &mut self,
         from_object: HeapObject,
@@ -1583,5 +1595,31 @@ impl<Alloc: Allocator> Runtime<Alloc> {
     ) -> Result<usize, Box<dyn Error>> {
         from_object.copy_object_except_header(to_object);
         Ok(to_object.tagged_pointer())
+    }
+
+    pub fn write_functions_to_pid_map(&self) {
+        // https://github.com/torvalds/linux/blob/6485cf5ea253d40d507cd71253c9568c5470cd27/tools/perf/Documentation/jit-interface.txt
+        let pid = std::process::id();
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(format!("/tmp/perf-{}.map", pid))
+            .unwrap();
+        // Each line has the following format, fields separated with spaces:
+        // START SIZE symbolname
+        // START and SIZE are hex numbers without 0x.
+        // symbolname is the rest of the line, so it could contain special characters.
+
+        let memory_offset = self.compiler.code_memory.as_ref().unwrap().as_ptr() as usize;
+        for function in self.compiler.functions.iter() {
+            if function.is_foreign || function.is_builtin {
+                continue;
+            }
+            let start = memory_offset + function.offset_or_pointer;
+            let size = function.size;
+            let name = function.name.clone();
+            let line = format!("{:x} {:x} {}\n", start, size, name);
+            file.write_all(line.as_bytes()).unwrap();
+        }
     }
 }

@@ -16,6 +16,7 @@ use std::{error::Error, time::Instant};
 
 mod arm;
 pub mod ast;
+mod builtins;
 pub mod common;
 mod gc;
 pub mod ir;
@@ -24,7 +25,6 @@ pub mod parser;
 mod primitives;
 pub mod runtime;
 mod types;
-mod builtins;
 
 #[derive(Debug, Encode, Decode)]
 pub struct Message {
@@ -281,6 +281,8 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     // If I'm compiling on the fly I need this to happen when I compile
     // not just here
     runtime.memory.stack_map = runtime.compiler.stack_map.clone();
+
+    runtime.write_functions_to_pid_map();
 
     let time = Instant::now();
     if let Some(top_level) = top_level {

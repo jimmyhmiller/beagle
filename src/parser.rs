@@ -711,7 +711,7 @@ impl Parser {
     // TODO: Why the difference between this and skip?
     fn move_to_next_non_whitespace(&mut self) {
         self.consume();
-        while !self.at_end() && (self.is_space() || self.is_comment())  {
+        while !self.at_end() && (self.is_space() || self.is_comment()) {
             self.consume();
         }
     }
@@ -731,7 +731,7 @@ impl Parser {
         }
     }
 
-    fn expect_comma(&mut self)  {
+    fn expect_comma(&mut self) {
         self.skip_whitespace();
         if self.is_comma() {
             self.consume();
@@ -814,7 +814,11 @@ impl Parser {
                 self.consume();
                 Ast::Identifier(name)
             }
-            _ => panic!("Expected field name got {:?} at {}", self.current_token(), self.current_location()),
+            _ => panic!(
+                "Expected field name got {:?} at {}",
+                self.current_token(),
+                self.current_location()
+            ),
         }
     }
 
@@ -849,7 +853,11 @@ impl Parser {
                 self.data_delimiter();
                 result
             }
-            _ => panic!("Expected variant name got {:?} on line {}", self.current_token(), self.current_location()),
+            _ => panic!(
+                "Expected variant name got {:?} on line {}",
+                self.current_token(),
+                self.current_location()
+            ),
         }
     }
 
@@ -879,7 +887,11 @@ impl Parser {
         if self.is_comma() || self.is_newline() {
             self.consume();
         } else {
-            panic!("Expected comma or new_line got {:?} at {}", self.get_token_repr(), self.current_location());
+            panic!(
+                "Expected comma or new_line got {:?} at {}",
+                self.get_token_repr(),
+                self.current_location()
+            );
         }
     }
 
@@ -895,7 +907,11 @@ impl Parser {
                 }
                 name
             }
-            _ => panic!("Expected arg got {:?} on line {}", self.current_token(), self.current_location()),
+            _ => panic!(
+                "Expected arg got {:?} on line {}",
+                self.current_token(),
+                self.current_location()
+            ),
         }
     }
 
@@ -1103,10 +1119,7 @@ impl Parser {
 
     fn is_whitespace(&self) -> bool {
         match self.current_token() {
-            Token::Spaces(_)
-            | Token::NewLine
-            | Token::Comment(_)
-            | Token::SemiColon => true,
+            Token::Spaces(_) | Token::NewLine | Token::Comment(_) | Token::SemiColon => true,
             _ => false,
         }
     }
@@ -1320,8 +1333,6 @@ impl Parser {
     fn is_dot(&self) -> bool {
         self.current_token() == Token::Dot
     }
-    
-
 }
 
 #[test]
@@ -1339,12 +1350,15 @@ fn test_tokenizer2() {
 
 #[test]
 fn test_parse() {
-    let mut parser = Parser::new("test".to_string(), String::from(
-        "
+    let mut parser = Parser::new(
+        "test".to_string(),
+        String::from(
+            "
     fn hello() {
         print(\"Hello World!\")
     }",
-    ));
+        ),
+    );
 
     let ast = parser.parse();
     println!("{:#?}", ast);
@@ -1352,8 +1366,10 @@ fn test_parse() {
 
 #[test]
 fn test_parse2() {
-    let mut parser = Parser::new("test".to_string(), String::from(
-        "
+    let mut parser = Parser::new(
+        "test".to_string(),
+        String::from(
+            "
     fn hello(x) {
         if x + 1 > 2 {
             print(\"Hello World!\")
@@ -1361,7 +1377,8 @@ fn test_parse2() {
             print(\"Hello World!!!!\")
         }
     }",
-    ));
+        ),
+    );
 
     let ast = parser.parse();
     println!("{:#?}", ast);
@@ -1377,17 +1394,19 @@ fn test_parens() {
 
 #[test]
 fn test_empty_function() {
-    let mut parser = Parser::new("test".to_string(), String::from(
-        "
+    let mut parser = Parser::new(
+        "test".to_string(),
+        String::from(
+            "
     fn empty(n) {
        
     }",
-    ));
+        ),
+    );
 
     let ast = parser.parse();
     println!("{:#?}", ast);
 }
-
 
 // Kind of pointless sense I have to pass a string
 // stringify wasn't preserving new lines
@@ -1396,17 +1415,14 @@ fn test_empty_function() {
 // Not sure about that decision yet
 #[macro_export]
 macro_rules! parse {
-    ($input:expr) => {
-        {
-            let mut parser = Parser::new("test".to_string(), $input.to_string());
-            parser.print_tokens();
-            parser.parse()
-        }
-     };
+    ($input:expr) => {{
+        let mut parser = Parser::new("test".to_string(), $input.to_string());
+        parser.print_tokens();
+        parser.parse()
+    }};
 }
 #[test]
 fn parse_simple_enum() {
-    
     let ast = parse! {
         "enum Color {
             red
@@ -1450,7 +1466,6 @@ fn parse_enum_creation_complex() {
     };
     println!("{:#?}", ast);
 }
-
 
 #[test]
 fn test_parsing_ast() {

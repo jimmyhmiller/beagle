@@ -1,8 +1,11 @@
-use std::{error::Error, mem, slice::{self, from_raw_parts}, thread};
+use std::{error::Error, mem, ptr, slice::from_raw_parts, thread};
 
-use crate::{gc::Allocator, runtime::Runtime, types::{BuiltInTypes, HeapObject}, Message, Serialize};
-
-
+use crate::{
+    gc::Allocator,
+    runtime::Runtime,
+    types::{BuiltInTypes, HeapObject},
+    Message, Serialize,
+};
 
 #[allow(unused)]
 #[no_mangle]
@@ -83,14 +86,15 @@ extern "C" fn allocate_float<Alloc: Allocator>(
 extern "C" fn fill_object_fields<Alloc: Allocator>(
     _runtime: *mut Runtime<Alloc>,
     object_pointer: usize,
-    value: usize
+    value: usize,
 ) -> usize {
     let mut object = HeapObject::from_tagged(object_pointer);
-    let data = vec![value; object.fields_size() / 8];
-    let byte_len = data.len() * std::mem::size_of::<usize>();
-    let data = unsafe { slice::from_raw_parts(data.as_ptr() as *const u8, byte_len) };
-    object.write_fields(data);
-    object.tagged_pointer()
+    let size = object.get_header().size as usize;
+    let raw_pointer = object.get_fields_mut().as_mut_ptr();
+    for i in 0..size {
+        unsafe { ptr::write(raw_pointer.add(i), value) };
+    }
+    object_pointer
 }
 
 extern "C" fn make_closure<Alloc: Allocator>(
@@ -257,7 +261,6 @@ pub unsafe extern "C" fn copy_object<Alloc: Allocator>(
     runtime.copy_object(object, &mut to_object).unwrap()
 }
 
-
 pub unsafe extern "C" fn copy_from_to_object<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,
     from: usize,
@@ -286,19 +289,19 @@ impl<Alloc: Allocator> Runtime<Alloc> {
             println_value::<Alloc> as *const u8,
             false,
         )?;
-    
+
         self.compiler.add_builtin_function(
             "beagle.core/print",
             print_value::<Alloc> as *const u8,
             false,
         )?;
-    
+
         self.compiler.add_builtin_function(
             "beagle.builtin/allocate",
             allocate::<Alloc> as *const u8,
             true,
         )?;
-    
+
         self.compiler.add_builtin_function(
             "beagle.builtin/allocate_float",
             allocate_float::<Alloc> as *const u8,
@@ -310,7 +313,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
             fill_object_fields::<Alloc> as *const u8,
             false,
         )?;
-    
+
         self.compiler.add_builtin_function(
             "beagle.builtin/copy_object",
             copy_object::<Alloc> as *const u8,
@@ -322,72 +325,71 @@ impl<Alloc: Allocator> Runtime<Alloc> {
             copy_from_to_object::<Alloc> as *const u8,
             false,
         )?;
-    
+
         // TODO: Probably needs true
         self.compiler.add_builtin_function(
             "beagle.builtin/make_closure",
             make_closure::<Alloc> as *const u8,
             false,
         )?;
-    
+
         self.compiler.add_builtin_function(
             "beagle.builtin/property_access",
             property_access::<Alloc> as *const u8,
             false,
         )?;
-    
+
         self.compiler.add_builtin_function(
             "beagle.builtin/throw_error",
             throw_error::<Alloc> as *const u8,
             false,
         )?;
-    
+
         self.compiler.add_builtin_function(
             "beagle.builtin/assert!",
             placeholder as *const u8,
             false,
         )?;
-    
-        self
-            .compiler
+
+        self.compiler
             .add_builtin_function("beagle.core/gc", gc::<Alloc> as *const u8, true)?;
-    
+
         self.compiler.add_builtin_function(
             "beagle.builtin/gc_add_root",
             gc_add_root::<Alloc> as *const u8,
             false,
         )?;
-    
+
         self.compiler.add_builtin_function(
             "beagle.core/thread",
             new_thread::<Alloc> as *const u8,
             false,
         )?;
-    
+
         self.compiler.add_builtin_function(
             "beagle.core/load_library",
             load_library::<Alloc> as *const u8,
             false,
         )?;
-    
+
         self.compiler.add_builtin_function(
             "beagle.builtin/__pause",
             __pause::<Alloc> as *const u8,
             true,
         )?;
-    
+
         self.compiler.add_builtin_function(
             "beagle.builtin/update_binding",
             update_binding::<Alloc> as *const u8,
             false,
         )?;
-    
+
         self.compiler.add_builtin_function(
             "beagle.builtin/get_binding",
             get_binding::<Alloc> as *const u8,
             false,
         )?;
-    
+
         self.compiler.add_builtin_function(
             "beagle.builtin/set_current_namespace",
             set_current_namespace::<Alloc> as *const u8,
@@ -395,6 +397,5 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         )?;
 
         Ok(())
-    
     }
 }

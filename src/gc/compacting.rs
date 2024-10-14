@@ -261,11 +261,12 @@ impl Allocator for CompactingHeap {
 
         let (start_segment, start_offset) = self.to_space.current_position();
         let namespace_roots = std::mem::take(&mut self.namespace_roots);
-         // There has to be a better answer than this. But it does seem to work.
-         for (namespace_id, root) in namespace_roots.into_iter() {
+        // There has to be a better answer than this. But it does seem to work.
+        for (namespace_id, root) in namespace_roots.into_iter() {
             if BuiltInTypes::is_heap_pointer(root) {
                 let new_pointer = unsafe { self.copy_using_cheneys_algorithm(root) };
-                self.namespace_relocations.push((namespace_id, vec![(root, new_pointer)]));
+                self.namespace_relocations
+                    .push((namespace_id, vec![(root, new_pointer)]));
                 self.namespace_roots.push((namespace_id, new_pointer));
             }
         }
@@ -351,7 +352,7 @@ impl CompactingHeap {
             }
         }
     }
-    
+
     unsafe fn copy_using_cheneys_algorithm(&mut self, root: usize) -> usize {
         let heap_object = HeapObject::from_tagged(root);
 

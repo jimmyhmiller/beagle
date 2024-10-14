@@ -82,7 +82,8 @@ impl Space {
 
     fn can_allocate(&mut self, size: Word) -> bool {
         let segment = self.segments.get(self.segment_offset).unwrap();
-        let current_segment = segment.offset + size.to_bytes() + HeapObject::header_size() < segment.size;
+        let current_segment =
+            segment.offset + size.to_bytes() + HeapObject::header_size() < segment.size;
         if current_segment {
             return true;
         }
@@ -104,7 +105,7 @@ impl Space {
         let offset = segment.offset;
         let full_size = size.to_bytes() + HeapObject::header_size();
         if offset + full_size > segment.size {
-           panic!("We should only be here if we think we can allocate: full_size: {}, offset: {}, segment.size: {}, diff {}", full_size, offset, segment.size, segment.size - offset);
+            panic!("We should only be here if we think we can allocate: full_size: {}, offset: {}, segment.size: {}, diff {}", full_size, offset, segment.size, segment.size - offset);
         }
         let pointer = self.write_object(self.segment_offset, offset, size);
         self.increment_current_offset(full_size);
@@ -191,10 +192,8 @@ impl Allocator for SimpleGeneration {
     }
 
     fn grow(&mut self, options: AllocatorOptions) {
-        if cfg!(debug_assertions) {
-            if self.old.segment_count() > 1000 {
-                WARN_MEMORY.call_once(|| println!("Warning, memory growing dramatically"));
-            }
+        if cfg!(debug_assertions) && self.old.segment_count() > 1000 {
+            WARN_MEMORY.call_once(|| println!("Warning, memory growing dramatically"));
         }
         self.old.grow(options);
     }
@@ -248,7 +247,6 @@ impl SimpleGeneration {
                 self.move_objects_referenced_from_old_to_old(&mut HeapObject::from_tagged(old));
             }
 
-
             let namespace_roots = std::mem::take(&mut self.namespace_roots);
             // There has to be a better answer than this. But it does seem to work.
             for (namespace_id, root) in namespace_roots.into_iter() {
@@ -260,26 +258,28 @@ impl SimpleGeneration {
                     // We have already copied this object, so the first field points to the new location
                     let new_pointer = heap_object.get_field(0);
                     self.namespace_roots.push((namespace_id, new_pointer));
-                    self.relocated_namespace_roots.push((namespace_id, vec![(root, new_pointer)]));
+                    self.relocated_namespace_roots
+                        .push((namespace_id, vec![(root, new_pointer)]));
                 } else if self.young.contains(heap_object.get_pointer()) {
                     let new_pointer = unsafe { self.copy(root) };
-                    self.relocated_namespace_roots.push((namespace_id, vec![(root, new_pointer)]));
+                    self.relocated_namespace_roots
+                        .push((namespace_id, vec![(root, new_pointer)]));
                     self.namespace_roots.push((namespace_id, new_pointer));
-                    self.move_objects_referenced_from_old_to_old(&mut HeapObject::from_tagged(new_pointer));
+                    self.move_objects_referenced_from_old_to_old(&mut HeapObject::from_tagged(
+                        new_pointer,
+                    ));
                 } else {
                     self.move_objects_referenced_from_old_to_old(&mut heap_object);
                 }
             }
             self.copy_remaining();
 
-
             // TODO: Do better
             self.old.clear_namespace_roots();
             for (namespace_id, root) in self.namespace_roots.iter() {
                 self.old.add_namespace_root(*namespace_id, *root);
             }
-            
-            
+
             let stack_buffer = get_live_stack(*stack_base, *stack_pointer);
             for (i, (stack_offset, _)) in roots.iter().enumerate() {
                 debug_assert!(
@@ -332,15 +332,15 @@ impl SimpleGeneration {
             if object.marked() {
                 panic!("We are copying to this space, nothing should be marked");
             }
-    
+
             for datum in object.get_fields_mut() {
                 if BuiltInTypes::is_heap_pointer(*datum) {
-                    *datum = unsafe { self.copy(*datum) }; 
+                    *datum = unsafe { self.copy(*datum) };
                 }
             }
         }
     }
-    
+
     unsafe fn copy(&mut self, root: usize) -> usize {
         let heap_object = HeapObject::from_tagged(root);
 
@@ -348,13 +348,14 @@ impl SimpleGeneration {
             return root;
         }
 
-
         // if it is marked we have already copied it
         // We now know that the first field is a pointer
         if heap_object.marked() {
             let first_field = heap_object.get_field(0);
             assert!(BuiltInTypes::is_heap_pointer(first_field));
-            assert!(!self.young.contains(BuiltInTypes::untag(first_field) as *const u8));
+            assert!(!self
+                .young
+                .contains(BuiltInTypes::untag(first_field) as *const u8));
             return first_field;
         }
 
@@ -374,13 +375,12 @@ impl SimpleGeneration {
             }
             self.copy(first_field);
         }
-        
+
         heap_object.write_field(0, tagged_new);
         heap_object.mark();
         self.copied.push(HeapObject::from_untagged(new_pointer));
         tagged_new
     }
-
 
     fn move_objects_referenced_from_old_to_old(&mut self, old_object: &mut HeapObject) {
         if self.young.contains(old_object.get_pointer()) {

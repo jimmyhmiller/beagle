@@ -457,14 +457,14 @@ impl HeapObject {
             panic!("Not tagged");
         }
     }
-    
-    pub fn write_fields(&mut self, fields: &[u8])  {
+
+    pub fn write_fields(&mut self, fields: &[u8]) {
         let untagged = self.untagged();
         let pointer = untagged as *mut u8;
         let pointer = unsafe { pointer.add(Self::header_size()) };
         unsafe { std::ptr::copy_nonoverlapping(fields.as_ptr(), pointer, fields.len()) };
     }
-    
+
     pub fn is_zero_size(&self) -> bool {
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
