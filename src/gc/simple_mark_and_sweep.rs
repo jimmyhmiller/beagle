@@ -106,11 +106,7 @@ impl Allocator for SimpleMarkSweepHeap {
     }
 
     fn gc_add_root(&mut self, _old: usize) {
-        // We don't need to do anything because all roots are gathered
-        // from the stack.
-        // Maybe we should do something though?
-        // I guess this could be useful for c stuff,
-        // but for right now I'm not going to do anything.
+
     }
 
     fn add_namespace_root(&mut self, namespace_id: usize, root: usize) {
@@ -160,6 +156,10 @@ impl SimpleMarkSweepHeap {
             }
         }
         false
+    }
+
+    pub fn clear_namespace_roots(&mut self) {
+        self.namespace_roots.clear();
     }
 
     fn switch_or_create_segments(&mut self, bytes: usize) -> SegmentAction {

@@ -1,5 +1,6 @@
 namespace test.gc.in.namespaces
 
+import "raw_mutable_array" as array
 
 struct HeapThing {
     x
@@ -7,18 +8,39 @@ struct HeapThing {
     z
 }
 
+struct PersistentVector {
+    count
+    shift
+    root
+    tail
+}
+
+let EMPTY = PersistentVector {
+    count: 0
+    shift: 5
+    root: array/new_array(0)
+    tail: array/new_array(0)
+}
+
+
 let global_thing = HeapThing { x: 1, y: 2, z: 3 }
+let global_thing2 = HeapThing { x: global_thing, y: global_thing, z: global_thing }
 
 fn main() {
+    println(EMPTY)
     gc()
     gc()
     let local_thing = HeapThing { x: 4, y: 5, z: 6 }
-    // error: global_thing is now local_thing because
-    // we don't count it as live because we don't walk
-    // namespaces for roots
+    gc()
     println(global_thing)
+    println(global_thing2)
+    println(EMPTY)
+    "done"
 }
 
 // Expect
+// PersistentVector { count: 0, shift: 5, root: [  ], tail: [  ] }
 // HeapThing { x: 1, y: 2, z: 3 }
-// null
+// HeapThing { x: HeapThing { x: 1, y: 2, z: 3 }, y: HeapThing { x: 1, y: 2, z: 3 }, z: HeapThing { x: 1, y: 2, z: 3 } }
+// PersistentVector { count: 0, shift: 5, root: [  ], tail: [  ] }
+// done
