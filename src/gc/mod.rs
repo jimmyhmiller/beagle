@@ -80,7 +80,7 @@ pub trait Allocator {
     );
 
     fn grow(&mut self, options: AllocatorOptions);
-    fn gc_add_root(&mut self, old: usize, young: usize);
+    fn gc_add_root(&mut self, old: usize);
     fn add_namespace_root(&mut self, namespace_id: usize, root: usize);
     // TODO: Get rid of allocation
     fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)>;

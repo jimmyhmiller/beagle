@@ -23,7 +23,7 @@ impl<'a> AstCompiler<'a> {
                 // TODO: I need a raw add that doesn't check for tags
                 let offset = self.ir.add_int(untagged, Value::RawValue(8));
                 let value = args[1];
-                self.call_builtin("beagle.builtin/gc_add_root", vec![pointer, value]);
+                self.call_builtin("beagle.builtin/gc_add_root", vec![pointer]);
                 self.ir.atomic_store(offset, value);
                 args[1]
             }
@@ -79,6 +79,7 @@ impl<'a> AstCompiler<'a> {
                 // let untagged_field = self.ir.untag(field);
                 let value = args[2];
                 self.ir.heap_store_with_reg_offset(pointer, value, field);
+                self.call_builtin("beagle.builtin/gc_add_root", vec![pointer]);
                 Value::Null
             }
             "beagle.primitive/read_field" => {

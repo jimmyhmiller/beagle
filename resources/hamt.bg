@@ -10,6 +10,12 @@ struct PersistentVector {
     tail
 }
 
+// TODO:
+// This was all failing because of this namespace
+// constant here. My GC was not working correctly with it
+// This was true for both generational and compacting
+// Based on the stuff I did with extra roots
+// I need to make namespace roots more sensible
 let EMPTY = PersistentVector {
     count: 0
     shift: 5
@@ -217,7 +223,7 @@ fn doAssoc(vec, level, node, index, value) {
 }
 
 
-fn fill_vec_n(vec, i, n, ) {
+fn fill_vec_n(vec, i, n) {
     // println(n)
     if i == n {
         vec
@@ -249,7 +255,12 @@ fn make_vec_of_every_size_and_verify(n) {
         "done"
     } else {
         println(n)
-        let vec = fill_vec_n(EMPTY, 0, n)
+        let vec = fill_vec_n(PersistentVector {
+            count: 0
+            shift: 5
+            root: array/new_array(0)
+            tail: array/new_array(0)
+        }, 0, n)
         get_and_verify(vec, 0)
         make_vec_of_every_size_and_verify(n - 1)
     }

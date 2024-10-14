@@ -133,7 +133,7 @@ pub struct SimpleGeneration {
     // right now it should work fine.
     // There should be very few atoms
     // But I will probably want to revist this
-    additional_roots: Vec<(usize, usize)>,
+    additional_roots: Vec<usize>,
     namespace_roots: Vec<(usize, usize)>,
     relocated_namespace_roots: Vec<(usize, Vec<(usize, usize)>)>,
     atomic_pause: [u8; 8],
@@ -147,7 +147,7 @@ impl Allocator for SimpleGeneration {
         let young = Space::new(young_size);
         let old = SimpleMarkSweepHeap::new_with_count(10);
         let copied = vec![];
-        let gc_count = 0;
+        let gc_count = 1;
         let full_gc_frequency = 10;
         Self {
             young,
@@ -199,8 +199,8 @@ impl Allocator for SimpleGeneration {
         self.old.grow(options);
     }
 
-    fn gc_add_root(&mut self, old: usize, young: usize) {
-        self.additional_roots.push((old, young));
+    fn gc_add_root(&mut self, old: usize) {
+        self.additional_roots.push(old);
     }
 
     fn get_pause_pointer(&self) -> usize {
@@ -241,11 +241,12 @@ impl SimpleGeneration {
         for (stack_base, stack_pointer) in stack_pointers.iter() {
             let roots = self.gather_roots(*stack_base, stack_map, *stack_pointer);
             let new_roots: Vec<usize> = roots.iter().map(|x| x.1).collect();
-            let new_roots = new_roots
-                .into_iter()
-                .chain(self.additional_roots.iter().map(|x| &x.1).copied())
-                .collect();
             let new_roots = unsafe { self.copy_all(new_roots) };
+
+            let additional_roots = std::mem::take(&mut self.additional_roots);
+            for old in additional_roots.into_iter() {
+                self.move_objects_referenced_from_old_to_old(&mut HeapObject::from_tagged(old));
+            }
             unsafe {
                 self.copy_all(
                     self.namespace_roots
@@ -320,18 +321,14 @@ impl SimpleGeneration {
             return root;
         }
 
-        // If the first field points into the old generation, we can just return the pointer
-        // because this is a forwarding pointer.
 
-        if !heap_object.is_small_object() {
+        // if it is marked we have already copied it
+        // We now know that the first field is a pointer
+        if heap_object.marked() {
             let first_field = heap_object.get_field(0);
-            if BuiltInTypes::is_heap_pointer(first_field) {
-                let untagged_data = BuiltInTypes::untag(first_field);
-                if !self.young.contains(untagged_data as *const u8) {
-                    debug_assert!(untagged_data % 8 == 0, "Pointer is not aligned");
-                    return first_field;
-                }
-            }
+            assert!(BuiltInTypes::is_heap_pointer(first_field));
+            assert!(!self.young.contains(BuiltInTypes::untag(first_field) as *const u8));
+            return first_field;
         }
 
         let data = heap_object.get_full_object_data();
@@ -340,18 +337,7 @@ impl SimpleGeneration {
         // update header of original object to now be the forwarding pointer
         let tagged_new = BuiltInTypes::get_kind(root).tag(new_pointer as isize) as usize;
 
-        for (old, young) in self.additional_roots.iter() {
-            if root == *young {
-                let mut object = HeapObject::from_tagged(*old);
-                let data = object.get_fields_mut();
-
-                for datum in data.iter_mut() {
-                    if datum == young {
-                        *datum = tagged_new;
-                    }
-                }
-            }
-        }
+        // TODO: Fix this so it can be like additional roots
         for (namespace_id, old_root) in self.namespace_roots.iter_mut() {
             if root == *old_root {
                 // check if namespace_id is in relocated_namespace_roots
@@ -371,9 +357,36 @@ impl SimpleGeneration {
             }
             *old_root = tagged_new;
         }
+        let first_field = heap_object.get_field(0);
+        if let Some(heap_object) = HeapObject::try_from_tagged(first_field) {
+            if !self.young.contains(heap_object.get_pointer()) {
+                return tagged_new;
+            }
+            self.copy(first_field);
+        }
+        
         heap_object.write_field(0, tagged_new);
+        heap_object.mark();
         self.copied.push(HeapObject::from_untagged(new_pointer));
         tagged_new
+    }
+
+
+    fn move_objects_referenced_from_old_to_old(&mut self, old_object: &mut HeapObject) {
+        if self.young.contains(old_object.get_pointer()) {
+            return;
+        }
+        let data = old_object.get_fields_mut();
+        for datum in data.iter_mut() {
+            if BuiltInTypes::is_heap_pointer(*datum) {
+                let untagged = BuiltInTypes::untag(*datum);
+                if !self.young.contains(untagged as *const u8) {
+                    continue;
+                }
+                let new_pointer = unsafe { self.copy(*datum) };
+                *datum = new_pointer;
+            }
+        }
     }
 
     // Stolen from simple mark and sweep

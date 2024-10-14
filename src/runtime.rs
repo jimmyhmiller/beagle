@@ -218,8 +218,8 @@ impl<Alloc: Allocator> Allocator for Memory<Alloc> {
         self.heap.grow(options)
     }
 
-    fn gc_add_root(&mut self, old: usize, young: usize) {
-        self.heap.gc_add_root(old, young)
+    fn gc_add_root(&mut self, old: usize) {
+        self.heap.gc_add_root(old)
     }
 
     fn add_namespace_root(&mut self, namespace_id: usize, root: usize) {
@@ -1327,9 +1327,9 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         drop(locked);
     }
 
-    pub fn gc_add_root(&mut self, old: usize, young: usize) {
-        if BuiltInTypes::is_heap_pointer(young) {
-            self.memory.heap.gc_add_root(old, young);
+    pub fn gc_add_root(&mut self, old: usize) {
+        if BuiltInTypes::is_heap_pointer(old) {
+            self.memory.heap.gc_add_root(old);
         }
     }
 
