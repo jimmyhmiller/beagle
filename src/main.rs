@@ -272,6 +272,12 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     // It should really be the top level of a namespace
     let top_level = runtime.compiler.compile(&program)?;
 
+   // Adding this line consistent makes my mark and sweep
+    // gc on binary trees fail. But only in release
+    // What did I do? Am I somehow messing with the stack?
+    // I thought my trampoline should fix that...
+    // runtime.write_functions_to_pid_map();
+
     runtime.compiler.check_functions();
     if args.show_times {
         println!("Compile time {:?}", compile_time.elapsed());
@@ -281,8 +287,6 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     // If I'm compiling on the fly I need this to happen when I compile
     // not just here
     runtime.memory.stack_map = runtime.compiler.stack_map.clone();
-
-    runtime.write_functions_to_pid_map();
 
     let time = Instant::now();
     if let Some(top_level) = top_level {
