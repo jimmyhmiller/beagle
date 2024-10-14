@@ -252,15 +252,9 @@ fn get_and_verify(vec, index) {
 
 fn make_vec_of_every_size_and_verify(n) {
     if n == 0 {
-        "done"
+        "worked!"
     } else {
-        println(n)
-        let vec = fill_vec_n(PersistentVector {
-            count: 0
-            shift: 5
-            root: array/new_array(0)
-            tail: array/new_array(0)
-        }, 0, n)
+        let vec = fill_vec_n(EMPTY, 0, n)
         get_and_verify(vec, 0)
         make_vec_of_every_size_and_verify(n - 1)
     }
@@ -268,44 +262,20 @@ fn make_vec_of_every_size_and_verify(n) {
 
 
 fn main() {
-
-    // TODO: Okay I think I've tracked this down to a gc/allocation bug
-    // This code seems to work fule with mark and sweep
-    // but fails with compacting and generational
-    // So it could be the moving
-    // it could be the size thing
-    // it could be something else,
-    // but I think the actual code *might* be working properly
-
-    // let vec = EMPTY
-    // let vec2 = push(vec, 1)
-    // let vec3 = push(vec2, 2)
-    // let vec4 = push(vec3, 3)
-    // let vec5 = assoc(vec4, 1, 4)
-    // println(get(vec5, 0))
-    // println(get(vec5, 1))
-    // println(get(vec5, 2))
-
-    // As soon as I do 10 million, it crashes
-    // not 100% sure why yet
-
-    // Okay, from what I can tell, I am one level too shallow
-    // let vec6 = fill_vec_n(EMPTY, 0, 10000000)
-    // get_and_verify(vec6, 0)
-
-    make_vec_of_every_size_and_verify(10000)
-    
-    // println(array/read_field(vec6.root, 0))
-    // get_and_verify(vec6, 0)
-    
-    // println(vec6)
-    // println("here!!!")
-    // println(vec6)
-    // TODO: get has a problem
-    // println(get(vec6, 0))
-    // let vec6 = assoc(vec6, 1, 99)
-    // println(get(vec6, 1))
-    // println(get(vec6, 2))
-    // println(get(vec6, 99))
+    let vec = EMPTY
+    println(vec)
+    gc()
+    println(vec)
+    println(make_vec_of_every_size_and_verify(1000))
+    gc()
+    gc()
+    println(make_vec_of_every_size_and_verify(1000))
     "done"
 }
+
+// Expect
+// PersistentVector { count: 0, shift: 5, root: [  ], tail: [  ] }
+// PersistentVector { count: 0, shift: 5, root: [  ], tail: [  ] }
+// worked!
+// worked!
+// done

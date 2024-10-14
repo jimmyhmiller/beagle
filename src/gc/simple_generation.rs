@@ -147,7 +147,7 @@ impl Allocator for SimpleGeneration {
         let young = Space::new(young_size);
         let old = SimpleMarkSweepHeap::new_with_count(10);
         let copied = vec![];
-        let gc_count = 1;
+        let gc_count = 0;
         let full_gc_frequency = 10;
         Self {
             young,
@@ -247,16 +247,39 @@ impl SimpleGeneration {
             for old in additional_roots.into_iter() {
                 self.move_objects_referenced_from_old_to_old(&mut HeapObject::from_tagged(old));
             }
-            unsafe {
-                self.copy_all(
-                    self.namespace_roots
-                        .iter()
-                        .map(|x| &x.1)
-                        .filter(|x| BuiltInTypes::is_heap_pointer(**x))
-                        .copied()
-                        .collect(),
-                )
-            };
+
+
+            let namespace_roots = std::mem::take(&mut self.namespace_roots);
+            // There has to be a better answer than this. But it does seem to work.
+            for (namespace_id, root) in namespace_roots.into_iter() {
+                if !BuiltInTypes::is_heap_pointer(root) {
+                    continue;
+                }
+                let mut heap_object = HeapObject::from_tagged(root);
+                if self.young.contains(heap_object.get_pointer()) && heap_object.marked() {
+                    // We have already copied this object, so the first field points to the new location
+                    let new_pointer = heap_object.get_field(0);
+                    self.namespace_roots.push((namespace_id, new_pointer));
+                    self.relocated_namespace_roots.push((namespace_id, vec![(root, new_pointer)]));
+                } else if self.young.contains(heap_object.get_pointer()) {
+                    let new_pointer = unsafe { self.copy(root) };
+                    self.relocated_namespace_roots.push((namespace_id, vec![(root, new_pointer)]));
+                    self.namespace_roots.push((namespace_id, new_pointer));
+                    self.move_objects_referenced_from_old_to_old(&mut HeapObject::from_tagged(new_pointer));
+                } else {
+                    self.move_objects_referenced_from_old_to_old(&mut heap_object);
+                }
+            }
+            self.copy_remaining();
+
+
+            // TODO: Do better
+            self.old.clear_namespace_roots();
+            for (namespace_id, root) in self.namespace_roots.iter() {
+                self.old.add_namespace_root(*namespace_id, *root);
+            }
+            
+            
             let stack_buffer = get_live_stack(*stack_base, *stack_pointer);
             for (i, (stack_offset, _)) in roots.iter().enumerate() {
                 debug_assert!(
@@ -299,21 +322,25 @@ impl SimpleGeneration {
             new_roots.push(self.copy(*root));
         }
 
-        while let Some(mut object) = self.copied.pop() {
-            if object.marked() {
-                panic!("We are copying to this space, nothing should be marked");
-            }
-
-            for datum in object.get_fields_mut() {
-                if BuiltInTypes::is_heap_pointer(*datum) {
-                    *datum = self.copy(*datum);
-                }
-            }
-        }
+        self.copy_remaining();
 
         new_roots
     }
 
+    fn copy_remaining(&mut self) {
+        while let Some(mut object) = self.copied.pop() {
+            if object.marked() {
+                panic!("We are copying to this space, nothing should be marked");
+            }
+    
+            for datum in object.get_fields_mut() {
+                if BuiltInTypes::is_heap_pointer(*datum) {
+                    *datum = unsafe { self.copy(*datum) }; 
+                }
+            }
+        }
+    }
+    
     unsafe fn copy(&mut self, root: usize) -> usize {
         let heap_object = HeapObject::from_tagged(root);
 
@@ -337,25 +364,8 @@ impl SimpleGeneration {
         // update header of original object to now be the forwarding pointer
         let tagged_new = BuiltInTypes::get_kind(root).tag(new_pointer as isize) as usize;
 
-        // TODO: Fix this so it can be like additional roots
-        for (namespace_id, old_root) in self.namespace_roots.iter_mut() {
-            if root == *old_root {
-                // check if namespace_id is in relocated_namespace_roots
-                // if it is add to list, otherwise create a new list
-                let mut found = false;
-                for (id, roots) in self.relocated_namespace_roots.iter_mut() {
-                    if *id == *namespace_id {
-                        roots.push((*old_root, tagged_new));
-                        found = true;
-                        break;
-                    }
-                }
-                if !found {
-                    self.relocated_namespace_roots
-                        .push((*namespace_id, vec![(*old_root, tagged_new)]));
-                }
-            }
-            *old_root = tagged_new;
+        if heap_object.is_zero_size() {
+            return tagged_new;
         }
         let first_field = heap_object.get_field(0);
         if let Some(heap_object) = HeapObject::try_from_tagged(first_field) {

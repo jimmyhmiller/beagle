@@ -286,10 +286,7 @@ impl HeapObject {
     }
 
     pub fn marked(&self) -> bool {
-        let untagged = self.untagged();
-        let pointer = untagged as *mut isize;
-        let data: usize = unsafe { *pointer.cast::<usize>() };
-        data & 1 == 1
+        self.get_header().marked
     }
 
     pub fn fields_size(&self) -> usize {
@@ -317,7 +314,7 @@ impl HeapObject {
         let size = self.full_size();
         let untagged = self.untagged();
         let pointer = untagged as *mut u8;
-        assert!(pointer as usize % 8 == 0);
+        assert!(pointer.is_aligned());
         unsafe { std::slice::from_raw_parts(pointer, size) }
     }
 
@@ -406,6 +403,7 @@ impl HeapObject {
     }
 
     pub fn write_field(&self, arg: i32, tagged_new: usize) {
+        debug_assert!(arg < self.fields_size() as i32);
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
         let pointer = unsafe { pointer.add(arg as usize + Self::header_size() / 8) };
@@ -444,10 +442,10 @@ impl HeapObject {
         header.small
     }
 
-    #[allow(unused)]
     pub fn get_header(&self) -> Header {
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
+        assert!(pointer.is_aligned());
         let data: usize = unsafe { *pointer.cast::<usize>() };
         Header::from_usize(data)
     }
@@ -465,6 +463,14 @@ impl HeapObject {
         let pointer = untagged as *mut u8;
         let pointer = unsafe { pointer.add(Self::header_size()) };
         unsafe { std::ptr::copy_nonoverlapping(fields.as_ptr(), pointer, fields.len()) };
+    }
+    
+    pub fn is_zero_size(&self) -> bool {
+        let untagged = self.untagged();
+        let pointer = untagged as *mut usize;
+        let data: usize = unsafe { *pointer.cast::<usize>() };
+        let header = Header::from_usize(data);
+        header.size == 0
     }
 }
 

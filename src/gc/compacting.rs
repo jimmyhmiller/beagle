@@ -120,6 +120,7 @@ impl Space {
         }
         let segment = self.segments.get_mut(self.segment_offset).unwrap();
         let buffer = &mut segment.memory[segment.offset..segment.offset + data.len()];
+        assert!(buffer.as_ptr().is_aligned());
         buffer.copy_from_slice(data);
         let pointer = buffer.as_ptr() as isize;
         self.increment_current_offset(data.len());
@@ -257,6 +258,19 @@ impl Allocator for CompactingHeap {
                 stack_buffer[*stack_offset] = new_roots[i];
             }
         }
+
+        let (start_segment, start_offset) = self.to_space.current_position();
+        let namespace_roots = std::mem::take(&mut self.namespace_roots);
+         // There has to be a better answer than this. But it does seem to work.
+         for (namespace_id, root) in namespace_roots.into_iter() {
+            if BuiltInTypes::is_heap_pointer(root) {
+                let new_pointer = unsafe { self.copy_using_cheneys_algorithm(root) };
+                self.namespace_relocations.push((namespace_id, vec![(root, new_pointer)]));
+                self.namespace_roots.push((namespace_id, new_pointer));
+            }
+        }
+        unsafe { self.copy_remaining(start_segment, start_offset) };
+
         mem::swap(&mut self.from_space, &mut self.to_space);
 
         self.to_space.clear();
@@ -314,27 +328,12 @@ impl CompactingHeap {
             new_roots.push(self.copy_using_cheneys_algorithm(*root));
         }
 
-        let mut new_namespace_roots = vec![];
-        for (namespace_id, namespace_root) in self.namespace_roots.clone().iter() {
-            if !BuiltInTypes::is_heap_pointer(*namespace_root) {
-                continue;
-            }
-            let new_pointer = self.copy_using_cheneys_algorithm(*namespace_root);
-            new_namespace_roots.push((*namespace_id, new_pointer));
-            // if namespace exists, push, otherwise create
-            let namespace = self
-                .namespace_relocations
-                .iter_mut()
-                .find(|(id, _)| *id == *namespace_id);
-            if let Some((_, relocations)) = namespace {
-                relocations.push((*namespace_root, new_pointer));
-            } else {
-                self.namespace_relocations
-                    .push((*namespace_id, vec![(*namespace_root, new_pointer)]));
-            }
-        }
-        self.namespace_roots = new_namespace_roots;
+        self.copy_remaining(start_segment, start_offset);
 
+        new_roots
+    }
+
+    unsafe fn copy_remaining(&mut self, start_segment: usize, start_offset: usize) {
         for mut object in self
             .to_space
             .object_iter_from_position(start_segment, start_offset)
@@ -342,7 +341,7 @@ impl CompactingHeap {
             if object.marked() {
                 panic!("We are copying to this space, nothing should be marked");
             }
-            if object.is_small_object() {
+            if object.is_small_object() || object.is_zero_size() {
                 continue;
             }
             for datum in object.get_fields_mut() {
@@ -351,17 +350,12 @@ impl CompactingHeap {
                 }
             }
         }
-
-        new_roots
     }
-
+    
     unsafe fn copy_using_cheneys_algorithm(&mut self, root: usize) -> usize {
         let heap_object = HeapObject::from_tagged(root);
 
-        // if the first field is in the to space, we have already
-        // copied this object. This is now the forwarding pointer.
-
-        if !heap_object.is_small_object() {
+        if !heap_object.is_zero_size() && !heap_object.is_small_object() {
             let first_field = heap_object.get_field(0);
             if BuiltInTypes::is_heap_pointer(heap_object.get_field(0)) {
                 let untagged_data = BuiltInTypes::untag(first_field);
@@ -371,12 +365,26 @@ impl CompactingHeap {
                 }
             }
         }
+        if heap_object.is_zero_size() || heap_object.is_small_object() {
+            let data = heap_object.get_full_object_data();
+            let new_pointer = self.to_space.copy_data_to_offset(data);
+            let tagged_new = BuiltInTypes::get_kind(root).tag(new_pointer) as usize;
+            return tagged_new;
+        }
+        let first_field = heap_object.get_field(0);
+        if BuiltInTypes::is_heap_pointer(first_field) {
+            let untagged = BuiltInTypes::untag(first_field);
+            if !self.from_space.contains(untagged as *const u8) {
+                heap_object.write_field(0, self.copy_using_cheneys_algorithm(first_field));
+            }
+        }
         let data = heap_object.get_full_object_data();
         let new_pointer = self.to_space.copy_data_to_offset(data);
         debug_assert!(new_pointer % 8 == 0, "Pointer is not aligned");
         // update header of original object to now be the forwarding pointer
         let tagged_new = BuiltInTypes::get_kind(root).tag(new_pointer) as usize;
         heap_object.write_field(0, tagged_new);
+        // heap_object.mark();
         tagged_new
     }
 
