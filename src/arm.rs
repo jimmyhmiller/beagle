@@ -65,6 +65,16 @@ pub fn sub(destination: Register, a: Register, b: Register) -> ArmAsm {
     }
 }
 
+pub fn sub_imm(destination: Register, a: Register, b: i32) -> ArmAsm {
+    ArmAsm::SubAddsubImm {
+        sf: destination.sf(),
+        sh: 0,
+        imm12: b,
+        rn: a,
+        rd: destination,
+    }
+}
+
 pub fn mul(destination: Register, a: Register, b: Register) -> ArmAsm {
     ArmAsm::Madd {
         sf: destination.sf(),
@@ -547,6 +557,9 @@ impl LowLevelArm {
     pub fn sub(&mut self, destination: Register, a: Register, b: Register) {
         self.instructions.push(sub(destination, a, b));
     }
+    pub fn sub_imm(&mut self, destination: Register, a: Register, b: i32) {
+        self.instructions.push(sub_imm(destination, a, b));
+    }
     pub fn mul(&mut self, destination: Register, a: Register, b: Register) {
         self.instructions.push(mul(destination, a, b));
     }
@@ -754,10 +767,8 @@ impl LowLevelArm {
     pub fn guard_float(&mut self, dest: Register, a: Register, jump: Label) {
         // floats are tagged with 0b001
         self.and_imm(dest, a, 0b111);
-        let temp_reg = self.volatile_register();
-        self.mov_64(temp_reg, 0b001);
-        self.free_register(temp_reg);
-        self.compare(dest, temp_reg);
+        self.sub_imm(dest, dest, 0b001);
+        self.compare(dest, ZERO_REGISTER);
         self.jump_not_equal(jump);
     }
 

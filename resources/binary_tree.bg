@@ -1,5 +1,7 @@
 namespace binary_tree
 
+import "beagle.primitive" as primitive
+
 fn math_max(a, b) {
     if a > b {
         a

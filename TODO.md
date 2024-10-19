@@ -13,3 +13,6 @@
 * If I try to recursion multiple times in the same function (same code path), it fails. I think because of tail position calcalations
 * Implement https://github.com/torvalds/linux/blob/master/tools/perf/Documentation/jitdump-specification.txt
 * Technically speaking, my arrays are now mutable. So they should have write barriers for old generation.
+* One thing I think I'm not doing is running the top levels when I import things
+* I fixed a bunch of stack map code in compacting. The errors have to also exist in mark and sweep. (Maybe also generational) Cleanup and unify this stuff.
+* I should probably have some gc-always runs

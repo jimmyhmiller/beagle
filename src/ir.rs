@@ -516,10 +516,12 @@ impl Ir {
         F: FnOnce(&mut Ir, Value, Value) -> Value,
         G: FnOnce(&mut Ir, Value, Value) -> Value,
     {
-        let result_register = self.volatile_register();
-        let a = self.assign_new(a.into());
-        let b = self.assign_new(b.into());
-        let add_float = self.label("add_float");
+        // TODO: result registers like this can cause problems if not assigned
+        // Need to think about this more
+        let result_register = self.assign_new(Value::TaggedConstant(0));
+        let a: VirtualRegister = self.assign_new(a.into());
+        let b: VirtualRegister = self.assign_new(b.into());
+        let add_float: Label = self.label("add_float");
         let after_add = self.label("after_add");
         // self.breakpoint();
         self.guard_int(a.into(), add_float);
@@ -531,6 +533,11 @@ impl Ir {
 
         self.guard_float(a.into(), self.after_return);
         self.guard_float(b.into(), self.after_return);
+
+        let size_reg = self.assign_new(1);
+        let float_pointer = self.allocate(size_reg.into());
+        let float_pointer = self.untag(float_pointer);
+
         let a = self.untag(a.into());
         let b = self.untag(b.into());
         let a = self.load_from_heap(a, 1);
@@ -540,9 +547,6 @@ impl Ir {
         let result = op_float(self, a, b);
         let result = self.fmov_float_to_general(result);
         // Allocate and store
-        let size_reg = self.assign_new(1);
-        let float_pointer = self.allocate(size_reg.into());
-        let float_pointer = self.untag(float_pointer);
         self.write_small_object_header(float_pointer);
         self.heap_store_offset(float_pointer, result, 1);
         let tagged = self.tag(float_pointer, BuiltInTypes::Float.get_tag());

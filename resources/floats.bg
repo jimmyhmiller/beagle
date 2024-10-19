@@ -1,5 +1,7 @@
 namespace floats
 
+import "beagle.primitive" as primitive
+
 let my_float = 3.14159
 let my_int = 3
 

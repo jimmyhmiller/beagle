@@ -611,7 +611,7 @@ impl<'a> AstCompiler<'a> {
 
                 let end_if_label = self.ir.label("end_if");
 
-                let result_reg = self.ir.volatile_register();
+                let result_reg = self.ir.assign_new(Value::TaggedConstant(0));
 
                 let then_label = self.ir.label("then");
                 self.ir
@@ -1087,10 +1087,13 @@ impl<'a> AstCompiler<'a> {
 
         let compiler_pointer_reg = self.ir.assign_new(self.compiler.get_compiler_ptr());
 
+        let stack_pointer = self.ir.get_stack_pointer_imm(0);
+
         let closure = self.ir.call(
             make_closure_reg.into(),
             vec![
                 compiler_pointer_reg.into(),
+                stack_pointer,
                 function_pointer_reg.into(),
                 num_free_reg.into(),
                 free_variable_pointer,
