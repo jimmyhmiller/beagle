@@ -12,7 +12,7 @@ use gc::{
 use gc::{Allocator, StackMapDetails};
 use runtime::{DefaultPrinter, Printer, Runtime, TestPrinter};
 
-use std::{error::Error, time::Instant};
+use std::{env, error::Error, time::Instant};
 
 mod arm;
 pub mod ast;
@@ -264,7 +264,15 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     runtime.install_builtins()?;
 
-    runtime.compiler.compile("resources/std.bg")?;
+    let exe_path = env::current_exe()?;
+    runtime.compiler.compile(
+        exe_path
+            .parent()
+            .expect("Failed to get executable directory")
+            .join("resources/std.bg")
+            .to_str()
+            .unwrap(),
+    )?;
 
     let compile_time = Instant::now();
 
@@ -272,11 +280,11 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     // It should really be the top level of a namespace
     let top_level = runtime.compiler.compile(&program)?;
 
-   // Adding this line consistent makes my mark and sweep
+    // Adding this line consistent makes my mark and sweep
     // gc on binary trees fail. But only in release
     // What did I do? Am I somehow messing with the stack?
     // I thought my trampoline should fix that...
-    // runtime.write_functions_to_pid_map();
+    runtime.write_functions_to_pid_map();
 
     runtime.compiler.check_functions();
     if args.show_times {

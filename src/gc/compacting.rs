@@ -1,11 +1,11 @@
 use core::panic;
-use std::{error::Error, mem};
+use std::{error::Error, mem, slice};
 
 use mmap_rs::{MmapMut, MmapOptions};
 
 use crate::types::{BuiltInTypes, HeapObject, Word};
 
-use super::{AllocateAction, Allocator, AllocatorOptions, StackMap, STACK_SIZE};
+use super::{AllocateAction, Allocator, AllocatorOptions, StackMap};
 
 struct Segment {
     memory: MmapMut,
@@ -408,23 +408,18 @@ impl CompactingHeap {
             let value = stack[i];
 
             if let Some(details) = stack_map.find_stack_data(value) {
-                let mut frame_size = details.max_stack_size + details.number_of_locals;
-                if frame_size % 2 != 0 {
-                    frame_size += 1;
-                }
+                let frame_size = details.max_stack_size + details.number_of_locals;
+                let padding = frame_size % 2;
+                let active_frame_size = details.current_stack_size + details.number_of_locals;
 
-                let bottom_of_frame = i + frame_size + 1;
-                let _top_of_frame = i + 1;
-
-                let active_frame = details.current_stack_size + details.number_of_locals;
-
-                i = bottom_of_frame;
+                let diff = frame_size - active_frame_size;
 
                 for (j, slot) in stack
                     .iter()
                     .enumerate()
-                    .take(bottom_of_frame)
-                    .skip(bottom_of_frame - active_frame)
+                    .skip(i + padding + 1)
+                    .skip(diff)
+                    .take(active_frame_size)
                 {
                     if BuiltInTypes::is_heap_pointer(*slot) {
                         roots.push((j, *slot));
@@ -433,6 +428,7 @@ impl CompactingHeap {
                         to_mark.push(*slot);
                     }
                 }
+                i = i + padding + 1 + frame_size;
                 continue;
             }
             i += 1;
@@ -441,17 +437,18 @@ impl CompactingHeap {
     }
 }
 
-fn get_live_stack<'a>(stack_base: usize, stack_pointer: usize) -> &'a mut [usize] {
-    let stack_end = stack_base;
-    // let current_stack_pointer = current_stack_pointer & !0b111;
-    let distance_till_end = stack_end - stack_pointer;
-    let num_64_till_end = (distance_till_end / 8) + 1;
-    let len = STACK_SIZE / 8;
-    let stack_begin = stack_end - STACK_SIZE;
-    let stack =
-        unsafe { std::slice::from_raw_parts_mut(stack_begin as *mut usize, STACK_SIZE / 8) };
+unsafe fn buffer_between<'a, T>(start: *mut T, end: *mut T) -> &'a mut [T] {
+    let len = end.offset_from(start);
+    slice::from_raw_parts_mut(start, len as usize)
+}
 
-    (&mut stack[len - num_64_till_end..]) as _
+fn get_live_stack<'a>(stack_base: usize, stack_pointer: usize) -> &'a mut [usize] {
+    return unsafe {
+        buffer_between(
+            (stack_pointer as *mut usize).sub(1),
+            stack_base as *mut usize,
+        )
+    };
 }
 
 // TODO: I can borrow the code here to get to a generational gc

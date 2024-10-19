@@ -1,9 +1,10 @@
 use core::fmt;
 use std::{
     collections::HashMap,
+    env,
     error::Error,
     io::Write,
-    slice::from_raw_parts_mut,
+    slice::{self, from_raw_parts_mut},
     sync::{atomic::AtomicUsize, Arc, Condvar, Mutex, TryLockError},
     thread::{self, JoinHandle, Thread, ThreadId},
     time::Duration,
@@ -491,6 +492,25 @@ impl Compiler {
         }
         assert!(function_pointer != 0);
 
+        self.update_stack_map_information(code, function_pointer, name);
+
+        debugger(Message {
+            kind: "user_function".to_string(),
+            data: Data::UserFunction {
+                name: name.unwrap_or("<Anonymous>").to_string(),
+                pointer: function_pointer,
+                len: bytes.len(),
+            },
+        });
+        Ok(function_pointer)
+    }
+
+    fn update_stack_map_information(
+        &mut self,
+        code: &mut LowLevelArm,
+        function_pointer: usize,
+        name: Option<&str>,
+    ) {
         let translated_stack_map = code.translate_stack_map(function_pointer);
         let translated_stack_map: Vec<(usize, StackMapDetails)> = translated_stack_map
             .iter()
@@ -515,16 +535,6 @@ impl Compiler {
             },
         });
         self.stack_map.extend(translated_stack_map);
-
-        debugger(Message {
-            kind: "user_function".to_string(),
-            data: Data::UserFunction {
-                name: name.unwrap_or("<Anonymous>").to_string(),
-                pointer: function_pointer,
-                len: bytes.len(),
-            },
-        });
-        Ok(function_pointer)
     }
 
     pub fn reserve_function(&mut self, name: &str) -> Result<Function, Box<dyn Error>> {
@@ -796,7 +806,7 @@ impl Compiler {
 
         self.compile_dependencies(&ast)?;
 
-        let top_level = self.compile_ast(file_name, ast)?;
+        let top_level = self.compile_ast(ast)?;
 
         if self.command_line_arguments.verbose {
             println!("Done compiling {:?}", file_name);
@@ -815,11 +825,7 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_ast(
-        &mut self,
-        file_name: &str,
-        ast: crate::ast::Ast,
-    ) -> Result<Option<String>, Box<dyn Error>> {
+    fn compile_ast(&mut self, ast: crate::ast::Ast) -> Result<Option<String>, Box<dyn Error>> {
         let mut ir = ast.compile(self);
         if ast.has_top_level() {
             let arm = LowLevelArm::new();
@@ -829,7 +835,7 @@ impl Compiler {
             let compiler_ptr = self.get_compiler_ptr() as usize;
             let mut arm = ir.compile(arm, error_fn_pointer, compiler_ptr);
             let max_locals = arm.max_locals as usize;
-            let function_name = format!("__{}_top_level", file_name);
+            let function_name = format!("{}/__top_level", self.current_namespace_name());
             self.upsert_function(Some(&function_name), &mut arm, max_locals)?;
             return Ok(Some(function_name));
         }
@@ -1062,7 +1068,14 @@ impl Compiler {
 
     /// TODO: Temporary please fix
     fn get_file_name_from_import(&self, import_name: String) -> String {
-        format!("resources/{}.bg", import_name)
+        let exe_path = env::current_exe().unwrap();
+        exe_path
+            .parent()
+            .expect("Failed to get executable directory")
+            .join(format!("resources/{}.bg", import_name))
+            .to_str()
+            .unwrap()
+            .to_string()
     }
 
     pub fn get_namespace_from_alias(&self, alias: &str) -> Option<String> {
@@ -1102,6 +1115,14 @@ impl fmt::Debug for Compiler {
             .field("functions", &self.functions)
             .finish()
     }
+}
+
+#[allow(unused)]
+#[derive(Debug)]
+pub struct StackValue {
+    function: Option<String>,
+    details: StackMapDetails,
+    stack: Vec<usize>,
 }
 
 impl<Alloc: Allocator> Runtime<Alloc> {
@@ -1229,6 +1250,55 @@ impl<Alloc: Allocator> Runtime<Alloc> {
             }
             Err(e) => Err(e),
         }
+    }
+
+    unsafe fn buffer_between<T>(start: *const T, end: *const T) -> &'static [T] {
+        let len = end.offset_from(start);
+        slice::from_raw_parts(start, len as usize)
+    }
+
+    fn find_function_for_pc(&self, pc: usize) -> Option<&Function> {
+        self.compiler.functions.iter().find(|f| {
+            let start =
+                f.offset_or_pointer + self.compiler.code_memory.as_ref().unwrap().as_ptr() as usize;
+            let end = start + f.size;
+            pc >= start && pc < end
+        })
+    }
+
+    #[allow(unused)]
+    pub fn parse_stack_frames(&self, stack_pointer: usize) -> Vec<StackValue> {
+        let stack_base = self.get_stack_base();
+        let stack = unsafe {
+            Self::buffer_between(
+                (stack_pointer as *const usize).sub(1),
+                stack_base as *const usize,
+            )
+        };
+        println!("Stack: {:?}", stack);
+        let mut stack_frames = vec![];
+        let mut i = 0;
+        while i < stack.len() {
+            let value = stack[i];
+            if let Some(details) = self.memory.stack_map.find_stack_data(value) {
+                let mut frame_size = details.max_stack_size + details.number_of_locals;
+                if frame_size % 2 != 0 {
+                    frame_size += 1
+                }
+                let current_frame = &stack[i..i + frame_size + 1];
+                let stack_value = StackValue {
+                    function: self.find_function_for_pc(value).map(|f| f.name.clone()),
+                    details: details.clone(),
+                    stack: current_frame.to_vec(),
+                };
+                println!("Stack value: {:#?}", stack_value);
+                stack_frames.push(stack_value);
+                i += details.current_stack_size + details.number_of_locals + 1;
+                continue;
+            }
+            i += 1;
+        }
+        stack_frames
     }
 
     pub fn gc(&mut self, stack_pointer: usize) {
@@ -1364,12 +1434,13 @@ impl<Alloc: Allocator> Runtime<Alloc> {
 
     pub fn make_closure(
         &mut self,
+        stack_pointer: usize,
         function: usize,
         free_variables: &[usize],
     ) -> Result<usize, Box<dyn Error>> {
         let len = 8 + 8 + 8 + free_variables.len() * 8;
         // TODO: Stack pointer should be passed in
-        let heap_pointer = self.allocate(len / 8, 0, BuiltInTypes::Closure)?;
+        let heap_pointer = self.allocate(len / 8, stack_pointer, BuiltInTypes::Closure)?;
         let heap_pointer = BuiltInTypes::untag(heap_pointer);
         let pointer = heap_pointer as *mut u8;
         let num_free = free_variables.len();

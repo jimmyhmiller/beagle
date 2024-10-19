@@ -7,6 +7,8 @@ use crate::{
     Message, Serialize,
 };
 
+use std::hint::black_box;
+
 #[allow(unused)]
 #[no_mangle]
 #[inline(never)]
@@ -15,7 +17,8 @@ use crate::{
 /// This does nothing
 pub unsafe extern "C" fn debugger_info(buffer: *const u8, length: usize) {
     // Hack to make sure this isn't inlined
-    let x = 2;
+    black_box(buffer);
+    black_box(length);
 }
 
 pub fn debugger(message: Message) {
@@ -99,6 +102,7 @@ extern "C" fn fill_object_fields<Alloc: Allocator>(
 
 extern "C" fn make_closure<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,
+    stack_pointer: usize,
     function: usize,
     num_free: usize,
     free_variable_pointer: usize,
@@ -109,7 +113,9 @@ extern "C" fn make_closure<Alloc: Allocator>(
     let free_variable_pointer = free_variable_pointer as *const usize;
     let start = unsafe { free_variable_pointer.sub(num_free - 1) };
     let free_variables = unsafe { from_raw_parts(start, num_free) };
-    runtime.make_closure(function, free_variables).unwrap()
+    runtime
+        .make_closure(stack_pointer, function, free_variables)
+        .unwrap()
 }
 
 extern "C" fn property_access<Alloc: Allocator>(
@@ -330,7 +336,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         self.compiler.add_builtin_function(
             "beagle.builtin/make_closure",
             make_closure::<Alloc> as *const u8,
-            false,
+            true,
         )?;
 
         self.compiler.add_builtin_function(

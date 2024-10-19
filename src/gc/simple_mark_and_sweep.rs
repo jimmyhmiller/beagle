@@ -355,9 +355,10 @@ impl SimpleMarkSweepHeap {
                     .skip(bottom_of_frame - active_frame)
                 {
                     if BuiltInTypes::is_heap_pointer(*slot) {
+                        // println!("{} {}", slot, BuiltInTypes::untag(*slot));
                         let untagged = BuiltInTypes::untag(*slot);
                         if untagged % 8 != 0 {
-                            println!("Not aligned");
+                            panic!("Not aligned");
                         }
                         // println!("Pushing mark 0x{:?}", stack[j]);
                         to_mark.push(HeapObject::from_tagged(*slot));
