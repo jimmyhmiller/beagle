@@ -767,7 +767,7 @@ impl LowLevelArm {
     pub fn guard_float(&mut self, dest: Register, a: Register, jump: Label) {
         // floats are tagged with 0b001
         self.and_imm(dest, a, 0b111);
-        self.sub_imm(dest, dest, 0b001);
+        self.sub_imm(dest, dest, BuiltInTypes::Float.get_tag() as i32);
         self.compare(dest, ZERO_REGISTER);
         self.jump_not_equal(jump);
     }
