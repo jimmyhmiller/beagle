@@ -1100,10 +1100,12 @@ impl Compiler {
 
     /// TODO: Temporary please fix
     fn get_file_name_from_import(&self, import_name: String) -> String {
-        let exe_path = env::current_exe().unwrap();
+        let mut exe_path = env::current_exe().unwrap();
+        exe_path = exe_path.parent().unwrap().to_path_buf();
+        if !exe_path.join(format!("resources/{}.bg", import_name)).exists() {
+            exe_path = exe_path.parent().unwrap().to_path_buf();
+        }
         exe_path
-            .parent()
-            .expect("Failed to get executable directory")
             .join(format!("resources/{}.bg", import_name))
             .to_str()
             .unwrap()

@@ -169,9 +169,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     for entry in std::fs::read_dir("resources")? {
         let entry = entry?;
-        let path = entry.path();
+        let mut path = entry.path();
+        if !path.exists() {
+            path = path.parent().unwrap().join("resources").join(path.file_name().unwrap());
+        }
         let path = path.to_str().unwrap();
-        let source = std::fs::read_to_string(path)?;
+        let source: String = std::fs::read_to_string(path)?;
         if !source.contains("// Expect") {
             continue;
         }
@@ -181,6 +184,7 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
                 continue;
             }
         }
+       
         println!("Running test: {}", path);
         let args = CommandLineArguments {
             program: Some(path.to_string()),
@@ -264,11 +268,13 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     runtime.install_builtins()?;
 
-    let exe_path = env::current_exe()?;
+    let mut exe_path = env::current_exe()?;
+    exe_path = exe_path.parent().unwrap().to_path_buf();
+    if !exe_path.join("resources/std.bg").exists() {
+        exe_path = exe_path.parent().unwrap().to_path_buf();
+    }
     runtime.compiler.compile(
         exe_path
-            .parent()
-            .expect("Failed to get executable directory")
             .join("resources/std.bg")
             .to_str()
             .unwrap(),
