@@ -590,6 +590,31 @@ impl<'a> AstCompiler<'a> {
             Ast::PropertyAccess { object, property } => {
                 let object = self.call_compile(object.as_ref());
                 let object = self.ir.assign_new(object);
+                let untagged_object = self.ir.untag(object.into());
+                // self.ir.breakpoint();
+                let struct_id = self.ir.read_struct_id(untagged_object);
+                let property_location = Value::RawValue(self.compiler.add_property_lookup());
+                let property_location = self.ir.assign_new(property_location);
+                let property_value = self.ir.load_from_heap(property_location.into(), 0);
+                let result = self.ir.assign_new(0);
+
+                let exit_property_access = self.ir.label("exit_property_access");
+                let slow_property_path = self.ir.label("slow_property_path");
+                // self.ir.jump(slow_property_path);
+                self.ir.jump_if(
+                    slow_property_path,
+                    Condition::NotEqual,
+                    struct_id,
+                    property_value,
+                );
+
+                let property_offset = self.ir.load_from_heap(property_location.into(), 1);
+                let property_result = self.ir.read_field(untagged_object, property_offset);
+
+                self.ir.assign(result, property_result);
+                self.ir.jump(exit_property_access);
+
+                self.ir.write_label(slow_property_path);
                 let property = if let Ast::Identifier(name) = property.as_ref() {
                     name.clone()
                 } else {
@@ -597,10 +622,16 @@ impl<'a> AstCompiler<'a> {
                 };
                 let constant_ptr = self.string_constant(property);
                 let constant_ptr = self.ir.assign_new(constant_ptr);
-                self.call_builtin(
+                let call_result = self.call_builtin(
                     "beagle.builtin/property_access",
-                    vec![object.into(), constant_ptr.into()],
-                )
+                    vec![object.into(), constant_ptr.into(), property_location.into()],
+                );
+
+                self.ir.assign(result, call_result);
+
+                self.ir.write_label(exit_property_access);
+
+                result.into()
             }
             Ast::If {
                 condition,

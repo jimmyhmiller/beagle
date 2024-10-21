@@ -488,6 +488,16 @@ impl Ir {
         );
     }
 
+    pub fn read_struct_id(&mut self, struct_pointer: Value) -> Value {
+        let byte_offset = Header::type_data_offset();
+        let mask = 0x00FFFFFFFF000000; // Mask to isolate 4 bytes for type metadata
+        let result = self.heap_load(struct_pointer);
+        let masked = self.and_imm(result, mask);
+        let tagged = self.tag(masked, BuiltInTypes::Int.get_tag());
+        let shifted = self.shift_right_imm(tagged, (byte_offset * 8) as i32);
+        
+        self.untag(shifted)
+    }
     pub fn write_type_id(&mut self, struct_pointer: Value, type_id: Value) {
         let byte_offset = Header::type_id_offset();
         let mask = !(0xFF << (byte_offset * 8));
@@ -518,6 +528,11 @@ impl Ir {
     pub fn write_field(&mut self, struct_pointer: Value, index: usize, field: Value) {
         let offset = 1;
         self.heap_store_offset(struct_pointer, field, offset + index);
+    }
+
+    pub fn read_field(&mut self, struct_pointer: Value, index: Value) -> Value {
+        let incremented = self.add_int(index, 1);
+        self.heap_load_with_reg_offset(struct_pointer, incremented)
     }
 
     pub fn write_small_object_header(&mut self, small_object_pointer: Value) {

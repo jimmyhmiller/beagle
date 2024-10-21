@@ -1,4 +1,9 @@
-use std::{error::Error, mem, ptr, slice::from_raw_parts, thread};
+use std::{
+    error::Error,
+    mem, ptr,
+    slice::{from_raw_parts, from_raw_parts_mut},
+    thread,
+};
 
 use crate::{
     gc::Allocator,
@@ -122,11 +127,17 @@ extern "C" fn property_access<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,
     struct_pointer: usize,
     str_constant_ptr: usize,
+    property_cache_location: usize,
 ) -> usize {
     let runtime = unsafe { &mut *runtime };
-    runtime
+    let (result, index) = runtime
         .compiler
-        .property_access(struct_pointer, str_constant_ptr)
+        .property_access(struct_pointer, str_constant_ptr);
+    let type_id = HeapObject::from_tagged(struct_pointer).get_struct_id();
+    let buffer = unsafe { from_raw_parts_mut(property_cache_location as *mut usize, 2) };
+    buffer[0] = type_id;
+    buffer[1] = index * 8;
+    result
 }
 
 pub unsafe extern "C" fn throw_error<Alloc: Allocator>(
