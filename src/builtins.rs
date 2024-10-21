@@ -1,7 +1,6 @@
 use std::{
     error::Error,
-    mem, ptr,
-    slice::{from_raw_parts, from_raw_parts_mut},
+    mem, slice::{from_raw_parts, from_raw_parts_mut},
     thread,
 };
 
@@ -97,13 +96,11 @@ extern "C" fn fill_object_fields<Alloc: Allocator>(
     value: usize,
 ) -> usize {
     let mut object = HeapObject::from_tagged(object_pointer);
-    let size = object.get_header().size as usize;
-    let raw_pointer = object.get_fields_mut().as_mut_ptr();
-    for i in 0..size {
-        unsafe { ptr::write(raw_pointer.add(i), value) };
-    }
+    let raw_slice = object.get_fields_mut();
+    raw_slice.fill(value);
     object_pointer
 }
+
 
 extern "C" fn make_closure<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,

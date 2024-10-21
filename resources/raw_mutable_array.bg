@@ -85,7 +85,7 @@ fn unsafe_copy_from_array_to(from, to) {
 fn copy_from_array_to(from, to) {
     panic_if_not_array("copy from", from)
     panic_if_not_array("copy to", to)
-    if count(from) > count(to) {
+    if primitive/size(from) > primitive/size(to) {
         primitive/panic("Array from size must be less than or equal to array to size")
     }
     unsafe_copy_from_array_to(from, to)
