@@ -368,6 +368,9 @@ pub struct Compiler {
     jump_table: Option<Mmap>,
     // Do I need this offset?
     jump_table_offset: usize,
+
+    property_look_up_cache: MmapMut,
+
     structs: StructManager,
     enums: EnumManager,
     functions: Vec<Function>,
@@ -381,6 +384,7 @@ pub struct Compiler {
     // Should I pass runtime to all the compiler stuff?
     pub stack_map: StackMap,
     pub pause_atom_ptr: Option<usize>,
+    property_look_up_cache_offset: usize,
 }
 
 impl Compiler {
@@ -786,7 +790,10 @@ impl Compiler {
         }
     }
 
-    pub fn compile(&mut self, file_name: &str) -> Result<Option<String>, Box<dyn Error>> {
+    // TODO: I'm going to need to change how this works at some point.
+    // I want to be able to dynamically run these namespaces
+    // not have this awkward compile returns top level names thing
+    pub fn compile(&mut self, file_name: &str) -> Result<Vec<String>, Box<dyn Error>> {
         if self.command_line_arguments.verbose {
             println!("Compiling {:?}", file_name);
         }
@@ -804,25 +811,33 @@ impl Compiler {
             println!("Parse time: {:?}", parse_time.elapsed());
         }
 
-        self.compile_dependencies(&ast)?;
+        let mut top_levels_to_run = self.compile_dependencies(&ast)?;
 
         let top_level = self.compile_ast(ast)?;
+        if let Some(top_level) = top_level {
+            top_levels_to_run.push(top_level);
+        }
 
         if self.command_line_arguments.verbose {
             println!("Done compiling {:?}", file_name);
         }
-        Ok(top_level)
+        Ok(top_levels_to_run)
     }
 
-    fn compile_dependencies(&mut self, ast: &crate::ast::Ast) -> Result<(), Box<dyn Error>> {
+    fn compile_dependencies(
+        &mut self,
+        ast: &crate::ast::Ast,
+    ) -> Result<Vec<String>, Box<dyn Error>> {
+        let mut top_levels_to_run = vec![];
         for import in ast.imports() {
             let (name, _alias) = self.extract_import(&import);
             if name == "beagle.core" || name == "beagle.primitive" || name == "beagle.builtin" {
                 continue;
             }
-            self.compile(&self.get_file_name_from_import(name))?;
+            let top_level = self.compile(&self.get_file_name_from_import(name))?;
+            top_levels_to_run.extend(top_level);
         }
-        Ok(())
+        Ok(top_levels_to_run)
     }
 
     fn compile_ast(&mut self, ast: crate::ast::Ast) -> Result<Option<String>, Box<dyn Error>> {
@@ -864,6 +879,19 @@ impl Compiler {
         Value::StringConstantPtr(offset)
     }
 
+    pub fn add_property_lookup(&mut self) -> usize {
+        if self.property_look_up_cache_offset >= self.property_look_up_cache.len() {
+            panic!("Property look up cache is full");
+        }
+        let location = unsafe {
+            self.property_look_up_cache
+                .as_ptr()
+                .add(self.property_look_up_cache_offset) as usize
+        };
+        self.property_look_up_cache_offset += 2 * 8;
+        location
+    }
+
     pub fn find_function(&self, name: &str) -> Option<Function> {
         assert!(
             name.contains("/"),
@@ -887,7 +915,11 @@ impl Compiler {
             .find(|f| f.offset_or_pointer == offset)
     }
 
-    pub fn property_access(&self, struct_pointer: usize, str_constant_ptr: usize) -> usize {
+    pub fn property_access(
+        &self,
+        struct_pointer: usize,
+        str_constant_ptr: usize,
+    ) -> (usize, usize) {
         if BuiltInTypes::untag(struct_pointer) % 8 != 0 {
             panic!("Not aligned");
         }
@@ -905,7 +937,7 @@ impl Compiler {
             .unwrap();
         // Temporary +1 because I was writing size as the first field
         // and I haven't changed that
-        heap_object.get_field(field_index)
+        (heap_object.get_field(field_index), field_index)
     }
 
     pub fn add_struct(&mut self, s: Struct) {
@@ -1149,6 +1181,15 @@ impl<Alloc: Allocator> Runtime<Alloc> {
                         .unwrap(),
                 ),
                 jump_table_offset: 0,
+                property_look_up_cache: MmapOptions::new(MmapOptions::page_size())
+                    .unwrap()
+                    .map_mut()
+                    .unwrap()
+                    .make_mut()
+                    .unwrap_or_else(|(_map, e)| {
+                        panic!("Failed to make mmap executable: {}", e);
+                    }),
+                property_look_up_cache_offset: 0,
                 structs: StructManager::new(),
                 enums: EnumManager::new(),
                 namespaces: NamespaceManager::new(),
@@ -1477,93 +1518,6 @@ impl<Alloc: Allocator> Runtime<Alloc> {
             buffer[24 + index] = byte;
         }
         Ok(BuiltInTypes::Closure.tag(heap_pointer as isize) as usize)
-    }
-
-    // TODO: Make this good
-    pub fn run(&self, jump_table_offset: usize) -> Result<u64, Box<dyn Error>> {
-        // get offset stored in jump table as a usize
-        let offset = &self.compiler.jump_table.as_ref().unwrap()
-            [jump_table_offset * 8..jump_table_offset * 8 + 8];
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(offset);
-        let start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
-
-        let trampoline = self
-            .compiler
-            .functions
-            .iter()
-            .find(|f| f.name == "trampoline")
-            .unwrap();
-        let trampoline_jump_table_offset = trampoline.jump_table_offset;
-        let trampoline_offset = &self.compiler.jump_table.as_ref().unwrap()
-            [trampoline_jump_table_offset * 8..trampoline_jump_table_offset * 8 + 8];
-
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(trampoline_offset);
-        let trampoline_start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
-
-        let f: fn(u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
-        let stack_pointer = self.get_stack_base();
-        let result = f(stack_pointer as u64, start as u64);
-        Ok(result)
-    }
-
-    pub fn run1(&self, jump_table_offset: usize, arg: u64) -> Result<u64, Box<dyn Error>> {
-        // get offset stored in jump table as a usize
-        let offset = &self.compiler.jump_table.as_ref().unwrap()
-            [jump_table_offset * 8..jump_table_offset * 8 + 8];
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(offset);
-        let start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
-
-        let trampoline = self
-            .compiler
-            .functions
-            .iter()
-            .find(|f| f.name == "trampoline")
-            .unwrap();
-        let trampoline_jump_table_offset = trampoline.jump_table_offset;
-        let trampoline_offset = &self.compiler.jump_table.as_ref().unwrap()
-            [trampoline_jump_table_offset * 8..trampoline_jump_table_offset * 8 + 8];
-
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(trampoline_offset);
-        let trampoline_start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
-
-        let f: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
-        let arg = BuiltInTypes::Int.tag(arg as isize) as u64;
-        let stack_pointer = self.get_stack_base();
-        let result = f(stack_pointer as u64, start as u64, arg);
-        Ok(result)
-    }
-
-    pub fn run2(
-        &self,
-        _jump_table_offset: usize,
-        _arg1: u64,
-        _arg2: u64,
-    ) -> Result<u64, Box<dyn Error>> {
-        unimplemented!("Add trampoline");
-    }
-
-    // TODO: Make less ugly
-    pub fn run_function(&self, name: &str, vec: Vec<i32>) -> u64 {
-        let function = self
-            .compiler
-            .functions
-            .iter()
-            .find(|f| f.name == name)
-            .unwrap_or_else(|| panic!("Can't find function named {}", name));
-        match vec.len() {
-            0 => self.run(function.jump_table_offset).unwrap(),
-            1 => self
-                .run1(function.jump_table_offset, vec[0] as u64)
-                .unwrap(),
-            2 => self
-                .run2(function.jump_table_offset, vec[0] as u64, vec[1] as u64)
-                .unwrap(),
-            _ => panic!("Too many arguments"),
-        }
     }
 
     #[allow(clippy::type_complexity)]

@@ -1,0 +1,70 @@
+namespace property_access_test
+
+struct Thing {
+    a
+    b
+}
+
+struct TreeNode {
+    left
+    right
+}
+
+fn get_a(thing) {
+    thing.a
+}
+
+fn itemCheck(node) {
+    if node.left == null {
+        1
+    } else {
+        1 + itemCheck(node.left) + itemCheck(node.right)
+    }
+}
+
+fn bottomUpTree(depth) {
+    if depth > 0 {
+        TreeNode {
+            left: bottomUpTree(depth - 1),
+            right: bottomUpTree(depth - 1)
+        }
+    } else {
+        TreeNode {
+            left: null,
+            right: null
+        }
+    }
+}
+
+fn get_b(thing) {
+    thing.b
+}
+
+fn main() {
+    let thing = Thing {
+        a: 1,
+        b: 2
+    }   
+
+    let tree = bottomUpTree(2)
+
+    let a = get_a(thing)
+    println(a)
+    let b = get_b(thing)
+    println(b)
+        let a = get_a(thing)
+    println(a)
+    let b = get_b(thing)
+    println(b)
+
+    println(itemCheck(tree))
+    "done"
+}
+
+// Expect
+// 1
+// 2
+// 1
+// 2
+// 7
+// done

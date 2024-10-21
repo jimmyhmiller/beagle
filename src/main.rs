@@ -278,7 +278,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     // TODO: Need better name for top_level
     // It should really be the top level of a namespace
-    let top_level = runtime.compiler.compile(&program)?;
+    let top_levels = runtime.compiler.compile(&program)?;
 
     // Adding this line consistent makes my mark and sweep
     // gc on binary trees fail. But only in release
@@ -297,7 +297,8 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     runtime.memory.stack_map = runtime.compiler.stack_map.clone();
 
     let time = Instant::now();
-    if let Some(top_level) = top_level {
+
+    for top_level in top_levels {
         if let Some(f) = runtime.get_function0(&top_level) {
             f();
         } else {

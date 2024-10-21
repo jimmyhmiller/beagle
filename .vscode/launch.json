@@ -12,17 +12,17 @@
                 "args": [
                     "build",
                     // "--release",
-                    "--profile=release-with-debug",
+                    // "--profile=release-with-debug",
                     "--bin=main",
                     "--package=main",
-                    "--features=compacting,thread-safe"
+                    "--features=simple-mark-and-sweep,thread-safe"
                 ],
                 "filter": {
                     "name": "main",
                     "kind": "bin"
                 }
             },
-            "args": ["resources/binary_tree.bg"],
+            "args": ["resources/hamt_benchmark.bg"],
             "cwd": "${workspaceFolder}"
         },
         {
