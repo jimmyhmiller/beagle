@@ -207,10 +207,11 @@ pub struct CompactingHeap {
     to_space: Space,
     namespace_roots: Vec<(usize, usize)>,
     namespace_relocations: Vec<(usize, Vec<(usize, usize)>)>,
+    options: AllocatorOptions,
 }
 
 impl Allocator for CompactingHeap {
-    fn new() -> Self {
+    fn new(options: AllocatorOptions) -> Self {
         let segment_size = MmapOptions::page_size() * 100;
         let from_space = Space::new(segment_size, 1);
         let to_space = Space::new(segment_size, 1);
@@ -219,29 +220,24 @@ impl Allocator for CompactingHeap {
             to_space,
             namespace_roots: vec![],
             namespace_relocations: vec![],
+            options,
         }
     }
 
-    fn allocate(
+    fn try_allocate(
         &mut self,
         bytes: usize,
         kind: BuiltInTypes,
-        options: AllocatorOptions,
     ) -> Result<AllocateAction, Box<dyn Error>> {
-        let pointer = self.allocate_inner(bytes, kind, options)?;
+        let pointer = self.allocate_inner(bytes, kind, self.options)?;
 
         Ok(pointer)
     }
 
     // TODO: Still got bugs here
     // Simple cases work, but not all cases
-    fn gc(
-        &mut self,
-        stack_map: &StackMap,
-        stack_pointers: &[(usize, usize)],
-        options: AllocatorOptions,
-    ) {
-        if !options.gc {
+    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
+        if !self.options.gc {
             return;
         }
         let start = std::time::Instant::now();
@@ -275,7 +271,7 @@ impl Allocator for CompactingHeap {
         mem::swap(&mut self.from_space, &mut self.to_space);
 
         self.to_space.clear();
-        if options.print_stats {
+        if self.options.print_stats {
             println!("GC took: {:?}", start.elapsed());
         }
     }
@@ -292,7 +288,7 @@ impl Allocator for CompactingHeap {
         self.namespace_roots.push((namespace_id, root));
     }
 
-    fn grow(&mut self, _options: AllocatorOptions) {
+    fn grow(&mut self) {
         self.from_space.resize();
     }
 
@@ -300,6 +296,10 @@ impl Allocator for CompactingHeap {
         let mut relocations = vec![];
         mem::swap(&mut self.namespace_relocations, &mut relocations);
         relocations
+    }
+
+    fn get_allocation_options(&self) -> AllocatorOptions {
+        self.options
     }
 }
 

@@ -9,7 +9,7 @@ use gc::{
     compacting::CompactingHeap, mutex_allocator::MutexAllocator,
     simple_generation::SimpleGeneration, simple_mark_and_sweep::SimpleMarkSweepHeap,
 };
-use gc::{Allocator, StackMapDetails};
+use gc::{get_allocate_options, Allocator, StackMapDetails};
 use runtime::{DefaultPrinter, Printer, Runtime, TestPrinter};
 
 use std::{env, error::Error, time::Instant};
@@ -19,6 +19,7 @@ pub mod ast;
 mod builtins;
 pub mod common;
 mod gc;
+mod hamt;
 pub mod ir;
 pub mod machine_code;
 pub mod parser;
@@ -171,7 +172,11 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         let entry = entry?;
         let mut path = entry.path();
         if !path.exists() {
-            path = path.parent().unwrap().join("resources").join(path.file_name().unwrap());
+            path = path
+                .parent()
+                .unwrap()
+                .join("resources")
+                .join(path.file_name().unwrap());
         }
         let path = path.to_str().unwrap();
         let source: String = std::fs::read_to_string(path)?;
@@ -184,7 +189,7 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
                 continue;
             }
         }
-       
+
         println!("Running test: {}", path);
         let args = CommandLineArguments {
             program: Some(path.to_string()),
@@ -247,7 +252,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    let allocator = Alloc::new();
+    let allocator = Alloc::new(get_allocate_options(&args));
     let printer: Box<dyn Printer> = if has_expect {
         Box::new(TestPrinter::new(Box::new(DefaultPrinter)))
     } else {
@@ -273,12 +278,9 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     if !exe_path.join("resources/std.bg").exists() {
         exe_path = exe_path.parent().unwrap().to_path_buf();
     }
-    runtime.compiler.compile(
-        exe_path
-            .join("resources/std.bg")
-            .to_str()
-            .unwrap(),
-    )?;
+    runtime
+        .compiler
+        .compile(exe_path.join("resources/std.bg").to_str().unwrap())?;
 
     let compile_time = Instant::now();
 

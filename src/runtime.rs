@@ -163,6 +163,7 @@ pub struct Runtime<Alloc: Allocator> {
     pub compiler: Compiler,
     pub memory: Memory<Alloc>,
     pub libraries: Vec<Library>,
+    #[allow(unused)]
     command_line_arguments: CommandLineArguments,
     pub printer: Box<dyn Printer>,
     // TODO: I don't have any code that looks at u8, just always u64
@@ -201,30 +202,24 @@ impl<Alloc: Allocator> Memory<Alloc> {
 }
 
 impl<Alloc: Allocator> Allocator for Memory<Alloc> {
-    fn new() -> Self {
+    fn new(_options: AllocatorOptions) -> Self {
         unimplemented!("Not going to use this");
     }
 
-    fn allocate(
+    fn try_allocate(
         &mut self,
         bytes: usize,
         kind: BuiltInTypes,
-        options: AllocatorOptions,
     ) -> Result<AllocateAction, Box<dyn Error>> {
-        self.heap.allocate(bytes, kind, options)
+        self.heap.try_allocate(bytes, kind)
     }
 
-    fn gc(
-        &mut self,
-        stack_map: &StackMap,
-        stack_pointers: &[(usize, usize)],
-        options: AllocatorOptions,
-    ) {
-        self.heap.gc(stack_map, stack_pointers, options);
+    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
+        self.heap.gc(stack_map, stack_pointers);
     }
 
-    fn grow(&mut self, options: AllocatorOptions) {
-        self.heap.grow(options)
+    fn grow(&mut self) {
+        self.heap.grow()
     }
 
     fn gc_add_root(&mut self, old: usize) {
@@ -237,6 +232,10 @@ impl<Alloc: Allocator> Allocator for Memory<Alloc> {
 
     fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)> {
         self.heap.get_namespace_relocations()
+    }
+
+    fn get_allocation_options(&self) -> AllocatorOptions {
+        self.heap.get_allocation_options()
     }
 }
 
@@ -1102,7 +1101,10 @@ impl Compiler {
     fn get_file_name_from_import(&self, import_name: String) -> String {
         let mut exe_path = env::current_exe().unwrap();
         exe_path = exe_path.parent().unwrap().to_path_buf();
-        if !exe_path.join(format!("resources/{}.bg", import_name)).exists() {
+        if !exe_path
+            .join(format!("resources/{}.bg", import_name))
+            .exists()
+        {
             exe_path = exe_path.parent().unwrap().to_path_buf();
         }
         exe_path
@@ -1226,14 +1228,6 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         }
     }
 
-    fn get_allocate_options(&self) -> AllocatorOptions {
-        AllocatorOptions {
-            gc: !self.command_line_arguments.no_gc,
-            print_stats: self.command_line_arguments.show_gc_times,
-            gc_always: self.command_line_arguments.gc_always,
-        }
-    }
-
     pub fn print(&mut self, result: usize) {
         let result = self.compiler.get_repr(result, 0).unwrap();
         self.printer.print(result);
@@ -1261,13 +1255,13 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         // TODO: I need to make it so that I can pass the ability to pause
         // to the allocator. Maybe the allocator should have the pause atom?
         // I need to think about how to abstract all these details out.
-        let options = self.get_allocate_options();
+        let options = self.memory.heap.get_allocation_options();
 
         if options.gc_always {
             self.gc(stack_pointer);
         }
 
-        let result = self.memory.heap.allocate(bytes, kind, options);
+        let result = self.memory.heap.try_allocate(bytes, kind);
 
         match result {
             Ok(AllocateAction::Allocated(value)) => {
@@ -1277,14 +1271,14 @@ impl<Alloc: Allocator> Runtime<Alloc> {
             }
             Ok(AllocateAction::Gc) => {
                 self.gc(stack_pointer);
-                let result = self.memory.heap.allocate(bytes, kind, options);
+                let result = self.memory.heap.try_allocate(bytes, kind);
                 if let Ok(AllocateAction::Allocated(result)) = result {
                     // tag
                     assert!(result.is_aligned());
                     let result = kind.tag(result as isize);
                     Ok(result as usize)
                 } else {
-                    self.memory.heap.grow(options);
+                    self.memory.heap.grow();
                     // TODO: Detect loop here
                     let pointer = self.allocate(bytes, stack_pointer, kind)?;
                     // If we went down this path, our pointer is already tagged
@@ -1352,7 +1346,6 @@ impl<Alloc: Allocator> Runtime<Alloc> {
             self.memory.heap.gc(
                 &self.memory.stack_map,
                 &[(self.get_stack_base(), stack_pointer)],
-                self.get_allocate_options(),
             );
 
             // TODO: This whole thing is awful.
@@ -1420,10 +1413,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
 
         drop(thread_state);
 
-        let options = self.get_allocate_options();
-        self.memory
-            .heap
-            .gc(&self.memory.stack_map, &stack_pointers, options);
+        self.memory.heap.gc(&self.memory.stack_map, &stack_pointers);
 
         self.is_paused
             .store(0, std::sync::atomic::Ordering::Release);

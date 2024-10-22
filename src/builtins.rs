@@ -1,6 +1,7 @@
 use std::{
     error::Error,
-    mem, slice::{from_raw_parts, from_raw_parts_mut},
+    mem,
+    slice::{from_raw_parts, from_raw_parts_mut},
     thread,
 };
 
@@ -100,7 +101,6 @@ extern "C" fn fill_object_fields<Alloc: Allocator>(
     raw_slice.fill(value);
     object_pointer
 }
-
 
 extern "C" fn make_closure<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,

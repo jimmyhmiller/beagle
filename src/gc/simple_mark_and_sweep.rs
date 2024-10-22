@@ -74,18 +74,18 @@ pub struct SimpleMarkSweepHeap {
     space: Space,
     free_list: Vec<FreeListEntry>,
     namespace_roots: Vec<(usize, usize)>,
+    options: AllocatorOptions,
 }
 
 impl Allocator for SimpleMarkSweepHeap {
-    fn new() -> Self {
-        Self::new_with_count(1)
+    fn new(options: AllocatorOptions) -> Self {
+        Self::new_with_count(options, 1)
     }
 
-    fn allocate(
+    fn try_allocate(
         &mut self,
         bytes: usize,
         _kind: BuiltInTypes,
-        _options: AllocatorOptions,
     ) -> Result<AllocateAction, Box<dyn Error>> {
         if self.can_allocate(bytes) {
             self.allocate_inner(Word::from_word(bytes), 0, None)
@@ -94,16 +94,11 @@ impl Allocator for SimpleMarkSweepHeap {
         }
     }
 
-    fn gc(
-        &mut self,
-        stack_map: &StackMap,
-        stack_pointers: &[(usize, usize)],
-        options: AllocatorOptions,
-    ) {
-        self.mark_and_sweep(stack_map, stack_pointers, options);
+    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
+        self.mark_and_sweep(stack_map, stack_pointers);
     }
 
-    fn grow(&mut self, _options: AllocatorOptions) {
+    fn grow(&mut self) {
         self.create_more_segments();
     }
 
@@ -118,10 +113,14 @@ impl Allocator for SimpleMarkSweepHeap {
         // so we don't have any relocations
         vec![]
     }
+
+    fn get_allocation_options(&self) -> AllocatorOptions {
+        self.options
+    }
 }
 
 impl SimpleMarkSweepHeap {
-    pub fn new_with_count(initial_segment_count: usize) -> Self {
+    pub fn new_with_count(options: AllocatorOptions, initial_segment_count: usize) -> Self {
         let segment_size = MmapOptions::page_size() * 100;
         let mut segments = vec![];
         for _ in 0..initial_segment_count {
@@ -136,6 +135,7 @@ impl SimpleMarkSweepHeap {
             },
             free_list: vec![],
             namespace_roots: vec![],
+            options,
         }
     }
 
@@ -295,18 +295,13 @@ impl SimpleMarkSweepHeap {
         );
     }
 
-    pub fn mark_and_sweep(
-        &mut self,
-        stack_map: &StackMap,
-        stack_pointers: &[(usize, usize)],
-        options: AllocatorOptions,
-    ) {
+    pub fn mark_and_sweep(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
         let start = std::time::Instant::now();
         for (stack_base, stack_pointer) in stack_pointers {
             self.mark(*stack_base, stack_map, *stack_pointer);
         }
         self.sweep();
-        if options.print_stats {
+        if self.options.print_stats {
             println!("Mark and sweep took {:?}", start.elapsed());
         }
     }

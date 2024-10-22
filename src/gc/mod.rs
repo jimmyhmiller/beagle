@@ -2,7 +2,7 @@ use std::{error::Error, thread::ThreadId};
 
 use bincode::{Decode, Encode};
 
-use crate::types::BuiltInTypes;
+use crate::{types::BuiltInTypes, CommandLineArguments};
 
 pub mod compacting;
 pub mod mutex_allocator;
@@ -60,31 +60,48 @@ pub enum AllocateAction {
     Gc,
 }
 
+pub fn get_allocate_options(command_line_arguments: &CommandLineArguments) -> AllocatorOptions {
+    AllocatorOptions {
+        gc: !command_line_arguments.no_gc,
+        print_stats: command_line_arguments.show_gc_times,
+        gc_always: command_line_arguments.gc_always,
+    }
+}
+
 pub trait Allocator {
-    fn new() -> Self;
+    fn new(options: AllocatorOptions) -> Self;
 
     // TODO: I probably want something like kind, but not actually kind
     // I might need to allocate things differently based on type
-    fn allocate(
+    fn try_allocate(
         &mut self,
-        bytes: usize,
+        words: usize,
         kind: BuiltInTypes,
-        options: AllocatorOptions,
     ) -> Result<AllocateAction, Box<dyn Error>>;
 
-    fn gc(
-        &mut self,
-        stack_map: &StackMap,
-        stack_pointers: &[(usize, usize)],
-        options: AllocatorOptions,
-    );
+    #[allow(unused)]
+    fn allocate(&mut self, words: usize, kind: BuiltInTypes) -> Result<*const u8, Box<dyn Error>> {
+        match self.try_allocate(words, kind)? {
+            AllocateAction::Allocated(pointer) => Ok(pointer),
+            AllocateAction::Gc => {
+                self.gc(&StackMap::new(), &[]);
+                self.try_allocate(words, kind).map(|action| match action {
+                    AllocateAction::Allocated(pointer) => pointer,
+                    AllocateAction::Gc => panic!("Shouldn't happen"),
+                })
+            }
+        }
+    }
 
-    fn grow(&mut self, options: AllocatorOptions);
+    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]);
+
+    fn grow(&mut self);
     fn gc_add_root(&mut self, old: usize);
     fn add_namespace_root(&mut self, namespace_id: usize, root: usize);
     // TODO: Get rid of allocation
     fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)>;
 
+    #[allow(unused)]
     fn get_pause_pointer(&self) -> usize {
         0
     }
@@ -94,4 +111,6 @@ pub trait Allocator {
     // TODO: I think this won't work because of my read write lock
     // I probably need to change that.
     fn register_parked_thread(&mut self, _thread_id: ThreadId, _stack_pointer: usize) {}
+
+    fn get_allocation_options(&self) -> AllocatorOptions;
 }
