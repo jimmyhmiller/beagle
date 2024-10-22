@@ -138,15 +138,15 @@ pub struct SimpleGeneration {
     namespace_roots: Vec<(usize, usize)>,
     relocated_namespace_roots: Vec<(usize, Vec<(usize, usize)>)>,
     atomic_pause: [u8; 8],
+    options: AllocatorOptions,
 }
 
 impl Allocator for SimpleGeneration {
-    #[allow(unused)]
-    fn new() -> Self {
+    fn new(options: AllocatorOptions) -> Self {
         // TODO: Make these configurable and play with configurations
         let young_size = MmapOptions::page_size() * 10000;
         let young = Space::new(young_size);
-        let old = SimpleMarkSweepHeap::new_with_count(10);
+        let old = SimpleMarkSweepHeap::new_with_count(options, 10);
         let copied = vec![];
         let gc_count = 0;
         let full_gc_frequency = 10;
@@ -160,48 +160,44 @@ impl Allocator for SimpleGeneration {
             namespace_roots: vec![],
             relocated_namespace_roots: vec![],
             atomic_pause: [0; 8],
+            options,
         }
     }
 
-    fn allocate(
+    fn try_allocate(
         &mut self,
         bytes: usize,
         kind: BuiltInTypes,
-        options: AllocatorOptions,
     ) -> Result<AllocateAction, Box<dyn Error>> {
-        let pointer = self.allocate_inner(bytes, kind, options)?;
+        let pointer = self.allocate_inner(bytes, kind)?;
         Ok(pointer)
     }
 
-    fn gc(
-        &mut self,
-        stack_map: &StackMap,
-        stack_pointers: &[(usize, usize)],
-        options: AllocatorOptions,
-    ) {
+    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
         // TODO: Need to figure out when to do a Major GC
-        if !options.gc {
+        if !self.options.gc {
             return;
         }
         if self.gc_count % self.full_gc_frequency == 0 {
-            self.full_gc(stack_map, stack_pointers, options);
+            self.full_gc(stack_map, stack_pointers);
         } else {
-            self.minor_gc(stack_map, stack_pointers, options);
+            self.minor_gc(stack_map, stack_pointers);
         }
         self.gc_count += 1;
     }
 
-    fn grow(&mut self, options: AllocatorOptions) {
+    fn grow(&mut self) {
         if cfg!(debug_assertions) && self.old.segment_count() > 1000 {
             WARN_MEMORY.call_once(|| println!("Warning, memory growing dramatically"));
         }
-        self.old.grow(options);
+        self.old.grow();
     }
 
     fn gc_add_root(&mut self, old: usize) {
         self.additional_roots.push(old);
     }
 
+    #[allow(unused)]
     fn get_pause_pointer(&self) -> usize {
         self.atomic_pause.as_ptr() as usize
     }
@@ -213,6 +209,10 @@ impl Allocator for SimpleGeneration {
     fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)> {
         std::mem::take(&mut self.relocated_namespace_roots)
     }
+
+    fn get_allocation_options(&self) -> AllocatorOptions {
+        self.options
+    }
 }
 
 impl SimpleGeneration {
@@ -220,7 +220,6 @@ impl SimpleGeneration {
         &mut self,
         bytes: usize,
         _kind: BuiltInTypes,
-        _options: AllocatorOptions,
     ) -> Result<AllocateAction, Box<dyn Error>> {
         let size = Word::from_word(bytes);
         if self.young.can_allocate(size) {
@@ -230,12 +229,7 @@ impl SimpleGeneration {
         }
     }
 
-    fn minor_gc(
-        &mut self,
-        stack_map: &StackMap,
-        stack_pointers: &[(usize, usize)],
-        options: AllocatorOptions,
-    ) {
+    fn minor_gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
         let start = std::time::Instant::now();
         for (stack_base, stack_pointer) in stack_pointers.iter() {
             let roots = self.gather_roots(*stack_base, stack_map, *stack_pointer);
@@ -290,19 +284,14 @@ impl SimpleGeneration {
             }
         }
         self.young.clear();
-        if options.print_stats {
+        if self.options.print_stats {
             println!("Minor GC took {:?}", start.elapsed());
         }
     }
 
-    fn full_gc(
-        &mut self,
-        stack_map: &StackMap,
-        stack_pointers: &[(usize, usize)],
-        options: AllocatorOptions,
-    ) {
-        self.minor_gc(stack_map, stack_pointers, options);
-        self.old.gc(stack_map, stack_pointers, options);
+    fn full_gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
+        self.minor_gc(stack_map, stack_pointers);
+        self.old.gc(stack_map, stack_pointers);
     }
 
     // TODO: I need to change this into a copy from roots to heap

@@ -426,6 +426,18 @@ impl HeapObject {
         header.type_id as usize
     }
 
+    pub fn write_type_id(&mut self, type_id: usize) {
+        let untagged = self.untagged();
+        let pointer = untagged as *mut usize;
+        let header = unsafe { *pointer };
+        let header = Header::from_usize(header);
+        let new_header = Header {
+            type_id: type_id as u8,
+            ..header
+        };
+        unsafe { *pointer = new_header.to_usize() };
+    }
+
     pub fn get_struct_id(&self) -> usize {
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
@@ -495,7 +507,7 @@ impl Ir {
         let masked = self.and_imm(result, mask);
         let tagged = self.tag(masked, BuiltInTypes::Int.get_tag());
         let shifted = self.shift_right_imm(tagged, (byte_offset * 8) as i32);
-        
+
         self.untag(shifted)
     }
     pub fn write_type_id(&mut self, struct_pointer: Value, type_id: Value) {

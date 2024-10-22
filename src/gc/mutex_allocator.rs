@@ -7,41 +7,37 @@ use super::{AllocateAction, Allocator, AllocatorOptions, StackMap};
 pub struct MutexAllocator<Alloc: Allocator> {
     alloc: Alloc,
     mutex: Mutex<()>,
+    options: AllocatorOptions,
 }
 
 impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
-    fn new() -> Self {
+    fn new(options: AllocatorOptions) -> Self {
         MutexAllocator {
-            alloc: Alloc::new(),
+            alloc: Alloc::new(options),
             mutex: Mutex::new(()),
+            options,
         }
     }
-    fn allocate(
+    fn try_allocate(
         &mut self,
         bytes: usize,
         kind: BuiltInTypes,
-        options: AllocatorOptions,
     ) -> Result<AllocateAction, Box<dyn std::error::Error>> {
         let lock = self.mutex.lock().unwrap();
-        let result = self.alloc.allocate(bytes, kind, options);
+        let result = self.alloc.try_allocate(bytes, kind);
         drop(lock);
         result
     }
 
-    fn gc(
-        &mut self,
-        stack_map: &StackMap,
-        stack_pointers: &[(usize, usize)],
-        options: AllocatorOptions,
-    ) {
+    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
         let lock = self.mutex.lock().unwrap();
-        self.alloc.gc(stack_map, stack_pointers, options);
+        self.alloc.gc(stack_map, stack_pointers);
         drop(lock)
     }
 
-    fn grow(&mut self, options: AllocatorOptions) {
+    fn grow(&mut self) {
         let lock = self.mutex.lock().unwrap();
-        self.alloc.grow(options);
+        self.alloc.grow();
         drop(lock)
     }
 
@@ -62,5 +58,8 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         let result = self.alloc.get_namespace_relocations();
         drop(lock);
         result
+    }
+    fn get_allocation_options(&self) -> AllocatorOptions {
+        self.options
     }
 }
