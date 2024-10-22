@@ -108,6 +108,8 @@ pub trait Allocator {
 
     fn register_thread(&mut self, _thread_id: ThreadId) {}
 
+    fn remove_thread(&mut self, _thread_id: ThreadId) {}
+
     // TODO: I think this won't work because of my read write lock
     // I probably need to change that.
     fn register_parked_thread(&mut self, _thread_id: ThreadId, _stack_pointer: usize) {}

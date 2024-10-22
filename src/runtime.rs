@@ -195,6 +195,7 @@ impl<Alloc: Allocator> Memory<Alloc> {
             self.stacks.retain(|(id, _)| *id != thread_id);
             self.threads.retain(|t| t.id() != thread_id);
             self.join_handles.remove(*index);
+            self.heap.remove_thread(thread_id);
         }
 
         self.join_handles.len()
