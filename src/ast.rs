@@ -132,6 +132,7 @@ pub enum Ast {
         left: Box<Ast>,
         right: Box<Ast>,
     },
+    Array(Vec<Ast>),
 }
 
 impl Ast {
@@ -570,6 +571,43 @@ impl<'a> AstCompiler<'a> {
                 self.ir
                     .tag(struct_pointer, BuiltInTypes::HeapObject.get_tag())
             }
+            Ast::Array(elements) => {
+                // Let's stary by just adding a popping for simplicity
+                for element in elements.iter() {
+                    self.not_tail_position();
+                    let value = self.call_compile(&element);
+                    let reg = self.ir.assign_new(value);
+                    self.ir.push_to_stack(reg.into());
+                }
+
+                let vec = self.get_function("persistent_vector/vec");
+
+                let vector_pointer = self.ir.call(
+                    vec,
+                    vec![],
+                );
+
+                let push = self.get_function("persistent_vector/push");
+                let vector_register = self.ir.assign_new(vector_pointer);
+                // the elements are on the stack in reverse, so I need to grab them by index in reverse
+                // and then shift the stack pointer
+                let stack_pointer = self.ir.get_current_stack_position();
+                for i in (0..elements.len()).rev() {
+                    let value = self.ir.load_from_memory(stack_pointer, (i as i32) + 1);
+                    let push_result = self.ir.call(
+                        push,
+                        vec![vector_register.into(), value],
+                    );
+                    self.ir.assign(vector_register, push_result);
+                }
+                for _ in 0..elements.len() {
+                    // TODO: Hacky since we aren't using this. I think it is an efficiency waste
+                    // I should probably do something better
+                    self.ir.pop_from_stack();
+                }
+
+                vector_register.into()
+            }
             Ast::Namespace { name } => {
                 let namespace_id = self.compiler.reserve_namespace(name);
                 let namespace_id = Value::RawValue(namespace_id);
@@ -909,6 +947,16 @@ impl<'a> AstCompiler<'a> {
         }
     }
 
+    fn get_function(&mut self, function_name: &str) -> Value {
+        let f = self
+            .compiler
+            .find_function(function_name)
+            .unwrap();
+        let f = self.compiler.get_function_pointer(f).unwrap();
+        let f = self.ir.assign_new(f);
+        f.into()
+    }
+    
     fn compile_standard_function_call(&mut self, name: String, mut args: Vec<Value>) -> Value {
         assert!(name.contains("/"));
 

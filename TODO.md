@@ -15,3 +15,6 @@
 * I fixed a bunch of stack map code in compacting. The errors have to also exist in mark and sweep. (Maybe also generational) Cleanup and unify this stuff.
 * I should probably have some gc-always runs
 * Mulit Arity and Var Args
+* I need the ability to re-export functions without a level of indirection
+* Figure out a print system for types like the vector
+* I need to do indexing with [] I just need to figure out how to distinguish a literal and indexing. How do other languages do that?

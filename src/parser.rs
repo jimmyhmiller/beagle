@@ -640,6 +640,12 @@ impl Parser {
                 self.expect_close_paren();
                 result
             }
+            Token::OpenBracket => {
+                self.consume();
+                let result = self.parse_array();
+                self.expect_close_bracket();
+                Some(result)
+            } 
             _ => panic!(
                 "Expected atom, got {} at line {}",
                 self.get_token_repr(),
@@ -727,7 +733,16 @@ impl Parser {
         if self.is_open_paren() {
             self.consume();
         } else {
-            panic!("Expected open paren {:?}", self.get_token_repr());
+            panic!("Expected open paren {:?} at {}", self.get_token_repr(), self.current_line);
+        }
+    }
+
+    fn expect_close_bracket(&mut self) {
+        self.skip_whitespace();
+        if self.is_close_bracket() {
+            self.consume();
+        } else {
+            panic!("Expected close bracket {:?} at {}", self.get_token_repr(), self.current_line);
         }
     }
 
@@ -1333,6 +1348,24 @@ impl Parser {
     fn is_dot(&self) -> bool {
         self.current_token() == Token::Dot
     }
+    
+    fn parse_array(&mut self) -> Ast {
+        let mut elements = Vec::new();
+        while !self.at_end() && !self.is_close_bracket() {
+            elements.push(self.parse_expression(0, true).unwrap());
+            self.skip_whitespace();
+            if !self.is_close_bracket() {
+                self.expect_comma();
+            }
+        }
+        Ast::Array(elements)
+    }
+    
+    fn is_close_bracket(&self) -> bool {
+        self.current_token() == Token::CloseBracket
+    }
+    
+
 }
 
 #[test]
@@ -1357,6 +1390,20 @@ fn test_parse() {
     fn hello() {
         print(\"Hello World!\")
     }",
+        ),
+    );
+
+    let ast = parser.parse();
+    println!("{:#?}", ast);
+}
+#[test]
+fn parse_array() {
+    let mut parser = Parser::new(
+        "test".to_string(),
+        String::from(
+            "
+    let x = [1, 2, 3, 4]
+    ",
         ),
     );
 

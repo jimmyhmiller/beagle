@@ -1,4 +1,4 @@
-namespace hamt
+namespace persistent_vector
 import "raw_mutable_array" as array
 import "beagle.primitive" as primitive
 
@@ -261,11 +261,15 @@ fn make_vec_of_every_size_and_verify(n) {
 }
 
 
+fn vec() {
+    EMPTY
+}
+
 fn main() {
-    let vec = EMPTY
-    println(vec)
+    let vec1 = EMPTY
+    println(vec1)
     gc()
-    println(vec)
+    println(vec1)
     println(make_vec_of_every_size_and_verify(1000))
     gc()
     gc()

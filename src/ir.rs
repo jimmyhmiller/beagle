@@ -1741,10 +1741,10 @@ impl Ir {
         dest
     }
 
-    pub fn get_stack_pointer_imm(&mut self, num_free: isize) -> Value {
+    pub fn get_stack_pointer_imm(&mut self, index: isize) -> Value {
         let dest = self.volatile_register().into();
         self.instructions
-            .push(Instruction::GetStackPointerImm(dest, num_free));
+            .push(Instruction::GetStackPointerImm(dest, index));
         dest
     }
 
