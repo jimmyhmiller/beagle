@@ -1,0 +1,32 @@
+namespace array_literals
+
+struct ExampleStruct {
+    value
+}
+
+fn with_side_effect(x) {
+    println(x)
+    x
+}
+
+fn main() {
+    let x = [1, 2, 3]
+    println(x)
+    let y = [2 + 2 - 3, ExampleStruct { value: 2}, with_side_effect(3), with_side_effect(4)]
+    println(y)
+    let q = []
+    println(q)
+    let r = push(q, 1)
+    println(r)
+    "done"
+}
+
+
+// Expect
+// PersistentVector { count: 3, shift: 5, root: [  ], tail: [ 1, 2, 3 ] }
+// 3
+// 4
+// PersistentVector { count: 4, shift: 5, root: [  ], tail: [ 1, ExampleStruct { value: 2 }, 3, 4 ] }
+// PersistentVector { count: 0, shift: 5, root: [  ], tail: [  ] }
+// PersistentVector { count: 1, shift: 5, root: [  ], tail: [ 1 ] }
+// done

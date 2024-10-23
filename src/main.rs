@@ -278,7 +278,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     if !exe_path.join("resources/std.bg").exists() {
         exe_path = exe_path.parent().unwrap().to_path_buf();
     }
-    runtime
+    let mut top_levels = runtime
         .compiler
         .compile(exe_path.join("resources/std.bg").to_str().unwrap())?;
 
@@ -286,7 +286,9 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     // TODO: Need better name for top_level
     // It should really be the top level of a namespace
-    let top_levels = runtime.compiler.compile(&program)?;
+    let new_top_levels = runtime.compiler.compile(&program)?;
+    let current_namespace = runtime.compiler.current_namespace_id();
+    top_levels.extend(new_top_levels);
 
     // Adding this line consistent makes my mark and sweep
     // gc on binary trees fail. But only in release
@@ -316,6 +318,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             );
         }
     }
+    runtime.compiler.set_current_namespace(current_namespace);
     let fully_qualified_main = runtime.compiler.current_namespace_name() + "/main";
     if let Some(f) = runtime.get_function0(&fully_qualified_main) {
         let result = f();

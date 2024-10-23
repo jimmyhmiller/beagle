@@ -2,6 +2,9 @@
 // Need to make this work in the language
 namespace beagle.core;
 import "beagle.primitive" as primitive
+// This might be a bit circularish. Not sure.
+// TODO: I need to namespace this stuff properly
+import "persistent_vector" as persistent_vector
 
 // This may seem weird
 // but we need our runtime to know
@@ -67,4 +70,13 @@ enum Type {
     MutablePointer,
     String,
     Void,
+}
+
+// TODO: Need a way to re-export rather than wrap
+fn get(coll, i) {
+    persistent_vector/get(coll, i)
+}
+
+fn push(coll, value) {
+    persistent_vector/push(coll, value)
 }
