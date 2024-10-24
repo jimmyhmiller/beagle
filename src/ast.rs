@@ -133,6 +133,7 @@ pub enum Ast {
         right: Box<Ast>,
     },
     Array(Vec<Ast>),
+    IndexOperator { array: Box<Ast>, index: Box<Ast> },
 }
 
 impl Ast {
@@ -670,6 +671,14 @@ impl<'a> AstCompiler<'a> {
                 self.ir.write_label(exit_property_access);
 
                 result.into()
+            }
+            Ast::IndexOperator { array, index } => {
+                let get = self.get_function("persistent_vector/get");
+                let array = self.call_compile(array.as_ref());
+                let index = self.call_compile(index.as_ref());
+                let array = self.ir.assign_new(array);
+                let index = self.ir.assign_new(index);
+                self.ir.call(get, vec![array.into(), index.into()])
             }
             Ast::If {
                 condition,

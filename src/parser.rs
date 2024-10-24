@@ -81,6 +81,7 @@ impl Token {
             | Token::BitWiseXor
             | Token::Or
             | Token::And
+            | Token::OpenBracket
             | Token::Dot => true,
             _ => false,
         }
@@ -1291,6 +1292,14 @@ impl Parser {
                         object: Box::new(lhs),
                         property: Box::new(rhs),
                     }
+                }
+            }
+            Token::OpenBracket => {
+                let index = Box::new(rhs);
+                self.expect_close_bracket();
+                Ast::IndexOperator {
+                    array: Box::new(lhs),
+                    index,
                 }
             }
             _ => panic!("Exepcted binary op got {:?}", current_token),

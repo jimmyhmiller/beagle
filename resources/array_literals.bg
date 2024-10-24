@@ -18,6 +18,8 @@ fn main() {
     println(q)
     let r = push(q, 1)
     println(r)
+    println(get(r, 0))
+    println(r[0])
     "done"
 }
 
@@ -29,4 +31,6 @@ fn main() {
 // PersistentVector { count: 4, shift: 5, root: [  ], tail: [ 1, ExampleStruct { value: 2 }, 3, 4 ] }
 // PersistentVector { count: 0, shift: 5, root: [  ], tail: [  ] }
 // PersistentVector { count: 1, shift: 5, root: [  ], tail: [ 1 ] }
+// 1
+// 1
 // done
