@@ -1,19 +1,7 @@
 namespace grab_bag
 
-// TODO: Change this to an import once I have that
-fn bottomUpTree(depth) {
-    if depth > 0 {
-        TreeNode {
-            left: bottomUpTree(depth - 1),
-            right: bottomUpTree(depth - 1)
-        }
-    } else {
-        TreeNode {
-            left: null,
-            right: null
-        }
-    }
-}
+import "binary_tree" as binary_tree
+
 
 // Intentionally after to make sure
 // declaration order doesn't matter
@@ -80,10 +68,7 @@ fn testMakeTree() {
 }
 
 fn testGcWithTree(n) {
-    // fails when gc right now
-    bottomUpTree(n)
-//     println("here")
-//     println(bottomUpTree(n))
+    binary_tree/bottomUpTree(n)
 }
 
 fn testGcSimple(n) {

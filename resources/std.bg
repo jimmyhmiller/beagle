@@ -1,5 +1,3 @@
-// TODO: I want to do beagle.core or beagle::core or beagle:core.
-// Need to make this work in the language
 namespace beagle.core;
 import "beagle.primitive" as primitive
 // This might be a bit circularish. Not sure.
@@ -16,9 +14,6 @@ fn __call_fn(f) { f() }
 struct Atom {
     value
 }
-
-// TODO: When I have namespaces
-// these won't be prefix named
 
 fn deref(atom) {
     // assert!(atom is Atom)

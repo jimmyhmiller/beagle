@@ -1473,7 +1473,6 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         free_variables: &[usize],
     ) -> Result<usize, Box<dyn Error>> {
         let len = 8 + 8 + 8 + free_variables.len() * 8;
-        // TODO: Stack pointer should be passed in
         let heap_pointer = self.allocate(len / 8, stack_pointer, BuiltInTypes::Closure)?;
         let heap_pointer = BuiltInTypes::untag(heap_pointer);
         let pointer = heap_pointer as *mut u8;
@@ -1550,7 +1549,6 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         }))
     }
 
-    // TODO: Allocate/gc need to change to work with this
     pub fn new_thread(&mut self, f: usize) {
         let trampoline = self.compiler.get_trampoline();
         let trampoline: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline) };

@@ -450,10 +450,3 @@ fn get_live_stack<'a>(stack_base: usize, stack_pointer: usize) -> &'a mut [usize
         )
     };
 }
-
-// TODO: I can borrow the code here to get to a generational gc
-// That should make a significant difference in performance
-// I think to get there, I just need to mark things when I compact them
-// Then those those that are marked get copied to the old generation
-// I should probably read more about a proper setup for this
-// to try and get the details right.

@@ -36,7 +36,6 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
     }
 
     fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
-
         if self.registered_threads == 0 {
             return self.alloc.gc(stack_map, stack_pointers);
         }
@@ -81,7 +80,7 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         drop(lock);
         result
     }
-    
+
     fn get_allocation_options(&self) -> AllocatorOptions {
         self.options
     }

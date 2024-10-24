@@ -389,25 +389,3 @@ fn try_all_examples() -> Result<(), Box<dyn Error>> {
     run_all_tests(args)?;
     Ok(())
 }
-
-// TODO:
-// Runtime?
-//     Function in our language names and calling them.
-//     Built-in functions
-//     Stack
-//     Heap
-// Parser
-// Debugging
-
-// TODO: Make variables
-// Should we allow reassignment?
-// Need to add guards against type errors
-// Need to do some looping construct
-// Need to do load and store in the actual
-// compiler instead of cheating
-// Think about protocols
-// Think about how to implementing interesting
-// data structures in the language itself
-// Consider checked and uncheck stuff
-
-// Bugs:

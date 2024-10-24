@@ -16,7 +16,6 @@ fn write_field_unsafe(array, index, value) {
 }
 
 fn is_array(array) {
-    // TODO: need to check if heap object first
     primitive/is_object(array) && primitive/read_type_id(array) == 1
 }
 
@@ -30,11 +29,7 @@ fn panic_if_not_array(message, array) {
 
 fn write_field(array, index, value) {
     panic_if_not_array("write", array)
-    // TODO: I need || (or should it be "or")
-    if index < 0 {
-        primitive/panic("Index out of bounds")
-    }
-    if index >= primitive/size(array) {
+    if index < 0 || index >= primitive/size(array) {
         primitive/panic("Index out of bounds")
     }
     write_field_unsafe(array, index, value)
@@ -42,21 +37,15 @@ fn write_field(array, index, value) {
 
 fn read_field(array, index) {
     panic_if_not_array("read", array)
-    if index < 0 {
-        primitive/panic("Index out of bounds")
-    }
-    if index >= primitive/size(array) {
+    if index < 0 || index >= primitive/size(array)  {
         primitive/panic("Index out of bounds")
     }
     read_field_unsafe(array, index)
 }
 
 fn new_array(size) {
-    if size < 0 {
+    if size < 0 || size > 256 {
         primitive/panic("Negative size")
-    }
-    if size > 256 {
-        primitive/panic("Size too large")
     }
     let array = allocate_array_unsafe(size)
     primitive/write_type_id(array, 1)

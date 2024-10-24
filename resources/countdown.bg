@@ -9,7 +9,6 @@ fn count_down(x) {
     }
 }
 
-// TODO: Allow top level
 fn main() {
     count_down(10)
 }

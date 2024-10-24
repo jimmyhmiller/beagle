@@ -234,9 +234,6 @@ pub struct HeapObject {
     tagged: bool,
 }
 
-// TODO: Implement methods for writing the header of the heap object
-// make sure we always use this representation everywhere so we can
-// change things in one place
 impl HeapObject {
     pub fn from_tagged(pointer: usize) -> Self {
         assert!(BuiltInTypes::is_heap_pointer(pointer));
@@ -294,11 +291,6 @@ impl HeapObject {
         let pointer = untagged as *mut isize;
         let data: usize = unsafe { *pointer.cast::<usize>() };
         let header = Header::from_usize(data);
-        // TODO: This is number of bytes, not number of fields
-        // so is this wrong?
-        // if header.size % 8 != 0 {
-        //     panic!("Size is not aligned");
-        // }
         header.size as usize * 8
     }
 

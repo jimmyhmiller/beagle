@@ -6,7 +6,6 @@ println(x)
 
 fn main() {
     println("Hello, world!")
-    // TODO: this prints function...
     println(x)
     "done"
 }
