@@ -73,8 +73,6 @@ pub enum Ast {
     Let(Box<Ast>, Box<Ast>),
     IntegerLiteral(i64),
     FloatLiteral(f64),
-    // TODO: Should I have both identifier and variable?
-    // When should I have them?
     Identifier(String),
     String(String),
     True,
@@ -133,7 +131,10 @@ pub enum Ast {
         right: Box<Ast>,
     },
     Array(Vec<Ast>),
-    IndexOperator { array: Box<Ast>, index: Box<Ast> },
+    IndexOperator {
+        array: Box<Ast>,
+        index: Box<Ast>,
+    },
 }
 
 impl Ast {
@@ -213,30 +214,11 @@ pub enum VariableLocation {
     NamespaceVariable(usize, usize),
 }
 
-// impl From<&VariableLocation> for Value {
-//     fn from(location: &VariableLocation) -> Self {
-//         match location {
-//             VariableLocation::Register(reg) => Value::Register(*reg),
-//             VariableLocation::Local(index) => Value::Local(*index),
-//             VariableLocation::FreeVariable(index) => Value::FreeVariable(*index),
-//         }
-//     }
-// }
-
 #[derive(Debug, Clone)]
 pub struct Context {
     pub tail_position: bool,
     pub in_function: bool,
 }
-
-// TODO: I have a global kind of compiler thing with functions
-// I think structs should maybe go there?
-// I also need to deal with namespacing
-// Or maybe I should just put everything in this environment and then
-// things in the top level are global/namespaced
-// in fact, I don't think I will have "global",
-// just namesapces
-// With "core" being included by default
 
 #[derive(Debug, Clone)]
 pub struct Environment {
@@ -576,17 +558,14 @@ impl<'a> AstCompiler<'a> {
                 // Let's stary by just adding a popping for simplicity
                 for element in elements.iter() {
                     self.not_tail_position();
-                    let value = self.call_compile(&element);
+                    let value = self.call_compile(element);
                     let reg = self.ir.assign_new(value);
                     self.ir.push_to_stack(reg.into());
                 }
 
                 let vec = self.get_function("persistent_vector/vec");
 
-                let vector_pointer = self.ir.call(
-                    vec,
-                    vec![],
-                );
+                let vector_pointer = self.ir.call(vec, vec![]);
 
                 let push = self.get_function("persistent_vector/push");
                 let vector_register = self.ir.assign_new(vector_pointer);
@@ -595,10 +574,7 @@ impl<'a> AstCompiler<'a> {
                 let stack_pointer = self.ir.get_current_stack_position();
                 for i in (0..elements.len()).rev() {
                     let value = self.ir.load_from_memory(stack_pointer, (i as i32) + 1);
-                    let push_result = self.ir.call(
-                        push,
-                        vec![vector_register.into(), value],
-                    );
+                    let push_result = self.ir.call(push, vec![vector_register.into(), value]);
                     self.ir.assign(vector_register, push_result);
                 }
                 for _ in 0..elements.len() {
@@ -856,7 +832,7 @@ impl<'a> AstCompiler<'a> {
                 }
 
                 // TODO: This isn't they way to handle this
-                // I am activing as if all closures are assign to a variable when they aren't.
+                // I am acting as if all closures are assign to a variable when they aren't.
                 // Need to have negative test cases for this
                 if let Some(function) = self.get_variable_current_env(&name) {
                     self.compile_closure_call(function, args)
@@ -957,15 +933,12 @@ impl<'a> AstCompiler<'a> {
     }
 
     fn get_function(&mut self, function_name: &str) -> Value {
-        let f = self
-            .compiler
-            .find_function(function_name)
-            .unwrap();
+        let f = self.compiler.find_function(function_name).unwrap();
         let f = self.compiler.get_function_pointer(f).unwrap();
         let f = self.ir.assign_new(f);
         f.into()
     }
-    
+
     fn compile_standard_function_call(&mut self, name: String, mut args: Vec<Value>) -> Value {
         assert!(name.contains("/"));
 
@@ -1077,7 +1050,6 @@ impl<'a> AstCompiler<'a> {
         );
         let free_variable_offset = self.ir.add_int(counter, Value::TaggedConstant(4));
         let free_variable_offset = self.ir.mul(free_variable_offset, Value::TaggedConstant(8));
-        // TODO: This needs to change based on counter
         let free_variable_offset = self.ir.untag(free_variable_offset);
         let free_variable = self
             .ir
@@ -1087,7 +1059,7 @@ impl<'a> AstCompiler<'a> {
         let num_local = self.ir.load_from_memory(closure_register, 3);
         let num_local = self.ir.tag(num_local, BuiltInTypes::Int.get_tag());
         let free_variable_offset = self.ir.add_int(free_variable_offset, num_local);
-        // // TODO: Make this better
+        // TODO: Make this better
         let free_variable_offset = self.ir.mul(free_variable_offset, Value::TaggedConstant(-8));
         let free_variable_offset = self.ir.untag(free_variable_offset);
         let free_variable_slot_pointer = self.ir.get_stack_pointer_imm(2);

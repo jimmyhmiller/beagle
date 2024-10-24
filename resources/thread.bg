@@ -43,15 +43,6 @@ fn testGc(n) {
     }
 }
 
-fn print_endlessly_gc(message, x) {
-    // println(message)
-    // println(x)
-    // TODO: This is causing gc issues
-    // Even without another thread
-    // gc()
-    print_endlessly_gc(message, x)
-}
-
 fn call_function() {
     // Doing this because locals live for the whole function
      let x = Thing { x: 42 };

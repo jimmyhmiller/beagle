@@ -294,17 +294,6 @@ impl SimpleGeneration {
         self.old.gc(stack_map, stack_pointers);
     }
 
-    // TODO: I need to change this into a copy from roots to heap
-    // not a segment.
-    // That means I need be able to capture the state before I start adding objects
-    // and then be able to iterate over the new ones added.
-    // Right now, this would cause problems, because the objects alive from the roots
-    // will probably not fit in one segment.
-
-    // I also should move this to a new struct
-
-    // I really want to experiment more with gc, but it feels so bogged down in the implementation
-    // details right now.
     unsafe fn copy_all(&mut self, roots: Vec<usize>) -> Vec<usize> {
         let mut new_roots = vec![];
         for root in roots.iter() {
@@ -454,10 +443,3 @@ fn get_live_stack<'a>(stack_base: usize, stack_pointer: usize) -> &'a mut [usize
 
     (&mut stack[len - num_64_till_end..]) as _
 }
-
-// TODO: I can borrow the code here to get to a generational gc
-// That should make a significant difference in performance
-// I think to get there, I just need to mark things when I compact them
-// Then those those that are marked get copied to the old generation
-// I should probably read more about a proper setup for this
-// to try and get the details right.

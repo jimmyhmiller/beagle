@@ -1,8 +1,6 @@
-// Stolen from my edtior, so probably not great
+// Stolen from my editor, so probably not great
 // Need to deal with failure?
-// Maybe not at the token level?\
-
-// TODO: Fix parsing parentheses for precedence
+// Maybe not at the token level?
 
 use crate::ast::Ast;
 
@@ -430,7 +428,7 @@ impl Parser {
     pub fn new(file_name: String, source: String) -> Parser {
         let mut tokenizer = Tokenizer::new();
         let input_bytes = source.as_bytes();
-        // TODO: I is probably better not to parse all at once
+        // TODO: It is probably better not to parse all at once
         let tokens = tokenizer.parse_all(input_bytes);
         Parser {
             file_name,
@@ -646,7 +644,7 @@ impl Parser {
                 let result = self.parse_array();
                 self.expect_close_bracket();
                 Some(result)
-            } 
+            }
             _ => panic!(
                 "Expected atom, got {} at line {}",
                 self.get_token_repr(),
@@ -715,7 +713,6 @@ impl Parser {
         }
     }
 
-    // TODO: Why the difference between this and skip?
     fn move_to_next_non_whitespace(&mut self) {
         self.consume();
         while !self.at_end() && (self.is_space() || self.is_comment()) {
@@ -734,7 +731,11 @@ impl Parser {
         if self.is_open_paren() {
             self.consume();
         } else {
-            panic!("Expected open paren {:?} at {}", self.get_token_repr(), self.current_line);
+            panic!(
+                "Expected open paren {:?} at {}",
+                self.get_token_repr(),
+                self.current_line
+            );
         }
     }
 
@@ -743,7 +744,11 @@ impl Parser {
         if self.is_close_bracket() {
             self.consume();
         } else {
-            panic!("Expected close bracket {:?} at {}", self.get_token_repr(), self.current_line);
+            panic!(
+                "Expected close bracket {:?} at {}",
+                self.get_token_repr(),
+                self.current_line
+            );
         }
     }
 
@@ -1014,17 +1019,10 @@ impl Parser {
 
     fn current_token(&self) -> Token {
         if self.position >= self.tokens.len() {
-            // TODO: Maybe bad idea
             Token::Never
         } else {
             self.tokens[self.position]
         }
-    }
-
-    #[allow(dead_code)]
-    fn peek(&self) -> Token {
-        // TODO: Handle end
-        self.tokens[self.position + 1]
     }
 
     fn parse_namespace(&mut self) -> Ast {
@@ -1139,12 +1137,6 @@ impl Parser {
             _ => false,
         }
     }
-
-    // TODO: If I'm not going to have null
-    // how do I have an empty else?
-    // or do I require an else block?
-    // If the if were a statement, then it would be fine
-    // but it's an expression
 
     fn parse_if(&mut self) -> Ast {
         let condition = Box::new(self.parse_expression(1, true).unwrap());
@@ -1357,7 +1349,7 @@ impl Parser {
     fn is_dot(&self) -> bool {
         self.current_token() == Token::Dot
     }
-    
+
     fn parse_array(&mut self) -> Ast {
         let mut elements = Vec::new();
         while !self.at_end() && !self.is_close_bracket() {
@@ -1369,12 +1361,10 @@ impl Parser {
         }
         Ast::Array(elements)
     }
-    
+
     fn is_close_bracket(&self) -> bool {
         self.current_token() == Token::CloseBracket
     }
-    
-
 }
 
 #[test]

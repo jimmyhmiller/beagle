@@ -340,7 +340,6 @@ impl<Alloc: Allocator> Runtime<Alloc> {
             false,
         )?;
 
-        // TODO: Probably needs true
         self.compiler.add_builtin_function(
             "beagle.builtin/make_closure",
             make_closure::<Alloc> as *const u8,
