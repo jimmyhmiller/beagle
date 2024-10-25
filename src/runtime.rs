@@ -11,6 +11,7 @@ use std::{
     vec,
 };
 
+use libffi::{low::CodePtr, middle::Cif};
 use libloading::Library;
 use mmap_rs::{Mmap, MmapMut, MmapOptions};
 
@@ -171,6 +172,7 @@ pub struct Runtime<Alloc: Allocator> {
     pub is_paused: AtomicUsize,
     pub thread_state: Arc<(Mutex<ThreadState>, Condvar)>,
     pub gc_lock: Mutex<()>,
+    pub ffi_function_info: Vec<(CodePtr, Cif)>,
 }
 
 pub struct Memory<Alloc: Allocator> {
@@ -415,11 +417,11 @@ impl Compiler {
         function: *const u8,
     ) -> Result<usize, Box<dyn Error>> {
         let index = self.functions.len();
-        let offset = function as usize;
-        let jump_table_offset = self.add_jump_table_entry(index, offset)?;
+        let pointer = function as usize;
+        let jump_table_offset = self.add_jump_table_entry(index, pointer)?;
         self.functions.push(Function {
             name: name.unwrap_or("<Anonymous>").to_string(),
-            offset_or_pointer: offset,
+            offset_or_pointer: pointer,
             jump_table_offset,
             is_foreign: true,
             is_builtin: false,
@@ -436,7 +438,9 @@ impl Compiler {
                     .unwrap(),
             },
         });
-        Ok(self.functions.len() - 1)
+        let function_pointer =
+            Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
+        Ok(function_pointer)
     }
     pub fn add_builtin_function(
         &mut self,
@@ -834,7 +838,8 @@ impl Compiler {
             if name == "beagle.core" || name == "beagle.primitive" || name == "beagle.builtin" {
                 continue;
             }
-            let top_level = self.compile(&self.get_file_name_from_import(name))?;
+            let file_name = self.get_file_name_from_import(name);
+            let top_level = self.compile(&file_name)?;
             top_levels_to_run.extend(top_level);
         }
         Ok(top_levels_to_run)
@@ -1226,6 +1231,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
                 }),
                 Condvar::new(),
             )),
+            ffi_function_info: vec![],
         }
     }
 
@@ -1637,5 +1643,23 @@ impl<Alloc: Allocator> Runtime<Alloc> {
             let line = format!("{:x} {:x} {}\n", start, size, name);
             file.write_all(line.as_bytes()).unwrap();
         }
+    }
+
+    pub fn get_library(&self, library_id: usize) -> &libloading::Library {
+        let library_object = HeapObject::from_tagged(library_id);
+        let library_id = BuiltInTypes::untag(library_object.get_field(0));
+        &self.libraries[library_id]
+    }
+
+    pub fn add_ffi_function_info(
+        &mut self,
+        ffi_function_info: (libffi::low::CodePtr, libffi::middle::Cif),
+    ) -> usize {
+        self.ffi_function_info.push(ffi_function_info);
+        self.ffi_function_info.len() - 1
+    }
+
+    pub fn get_ffi_info(&self, ffi_info_id: usize) -> &(libffi::low::CodePtr, libffi::middle::Cif) {
+        self.ffi_function_info.get(ffi_info_id).unwrap()
     }
 }

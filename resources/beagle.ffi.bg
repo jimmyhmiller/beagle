@@ -1,0 +1,8 @@
+namespace beagle.ffi
+
+
+fn __create_ffi_function(ffi_info) {
+    fn() {
+        call_ffi_info(ffi_info)
+    }
+}
