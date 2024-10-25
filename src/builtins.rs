@@ -5,6 +5,11 @@ use std::{
     thread,
 };
 
+use libffi::{
+    low::CodePtr,
+    middle::{arg, Cif, Type},
+};
+
 use crate::{
     gc::Allocator,
     runtime::Runtime,
@@ -259,6 +264,43 @@ pub unsafe extern "C" fn load_library<Alloc: Allocator>(
     function(id)
 }
 
+pub unsafe extern "C" fn get_function<Alloc: Allocator>(
+    runtime: *mut Runtime<Alloc>,
+    library_id: usize,
+    function_name: usize,
+) -> usize {
+    let runtime = unsafe { &mut *runtime };
+    let library = runtime.get_library(library_id);
+    let function_name = runtime.compiler.get_string(function_name);
+    let func_ptr = unsafe { library.get::<fn()>(function_name.as_bytes()).unwrap() };
+
+    let code_ptr = unsafe { CodePtr(func_ptr.try_as_raw_ptr().unwrap()) };
+    let cif = Cif::new([Type::u32()], Type::i32());
+
+    let ffi_info_id = runtime.add_ffi_function_info((code_ptr, cif));
+    let ffi_info_id = BuiltInTypes::Int.tag(ffi_info_id as isize) as usize;
+
+    let create_ffi_function = runtime
+        .compiler
+        .get_function_by_name("beagle.ffi/__create_ffi_function")
+        .unwrap();
+    let function_pointer = runtime.compiler.get_pointer(create_ffi_function).unwrap();
+    let function: fn(usize) -> usize = std::mem::transmute(function_pointer);
+    function(ffi_info_id)
+}
+
+pub unsafe extern "C" fn call_ffi_info<Alloc: Allocator>(
+    runtime: *mut Runtime<Alloc>,
+    ffi_info_id: usize,
+) -> usize {
+    let runtime = unsafe { &mut *runtime };
+    let ffi_info_id = BuiltInTypes::untag(ffi_info_id);
+    let ffi_info = runtime.get_ffi_info(ffi_info_id);
+    let (code_ptr, cif) = ffi_info;
+    let result = cif.call::<u32>(*code_ptr, &[arg(&0)]);
+    result as usize
+}
+
 pub unsafe extern "C" fn copy_object<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,
     stack_pointer: usize,
@@ -380,8 +422,20 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         )?;
 
         self.compiler.add_builtin_function(
-            "beagle.core/load_library",
+            "beagle.ffi/load_library",
             load_library::<Alloc> as *const u8,
+            false,
+        )?;
+
+        self.compiler.add_builtin_function(
+            "beagle.ffi/get_function",
+            get_function::<Alloc> as *const u8,
+            false,
+        )?;
+
+        self.compiler.add_builtin_function(
+            "beagle.ffi/call_ffi_info",
+            call_ffi_info::<Alloc> as *const u8,
             false,
         )?;
 

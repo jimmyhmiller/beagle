@@ -1,8 +1,74 @@
 namespace ffi_test
 
+import "beagle.ffi" as ffi
 
+
+// TODO: I need to resolve not just functions as namespaced
+// things. It seems right now I can't refer to top level
+// things like ffi/u32
+// I need to add that ability then I could start actually call functions
+// with their current types
+// I will also need a way for rust to know how to convert those
+// Though maybe I just make them integers instead of some enum?
+// That's a bit ugly though. But maybe it's a start
 fn main() {
-    let lib = load_library("/opt/homebrew/lib/libSDL2-2.0.0.dylib")
+    let sdl = ffi/load_library("/opt/homebrew/lib/libSDL2-2.0.0.dylib")
+    let sdl_init = ffi/get_function(sdl, "SDL_Init", [], null)
+    sdl_init(0)
 
-    println(lib)
+    println(sdl)
 }
+
+
+
+
+// Made up example code from chatgpt
+// namespace sdl_example
+
+// // Import the ffi module explicitly
+// import "ffi" as ffi
+
+// // Load the SDL2 library dynamically using ffi
+// let sdl = ffi/load_lib("/opt/homebrew/lib/libSDL2-2.0.0.dylib")
+
+// fn main() {
+//     // SDL_Init (fn(u32) -> i32)
+//     let SDL_Init = ffi/get_function(sdl, "SDL_Init", [ffi/u32], ffi/i32)
+//     SDL_Init(0)
+
+//     // SDL_CreateWindow (fn(*const i8, i32, i32, i32, i32, u32) -> *mut ())
+//     let SDL_CreateWindow = ffi/get_function(sdl, "SDL_CreateWindow", 
+//         [ffi/pointer, ffi/i32, ffi/i32, ffi/i32, ffi/i32, ffi/u32], ffi/pointer)
+//     let title = "SDL2 Window" // Window title
+//     let window = SDL_CreateWindow(title, 100, 100, 640, 480, 0)
+
+//     // SDL_PollEvent (fn(*mut u8) -> i32)
+//     let SDL_PollEvent = ffi/get_function(sdl, "SDL_PollEvent", [ffi/mutable_pointer], ffi/i32)
+//     let eventBuffer = ffi/allocate(24) // Dynamic buffer for SDL_Event (at least 24 bytes)
+//     let quit = false
+
+//     // Event loop
+//     while !quit {
+//         if SDL_PollEvent(eventBuffer) != 0 {
+//             // Correctly interpret the first 4 bytes as a u32 for the event type
+//             let eventTypeBytes = ffi/get_bytes(eventBuffer, 0, 4)
+//             let eventType = ffi/u32_from_bytes(eventTypeBytes)
+            
+//             if eventType == 256 { // SDL_QUIT event
+//                 quit = true
+//             }
+//         }
+
+//         // SDL_Delay (fn(u32) -> void)
+//         let SDL_Delay = ffi/get_function(sdl, "SDL_Delay", [ffi/u32], ffi/void)
+//         SDL_Delay(16)
+//     }
+
+//     // SDL_DestroyWindow (fn(*mut ()) -> void)
+//     let SDL_DestroyWindow = ffi/get_function(sdl, "SDL_DestroyWindow", [ffi/pointer], ffi/void)
+//     SDL_DestroyWindow(window)
+
+//     // SDL_Quit (fn() -> void)
+//     let SDL_Quit = ffi/get_function(sdl, "SDL_Quit", [], ffi/void)
+//     SDL_Quit()
+// }
