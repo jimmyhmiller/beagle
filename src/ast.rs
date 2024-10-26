@@ -430,7 +430,7 @@ impl<'a> AstCompiler<'a> {
                 let namespace_id = self
                     .compiler
                     .find_binding(self.compiler.current_namespace_id(), &name)
-                    .unwrap();
+                    .unwrap_or_else(|| panic!("binding not found {}", name));
                 let value_reg = self.ir.assign_new(value);
                 self.store_namespaced_variable(Value::RawValue(namespace_id), value_reg);
                 // TODO: This should probably return the enum value
@@ -448,6 +448,7 @@ impl<'a> AstCompiler<'a> {
                 variant,
                 fields,
             } => {
+                let (namespace, name) = self.get_namespace_name_and_name(&name);
                 let field_results = fields
                     .iter()
                     .map(|field| {
@@ -458,7 +459,7 @@ impl<'a> AstCompiler<'a> {
 
                 let (struct_id, struct_type) = self
                     .compiler
-                    .get_struct(&format!("{}.{}", name, variant))
+                    .get_struct(&format!("{}/{}.{}", namespace, name, variant))
                     .unwrap_or_else(|| panic!("Struct not found {}", name));
 
                 for field in fields.iter() {
@@ -499,6 +500,7 @@ impl<'a> AstCompiler<'a> {
                     .tag(struct_pointer, BuiltInTypes::HeapObject.get_tag())
             }
             Ast::StructCreation { name, fields } => {
+                let (namespace, name) = self.get_namespace_name_and_name(&name);
                 for field in fields.iter() {
                     self.not_tail_position();
                     let value = self.call_compile(&field.1);
@@ -508,8 +510,10 @@ impl<'a> AstCompiler<'a> {
 
                 let (struct_id, struct_type) = self
                     .compiler
-                    .get_struct(&name)
-                    .unwrap_or_else(|| panic!("Struct not found {}", name));
+                    .get_struct(&format!("{}/{}", namespace, name))
+                    .unwrap_or_else(|| {
+                        panic!("Struct not found {}/{}",  namespace, name)
+                    });
 
                 let mut field_order: Vec<usize> = vec![];
                 for field in fields.iter() {
@@ -1212,9 +1216,18 @@ impl<'a> AstCompiler<'a> {
     }
 
     fn get_variable_alloc_free_variable(&mut self, name: &str) -> VariableLocation {
-        // TODO: Should walk the environment stack
         if let Some(variable) = self.get_variable_in_stack(name) {
             variable.clone()
+        } else if name.contains("/") {
+            let (namespace_name, name) = self.get_namespace_name_and_name(name);
+            let namespace_id = self.compiler.get_namespace_id(&namespace_name).unwrap();
+
+            let slot = self
+                .compiler
+                .find_binding(namespace_id, &name)
+                .unwrap_or_else(|| panic!("Can't find variable {}", name));
+
+            VariableLocation::NamespaceVariable(namespace_id, slot)
         } else {
             let current_env = self.environment_stack.last_mut().unwrap();
             current_env.free_variables.push(name.to_string());
@@ -1295,8 +1308,9 @@ impl<'a> AstCompiler<'a> {
                 }
             }
             Ast::Struct { name, fields } => {
+                let (namespace, name) = self.get_namespace_name_and_name(name);
                 self.compiler.add_struct(Struct {
-                    name: name.clone(),
+                    name: format!("{}/{}", namespace, name),
                     fields: fields
                         .iter()
                         .map(|field| {
@@ -1310,8 +1324,9 @@ impl<'a> AstCompiler<'a> {
                 });
             }
             Ast::Enum { name, variants } => {
+                let (namespace, name) = self.get_namespace_name_and_name(name);
                 let enum_repr = Enum {
-                    name: name.clone(),
+                    name: format!("{}/{}", namespace, name),
                     variants: variants
                         .iter()
                         .map(|variant| match variant {
@@ -1339,8 +1354,9 @@ impl<'a> AstCompiler<'a> {
                         .collect(),
                 };
 
+                let (namespace, name) = self.get_namespace_name_and_name(&name);
                 self.compiler.add_struct(Struct {
-                    name: name.to_string(),
+                    name: format!("{}/{}", namespace, name),
                     fields: variants
                         .iter()
                         .map(|variant| match variant {
@@ -1357,22 +1373,26 @@ impl<'a> AstCompiler<'a> {
                         Ast::EnumVariant {
                             name: variant_name,
                             fields,
-                        } => self.compiler.add_struct(Struct {
-                            name: format!("{}.{}", name, variant_name),
-                            fields: fields
-                                .iter()
-                                .map(|field| {
-                                    if let Ast::Identifier(name) = field {
-                                        name.clone()
-                                    } else {
-                                        panic!("Expected identifier got {:?}", field)
-                                    }
-                                })
-                                .collect(),
-                        }),
-                        Ast::EnumStaticVariant { name: variant_name } => {
+                        } => {
+                            let (namespace, name) = self.get_namespace_name_and_name(&name);
                             self.compiler.add_struct(Struct {
-                                name: format!("{}.{}", name, variant_name),
+                                name: format!("{}/{}.{}", namespace, name, variant_name),
+                                fields: fields
+                                    .iter()
+                                    .map(|field| {
+                                        if let Ast::Identifier(name) = field {
+                                            name.clone()
+                                        } else {
+                                            panic!("Expected identifier got {:?}", field)
+                                        }
+                                    })
+                                    .collect(),
+                            })
+                        }
+                        Ast::EnumStaticVariant { name: variant_name } => {
+                            let (namespace, name) = self.get_namespace_name_and_name(&name);
+                            self.compiler.add_struct(Struct {
+                                name: format!("{}/{}.{}", namespace, name, variant_name),
                                 fields: vec![],
                             });
                         }
@@ -1416,6 +1436,21 @@ impl<'a> AstCompiler<'a> {
     fn own_fully_qualified_name(&self) -> Option<String> {
         let name = self.name.as_ref()?;
         Some(self.compiler.current_namespace_name() + "/" + name)
+    }
+
+    fn get_namespace_name_and_name(&self, name: &str) -> (String, String) {
+        if name.contains("/") {
+            let parts: Vec<&str> = name.split("/").collect();
+            let alias = parts[0];
+            let name = parts[1];
+            let namespace = self
+                .compiler
+                .get_namespace_from_alias(alias)
+                .unwrap_or_else(|| panic!("Can't find alias {}", alias));
+            (namespace, name.to_string())
+        } else {
+            (self.compiler.current_namespace_name(), name.to_string())
+        }
     }
 }
 

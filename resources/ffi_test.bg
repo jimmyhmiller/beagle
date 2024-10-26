@@ -13,7 +13,7 @@ import "beagle.ffi" as ffi
 // That's a bit ugly though. But maybe it's a start
 fn main() {
     let sdl = ffi/load_library("/opt/homebrew/lib/libSDL2-2.0.0.dylib")
-    let sdl_init = ffi/get_function(sdl, "SDL_Init", [], null)
+    let sdl_init = ffi/get_function(sdl, "SDL_Init", [ffi/Type.U32], ffi/Type.I32)
     sdl_init(0)
 
     println(sdl)
