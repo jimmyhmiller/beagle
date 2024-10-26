@@ -1,3 +1,4 @@
+use core::panic;
 use std::{
     error::Error,
     mem,
@@ -257,12 +258,33 @@ pub unsafe extern "C" fn load_library<Alloc: Allocator>(
 
     let call_fn = runtime
         .compiler
-        .get_function_by_name("beagle.core/__make_lib_struct")
+        .get_function_by_name("beagle.ffi/__make_lib_struct")
         .unwrap();
     let function_pointer = runtime.compiler.get_pointer(call_fn).unwrap();
     let function: fn(usize) -> usize = std::mem::transmute(function_pointer);
     function(id)
 }
+
+#[allow(unused)]
+pub fn map_ffi_types<Alloc: Allocator>(runtime: &Runtime<Alloc>, value: usize) -> Type {
+    let heap_object = HeapObject::from_tagged(value);
+    let struct_id = heap_object.get_struct_id();
+    let struct_info = runtime.compiler.get_struct_by_id(struct_id).unwrap();
+    let name = struct_info.name.as_str().split_once("/").unwrap().1;
+    match name {
+        "U32" => Type::u32(),
+        "I32" => Type::i32(),
+        "Pointer" => Type::pointer(),
+        "MutablePointer" => Type::pointer(),
+        "String" => Type::pointer(),
+        "Void" => Type::void(),
+        _ => panic!("Unknown type"),
+    }
+}
+
+// TODO:
+// I need to get the elements of this vector into
+// a rust vector and then map the typess
 
 pub unsafe extern "C" fn get_function<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,

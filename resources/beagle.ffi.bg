@@ -1,6 +1,27 @@
 namespace beagle.ffi
 
 
+// Probably should move this stuff to an ffi namespace
+struct Library {
+    id
+}
+
+fn __make_lib_struct(id) {
+    Library { id: id }
+}
+
+enum Type {
+    U32,
+    I32,
+    Pointer,
+    MutablePointer,
+    String,
+    Void,
+}
+
+// TODO: I could make a function that maps between a type an integer
+// but I don't actually have equality defined for structures
+
 fn __create_ffi_function(ffi_info) {
     fn() {
         call_ffi_info(ffi_info)

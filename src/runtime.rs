@@ -955,7 +955,10 @@ impl Compiler {
         // struct Point { x y }
         // and then you say let x = Point
         // x is a struct object that describes the struct Point
-        self.namespaces.add_binding(&name, 0);
+
+        // grab the simple name for the binding
+        let (_, simple_name) = name.split_once("/").unwrap();
+        self.namespaces.add_binding(simple_name, 0);
     }
 
     pub fn add_enum(&mut self, e: Enum) {
@@ -981,7 +984,8 @@ impl Compiler {
     ) -> Option<String> {
         // It should look like this
         // struct_name { field1: value1, field2: value2 }
-        let mut repr = struct_value.name.clone();
+        let simple_name = struct_value.name.split_once("/").unwrap().1;
+        let mut repr = simple_name.to_string();
         if struct_value.fields.is_empty() {
             return Some(repr);
         }
@@ -1103,6 +1107,10 @@ impl Compiler {
         namespace.aliases.insert(alias, namespace_id);
     }
 
+    pub fn get_namespace_id(&self, name: &str) -> Option<usize> {
+        self.namespaces.get_namespace_id(name)
+    }
+
     /// TODO: Temporary please fix
     fn get_file_name_from_import(&self, import_name: String) -> String {
         let mut exe_path = env::current_exe().unwrap();
@@ -1145,6 +1153,10 @@ impl Compiler {
             }
             _ => panic!("Not an import"),
         }
+    }
+
+    pub fn get_struct_by_id(&self, struct_id: usize) -> Option<&Struct> {
+        self.structs.get_by_id(struct_id)
     }
 }
 
