@@ -266,38 +266,66 @@ pub unsafe extern "C" fn load_library<Alloc: Allocator>(
 }
 
 #[allow(unused)]
-pub fn map_ffi_types<Alloc: Allocator>(runtime: &Runtime<Alloc>, value: usize) -> Type {
+pub fn map_ffi_type<Alloc: Allocator>(runtime: &Runtime<Alloc>, value: usize) -> Type {
     let heap_object = HeapObject::from_tagged(value);
-    let struct_id = heap_object.get_struct_id();
-    let struct_info = runtime.compiler.get_struct_by_id(struct_id).unwrap();
+    let struct_id = BuiltInTypes::untag(heap_object.get_struct_id());
+    let struct_info = runtime.compiler.get_struct_by_id(struct_id).expect(&format!("Could not find struct with id {}", struct_id));
     let name = struct_info.name.as_str().split_once("/").unwrap().1;
     match name {
-        "U32" => Type::u32(),
-        "I32" => Type::i32(),
-        "Pointer" => Type::pointer(),
-        "MutablePointer" => Type::pointer(),
-        "String" => Type::pointer(),
-        "Void" => Type::void(),
-        _ => panic!("Unknown type"),
+        "Type.U32" => Type::u32(),
+        "Type.I32" => Type::i32(),
+        "Type.Pointer" => Type::pointer(),
+        "Type.MutablePointer" => Type::pointer(),
+        "Type.String" => Type::pointer(),
+        "Type.Void" => Type::void(),
+        _ => panic!("Unknown type: {}", name),
     }
+}
+
+fn persistent_vector_to_array<Alloc: Allocator>(
+    runtime: &Runtime<Alloc>,
+    vector: usize,
+) -> HeapObject {
+    let make_array = runtime
+        .compiler
+        .get_function_by_name("persistent_vector/to_array")
+        .unwrap();
+    let function_pointer = runtime.compiler.get_pointer(make_array).unwrap();
+    let function: fn(usize) -> usize = unsafe { std::mem::transmute(function_pointer) };
+    let tagged = function(vector);
+    HeapObject::from_tagged(tagged)
+}
+
+fn array_to_vec(object: HeapObject) -> Vec<usize> {
+    object.get_fields().to_vec()
 }
 
 // TODO:
 // I need to get the elements of this vector into
-// a rust vector and then map the typess
+// a rust vector and then map the types
 
 pub unsafe extern "C" fn get_function<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,
-    library_id: usize,
+    library_struct: usize,
     function_name: usize,
+    types: usize,
+    return_type: usize,
 ) -> usize {
     let runtime = unsafe { &mut *runtime };
-    let library = runtime.get_library(library_id);
+    let library = runtime.get_library(library_struct);
     let function_name = runtime.compiler.get_string(function_name);
     let func_ptr = unsafe { library.get::<fn()>(function_name.as_bytes()).unwrap() };
 
     let code_ptr = unsafe { CodePtr(func_ptr.try_as_raw_ptr().unwrap()) };
-    let cif = Cif::new([Type::u32()], Type::i32());
+
+    let types: Vec<Type> = array_to_vec(persistent_vector_to_array(runtime, types))
+        .iter()
+        .map(|x| map_ffi_type(runtime, *x))
+        .collect();
+
+    let return_type = map_ffi_type(runtime, return_type);
+
+    let cif = Cif::new(types, return_type);
 
     let ffi_info_id = runtime.add_ffi_function_info((code_ptr, cif));
     let ffi_info_id = BuiltInTypes::Int.tag(ffi_info_id as isize) as usize;

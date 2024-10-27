@@ -122,40 +122,6 @@ fn new_path(vec, level, node) {
 }
 
 
-fn print_array_summary_single_level(array, index) {
-    let count = array/count(array)
-    print("Array(")
-    print(count)
-    print(")")
-}
-
-
-fn print_array_summary(array, index) {
-
-    if array/is_array(array) == false {
-        print(" ")
-        print(array)
-        println(" ")
-    } else {
-        let count = array/count(array)
-        if index == count {
-            println("")
-        } else {
-            let elem = array/read_field(array, index)
-            if array/is_array(elem) {
-                print_array_summary_single_level(elem, 0)
-                print(" ")
-                print_array_summary(array, index + 1)
-            } else {
-                print(" ")
-                print(elem)
-                print(" ")
-                print_array_summary(array, index + 1)
-            }
-        }
-    }
-}
-
 fn push_tail(vec, level, parent, tail_node) {
     let new_array = array/new_array(32)
     if array/is_array(parent) == false {
@@ -223,15 +189,17 @@ fn doAssoc(vec, level, node, index, value) {
 }
 
 
-fn fill_vec_n(vec, i, n) {
-    // println(n)
+fn fill_vec_n_helper(vec, i, n) {
     if i == n {
         vec
     } else {
-        // println(vec)
         let new_vec = push(vec, i)
-        fill_vec_n(new_vec, i + 1, n)
+        fill_vec_n_helper(new_vec, i + 1, n)
     }
+}
+
+fn fill_vec_n(n) {
+    fill_vec_n_helper(EMPTY, 0, n)
 }
 
 fn get_and_verify(vec, index) {
@@ -254,12 +222,34 @@ fn make_vec_of_every_size_and_verify(n) {
     if n == 0 {
         "worked!"
     } else {
-        let vec = fill_vec_n(EMPTY, 0, n)
+        let vec = fill_vec_n(n)
         get_and_verify(vec, 0)
         make_vec_of_every_size_and_verify(n - 1)
     }
 }
 
+fn count(vec) {
+    vec.count
+}
+
+
+// TODO: I have a problem with arguments being passed properly.
+// If you swap arr and vec here, I overwrite x2.
+// I need to preserve that value, but I don't feel like doing that right now
+// so I'm just going to move them for the moment.
+fn to_array_helper(arr, i, vec) {
+    if i == count(vec) {
+        arr
+    } else {
+        array/write_field(arr, i, get(vec, i))
+        to_array_helper(arr, i + 1, vec)
+    }
+}
+
+fn to_array(vec) {
+    let arr = array/new_array(count(vec))
+    to_array_helper(arr, 0, vec)
+}
 
 fn vec() {
     EMPTY
@@ -274,6 +264,9 @@ fn main() {
     gc()
     gc()
     println(make_vec_of_every_size_and_verify(1000))
+    let vec2 = fill_vec_n(10);
+    let array2 = to_array(vec2)
+    println(array2)
     "done"
 }
 
@@ -282,4 +275,5 @@ fn main() {
 // PersistentVector { count: 0, shift: 5, root: [  ], tail: [  ] }
 // worked!
 // worked!
+// [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 ]
 // done
