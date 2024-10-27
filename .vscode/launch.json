@@ -22,7 +22,7 @@
                     "kind": "bin"
                 }
             },
-            "args": ["resources/ffi_test.bg"],
+            "args": ["resources/persistent_vector.bg"],
             "cwd": "${workspaceFolder}"
         },
         {

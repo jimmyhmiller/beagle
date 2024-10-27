@@ -38,12 +38,12 @@ impl BuiltInTypes {
         }
     }
 
-    pub fn untag(pointer: usize) -> usize {
-        pointer >> 3
+    pub fn untag(value: usize) -> usize {
+        value >> 3
     }
 
-    pub fn untag_isize(pointer: isize) -> isize {
-        pointer >> 3
+    pub fn untag_isize(value: isize) -> isize {
+        value >> 3
     }
 
     pub fn get_kind(pointer: usize) -> Self {

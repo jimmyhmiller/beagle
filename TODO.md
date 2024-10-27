@@ -19,3 +19,4 @@
 * Figure out a print system for types like the vector
 * I need to do indexing with [] I just need to figure out how to distinguish a literal and indexing. How do other languages do that?
 * Make namespacing reference work for structs and enums better
+* Builtins need better type checking setup

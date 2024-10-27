@@ -16,6 +16,18 @@ fn main() {
     let sdl_init = ffi/get_function(sdl, "SDL_Init", [ffi/Type.U32], ffi/Type.I32)
     sdl_init(0)
 
+    // TODO: This code causes me to have no free registers
+    // SDL_CreateWindow (fn(*const i8, i32, i32, i32, i32, u32) -> *mut ())
+    let sdl_window_create = ffi/get_function(
+        sdl,
+        "SDL_CreateWindow",
+        [ffi/Type.String, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.U32],
+        ffi/Type.Pointer
+    )
+
+    let title = "SDL2 Window" // Window title
+    let window = sdl_window_create(title, 100, 100, 640, 480, 0)
+
     println(sdl)
 }
 
