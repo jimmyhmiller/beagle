@@ -511,9 +511,7 @@ impl<'a> AstCompiler<'a> {
                 let (struct_id, struct_type) = self
                     .compiler
                     .get_struct(&format!("{}/{}", namespace, name))
-                    .unwrap_or_else(|| {
-                        panic!("Struct not found {}/{}",  namespace, name)
-                    });
+                    .unwrap_or_else(|| panic!("Struct not found {}/{}", namespace, name));
 
                 let mut field_order: Vec<usize> = vec![];
                 for field in fields.iter() {

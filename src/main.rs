@@ -24,6 +24,7 @@ pub mod ir;
 pub mod machine_code;
 pub mod parser;
 mod primitives;
+mod register_allocation;
 pub mod runtime;
 mod types;
 

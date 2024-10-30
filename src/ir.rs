@@ -43,9 +43,9 @@ impl Value {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct VirtualRegister {
-    argument: Option<usize>,
-    index: usize,
-    volatile: bool,
+    pub argument: Option<usize>,
+    pub index: usize,
+    pub volatile: bool,
 }
 
 impl From<VirtualRegister> for Value {
@@ -149,6 +149,17 @@ impl TryInto<VirtualRegister> for &VirtualRegister {
     }
 }
 
+impl TryInto<VirtualRegister> for &mut Value {
+    type Error = Value;
+
+    fn try_into(self) -> Result<VirtualRegister, Self::Error> {
+        match self {
+            Value::Register(register) => Ok(*register),
+            _ => Err(*self),
+        }
+    }
+}
+
 impl<T> From<*const T> for Value {
     fn from(val: *const T) -> Self {
         Value::Pointer(val as usize)
@@ -173,8 +184,19 @@ macro_rules! get_registers {
     };
 }
 
+macro_rules! replace_register {
+    ($x:expr, $old_register:expr, $new_register:expr) => {
+        if let Value::Register(register) = $x {
+            if *register == $old_register {
+                *register = $new_register;
+            }
+        }
+    };
+    () => {};
+}
+
 impl Instruction {
-    fn get_registers(&self) -> Vec<VirtualRegister> {
+    pub fn get_registers(&self) -> Vec<VirtualRegister> {
         match self {
             Instruction::Sub(a, b, c) => {
                 get_registers!(a, b, c)
@@ -363,6 +385,103 @@ impl Instruction {
             Instruction::ExtendLifeTime(a) => {
                 get_register!(a)
             }
+        }
+    }
+
+    pub fn replace_register(
+        &mut self,
+        old_register: VirtualRegister,
+        new_register: VirtualRegister,
+    ) {
+        match self {
+            Instruction::Sub(value, value1, value2)
+            | Instruction::AddInt(value, value1, value2)
+            | Instruction::Mul(value, value1, value2)
+            | Instruction::Div(value, value1, value2)
+            | Instruction::HeapLoadReg(value, value1, value2)
+            | Instruction::HeapStoreOffsetReg(value, value1, value2)
+            | Instruction::ShiftLeft(value, value1, value2)
+            | Instruction::ShiftRight(value, value1, value2)
+            | Instruction::ShiftRightZero(value, value1, value2)
+            | Instruction::And(value, value1, value2)
+            | Instruction::Or(value, value1, value2)
+            | Instruction::Xor(value, value1, value2)
+            | Instruction::AddFloat(value, value1, value2)
+            | Instruction::SubFloat(value, value1, value2)
+            | Instruction::MulFloat(value, value1, value2)
+            | Instruction::DivFloat(value, value1, value2)
+            | Instruction::Compare(value, value1, value2, _)
+            | Instruction::Tag(value, value1, value2)
+            | Instruction::CompareAndSwap(value, value1, value2) => {
+                replace_register!(value, old_register, new_register);
+                replace_register!(value1, old_register, new_register);
+                replace_register!(value2, old_register, new_register);
+            }
+
+            Instruction::HeapLoad(value, value1, _)
+            | Instruction::HeapStore(value, value1)
+            | Instruction::LoadLocal(value, value1)
+            | Instruction::StoreLocal(value, value1)
+            | Instruction::GetStackPointer(value, value1)
+            | Instruction::GetTag(value, value1)
+            | Instruction::Untag(value, value1)
+            | Instruction::HeapStoreOffset(value, value1, _)
+            | Instruction::HeapStoreByteOffsetMasked(value, value1, _, _, _)
+            | Instruction::AtomicLoad(value, value1)
+            | Instruction::AtomicStore(value, value1)
+            | Instruction::StoreFloat(value, value1, _)
+            | Instruction::GuardInt(value, value1, _)
+            | Instruction::GuardFloat(value, value1, _)
+            | Instruction::LoadConstant(value, value1)
+            | Instruction::FmovGeneralToFloat(value, value1)
+            | Instruction::FmovFloatToGeneral(value, value1)
+            | Instruction::ShiftRightImm(value, value1, _)
+            | Instruction::AndImm(value, value1, _)
+            | Instruction::JumpIf(_, _, value, value1) => {
+                replace_register!(value, old_register, new_register);
+                replace_register!(value1, old_register, new_register);
+            }
+
+            Instruction::Ret(value)
+            | Instruction::LoadTrue(value)
+            | Instruction::LoadFalse(value)
+            | Instruction::RegisterArgument(value)
+            | Instruction::PushStack(value)
+            | Instruction::PopStack(value)
+            | Instruction::LoadFreeVariable(value, _)
+            | Instruction::GetStackPointerImm(value, _)
+            | Instruction::CurrentStackPosition(value)
+            | Instruction::ExtendLifeTime(value) => {
+                replace_register!(value, old_register, new_register);
+            }
+
+            Instruction::Assign(virtual_register, value) => {
+                if *virtual_register == old_register {
+                    *virtual_register = new_register;
+                }
+                replace_register!(value, old_register, new_register);
+            }
+            Instruction::Recurse(value, vec) => {
+                replace_register!(value, old_register, new_register);
+                for value in vec {
+                    replace_register!(value, old_register, new_register);
+                }
+            }
+            Instruction::TailRecurse(value, vec) => {
+                replace_register!(value, old_register, new_register);
+                for value in vec {
+                    replace_register!(value, old_register, new_register);
+                }
+            }
+            Instruction::Call(value, value1, vec, _) => {
+                replace_register!(value, old_register, new_register);
+                replace_register!(value1, old_register, new_register);
+                for value in vec {
+                    replace_register!(value, old_register, new_register);
+                }
+            }
+
+            Instruction::Jump(_) | Instruction::Breakpoint => {}
         }
     }
 }

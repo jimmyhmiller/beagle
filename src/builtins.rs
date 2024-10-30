@@ -269,7 +269,10 @@ pub unsafe extern "C" fn load_library<Alloc: Allocator>(
 pub fn map_ffi_type<Alloc: Allocator>(runtime: &Runtime<Alloc>, value: usize) -> Type {
     let heap_object = HeapObject::from_tagged(value);
     let struct_id = BuiltInTypes::untag(heap_object.get_struct_id());
-    let struct_info = runtime.compiler.get_struct_by_id(struct_id).expect(&format!("Could not find struct with id {}", struct_id));
+    let struct_info = runtime
+        .compiler
+        .get_struct_by_id(struct_id)
+        .unwrap_or_else(|| panic!("Could not find struct with id {}", struct_id));
     let name = struct_info.name.as_str().split_once("/").unwrap().1;
     match name {
         "Type.U32" => Type::u32(),
