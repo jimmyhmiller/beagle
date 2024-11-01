@@ -20,3 +20,4 @@
 * I need to do indexing with [] I just need to figure out how to distinguish a literal and indexing. How do other languages do that?
 * Make namespacing reference work for structs and enums better
 * Builtins need better type checking setup
+* Need to make the tests start a process so if one crashes, we still know the total results

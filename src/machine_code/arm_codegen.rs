@@ -22,6 +22,13 @@ impl Register {
             Size::S64 => 1,
         }
     }
+
+    pub fn from_index(index: usize) -> Register {
+        Register {
+            index: index as u8,
+            size: Size::S64,
+        }
+    }
 }
 
 impl Register {
