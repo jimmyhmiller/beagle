@@ -1,6 +1,7 @@
 namespace ffi_test
 
 import "beagle.ffi" as ffi
+import "beagle.primitive" as primitive
 
 
 // TODO: I need to resolve not just functions as namespaced
@@ -14,6 +15,9 @@ import "beagle.ffi" as ffi
 fn main() {
     let sdl = ffi/load_library("/opt/homebrew/lib/libSDL2-2.0.0.dylib")
     let sdl_init = ffi/get_function(sdl, "SDL_Init", [ffi/Type.U32], ffi/Type.I32)
+    // TODO: Fix closures
+    println(sdl_init)
+    // primitive/breakpoint()
     sdl_init(0)
 
     // TODO: This code causes me to have no free registers
@@ -24,8 +28,12 @@ fn main() {
         [ffi/Type.String, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.U32],
         ffi/Type.Pointer
     )
+    
+    println(sdl_window_create);
 
     let title = "SDL2 Window" // Window title
+    // primitive/breakpoint()
+
     let window = sdl_window_create(title, 100, 100, 640, 480, 0)
 
     println(sdl)

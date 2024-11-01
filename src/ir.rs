@@ -1,8 +1,10 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use crate::arm::FmovDirection;
 use crate::machine_code::arm_codegen::{Register, X0, X1};
 
+use crate::register_allocation::simple::SimpleRegisterAllocator;
 use crate::types::BuiltInTypes;
 use crate::{arm::LowLevelArm, common::Label};
 
@@ -46,6 +48,31 @@ pub struct VirtualRegister {
     pub argument: Option<usize>,
     pub index: usize,
     pub volatile: bool,
+    // Hack to experiment with stuff
+    pub is_physical: bool,
+}
+
+impl Ord for VirtualRegister {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self.argument, other.argument) {
+            (Some(a), Some(b)) => a.cmp(&b),
+            (None, Some(_)) => Ordering::Less,
+            (Some(_), None) => Ordering::Greater,
+            (None, None) => match self.index.cmp(&other.index) {
+                Ordering::Equal => match self.volatile.cmp(&other.volatile) {
+                    Ordering::Equal => self.is_physical.cmp(&other.is_physical),
+                    other => other,
+                },
+                other => other,
+            },
+        }
+    }
+}
+
+impl PartialOrd for VirtualRegister {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl From<VirtualRegister> for Value {
@@ -103,7 +130,7 @@ pub enum Instruction {
     GetTag(Value, Value),
     Untag(Value, Value),
     HeapStoreOffset(Value, Value, usize),
-    HeapStoreByteOffsetMasked(Value, Value, usize, usize, usize),
+    HeapStoreByteOffsetMasked(Value, Value, Value, Value, usize, usize, usize),
     CurrentStackPosition(Value),
     ExtendLifeTime(Value),
     HeapStoreOffsetReg(Value, Value, Value),
@@ -141,6 +168,7 @@ impl TryInto<VirtualRegister> for &Value {
         }
     }
 }
+
 impl TryInto<VirtualRegister> for &VirtualRegister {
     type Error = ();
 
@@ -157,6 +185,36 @@ impl TryInto<VirtualRegister> for &mut Value {
             Value::Register(register) => Ok(*register),
             _ => Err(*self),
         }
+    }
+}
+
+impl TryInto<Register> for Value {
+    type Error = Value;
+
+    fn try_into(self) -> Result<Register, Self::Error> {
+        match self {
+            Value::Register(register) => Ok(Register::from_index(register.index)),
+            _ => Err(self),
+        }
+    }
+}
+
+impl TryInto<Register> for &Value {
+    type Error = Value;
+
+    fn try_into(self) -> Result<Register, Self::Error> {
+        match self {
+            Value::Register(register) => Ok(Register::from_index(register.index)),
+            _ => Err(*self),
+        }
+    }
+}
+
+impl TryInto<Register> for &VirtualRegister {
+    type Error = ();
+
+    fn try_into(self) -> Result<Register, Self::Error> {
+        Ok(Register::from_index(self.index))
     }
 }
 
@@ -334,8 +392,8 @@ impl Instruction {
             Instruction::HeapStoreOffset(a, b, _) => {
                 get_registers!(a, b)
             }
-            Instruction::HeapStoreByteOffsetMasked(a, b, _, _, _) => {
-                get_registers!(a, b)
+            Instruction::HeapStoreByteOffsetMasked(a, b, c, d, _, _, _) => {
+                get_registers!(a, b, c, d)
             }
             Instruction::HeapStoreOffsetReg(a, b, c) => {
                 get_registers!(a, b, c)
@@ -394,6 +452,13 @@ impl Instruction {
         new_register: VirtualRegister,
     ) {
         match self {
+            Instruction::HeapStoreByteOffsetMasked(value, value1, value2, value3, _, _, _) => {
+                replace_register!(value, old_register, new_register);
+                replace_register!(value1, old_register, new_register);
+                replace_register!(value2, old_register, new_register);
+                replace_register!(value3, old_register, new_register);
+            }
+
             Instruction::Sub(value, value1, value2)
             | Instruction::AddInt(value, value1, value2)
             | Instruction::Mul(value, value1, value2)
@@ -426,7 +491,6 @@ impl Instruction {
             | Instruction::GetTag(value, value1)
             | Instruction::Untag(value, value1)
             | Instruction::HeapStoreOffset(value, value1, _)
-            | Instruction::HeapStoreByteOffsetMasked(value, value1, _, _, _)
             | Instruction::AtomicLoad(value, value1)
             | Instruction::AtomicStore(value, value1)
             | Instruction::StoreFloat(value, value1, _)
@@ -486,46 +550,6 @@ impl Instruction {
     }
 }
 
-struct RegisterAllocator {
-    lifetimes: HashMap<VirtualRegister, (usize, usize)>,
-    allocated_registers: HashMap<VirtualRegister, Register>,
-}
-
-impl RegisterAllocator {
-    fn new(lifetimes: HashMap<VirtualRegister, (usize, usize)>) -> Self {
-        Self {
-            lifetimes,
-            allocated_registers: HashMap::new(),
-        }
-    }
-
-    fn allocate_register(
-        &mut self,
-        index: usize,
-        register: VirtualRegister,
-        lang: &mut LowLevelArm,
-    ) -> Register {
-        let (start, _end) = self.lifetimes.get(&register).unwrap();
-        if index == *start {
-            // Is it okay that the register is already allocated for the argument?
-            if let Some(arg) = register.argument {
-                let reg = lang.arg(arg as u8);
-                self.allocated_registers.insert(register, reg);
-                lang.reserve_register(reg);
-                reg
-            } else {
-                assert!(!self.allocated_registers.contains_key(&register));
-                let reg = lang.volatile_register();
-                self.allocated_registers.insert(register, reg);
-                reg
-            }
-        } else {
-            assert!(self.allocated_registers.contains_key(&register));
-            *self.allocated_registers.get(&register).unwrap()
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct Ir {
     register_index: usize,
@@ -562,6 +586,7 @@ impl Ir {
             argument,
             index: self.register_index,
             volatile,
+            is_physical: false,
         };
         self.register_index += 1;
         register
@@ -898,57 +923,10 @@ impl Ir {
         label
     }
 
-    pub fn write_label(&mut self, early_exit: Label) {
+    pub fn write_label(&mut self, label: Label) {
         assert!(!self.label_locations.contains_key(&self.instructions.len()));
         self.label_locations
-            .insert(self.instructions.len(), early_exit.index);
-    }
-
-    fn get_register_lifetime(&mut self) -> HashMap<VirtualRegister, (usize, usize)> {
-        let mut result: HashMap<VirtualRegister, (usize, usize)> = HashMap::new();
-        for (index, instruction) in self.instructions.iter().enumerate().rev() {
-            for register in instruction.get_registers() {
-                if let Some((_start, end)) = result.get(&register) {
-                    result.insert(register, (index, *end));
-                } else {
-                    result.insert(register, (index, index));
-                }
-            }
-        }
-
-        result
-    }
-
-    #[allow(unused)]
-    pub fn draw_lifetimes(lifetimes: &HashMap<VirtualRegister, (usize, usize)>) {
-        // Find the maximum lifetime to set the width of the diagram
-        let max_lifetime = lifetimes.values().map(|(_, end)| end).max().unwrap_or(&0);
-        // sort lifetime by start
-        let mut lifetimes: Vec<(VirtualRegister, (usize, usize))> =
-            lifetimes.clone().into_iter().collect();
-        lifetimes.sort_by_key(|(_, (start, _))| *start);
-
-        for (register, (start, end)) in &lifetimes {
-            // Print the register name
-            print!("{:10} |", register.index);
-
-            // Print the start of the lifetime
-            for _ in 0..*start {
-                print!(" ");
-            }
-
-            // Print the lifetime
-            for _ in *start..*end {
-                print!("-");
-            }
-
-            // Print the rest of the line
-            for _ in *end..*max_lifetime {
-                print!(" ");
-            }
-
-            println!("|");
-        }
+            .insert(self.instructions.len(), label.index);
     }
 
     pub fn compile(
@@ -978,6 +956,16 @@ impl Ir {
 
         let exit = lang.new_label("exit");
 
+        let mut simple_register_allocator = SimpleRegisterAllocator::new(
+            self.instructions.clone(),
+            self.num_locals,
+            self.label_locations.clone(),
+        );
+        simple_register_allocator.simplify_registers();
+        self.instructions = simple_register_allocator.instructions.clone();
+        self.num_locals = simple_register_allocator.max_num_locals;
+        self.label_locations = simple_register_allocator.label_locations.clone();
+
         self.compile_instructions(&mut lang, exit, before_prelude, after_prelude);
 
         lang.write_label(exit);
@@ -992,7 +980,6 @@ impl Ir {
         lang.mov_64(X0, compiler_ptr as isize);
         lang.get_stack_pointer_imm(X1, 0);
         lang.call(register);
-
         lang
     }
 
@@ -1010,22 +997,8 @@ impl Ir {
             let new_label = lang.new_label(&self.label_names[label.index]);
             ir_label_to_lang_label.insert(**label, new_label);
         }
-        let lifetimes = self.get_register_lifetime();
-        // println!("compiling {}", name);
-        // Self::draw_lifetimes(&lifetimes);
-        let mut alloc = RegisterAllocator::new(lifetimes);
 
-        let mut lifetimes2: Vec<(VirtualRegister, (usize, usize))> =
-            alloc.lifetimes.iter().map(|(r, v)| (*r, *v)).collect();
-        lifetimes2.sort_by_key(|(_, (start, _))| *start);
         for (index, instruction) in self.instructions.iter().enumerate() {
-            for (register, (_start, end)) in lifetimes2.iter() {
-                if index == end + 1 {
-                    if let Some(register) = alloc.allocated_registers.get(register) {
-                        lang.free_register(*register);
-                    }
-                }
-            }
             let label = self.label_locations.get(&index);
             if let Some(label) = label {
                 lang.write_label(ir_label_to_lang_label[&self.labels[*label]]);
@@ -1038,11 +1011,8 @@ impl Ir {
                 Instruction::ExtendLifeTime(_) => {}
                 Instruction::Sub(dest, a, b) => {
                     let a = a.try_into().unwrap();
-                    let a = alloc.allocate_register(index, a, lang);
                     let b = b.try_into().unwrap();
-                    let b = alloc.allocate_register(index, b, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
 
                     lang.guard_integer(dest, a, self.after_return);
                     lang.guard_integer(dest, b, self.after_return);
@@ -1056,21 +1026,15 @@ impl Ir {
                 }
                 Instruction::AddInt(dest, a, b) => {
                     let a = a.try_into().unwrap();
-                    let a = alloc.allocate_register(index, a, lang);
                     let b = b.try_into().unwrap();
-                    let b = alloc.allocate_register(index, b, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
 
                     lang.add(dest, a, b);
                 }
                 Instruction::Mul(dest, a, b) => {
                     let a = a.try_into().unwrap();
-                    let a = alloc.allocate_register(index, a, lang);
                     let b = b.try_into().unwrap();
-                    let b = alloc.allocate_register(index, b, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
 
                     // lang.breakpoint();
                     lang.guard_integer(dest, a, self.after_return);
@@ -1085,11 +1049,8 @@ impl Ir {
                 }
                 Instruction::Div(dest, a, b) => {
                     let a = a.try_into().unwrap();
-                    let a = alloc.allocate_register(index, a, lang);
                     let b = b.try_into().unwrap();
-                    let b = alloc.allocate_register(index, b, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
 
                     lang.guard_integer(dest, a, self.after_return);
                     lang.guard_integer(dest, b, self.after_return);
@@ -1103,9 +1064,7 @@ impl Ir {
                 }
                 Instruction::ShiftRightImm(dest, value, shift) => {
                     let value = value.try_into().unwrap();
-                    let value = alloc.allocate_register(index, value, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
 
                     lang.guard_integer(dest, value, self.after_return);
 
@@ -1113,18 +1072,13 @@ impl Ir {
                 }
                 Instruction::AndImm(dest, value, imm) => {
                     let value = value.try_into().unwrap();
-                    let value = alloc.allocate_register(index, value, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.and_imm(dest, value, *imm);
                 }
                 Instruction::ShiftLeft(dest, a, b) => {
                     let a = a.try_into().unwrap();
-                    let a = alloc.allocate_register(index, a, lang);
                     let b = b.try_into().unwrap();
-                    let b = alloc.allocate_register(index, b, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
 
                     lang.guard_integer(dest, a, self.after_return);
                     lang.guard_integer(dest, b, self.after_return);
@@ -1138,11 +1092,8 @@ impl Ir {
                 }
                 Instruction::ShiftRight(dest, a, b) => {
                     let a = a.try_into().unwrap();
-                    let a = alloc.allocate_register(index, a, lang);
                     let b = b.try_into().unwrap();
-                    let b = alloc.allocate_register(index, b, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
 
                     lang.guard_integer(dest, a, self.after_return);
                     lang.guard_integer(dest, b, self.after_return);
@@ -1156,11 +1107,8 @@ impl Ir {
                 }
                 Instruction::ShiftRightZero(dest, a, b) => {
                     let a = a.try_into().unwrap();
-                    let a = alloc.allocate_register(index, a, lang);
                     let b = b.try_into().unwrap();
-                    let b = alloc.allocate_register(index, b, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
 
                     lang.guard_integer(dest, a, self.after_return);
                     lang.guard_integer(dest, b, self.after_return);
@@ -1175,263 +1123,168 @@ impl Ir {
                 }
                 Instruction::And(dest, a, b) => {
                     let a = a.try_into().unwrap();
-                    let a = alloc.allocate_register(index, a, lang);
                     let b = b.try_into().unwrap();
-                    let b = alloc.allocate_register(index, b, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.and(dest, a, b);
                 }
                 Instruction::Or(dest, a, b) => {
                     let a = a.try_into().unwrap();
-                    let a = alloc.allocate_register(index, a, lang);
                     let b = b.try_into().unwrap();
-                    let b = alloc.allocate_register(index, b, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.or(dest, a, b);
                 }
                 Instruction::Xor(dest, a, b) => {
-                    let a: VirtualRegister = a.try_into().unwrap();
-                    let a = alloc.allocate_register(index, a, lang);
+                    let a = a.try_into().unwrap();
                     let b = b.try_into().unwrap();
-                    let b = alloc.allocate_register(index, b, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.xor(dest, a, b);
                 }
                 Instruction::GuardInt(dest, value, label) => {
                     let value = value.try_into().unwrap();
-                    let value = alloc.allocate_register(index, value, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.guard_integer(dest, value, ir_label_to_lang_label[label]);
                 }
                 Instruction::GuardFloat(dest, value, label) => {
                     let value = value.try_into().unwrap();
-                    let value = alloc.allocate_register(index, value, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.guard_float(dest, value, ir_label_to_lang_label[label]);
                 }
                 Instruction::FmovGeneralToFloat(dest, src) => {
                     let src = src.try_into().unwrap();
-                    let src = alloc.allocate_register(index, src, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.fmov(dest, src, FmovDirection::FromGeneralToFloat);
                 }
                 Instruction::FmovFloatToGeneral(dest, src) => {
                     let src = src.try_into().unwrap();
-                    let src = alloc.allocate_register(index, src, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.fmov(dest, src, FmovDirection::FromFloatToGeneral);
                 }
                 Instruction::AddFloat(dest, a, b) => {
                     let a = a.try_into().unwrap();
-                    let a = alloc.allocate_register(index, a, lang);
                     let b = b.try_into().unwrap();
-                    let b = alloc.allocate_register(index, b, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.fadd(dest, a, b);
                 }
                 Instruction::SubFloat(dest, a, b) => {
                     let a = a.try_into().unwrap();
-                    let a = alloc.allocate_register(index, a, lang);
                     let b = b.try_into().unwrap();
-                    let b = alloc.allocate_register(index, b, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.fsub(dest, a, b);
                 }
                 Instruction::MulFloat(dest, a, b) => {
                     let a = a.try_into().unwrap();
-                    let a = alloc.allocate_register(index, a, lang);
                     let b = b.try_into().unwrap();
-                    let b = alloc.allocate_register(index, b, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.fmul(dest, a, b);
                 }
                 Instruction::DivFloat(dest, a, b) => {
                     let a = a.try_into().unwrap();
-                    let a = alloc.allocate_register(index, a, lang);
                     let b = b.try_into().unwrap();
-                    let b = alloc.allocate_register(index, b, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.fdiv(dest, a, b);
                 }
-                Instruction::Assign(dest, val) => match val {
-                    Value::Register(virt_reg) => {
-                        let register = alloc.allocate_register(index, *virt_reg, lang);
-                        let dest = alloc.allocate_register(index, *dest, lang);
-                        lang.mov_reg(dest, register);
+                Instruction::Assign(dest, val) => {
+                    let dest = dest.try_into().unwrap();
+                    match val {
+                        Value::Register(virt_reg) => {
+                            let register = virt_reg.try_into().unwrap();
+                            lang.mov_reg(dest, register);
+                        }
+                        Value::TaggedConstant(i) => {
+                            let tagged = BuiltInTypes::construct_int(*i);
+                            lang.mov_64(dest, tagged);
+                        }
+                        Value::StringConstantPtr(ptr) => {
+                            let tagged = BuiltInTypes::String.tag(*ptr as isize);
+                            lang.mov_64(dest, tagged);
+                        }
+                        Value::Function(id) => {
+                            let function = BuiltInTypes::Function.tag(*id as isize);
+                            lang.mov_64(dest, function);
+                        }
+                        Value::Pointer(ptr) => {
+                            lang.mov_64(dest, *ptr as isize);
+                        }
+                        Value::RawValue(value) => {
+                            lang.mov_64(dest, *value as isize);
+                        }
+                        Value::True => {
+                            lang.mov_64(dest, BuiltInTypes::construct_boolean(true));
+                        }
+                        Value::False => {
+                            lang.mov_64(dest, BuiltInTypes::construct_boolean(false));
+                        }
+                        Value::Local(local) => lang.load_local(dest, *local as i32),
+                        Value::FreeVariable(free_variable) => {
+                            // The idea here is that I would store free variables after the locals on the stack
+                            // Need to make sure I preserve that space
+                            // and that at this point in the program I know how many locals there are.
+                            lang.load_from_stack(
+                                dest,
+                                -((*free_variable + self.num_locals + 1) as i32),
+                            );
+                        }
+                        Value::Null => {
+                            lang.mov_64(dest, 0b111_isize);
+                        }
                     }
-                    Value::TaggedConstant(i) => {
-                        let register = alloc.allocate_register(index, *dest, lang);
-                        let tagged = BuiltInTypes::construct_int(*i);
-                        lang.mov_64(register, tagged);
-                    }
-                    Value::StringConstantPtr(ptr) => {
-                        let register = alloc.allocate_register(index, *dest, lang);
-                        let tagged = BuiltInTypes::String.tag(*ptr as isize);
-                        lang.mov_64(register, tagged);
-                    }
-                    Value::Function(id) => {
-                        let register = alloc.allocate_register(index, *dest, lang);
-                        let function = BuiltInTypes::Function.tag(*id as isize);
-                        lang.mov_64(register, function);
-                    }
-                    Value::Pointer(ptr) => {
-                        let register = alloc.allocate_register(index, *dest, lang);
-                        lang.mov_64(register, *ptr as isize);
-                    }
-                    Value::RawValue(value) => {
-                        let register = alloc.allocate_register(index, *dest, lang);
-                        lang.mov_64(register, *value as isize);
-                    }
-                    Value::True => {
-                        let register = alloc.allocate_register(index, *dest, lang);
-                        lang.mov_64(register, BuiltInTypes::construct_boolean(true));
-                    }
-                    Value::False => {
-                        let register = alloc.allocate_register(index, *dest, lang);
-                        lang.mov_64(register, BuiltInTypes::construct_boolean(false));
-                    }
-                    Value::Local(local) => {
-                        let register = alloc.allocate_register(index, *dest, lang);
-                        lang.load_local(register, *local as i32)
-                    }
-                    Value::FreeVariable(free_variable) => {
-                        let register = alloc.allocate_register(index, *dest, lang);
-                        // The idea here is that I would store free variables after the locals on the stack
-                        // Need to make sure I preserve that space
-                        // and that at this point in the program I know how many locals there are.
-                        lang.load_from_stack(
-                            register,
-                            -((*free_variable + self.num_locals + 1) as i32),
-                        );
-                    }
-                    Value::Null => {
-                        let register = alloc.allocate_register(index, *dest, lang);
-                        lang.mov_64(register, 0b111_isize);
-                    }
-                },
+                }
                 Instruction::LoadConstant(dest, val) => {
                     let val = val.try_into().unwrap();
-                    let val = alloc.allocate_register(index, val, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.mov_reg(dest, val);
                 }
                 Instruction::LoadLocal(dest, local) => {
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     let local = local.as_local();
                     lang.load_local(dest, local as i32);
                 }
                 Instruction::StoreLocal(dest, value) => {
                     let value = value.try_into().unwrap();
-                    let value = alloc.allocate_register(index, value, lang);
                     lang.store_local(value, dest.as_local() as i32);
                 }
                 Instruction::LoadTrue(dest) => {
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.mov_64(dest, BuiltInTypes::construct_boolean(true));
                 }
                 Instruction::LoadFalse(dest) => {
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.mov_64(dest, BuiltInTypes::construct_boolean(false));
                 }
                 Instruction::StoreFloat(dest, temp, value) => {
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     let temp = temp.try_into().unwrap();
-                    let temp = alloc.allocate_register(index, temp, lang);
                     lang.mov_64(temp, value.to_bits() as isize);
                     // The header is the first field, so offset is 1
                     lang.store_on_heap(dest, temp, 1)
                 }
                 Instruction::Recurse(dest, args) => {
                     // TODO: Clean up duplication
-                    let mut out_live_call_registers = vec![];
-                    for (register, (start, end)) in alloc.lifetimes.iter() {
-                        if *end < index {
-                            continue;
-                        }
-                        if *start > index {
-                            continue;
-                        }
-                        if index != *end {
-                            if let Some(register) = alloc.allocated_registers.get(register) {
-                                out_live_call_registers.push(*register);
-                            }
-                        }
-                    }
-
-                    for register in out_live_call_registers.iter() {
-                        lang.push_to_stack(*register);
-                    }
                     for (index, arg) in args.iter().enumerate().rev() {
                         let arg = arg.try_into().unwrap();
-                        let arg = alloc.allocate_register(index, arg, lang);
                         lang.mov_reg(lang.arg(index as u8), arg);
                     }
                     lang.recurse(before_prelude);
                     let dest = dest.try_into().unwrap();
-                    let register = alloc.allocate_register(index, dest, lang);
-                    lang.mov_reg(register, lang.ret_reg());
-                    for (index, register) in out_live_call_registers.iter().enumerate() {
-                        lang.pop_from_stack_indexed(*register, index as i32);
-                    }
+                    lang.mov_reg(dest, lang.ret_reg());
                 }
                 Instruction::TailRecurse(dest, args) => {
                     for (index, arg) in args.iter().enumerate().rev() {
                         let arg = arg.try_into().unwrap();
-                        let arg = alloc.allocate_register(index, arg, lang);
                         lang.mov_reg(lang.arg(index as u8), arg);
                     }
                     lang.jump(after_prelude);
                     let dest = dest.try_into().unwrap();
-                    let register = alloc.allocate_register(index, dest, lang);
-                    lang.mov_reg(register, lang.ret_reg());
+                    lang.mov_reg(dest, lang.ret_reg());
                 }
                 Instruction::Call(dest, function, args, builtin) => {
-                    // TODO: Clean up duplication
-                    let mut out_live_call_registers = vec![];
-                    for (register, (start, end)) in alloc.lifetimes.iter() {
-                        if *end < index {
-                            continue;
-                        }
-                        if *start > index {
-                            continue;
-                        }
-                        if index != *end {
-                            if let Some(register) = alloc.allocated_registers.get(register) {
-                                out_live_call_registers.push(*register);
-                            }
-                        }
-                    }
-
-                    // I only need to store on stack those things that live past the call
-                    // I think this is part of the reason why I have too many registers live at a time
-                    for register in out_live_call_registers.iter() {
-                        lang.push_to_stack(*register);
-                    }
                     for (arg_index, arg) in args.iter().enumerate().rev() {
                         let arg = arg.try_into().unwrap();
-                        let arg = alloc.allocate_register(index, arg, lang);
                         lang.mov_reg(lang.arg(arg_index as u8), arg);
                     }
                     // TODO: I am not actually checking any tags here
                     // or unmasking or anything. Just straight up calling it
-                    let function =
-                        alloc.allocate_register(index, function.try_into().unwrap(), lang);
+                    let function = function.try_into().unwrap();
                     lang.shift_right_imm(function, function, BuiltInTypes::tag_size());
                     if *builtin {
                         lang.call_builtin(function);
@@ -1440,35 +1293,23 @@ impl Ir {
                     }
 
                     let dest = dest.try_into().unwrap();
-                    let register = alloc.allocate_register(index, dest, lang);
-                    lang.mov_reg(register, lang.ret_reg());
-                    for register in out_live_call_registers.iter().rev() {
-                        lang.pop_from_stack(*register);
-                    }
+                    lang.mov_reg(dest, lang.ret_reg());
                 }
                 Instruction::Compare(dest, a, b, condition) => {
                     let a = a.try_into().unwrap();
-                    let a = alloc.allocate_register(index, a, lang);
                     let b = b.try_into().unwrap();
-                    let b = alloc.allocate_register(index, b, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.compare_bool(*condition, dest, a, b);
                 }
                 Instruction::Tag(destination, a, b) => {
                     let a = a.try_into().unwrap();
-                    let a = alloc.allocate_register(index, a, lang);
                     let b = b.try_into().unwrap();
-                    let b = alloc.allocate_register(index, b, lang);
                     let dest = destination.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.tag_value(dest, a, b);
                 }
                 Instruction::JumpIf(label, condition, a, b) => {
                     let a = a.try_into().unwrap();
-                    let a = alloc.allocate_register(index, a, lang);
                     let b = b.try_into().unwrap();
-                    let b = alloc.allocate_register(index, b, lang);
                     let label = ir_label_to_lang_label.get(label).unwrap();
                     lang.compare(a, b);
                     match condition {
@@ -1486,7 +1327,7 @@ impl Ir {
                 }
                 Instruction::Ret(value) => match value {
                     Value::Register(virt_reg) => {
-                        let register = alloc.allocate_register(index, *virt_reg, lang);
+                        let register = virt_reg.try_into().unwrap();
                         if register == lang.ret_reg() {
                             lang.jump(exit);
                         } else {
@@ -1539,70 +1380,60 @@ impl Ir {
                 },
                 Instruction::HeapLoad(dest, ptr, offset) => {
                     let ptr = ptr.try_into().unwrap();
-                    let ptr = alloc.allocate_register(index, ptr, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.load_from_heap(dest, ptr, *offset);
                 }
                 Instruction::AtomicLoad(dest, ptr) => {
                     let ptr = ptr.try_into().unwrap();
-                    let ptr = alloc.allocate_register(index, ptr, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.atomic_load(dest, ptr);
                 }
                 Instruction::AtomicStore(ptr, val) => {
                     let ptr = ptr.try_into().unwrap();
-                    let ptr = alloc.allocate_register(index, ptr, lang);
                     let val = val.try_into().unwrap();
-                    let val = alloc.allocate_register(index, val, lang);
                     lang.atomic_store(ptr, val);
                 }
                 Instruction::CompareAndSwap(dest, ptr, val) => {
                     let ptr = ptr.try_into().unwrap();
-                    let ptr = alloc.allocate_register(index, ptr, lang);
                     let val = val.try_into().unwrap();
-                    let val = alloc.allocate_register(index, val, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.compare_and_swap(dest, ptr, val);
                 }
                 Instruction::HeapLoadReg(dest, ptr, offset) => {
                     let ptr = ptr.try_into().unwrap();
-                    let ptr = alloc.allocate_register(index, ptr, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     let offset = offset.try_into().unwrap();
-                    let offset = alloc.allocate_register(index, offset, lang);
                     lang.load_from_heap_with_reg_offset(dest, ptr, offset);
                 }
                 Instruction::HeapStore(ptr, val) => {
                     let ptr = ptr.try_into().unwrap();
-                    let ptr = alloc.allocate_register(index, ptr, lang);
                     let val = val.try_into().unwrap();
-                    let val = alloc.allocate_register(index, val, lang);
                     lang.store_on_heap(ptr, val, 0);
                 }
 
                 Instruction::HeapStoreOffset(ptr, val, offset) => {
                     let ptr = ptr.try_into().unwrap();
-                    let ptr = alloc.allocate_register(index, ptr, lang);
                     let val = val.try_into().unwrap();
-                    let val = alloc.allocate_register(index, val, lang);
                     lang.store_on_heap(ptr, val, *offset as i32);
                 }
-                Instruction::HeapStoreByteOffsetMasked(ptr, val, offset, byte_offset, mask) => {
+                Instruction::HeapStoreByteOffsetMasked(
+                    ptr,
+                    val,
+                    temp1,
+                    temp2,
+                    offset,
+                    byte_offset,
+                    mask,
+                ) => {
                     // We are trying to write to a specific byte in a word
                     // We need to load the word, mask out the byte, or in the new value
                     // and then store it back
                     let ptr = ptr.try_into().unwrap();
-                    let ptr = alloc.allocate_register(index, ptr, lang);
                     let val = val.try_into().unwrap();
-                    let val = alloc.allocate_register(index, val, lang);
-                    let dest = lang.volatile_register();
+                    let dest = temp1.try_into().unwrap();
                     // lang.breakpoint();
                     lang.load_from_heap(dest, ptr, *offset as i32);
-                    let mask_register = lang.volatile_register();
+                    let mask_register = temp2.try_into().unwrap();
                     lang.mov_64(mask_register, *mask as isize);
                     lang.and(dest, dest, mask_register);
                     lang.free_register(mask_register);
@@ -1613,64 +1444,44 @@ impl Ir {
                 }
                 Instruction::HeapStoreOffsetReg(ptr, val, offset) => {
                     let ptr = ptr.try_into().unwrap();
-                    let ptr = alloc.allocate_register(index, ptr, lang);
                     let val = val.try_into().unwrap();
-                    let val = alloc.allocate_register(index, val, lang);
                     let offset = offset.try_into().unwrap();
-                    let offset = alloc.allocate_register(index, offset, lang);
                     lang.store_to_heap_with_reg_offset(ptr, val, offset);
                 }
-                Instruction::RegisterArgument(arg) => {
-                    // This doesn't actually compile into any code
-                    // it is here to say the argument is live from the beginning
-
-                    let arg = arg.try_into().unwrap();
-                    alloc.allocate_register(index, arg, lang);
-                }
+                Instruction::RegisterArgument(_arg) => {}
                 Instruction::PushStack(val) => {
                     let val = val.try_into().unwrap();
-                    let val = alloc.allocate_register(index, val, lang);
                     lang.push_to_stack(val);
                 }
                 Instruction::PopStack(val) => {
                     let val = val.try_into().unwrap();
-                    let val = alloc.allocate_register(index, val, lang);
                     lang.pop_from_stack(val);
                 }
                 Instruction::LoadFreeVariable(dest, free_variable) => {
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.load_from_stack(dest, (*free_variable + self.num_locals) as i32);
                 }
                 Instruction::GetStackPointer(dest, offset) => {
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     let offset = offset.try_into().unwrap();
-                    let offset = alloc.allocate_register(index, offset, lang);
                     lang.get_stack_pointer(dest, offset);
                 }
                 Instruction::GetStackPointerImm(dest, offset) => {
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.get_stack_pointer_imm(dest, *offset);
                 }
                 Instruction::CurrentStackPosition(dest) => {
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.get_current_stack_position(dest)
                 }
                 Instruction::GetTag(dest, value) => {
                     let value = value.try_into().unwrap();
-                    let value = alloc.allocate_register(index, value, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.get_tag(dest, value);
                 }
                 Instruction::Untag(dest, value) => {
                     let value = value.try_into().unwrap();
-                    let value = alloc.allocate_register(index, value, lang);
                     let dest = dest.try_into().unwrap();
-                    let dest = alloc.allocate_register(index, dest, lang);
                     lang.shift_right_imm(dest, value, BuiltInTypes::tag_size());
                 }
             }
@@ -1734,10 +1545,14 @@ impl Ir {
     {
         let source = self.assign_new(value.into());
         let dest = self.assign_new(dest.into());
+        let temp1 = self.assign_new(Value::RawValue(0));
+        let temp2 = self.assign_new(Value::RawValue(0));
         self.instructions
             .push(Instruction::HeapStoreByteOffsetMasked(
                 dest.into(),
                 source.into(),
+                temp1.into(),
+                temp2.into(),
                 offset,
                 byte_offset,
                 mask,

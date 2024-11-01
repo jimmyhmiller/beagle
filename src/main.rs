@@ -23,6 +23,7 @@ mod hamt;
 pub mod ir;
 pub mod machine_code;
 pub mod parser;
+mod pretty_print;
 mod primitives;
 mod register_allocation;
 pub mod runtime;
@@ -157,6 +158,8 @@ pub struct CommandLineArguments {
     debug: bool,
     #[clap(long, default_value = "false")]
     verbose: bool,
+    #[clap(long, default_value = "false")]
+    no_std: bool,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -203,8 +206,9 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             test: true,
             debug: args.debug,
             verbose: args.verbose,
+            no_std: args.no_std,
         };
-        main_inner(args)?;
+        main_inner(args).ok();
     }
     Ok(())
 }
@@ -273,17 +277,19 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         .set_pause_atom_ptr(runtime.pause_atom_ptr());
 
     runtime.install_builtins()?;
-
-    let mut exe_path = env::current_exe()?;
-    exe_path = exe_path.parent().unwrap().to_path_buf();
-    if !exe_path.join("resources/std.bg").exists() {
-        exe_path = exe_path.parent().unwrap().to_path_buf();
-    }
-    let mut top_levels = runtime
-        .compiler
-        .compile(exe_path.join("resources/std.bg").to_str().unwrap())?;
-
     let compile_time = Instant::now();
+
+    let mut top_levels = vec![];
+    if !args.no_std {
+        let mut exe_path = env::current_exe()?;
+        exe_path = exe_path.parent().unwrap().to_path_buf();
+        if !exe_path.join("resources/std.bg").exists() {
+            exe_path = exe_path.parent().unwrap().to_path_buf();
+        }
+        top_levels = runtime
+            .compiler
+            .compile(exe_path.join("resources/std.bg").to_str().unwrap())?;
+    }
 
     // TODO: Need better name for top_level
     // It should really be the top level of a namespace
@@ -386,6 +392,7 @@ fn try_all_examples() -> Result<(), Box<dyn Error>> {
         test: false,
         debug: false,
         verbose: false,
+        no_std: false,
     };
     run_all_tests(args)?;
     Ok(())
