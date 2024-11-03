@@ -558,13 +558,13 @@ pub struct Ir {
     label_names: Vec<String>,
     label_locations: HashMap<usize, usize>,
     pub num_locals: usize,
-    compiler_pointer: usize,
+    runtime_pointer: usize,
     allocate_fn_pointer: usize,
     after_return: Label,
 }
 
 impl Ir {
-    pub fn new(compiler_pointer: usize, allocate_fn_pointer: usize) -> Self {
+    pub fn new(runtime_pointer: usize, allocate_fn_pointer: usize) -> Self {
         let mut me = Self {
             register_index: 0,
             instructions: vec![],
@@ -572,7 +572,7 @@ impl Ir {
             label_names: vec![],
             label_locations: HashMap::new(),
             num_locals: 0,
-            compiler_pointer,
+            runtime_pointer,
             allocate_fn_pointer,
             after_return: Label { index: 0 },
         };
@@ -933,7 +933,7 @@ impl Ir {
         &mut self,
         mut lang: LowLevelArm,
         error_fn_pointer: usize,
-        compiler_ptr: usize,
+        runtime_ptr: usize,
     ) -> LowLevelArm {
         // println!("{:#?}", self.instructions);
         lang.set_max_locals(self.num_locals);
@@ -977,7 +977,7 @@ impl Ir {
         lang.write_label(lang_after_return);
         let register = lang.canonical_volatile_registers[0];
         lang.mov_64(register, error_fn_pointer as isize);
-        lang.mov_64(X0, compiler_ptr as isize);
+        lang.mov_64(X0, runtime_ptr as isize);
         lang.get_stack_pointer_imm(X1, 0);
         lang.call(register);
         lang
@@ -1797,10 +1797,10 @@ impl Ir {
     }
 
     fn allocate(&mut self, size: Value) -> Value {
-        let compiler_pointer = self.assign_new(Value::Pointer(self.compiler_pointer));
+        let runtime_pointer = self.assign_new(Value::Pointer(self.runtime_pointer));
         let stack_pointer = self.get_stack_pointer_imm(0);
         let f = self.assign_new(Value::Function(self.allocate_fn_pointer));
-        self.call_builtin(f.into(), vec![compiler_pointer.into(), stack_pointer, size])
+        self.call_builtin(f.into(), vec![runtime_pointer.into(), stack_pointer, size])
     }
 
     fn insert_label(&mut self, name: &str, label: Label) -> usize {
