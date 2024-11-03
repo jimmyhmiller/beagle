@@ -268,10 +268,10 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     compile_trampoline(runtime.get_mut());
 
-    let compiler_lock_pointer = &runtime.get_mut().compiler as *const _;
+    let runtime_pointer = runtime.get() as *const _;
     runtime.get_mut()
         .compiler
-        .set_compiler_lock_pointer(compiler_lock_pointer);
+        .set_runtime_pointer(runtime_pointer);
 
     let pause_atom_ptr = runtime.get_mut().pause_atom_ptr();
     runtime.get_mut()

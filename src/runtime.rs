@@ -1,14 +1,6 @@
 use core::fmt;
 use std::{
-    collections::HashMap,
-    env,
-    error::Error,
-    io::Write,
-    slice::{self},
-    sync::{atomic::AtomicUsize, Arc, Condvar, Mutex, TryLockError},
-    thread::{self, JoinHandle, Thread, ThreadId},
-    time::Duration,
-    vec,
+    collections::HashMap, env, error::Error, io::Write, slice::{self}, sync::{atomic::AtomicUsize, Arc, Condvar, Mutex, TryLockError}, thread::{self, JoinHandle, Thread, ThreadId}, time::Duration, vec
 };
 
 use libffi::{low::CodePtr, middle::Cif};
@@ -386,7 +378,7 @@ pub struct Compiler {
     namespaces: NamespaceManager,
     #[allow(unused)]
     command_line_arguments: CommandLineArguments,
-    pub compiler_pointer: Option<*const Compiler>,
+    pub runtime_pointer: Option<*const u8>,
     // TODO: Need to transfer these after I compiler to memory
     // is there a better way?
     // Should I pass runtime to all the compiler stuff?
@@ -404,8 +396,8 @@ impl Compiler {
         self.pause_atom_ptr = Some(pointer);
     }
 
-    pub fn get_compiler_ptr(&self) -> *const Compiler {
-        self.compiler_pointer.unwrap()
+    pub fn get_runtime_ptr(&self) -> *const u8 {
+        self.runtime_pointer.unwrap()
     }
 
     pub fn allocate_fn_pointer(&mut self) -> usize {
@@ -413,8 +405,8 @@ impl Compiler {
         self.get_function_pointer(allocate_fn_pointer).unwrap()
     }
 
-    pub fn set_compiler_lock_pointer(&mut self, pointer: *const Compiler) {
-        self.compiler_pointer = Some(pointer);
+    pub fn set_runtime_pointer(&mut self, pointer: *const u8) {
+        self.runtime_pointer = Some(pointer);
     }
 
     pub fn add_foreign_function(
@@ -846,8 +838,8 @@ impl Compiler {
             let error_fn_pointer = self.find_function("beagle.builtin/throw_error").unwrap();
             let error_fn_pointer = self.get_function_pointer(error_fn_pointer).unwrap();
 
-            let compiler_ptr = self.get_compiler_ptr() as usize;
-            let mut arm = ir.compile(arm, error_fn_pointer, compiler_ptr);
+            let runtime_ptr = self.get_runtime_ptr() as usize;
+            let mut arm = ir.compile(arm, error_fn_pointer, runtime_ptr);
             let max_locals = arm.max_locals as usize;
             let function_name = format!("{}/__top_level", self.current_namespace_name());
             self.upsert_function(Some(&function_name), &mut arm, max_locals)?;
@@ -1212,7 +1204,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
                 functions: Vec::new(),
                 string_constants: vec![],
                 command_line_arguments: command_line_arguments.clone(),
-                compiler_pointer: None,
+                runtime_pointer: None,
                 stack_map: StackMap::new(),
                 pause_atom_ptr: None,
             },
