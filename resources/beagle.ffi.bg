@@ -10,6 +10,15 @@ fn __make_lib_struct(id) {
     Library { id: id }
 }
 
+
+struct Buffer {
+    ptr
+}
+
+fn __make_buffer_struct(ptr) {
+    Buffer { ptr: ptr }
+}
+
 enum Type {
     U32,
     I32,
@@ -23,7 +32,8 @@ enum Type {
 // but I don't actually have equality defined for structures
 
 fn __create_ffi_function(ffi_info) {
-    fn() {
-        call_ffi_info(ffi_info)
+    // TODO: Hack, but trying to get things to work
+    fn(a1, a2, a3, a4, a5, a6) {
+        call_ffi_info(ffi_info, a1, a2, a3, a4, a5, a6)
     }
 }

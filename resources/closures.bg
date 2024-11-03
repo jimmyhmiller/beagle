@@ -33,6 +33,7 @@ fn main() {
     closure_1()
     closure_2()
     closure_3()
+    "done"
 }
 
 // Expected output:
@@ -40,4 +41,4 @@ fn main() {
 // 42
 // 50
 // 42
-// null
+// done

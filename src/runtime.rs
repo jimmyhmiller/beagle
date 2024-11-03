@@ -4,7 +4,7 @@ use std::{
     env,
     error::Error,
     io::Write,
-    slice::{self, from_raw_parts_mut},
+    slice::{self},
     sync::{atomic::AtomicUsize, Arc, Condvar, Mutex, TryLockError},
     thread::{self, JoinHandle, Thread, ThreadId},
     time::Duration,
@@ -132,6 +132,12 @@ impl Printer for TestPrinter {
     }
 }
 
+pub struct FFIInfo {
+    pub function: CodePtr,
+    pub cif: Cif,
+    pub number_of_arguments: usize,
+}
+
 pub struct ThreadState {
     pub paused_threads: usize,
     pub stack_pointers: Vec<(usize, usize)>,
@@ -172,7 +178,7 @@ pub struct Runtime<Alloc: Allocator> {
     pub is_paused: AtomicUsize,
     pub thread_state: Arc<(Mutex<ThreadState>, Condvar)>,
     pub gc_lock: Mutex<()>,
-    pub ffi_function_info: Vec<(CodePtr, Cif)>,
+    pub ffi_function_info: Vec<FFIInfo>,
 }
 
 pub struct Memory<Alloc: Allocator> {
@@ -735,36 +741,24 @@ impl Compiler {
             }
             BuiltInTypes::Function => Some("function".to_string()),
             BuiltInTypes::Closure => {
-                let value = BuiltInTypes::untag(value);
-                unsafe {
-                    let pointer = value as *const u8;
-                    if pointer as usize % 8 != 0 {
-                        panic!("Not aligned");
-                    }
-                    let function_pointer = *(pointer as *const usize);
-                    let num_free = *(pointer.add(8) as *const usize);
-                    let num_locals = *(pointer.add(16) as *const usize);
-                    let free_variables = std::slice::from_raw_parts(pointer.add(24), num_free * 8);
-                    let mut repr = "Closure { ".to_string();
-                    repr.push_str(&self.get_repr(function_pointer, depth + 1)?);
+                let heap_object = HeapObject::from_tagged(value);
+                let function_pointer = heap_object.get_field(0);
+                let num_free = heap_object.get_field(1);
+                let num_locals = heap_object.get_field(2);
+                let free_variables = heap_object.get_fields()[3..].to_vec();
+                let mut repr = "Closure { ".to_string();
+                repr.push_str(&self.get_repr(function_pointer, depth + 1)?);
+                repr.push_str(", ");
+                repr.push_str(&num_free.to_string());
+                repr.push_str(", ");
+                repr.push_str(&num_locals.to_string());
+                repr.push_str(", [");
+                for value in free_variables {
+                    repr.push_str(&self.get_repr(value, depth + 1)?);
                     repr.push_str(", ");
-                    repr.push_str(&num_free.to_string());
-                    repr.push_str(", ");
-                    repr.push_str(&num_locals.to_string());
-                    repr.push_str(", [");
-                    for i in 0..num_free {
-                        let value = &free_variables[i * 8..i * 8 + 8];
-                        let mut bytes = [0u8; 8];
-                        bytes.copy_from_slice(value);
-                        let value = usize::from_le_bytes(bytes);
-                        repr.push_str(&self.get_repr(value, depth + 1)?);
-                        if i != num_free - 1 {
-                            repr.push_str(", ");
-                        }
-                    }
-                    repr.push_str("] }");
-                    Some(repr)
                 }
+                repr.push_str("] }");
+                Some(repr)
             }
             BuiltInTypes::HeapObject => {
                 // TODO: Once I change the setup for heap objects
@@ -1492,8 +1486,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
     ) -> Result<usize, Box<dyn Error>> {
         let len = 8 + 8 + 8 + free_variables.len() * 8;
         let heap_pointer = self.allocate(len / 8, stack_pointer, BuiltInTypes::Closure)?;
-        let heap_pointer = BuiltInTypes::untag(heap_pointer);
-        let pointer = heap_pointer as *mut u8;
+        let heap_object = HeapObject::from_tagged(heap_pointer);
         let num_free = free_variables.len();
         let function_definition = self
             .compiler
@@ -1504,30 +1497,13 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         let function_definition = function_definition.unwrap();
         let num_locals = function_definition.number_of_locals;
 
-        let function = function.to_le_bytes();
-
-        let free_variables = free_variables.iter().flat_map(|v| v.to_le_bytes());
-        let buffer = unsafe { from_raw_parts_mut(pointer.add(8), len) };
-        // write function pointer
-        for (index, byte) in function.iter().enumerate() {
-            buffer[index] = *byte;
+        heap_object.write_field(0, function);
+        heap_object.write_field(1, num_free);
+        heap_object.write_field(2, num_locals);
+        for (index, value) in free_variables.iter().enumerate() {
+            heap_object.write_field((index + 3) as i32, *value);
         }
-        let num_free = num_free.to_le_bytes();
-        // Write number of free variables
-        for (index, byte) in num_free.iter().enumerate() {
-            buffer[8 + index] = *byte;
-        }
-
-        let num_locals = num_locals.to_le_bytes();
-        // Write number of locals
-        for (index, byte) in num_locals.iter().enumerate() {
-            buffer[16 + index] = *byte;
-        }
-        // write free variables
-        for (index, byte) in free_variables.enumerate() {
-            buffer[24 + index] = byte;
-        }
-        Ok(BuiltInTypes::Closure.tag(heap_pointer as isize) as usize)
+        Ok(heap_pointer)
     }
 
     #[allow(clippy::type_complexity)]
@@ -1665,13 +1641,15 @@ impl<Alloc: Allocator> Runtime<Alloc> {
 
     pub fn add_ffi_function_info(
         &mut self,
-        ffi_function_info: (libffi::low::CodePtr, libffi::middle::Cif),
+        ffi_function_info: FFIInfo,
     ) -> usize {
         self.ffi_function_info.push(ffi_function_info);
         self.ffi_function_info.len() - 1
     }
 
-    pub fn get_ffi_info(&self, ffi_info_id: usize) -> &(libffi::low::CodePtr, libffi::middle::Cif) {
+    pub fn get_ffi_info(&self, ffi_info_id: usize) -> &FFIInfo {
         self.ffi_function_info.get(ffi_info_id).unwrap()
     }
 }
+
+

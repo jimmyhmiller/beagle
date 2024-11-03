@@ -21,3 +21,4 @@
 * Make namespacing reference work for structs and enums better
 * Builtins need better type checking setup
 * Need to make the tests start a process so if one crashes, we still know the total results
+* I've got some stuff going on with malloc and free that is making rust not happy. In the case I saw, it looks like namsepace bindings are causing issues. I can find it by running the sdl example.
