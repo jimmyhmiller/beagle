@@ -12,6 +12,19 @@ use crate::ir::{Instruction, Value, VirtualRegister};
 // I might also want to make this take an IR instead of the current setup
 
 
+// TODO:
+// This isn't working correctly with test_ffi and my closure code
+// I think my problem is how I'm restoring spills
+// That code does not know anything about branches.
+// Maybe I shouldn't try to reload from memory in this kind of static way
+// but instead change where the value is and let the compiler
+// make sure to load it, like I do locals.
+// I mean, I'm even putting them in locals,
+// so that would make sense.
+// But the way I'm using the locals is not quite right
+// I would need to just use each slot for one thing
+
+
 pub struct SimpleRegisterAllocator {
     pub lifetimes: HashMap<VirtualRegister, (usize, usize)>,
     pub multiplex_lifetime: HashMap<VirtualRegister, Vec<usize>>,
@@ -75,6 +88,12 @@ impl SimpleRegisterAllocator {
         let mut to_free = vec![];
         let mut resulting_label_locations: HashMap<usize, usize> = HashMap::new();
         for (instruction_index, instruction) in cloned_instructions.iter_mut().enumerate() {
+
+            // TODO: My labels are all off. I need to fix that
+            if let Some(label) = self.label_locations.get(&instruction_index) {
+                resulting_label_locations.insert(resulting_instructions.len(), *label);
+            }
+
             for register in instruction.get_registers() {
                 if let Some(local_offset) = spilled_registers.remove(&register) {
                     if let Some(new_register) = self.get_free_register() {
@@ -123,7 +142,6 @@ impl SimpleRegisterAllocator {
                                     .push(instruction_index);
                                 break;
                             } else {
-                                // println!("spilling");
                                 self.spill(&mut resulting_instructions, &mut spilled_registers);
                             }
                         }
@@ -144,10 +162,6 @@ impl SimpleRegisterAllocator {
                         .or_default()
                         .push(instruction_index);
                 }
-            }
-
-            if let Some(label) = self.label_locations.get(&instruction_index) {
-                resulting_label_locations.insert(resulting_instructions.len(), *label);
             }
 
             match instruction {

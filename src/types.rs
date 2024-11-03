@@ -394,12 +394,12 @@ impl HeapObject {
         untagged as *const u8
     }
 
-    pub fn write_field(&self, arg: i32, tagged_new: usize) {
-        debug_assert!(arg < self.fields_size() as i32);
+    pub fn write_field(&self, index: i32, value: usize) {
+        debug_assert!(index < self.fields_size() as i32);
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
-        let pointer = unsafe { pointer.add(arg as usize + Self::header_size() / 8) };
-        unsafe { *pointer = tagged_new };
+        let pointer = unsafe { pointer.add(index as usize + Self::header_size() / 8) };
+        unsafe { *pointer = value };
     }
 
     pub fn get_field(&self, arg: usize) -> usize {

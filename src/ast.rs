@@ -2,10 +2,7 @@ use ir::{Ir, Value, VirtualRegister};
 use std::collections::HashMap;
 
 use crate::{
-    arm::LowLevelArm,
-    ir::{self, Condition},
-    runtime::{Compiler, Enum, EnumVariant, Struct},
-    types::BuiltInTypes,
+    arm::LowLevelArm, ir::{self, Condition}, runtime::{Compiler, Enum, EnumVariant, Struct}, types::BuiltInTypes
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -385,7 +382,7 @@ impl<'a> AstCompiler<'a> {
                 self.ir = old_ir;
 
                 if self.has_free_variables() {
-                    return self.compile_closure(function_pointer);
+                    return self.compile_closure(BuiltInTypes::Function.tag(function_pointer as isize) as usize);
                 }
 
                 let function = self.ir.function(Value::Function(function_pointer));
@@ -999,7 +996,7 @@ impl<'a> AstCompiler<'a> {
         } else {
             self.compiler
                 .find_function(&("beagle.core/".to_owned() + name))
-                .unwrap();
+                .expect(&format!("Did not find function {}", name));
             "beagle.core/".to_string() + name
         };
         full_function_name
@@ -1145,7 +1142,7 @@ impl<'a> AstCompiler<'a> {
         let make_closure_reg = self.ir.volatile_register();
         self.ir.assign(make_closure_reg, make_closure);
         let function_pointer_reg = self.ir.volatile_register();
-        self.ir.assign(function_pointer_reg, function_pointer);
+        self.ir.assign(function_pointer_reg, Value::RawValue(function_pointer));
 
         let compiler_pointer_reg = self.ir.assign_new(self.compiler.get_compiler_ptr());
 
