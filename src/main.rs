@@ -12,7 +12,7 @@ use gc::{
 use gc::{get_allocate_options, Allocator, StackMapDetails};
 use runtime::{DefaultPrinter, Printer, Runtime, TestPrinter};
 
-use std::{env, error::Error, time::Instant};
+use std::{cell::UnsafeCell, env, error::Error, time::Instant};
 
 mod arm;
 pub mod ast;
@@ -264,19 +264,21 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         Box::new(DefaultPrinter)
     };
 
-    let mut runtime = Runtime::new(args.clone(), allocator, printer);
+    let mut runtime = UnsafeCell::new(Runtime::new(args.clone(), allocator, printer));
 
-    compile_trampoline(&mut runtime);
+    compile_trampoline(runtime.get_mut());
 
-    runtime
+    let compiler_lock_pointer = &runtime.get_mut().compiler as *const _;
+    runtime.get_mut()
         .compiler
-        .set_compiler_lock_pointer(&runtime.compiler as *const _);
+        .set_compiler_lock_pointer(compiler_lock_pointer);
 
-    runtime
+    let pause_atom_ptr = runtime.get_mut().pause_atom_ptr();
+    runtime.get_mut()
         .compiler
-        .set_pause_atom_ptr(runtime.pause_atom_ptr());
+        .set_pause_atom_ptr(pause_atom_ptr);
 
-    runtime.install_builtins()?;
+    runtime.get_mut().install_builtins()?;
     let compile_time = Instant::now();
 
     let mut top_levels = vec![];
@@ -287,23 +289,24 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             exe_path = exe_path.parent().unwrap().to_path_buf();
         }
         top_levels = runtime
+        .get_mut()
             .compiler
             .compile(exe_path.join("resources/std.bg").to_str().unwrap())?;
     }
 
     // TODO: Need better name for top_level
     // It should really be the top level of a namespace
-    let new_top_levels = runtime.compiler.compile(&program)?;
-    let current_namespace = runtime.compiler.current_namespace_id();
+    let new_top_levels = runtime.get_mut().compiler.compile(&program)?;
+    let current_namespace = runtime.get_mut().compiler.current_namespace_id();
     top_levels.extend(new_top_levels);
 
     // Adding this line consistent makes my mark and sweep
     // gc on binary trees fail. But only in release
     // What did I do? Am I somehow messing with the stack?
     // I thought my trampoline should fix that...
-    runtime.write_functions_to_pid_map();
+    runtime.get_mut().write_functions_to_pid_map();
 
-    runtime.compiler.check_functions();
+    runtime.get_mut().compiler.check_functions();
     if args.show_times {
         println!("Compile time {:?}", compile_time.elapsed());
     }
@@ -311,12 +314,12 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     // TODO: Do better
     // If I'm compiling on the fly I need this to happen when I compile
     // not just here
-    runtime.memory.stack_map = runtime.compiler.stack_map.clone();
+    runtime.get_mut().memory.stack_map = runtime.get_mut().compiler.stack_map.clone();
 
     let time = Instant::now();
 
     for top_level in top_levels {
-        if let Some(f) = runtime.get_function0(&top_level) {
+        if let Some(f) = runtime.get_mut().get_function0(&top_level) {
             f();
         } else {
             panic!(
@@ -325,11 +328,11 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             );
         }
     }
-    runtime.compiler.set_current_namespace(current_namespace);
-    let fully_qualified_main = runtime.compiler.current_namespace_name() + "/main";
-    if let Some(f) = runtime.get_function0(&fully_qualified_main) {
+    runtime.get_mut().compiler.set_current_namespace(current_namespace);
+    let fully_qualified_main = runtime.get_mut().compiler.current_namespace_name() + "/main";
+    if let Some(f) = runtime.get_mut().get_function0(&fully_qualified_main) {
         let result = f();
-        runtime.println(result as usize);
+        runtime.get_mut().println(result as usize);
     } else if args.debug {
         println!("No main function");
     }
@@ -342,7 +345,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         let source = std::fs::read_to_string(program)?;
         let expected = get_expect(&source);
         let expected = expected.trim();
-        let printed = runtime.printer.get_output().join("").trim().to_string();
+        let printed = runtime.get_mut().printer.get_output().join("").trim().to_string();
         if printed != expected {
             println!("Expected: \n{}\n", expected);
             println!("Got: \n{}\n", printed);
@@ -354,7 +357,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     loop {
         // take the list of threads so we are not holding a borrow on the compiler
         // use mem::replace to swap out the threads with an empty vec
-        let threads = std::mem::take(&mut runtime.memory.join_handles);
+        let threads = std::mem::take(&mut runtime.get_mut().memory.join_handles);
         if threads.is_empty() {
             break;
         }
