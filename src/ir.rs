@@ -902,7 +902,9 @@ impl Ir {
     {
         let val = val.into();
         if let Value::Register(register) = val {
-            return register;
+            if register.argument.is_none() && register.volatile {
+                return register;
+            }
         }
         let register = self.next_register(None, false);
         self.instructions.push(Instruction::Assign(register, val));
