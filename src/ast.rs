@@ -2,7 +2,10 @@ use ir::{Ir, Value, VirtualRegister};
 use std::collections::HashMap;
 
 use crate::{
-    arm::LowLevelArm, ir::{self, Condition}, runtime::{Compiler, Enum, EnumVariant, Struct}, types::BuiltInTypes
+    arm::LowLevelArm,
+    ir::{self, Condition},
+    runtime::{Compiler, Enum, EnumVariant, Struct},
+    types::BuiltInTypes,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -382,7 +385,9 @@ impl<'a> AstCompiler<'a> {
                 self.ir = old_ir;
 
                 if self.has_free_variables() {
-                    return self.compile_closure(BuiltInTypes::Function.tag(function_pointer as isize) as usize);
+                    return self.compile_closure(
+                        BuiltInTypes::Function.tag(function_pointer as isize) as usize,
+                    );
                 }
 
                 let function = self.ir.function(Value::Function(function_pointer));
@@ -996,24 +1001,21 @@ impl<'a> AstCompiler<'a> {
         } else {
             self.compiler
                 .find_function(&("beagle.core/".to_owned() + name))
-                .expect(&format!("Did not find function {}", name));
+                .unwrap_or_else(|| panic!("Did not find function {}", name));
             "beagle.core/".to_string() + name
         };
         full_function_name
     }
 
     fn compile_closure_call(&mut self, function: VariableLocation, args: Vec<Value>) -> Value {
-        let function_register = self.ir.volatile_register();
-
-        let closure_register = self.ir.volatile_register();
         let function = self.resolve_variable(&function);
-        self.ir.assign(closure_register, function);
+        let function_register = self.ir.assign_new(function);
+        let closure_register = self.ir.assign_new(function_register);
         // Check if the tag is a closure
         let tag = self.ir.get_tag(closure_register.into());
         let closure_tag = BuiltInTypes::Closure.get_tag();
         let closure_tag = Value::RawValue(closure_tag as usize);
         let call_function = self.ir.label("call_function");
-        let skip_load_function = self.ir.label("skip_load_function");
         // TODO: It might be better to change the layout of these jumps
         // so that the non-closure case is the fall through
         // I just have to think about the correct way to do that
@@ -1027,22 +1029,24 @@ impl<'a> AstCompiler<'a> {
         //     ree_variables: *const Value,
         // }
         let closure_register = self.ir.untag(closure_register.into());
+        // self.ir.breakpoint();
         let function_pointer = self.ir.load_from_memory(closure_register, 1);
-
+        // self.ir.breakpoint();
         self.ir.assign(function_register, function_pointer);
 
         // TODO: I need to fix how these are stored on the stack
 
-        let num_free_variables = self.ir.load_from_memory(closure_register, 2);
-        let num_free_variables = self.ir.tag(num_free_variables, BuiltInTypes::Int.get_tag());
         // for each variable I need to push them onto the stack after the prelude
         let loop_start = self.ir.label("loop_start");
         let counter = self.ir.volatile_register();
         // self.ir.breakpoint();
         self.ir.assign(counter, Value::TaggedConstant(0));
+        // self.ir.breakpoint();
         self.ir.write_label(loop_start);
+        let num_free_variables = self.ir.load_from_memory(closure_register, 2);
+        let num_free_variables = self.ir.tag(num_free_variables, BuiltInTypes::Int.get_tag());
         self.ir.jump_if(
-            skip_load_function,
+            call_function,
             Condition::GreaterThanOrEqual,
             counter,
             num_free_variables,
@@ -1074,12 +1078,10 @@ impl<'a> AstCompiler<'a> {
         self.ir.assign(counter, counter_increment);
 
         self.ir.jump(loop_start);
-        self.ir.extend_register_life(num_free_variables);
         self.ir.extend_register_life(counter.into());
         self.ir.extend_register_life(closure_register);
         self.ir.write_label(call_function);
-        self.ir.assign(function_register, function);
-        self.ir.write_label(skip_load_function);
+        // self.ir.breakpoint();
         self.ir.call(function_register.into(), args)
     }
 
@@ -1142,7 +1144,8 @@ impl<'a> AstCompiler<'a> {
         let make_closure_reg = self.ir.volatile_register();
         self.ir.assign(make_closure_reg, make_closure);
         let function_pointer_reg = self.ir.volatile_register();
-        self.ir.assign(function_pointer_reg, Value::RawValue(function_pointer));
+        self.ir
+            .assign(function_pointer_reg, Value::RawValue(function_pointer));
 
         let runtime_pointer_reg = self.ir.assign_new(self.compiler.get_runtime_ptr());
 

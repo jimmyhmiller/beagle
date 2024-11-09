@@ -134,6 +134,43 @@ fn compile_trampoline<Alloc: Allocator>(runtime: &mut Runtime<Alloc>) {
     function.is_builtin = true;
 }
 
+fn compile_save_volatile_registers<Alloc: Allocator>(runtime: &mut Runtime<Alloc>) {
+    let mut lang = LowLevelArm::new();
+    // lang.breakpoint();
+    lang.prelude(-2);
+
+    lang.sub_stack_pointer(lang.canonical_volatile_registers.len() as i32);
+
+    for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
+        lang.store_on_stack(*reg, -((i + 3) as i32));
+    }
+
+    lang.call(X1);
+
+    for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
+        lang.load_from_stack(*reg, -((i + 3) as i32));
+    }
+
+    lang.add_stack_pointer(lang.canonical_volatile_registers.len() as i32);
+
+    lang.epilogue(2);
+    lang.ret();
+
+    runtime
+        .compiler
+        .add_function(
+            Some("beagle.builtin/save_volatile_registers"),
+            &lang.compile_directly(),
+            0,
+        )
+        .unwrap();
+    let function = runtime
+        .compiler
+        .get_function_by_name_mut("beagle.builtin/save_volatile_registers")
+        .unwrap();
+    function.is_builtin = true;
+}
+
 #[derive(ClapParser, Debug, Clone)]
 #[command(version, about, long_about = None)]
 #[command(name = "beag")]
@@ -267,14 +304,17 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     let mut runtime = UnsafeCell::new(Runtime::new(args.clone(), allocator, printer));
 
     compile_trampoline(runtime.get_mut());
+    compile_save_volatile_registers(runtime.get_mut());
 
     let runtime_pointer = runtime.get() as *const _;
-    runtime.get_mut()
+    runtime
+        .get_mut()
         .compiler
         .set_runtime_pointer(runtime_pointer);
 
     let pause_atom_ptr = runtime.get_mut().pause_atom_ptr();
-    runtime.get_mut()
+    runtime
+        .get_mut()
         .compiler
         .set_pause_atom_ptr(pause_atom_ptr);
 
@@ -289,7 +329,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             exe_path = exe_path.parent().unwrap().to_path_buf();
         }
         top_levels = runtime
-        .get_mut()
+            .get_mut()
             .compiler
             .compile(exe_path.join("resources/std.bg").to_str().unwrap())?;
     }
@@ -300,10 +340,6 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     let current_namespace = runtime.get_mut().compiler.current_namespace_id();
     top_levels.extend(new_top_levels);
 
-    // Adding this line consistent makes my mark and sweep
-    // gc on binary trees fail. But only in release
-    // What did I do? Am I somehow messing with the stack?
-    // I thought my trampoline should fix that...
     runtime.get_mut().write_functions_to_pid_map();
 
     runtime.get_mut().compiler.check_functions();
@@ -328,7 +364,10 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             );
         }
     }
-    runtime.get_mut().compiler.set_current_namespace(current_namespace);
+    runtime
+        .get_mut()
+        .compiler
+        .set_current_namespace(current_namespace);
     let fully_qualified_main = runtime.get_mut().compiler.current_namespace_name() + "/main";
     if let Some(f) = runtime.get_mut().get_function0(&fully_qualified_main) {
         let result = f();
@@ -345,7 +384,13 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         let source = std::fs::read_to_string(program)?;
         let expected = get_expect(&source);
         let expected = expected.trim();
-        let printed = runtime.get_mut().printer.get_output().join("").trim().to_string();
+        let printed = runtime
+            .get_mut()
+            .printer
+            .get_output()
+            .join("")
+            .trim()
+            .to_string();
         if printed != expected {
             println!("Expected: \n{}\n", expected);
             println!("Got: \n{}\n", printed);

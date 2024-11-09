@@ -10,7 +10,7 @@ impl PrettyPrint for Value {
     fn pretty_print(&self) -> String {
         match self {
             Value::Register(register) => register.pretty_print(),
-            Value::RawValue(value) => format!("{}", value),
+            Value::RawValue(value) => format!("raw{}", value),
             Value::Pointer(value) => format!("ptr{}", value),
             Value::TaggedConstant(value) => format!("tagged_constant{}", value),
             Value::StringConstantPtr(value) => format!("string_constant_ptr{}", value),
@@ -69,6 +69,9 @@ impl PrettyPrint for Vec<Value> {
 impl PrettyPrint for Instruction {
     fn pretty_print(&self) -> String {
         match self {
+            Instruction::Label(label) => {
+                format!("label{}:", label.index)
+            }
             Instruction::Sub(value, value1, value2) => {
                 format!(
                     "sub {}, {}, {}",
@@ -133,9 +136,7 @@ impl PrettyPrint for Instruction {
             Instruction::Ret(value) => {
                 format!("ret {}", value.pretty_print())
             }
-            Instruction::Breakpoint => {
-                "breakpoint".to_string()
-            }
+            Instruction::Breakpoint => "breakpoint".to_string(),
             Instruction::Compare(value, value1, value2, condition) => {
                 format!(
                     "compare {}, {}, {}, {:?}",

@@ -1,6 +1,14 @@
 use core::fmt;
 use std::{
-    collections::HashMap, env, error::Error, io::Write, slice::{self}, sync::{atomic::AtomicUsize, Arc, Condvar, Mutex, TryLockError}, thread::{self, JoinHandle, Thread, ThreadId}, time::Duration, vec
+    collections::HashMap,
+    env,
+    error::Error,
+    io::Write,
+    slice::{self},
+    sync::{atomic::AtomicUsize, Arc, Condvar, Mutex, TryLockError},
+    thread::{self, JoinHandle, Thread, ThreadId},
+    time::Duration,
+    vec,
 };
 
 use libffi::{low::CodePtr, middle::Cif};
@@ -1631,10 +1639,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         &self.libraries[library_id]
     }
 
-    pub fn add_ffi_function_info(
-        &mut self,
-        ffi_function_info: FFIInfo,
-    ) -> usize {
+    pub fn add_ffi_function_info(&mut self, ffi_function_info: FFIInfo) -> usize {
         self.ffi_function_info.push(ffi_function_info);
         self.ffi_function_info.len() - 1
     }
@@ -1643,5 +1648,3 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         self.ffi_function_info.get(ffi_info_id).unwrap()
     }
 }
-
-

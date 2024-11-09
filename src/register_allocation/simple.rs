@@ -11,7 +11,6 @@ use crate::ir::{Instruction, Value, VirtualRegister};
 // register allocation
 // I might also want to make this take an IR instead of the current setup
 
-
 // TODO:
 // This isn't working correctly with test_ffi and my closure code
 // I think my problem is how I'm restoring spills
@@ -23,7 +22,6 @@ use crate::ir::{Instruction, Value, VirtualRegister};
 // so that would make sense.
 // But the way I'm using the locals is not quite right
 // I would need to just use each slot for one thing
-
 
 pub struct SimpleRegisterAllocator {
     pub lifetimes: HashMap<VirtualRegister, (usize, usize)>,
@@ -86,23 +84,18 @@ impl SimpleRegisterAllocator {
         let mut resulting_instructions: Vec<Instruction> = vec![];
         let mut spilled_registers: HashMap<VirtualRegister, usize> = HashMap::new();
         let mut to_free = vec![];
-        let mut resulting_label_locations: HashMap<usize, usize> = HashMap::new();
         for (instruction_index, instruction) in cloned_instructions.iter_mut().enumerate() {
-
             // TODO: My labels are all off. I need to fix that
-            if let Some(label) = self.label_locations.get(&instruction_index) {
-                resulting_label_locations.insert(resulting_instructions.len(), *label);
-            }
 
             for register in instruction.get_registers() {
-                if let Some(local_offset) = spilled_registers.remove(&register) {
+                if let Some(local_offset) = spilled_registers.get(&register) {
                     if let Some(new_register) = self.get_free_register() {
                         self.allocated_registers.insert(register, new_register);
                         resulting_instructions.push(Instruction::LoadLocal(
                             Value::Register(new_register),
-                            Value::Local(local_offset),
+                            Value::Local(*local_offset),
                         ));
-                        self.num_locals -= 1;
+                        // self.num_locals -= 1;
                     } else {
                         // TODO: I think I should actually spill here
                         // But I'm actually going to intentionally leave this here so that
@@ -142,7 +135,21 @@ impl SimpleRegisterAllocator {
                                     .push(instruction_index);
                                 break;
                             } else {
-                                self.spill(&mut resulting_instructions, &mut spilled_registers);
+                                // panic!("Spilling isn't working properly yet");
+                                let (register, spilled) = self.spill(&mut spilled_registers);
+                                let index = resulting_instructions
+                                    .iter()
+                                    .enumerate()
+                                    .rev()
+                                    .find_map(|(index, instruction)| {
+                                        if instruction.get_registers().contains(&register) {
+                                            Some(index)
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .unwrap();
+                                resulting_instructions.insert(index + 1, spilled);
                             }
                         }
                     }
@@ -196,18 +203,33 @@ impl SimpleRegisterAllocator {
                     resulting_instructions.push(instruction.clone());
                 }
             }
+
+            if let Instruction::Assign(register, _) = self.instructions[instruction_index] { if let Instruction::Assign(new_register, _) = resulting_instructions.last().unwrap() {
+                if let Some(local_offset) = spilled_registers.get(&register) {
+                    resulting_instructions.push(Instruction::StoreLocal(
+                        Value::Local(*local_offset),
+                        Value::Register(*new_register),
+                    ));
+                }
+            } }
+        }
+
+        let mut new_labels: HashMap<usize, usize> = HashMap::new();
+        for (index, instruction) in resulting_instructions.iter().enumerate() {
+            if let Instruction::Label(label) = instruction {
+                new_labels.insert(index + 1, label.index);
+            }
         }
 
         self.instructions = resulting_instructions;
         self.lifetimes = Self::get_register_lifetime(&self.instructions);
-        self.label_locations = resulting_label_locations;
+        self.label_locations = new_labels;
     }
 
     fn spill(
         &mut self,
-        resulting_instructions: &mut Vec<Instruction>,
         spilled_registers: &mut HashMap<VirtualRegister, usize>,
-    ) {
+    ) -> (VirtualRegister, Instruction) {
         let (corresponding_register, latest_allocated_register) = self
             .allocated_registers
             .iter()
@@ -226,8 +248,8 @@ impl SimpleRegisterAllocator {
             Value::Register(latest_allocated_register),
         );
 
-        resulting_instructions.push(spill_instruction);
         spilled_registers.insert(corresponding_register, self.num_locals);
+        (latest_allocated_register, spill_instruction)
     }
 
     #[allow(unused)]

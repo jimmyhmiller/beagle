@@ -156,6 +156,7 @@ pub enum Instruction {
     And(Value, Value, Value),
     Or(Value, Value, Value),
     Xor(Value, Value, Value),
+    Label(Label),
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -256,6 +257,7 @@ macro_rules! replace_register {
 impl Instruction {
     pub fn get_registers(&self) -> Vec<VirtualRegister> {
         match self {
+            Instruction::Label(_) => vec![],
             Instruction::Sub(a, b, c) => {
                 get_registers!(a, b, c)
             }
@@ -452,6 +454,7 @@ impl Instruction {
         new_register: VirtualRegister,
     ) {
         match self {
+            Instruction::Label(_) => {}
             Instruction::HeapStoreByteOffsetMasked(value, value1, value2, value3, _, _, _) => {
                 replace_register!(value, old_register, new_register);
                 replace_register!(value1, old_register, new_register);
@@ -924,6 +927,7 @@ impl Ir {
     }
 
     pub fn write_label(&mut self, label: Label) {
+        self.instructions.push(Instruction::Label(label));
         assert!(!self.label_locations.contains_key(&self.instructions.len()));
         self.label_locations
             .insert(self.instructions.len(), label.index);
@@ -1008,6 +1012,7 @@ impl Ir {
                 Instruction::Breakpoint => {
                     lang.breakpoint();
                 }
+                Instruction::Label(_) => {}
                 Instruction::ExtendLifeTime(_) => {}
                 Instruction::Sub(dest, a, b) => {
                     let a = a.try_into().unwrap();

@@ -757,7 +757,11 @@ impl Parser {
         if self.is_comma() {
             self.consume();
         } else {
-            panic!("Expected comma {:?}", self.get_token_repr());
+            panic!(
+                "Expected comma {:?} at {}",
+                self.get_token_repr(),
+                self.current_location()
+            );
         }
     }
 
