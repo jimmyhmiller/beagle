@@ -739,7 +739,10 @@ impl Compiler {
                     Some("true".to_string())
                 }
             }
-            BuiltInTypes::Function => Some("function".to_string()),
+            BuiltInTypes::Function => {
+                let untagged = BuiltInTypes::untag(value);
+                Some(format!("function({:#02x})", untagged))
+            },
             BuiltInTypes::Closure => {
                 let heap_object = HeapObject::from_tagged(value);
                 let function_pointer = heap_object.get_field(0);
