@@ -667,6 +667,10 @@ impl LowLevelArm {
         self.load_from_stack(reg, -(offset + self.max_locals + 1))
     }
 
+    pub fn pop_from_stack_indexed_raw(&mut self, reg: Register, offset: i32) {
+        self.load_from_stack(reg, -(offset))
+    }
+
     pub fn pop_from_stack(&mut self, reg: Register) {
         self.increment_stack_size(-1);
         self.load_from_stack(reg, -(self.max_locals + self.stack_size + 1))

@@ -6,6 +6,8 @@ import "beagle.primitive" as primitive
 
 
 fn loop(sdl_poll_event, buffer) {
+    println(sdl_poll_event)
+    primitive/breakpoint()
     sdl_poll_event(buffer)
     if ffi/get_u32(buffer, 0) == 256 {
         true
@@ -26,19 +28,8 @@ fn loop(sdl_poll_event, buffer) {
 // That's a bit ugly though. But maybe it's a start
 fn main() {
     let sdl = ffi/load_library("/opt/homebrew/lib/libSDL2-2.0.0.dylib")
-    // primitive/breakpoint()
-    let fn_name = "SDL_Init"
-    let fn_args = [ffi/Type.U32]
-    let fn_return = ffi/Type.I32
-    // println(fn_return)
-    // primitive/breakpoint()
-    let sdl_init = ffi/get_function(sdl, fn_name, fn_args, fn_return)
-    // TODO: Fix closures
-    // println(sdl_init)
-    // primitive/breakpoint()
+    let sdl_init = ffi/get_function(sdl, "SDL_Init", [ffi/Type.U32], ffi/Type.I32)
     sdl_init(32)
-
-    // TODO: This code causes me to have no free registers
     // SDL_CreateWindow (fn(*const i8, i32, i32, i32, i32, u32) -> *mut ())
     let sdl_window_create = ffi/get_function(
         sdl,
@@ -46,17 +37,22 @@ fn main() {
         [ffi/Type.String, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.U32],
         ffi/Type.Pointer
     )
-    
-    // println(sdl_window_create);
 
-    let title = "SDL2 Window" // Window title
     // primitive/breakpoint()
+    let window = sdl_window_create("SDL2 Window", 100, 100, 640, 480, 4)
 
-    let window = sdl_window_create(title, 100, 100, 640, 480, 4)
-
+    // primitive/breakpoint()
     let sdl_poll_event = ffi/get_function(sdl, "SDL_PollEvent", [ffi/Type.Pointer], ffi/Type.I32)
+    println("allocate");
     let buffer = ffi/allocate(24)
 
+
+    sdl_poll_event(buffer)
+    wait_for_input()
+    // This loop doesn't work because
+    // sdl_poll_event isn't working properly there
+    // need a in function way to do this. But also need to 
+    // fix this code.
     loop(sdl_poll_event, buffer)
 
     println("done")

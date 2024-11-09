@@ -1,6 +1,11 @@
 use core::panic;
 use std::{
-    error::Error, ffi::CString, mem, os::raw::c_void, slice::{from_raw_parts, from_raw_parts_mut}, thread
+    error::Error,
+    ffi::CString,
+    mem,
+    os::raw::c_void,
+    slice::{from_raw_parts, from_raw_parts_mut},
+    thread,
 };
 
 use libffi::{
@@ -119,6 +124,11 @@ extern "C" fn make_closure<Alloc: Allocator>(
             BuiltInTypes::get_kind(function)
         );
     }
+
+    assert!(matches!(
+        BuiltInTypes::get_kind(function),
+        BuiltInTypes::Function
+    ));
 
     let num_free = BuiltInTypes::untag(num_free);
     let free_variable_pointer = free_variable_pointer as *const usize;
@@ -250,6 +260,29 @@ pub unsafe extern "C" fn __pause<Alloc: Allocator>(
     BuiltInTypes::null_value() as usize
 }
 
+pub unsafe fn call_fn_1<Alloc: Allocator>(
+    runtime: &Runtime<Alloc>,
+    function_name: &str,
+    arg1: usize,
+) -> usize {
+    let save_volatile_registers = runtime
+        .compiler
+        .get_function_by_name("beagle.builtin/save_volatile_registers")
+        .unwrap();
+    let save_volatile_registers = runtime
+        .compiler
+        .get_pointer(save_volatile_registers)
+        .unwrap();
+    let save_volatile_registers: fn(usize, usize) -> usize =
+        std::mem::transmute(save_volatile_registers);
+    let function = runtime
+        .compiler
+        .get_function_by_name(function_name)
+        .unwrap();
+    let function = runtime.compiler.get_pointer(function).unwrap();
+    save_volatile_registers(arg1, function)
+}
+
 pub unsafe extern "C" fn load_library<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,
     name: usize,
@@ -259,13 +292,11 @@ pub unsafe extern "C" fn load_library<Alloc: Allocator>(
     let lib = libloading::Library::new(string).unwrap();
     let id = runtime.add_library(lib);
 
-    let call_fn = runtime
-        .compiler
-        .get_function_by_name("beagle.ffi/__make_lib_struct")
-        .unwrap();
-    let function_pointer = runtime.compiler.get_pointer(call_fn).unwrap();
-    let function: fn(usize) -> usize = std::mem::transmute(function_pointer);
-    function(id)
+    call_fn_1(
+        runtime,
+        "beagle.ffi/__make_lib_struct",
+        BuiltInTypes::Int.tag(id as isize) as usize,
+    )
 }
 
 #[allow(unused)]
@@ -288,23 +319,16 @@ pub fn map_ffi_type<Alloc: Allocator>(runtime: &Runtime<Alloc>, value: usize) ->
     }
 }
 
-fn persistent_vector_to_array<Alloc: Allocator>(
+unsafe fn persistent_vector_to_array<Alloc: Allocator>(
     runtime: &Runtime<Alloc>,
     vector: usize,
 ) -> HeapObject {
-
     // TODO: This isn't actually a safe thing to do. It allocates
     // which means that any pointers I had now could have moved.
     // I also am not sure I can from one of these runtime
     // functions end up in another runtime function
     // Because then I have multiple mutable references it runtime.
-    let make_array = runtime
-        .compiler
-        .get_function_by_name("persistent_vector/to_array")
-        .unwrap();
-    let function_pointer = runtime.compiler.get_pointer(make_array).unwrap();
-    let function: fn(usize) -> usize = unsafe { std::mem::transmute(function_pointer) };
-    let tagged = function(vector);
+    let tagged = call_fn_1(runtime, "persistent_vector/to_array", vector);
     HeapObject::from_tagged(tagged)
 }
 
@@ -342,8 +366,8 @@ pub unsafe extern "C" fn get_function<Alloc: Allocator>(
     let function_name = runtime.compiler.get_string(function_name);
     let func_ptr = unsafe { library.get::<fn()>(function_name.as_bytes()).unwrap() };
 
-    let code_ptr =  unsafe { CodePtr(func_ptr.try_as_raw_ptr().unwrap()) };
-    
+    let code_ptr = unsafe { CodePtr(func_ptr.try_as_raw_ptr().unwrap()) };
+
     // let code_ptr = if function_name == "SDL_CreateWindow" {
     //     CodePtr(create_window_placeholder as *mut c_void)
     // } else {
@@ -372,14 +396,8 @@ pub unsafe extern "C" fn get_function<Alloc: Allocator>(
     });
     let ffi_info_id = BuiltInTypes::Int.tag(ffi_info_id as isize) as usize;
 
-    let create_ffi_function = runtime
-        .compiler
-        .get_function_by_name("beagle.ffi/__create_ffi_function")
-        .unwrap();
-    let function_pointer = runtime.compiler.get_pointer(create_ffi_function).unwrap();
-    let function: fn(usize) -> usize = std::mem::transmute(function_pointer);
-    let result = function(ffi_info_id);
-    result
+    
+    call_fn_1(runtime, "beagle.ffi/__create_ffi_function", ffi_info_id)
 }
 
 // TODO: Fix this to allow multiple arguments
@@ -399,7 +417,7 @@ pub unsafe extern "C" fn call_ffi_info<Alloc: Allocator>(
     let ffi_info = runtime.get_ffi_info(ffi_info_id);
     let code_ptr = ffi_info.function;
     let arguments = [a1, a2, a3, a4, a5, a6];
-    
+
     // TODO: I hate this and don't want to make things work this way.
     // I get the tradeoff that libffi is making, but not a fan.
     let mut string_values = Box::new(Vec::new());
@@ -460,7 +478,6 @@ pub unsafe extern "C" fn call_ffi_info<Alloc: Allocator>(
 
     let result = ffi_info.cif.call::<u32>(code_ptr, &passed_arguments);
 
-
     result as usize
 }
 
@@ -509,14 +526,8 @@ unsafe extern "C" fn ffi_allocate<Alloc: Allocator>(
     let buffer = Box::new(vec![0u8; size]);
     let buffer_ptr = Box::into_raw(buffer);
 
-
-    let call_fn = runtime
-        .compiler
-        .get_function_by_name("beagle.ffi/__make_buffer_struct")
-        .unwrap();
-    let function_pointer = runtime.compiler.get_pointer(call_fn).unwrap();
-    let function: fn(usize) -> usize = std::mem::transmute(function_pointer);
-    function(BuiltInTypes::Int.tag(buffer_ptr as isize) as usize)
+    let buffer = BuiltInTypes::Int.tag(buffer_ptr as isize) as usize;
+    call_fn_1(runtime, "beagle.ffi/__make_buffer_struct", buffer)
 }
 
 unsafe extern "C" fn ffi_get_u32<Alloc: Allocator>(
@@ -531,7 +542,6 @@ unsafe extern "C" fn ffi_get_u32<Alloc: Allocator>(
     let value = *(buffer.add(offset) as *const u32);
     BuiltInTypes::Int.tag(value as isize) as usize
 }
-
 
 extern "C" fn placeholder() -> usize {
     BuiltInTypes::null_value() as usize
