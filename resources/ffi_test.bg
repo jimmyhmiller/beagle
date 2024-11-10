@@ -5,14 +5,14 @@ import "beagle.primitive" as primitive
 
 
 
-fn loop(sdl_poll_event, buffer) {
-    println(sdl_poll_event)
-    primitive/breakpoint()
+fn loop(sdl_poll_event, delay, buffer) {
+    // primitive/breakpoint()
     sdl_poll_event(buffer)
     if ffi/get_u32(buffer, 0) == 256 {
         true
     } else {
-        loop(sdl_poll_event, buffer)
+        delay(16)
+        loop(sdl_poll_event, delay, buffer)
     }
 
 }
@@ -43,17 +43,17 @@ fn main() {
 
     // primitive/breakpoint()
     let sdl_poll_event = ffi/get_function(sdl, "SDL_PollEvent", [ffi/Type.Pointer], ffi/Type.I32)
-    println("allocate");
     let buffer = ffi/allocate(24)
 
+    let sdl_delay = ffi/get_function(sdl, "SDL_Delay", [ffi/Type.U32], ffi/Type.Void)
 
-    sdl_poll_event(buffer)
-    wait_for_input()
+
+    // wait_for_input()
     // This loop doesn't work because
     // sdl_poll_event isn't working properly there
     // need a in function way to do this. But also need to 
     // fix this code.
-    loop(sdl_poll_event, buffer)
+    loop(sdl_poll_event, sdl_delay, buffer)
 
     println("done")
 }

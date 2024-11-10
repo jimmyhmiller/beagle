@@ -1,16 +1,11 @@
 use core::panic;
 use std::{
-    error::Error,
-    ffi::CString,
-    mem,
-    os::raw::c_void,
-    slice::{from_raw_parts, from_raw_parts_mut},
-    thread,
+    error::Error, ffi::c_void, mem, slice::{from_raw_parts, from_raw_parts_mut}, thread
 };
 
 use libffi::{
     low::CodePtr,
-    middle::{Arg, Cif, Type},
+    middle::{arg, Arg, Cif, Type},
 };
 
 use crate::{
@@ -350,6 +345,12 @@ extern "C" fn create_window_placeholder(
     0
 }
 
+#[allow(unused)]
+extern "C" fn sdl_poll_event(buffer: *const u32) -> usize {
+    println!("Arguments {:?}", buffer);
+    0
+}
+
 // TODO:
 // I need to get the elements of this vector into
 // a rust vector and then map the types
@@ -368,8 +369,8 @@ pub unsafe extern "C" fn get_function<Alloc: Allocator>(
 
     let code_ptr = unsafe { CodePtr(func_ptr.try_as_raw_ptr().unwrap()) };
 
-    // let code_ptr = if function_name == "SDL_CreateWindow" {
-    //     CodePtr(create_window_placeholder as *mut c_void)
+    // let code_ptr = if function_name == "SDL_PollEvent" {
+    //     CodePtr(sdl_poll_event as *mut c_void)
     // } else {
     //     unsafe { CodePtr(func_ptr.try_as_raw_ptr().unwrap()) }
     // };
@@ -414,69 +415,36 @@ pub unsafe extern "C" fn call_ffi_info<Alloc: Allocator>(
 ) -> usize {
     let runtime = unsafe { &mut *runtime };
     let ffi_info_id = BuiltInTypes::untag(ffi_info_id);
-    let ffi_info = runtime.get_ffi_info(ffi_info_id);
+    let ffi_info = runtime.get_ffi_info(ffi_info_id).clone();
     let code_ptr = ffi_info.function;
     let arguments = [a1, a2, a3, a4, a5, a6];
-
-    // TODO: I hate this and don't want to make things work this way.
-    // I get the tradeoff that libffi is making, but not a fan.
-    let mut string_values = Box::new(Vec::new());
-    let mut i32_values = Box::new(Vec::new());
-    let mut ptr_values = Box::new(Vec::new());
-
     let args = &arguments[..ffi_info.number_of_arguments];
+    let mut argument_pointers = vec![];
 
     for argument in args.iter() {
         let kind = BuiltInTypes::get_kind(*argument);
         match kind {
             BuiltInTypes::String => {
                 let string = runtime.compiler.get_string(*argument);
-                string_values.push(CString::new(string).unwrap());
+                let pointer = runtime.memory.native_arguments.write_c_string(&string);
+                argument_pointers.push(arg(&pointer));
             }
             BuiltInTypes::Int => {
-                i32_values.push(BuiltInTypes::untag(*argument) as i32);
+                let pointer = runtime.memory.native_arguments.write_i32(BuiltInTypes::untag(*argument) as i32);
+                argument_pointers.push(arg(pointer));
             }
             BuiltInTypes::HeapObject => {
                 // TODO: Make this type safe
                 let heap_object = HeapObject::from_tagged(*argument);
                 let buffer = BuiltInTypes::untag(heap_object.get_field(0));
-                ptr_values.push(buffer as *mut c_void);
+                let pointer = runtime.memory.native_arguments.write_pointer(buffer);
+                argument_pointers.push(arg(&pointer));
             }
             _ => panic!("Unsupported type: {:?}", kind),
         }
     }
 
-    let mut passed_arguments = Vec::new();
-    let mut string_index = 0;
-    let mut i32_index = 0;
-    let mut ptr_index = 0;
-    for argument in args.iter() {
-        let kind = BuiltInTypes::get_kind(*argument);
-        match kind {
-            BuiltInTypes::String => {
-                let string = &string_values[string_index];
-                passed_arguments.push(Arg::new(&(string.as_ptr() as *mut c_void)));
-                string_index += 1;
-            }
-            BuiltInTypes::Int => {
-                passed_arguments.push(Arg::new(i32_values.get(i32_index).unwrap()));
-                i32_index += 1;
-            }
-            BuiltInTypes::HeapObject => {
-                passed_arguments.push(Arg::new(ptr_values.get(ptr_index).unwrap()));
-                ptr_index += 1;
-            }
-            _ => panic!("Unsupported type: {:?}", kind),
-        }
-    }
-
-    // TODO: I'm just leaking this memory for now.
-    // I don't know what to do with it yet. So I need to figure that out.
-    Box::leak(string_values);
-    Box::leak(i32_values);
-    Box::leak(ptr_values);
-
-    let result = ffi_info.cif.call::<u32>(code_ptr, &passed_arguments);
+    let result = ffi_info.cif.call::<u32>(code_ptr, &argument_pointers);
 
     result as usize
 }

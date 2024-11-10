@@ -3,6 +3,7 @@ use std::{
     collections::HashMap,
     env,
     error::Error,
+    ffi::{c_void, CString},
     io::Write,
     slice::{self},
     sync::{atomic::AtomicUsize, Arc, Condvar, Mutex, TryLockError},
@@ -132,6 +133,7 @@ impl Printer for TestPrinter {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct FFIInfo {
     pub function: CodePtr,
     pub cif: Cif,
@@ -181,9 +183,69 @@ pub struct Runtime<Alloc: Allocator> {
     pub ffi_function_info: Vec<FFIInfo>,
 }
 
+pub struct MMapMutWithOffset {
+    mmap: MmapMut,
+    offset: usize,
+}
+
+impl MMapMutWithOffset {
+    fn new() -> Self {
+        Self {
+            mmap: MmapOptions::new(MmapOptions::page_size() * 10)
+                .unwrap()
+                .map_mut()
+                .unwrap(),
+            offset: 0,
+        }
+    }
+
+    pub fn write_c_string(&mut self, string: &str) -> *mut c_void {
+        let start = self.offset;
+        let c_string = CString::new(string).unwrap();
+        let bytes = c_string.as_bytes_with_nul();
+        for byte in bytes {
+            self.mmap[self.offset] = *byte;
+            self.offset += 1;
+        }
+        self.mmap[self.offset] = 0;
+        self.offset += 1;
+        unsafe { self.mmap.as_ptr().add(start) as *mut c_void }
+    }
+
+    pub fn write_u32(&mut self, value: u32) -> &u32 {
+        let start = self.offset;
+        let bytes = value.to_le_bytes();
+        for byte in bytes {
+            self.mmap[self.offset] = byte;
+            self.offset += 1;
+        }
+        unsafe { &*(self.mmap.as_ptr().add(start) as *const u32) }
+    }
+
+    pub fn write_i32(&mut self, value: i32) -> &i32 {
+        let start = self.offset;
+        let bytes = value.to_le_bytes();
+        for byte in bytes {
+            self.mmap[self.offset] = byte;
+            self.offset += 1;
+        }
+        let result = unsafe { &*(self.mmap.as_ptr().add(start) as *const i32) };
+        result
+    }
+
+    pub fn write_pointer(&mut self, value: usize) -> *mut c_void {
+        value as *mut c_void
+    }
+
+    pub fn clear(&mut self) {
+        self.offset = 0;
+    }
+}
+
 pub struct Memory<Alloc: Allocator> {
     heap: Alloc,
     stacks: Vec<(ThreadId, MmapMut)>,
+    pub native_arguments: MMapMutWithOffset,
     pub join_handles: Vec<JoinHandle<u64>>,
     pub threads: Vec<Thread>,
     pub stack_map: StackMap,
@@ -1222,6 +1284,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
                     std::thread::current().id(),
                     MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap(),
                 )],
+                native_arguments: MMapMutWithOffset::new(),
                 join_handles: vec![],
                 threads: vec![std::thread::current()],
                 command_line_arguments,
