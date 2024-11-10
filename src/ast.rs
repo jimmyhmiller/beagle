@@ -313,8 +313,9 @@ impl<'a> AstCompiler<'a> {
                 self.name = name.clone();
                 for (index, arg) in args.iter().enumerate() {
                     let reg = self.ir.arg(index);
-                    self.ir.register_argument(reg);
-                    self.insert_variable(arg.clone(), VariableLocation::Register(reg));
+                    let local = self.find_or_insert_local(&arg.clone());
+                    self.ir.store_local(local, reg);
+                    self.insert_variable(arg.clone(), VariableLocation::Local(local));
                 }
 
                 let should_pause_atom = self.compiler.get_pause_atom();
@@ -1175,9 +1176,9 @@ impl<'a> AstCompiler<'a> {
         }
     }
 
-    fn insert_variable(&mut self, clone: String, reg: VariableLocation) {
+    fn insert_variable(&mut self, name: String, reg: VariableLocation) {
         let current_env = self.environment_stack.last_mut().unwrap();
-        current_env.variables.insert(clone, reg);
+        current_env.variables.insert(name, reg);
     }
 
     // TODO: Need to walk the environment stack
@@ -1283,7 +1284,7 @@ impl<'a> AstCompiler<'a> {
         let pointer: Value = self.compiler.get_runtime_ptr().into();
         self.ir.assign(pointer_reg, pointer);
         args.insert(0, pointer_reg.into());
-        self.ir.call(function.into(), args)
+        self.ir.call_builtin(function.into(), args)
     }
 
     fn first_pass(&mut self, ast: &Ast) {

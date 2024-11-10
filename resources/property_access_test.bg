@@ -52,7 +52,7 @@ fn main() {
     println(a)
     let b = get_b(thing)
     println(b)
-        let a = get_a(thing)
+    let a = get_a(thing)
     println(a)
     let b = get_b(thing)
     println(b)
