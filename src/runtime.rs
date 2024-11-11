@@ -210,7 +210,8 @@ impl MMapMutWithOffset {
         }
     }
 
-    pub fn write_c_string(&mut self, string: &str) -> *mut c_void {
+    pub fn write_c_string(&mut self, string: String) -> *mut i8 {
+        let string = string.clone();
         let start = self.offset;
         let c_string = CString::new(string).unwrap();
         let bytes = c_string.as_bytes_with_nul();
@@ -218,9 +219,7 @@ impl MMapMutWithOffset {
             self.mmap[self.offset] = *byte;
             self.offset += 1;
         }
-        self.mmap[self.offset] = 0;
-        self.offset += 1;
-        unsafe { self.mmap.as_ptr().add(start) as *mut c_void }
+        unsafe { self.mmap.as_ptr().add(start) as *mut i8 }
     }
 
     pub fn write_u32(&mut self, value: u32) -> &u32 {

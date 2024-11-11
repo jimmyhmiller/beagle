@@ -139,7 +139,7 @@ fn compile_save_volatile_registers<Alloc: Allocator>(runtime: &mut Runtime<Alloc
     // lang.breakpoint();
     lang.prelude(-2);
 
-    lang.sub_stack_pointer(lang.canonical_volatile_registers.len() as i32);
+    lang.sub_stack_pointer((lang.canonical_volatile_registers.len() + 2) as i32);
 
     for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
         lang.store_on_stack(*reg, -((i + 3) as i32));
@@ -151,7 +151,7 @@ fn compile_save_volatile_registers<Alloc: Allocator>(runtime: &mut Runtime<Alloc
         lang.load_from_stack(*reg, -((i + 3) as i32));
     }
 
-    lang.add_stack_pointer(lang.canonical_volatile_registers.len() as i32);
+    lang.add_stack_pointer((lang.canonical_volatile_registers.len() + 2) as i32);
 
     lang.epilogue(2);
     lang.ret();

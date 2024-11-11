@@ -1,9 +1,6 @@
 use core::panic;
 use std::{
-    error::Error,
-    mem,
-    slice::{from_raw_parts, from_raw_parts_mut},
-    thread,
+    error::Error, mem, slice::{from_raw_parts, from_raw_parts_mut}, thread
 };
 
 use libffi::{
@@ -391,17 +388,13 @@ pub extern "C" fn get_function<Alloc: Allocator>(
 
     let code_ptr = unsafe { CodePtr(func_ptr.try_as_raw_ptr().unwrap()) };
 
-    // let code_ptr = if function_name == "SDL_PollEvent" {
-    //     CodePtr(sdl_poll_event as *mut c_void)
+    // use std::ffi::c_void;
+    // let code_ptr = if function_name == "SDL_CreateWindow" {
+    //     CodePtr(create_window_placeholder as *mut c_void)
     // } else {
     //     unsafe { CodePtr(func_ptr.try_as_raw_ptr().unwrap()) }
     // };
 
-    // If I am going to call into the language from the runtime
-    // I am going to need to have something that saves and restores
-    // callee saved registers.
-    // I now have that in place, but things are still breaking in release mode
-    // :(
     let types: Vec<Type> = array_to_vec(persistent_vector_to_array(runtime, types))
         .iter()
         .map(|x| map_ffi_type(runtime, *x))
@@ -478,7 +471,7 @@ pub unsafe extern "C" fn call_ffi_info<Alloc: Allocator>(
         match kind {
             BuiltInTypes::String => {
                 let string = runtime.compiler.get_string(*argument);
-                let pointer = runtime.memory.native_arguments.write_c_string(&string);
+                let pointer = runtime.memory.native_arguments.write_c_string(string);
                 argument_pointers.push(arg(&pointer));
             }
             BuiltInTypes::Int => {
