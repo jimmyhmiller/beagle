@@ -17,15 +17,6 @@ fn loop(sdl_poll_event, delay, buffer) {
 
 }
 
-
-// TODO: I need to resolve not just functions as namespaced
-// things. It seems right now I can't refer to top level
-// things like ffi/u32
-// I need to add that ability then I could start actually call functions
-// with their current types
-// I will also need a way for rust to know how to convert those
-// Though maybe I just make them integers instead of some enum?
-// That's a bit ugly though. But maybe it's a start
 fn main() {
     let sdl = ffi/load_library("/opt/homebrew/lib/libSDL2-2.0.0.dylib")
     let sdl_init = ffi/get_function(sdl, "SDL_Init", [ffi/Type.U32], ffi/Type.I32)

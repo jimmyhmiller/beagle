@@ -204,14 +204,17 @@ impl SimpleRegisterAllocator {
                 }
             }
 
-            if let Instruction::Assign(register, _) = self.instructions[instruction_index] { if let Instruction::Assign(new_register, _) = resulting_instructions.last().unwrap() {
-                if let Some(local_offset) = spilled_registers.get(&register) {
-                    resulting_instructions.push(Instruction::StoreLocal(
-                        Value::Local(*local_offset),
-                        Value::Register(*new_register),
-                    ));
+            if let Instruction::Assign(register, _) = self.instructions[instruction_index] {
+                if let Instruction::Assign(new_register, _) = resulting_instructions.last().unwrap()
+                {
+                    if let Some(local_offset) = spilled_registers.get(&register) {
+                        resulting_instructions.push(Instruction::StoreLocal(
+                            Value::Local(*local_offset),
+                            Value::Register(*new_register),
+                        ));
+                    }
                 }
-            } }
+            }
         }
 
         let mut new_labels: HashMap<usize, usize> = HashMap::new();

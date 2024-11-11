@@ -11,12 +11,12 @@ fn __make_lib_struct(id) {
 }
 
 
-struct Buffer {
+struct Pointer {
     ptr
 }
 
-fn __make_buffer_struct(ptr) {
-    Buffer { ptr: ptr }
+fn __make_pointer_struct(ptr) {
+    Pointer { ptr: ptr }
 }
 
 enum Type {
