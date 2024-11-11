@@ -12,7 +12,7 @@
                 "args": [
                     "build",
                     // "--release",
-                    // "--profile=release-with-debug",
+                    "--profile=release-with-debug",
                     "--bin=main",
                     "--package=main",
                     "--features=simple-generation,thread-safe"

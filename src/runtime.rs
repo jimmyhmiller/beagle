@@ -134,10 +134,21 @@ impl Printer for TestPrinter {
 }
 
 #[derive(Debug, Clone)]
+pub enum FFIType {
+    U32,
+    I32,
+    Pointer,
+    MutablePointer,
+    String,
+    Void,
+}
+
+#[derive(Debug, Clone)]
 pub struct FFIInfo {
     pub function: CodePtr,
     pub cif: Cif,
     pub number_of_arguments: usize,
+    pub return_type: FFIType,
 }
 
 pub struct ThreadState {
@@ -229,8 +240,8 @@ impl MMapMutWithOffset {
             self.mmap[self.offset] = byte;
             self.offset += 1;
         }
-        let result = unsafe { &*(self.mmap.as_ptr().add(start) as *const i32) };
-        result
+        
+        (unsafe { &*(self.mmap.as_ptr().add(start) as *const i32) }) as _
     }
 
     pub fn write_pointer(&mut self, value: usize) -> *mut c_void {

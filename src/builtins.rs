@@ -1,16 +1,19 @@
 use core::panic;
 use std::{
-    error::Error, ffi::c_void, mem, slice::{from_raw_parts, from_raw_parts_mut}, thread
+    error::Error,
+    mem,
+    slice::{from_raw_parts, from_raw_parts_mut},
+    thread,
 };
 
 use libffi::{
     low::CodePtr,
-    middle::{arg, Arg, Cif, Type},
+    middle::{arg, Cif, Type},
 };
 
 use crate::{
     gc::Allocator,
-    runtime::{FFIInfo, Runtime},
+    runtime::{FFIInfo, FFIType, Runtime},
     types::{BuiltInTypes, HeapObject},
     Message, Serialize,
 };
@@ -270,6 +273,7 @@ pub unsafe fn call_fn_1<Alloc: Allocator>(
         .unwrap();
     let save_volatile_registers: fn(usize, usize) -> usize =
         std::mem::transmute(save_volatile_registers);
+
     let function = runtime
         .compiler
         .get_function_by_name(function_name)
@@ -294,7 +298,6 @@ pub unsafe extern "C" fn load_library<Alloc: Allocator>(
     )
 }
 
-#[allow(unused)]
 pub fn map_ffi_type<Alloc: Allocator>(runtime: &Runtime<Alloc>, value: usize) -> Type {
     let heap_object = HeapObject::from_tagged(value);
     let struct_id = BuiltInTypes::untag(heap_object.get_struct_id());
@@ -314,7 +317,26 @@ pub fn map_ffi_type<Alloc: Allocator>(runtime: &Runtime<Alloc>, value: usize) ->
     }
 }
 
-unsafe fn persistent_vector_to_array<Alloc: Allocator>(
+pub fn map_ffi_return_type<Alloc: Allocator>(runtime: &Runtime<Alloc>, value: usize) -> FFIType {
+    let heap_object = HeapObject::from_tagged(value);
+    let struct_id = BuiltInTypes::untag(heap_object.get_struct_id());
+    let struct_info = runtime
+        .compiler
+        .get_struct_by_id(struct_id)
+        .unwrap_or_else(|| panic!("Could not find struct with id {}", struct_id));
+    let name = struct_info.name.as_str().split_once("/").unwrap().1;
+    match name {
+        "Type.U32" => FFIType::U32,
+        "Type.I32" => FFIType::I32,
+        "Type.Pointer" => FFIType::Pointer,
+        "Type.MutablePointer" => FFIType::MutablePointer,
+        "Type.String" => FFIType::String,
+        "Type.Void" => FFIType::Void,
+        _ => panic!("Unknown type: {}", name),
+    }
+}
+
+fn persistent_vector_to_array<Alloc: Allocator>(
     runtime: &Runtime<Alloc>,
     vector: usize,
 ) -> HeapObject {
@@ -323,7 +345,7 @@ unsafe fn persistent_vector_to_array<Alloc: Allocator>(
     // I also am not sure I can from one of these runtime
     // functions end up in another runtime function
     // Because then I have multiple mutable references it runtime.
-    let tagged = call_fn_1(runtime, "persistent_vector/to_array", vector);
+    let tagged = unsafe { call_fn_1(runtime, "persistent_vector/to_array", vector) };
     HeapObject::from_tagged(tagged)
 }
 
@@ -355,7 +377,7 @@ extern "C" fn sdl_poll_event(buffer: *const u32) -> usize {
 // I need to get the elements of this vector into
 // a rust vector and then map the types
 
-pub unsafe extern "C" fn get_function<Alloc: Allocator>(
+pub extern "C" fn get_function<Alloc: Allocator>(
     runtime: *mut Runtime<Alloc>,
     library_struct: usize,
     function_name: usize,
@@ -378,28 +400,58 @@ pub unsafe extern "C" fn get_function<Alloc: Allocator>(
     // If I am going to call into the language from the runtime
     // I am going to need to have something that saves and restores
     // callee saved registers.
-    // Right now I'm not, which is why in release mode return_type is breaking.
-
+    // I now have that in place, but things are still breaking in release mode
+    // :(
     let types: Vec<Type> = array_to_vec(persistent_vector_to_array(runtime, types))
         .iter()
         .map(|x| map_ffi_type(runtime, *x))
         .collect();
     let number_of_arguments = types.len();
 
-    let return_type = map_ffi_type(runtime, return_type);
+    let lib_ffi_return_type = map_ffi_type(runtime, return_type);
+    let ffi_return_type = map_ffi_return_type(runtime, return_type);
 
-    let cif = Cif::new(types, return_type);
+    let cif = Cif::new(types, lib_ffi_return_type.clone());
 
     let ffi_info_id = runtime.add_ffi_function_info(FFIInfo {
         function: code_ptr,
         cif,
         number_of_arguments,
+        return_type: ffi_return_type,
     });
     let ffi_info_id = BuiltInTypes::Int.tag(ffi_info_id as isize) as usize;
 
-    
-    call_fn_1(runtime, "beagle.ffi/__create_ffi_function", ffi_info_id)
+    unsafe { call_fn_1(runtime, "beagle.ffi/__create_ffi_function", ffi_info_id) }
 }
+
+// In general, this code doesn't work with release mode... :(
+
+// TODO:
+// thread 'main' panicked at /Users/jimmyhmiller/.cargo/registry/src/index.crates.io-6f17d22bba15001f/libffi-3.2.0/src/middle/types.rs:151:8:
+// misaligned pointer dereference: address must be a multiple of 0x8 but is 0x88263ae042be000d
+// stack backtrace:
+//    0: rust_begin_unwind
+//              at /rustc/3f5fd8dd41153bc5fdca9427e9e05be2c767ba23/library/std/src/panicking.rs:652:5
+//    1: core::panicking::panic_nounwind_fmt::runtime
+//              at /rustc/3f5fd8dd41153bc5fdca9427e9e05be2c767ba23/library/core/src/panicking.rs:110:18
+//    2: core::panicking::panic_nounwind_fmt
+//              at /rustc/3f5fd8dd41153bc5fdca9427e9e05be2c767ba23/library/core/src/panicking.rs:120:5
+//    3: core::panicking::panic_misaligned_pointer_dereference
+//              at /rustc/3f5fd8dd41153bc5fdca9427e9e05be2c767ba23/library/core/src/panicking.rs:287:5
+//    4: libffi::middle::types::ffi_type_clone
+//              at /Users/jimmyhmiller/.cargo/registry/src/index.crates.io-6f17d22bba15001f/libffi-3.2.0/src/middle/types.rs:151:8
+//    5: libffi::middle::types::ffi_type_array_clone
+//              at /Users/jimmyhmiller/.cargo/registry/src/index.crates.io-6f17d22bba15001f/libffi-3.2.0/src/middle/types.rs:143:23
+//    6: <libffi::middle::types::TypeArray as core::clone::Clone>::clone
+//              at /Users/jimmyhmiller/.cargo/registry/src/index.crates.io-6f17d22bba15001f/libffi-3.2.0/src/middle/types.rs:204:40
+//    7: <libffi::middle::Cif as core::clone::Clone>::clone
+//              at /Users/jimmyhmiller/.cargo/registry/src/index.crates.io-6f17d22bba15001f/libffi-3.2.0/src/middle/mod.rs:91:19
+//    8: <main::runtime::FFIInfo as core::clone::Clone>::clone
+//              at ./src/runtime.rs:149:5
+//    9: main::builtins::call_ffi_info
+//              at ./src/builtins.rs:439:20
+// note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+// thread caused non-unwinding panic. aborting.
 
 // TODO: Fix this to allow multiple arguments
 // instead of hardcoding 0
@@ -430,7 +482,10 @@ pub unsafe extern "C" fn call_ffi_info<Alloc: Allocator>(
                 argument_pointers.push(arg(&pointer));
             }
             BuiltInTypes::Int => {
-                let pointer = runtime.memory.native_arguments.write_i32(BuiltInTypes::untag(*argument) as i32);
+                let pointer = runtime
+                    .memory
+                    .native_arguments
+                    .write_i32(BuiltInTypes::untag(*argument) as i32);
                 argument_pointers.push(arg(pointer));
             }
             BuiltInTypes::HeapObject => {
@@ -444,9 +499,33 @@ pub unsafe extern "C" fn call_ffi_info<Alloc: Allocator>(
         }
     }
 
-    let result = ffi_info.cif.call::<u32>(code_ptr, &argument_pointers);
-
-    result as usize
+    match ffi_info.return_type {
+        FFIType::Void => {
+            ffi_info.cif.call::<()>(code_ptr, &argument_pointers);
+            BuiltInTypes::null_value() as usize
+        }
+        FFIType::U32 => {
+            let result = ffi_info.cif.call::<u32>(code_ptr, &argument_pointers);
+            BuiltInTypes::Int.tag(result as isize) as usize
+        }
+        FFIType::I32 => {
+            let result = ffi_info.cif.call::<i32>(code_ptr, &argument_pointers);
+            BuiltInTypes::Int.tag(result as isize) as usize
+        }
+        FFIType::Pointer => {
+            let result = ffi_info.cif.call::<*mut u8>(code_ptr, &argument_pointers);
+            let pointer_value = BuiltInTypes::Int.tag(result as isize) as usize;
+            call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", pointer_value)
+        }
+        FFIType::MutablePointer => {
+            let result = ffi_info.cif.call::<*mut u8>(code_ptr, &argument_pointers);
+            let pointer_value = BuiltInTypes::Int.tag(result as isize) as usize;
+            call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", pointer_value)
+        }
+        FFIType::String => {
+            todo!()
+        }
+    }
 }
 
 pub unsafe extern "C" fn copy_object<Alloc: Allocator>(
@@ -495,7 +574,7 @@ unsafe extern "C" fn ffi_allocate<Alloc: Allocator>(
     let buffer_ptr = Box::into_raw(buffer);
 
     let buffer = BuiltInTypes::Int.tag(buffer_ptr as isize) as usize;
-    call_fn_1(runtime, "beagle.ffi/__make_buffer_struct", buffer)
+    call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", buffer)
 }
 
 unsafe extern "C" fn ffi_get_u32<Alloc: Allocator>(
@@ -509,6 +588,20 @@ unsafe extern "C" fn ffi_get_u32<Alloc: Allocator>(
     let offset = BuiltInTypes::untag(offset);
     let value = *(buffer.add(offset) as *const u32);
     BuiltInTypes::Int.tag(value as isize) as usize
+}
+
+unsafe extern "C" fn ffi_set_i32<Alloc: Allocator>(
+    _runtime: *mut Runtime<Alloc>,
+    buffer: usize,
+    offset: usize,
+    value: usize,
+) -> usize {
+    let buffer_object = HeapObject::from_tagged(buffer);
+    let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+    let offset = BuiltInTypes::untag(offset);
+    let value = BuiltInTypes::untag(value) as i32;
+    *(buffer.add(offset) as *mut i32) = value;
+    BuiltInTypes::null_value() as usize
 }
 
 extern "C" fn placeholder() -> usize {
@@ -631,6 +724,12 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         self.compiler.add_builtin_function(
             "beagle.ffi/get_u32",
             ffi_get_u32::<Alloc> as *const u8,
+            false,
+        )?;
+
+        self.compiler.add_builtin_function(
+            "beagle.ffi/set_i32",
+            ffi_set_i32::<Alloc> as *const u8,
             false,
         )?;
 
