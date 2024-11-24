@@ -133,8 +133,9 @@ impl Printer for TestPrinter {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FFIType {
+    U8,
     U32,
     I32,
     Pointer,
@@ -148,6 +149,7 @@ pub struct FFIInfo {
     pub function: CodePtr,
     pub cif: Cif,
     pub number_of_arguments: usize,
+    pub argument_types: Vec<FFIType>,
     pub return_type: FFIType,
 }
 
@@ -192,6 +194,7 @@ pub struct Runtime<Alloc: Allocator> {
     pub thread_state: Arc<(Mutex<ThreadState>, Condvar)>,
     pub gc_lock: Mutex<()>,
     pub ffi_function_info: Vec<FFIInfo>,
+    pub ffi_info_by_name: HashMap<String, usize>,
 }
 
 pub struct MMapMutWithOffset {
@@ -243,13 +246,28 @@ impl MMapMutWithOffset {
         (unsafe { &*(self.mmap.as_ptr().add(start) as *const i32) }) as _
     }
 
-    pub fn write_pointer(&mut self, value: usize) -> *mut c_void {
-        value as *mut c_void
+    pub fn write_u8(&mut self, argument: u8) -> &u8 {
+        let start = self.offset;
+        self.mmap[start] = argument;
+        // We need to make sure we keep correct alignment
+        self.offset += 2;
+        unsafe { &*(self.mmap.as_ptr().add(start) as *const u8) }
+    }
+
+    pub fn write_pointer(&mut self, value: usize) -> & *mut c_void {
+        let start = self.offset;
+        let bytes = value.to_le_bytes();
+        for byte in bytes {
+            self.mmap[self.offset] = byte;
+            self.offset += 1;
+        }
+        unsafe { &*(self.mmap.as_ptr().add(start) as *const *mut c_void) }
     }
 
     pub fn clear(&mut self) {
         self.offset = 0;
     }
+    
 }
 
 pub struct Memory<Alloc: Allocator> {
@@ -1311,6 +1329,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
                 Condvar::new(),
             )),
             ffi_function_info: vec![],
+            ffi_info_by_name: HashMap::new(),
         }
     }
 
@@ -1571,8 +1590,8 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         let num_locals = function_definition.number_of_locals;
 
         heap_object.write_field(0, function);
-        heap_object.write_field(1, num_free);
-        heap_object.write_field(2, num_locals);
+        heap_object.write_field(1, BuiltInTypes::Int.tag(num_free as isize) as usize);
+        heap_object.write_field(2, BuiltInTypes::Int.tag(num_locals as isize) as usize);
         for (index, value) in free_variables.iter().enumerate() {
             heap_object.write_field((index + 3) as i32, *value);
         }
@@ -1719,5 +1738,13 @@ impl<Alloc: Allocator> Runtime<Alloc> {
 
     pub fn get_ffi_info(&self, ffi_info_id: usize) -> &FFIInfo {
         self.ffi_function_info.get(ffi_info_id).unwrap()
+    }
+    
+    pub fn add_ffi_info_by_name(&mut self, function_name: String, ffi_info_id: usize) {
+        self.ffi_info_by_name.insert(function_name, ffi_info_id);
+    }
+    
+    pub fn find_ffi_info_by_name(&self, function_name: &str) -> Option<usize> {
+        self.ffi_info_by_name.get(function_name).cloned()
     }
 }

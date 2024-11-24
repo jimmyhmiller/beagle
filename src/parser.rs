@@ -17,8 +17,9 @@ pub enum Token {
     Comma,
     Dot,
     NewLine,
-    If,
     Fn,
+    Loop,
+    If,
     Else,
     LessThanOrEqual,
     LessThan,
@@ -259,6 +260,7 @@ impl Tokenizer {
         }
         match &input_bytes[start..self.position] {
             b"fn" => Token::Fn,
+            b"loop" => Token::Loop,
             b"if" => Token::If,
             b"else" => Token::Else,
             b"<=" => Token::LessThanOrEqual,
@@ -539,6 +541,10 @@ impl Parser {
                 self.move_to_next_non_whitespace();
                 Some(self.parse_function())
             }
+            Token::Loop => {
+                self.move_to_next_non_whitespace();
+                Some(self.parse_loop())
+            }
             Token::Struct => {
                 self.move_to_next_atom();
                 Some(self.parse_struct())
@@ -667,6 +673,11 @@ impl Parser {
         self.expect_close_paren();
         let body = self.parse_block();
         Ast::Function { name, args, body }
+    }
+
+    fn parse_loop(&mut self) -> Ast {
+        let body = self.parse_block();
+        Ast::Loop { body }
     }
 
     fn parse_struct(&mut self) -> Ast {

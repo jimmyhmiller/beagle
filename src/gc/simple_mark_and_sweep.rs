@@ -307,6 +307,7 @@ impl SimpleMarkSweepHeap {
     }
 
     pub fn mark(&mut self, stack_base: usize, stack_map: &StackMap, stack_pointer: usize) {
+
         // I'm adding to the end of the stack I've allocated so I only need to go from the end
         // til the current stack
         let stack_end = stack_base;
@@ -355,7 +356,6 @@ impl SimpleMarkSweepHeap {
                         if untagged % 8 != 0 {
                             panic!("Not aligned");
                         }
-                        // println!("Pushing mark 0x{:?}", stack[j]);
                         to_mark.push(HeapObject::from_tagged(*slot));
                     }
                 }
@@ -370,7 +370,6 @@ impl SimpleMarkSweepHeap {
             }
 
             object.mark();
-
             for object in object.get_heap_references() {
                 to_mark.push(object);
             }

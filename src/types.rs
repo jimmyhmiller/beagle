@@ -270,6 +270,13 @@ impl HeapObject {
         }
     }
 
+    pub fn get_object_type(&self) -> Option<BuiltInTypes> {
+        if !self.tagged {
+            return None;
+        }
+        Some(BuiltInTypes::get_kind(self.pointer))
+    }
+
     pub fn mark(&self) {
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;

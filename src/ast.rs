@@ -135,6 +135,9 @@ pub enum Ast {
         array: Box<Ast>,
         index: Box<Ast>,
     },
+    Loop {
+        body: Vec<Ast>,
+    },
 }
 
 impl Ast {
@@ -225,6 +228,7 @@ pub struct Environment {
     pub local_variables: Vec<String>,
     pub variables: HashMap<String, VariableLocation>,
     pub free_variables: Vec<String>,
+    pub argument_locations: HashMap<usize, VariableLocation>,
 }
 
 impl Environment {
@@ -233,6 +237,7 @@ impl Environment {
             local_variables: vec![],
             variables: HashMap::new(),
             free_variables: vec![],
+            argument_locations: HashMap::new(),
         }
     }
 }
@@ -303,6 +308,23 @@ impl<'a> AstCompiler<'a> {
             }
             Ast::Function { name, args, body } => {
                 self.create_new_environment();
+
+                let is_not_top_level = self.environment_stack.len() > 2;
+
+                let variable_locaton = if is_not_top_level {
+                    // We are inside a function already, so this isn't a top level function
+                    // We are going to create a location for it, so that we can make sure recursion will work
+                    // for it
+                    if let Some(name) = &name {
+                        let new_local = self.find_or_insert_local(name);
+                        self.insert_variable(name.to_string(), VariableLocation::Local(new_local));
+                        Some(VariableLocation::Local(new_local))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 let old_ir = std::mem::replace(
                     &mut self.ir,
                     Ir::new(
@@ -310,12 +332,28 @@ impl<'a> AstCompiler<'a> {
                         self.compiler.allocate_fn_pointer(),
                     ),
                 );
+                let old_name = self.name.clone();
                 self.name = name.clone();
+                if is_not_top_level {
+                    let name = "<closure_context>";
+                    let reg = self.ir.arg(0);
+                    let local = self.find_or_insert_local(name);
+                    self.ir.store_local(local, reg);
+                    let local = VariableLocation::Local(local);
+                    self.register_arg_location(0, local.clone());
+                    self.insert_variable(name.to_string(), local);
+                }
                 for (index, arg) in args.iter().enumerate() {
+                    let mut index = index;
+                    if is_not_top_level {
+                        index += 1;
+                    }
                     let reg = self.ir.arg(index);
                     let local = self.find_or_insert_local(&arg.clone());
                     self.ir.store_local(local, reg);
-                    self.insert_variable(arg.clone(), VariableLocation::Local(local));
+                    let local = VariableLocation::Local(local);
+                    self.register_arg_location(index, local.clone());
+                    self.insert_variable(arg.clone(), local);
                 }
 
                 let should_pause_atom = self.compiler.get_pause_atom();
@@ -359,6 +397,8 @@ impl<'a> AstCompiler<'a> {
                 let return_value = self.call_compile(&Box::new(last));
                 self.ir.ret(return_value);
 
+                self.name = old_name;
+
                 let lang = LowLevelArm::new();
 
                 let error_fn_pointer = self
@@ -374,8 +414,10 @@ impl<'a> AstCompiler<'a> {
 
                 let mut code = self.ir.compile(lang, error_fn_pointer, runtime_ptr);
 
-                let full_function_name =
-                    name.map(|name| self.compiler.current_namespace_name() + "/" + &name);
+                let full_function_name = name
+                    .clone()
+                    .map(|name| self.compiler.current_namespace_name() + "/" + &name);
+
                 let function_pointer = self
                     .compiler
                     .upsert_function(full_function_name.as_deref(), &mut code, self.ir.num_locals)
@@ -385,18 +427,45 @@ impl<'a> AstCompiler<'a> {
 
                 self.ir = old_ir;
 
-                if self.has_free_variables() {
-                    return self.compile_closure(
+                if is_not_top_level {
+                    let function = self.compile_closure(
                         BuiltInTypes::Function.tag(function_pointer as isize) as usize,
                     );
+                    if let Some(VariableLocation::Local(index)) = variable_locaton {
+                        let reg = self.ir.assign_new(function);
+                        self.ir.store_local(index, reg);
+                    }
+                    self.pop_environment();
+                    if variable_locaton.is_some() && name.is_some() {
+                        let local = self.find_or_insert_local(name.as_ref().unwrap());
+                        self.insert_variable(
+                            name.as_ref().unwrap().to_string(),
+                            VariableLocation::Local(local),
+                        );
+                    }
+                    return function;
                 }
 
                 let function = self.ir.function(Value::Function(function_pointer));
 
+                if let Some(VariableLocation::Local(index)) = variable_locaton {
+                    let reg = self.ir.assign_new(function);
+                    self.ir.store_local(index, reg);
+                }
                 self.pop_environment();
+
                 function
             }
 
+            Ast::Loop { body } => {
+                let loop_start = self.ir.label("loop_start");
+                self.ir.write_label(loop_start);
+                for ast in body.iter() {
+                    self.call_compile(ast);
+                }
+                self.ir.jump(loop_start);
+                Value::Null
+            }
             Ast::Struct { name: _, fields: _ } => {
                 // TODO: This should probably return the struct value
                 // A concept I don't yet have
@@ -805,7 +874,7 @@ impl<'a> AstCompiler<'a> {
             }
             Ast::Call { name, args } => {
                 let name = self.get_qualified_function_name(&name);
-                if Some(name.clone()) == self.own_fully_qualified_name() {
+                if self.name_matches(&name) {
                     if self.is_tail_position() {
                         return self.call_compile(&Ast::TailRecurse { args });
                     } else {
@@ -839,8 +908,12 @@ impl<'a> AstCompiler<'a> {
                 // TODO: This isn't they way to handle this
                 // I am acting as if all closures are assign to a variable when they aren't.
                 // Need to have negative test cases for this
-                if let Some(function) = self.get_variable_current_env(&name) {
-                    self.compile_closure_call(function, args)
+                if !self.is_qualifed_function_name(&name) {
+                    if let Some(function) = self.get_variable(&name) {
+                        self.compile_closure_call(function, args)
+                    } else {
+                        panic!("Not qualified and didn't find it {}", name);
+                    }
                 } else {
                     self.compile_standard_function_call(name, args)
                 }
@@ -945,7 +1018,11 @@ impl<'a> AstCompiler<'a> {
     }
 
     fn compile_standard_function_call(&mut self, name: String, mut args: Vec<Value>) -> Value {
-        assert!(name.contains("/"));
+        assert!(
+            name.contains("/"),
+            "Function name should be fully qualified {}",
+            name
+        );
 
         // TODO: I shouldn't just assume the function will exist
         // unless I have a good plan for dealing with when it doesn't
@@ -981,6 +1058,22 @@ impl<'a> AstCompiler<'a> {
         }
     }
 
+    fn create_free_if_closable(&mut self, name: &String) -> Option<VariableLocation> {
+        let mut can_be_closed = false;
+        for environment in self.environment_stack.iter_mut().rev().skip(1) {
+            if environment.variables.get(name).is_some() {
+                can_be_closed = true;
+                break;
+            }
+        }
+        if can_be_closed {
+            let free_variable = self.find_or_insert_free_variable(name);
+            Some(VariableLocation::FreeVariable(free_variable))
+        } else {
+            None
+        }
+    }
+
     fn get_qualified_function_name(&mut self, name: &String) -> String {
         let full_function_name = if name.contains("/") {
             let parts: Vec<&str> = name.split("/").collect();
@@ -991,7 +1084,7 @@ impl<'a> AstCompiler<'a> {
                 .get_namespace_from_alias(alias)
                 .unwrap_or_else(|| panic!("Can't find alias {}", alias));
             namespace + "/" + name
-        } else if self.get_variable_in_stack(name).is_some() {
+        } else if self.get_variable(name).is_some() {
             name.clone()
         } else if self
             .compiler
@@ -999,16 +1092,24 @@ impl<'a> AstCompiler<'a> {
             .is_some()
         {
             self.compiler.current_namespace_name() + "/" + name
-        } else {
-            self.compiler
-                .find_function(&("beagle.core/".to_owned() + name))
-                .unwrap_or_else(|| panic!("Did not find function {}", name));
+        } else if let Some(_) = self
+            .compiler
+            .find_function(&("beagle.core/".to_owned() + name))
+        {
             "beagle.core/".to_string() + name
+        } else {
+            if let Some(_) = self.create_free_if_closable(name) {
+                name.clone()
+            } else {
+                panic!("Can't find function {}", name);
+            }
         };
         full_function_name
     }
 
     fn compile_closure_call(&mut self, function: VariableLocation, args: Vec<Value>) -> Value {
+        // self.ir.breakpoint();
+        let ret_register = self.ir.assign_new(Value::TaggedConstant(0));
         let function = self.resolve_variable(&function);
         let function_register = self.ir.assign_new(function);
         let closure_register = self.ir.assign_new(function_register);
@@ -1016,12 +1117,17 @@ impl<'a> AstCompiler<'a> {
         let tag = self.ir.get_tag(closure_register.into());
         let closure_tag = BuiltInTypes::Closure.get_tag();
         let closure_tag = Value::RawValue(closure_tag as usize);
-        let call_function = self.ir.label("call_function");
+        let call_closure = self.ir.label("call_closure");
+        let exit_closure_call = self.ir.label("exit_closure_call");
         // TODO: It might be better to change the layout of these jumps
         // so that the non-closure case is the fall through
         // I just have to think about the correct way to do that
-        self.ir
-            .jump_if(call_function, Condition::NotEqual, tag, closure_tag);
+        self.ir.jump_if(call_closure, Condition::Equal, tag, closure_tag);
+        let result = self.ir.call(function_register.into(), args.clone());
+        self.ir.assign(ret_register, result);
+        self.ir.jump(exit_closure_call);
+        self.ir.write_label(call_closure);
+
         // I need to grab the function pointer
         // Closures are a pointer to a structure like this
         // struct Closure {
@@ -1029,61 +1135,20 @@ impl<'a> AstCompiler<'a> {
         //     num_free_variables: usize,
         //     ree_variables: *const Value,
         // }
-        let closure_register = self.ir.untag(closure_register.into());
+        let untagged_closure_register = self.ir.untag(closure_register.into());
         // self.ir.breakpoint();
-        let function_pointer = self.ir.load_from_memory(closure_register, 1);
+        let function_pointer = self.ir.load_from_memory(untagged_closure_register, 1);
+        // make the first argument to the closure be the values pointer
+        // the rest of the arguments are the arguments passed to the closure
+        let mut args = args;
+        args.insert(0, closure_register.into());
+        let result = self.ir.call(function_pointer, args);
+        self.ir.assign(ret_register, result);
+
+        self.ir.write_label(exit_closure_call);
+        ret_register.into()
         // self.ir.breakpoint();
-        self.ir.assign(function_register, function_pointer);
 
-        // TODO: I need to fix how these are stored on the stack
-
-        // for each variable I need to push them onto the stack after the prelude
-        let loop_start = self.ir.label("loop_start");
-        let counter = self.ir.volatile_register();
-        // self.ir.breakpoint();
-        self.ir.assign(counter, Value::TaggedConstant(0));
-        // self.ir.breakpoint();
-        self.ir.write_label(loop_start);
-        let num_free_variables = self.ir.load_from_memory(closure_register, 2);
-        let num_free_variables = self.ir.tag(num_free_variables, BuiltInTypes::Int.get_tag());
-        self.ir.jump_if(
-            call_function,
-            Condition::GreaterThanOrEqual,
-            counter,
-            num_free_variables,
-        );
-        let free_variable_offset = self.ir.add_int(counter, Value::TaggedConstant(4));
-        let free_variable_offset = self.ir.mul(free_variable_offset, Value::TaggedConstant(8));
-        let free_variable_offset = self.ir.untag(free_variable_offset);
-        let free_variable = self
-            .ir
-            .heap_load_with_reg_offset(closure_register, free_variable_offset);
-
-        let free_variable_offset = self.ir.sub_int(num_free_variables, counter);
-        let num_local = self.ir.load_from_memory(closure_register, 3);
-        let num_local = self.ir.tag(num_local, BuiltInTypes::Int.get_tag());
-        let free_variable_offset = self.ir.add_int(free_variable_offset, num_local);
-        // TODO: Make this better
-        let free_variable_offset = self.ir.mul(free_variable_offset, Value::TaggedConstant(-8));
-        let free_variable_offset = self.ir.untag(free_variable_offset);
-        let free_variable_slot_pointer = self.ir.get_stack_pointer_imm(2);
-        self.ir.heap_store_with_reg_offset(
-            free_variable_slot_pointer,
-            free_variable,
-            free_variable_offset,
-        );
-
-        let label = self.ir.label("increment_counter");
-        self.ir.write_label(label);
-        let counter_increment = self.ir.add_int(Value::TaggedConstant(1), counter);
-        self.ir.assign(counter, counter_increment);
-
-        self.ir.jump(loop_start);
-        self.ir.extend_register_life(counter.into());
-        self.ir.extend_register_life(closure_register);
-        self.ir.write_label(call_function);
-        // self.ir.breakpoint();
-        self.ir.call(function_register.into(), args)
     }
 
     fn compile_closure(&mut self, function_pointer: usize) -> Value {
@@ -1105,7 +1170,7 @@ impl<'a> AstCompiler<'a> {
         let free_variable_pointer = self.ir.get_current_stack_position();
 
         self.ir.write_label(label);
-        for free_variable in self.get_current_env().free_variables.clone().iter() {
+        for free_variable in self.get_current_env().free_variables.clone().iter().rev() {
             let variable = self
                 .get_variable(free_variable)
                 .unwrap_or_else(|| panic!("Can't find variable {}", free_variable));
@@ -1162,7 +1227,6 @@ impl<'a> AstCompiler<'a> {
                 free_variable_pointer,
             ],
         );
-        self.pop_environment();
         closure
     }
 
@@ -1176,22 +1240,12 @@ impl<'a> AstCompiler<'a> {
         }
     }
 
-    fn insert_variable(&mut self, name: String, reg: VariableLocation) {
+    fn insert_variable(&mut self, name: String, location: VariableLocation) {
         let current_env = self.environment_stack.last_mut().unwrap();
-        current_env.variables.insert(name, reg);
+        current_env.variables.insert(name, location);
     }
 
-    // TODO: Need to walk the environment stack
-    fn get_variable_current_env(&self, name: &str) -> Option<VariableLocation> {
-        self.environment_stack
-            .last()
-            .unwrap()
-            .variables
-            .get(name)
-            .cloned()
-    }
-
-    fn get_variable_in_stack(&self, name: &str) -> Option<VariableLocation> {
+    fn get_accessible_variable(&self, name: &str) -> Option<VariableLocation> {
         // Let's look in the current environment
         // Then we will look in the current namespace
         // then we will look in the global namespace
@@ -1214,8 +1268,18 @@ impl<'a> AstCompiler<'a> {
         }
     }
 
+    fn find_or_insert_free_variable(&mut self, name: &str) -> usize {
+        let current_env = self.environment_stack.last_mut().unwrap();
+        if let Some(index) = current_env.free_variables.iter().position(|n| n == name) {
+            index
+        } else {
+            current_env.free_variables.push(name.to_string());
+            current_env.free_variables.len() - 1
+        }
+    }
+
     fn get_variable_alloc_free_variable(&mut self, name: &str) -> VariableLocation {
-        if let Some(variable) = self.get_variable_in_stack(name) {
+        if let Some(variable) = self.get_accessible_variable(name) {
             variable.clone()
         } else if name.contains("/") {
             let (namespace_name, name) = self.get_namespace_name_and_name(name);
@@ -1266,9 +1330,8 @@ impl<'a> AstCompiler<'a> {
         self.environment_stack.last().unwrap()
     }
 
-    fn has_free_variables(&self) -> bool {
-        let current_env = self.get_current_env();
-        !current_env.free_variables.is_empty()
+    fn get_current_env_mut(&mut self) -> &mut Environment {
+        self.environment_stack.last_mut().unwrap()
     }
 
     pub fn call_builtin(&mut self, arg: &str, args: Vec<Value>) -> Value {
@@ -1420,7 +1483,14 @@ impl<'a> AstCompiler<'a> {
         match reg {
             VariableLocation::Register(reg) => Value::Register(*reg),
             VariableLocation::Local(index) => Value::Local(*index),
-            VariableLocation::FreeVariable(index) => Value::FreeVariable(*index),
+            VariableLocation::FreeVariable(index) => {
+                let arg0_location = self.get_argument_location(0);
+                let arg0 = self.resolve_variable(&arg0_location);
+                let arg0: VirtualRegister = self.ir.assign_new(arg0);
+                let arg0 = self.ir.untag(arg0.into());
+                let index = self.ir.assign_new(Value::TaggedConstant((*index + 3) as isize));
+                self.ir.read_field(arg0.into(), index.into()).into()
+            },
             VariableLocation::NamespaceVariable(namespace, slot) => {
                 let slot = self.ir.assign_new(Value::RawValue(*slot));
                 let namespace = self.ir.assign_new(Value::RawValue(*namespace));
@@ -1429,6 +1499,17 @@ impl<'a> AstCompiler<'a> {
                     vec![namespace.into(), slot.into()],
                 )
             }
+        }
+    }
+
+    fn name_matches(&self, name: &String) -> bool {
+        if self.name.is_none() {
+            return false;
+        }
+        if name.contains("/") {
+            return *name == self.own_fully_qualified_name().unwrap();
+        } else {
+            name == self.name.as_ref().unwrap()
         }
     }
 
@@ -1450,6 +1531,18 @@ impl<'a> AstCompiler<'a> {
         } else {
             (self.compiler.current_namespace_name(), name.to_string())
         }
+    }
+    
+    fn register_arg_location(&mut self, index: usize, local: VariableLocation) {
+        self.get_current_env_mut().argument_locations.insert(index, local);
+    }
+
+    fn get_argument_location(&self, index: usize) -> VariableLocation {
+        self.get_current_env().argument_locations.get(&index).unwrap().clone()
+    }
+    
+    fn is_qualifed_function_name(&self, name: &str) -> bool {
+        name.contains("/")
     }
 }
 
