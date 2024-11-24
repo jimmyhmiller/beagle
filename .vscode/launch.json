@@ -12,10 +12,10 @@
                 "args": [
                     "build",
                     // "--release",
-                    "--profile=release-with-debug",
+                    // "--profile=release-with-debug",
                     "--bin=main",
                     "--package=main",
-                    "--features=simple-generation,thread-safe"
+                    "--features=simple-mark-and-sweep,thread-safe"
                 ],
                 "filter": {
                     "name": "main",

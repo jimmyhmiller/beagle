@@ -3,52 +3,87 @@ namespace ffi_test
 import "beagle.ffi" as ffi
 import "beagle.primitive" as primitive
 
+let sdl = ffi/load_library("/opt/homebrew/lib/libSDL2-2.0.0.dylib")
+let sdl_init = ffi/get_function(sdl, "SDL_Init", [ffi/Type.U32], ffi/Type.I32)
+let sdl_create_window = ffi/get_function(
+    sdl,
+    "SDL_CreateWindow",
+    [ffi/Type.String, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.U32],
+    ffi/Type.Pointer
+)
+let sdl_create_renderer = ffi/get_function(
+    sdl,
+    "SDL_CreateRenderer",
+    [ffi/Type.Pointer, ffi/Type.I32, ffi/Type.U32],
+    ffi/Type.Pointer
+)
+let sdl_set_render_draw_color = ffi/get_function(
+    sdl,
+    "SDL_SetRenderDrawColor",
+    [ffi/Type.Pointer, ffi/Type.U8, ffi/Type.U8, ffi/Type.U8, ffi/Type.U8],
+    ffi/Type.I32
+)
+let sdl_render_clear = ffi/get_function(sdl, "SDL_RenderClear", [ffi/Type.Pointer], ffi/Type.I32)
+let sdl_render_present = ffi/get_function(sdl, "SDL_RenderPresent", [ffi/Type.Pointer], ffi/Type.Void)
+let sdl_poll_event = ffi/get_function(sdl, "SDL_PollEvent", [ffi/Type.Pointer], ffi/Type.I32)
+let sdl_delay = ffi/get_function(sdl, "SDL_Delay", [ffi/Type.U32], ffi/Type.Void)
+let sdl_render_fill_rect = ffi/get_function(
+    sdl,
+    "SDL_RenderFillRect",
+    [ffi/Type.Pointer, ffi/Type.Pointer],
+    ffi/Type.I32
+)
 
+// Rect structure: [x, y, w, h] (4 * 4 bytes = 16 bytes)
+let rect_size = 16
 
-fn loop(sdl_poll_event, delay, buffer) {
-    // primitive/breakpoint()
+fn loop_it(buffer, renderer, rect_ptr) {
     sdl_poll_event(buffer)
     if ffi/get_u32(buffer, 0) == 256 {
         true
     } else {
-        delay(16)
-        loop(sdl_poll_event, delay, buffer)
-    }
+        // Clear the renderer
+        sdl_set_render_draw_color(renderer, 0, 0, 0, 255) // Black background
+        sdl_render_clear(renderer)
 
+        // Draw the rectangle
+        sdl_set_render_draw_color(renderer, 255, 0, 0, 255) // Red color
+        sdl_render_fill_rect(renderer, rect_ptr)
+
+        // Present the updated screen
+        sdl_render_present(renderer)
+
+        sdl_delay(16)
+        loop_it(buffer, renderer, rect_ptr)
+    }
 }
 
 fn main() {
-    let sdl = ffi/load_library("/opt/homebrew/lib/libSDL2-2.0.0.dylib")
-    let sdl_init = ffi/get_function(sdl, "SDL_Init", [ffi/Type.U32], ffi/Type.I32)
+    println("Starting")
     sdl_init(32)
-    // SDL_CreateWindow (fn(*const i8, i32, i32, i32, i32, u32) -> *mut ())
-    let sdl_window_create = ffi/get_function(
-        sdl,
-        "SDL_CreateWindow",
-        [ffi/Type.String, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.U32],
-        ffi/Type.Pointer
-    )
+    println("SDL Initialized")
 
-    // primitive/breakpoint()
-    let window = sdl_window_create("SDL2 Window", 100, 100, 640, 480, 4)
+    let window = sdl_create_window("SDL2 Window", 100, 100, 640, 480, 4)
+    println("Window Created")
 
-    // primitive/breakpoint()
-    let sdl_poll_event = ffi/get_function(sdl, "SDL_PollEvent", [ffi/Type.Pointer], ffi/Type.I32)
-    let buffer = ffi/allocate(24)
+    let renderer = sdl_create_renderer(window, -1, 0)
+    println("Renderer Created")
 
-    let sdl_delay = ffi/get_function(sdl, "SDL_Delay", [ffi/Type.U32], ffi/Type.Void)
+    // Allocate memory for event buffer and rect
+    let buffer = ffi/allocate(56)
+    let rect_ptr = ffi/allocate(rect_size)
 
+    // Set up rectangle dimensions: x=200, y=150, w=240, h=180
+    ffi/set_i32(rect_ptr, 0, 200) // x
+    ffi/set_i32(rect_ptr, 4, 150) // y
+    ffi/set_i32(rect_ptr, 8, 240) // w
+    ffi/set_i32(rect_ptr, 12, 180) // h
 
-    // wait_for_input()
-    // This loop doesn't work because
-    // sdl_poll_event isn't working properly there
-    // need a in function way to do this. But also need to 
-    // fix this code.
-    loop(sdl_poll_event, sdl_delay, buffer)
+    loop_it(buffer, renderer, rect_ptr)
 
-    println("done")
+    println("Done")
+
 }
-
 
 
 

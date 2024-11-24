@@ -1,6 +1,6 @@
 use core::panic;
 use std::{
-    error::Error, mem, slice::{from_raw_parts, from_raw_parts_mut}, thread
+    error::Error, ffi::c_void, mem, slice::{from_raw_parts, from_raw_parts_mut}, thread
 };
 
 use libffi::{
@@ -127,7 +127,7 @@ extern "C" fn make_closure<Alloc: Allocator>(
 
     let num_free = BuiltInTypes::untag(num_free);
     let free_variable_pointer = free_variable_pointer as *const usize;
-    let start = unsafe { free_variable_pointer.sub(num_free - 1) };
+    let start = unsafe { free_variable_pointer.sub(num_free.saturating_sub(1)) };
     let free_variables = unsafe { from_raw_parts(start, num_free) };
     runtime
         .make_closure(stack_pointer, function, free_variables)
@@ -304,6 +304,7 @@ pub fn map_ffi_type<Alloc: Allocator>(runtime: &Runtime<Alloc>, value: usize) ->
         .unwrap_or_else(|| panic!("Could not find struct with id {}", struct_id));
     let name = struct_info.name.as_str().split_once("/").unwrap().1;
     match name {
+        "Type.U8" => Type::u8(),
         "Type.U32" => Type::u32(),
         "Type.I32" => Type::i32(),
         "Type.Pointer" => Type::pointer(),
@@ -314,7 +315,7 @@ pub fn map_ffi_type<Alloc: Allocator>(runtime: &Runtime<Alloc>, value: usize) ->
     }
 }
 
-pub fn map_ffi_return_type<Alloc: Allocator>(runtime: &Runtime<Alloc>, value: usize) -> FFIType {
+pub fn map_beagle_type_to_ffi_type<Alloc: Allocator>(runtime: &Runtime<Alloc>, value: usize) -> FFIType {
     let heap_object = HeapObject::from_tagged(value);
     let struct_id = BuiltInTypes::untag(heap_object.get_struct_id());
     let struct_info = runtime
@@ -323,6 +324,7 @@ pub fn map_ffi_return_type<Alloc: Allocator>(runtime: &Runtime<Alloc>, value: us
         .unwrap_or_else(|| panic!("Could not find struct with id {}", struct_id));
     let name = struct_info.name.as_str().split_once("/").unwrap().1;
     match name {
+        "Type.U8" => FFIType::U8,
         "Type.U32" => FFIType::U32,
         "Type.I32" => FFIType::I32,
         "Type.Pointer" => FFIType::Pointer,
@@ -365,6 +367,16 @@ extern "C" fn create_window_placeholder(
 }
 
 #[allow(unused)]
+extern "C" fn sdl_render_fill_rect_placeholder(
+    renderer: *const u32,
+    rect: *const u32,
+) -> usize {
+    println!("Arguments {:?}", (renderer, rect));
+    0
+}
+
+
+#[allow(unused)]
 extern "C" fn sdl_poll_event(buffer: *const u32) -> usize {
     println!("Arguments {:?}", buffer);
     0
@@ -384,34 +396,46 @@ pub extern "C" fn get_function<Alloc: Allocator>(
     let runtime = unsafe { &mut *runtime };
     let library = runtime.get_library(library_struct);
     let function_name = runtime.compiler.get_string(function_name);
+
+    // TODO: I should actually cache the closure, but I don't want to do that and mess up gc
+    if let Some(ffi_info_id) = runtime.find_ffi_info_by_name(&function_name) {
+        return unsafe { call_fn_1(runtime, "beagle.ffi/__create_ffi_function", ffi_info_id) }
+    }
+    
     let func_ptr = unsafe { library.get::<fn()>(function_name.as_bytes()).unwrap() };
 
     let code_ptr = unsafe { CodePtr(func_ptr.try_as_raw_ptr().unwrap()) };
 
     // use std::ffi::c_void;
-    // let code_ptr = if function_name == "SDL_CreateWindow" {
-    //     CodePtr(create_window_placeholder as *mut c_void)
+    // let code_ptr = if function_name == "SDL_RenderFillRect" {
+    //     CodePtr(sdl_render_fill_rect_placeholder as *mut c_void)
     // } else {
     //     unsafe { CodePtr(func_ptr.try_as_raw_ptr().unwrap()) }
     // };
 
-    let types: Vec<Type> = array_to_vec(persistent_vector_to_array(runtime, types))
+    let types : Vec<usize> = array_to_vec(persistent_vector_to_array(runtime, types))
         .iter()
-        .map(|x| map_ffi_type(runtime, *x))
+        .cloned()
         .collect();
-    let number_of_arguments = types.len();
+
+    let lib_ffi_types: Vec<Type> = types.iter().map(|t| map_ffi_type(runtime, *t)).collect();
+    let number_of_arguments = lib_ffi_types.len();
+    
+    let beagle_ffi_types = types.iter().map(|t| map_beagle_type_to_ffi_type(runtime, *t)).collect::<Vec<_>>();
 
     let lib_ffi_return_type = map_ffi_type(runtime, return_type);
-    let ffi_return_type = map_ffi_return_type(runtime, return_type);
+    let ffi_return_type = map_beagle_type_to_ffi_type(runtime, return_type);
 
-    let cif = Cif::new(types, lib_ffi_return_type.clone());
+    let cif = Cif::new(lib_ffi_types, lib_ffi_return_type.clone());
 
     let ffi_info_id = runtime.add_ffi_function_info(FFIInfo {
         function: code_ptr,
         cif,
         number_of_arguments,
+        argument_types: beagle_ffi_types,
         return_type: ffi_return_type,
     });
+    runtime.add_ffi_info_by_name(function_name, ffi_info_id);
     let ffi_info_id = BuiltInTypes::Int.tag(ffi_info_id as isize) as usize;
 
     unsafe { call_fn_1(runtime, "beagle.ffi/__create_ffi_function", ffi_info_id) }
@@ -464,38 +488,71 @@ pub unsafe extern "C" fn call_ffi_info<Alloc: Allocator>(
     let code_ptr = ffi_info.function;
     let arguments = [a1, a2, a3, a4, a5, a6];
     let args = &arguments[..ffi_info.number_of_arguments];
+    let argument_types = ffi_info.argument_types;
     let mut argument_pointers = vec![];
 
-    for argument in args.iter() {
+    for (argument, ffi_type) in args.iter().zip(argument_types.iter()) {
         let kind = BuiltInTypes::get_kind(*argument);
         match kind {
             BuiltInTypes::String => {
+                if ffi_type != &FFIType::String {
+                    panic!("Expected string, got {:?}", ffi_type);
+                }
                 let string = runtime.compiler.get_string(*argument);
                 let pointer = runtime.memory.native_arguments.write_c_string(string);
                 argument_pointers.push(arg(&pointer));
             }
             BuiltInTypes::Int => {
-                let pointer = runtime
-                    .memory
-                    .native_arguments
-                    .write_i32(BuiltInTypes::untag(*argument) as i32);
-                argument_pointers.push(arg(pointer));
+                match ffi_type {
+                    FFIType::U8 => {
+                        let pointer = runtime
+                            .memory
+                            .native_arguments
+                            .write_u8(BuiltInTypes::untag(*argument) as u8);
+                        argument_pointers.push(arg(pointer));
+                    }
+                    FFIType::U32 => {
+                        let pointer = runtime
+                            .memory
+                            .native_arguments
+                            .write_u32(BuiltInTypes::untag(*argument) as u32);
+                        argument_pointers.push(arg(pointer));
+                    }
+                    FFIType::I32 => {
+                        let pointer = runtime
+                            .memory
+                            .native_arguments
+                            .write_i32(BuiltInTypes::untag(*argument) as i32);
+                        argument_pointers.push(arg(pointer));
+                    }
+
+                    FFIType::Pointer | FFIType::MutablePointer | FFIType::String | FFIType::Void  => {
+                        panic!("Expected pointer, got {:?}", ffi_type);
+                    }
+                }
             }
             BuiltInTypes::HeapObject => {
+                if ffi_type != &FFIType::Pointer && ffi_type != &FFIType::MutablePointer {
+                    panic!("Expected pointer, got {:?}", ffi_type);
+                }
                 // TODO: Make this type safe
                 let heap_object = HeapObject::from_tagged(*argument);
                 let buffer = BuiltInTypes::untag(heap_object.get_field(0));
                 let pointer = runtime.memory.native_arguments.write_pointer(buffer);
-                argument_pointers.push(arg(&pointer));
+                argument_pointers.push(arg(pointer));
             }
             _ => panic!("Unsupported type: {:?}", kind),
         }
     }
 
-    match ffi_info.return_type {
+    let return_value = match ffi_info.return_type {
         FFIType::Void => {
             ffi_info.cif.call::<()>(code_ptr, &argument_pointers);
             BuiltInTypes::null_value() as usize
+        }
+        FFIType::U8 => {
+            let result = ffi_info.cif.call::<u8>(code_ptr, &argument_pointers);
+            BuiltInTypes::Int.tag(result as isize) as usize
         }
         FFIType::U32 => {
             let result = ffi_info.cif.call::<u32>(code_ptr, &argument_pointers);
@@ -518,7 +575,9 @@ pub unsafe extern "C" fn call_ffi_info<Alloc: Allocator>(
         FFIType::String => {
             todo!()
         }
-    }
+    };
+    runtime.memory.native_arguments.clear();
+    return_value
 }
 
 pub unsafe extern "C" fn copy_object<Alloc: Allocator>(
@@ -563,8 +622,10 @@ unsafe extern "C" fn ffi_allocate<Alloc: Allocator>(
     // I probably need a better answer than this
     // but for now we are just going to leak memory
     let size = BuiltInTypes::untag(size);
-    let buffer = Box::new(vec![0u8; size]);
-    let buffer_ptr = Box::into_raw(buffer);
+
+    let mut buffer: Vec<u8> = vec![0; size];
+    let buffer_ptr: *mut c_void = buffer.as_mut_ptr() as *mut c_void;
+    std::mem::forget(buffer);
 
     let buffer = BuiltInTypes::Int.tag(buffer_ptr as isize) as usize;
     call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", buffer)
@@ -595,6 +656,19 @@ unsafe extern "C" fn ffi_set_i32<Alloc: Allocator>(
     let value = BuiltInTypes::untag(value) as i32;
     *(buffer.add(offset) as *mut i32) = value;
     BuiltInTypes::null_value() as usize
+}
+
+
+unsafe extern "C" fn ffi_get_i32<Alloc: Allocator>(
+    _runtime: *mut Runtime<Alloc>,
+    buffer: usize,
+    offset: usize,
+) -> usize {
+    let buffer_object = HeapObject::from_tagged(buffer);
+    let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+    let offset = BuiltInTypes::untag(offset);
+    let value = *(buffer.add(offset) as *const i32);
+    BuiltInTypes::Int.tag(value as isize) as usize
 }
 
 extern "C" fn placeholder() -> usize {
@@ -723,6 +797,12 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         self.compiler.add_builtin_function(
             "beagle.ffi/set_i32",
             ffi_set_i32::<Alloc> as *const u8,
+            false,
+        )?;
+
+        self.compiler.add_builtin_function(
+            "beagle.ffi/get_i32",
+            ffi_get_i32::<Alloc> as *const u8,
             false,
         )?;
 
