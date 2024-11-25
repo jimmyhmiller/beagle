@@ -541,7 +541,10 @@ pub unsafe extern "C" fn call_ffi_info<Alloc: Allocator>(
                 let pointer = runtime.memory.native_arguments.write_pointer(buffer);
                 argument_pointers.push(arg(pointer));
             }
-            _ => panic!("Unsupported type: {:?}", kind),
+            _ => {
+                runtime.print(*argument);
+                panic!("Unsupported type: {:?}", kind)
+            }
         }
     }
 

@@ -3,6 +3,17 @@ namespace ffi_test
 import "beagle.ffi" as ffi
 import "beagle.primitive" as primitive
 
+struct State {
+    rect_x
+    rect_y
+    dx
+    dy
+    screen_width
+    screen_height
+}
+
+let state = atom(State { rect_x: 200, rect_y: 150, dx: 2, dy: 2, screen_width: 640, screen_height: 480 })
+
 let sdl = ffi/load_library("/opt/homebrew/lib/libSDL2-2.0.0.dylib")
 let sdl_init = ffi/get_function(sdl, "SDL_Init", [ffi/Type.U32], ffi/Type.I32)
 let sdl_create_window = ffi/get_function(
@@ -34,17 +45,56 @@ let sdl_render_fill_rect = ffi/get_function(
     ffi/Type.I32
 )
 
+let sdl_get_window_size = ffi/get_function(
+    sdl,
+    "SDL_GetWindowSize",
+    [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer],
+    ffi/Type.Void
+)
+
 // Rect structure: [x, y, w, h] (4 * 4 bytes = 16 bytes)
 let rect_size = 16
 
-fn loop_it(buffer, renderer, rect_ptr) {
+fn loop_it(buffer, renderer, rect_ptr, window) {
     sdl_poll_event(buffer)
     if ffi/get_u32(buffer, 0) == 256 {
         true
     } else {
+        // Check if window has been resized
+        let current_state = deref(state)
+        let width_ptr = ffi/allocate(4)
+        let height_ptr = ffi/allocate(4)
+        sdl_get_window_size(window, width_ptr, height_ptr)
+
+        let new_width = ffi/get_i32(width_ptr, 0)
+        let new_height = ffi/get_i32(height_ptr, 0)
+
+        let updated_state = swap!(state, fn(s) {
+            State {
+                rect_x: s.rect_x + s.dx,
+                rect_y: s.rect_y + s.dy,
+                dx: if s.rect_x + s.dx <= 0 || s.rect_x + s.dx + 240 >= s.screen_width {
+                    s.dx * -1
+                } else {
+                    s.dx
+                },
+                dy: if s.rect_y + s.dy <= 0 || s.rect_y + s.dy + 180 >= s.screen_height {
+                    s.dy * -1
+                } else {
+                    s.dy
+                },
+                screen_width: new_width,
+                screen_height: new_height,
+            }
+        })
+
         // Clear the renderer
         sdl_set_render_draw_color(renderer, 0, 0, 0, 255) // Black background
         sdl_render_clear(renderer)
+
+        // Update the rectangle position
+        ffi/set_i32(rect_ptr, 0, updated_state.rect_x)
+        ffi/set_i32(rect_ptr, 4, updated_state.rect_y)
 
         // Draw the rectangle
         sdl_set_render_draw_color(renderer, 255, 0, 0, 255) // Red color
@@ -53,8 +103,8 @@ fn loop_it(buffer, renderer, rect_ptr) {
         // Present the updated screen
         sdl_render_present(renderer)
 
-        sdl_delay(16)
-        loop_it(buffer, renderer, rect_ptr)
+        // sdl_delay(16)
+        loop_it(buffer, renderer, rect_ptr, window)
     }
 }
 
@@ -66,7 +116,7 @@ fn main() {
     let window = sdl_create_window("SDL2 Window", 100, 100, 640, 480, 4)
     println("Window Created")
 
-    let renderer = sdl_create_renderer(window, -1, 0)
+    let renderer = sdl_create_renderer(window, -1, 2)
     println("Renderer Created")
 
     // Allocate memory for event buffer and rect
@@ -79,61 +129,7 @@ fn main() {
     ffi/set_i32(rect_ptr, 8, 240) // w
     ffi/set_i32(rect_ptr, 12, 180) // h
 
-    loop_it(buffer, renderer, rect_ptr)
+    loop_it(buffer, renderer, rect_ptr, window)
 
     println("Done")
-
 }
-
-
-
-// Made up example code from chatgpt
-// namespace sdl_example
-
-// // Import the ffi module explicitly
-// import "ffi" as ffi
-
-// // Load the SDL2 library dynamically using ffi
-// let sdl = ffi/load_lib("/opt/homebrew/lib/libSDL2-2.0.0.dylib")
-
-// fn main() {
-//     // SDL_Init (fn(u32) -> i32)
-//     let SDL_Init = ffi/get_function(sdl, "SDL_Init", [ffi/u32], ffi/i32)
-//     SDL_Init(0)
-
-//     // SDL_CreateWindow (fn(*const i8, i32, i32, i32, i32, u32) -> *mut ())
-//     let SDL_CreateWindow = ffi/get_function(sdl, "SDL_CreateWindow", 
-//         [ffi/pointer, ffi/i32, ffi/i32, ffi/i32, ffi/i32, ffi/u32], ffi/pointer)
-//     let title = "SDL2 Window" // Window title
-//     let window = SDL_CreateWindow(title, 100, 100, 640, 480, 0)
-
-//     // SDL_PollEvent (fn(*mut u8) -> i32)
-//     let SDL_PollEvent = ffi/get_function(sdl, "SDL_PollEvent", [ffi/mutable_pointer], ffi/i32)
-//     let eventBuffer = ffi/allocate(24) // Dynamic buffer for SDL_Event (at least 24 bytes)
-//     let quit = false
-
-//     // Event loop
-//     while !quit {
-//         if SDL_PollEvent(eventBuffer) != 0 {
-//             // Correctly interpret the first 4 bytes as a u32 for the event type
-//             let eventTypeBytes = ffi/get_bytes(eventBuffer, 0, 4)
-//             let eventType = ffi/u32_from_bytes(eventTypeBytes)
-            
-//             if eventType == 256 { // SDL_QUIT event
-//                 quit = true
-//             }
-//         }
-
-//         // SDL_Delay (fn(u32) -> void)
-//         let SDL_Delay = ffi/get_function(sdl, "SDL_Delay", [ffi/u32], ffi/void)
-//         SDL_Delay(16)
-//     }
-
-//     // SDL_DestroyWindow (fn(*mut ()) -> void)
-//     let SDL_DestroyWindow = ffi/get_function(sdl, "SDL_DestroyWindow", [ffi/pointer], ffi/void)
-//     SDL_DestroyWindow(window)
-
-//     // SDL_Quit (fn() -> void)
-//     let SDL_Quit = ffi/get_function(sdl, "SDL_Quit", [], ffi/void)
-//     SDL_Quit()
-// }
