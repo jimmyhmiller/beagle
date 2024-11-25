@@ -73,6 +73,7 @@ impl SimpleRegisterAllocator {
         if register.argument.is_some() {
             return;
         }
+
         assert!(register.is_physical);
         self.free_registers.push(register);
     }
@@ -84,8 +85,16 @@ impl SimpleRegisterAllocator {
         let mut resulting_instructions: Vec<Instruction> = vec![];
         let mut spilled_registers: HashMap<VirtualRegister, usize> = HashMap::new();
         let mut to_free = vec![];
+        let init_free_count = self.free_registers.len();
         for (instruction_index, instruction) in cloned_instructions.iter_mut().enumerate() {
             // TODO: My labels are all off. I need to fix that
+            debug_assert!(
+                self.free_registers.len() + self.allocated_registers.len() == init_free_count,
+                "Free registers: {:#?}, allocated registers: {:#?}",
+                self.free_registers,
+                self.allocated_registers
+            );
+
 
             for register in instruction.get_registers() {
                 if let Some(local_offset) = spilled_registers.get(&register) {
@@ -95,6 +104,7 @@ impl SimpleRegisterAllocator {
                             Value::Register(new_register),
                             Value::Local(*local_offset),
                         ));
+                        to_free.push(register);
                         // self.num_locals -= 1;
                     } else {
                         // TODO: I think I should actually spill here
@@ -125,6 +135,12 @@ impl SimpleRegisterAllocator {
                                     .entry(new_register)
                                     .or_default()
                                     .push(instruction_index);
+                                debug_assert!(
+                                    self.free_registers.len() + self.allocated_registers.len() >= init_free_count,
+                                    "Free registers: {:#?}, allocated registers: {:#?}",
+                                    self.free_registers,
+                                    self.allocated_registers
+                                );
                                 break;
                             } else if let Some(new_register) = self.get_free_register() {
                                 self.allocated_registers.insert(register, new_register);
@@ -133,6 +149,12 @@ impl SimpleRegisterAllocator {
                                     .entry(new_register)
                                     .or_default()
                                     .push(instruction_index);
+                                debug_assert!(
+                                    self.free_registers.len() + self.allocated_registers.len() >= init_free_count,
+                                    "Free registers: {:#?}, allocated registers: {:#?}",
+                                    self.free_registers,
+                                    self.allocated_registers
+                                );
                                 break;
                             } else {
                                 // panic!("Spilling isn't working properly yet");
@@ -150,15 +172,27 @@ impl SimpleRegisterAllocator {
                                     })
                                     .unwrap();
                                 resulting_instructions.insert(index + 1, spilled);
+                                debug_assert!(
+                                    self.free_registers.len() + self.allocated_registers.len() >= init_free_count,
+                                    "Free registers: {:#?}, allocated registers: {:#?}",
+                                    self.free_registers,
+                                    self.allocated_registers
+                                );
                             }
                         }
                     }
 
-                    if end == instruction_index {
+                    if end <= instruction_index {
                         to_free.push(register);
                     }
                 }
             }
+            assert!(
+                self.free_registers.len() + self.allocated_registers.len() >= init_free_count,
+                "Free registers: {:#?}, allocated registers: {:#?}",
+                self.free_registers,
+                self.allocated_registers
+            );
             for register in to_free.iter() {
                 if let Some(allocated_register) = self.allocated_registers.get(register) {
                     let allocated_register = *allocated_register;
@@ -169,6 +203,12 @@ impl SimpleRegisterAllocator {
                         .or_default()
                         .push(instruction_index);
                 }
+                debug_assert!(
+                    self.free_registers.len() + self.allocated_registers.len() >= init_free_count,
+                    "Free registers: {:#?}, allocated registers: {:#?}",
+                    self.free_registers,
+                    self.allocated_registers
+                );
             }
 
             match instruction {

@@ -476,23 +476,30 @@ impl Parser {
 
     fn get_precedence(&self) -> (usize, Associativity) {
         match self.current_token() {
+            // Logical OR (||) has the lowest precedence among common operators.
+            Token::Or => (10, Associativity::Left),
+            // Logical AND (&&) comes after OR.
+            Token::And => (20, Associativity::Left),
+            // Comparison operators.
             Token::LessThanOrEqual
             | Token::LessThan
             | Token::EqualEqual
             | Token::NotEqual
             | Token::GreaterThan
-            | Token::GreaterThanOrEqual => (10, Associativity::Left),
-            Token::Plus | Token::Minus | Token::And | Token::Or => (20, Associativity::Left),
-            Token::Mul
-            | Token::Div
-            | Token::BitWiseAnd
-            | Token::BitWiseOr
-            | Token::BitWiseXor
-            | Token::ShiftLeft
-            | Token::ShiftRight
-            | Token::ShiftRightZero => (30, Associativity::Left),
-            // TODO: No idea what this should be
-            Token::Dot => (40, Associativity::Left),
+            | Token::GreaterThanOrEqual => (30, Associativity::Left),
+            // Addition and subtraction.
+            Token::Plus | Token::Minus => (40, Associativity::Left),
+            // Multiplication, division, etc.
+            Token::Mul | Token::Div => (50, Associativity::Left),
+            // Bitwise operations (lower precedence than arithmetic).
+            Token::BitWiseOr => (60, Associativity::Left),
+            Token::BitWiseXor => (70, Associativity::Left),
+            Token::BitWiseAnd => (80, Associativity::Left),
+            // Shift operations.
+            Token::ShiftLeft | Token::ShiftRight | Token::ShiftRightZero => (90, Associativity::Left),
+            // Dot (e.g., for member access) should have very high precedence.
+            Token::Dot => (100, Associativity::Left),
+            // Default for unrecognized tokens.
             _ => (0, Associativity::Left),
         }
     }
@@ -1543,6 +1550,15 @@ fn parse_struct_creation() {
             left: y
             right: y
         }"
+    };
+    println!("{:#?}", ast);
+}
+
+#[test] 
+fn parse_expression(){
+    let ast = parse!{
+        "current_state.rect_y + current_state.dy <= 0 ||
+                         current_state.rect_y + current_state.dy + 180 >= screen_height"
     };
     println!("{:#?}", ast);
 }
