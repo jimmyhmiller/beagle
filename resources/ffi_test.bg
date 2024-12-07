@@ -55,6 +55,28 @@ let sdl_get_window_size = ffi/get_function(
 // Rect structure: [x, y, w, h] (4 * 4 bytes = 16 bytes)
 let rect_size = 16
 
+fn update_state(new_width, new_height) {
+    swap!(state, fn(s) {
+        State {
+            rect_x: s.rect_x + s.dx,
+            rect_y: s.rect_y + s.dy,
+            dx: if s.rect_x + s.dx <= 0 || s.rect_x + s.dx + 240 >= s.screen_width {
+                s.dx * -1
+            } else {
+                s.dx
+            },
+            dy: if s.rect_y + s.dy <= 0 || s.rect_y + s.dy + 180 >= s.screen_height {
+                s.dy * -1
+            } else {
+                s.dy
+            },
+            screen_width: new_width,
+            screen_height: new_height,
+        }
+    })
+}
+
+
 fn loop_it(buffer, renderer, rect_ptr, window) {
     sdl_poll_event(buffer)
     if ffi/get_u32(buffer, 0) == 256 {
@@ -69,24 +91,7 @@ fn loop_it(buffer, renderer, rect_ptr, window) {
         let new_width = ffi/get_i32(width_ptr, 0)
         let new_height = ffi/get_i32(height_ptr, 0)
 
-        let updated_state = swap!(state, fn(s) {
-            State {
-                rect_x: s.rect_x + s.dx,
-                rect_y: s.rect_y + s.dy,
-                dx: if s.rect_x + s.dx <= 0 || s.rect_x + s.dx + 240 >= s.screen_width {
-                    s.dx * -1
-                } else {
-                    s.dx
-                },
-                dy: if s.rect_y + s.dy <= 0 || s.rect_y + s.dy + 180 >= s.screen_height {
-                    s.dy * -1
-                } else {
-                    s.dy
-                },
-                screen_width: new_width,
-                screen_height: new_height,
-            }
-        })
+        let updated_state = update_state(new_width, new_height)
 
         // Clear the renderer
         sdl_set_render_draw_color(renderer, 0, 0, 0, 255) // Black background
@@ -103,7 +108,7 @@ fn loop_it(buffer, renderer, rect_ptr, window) {
         // Present the updated screen
         sdl_render_present(renderer)
 
-        // sdl_delay(16)
+        sdl_delay(16)
         loop_it(buffer, renderer, rect_ptr, window)
     }
 }
