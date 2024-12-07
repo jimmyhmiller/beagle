@@ -140,7 +140,7 @@ pub struct Header {
     pub type_id: u8,
     pub type_data: u32,
     pub size: u8,
-    pub small: bool,
+    pub opaque: bool,
     pub marked: bool,
 }
 
@@ -148,7 +148,7 @@ impl Header {
     // | Byte 7  | Bytes 3-6     | Byte 2 | Byte 1  | Byte 0               |
     // |---------|---------------|--------|---------|----------------------|
     // | Type    | Type Metadata | Size   | Padding | Flag bits            |
-    // |         | (4 bytes)     |        |         | Small object (bit 1) |
+    // |         | (4 bytes)     |        |         | Opaque object (bit 1) |
     // |         |               |        |         | Marked (bit 0)       |
 
     fn to_usize(self) -> usize {
@@ -156,7 +156,7 @@ impl Header {
         data |= (self.type_id as usize) << 56;
         data |= (self.type_data as usize) << 24;
         data |= (self.size as usize) << 16;
-        if self.small {
+        if self.opaque {
             data |= 0b10;
         }
         if self.marked {
@@ -169,13 +169,13 @@ impl Header {
         let _type = (data >> 56) as u8;
         let type_data = (data >> 24) as u32;
         let size = (data >> 16) as u8;
-        let small = (data & 0b10) == 0b10;
+        let opaque = (data & 0b10) == 0b10;
         let marked = (data & 0b1) == 0b1;
         Header {
             type_id: _type,
             type_data,
             size,
-            small,
+            opaque,
             marked,
         }
     }
@@ -199,7 +199,7 @@ fn header() {
         type_id: 0,
         type_data: 0,
         size: 0b0,
-        small: true,
+        opaque: true,
         marked: false,
     };
     let data = header.to_usize();
@@ -215,7 +215,7 @@ fn header() {
                         type_id: t,
                         type_data: u32::MAX,
                         size: s,
-                        small: *sm,
+                        opaque: *sm,
                         marked: *m,
                     };
                     let data = header.to_usize();
@@ -302,6 +302,9 @@ impl HeapObject {
     }
 
     pub fn get_fields(&self) -> &[usize] {
+        if self.is_opaque_object() {
+            return &[];
+        }
         let size = self.fields_size();
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
@@ -321,15 +324,13 @@ impl HeapObject {
         let fields = self.get_fields();
         fields
             .iter()
-            // Hack to make sure we don't get any references if this is a small object
-            // Trying to do an empty in a condition makes the type checker complain
-            .filter(|_x| !self.is_small_object())
+            .filter(|_x| !self.is_opaque_object())
             .filter(|x| BuiltInTypes::is_heap_pointer(**x))
             .map(|&pointer| HeapObject::from_tagged(pointer))
     }
 
     pub fn get_fields_mut(&mut self) -> &mut [usize] {
-        if self.is_small_object() {
+        if self.is_opaque_object() {
             return &mut [];
         }
         let size = self.fields_size();
@@ -371,7 +372,7 @@ impl HeapObject {
             type_id: 0,
             type_data: 0,
             size: field_size.to_words() as u8,
-            small: false,
+            opaque: false,
             marked: false,
         };
 
@@ -445,12 +446,12 @@ impl HeapObject {
         header.type_data as usize
     }
 
-    pub fn is_small_object(&self) -> bool {
+    pub fn is_opaque_object(&self) -> bool {
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
         let data: usize = unsafe { *pointer.cast::<usize>() };
         let header = Header::from_usize(data);
-        header.small
+        header.opaque
     }
 
     pub fn get_header(&self) -> Header {
@@ -554,7 +555,7 @@ impl Ir {
             type_id: 0,
             type_data: 0,
             size: 1,
-            small: true,
+            opaque: true,
             marked: false,
         };
         self.heap_store(small_object_pointer, Value::RawValue(header.to_usize()));

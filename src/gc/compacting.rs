@@ -342,7 +342,9 @@ impl CompactingHeap {
             if object.marked() {
                 panic!("We are copying to this space, nothing should be marked");
             }
-            if object.is_small_object() || object.is_zero_size() {
+            if object.is_opaque_object() || object.is_zero_size() {
+                // TODO(DuplicatingOpaque): I think right now I'm duplicating opaque objects
+                // Once I have a good means of visualizing that, it would be obvious
                 continue;
             }
             for datum in object.get_fields_mut() {
@@ -356,7 +358,8 @@ impl CompactingHeap {
     unsafe fn copy_using_cheneys_algorithm(&mut self, root: usize) -> usize {
         let heap_object = HeapObject::from_tagged(root);
 
-        if !heap_object.is_zero_size() && !heap_object.is_small_object() {
+        if !heap_object.is_zero_size() && !heap_object.is_opaque_object() {
+            // TODO(DuplicatingOpaque)
             let first_field = heap_object.get_field(0);
             if BuiltInTypes::is_heap_pointer(heap_object.get_field(0)) {
                 let untagged_data = BuiltInTypes::untag(first_field);
@@ -366,7 +369,8 @@ impl CompactingHeap {
                 }
             }
         }
-        if heap_object.is_zero_size() || heap_object.is_small_object() {
+        if heap_object.is_zero_size() || heap_object.is_opaque_object() {
+            // TODO(DuplicatingOpaque)
             let data = heap_object.get_full_object_data();
             let new_pointer = self.to_space.copy_data_to_offset(data);
             let tagged_new = BuiltInTypes::get_kind(root).tag(new_pointer) as usize;
