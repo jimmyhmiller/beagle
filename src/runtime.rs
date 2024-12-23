@@ -22,7 +22,7 @@ use crate::{
     gc::{AllocateAction, Allocator, AllocatorOptions, StackMap, StackMapDetails, STACK_SIZE},
     ir::{StringValue, Value},
     parser::Parser,
-    types::{BuiltInTypes, HeapObject},
+    types::{BuiltInTypes, Header, HeapObject, Tagged},
     CommandLineArguments, Data, Message,
 };
 
@@ -242,7 +242,7 @@ impl MMapMutWithOffset {
             self.mmap[self.offset] = byte;
             self.offset += 1;
         }
-        
+
         (unsafe { &*(self.mmap.as_ptr().add(start) as *const i32) }) as _
     }
 
@@ -251,10 +251,10 @@ impl MMapMutWithOffset {
         self.mmap[start] = argument;
         // We need to make sure we keep correct alignment
         self.offset += 2;
-        unsafe { &*(self.mmap.as_ptr().add(start) as *const u8) }
+        unsafe { &*(self.mmap.as_ptr().add(start)) }
     }
 
-    pub fn write_pointer(&mut self, value: usize) -> & *mut c_void {
+    pub fn write_pointer(&mut self, value: usize) -> &*mut c_void {
         let start = self.offset;
         let bytes = value.to_le_bytes();
         for byte in bytes {
@@ -267,7 +267,6 @@ impl MMapMutWithOffset {
     pub fn clear(&mut self) {
         self.offset = 0;
     }
-    
 }
 
 pub struct Memory<Alloc: Allocator> {
@@ -297,6 +296,22 @@ impl<Alloc: Allocator> Memory<Alloc> {
         }
 
         self.join_handles.len()
+    }
+
+    pub fn alloc_string(&mut self, string: String) -> Result<Tagged, Box<dyn Error>> {
+        let bytes = string.as_bytes();
+        let words = bytes.len() / 8 + 1;
+        let pointer = self.heap.allocate(words, BuiltInTypes::HeapObject)?;
+        let mut heap_object = HeapObject::from_untagged(pointer);
+        heap_object.writer_header_direct(Header {
+            type_id: 2,
+            type_data: bytes.len() as u32,
+            size: words as u8,
+            opaque: true,
+            marked: false,
+        });
+        heap_object.write_fields(bytes);
+        Ok(BuiltInTypes::HeapObject.tagged(pointer as usize))
     }
 }
 
@@ -855,26 +870,47 @@ impl Compiler {
                 // I need to figure out what kind of heap object I have
                 let object = HeapObject::from_tagged(value);
                 let header = object.get_header();
-                if header.type_id != 0 {
-                    // This isn't a struct and right now
-                    // we don't have a print system for other types
-                    // so we are just going to print it like an array
-                    let fields = object.get_fields();
-                    let mut repr = "[ ".to_string();
-                    for (index, field) in fields.iter().enumerate() {
-                        repr.push_str(&self.get_repr(*field, depth + 1)?);
-                        if index != fields.len() - 1 {
-                            repr.push_str(", ");
-                        }
+
+                // TODO: Make this documented and good
+                match header.type_id {
+                    0 => {
+                        let struct_id = BuiltInTypes::untag(object.get_struct_id());
+                        let struct_value = self.structs.get_by_id(struct_id);
+                        Some(self.get_struct_repr(struct_value?, object.get_fields(), depth + 1)?)
                     }
-                    repr.push_str(" ]");
-                    return Some(repr);
+                    1 => {
+                        let fields = object.get_fields();
+                        let mut repr = "[ ".to_string();
+                        for (index, field) in fields.iter().enumerate() {
+                            repr.push_str(&self.get_repr(*field, depth + 1)?);
+                            if index != fields.len() - 1 {
+                                repr.push_str(", ");
+                            }
+                        }
+                        repr.push_str(" ]");
+                        Some(repr)
+                    }
+                    2 => {
+                        let bytes = object.get_string_bytes();
+                        let string = std::str::from_utf8(bytes).unwrap();
+                        Some(string.to_string())
+                    }
+                    _ => Some("Unknown".to_string()),
                 }
-                // TODO: abstract over this (memory-layout)
-                let struct_id = BuiltInTypes::untag(object.get_struct_id());
-                let struct_value = self.structs.get_by_id(struct_id);
-                Some(self.get_struct_repr(struct_value?, object.get_fields(), depth + 1)?)
             }
+        }
+    }
+
+    pub fn compile_string(&mut self, string: &str) -> Result<usize, Box<dyn Error>> {
+        let mut parser = Parser::new("".to_string(), string.to_string());
+        let ast = parser.parse();
+        let top_level = self.compile_ast(ast, "REPL_FUNCTION".to_string())?;
+        if let Some(top_level) = top_level {
+            let function = self.get_function_by_name(&top_level).unwrap();
+            let function_pointer = self.get_pointer(function).unwrap();
+            Ok(function_pointer)
+        } else {
+            Ok(0)
         }
     }
 
@@ -901,7 +937,10 @@ impl Compiler {
 
         let mut top_levels_to_run = self.compile_dependencies(&ast)?;
 
-        let top_level = self.compile_ast(ast)?;
+        let top_level = self.compile_ast(
+            ast,
+            format!("{}/__top_level", self.current_namespace_name()),
+        )?;
         if let Some(top_level) = top_level {
             top_levels_to_run.push(top_level);
         }
@@ -929,7 +968,11 @@ impl Compiler {
         Ok(top_levels_to_run)
     }
 
-    fn compile_ast(&mut self, ast: crate::ast::Ast) -> Result<Option<String>, Box<dyn Error>> {
+    fn compile_ast(
+        &mut self,
+        ast: crate::ast::Ast,
+        top_level_name: String,
+    ) -> Result<Option<String>, Box<dyn Error>> {
         let mut ir = ast.compile(self);
         if ast.has_top_level() {
             let arm = LowLevelArm::new();
@@ -939,9 +982,8 @@ impl Compiler {
             let runtime_ptr = self.get_runtime_ptr() as usize;
             let mut arm = ir.compile(arm, error_fn_pointer, runtime_ptr);
             let max_locals = arm.max_locals as usize;
-            let function_name = format!("{}/__top_level", self.current_namespace_name());
-            self.upsert_function(Some(&function_name), &mut arm, max_locals)?;
-            return Ok(Some(function_name));
+            self.upsert_function(Some(&top_level_name), &mut arm, max_locals)?;
+            return Ok(Some(top_level_name));
         }
         Ok(None)
     }
@@ -1739,11 +1781,11 @@ impl<Alloc: Allocator> Runtime<Alloc> {
     pub fn get_ffi_info(&self, ffi_info_id: usize) -> &FFIInfo {
         self.ffi_function_info.get(ffi_info_id).unwrap()
     }
-    
+
     pub fn add_ffi_info_by_name(&mut self, function_name: String, ffi_info_id: usize) {
         self.ffi_info_by_name.insert(function_name, ffi_info_id);
     }
-    
+
     pub fn find_ffi_info_by_name(&self, function_name: &str) -> Option<usize> {
         self.ffi_info_by_name.get(function_name).cloned()
     }

@@ -1,0 +1,22 @@
+namespace repl_test
+
+import "beagle.builtin" as builtin
+
+let y = 3
+
+fn print_it() {
+    println("it")
+}
+
+fn repl() {
+    let x = builtin/wait_for_input()
+    println(eval(x))
+    repl()
+}
+
+fn main() {
+    thread(repl)
+    sleep(5000)
+    print_it()
+    main()
+}

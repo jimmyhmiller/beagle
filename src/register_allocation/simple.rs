@@ -95,7 +95,6 @@ impl SimpleRegisterAllocator {
                 self.allocated_registers
             );
 
-
             for register in instruction.get_registers() {
                 if let Some(local_offset) = spilled_registers.get(&register) {
                     if let Some(new_register) = self.get_free_register() {
@@ -136,7 +135,8 @@ impl SimpleRegisterAllocator {
                                     .or_default()
                                     .push(instruction_index);
                                 debug_assert!(
-                                    self.free_registers.len() + self.allocated_registers.len() >= init_free_count,
+                                    self.free_registers.len() + self.allocated_registers.len()
+                                        >= init_free_count,
                                     "Free registers: {:#?}, allocated registers: {:#?}",
                                     self.free_registers,
                                     self.allocated_registers
@@ -150,7 +150,8 @@ impl SimpleRegisterAllocator {
                                     .or_default()
                                     .push(instruction_index);
                                 debug_assert!(
-                                    self.free_registers.len() + self.allocated_registers.len() >= init_free_count,
+                                    self.free_registers.len() + self.allocated_registers.len()
+                                        >= init_free_count,
                                     "Free registers: {:#?}, allocated registers: {:#?}",
                                     self.free_registers,
                                     self.allocated_registers
@@ -173,7 +174,8 @@ impl SimpleRegisterAllocator {
                                     .unwrap();
                                 resulting_instructions.insert(index + 1, spilled);
                                 debug_assert!(
-                                    self.free_registers.len() + self.allocated_registers.len() >= init_free_count,
+                                    self.free_registers.len() + self.allocated_registers.len()
+                                        >= init_free_count,
                                     "Free registers: {:#?}, allocated registers: {:#?}",
                                     self.free_registers,
                                     self.allocated_registers

@@ -307,7 +307,6 @@ impl SimpleMarkSweepHeap {
     }
 
     pub fn mark(&mut self, stack_base: usize, stack_map: &StackMap, stack_pointer: usize) {
-
         // I'm adding to the end of the stack I've allocated so I only need to go from the end
         // til the current stack
         let stack_end = stack_base;

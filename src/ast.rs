@@ -304,7 +304,7 @@ impl<'a> AstCompiler<'a> {
                     self.tail_position();
                     last = self.call_compile(ast);
                 }
-                last
+                self.ir.ret(last)
             }
             Ast::Function { name, args, body } => {
                 self.create_new_environment();
@@ -444,9 +444,22 @@ impl<'a> AstCompiler<'a> {
                         );
                     }
                     return function;
-                }
+                } 
 
                 let function = self.ir.function(Value::Function(function_pointer));
+                if let Some(name) = name {
+                    let function_reg = self.ir.assign_new(function);
+                    let namespace_id = self.compiler.current_namespace_id();
+                    let reserved_namespace_slot = self.compiler.reserve_namespace_slot(&name);
+                    self.store_namespaced_variable(
+                        Value::RawValue(reserved_namespace_slot),
+                        function_reg,
+                    );
+                    self.insert_variable(
+                        name.to_string(),
+                        VariableLocation::NamespaceVariable(namespace_id, reserved_namespace_slot),
+                    );
+                }
 
                 if let Some(VariableLocation::Local(index)) = variable_locaton {
                     let reg = self.ir.assign_new(function);
@@ -1061,7 +1074,7 @@ impl<'a> AstCompiler<'a> {
     fn create_free_if_closable(&mut self, name: &String) -> Option<VariableLocation> {
         let mut can_be_closed = false;
         for environment in self.environment_stack.iter_mut().rev().skip(1) {
-            if environment.variables.get(name).is_some() {
+            if environment.variables.contains_key(name) {
                 can_be_closed = true;
                 break;
             }
@@ -1092,17 +1105,15 @@ impl<'a> AstCompiler<'a> {
             .is_some()
         {
             self.compiler.current_namespace_name() + "/" + name
-        } else if let Some(_) = self
+        } else if self
             .compiler
-            .find_function(&("beagle.core/".to_owned() + name))
+            .find_function(&("beagle.core/".to_owned() + name)).is_some()
         {
             "beagle.core/".to_string() + name
+        } else if self.create_free_if_closable(name).is_some() {
+            name.clone()
         } else {
-            if let Some(_) = self.create_free_if_closable(name) {
-                name.clone()
-            } else {
-                panic!("Can't find function {}", name);
-            }
+            panic!("Can't find function {}", name);
         };
         full_function_name
     }
@@ -1122,7 +1133,8 @@ impl<'a> AstCompiler<'a> {
         // TODO: It might be better to change the layout of these jumps
         // so that the non-closure case is the fall through
         // I just have to think about the correct way to do that
-        self.ir.jump_if(call_closure, Condition::Equal, tag, closure_tag);
+        self.ir
+            .jump_if(call_closure, Condition::Equal, tag, closure_tag);
         let result = self.ir.call(function_register.into(), args.clone());
         self.ir.assign(ret_register, result);
         self.ir.jump(exit_closure_call);
@@ -1148,7 +1160,6 @@ impl<'a> AstCompiler<'a> {
         self.ir.write_label(exit_closure_call);
         ret_register.into()
         // self.ir.breakpoint();
-
     }
 
     fn compile_closure(&mut self, function_pointer: usize) -> Value {
@@ -1217,7 +1228,8 @@ impl<'a> AstCompiler<'a> {
 
         let stack_pointer = self.ir.get_stack_pointer_imm(0);
 
-        let closure = self.ir.call(
+        
+        self.ir.call(
             make_closure_reg.into(),
             vec![
                 runtime_pointer_reg.into(),
@@ -1226,8 +1238,7 @@ impl<'a> AstCompiler<'a> {
                 num_free_reg.into(),
                 free_variable_pointer,
             ],
-        );
-        closure
+        )
     }
 
     fn find_or_insert_local(&mut self, name: &str) -> usize {
@@ -1488,9 +1499,11 @@ impl<'a> AstCompiler<'a> {
                 let arg0 = self.resolve_variable(&arg0_location);
                 let arg0: VirtualRegister = self.ir.assign_new(arg0);
                 let arg0 = self.ir.untag(arg0.into());
-                let index = self.ir.assign_new(Value::TaggedConstant((*index + 3) as isize));
-                self.ir.read_field(arg0.into(), index.into()).into()
-            },
+                let index = self
+                    .ir
+                    .assign_new(Value::TaggedConstant((*index + 3) as isize));
+                self.ir.read_field(arg0, index.into())
+            }
             VariableLocation::NamespaceVariable(namespace, slot) => {
                 let slot = self.ir.assign_new(Value::RawValue(*slot));
                 let namespace = self.ir.assign_new(Value::RawValue(*namespace));
@@ -1507,7 +1520,7 @@ impl<'a> AstCompiler<'a> {
             return false;
         }
         if name.contains("/") {
-            return *name == self.own_fully_qualified_name().unwrap();
+            *name == self.own_fully_qualified_name().unwrap()
         } else {
             name == self.name.as_ref().unwrap()
         }
@@ -1532,15 +1545,21 @@ impl<'a> AstCompiler<'a> {
             (self.compiler.current_namespace_name(), name.to_string())
         }
     }
-    
+
     fn register_arg_location(&mut self, index: usize, local: VariableLocation) {
-        self.get_current_env_mut().argument_locations.insert(index, local);
+        self.get_current_env_mut()
+            .argument_locations
+            .insert(index, local);
     }
 
     fn get_argument_location(&self, index: usize) -> VariableLocation {
-        self.get_current_env().argument_locations.get(&index).unwrap().clone()
+        self.get_current_env()
+            .argument_locations
+            .get(&index)
+            .unwrap()
+            .clone()
     }
-    
+
     fn is_qualifed_function_name(&self, name: &str) -> bool {
         name.contains("/")
     }

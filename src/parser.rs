@@ -496,7 +496,9 @@ impl Parser {
             Token::BitWiseXor => (70, Associativity::Left),
             Token::BitWiseAnd => (80, Associativity::Left),
             // Shift operations.
-            Token::ShiftLeft | Token::ShiftRight | Token::ShiftRightZero => (90, Associativity::Left),
+            Token::ShiftLeft | Token::ShiftRight | Token::ShiftRightZero => {
+                (90, Associativity::Left)
+            }
             // Dot (e.g., for member access) should have very high precedence.
             Token::Dot => (100, Associativity::Left),
             // Default for unrecognized tokens.
@@ -812,7 +814,7 @@ impl Parser {
         if self.is_as() {
             self.consume();
         } else {
-            panic!("Expected at got {:?}", self.get_token_repr());
+            panic!("Expected as got {:?}", self.get_token_repr());
         }
     }
 
@@ -1554,9 +1556,9 @@ fn parse_struct_creation() {
     println!("{:#?}", ast);
 }
 
-#[test] 
-fn parse_expression(){
-    let ast = parse!{
+#[test]
+fn parse_expression() {
+    let ast = parse! {
         "current_state.rect_y + current_state.dy <= 0 ||
                          current_state.rect_y + current_state.dy + 180 >= screen_height"
     };
