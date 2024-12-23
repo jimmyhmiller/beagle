@@ -57,8 +57,8 @@ fn call_function() {
         testGc(0)
         testGc(0)
     };
-    // thread(f);
-    f()
+    thread(f);
+    // f()
 }
 
 fn swap_counter_in_many_threads(counter, n) {
@@ -67,8 +67,8 @@ fn swap_counter_in_many_threads(counter, n) {
     };
 
     if n > 0 {
-        // thread(f);
-        f()
+        thread(f);
+        // f()
         swap_counter_in_many_threads(counter, n - 1)
     }
 }

@@ -11,7 +11,7 @@
             "cargo": {
                 "args": [
                     "build",
-                    // "--release",
+                    "--release",
                     // "--profile=release-with-debug",
                     "--bin=main",
                     "--package=main",

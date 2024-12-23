@@ -2,6 +2,7 @@ namespace ffi_test
 
 import "beagle.ffi" as ffi
 import "beagle.primitive" as primitive
+import "repl_test" as repl
 
 struct State {
     rect_x
@@ -10,9 +11,25 @@ struct State {
     dy
     screen_width
     screen_height
+    rect_color
 }
 
-let state = atom(State { rect_x: 200, rect_y: 150, dx: 2, dy: 2, screen_width: 640, screen_height: 480 })
+struct Color {
+    r
+    g
+    b
+}
+
+
+let state = atom(State {
+    rect_x: 200,
+    rect_y: 150,
+    dx: 2,
+    dy: 2,
+    screen_width: 640,
+    screen_height: 480,
+    rect_color: Color { r: 255, g: 0, b: 0}
+})
 
 let sdl = ffi/load_library("/opt/homebrew/lib/libSDL2-2.0.0.dylib")
 let sdl_init = ffi/get_function(sdl, "SDL_Init", [ffi/Type.U32], ffi/Type.I32)
@@ -72,10 +89,25 @@ fn update_state(new_width, new_height) {
             },
             screen_width: new_width,
             screen_height: new_height,
+            rect_color: s.rect_color
         }
     })
 }
 
+fn change_color(color) {
+    // TODO: assoc function for structs
+    swap!(state, fn(s) {
+        State {
+            rect_x: s.rect_x,
+            rect_y: s.rect_y,
+            dx: s.dx,
+            dy: s.dy,
+            screen_width: s.screen_width,
+            screen_height: s.screen_height,
+            rect_color: color
+        }
+    })
+}
 
 fn loop_it(buffer, renderer, rect_ptr, window) {
     sdl_poll_event(buffer)
@@ -102,7 +134,8 @@ fn loop_it(buffer, renderer, rect_ptr, window) {
         ffi/set_i32(rect_ptr, 4, updated_state.rect_y)
 
         // Draw the rectangle
-        sdl_set_render_draw_color(renderer, 255, 0, 0, 255) // Red color
+        let color = current_state.rect_color
+        sdl_set_render_draw_color(renderer, color.r, color.g, color.b, 255) // Red color
         sdl_render_fill_rect(renderer, rect_ptr)
 
         // Present the updated screen
@@ -114,6 +147,7 @@ fn loop_it(buffer, renderer, rect_ptr, window) {
 }
 
 fn main() {
+    thread(repl/repl)
     println("Starting")
     sdl_init(32)
     println("SDL Initialized")

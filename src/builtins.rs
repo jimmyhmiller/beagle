@@ -1,6 +1,10 @@
 use core::panic;
 use std::{
-    error::Error, ffi::c_void, mem, slice::{from_raw_parts, from_raw_parts_mut}, thread
+    error::Error,
+    ffi::c_void,
+    mem::{self, transmute},
+    slice::{from_raw_parts, from_raw_parts_mut},
+    thread,
 };
 
 use libffi::{
@@ -315,7 +319,10 @@ pub fn map_ffi_type<Alloc: Allocator>(runtime: &Runtime<Alloc>, value: usize) ->
     }
 }
 
-pub fn map_beagle_type_to_ffi_type<Alloc: Allocator>(runtime: &Runtime<Alloc>, value: usize) -> FFIType {
+pub fn map_beagle_type_to_ffi_type<Alloc: Allocator>(
+    runtime: &Runtime<Alloc>,
+    value: usize,
+) -> FFIType {
     let heap_object = HeapObject::from_tagged(value);
     let struct_id = BuiltInTypes::untag(heap_object.get_struct_id());
     let struct_info = runtime
@@ -367,14 +374,10 @@ extern "C" fn create_window_placeholder(
 }
 
 #[allow(unused)]
-extern "C" fn sdl_render_fill_rect_placeholder(
-    renderer: *const u32,
-    rect: *const u32,
-) -> usize {
+extern "C" fn sdl_render_fill_rect_placeholder(renderer: *const u32, rect: *const u32) -> usize {
     println!("Arguments {:?}", (renderer, rect));
     0
 }
-
 
 #[allow(unused)]
 extern "C" fn sdl_poll_event(buffer: *const u32) -> usize {
@@ -399,9 +402,9 @@ pub extern "C" fn get_function<Alloc: Allocator>(
 
     // TODO: I should actually cache the closure, but I don't want to do that and mess up gc
     if let Some(ffi_info_id) = runtime.find_ffi_info_by_name(&function_name) {
-        return unsafe { call_fn_1(runtime, "beagle.ffi/__create_ffi_function", ffi_info_id) }
+        return unsafe { call_fn_1(runtime, "beagle.ffi/__create_ffi_function", ffi_info_id) };
     }
-    
+
     let func_ptr = unsafe { library.get::<fn()>(function_name.as_bytes()).unwrap() };
 
     let code_ptr = unsafe { CodePtr(func_ptr.try_as_raw_ptr().unwrap()) };
@@ -413,15 +416,15 @@ pub extern "C" fn get_function<Alloc: Allocator>(
     //     unsafe { CodePtr(func_ptr.try_as_raw_ptr().unwrap()) }
     // };
 
-    let types : Vec<usize> = array_to_vec(persistent_vector_to_array(runtime, types))
-        .iter()
-        .cloned()
-        .collect();
+    let types: Vec<usize> = array_to_vec(persistent_vector_to_array(runtime, types)).to_vec();
 
     let lib_ffi_types: Vec<Type> = types.iter().map(|t| map_ffi_type(runtime, *t)).collect();
     let number_of_arguments = lib_ffi_types.len();
-    
-    let beagle_ffi_types = types.iter().map(|t| map_beagle_type_to_ffi_type(runtime, *t)).collect::<Vec<_>>();
+
+    let beagle_ffi_types = types
+        .iter()
+        .map(|t| map_beagle_type_to_ffi_type(runtime, *t))
+        .collect::<Vec<_>>();
 
     let lib_ffi_return_type = map_ffi_type(runtime, return_type);
     let ffi_return_type = map_beagle_type_to_ffi_type(runtime, return_type);
@@ -502,35 +505,33 @@ pub unsafe extern "C" fn call_ffi_info<Alloc: Allocator>(
                 let pointer = runtime.memory.native_arguments.write_c_string(string);
                 argument_pointers.push(arg(&pointer));
             }
-            BuiltInTypes::Int => {
-                match ffi_type {
-                    FFIType::U8 => {
-                        let pointer = runtime
-                            .memory
-                            .native_arguments
-                            .write_u8(BuiltInTypes::untag(*argument) as u8);
-                        argument_pointers.push(arg(pointer));
-                    }
-                    FFIType::U32 => {
-                        let pointer = runtime
-                            .memory
-                            .native_arguments
-                            .write_u32(BuiltInTypes::untag(*argument) as u32);
-                        argument_pointers.push(arg(pointer));
-                    }
-                    FFIType::I32 => {
-                        let pointer = runtime
-                            .memory
-                            .native_arguments
-                            .write_i32(BuiltInTypes::untag(*argument) as i32);
-                        argument_pointers.push(arg(pointer));
-                    }
-
-                    FFIType::Pointer | FFIType::MutablePointer | FFIType::String | FFIType::Void  => {
-                        panic!("Expected pointer, got {:?}", ffi_type);
-                    }
+            BuiltInTypes::Int => match ffi_type {
+                FFIType::U8 => {
+                    let pointer = runtime
+                        .memory
+                        .native_arguments
+                        .write_u8(BuiltInTypes::untag(*argument) as u8);
+                    argument_pointers.push(arg(pointer));
                 }
-            }
+                FFIType::U32 => {
+                    let pointer = runtime
+                        .memory
+                        .native_arguments
+                        .write_u32(BuiltInTypes::untag(*argument) as u32);
+                    argument_pointers.push(arg(pointer));
+                }
+                FFIType::I32 => {
+                    let pointer = runtime
+                        .memory
+                        .native_arguments
+                        .write_i32(BuiltInTypes::untag(*argument) as i32);
+                    argument_pointers.push(arg(pointer));
+                }
+
+                FFIType::Pointer | FFIType::MutablePointer | FFIType::String | FFIType::Void => {
+                    panic!("Expected pointer, got {:?}", ffi_type);
+                }
+            },
             BuiltInTypes::HeapObject => {
                 if ffi_type != &FFIType::Pointer && ffi_type != &FFIType::MutablePointer {
                     panic!("Expected pointer, got {:?}", ffi_type);
@@ -661,7 +662,6 @@ unsafe extern "C" fn ffi_set_i32<Alloc: Allocator>(
     BuiltInTypes::null_value() as usize
 }
 
-
 unsafe extern "C" fn ffi_get_i32<Alloc: Allocator>(
     _runtime: *mut Runtime<Alloc>,
     buffer: usize,
@@ -678,10 +678,40 @@ extern "C" fn placeholder() -> usize {
     BuiltInTypes::null_value() as usize
 }
 
-extern "C" fn wait_for_input() -> usize {
+extern "C" fn wait_for_input<Alloc: Allocator>(runtime: *mut Runtime<Alloc>) -> usize {
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).unwrap();
-    0
+    let runtime = unsafe { &mut *runtime };
+    let string = runtime.memory.alloc_string(input);
+    string.unwrap().into()
+}
+
+extern "C" fn eval<Alloc: Allocator>(runtime: *mut Runtime<Alloc>, code: usize) -> usize {
+    let runtime = unsafe { &mut *runtime };
+    let code = match BuiltInTypes::get_kind(code) {
+        BuiltInTypes::String => runtime.compiler.get_string(code),
+        BuiltInTypes::HeapObject => {
+            let code = HeapObject::from_tagged(code);
+            assert!(code.get_header().type_id == 2);
+            let bytes = code.get_string_bytes();
+            let code = std::str::from_utf8(bytes).unwrap();
+            code.to_string()
+        }
+        _ => panic!("Expected string, got {:?}", BuiltInTypes::get_kind(code)),
+    };
+    let result = runtime.compiler.compile_string(&code).unwrap();
+    mem::forget(code);
+    if result == 0 {
+        return BuiltInTypes::null_value() as usize;
+    }
+    let f: fn() -> usize = unsafe { transmute(result) };
+    f()
+}
+
+extern "C" fn sleep<Alloc: Allocator>(_runtime: *mut Runtime<Alloc>, time: usize) -> usize {
+    let time = BuiltInTypes::untag(time);
+    std::thread::sleep(std::time::Duration::from_millis(time as u64));
+    BuiltInTypes::null_value() as usize
 }
 
 impl<Alloc: Allocator> Runtime<Alloc> {
@@ -834,8 +864,20 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         )?;
 
         self.compiler.add_builtin_function(
-            "beagle.core/wait_for_input",
-            wait_for_input as *const u8,
+            "beagle.builtin/wait_for_input",
+            wait_for_input::<Alloc> as *const u8,
+            false,
+        )?;
+
+        self.compiler.add_builtin_function(
+            "beagle.core/eval",
+            eval::<Alloc> as *const u8,
+            false,
+        )?;
+
+        self.compiler.add_builtin_function(
+            "beagle.core/sleep",
+            sleep::<Alloc> as *const u8,
             false,
         )?;
 

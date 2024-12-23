@@ -25,6 +25,10 @@ impl BuiltInTypes {
         value | tag
     }
 
+    pub fn tagged(&self, value: usize) -> Tagged {
+        Tagged(self.tag(value as isize) as usize)
+    }
+
     pub fn get_tag(&self) -> isize {
         match self {
             BuiltInTypes::Int => 0b000,
@@ -312,6 +316,15 @@ impl HeapObject {
         unsafe { std::slice::from_raw_parts(pointer, size / 8) }
     }
 
+    pub fn get_string_bytes(&self) -> &[u8] {
+        let header = self.get_header();
+        let bytes = header.type_data as usize;
+        let untagged = self.untagged();
+        let pointer = untagged as *mut u8;
+        let pointer = unsafe { pointer.add(Self::header_size()) };
+        unsafe { std::slice::from_raw_parts(pointer, bytes) }
+    }
+
     pub fn get_full_object_data(&self) -> &[u8] {
         let size = self.full_size();
         let untagged = self.untagged();
@@ -357,6 +370,12 @@ impl HeapObject {
 
     pub fn header_size() -> usize {
         8
+    }
+
+    pub fn writer_header_direct(&mut self, header: Header) {
+        let untagged = self.untagged();
+        let pointer = untagged as *mut usize;
+        unsafe { *pointer.cast::<usize>() = header.to_usize() };
     }
 
     pub fn write_header(&mut self, field_size: Word) {
@@ -580,5 +599,13 @@ impl Word {
 
     pub fn to_words(self) -> usize {
         self.0
+    }
+}
+
+pub struct Tagged(usize);
+
+impl From<Tagged> for usize {
+    fn from(val: Tagged) -> Self {
+        val.0
     }
 }

@@ -25,7 +25,7 @@ libffi = "3.2.0"
 
 
 [features]
-default = []
+default = ["thread-safe"]
 simple-mark-and-sweep = []
 compacting = []
 simple-generation = []
