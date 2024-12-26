@@ -22,3 +22,5 @@
 * Builtins need better type checking setup
 * Need to make the tests start a process so if one crashes, we still know the total results
 * I've got some stuff going on with malloc and free that is making rust not happy. In the case I saw, it looks like namsepace bindings are causing issues. I can find it by running the sdl example.
+* We need to say that a thread is at a safe point when it makes a c call
+* And then check if we are in gc when we return from one
