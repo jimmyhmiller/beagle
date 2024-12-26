@@ -26,6 +26,8 @@ use crate::{
     CommandLineArguments, Data, Message,
 };
 
+use std::cell::RefCell;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
     name: String,
@@ -158,6 +160,9 @@ pub struct FFIInfo {
 pub struct ThreadState {
     pub paused_threads: usize,
     pub stack_pointers: Vec<(usize, usize)>,
+    // TODO: I probably don't want to do this here. This requires taking a mutex
+    // not really ideal for c calls.
+    pub c_calling_stack_pointers: HashMap<ThreadId, (usize, usize)>,
 }
 
 impl ThreadState {
@@ -168,6 +173,17 @@ impl ThreadState {
 
     pub fn unpause(&mut self) {
         self.paused_threads -= 1;
+    }
+
+    pub fn register_c_call(&mut self, stack_pointer: (usize, usize)) {
+        let thread_id = thread::current().id();
+        self.c_calling_stack_pointers
+            .insert(thread_id, stack_pointer);
+    }
+
+    pub fn unregister_c_call(&mut self) {
+        let thread_id = thread::current().id();
+        self.c_calling_stack_pointers.remove(&thread_id);
     }
 
     pub fn clear(&mut self) {
@@ -237,17 +253,17 @@ impl MMapMutWithOffset {
         unsafe { &*(self.mmap.as_ptr().add(start) as *const u16) }
     }
 
-    pub fn write_u32(&mut self, value: u32) -> &u32 {
+    pub fn write_u32(&mut self, value: u32) -> *const u32 {
         let start = self.offset;
         let bytes = value.to_le_bytes();
         for byte in bytes {
             self.mmap[self.offset] = byte;
             self.offset += 1;
         }
-        unsafe { &*(self.mmap.as_ptr().add(start) as *const u32) }
+        unsafe { self.mmap.as_ptr().add(start) as *const u32 }
     }
 
-    pub fn write_i32(&mut self, value: i32) -> &i32 {
+    pub fn write_i32(&mut self, value: i32) -> *const i32 {
         let start = self.offset;
         let bytes = value.to_le_bytes();
         for byte in bytes {
@@ -255,25 +271,25 @@ impl MMapMutWithOffset {
             self.offset += 1;
         }
 
-        (unsafe { &*(self.mmap.as_ptr().add(start) as *const i32) }) as _
+        (unsafe { self.mmap.as_ptr().add(start) as *const i32 }) as _
     }
 
-    pub fn write_u8(&mut self, argument: u8) -> &u8 {
+    pub fn write_u8(&mut self, argument: u8) -> *const u8 {
         let start = self.offset;
         self.mmap[start] = argument;
         // We need to make sure we keep correct alignment
         self.offset += 2;
-        unsafe { &*(self.mmap.as_ptr().add(start)) }
+        unsafe { self.mmap.as_ptr().add(start) }
     }
 
-    pub fn write_pointer(&mut self, value: usize) -> &*mut c_void {
+    pub fn write_pointer(&mut self, value: usize) -> *const *mut c_void {
         let start = self.offset;
         let bytes = value.to_le_bytes();
         for byte in bytes {
             self.mmap[self.offset] = byte;
             self.offset += 1;
         }
-        unsafe { &*(self.mmap.as_ptr().add(start) as *const *mut c_void) }
+        unsafe { self.mmap.as_ptr().add(start) as *const *mut c_void }
     }
 
     pub fn clear(&mut self) {
@@ -281,16 +297,20 @@ impl MMapMutWithOffset {
     }
 }
 
+thread_local! {
+    pub static NATIVE_ARGUMENTS : RefCell<MMapMutWithOffset> = RefCell::new(MMapMutWithOffset::new());
+}
+
 pub struct Memory<Alloc: Allocator> {
     heap: Alloc,
     stacks: Vec<(ThreadId, MmapMut)>,
-    pub native_arguments: MMapMutWithOffset,
     pub join_handles: Vec<JoinHandle<u64>>,
     pub threads: Vec<Thread>,
     pub stack_map: StackMap,
     #[allow(unused)]
     command_line_arguments: CommandLineArguments,
 }
+
 impl<Alloc: Allocator> Memory<Alloc> {
     fn active_threads(&mut self) -> usize {
         let mut completed_threads = vec![];
@@ -324,6 +344,46 @@ impl<Alloc: Allocator> Memory<Alloc> {
         });
         heap_object.write_fields(bytes);
         Ok(BuiltInTypes::HeapObject.tagged(pointer as usize))
+    }
+
+    pub fn write_c_string(&mut self, string: String) -> *mut i8 {
+        let mut result: *mut i8 = std::ptr::null_mut();
+        NATIVE_ARGUMENTS.with(|memory| result = memory.borrow_mut().write_c_string(string));
+        result
+    }
+
+    pub fn write_pointer(&mut self, value: usize) -> &*mut c_void {
+        let mut result: *const *mut c_void = std::ptr::null_mut();
+        NATIVE_ARGUMENTS.with(|memory| result = memory.borrow_mut().write_pointer(value));
+        unsafe { &*result }
+    }
+
+    pub fn write_u32(&mut self, value: u32) -> &u32 {
+        let mut result: *const u32 = &0;
+        NATIVE_ARGUMENTS.with(|memory| result = memory.borrow_mut().write_u32(value));
+        unsafe { &*result }
+    }
+
+    pub fn write_i32(&mut self, value: i32) -> &i32 {
+        let mut result: *const i32 = &0;
+        NATIVE_ARGUMENTS.with(|memory| result = memory.borrow_mut().write_i32(value));
+        unsafe { &*result }
+    }
+
+    pub fn write_u8(&mut self, value: u8) -> &u8 {
+        let mut result: *const u8 = &0;
+        NATIVE_ARGUMENTS.with(|memory| result = memory.borrow_mut().write_u8(value));
+        unsafe { &*result }
+    }
+
+    pub fn write_u16(&mut self, value: u16) -> &u16 {
+        let mut result: *const u16 = &0;
+        NATIVE_ARGUMENTS.with(|memory| result = memory.borrow_mut().write_u16(value));
+        unsafe { &*result }
+    }
+
+    pub fn clear_native_arguments(&self) {
+        NATIVE_ARGUMENTS.with(|memory| memory.borrow_mut().clear());
     }
 }
 
@@ -1366,7 +1426,6 @@ impl<Alloc: Allocator> Runtime<Alloc> {
                     std::thread::current().id(),
                     MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap(),
                 )],
-                native_arguments: MMapMutWithOffset::new(),
                 join_handles: vec![],
                 threads: vec![std::thread::current()],
                 command_line_arguments,
@@ -1379,6 +1438,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
                 Mutex::new(ThreadState {
                     paused_threads: 0,
                     stack_pointers: vec![],
+                    c_calling_stack_pointers: HashMap::new(),
                 }),
                 Condvar::new(),
             )),
@@ -1564,7 +1624,9 @@ impl<Alloc: Allocator> Runtime<Alloc> {
 
         let (lock, cvar) = &*self.thread_state;
         let mut thread_state = lock.lock().unwrap();
-        while thread_state.paused_threads < self.memory.active_threads() {
+        while thread_state.paused_threads + thread_state.c_calling_stack_pointers.len()
+            < self.memory.active_threads()
+        {
             thread_state = cvar.wait(thread_state).unwrap();
         }
 
