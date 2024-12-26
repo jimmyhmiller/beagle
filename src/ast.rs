@@ -960,7 +960,7 @@ impl<'a> AstCompiler<'a> {
             }
             Ast::Identifier(name) => {
                 let reg = &self.get_variable_alloc_free_variable(&name);
-                self.resolve_variable(reg)
+                self.resolve_variable(reg).expect(&format!("Could not resolve variable {}", name))
             }
             Ast::Let(name, value) => {
                 if let Ast::Identifier(name) = name.as_ref() {
@@ -1121,7 +1121,7 @@ impl<'a> AstCompiler<'a> {
     fn compile_closure_call(&mut self, function: VariableLocation, args: Vec<Value>) -> Value {
         // self.ir.breakpoint();
         let ret_register = self.ir.assign_new(Value::TaggedConstant(0));
-        let function = self.resolve_variable(&function);
+        let function = self.resolve_variable(&function).unwrap();
         let function_register = self.ir.assign_new(function);
         let closure_register = self.ir.assign_new(function_register);
         // Check if the tag is a closure
@@ -1197,7 +1197,7 @@ impl<'a> AstCompiler<'a> {
                     self.ir.push_to_stack(reg.into());
                 }
                 VariableLocation::NamespaceVariable(namespace, slot) => {
-                    self.resolve_variable(&VariableLocation::NamespaceVariable(namespace, slot));
+                    self.resolve_variable(&VariableLocation::NamespaceVariable(namespace, slot)).unwrap();
                 }
                 VariableLocation::FreeVariable(_) => {
                     panic!(
@@ -1490,27 +1490,27 @@ impl<'a> AstCompiler<'a> {
         );
     }
 
-    fn resolve_variable(&mut self, reg: &VariableLocation) -> Value {
+    fn resolve_variable(&mut self, reg: &VariableLocation) -> Result<Value, String> {
         match reg {
-            VariableLocation::Register(reg) => Value::Register(*reg),
-            VariableLocation::Local(index) => Value::Local(*index),
+            VariableLocation::Register(reg) => Ok(Value::Register(*reg)),
+            VariableLocation::Local(index) => Ok(Value::Local(*index)),
             VariableLocation::FreeVariable(index) => {
-                let arg0_location = self.get_argument_location(0);
-                let arg0 = self.resolve_variable(&arg0_location);
+                let arg0_location = self.get_argument_location(0).ok_or("Variable not found")?;
+                let arg0 = self.resolve_variable(&arg0_location)?;
                 let arg0: VirtualRegister = self.ir.assign_new(arg0);
                 let arg0 = self.ir.untag(arg0.into());
                 let index = self
                     .ir
                     .assign_new(Value::TaggedConstant((*index + 3) as isize));
-                self.ir.read_field(arg0, index.into())
+                Ok(self.ir.read_field(arg0, index.into()))
             }
             VariableLocation::NamespaceVariable(namespace, slot) => {
                 let slot = self.ir.assign_new(Value::RawValue(*slot));
                 let namespace = self.ir.assign_new(Value::RawValue(*namespace));
-                self.call_builtin(
+                Ok(self.call_builtin(
                     "beagle.builtin/get_binding",
                     vec![namespace.into(), slot.into()],
-                )
+                ))
             }
         }
     }
@@ -1552,12 +1552,11 @@ impl<'a> AstCompiler<'a> {
             .insert(index, local);
     }
 
-    fn get_argument_location(&self, index: usize) -> VariableLocation {
+    fn get_argument_location(&self, index: usize) -> Option<VariableLocation> {
         self.get_current_env()
             .argument_locations
             .get(&index)
-            .unwrap()
-            .clone()
+            .cloned()
     }
 
     fn is_qualifed_function_name(&self, name: &str) -> bool {

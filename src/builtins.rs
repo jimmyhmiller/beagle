@@ -309,6 +309,7 @@ pub fn map_ffi_type<Alloc: Allocator>(runtime: &Runtime<Alloc>, value: usize) ->
     let name = struct_info.name.as_str().split_once("/").unwrap().1;
     match name {
         "Type.U8" => Type::u8(),
+        "Type.U16" => Type::u16(),
         "Type.U32" => Type::u32(),
         "Type.I32" => Type::i32(),
         "Type.Pointer" => Type::pointer(),
@@ -332,6 +333,7 @@ pub fn map_beagle_type_to_ffi_type<Alloc: Allocator>(
     let name = struct_info.name.as_str().split_once("/").unwrap().1;
     match name {
         "Type.U8" => FFIType::U8,
+        "Type.U16" => FFIType::U16,
         "Type.U32" => FFIType::U32,
         "Type.I32" => FFIType::I32,
         "Type.Pointer" => FFIType::Pointer,
@@ -402,6 +404,7 @@ pub extern "C" fn get_function<Alloc: Allocator>(
 
     // TODO: I should actually cache the closure, but I don't want to do that and mess up gc
     if let Some(ffi_info_id) = runtime.find_ffi_info_by_name(&function_name) {
+        let ffi_info_id = BuiltInTypes::Int.tag(ffi_info_id as isize) as usize;
         return unsafe { call_fn_1(runtime, "beagle.ffi/__create_ffi_function", ffi_info_id) };
     }
 
@@ -432,6 +435,7 @@ pub extern "C" fn get_function<Alloc: Allocator>(
     let cif = Cif::new(lib_ffi_types, lib_ffi_return_type.clone());
 
     let ffi_info_id = runtime.add_ffi_function_info(FFIInfo {
+        name: function_name.to_string(),
         function: code_ptr,
         cif,
         number_of_arguments,
@@ -513,6 +517,13 @@ pub unsafe extern "C" fn call_ffi_info<Alloc: Allocator>(
                         .write_u8(BuiltInTypes::untag(*argument) as u8);
                     argument_pointers.push(arg(pointer));
                 }
+                FFIType::U16 => {
+                    let pointer = runtime
+                        .memory
+                        .native_arguments
+                        .write_u16(BuiltInTypes::untag(*argument) as u16);
+                    argument_pointers.push(arg(pointer));
+                }
                 FFIType::U32 => {
                     let pointer = runtime
                         .memory
@@ -556,6 +567,10 @@ pub unsafe extern "C" fn call_ffi_info<Alloc: Allocator>(
         }
         FFIType::U8 => {
             let result = ffi_info.cif.call::<u8>(code_ptr, &argument_pointers);
+            BuiltInTypes::Int.tag(result as isize) as usize
+        }
+        FFIType::U16 => {
+            let result = ffi_info.cif.call::<u16>(code_ptr, &argument_pointers);
             BuiltInTypes::Int.tag(result as isize) as usize
         }
         FFIType::U32 => {
@@ -662,6 +677,20 @@ unsafe extern "C" fn ffi_set_i32<Alloc: Allocator>(
     BuiltInTypes::null_value() as usize
 }
 
+unsafe extern "C" fn ffi_set_i16<Alloc: Allocator>(
+    _runtime: *mut Runtime<Alloc>,
+    buffer: usize,
+    offset: usize,
+    value: usize,
+) -> usize {
+    let buffer_object = HeapObject::from_tagged(buffer);
+    let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+    let offset = BuiltInTypes::untag(offset);
+    let value = BuiltInTypes::untag(value) as i16;
+    *(buffer.add(offset) as *mut i16) = value;
+    BuiltInTypes::null_value() as usize
+}
+
 unsafe extern "C" fn ffi_get_i32<Alloc: Allocator>(
     _runtime: *mut Runtime<Alloc>,
     buffer: usize,
@@ -672,6 +701,22 @@ unsafe extern "C" fn ffi_get_i32<Alloc: Allocator>(
     let offset = BuiltInTypes::untag(offset);
     let value = *(buffer.add(offset) as *const i32);
     BuiltInTypes::Int.tag(value as isize) as usize
+}
+
+unsafe extern "C" fn ffi_get_string<Alloc: Allocator>(
+    runtime: *mut Runtime<Alloc>,
+    buffer: usize,
+    offset: usize,
+    len: usize,
+) -> usize {
+    let runtime = unsafe { &mut *runtime };
+    let buffer_object = HeapObject::from_tagged(buffer);
+    let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+    let offset = BuiltInTypes::untag(offset);
+    let len = BuiltInTypes::untag(len);
+    let slice = std::slice::from_raw_parts(buffer.add(offset), len);
+    let string = std::str::from_utf8(slice).unwrap();
+    runtime.memory.alloc_string(string.to_string()).unwrap().into()
 }
 
 extern "C" fn placeholder() -> usize {
@@ -826,6 +871,12 @@ impl<Alloc: Allocator> Runtime<Alloc> {
             ffi_get_u32::<Alloc> as *const u8,
             false,
         )?;
+        
+        self.compiler.add_builtin_function(
+            "beagle.ffi/set_i16",
+            ffi_set_i16::<Alloc> as *const u8,
+            false,
+        )?;
 
         self.compiler.add_builtin_function(
             "beagle.ffi/set_i32",
@@ -836,6 +887,12 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         self.compiler.add_builtin_function(
             "beagle.ffi/get_i32",
             ffi_get_i32::<Alloc> as *const u8,
+            false,
+        )?;
+
+        self.compiler.add_builtin_function(
+            "beagle.ffi/get_string",
+            ffi_get_string::<Alloc> as *const u8,
             false,
         )?;
 

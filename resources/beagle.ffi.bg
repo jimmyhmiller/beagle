@@ -21,6 +21,7 @@ fn __make_pointer_struct(ptr) {
 
 enum Type {
     U8,
+    U16,
     U32,
     I32,
     Pointer,
