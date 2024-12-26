@@ -444,7 +444,7 @@ impl<'a> AstCompiler<'a> {
                         );
                     }
                     return function;
-                } 
+                }
 
                 let function = self.ir.function(Value::Function(function_pointer));
                 if let Some(name) = name {
@@ -960,7 +960,8 @@ impl<'a> AstCompiler<'a> {
             }
             Ast::Identifier(name) => {
                 let reg = &self.get_variable_alloc_free_variable(&name);
-                self.resolve_variable(reg).expect(&format!("Could not resolve variable {}", name))
+                self.resolve_variable(reg)
+                    .unwrap_or_else(|_| panic!("Could not resolve variable {}", name))
             }
             Ast::Let(name, value) => {
                 if let Ast::Identifier(name) = name.as_ref() {
@@ -1107,7 +1108,8 @@ impl<'a> AstCompiler<'a> {
             self.compiler.current_namespace_name() + "/" + name
         } else if self
             .compiler
-            .find_function(&("beagle.core/".to_owned() + name)).is_some()
+            .find_function(&("beagle.core/".to_owned() + name))
+            .is_some()
         {
             "beagle.core/".to_string() + name
         } else if self.create_free_if_closable(name).is_some() {
@@ -1197,7 +1199,8 @@ impl<'a> AstCompiler<'a> {
                     self.ir.push_to_stack(reg.into());
                 }
                 VariableLocation::NamespaceVariable(namespace, slot) => {
-                    self.resolve_variable(&VariableLocation::NamespaceVariable(namespace, slot)).unwrap();
+                    self.resolve_variable(&VariableLocation::NamespaceVariable(namespace, slot))
+                        .unwrap();
                 }
                 VariableLocation::FreeVariable(_) => {
                     panic!(
@@ -1228,7 +1231,6 @@ impl<'a> AstCompiler<'a> {
 
         let stack_pointer = self.ir.get_stack_pointer_imm(0);
 
-        
         self.ir.call(
             make_closure_reg.into(),
             vec![

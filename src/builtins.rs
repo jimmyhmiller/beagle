@@ -235,6 +235,29 @@ pub unsafe extern "C" fn __pause<Alloc: Allocator>(
 ) -> usize {
     let runtime = unsafe { &mut *runtime };
 
+    pause_current_thread(stack_pointer, runtime);
+
+    while runtime.is_paused() {
+        // Park can unpark itself even if I haven't called unpark
+        thread::park();
+    }
+
+    unpause_current_thread(runtime);
+
+    // Apparently, I can't count on this not unparking
+    // I need some other mechanism to know that things are ready
+    BuiltInTypes::null_value() as usize
+}
+
+fn unpause_current_thread<Alloc: Allocator>(runtime: &mut Runtime<Alloc>) {
+    let thread_state = runtime.thread_state.clone();
+    let (lock, condvar) = &*thread_state;
+    let mut state = lock.lock().unwrap();
+    state.unpause();
+    condvar.notify_one();
+}
+
+fn pause_current_thread<Alloc: Allocator>(stack_pointer: usize, runtime: &mut Runtime<Alloc>) {
     let thread_state = runtime.thread_state.clone();
     let (lock, condvar) = &*thread_state;
     let mut state = lock.lock().unwrap();
@@ -242,21 +265,6 @@ pub unsafe extern "C" fn __pause<Alloc: Allocator>(
     state.pause((stack_base, stack_pointer));
     condvar.notify_one();
     drop(state);
-
-    while runtime.is_paused() {
-        // Park can unpark itself even if I haven't called unpark
-        thread::park();
-    }
-
-    let thread_state = runtime.thread_state.clone();
-    let (lock, condvar) = &*thread_state;
-    let mut state = lock.lock().unwrap();
-    state.unpause();
-    condvar.notify_one();
-
-    // Apparently, I can't count on this not unparking
-    // I need some other mechanism to know that things are ready
-    BuiltInTypes::null_value() as usize
 }
 
 pub unsafe fn call_fn_1<Alloc: Allocator>(
@@ -716,7 +724,11 @@ unsafe extern "C" fn ffi_get_string<Alloc: Allocator>(
     let len = BuiltInTypes::untag(len);
     let slice = std::slice::from_raw_parts(buffer.add(offset), len);
     let string = std::str::from_utf8(slice).unwrap();
-    runtime.memory.alloc_string(string.to_string()).unwrap().into()
+    runtime
+        .memory
+        .alloc_string(string.to_string())
+        .unwrap()
+        .into()
 }
 
 extern "C" fn placeholder() -> usize {
@@ -871,7 +883,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
             ffi_get_u32::<Alloc> as *const u8,
             false,
         )?;
-        
+
         self.compiler.add_builtin_function(
             "beagle.ffi/set_i16",
             ffi_set_i16::<Alloc> as *const u8,
