@@ -249,14 +249,6 @@ pub unsafe extern "C" fn __pause<Alloc: Allocator>(
     BuiltInTypes::null_value() as usize
 }
 
-fn unpause_current_thread<Alloc: Allocator>(runtime: &mut Runtime<Alloc>) {
-    let thread_state = runtime.thread_state.clone();
-    let (lock, condvar) = &*thread_state;
-    let mut state = lock.lock().unwrap();
-    state.unpause();
-    condvar.notify_one();
-}
-
 fn pause_current_thread<Alloc: Allocator>(stack_pointer: usize, runtime: &mut Runtime<Alloc>) {
     let thread_state = runtime.thread_state.clone();
     let (lock, condvar) = &*thread_state;
@@ -265,6 +257,42 @@ fn pause_current_thread<Alloc: Allocator>(stack_pointer: usize, runtime: &mut Ru
     state.pause((stack_base, stack_pointer));
     condvar.notify_one();
     drop(state);
+}
+
+fn unpause_current_thread<Alloc: Allocator>(runtime: &mut Runtime<Alloc>) {
+    let thread_state = runtime.thread_state.clone();
+    let (lock, condvar) = &*thread_state;
+    let mut state = lock.lock().unwrap();
+    state.unpause();
+    condvar.notify_one();
+}
+
+pub extern "C" fn register_c_call<Alloc: Allocator>(
+    runtime: *mut Runtime<Alloc>,
+    stack_pointer: usize,
+) -> usize {
+    let runtime = unsafe { &mut *runtime };
+    let thread_state = runtime.thread_state.clone();
+    let (lock, condvar) = &*thread_state;
+    let mut state = lock.lock().unwrap();
+    let stack_base = runtime.get_stack_base();
+    state.register_c_call((stack_base, stack_pointer));
+    condvar.notify_one();
+    BuiltInTypes::null_value() as usize
+}
+
+pub extern "C" fn unregister_c_call<Alloc: Allocator>(runtime: *mut Runtime<Alloc>) -> usize {
+    let runtime = unsafe { &mut *runtime };
+    let thread_state = runtime.thread_state.clone();
+    let (lock, condvar) = &*thread_state;
+    let mut state = lock.lock().unwrap();
+    state.unregister_c_call();
+    condvar.notify_one();
+    while runtime.is_paused() {
+        // Park can unpark itself even if I haven't called unpark
+        thread::park();
+    }
+    BuiltInTypes::null_value() as usize
 }
 
 pub unsafe fn call_fn_1<Alloc: Allocator>(
@@ -514,35 +542,31 @@ pub unsafe extern "C" fn call_ffi_info<Alloc: Allocator>(
                     panic!("Expected string, got {:?}", ffi_type);
                 }
                 let string = runtime.compiler.get_string(*argument);
-                let pointer = runtime.memory.native_arguments.write_c_string(string);
-                argument_pointers.push(arg(&pointer));
+                let string = runtime.memory.write_c_string(string);
+                argument_pointers.push(arg(&string));
             }
             BuiltInTypes::Int => match ffi_type {
                 FFIType::U8 => {
                     let pointer = runtime
                         .memory
-                        .native_arguments
                         .write_u8(BuiltInTypes::untag(*argument) as u8);
                     argument_pointers.push(arg(pointer));
                 }
                 FFIType::U16 => {
                     let pointer = runtime
                         .memory
-                        .native_arguments
                         .write_u16(BuiltInTypes::untag(*argument) as u16);
                     argument_pointers.push(arg(pointer));
                 }
                 FFIType::U32 => {
                     let pointer = runtime
                         .memory
-                        .native_arguments
                         .write_u32(BuiltInTypes::untag(*argument) as u32);
                     argument_pointers.push(arg(pointer));
                 }
                 FFIType::I32 => {
                     let pointer = runtime
                         .memory
-                        .native_arguments
                         .write_i32(BuiltInTypes::untag(*argument) as i32);
                     argument_pointers.push(arg(pointer));
                 }
@@ -558,7 +582,7 @@ pub unsafe extern "C" fn call_ffi_info<Alloc: Allocator>(
                 // TODO: Make this type safe
                 let heap_object = HeapObject::from_tagged(*argument);
                 let buffer = BuiltInTypes::untag(heap_object.get_field(0));
-                let pointer = runtime.memory.native_arguments.write_pointer(buffer);
+                let pointer = runtime.memory.write_pointer(buffer);
                 argument_pointers.push(arg(pointer));
             }
             _ => {
@@ -603,7 +627,7 @@ pub unsafe extern "C" fn call_ffi_info<Alloc: Allocator>(
             todo!()
         }
     };
-    runtime.memory.native_arguments.clear();
+    runtime.memory.clear_native_arguments();
     return_value
 }
 
@@ -912,6 +936,18 @@ impl<Alloc: Allocator> Runtime<Alloc> {
             "beagle.builtin/__pause",
             __pause::<Alloc> as *const u8,
             true,
+        )?;
+
+        self.compiler.add_builtin_function(
+            "beagle.builtin/__register_c_call",
+            register_c_call::<Alloc> as *const u8,
+            true,
+        )?;
+
+        self.compiler.add_builtin_function(
+            "beagle.builtin/__unregister_c_call",
+            unregister_c_call::<Alloc> as *const u8,
+            false,
         )?;
 
         self.compiler.add_builtin_function(

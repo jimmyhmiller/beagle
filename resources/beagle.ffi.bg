@@ -1,5 +1,7 @@
 namespace beagle.ffi
 
+import "beagle.builtin" as builtin
+
 
 // Probably should move this stuff to an ffi namespace
 struct Library {
@@ -36,6 +38,9 @@ enum Type {
 fn __create_ffi_function(ffi_info) {
     // TODO: Hack, but trying to get things to work
     fn(a1, a2, a3, a4, a5, a6) {
-        call_ffi_info(ffi_info, a1, a2, a3, a4, a5, a6)
+        builtin/__register_c_call();
+        let result = call_ffi_info(ffi_info, a1, a2, a3, a4, a5, a6)
+        builtin/__unregister_c_call()
+        result
     }
 }
