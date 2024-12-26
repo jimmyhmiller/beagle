@@ -1,0 +1,170 @@
+namespace socket_test
+
+import "beagle.ffi" as ffi
+import "beagle.primitive" as primitive
+
+let libc = ffi/load_library("/usr/lib/libSystem.dylib")
+
+// Function bindings
+let socket = ffi/get_function(
+    libc,
+    "socket",
+    [ffi/Type.I32, ffi/Type.I32, ffi/Type.I32],
+    ffi/Type.I32
+)
+
+let bind = ffi/get_function(
+    libc,
+    "bind",
+    [ffi/Type.I32, ffi/Type.Pointer, ffi/Type.U32],
+    ffi/Type.I32
+)
+
+let listen = ffi/get_function(
+    libc,
+    "listen",
+    [ffi/Type.I32, ffi/Type.I32],
+    ffi/Type.I32
+)
+
+let accept = ffi/get_function(
+    libc,
+    "accept",
+    [ffi/Type.I32, ffi/Type.Pointer, ffi/Type.Pointer],
+    ffi/Type.I32
+)
+
+let recv = ffi/get_function(
+    libc,
+    "recv",
+    [ffi/Type.I32, ffi/Type.Pointer, ffi/Type.U32, ffi/Type.I32],
+    ffi/Type.I32
+)
+
+let htons = ffi/get_function(
+    libc,
+    "htons",
+    [ffi/Type.U16],
+    ffi/Type.U16
+)
+
+// Constants
+let AF_INET = 2
+let SOCK_STREAM = 1
+let IPPROTO_TCP = 6
+let INADDR_ANY = 0
+let PORT = 12345
+let BACKLOG = 5
+let BUFFER_SIZE = 1024
+
+struct ServerState {
+    server_fd
+    sockaddr_in
+    sockaddr_in_size
+    buffer
+}
+
+fn init_server(port) {
+    // Create a socket
+    println(AF_INET)
+    println(SOCK_STREAM)
+    println(IPPROTO_TCP)
+    let server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+    if server_fd < 0 {
+        println("Failed to create socket")
+        // primitive/exit(1)
+    }
+    println("Socket created")
+
+    // Set up sockaddr_in structure
+    let sockaddr_in_size = 16 // 2 bytes family, 2 bytes port, 4 bytes address, 8 bytes padding
+    let sockaddr_in = ffi/allocate(sockaddr_in_size)
+
+    println("allocated sockaddr_in")
+
+    // Set family to AF_INET
+    ffi/set_i16(sockaddr_in, 0, AF_INET)
+
+    println("set family")
+
+    println(libc)
+    println(htons)
+
+    println("here")
+
+    // Set port (convert to network byte order)
+    ffi/set_i16(sockaddr_in, 2, htons(port))
+
+    println("set port")
+
+    // Set address to INADDR_ANY
+    ffi/set_i32(sockaddr_in, 4, INADDR_ANY)
+
+    println("set address")
+
+    // Bind the socket
+    if bind(server_fd, sockaddr_in, sockaddr_in_size) < 0 {
+        println("Failed to bind socket")
+        // primitive/exit(1)
+    }
+    println("Socket bound to port ", port)
+
+    // Start listening
+    if listen(server_fd, BACKLOG) < 0 {
+        println("Failed to listen on socket")
+        // primitive/exit(1)
+    }
+    println("Listening on port ", port)
+
+    // Initialize buffer for receiving data
+    let buffer = ffi/allocate(BUFFER_SIZE)
+
+    ServerState {
+        server_fd: server_fd,
+        sockaddr_in: sockaddr_in,
+        sockaddr_in_size: sockaddr_in_size,
+        buffer: buffer
+    }
+}
+
+fn handle_client(state, client_fd, on_data) {
+    // Receive data
+    let bytes_received = recv(client_fd, state.buffer, BUFFER_SIZE, 0)
+    if bytes_received > 0 {
+        let data = ffi/get_string(state.buffer, 0, bytes_received)
+        on_data(data)
+    } else {
+        println("Failed to receive data or connection closed")
+    }
+}
+
+fn accept_connections(state, on_data) {
+    println("Waiting for a connection...")
+    let client_addr = ffi/allocate(state.sockaddr_in_size)
+    let addr_len = ffi/allocate(4)
+    let client_fd = accept(state.server_fd, client_addr, addr_len)
+    if client_fd < 0 {
+        println("Failed to accept connection")
+        accept_connections(state, on_data)
+    } else {
+        println("Connection accepted")
+        handle_client(state, client_fd, on_data)
+        accept_connections(state, on_data)
+    }
+}
+
+
+fn server(port, on_data) {
+    println("starting")
+    let server_state = init_server(port)
+    println("server initialized")
+    accept_connections(server_state, on_data)
+}
+
+fn main() {
+    let server_state = init_server(PORT)
+    accept_connections(server_state, fn(data) {
+        print("Received data: ")
+        println(data)
+    })
+}

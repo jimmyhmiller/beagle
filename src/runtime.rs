@@ -142,10 +142,12 @@ pub enum FFIType {
     MutablePointer,
     String,
     Void,
+    U16,
 }
 
 #[derive(Debug, Clone)]
 pub struct FFIInfo {
+    pub name: String,
     pub function: CodePtr,
     pub cif: Cif,
     pub number_of_arguments: usize,
@@ -225,6 +227,16 @@ impl MMapMutWithOffset {
         unsafe { self.mmap.as_ptr().add(start) as *mut i8 }
     }
 
+    pub fn write_u16(&mut self, value: u16) -> &u16 {
+        let start = self.offset;
+        let bytes = value.to_le_bytes();
+        for byte in bytes {
+            self.mmap[self.offset] = byte;
+            self.offset += 1;
+        }
+        unsafe { &*(self.mmap.as_ptr().add(start) as *const u16) }
+    }
+
     pub fn write_u32(&mut self, value: u32) -> &u32 {
         let start = self.offset;
         let bytes = value.to_le_bytes();
@@ -234,6 +246,7 @@ impl MMapMutWithOffset {
         }
         unsafe { &*(self.mmap.as_ptr().add(start) as *const u32) }
     }
+    
 
     pub fn write_i32(&mut self, value: i32) -> &i32 {
         let start = self.offset;
@@ -1065,7 +1078,7 @@ impl Compiler {
             .fields
             .iter()
             .position(|f| f == string)
-            .unwrap();
+            .expect(format!("Field {} not found in struct", string).as_str());
         // Temporary +1 because I was writing size as the first field
         // and I haven't changed that
         (heap_object.get_field(field_index), field_index)
