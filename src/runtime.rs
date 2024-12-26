@@ -246,7 +246,6 @@ impl MMapMutWithOffset {
         }
         unsafe { &*(self.mmap.as_ptr().add(start) as *const u32) }
     }
-    
 
     pub fn write_i32(&mut self, value: i32) -> &i32 {
         let start = self.offset;
@@ -1078,7 +1077,7 @@ impl Compiler {
             .fields
             .iter()
             .position(|f| f == string)
-            .expect(format!("Field {} not found in struct", string).as_str());
+            .unwrap_or_else(|| panic!("Field {} not found in struct", string));
         // Temporary +1 because I was writing size as the first field
         // and I haven't changed that
         (heap_object.get_field(field_index), field_index)
@@ -1508,6 +1507,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
                 &[(self.get_stack_base(), stack_pointer)],
             );
 
+            // duplicated below
             // TODO: This whole thing is awful.
             // I should be passing around the slot so I can just update the binding directly.
             let relocations = self.memory.get_namespace_relocations();
@@ -1574,6 +1574,30 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         drop(thread_state);
 
         self.memory.heap.gc(&self.memory.stack_map, &stack_pointers);
+
+        // Duplicated from above becauase I can't borrow self twice
+        // TODO: This whole thing is awful.
+        // I should be passing around the slot so I can just update the binding directly.
+        let relocations = self.memory.get_namespace_relocations();
+        for (namespace, values) in relocations {
+            for (old, new) in values {
+                for (_, value) in self
+                    .compiler
+                    .namespaces
+                    .namespaces
+                    .get_mut(namespace)
+                    .unwrap()
+                    .get_mut()
+                    .unwrap()
+                    .bindings
+                    .iter_mut()
+                {
+                    if *value == old {
+                        *value = new;
+                    }
+                }
+            }
+        }
 
         self.is_paused
             .store(0, std::sync::atomic::Ordering::Release);
