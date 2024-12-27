@@ -316,7 +316,7 @@ pub unsafe fn call_fn_1<Alloc: Allocator>(
         .get_function_by_name(function_name)
         .unwrap();
     let function = runtime.compiler.get_pointer(function).unwrap();
-    save_volatile_registers(arg1, function)
+    save_volatile_registers(arg1, function as usize)
 }
 
 pub unsafe extern "C" fn load_library<Alloc: Allocator>(

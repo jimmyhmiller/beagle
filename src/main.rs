@@ -17,6 +17,7 @@ use std::{cell::UnsafeCell, env, error::Error, time::Instant};
 mod arm;
 pub mod ast;
 mod builtins;
+mod code_memory;
 pub mod common;
 mod gc;
 mod hamt;
@@ -125,8 +126,9 @@ fn compile_trampoline<Alloc: Allocator>(runtime: &mut Runtime<Alloc>) {
 
     runtime
         .compiler
-        .add_function(Some("trampoline"), &lang.compile_directly(), 0)
+        .add_function_mark_executable(Some("trampoline"), &lang.compile_directly(), 0)
         .unwrap();
+
     let function = runtime
         .compiler
         .get_function_by_name_mut("trampoline")
@@ -158,7 +160,7 @@ fn compile_save_volatile_registers<Alloc: Allocator>(runtime: &mut Runtime<Alloc
 
     runtime
         .compiler
-        .add_function(
+        .add_function_mark_executable(
             Some("beagle.builtin/save_volatile_registers"),
             &lang.compile_directly(),
             0,

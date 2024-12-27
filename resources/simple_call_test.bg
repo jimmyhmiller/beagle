@@ -8,7 +8,7 @@ fn many_arguments(a, b, c, d, e, f) {
 fn swap_argments(f, e, d, c, b, a) {
     many_arguments(a, b, c, d, e, f)
 }
-s
+
 
 fn main() {
     // Should be -9
