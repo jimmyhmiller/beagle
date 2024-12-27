@@ -19,6 +19,7 @@ use mmap_rs::{Mmap, MmapMut, MmapOptions};
 use crate::{
     arm::LowLevelArm,
     builtins::{__pause, debugger},
+    code_memory::CodeAllocator,
     gc::{AllocateAction, Allocator, AllocatorOptions, StackMap, StackMapDetails, STACK_SIZE},
     ir::{StringValue, Value},
     parser::Parser,
@@ -31,7 +32,7 @@ use std::cell::RefCell;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
     name: String,
-    offset_or_pointer: usize,
+    pointer: *const u8,
     jump_table_offset: usize,
     is_foreign: bool,
     pub is_builtin: bool,
@@ -548,7 +549,7 @@ impl NamespaceManager {
 
 pub struct Compiler {
     code_offset: usize,
-    code_memory: Option<Mmap>,
+    code_allocator: CodeAllocator,
     // TODO: Think about the jump table more
     jump_table: Option<Mmap>,
     // Do I need this offset?
@@ -587,7 +588,7 @@ impl Compiler {
 
     pub fn allocate_fn_pointer(&mut self) -> usize {
         let allocate_fn_pointer = self.find_function("beagle.builtin/allocate").unwrap();
-        self.get_function_pointer(allocate_fn_pointer).unwrap()
+        self.get_function_pointer(allocate_fn_pointer).unwrap() as usize
     }
 
     pub fn set_runtime_pointer(&mut self, pointer: *const u8) {
@@ -600,11 +601,11 @@ impl Compiler {
         function: *const u8,
     ) -> Result<usize, Box<dyn Error>> {
         let index = self.functions.len();
-        let pointer = function as usize;
+        let pointer = function;
         let jump_table_offset = self.add_jump_table_entry(index, pointer)?;
         self.functions.push(Function {
             name: name.unwrap_or("<Anonymous>").to_string(),
-            offset_or_pointer: pointer,
+            pointer,
             jump_table_offset,
             is_foreign: true,
             is_builtin: false,
@@ -618,12 +619,12 @@ impl Compiler {
             data: Data::ForeignFunction {
                 name: name.unwrap_or("<Anonymous>").to_string(),
                 pointer: Self::get_function_pointer(self, self.functions.last().unwrap().clone())
-                    .unwrap(),
+                    .unwrap() as usize,
             },
         });
         let function_pointer =
             Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
-        Ok(function_pointer)
+        Ok(function_pointer as usize)
     }
     pub fn add_builtin_function(
         &mut self,
@@ -632,12 +633,12 @@ impl Compiler {
         needs_stack_pointer: bool,
     ) -> Result<usize, Box<dyn Error>> {
         let index = self.functions.len();
-        let offset = function as usize;
+        let pointer = function;
 
-        let jump_table_offset = self.add_jump_table_entry(index, offset)?;
+        let jump_table_offset = self.add_jump_table_entry(index, pointer)?;
         self.functions.push(Function {
             name: name.to_string(),
-            offset_or_pointer: offset,
+            pointer,
             jump_table_offset,
             is_foreign: true,
             is_builtin: true,
@@ -648,12 +649,12 @@ impl Compiler {
         });
         let pointer =
             Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
-        self.namespaces.add_binding(name, pointer);
+        self.namespaces.add_binding(name, pointer as usize);
         debugger(Message {
             kind: "builtin_function".to_string(),
             data: Data::BuiltinFunction {
                 name: name.to_string(),
-                pointer,
+                pointer: pointer as usize,
             },
         });
         Ok(self.functions.len() - 1)
@@ -735,10 +736,10 @@ impl Compiler {
             }
         }
         let index = self.functions.len();
-        let jump_table_offset = self.add_jump_table_entry(index, 0)?;
+        let jump_table_offset = self.add_jump_table_entry(index, std::ptr::null())?;
         let function = Function {
             name: name.to_string(),
-            offset_or_pointer: 0,
+            pointer: std::ptr::null(),
             jump_table_offset,
             is_foreign: false,
             is_builtin: false,
@@ -751,17 +752,28 @@ impl Compiler {
         Ok(function)
     }
 
+    pub fn add_function_mark_executable(
+        &mut self,
+        name: Option<&str>,
+        code: &[u8],
+        number_of_locals: usize,
+    ) -> Result<usize, Box<dyn Error>> {
+        let result = self.add_function(name, code, number_of_locals);
+        self.code_allocator.make_executable();
+        result
+    }
+
     pub fn add_function(
         &mut self,
         name: Option<&str>,
         code: &[u8],
         number_of_locals: usize,
     ) -> Result<usize, Box<dyn Error>> {
-        let offset = self.add_code(code)?;
+        let pointer = self.add_code(code)?;
         let index = self.functions.len();
         self.functions.push(Function {
             name: name.unwrap_or("<Anonymous>").to_string(),
-            offset_or_pointer: offset,
+            pointer,
             jump_table_offset: 0,
             is_foreign: false,
             is_builtin: false,
@@ -776,9 +788,9 @@ impl Compiler {
 
         self.functions[index].jump_table_offset = jump_table_offset;
         if let Some(name) = name {
-            self.namespaces.add_binding(name, function_pointer);
+            self.namespaces.add_binding(name, function_pointer as usize);
         }
-        Ok(function_pointer)
+        Ok(function_pointer as usize)
     }
 
     pub fn overwrite_function(
@@ -786,36 +798,28 @@ impl Compiler {
         index: usize,
         code: &[u8],
     ) -> Result<usize, Box<dyn Error>> {
-        let offset = self.add_code(code)?;
+        let pointer = self.add_code(code)?;
         let function = &mut self.functions[index];
-        function.offset_or_pointer = offset;
+        function.pointer = pointer;
         let jump_table_offset = function.jump_table_offset;
         let function_clone = function.clone();
         let function_pointer = self.get_function_pointer(function_clone).unwrap();
-        self.modify_jump_table_entry(jump_table_offset, function_pointer)?;
+        self.modify_jump_table_entry(jump_table_offset, function_pointer as usize)?;
         let function = &mut self.functions[index];
         function.size = code.len();
         function.is_defined = true;
-        Ok(function_pointer)
+        Ok(function_pointer as usize)
     }
 
-    pub fn get_pointer(&self, function: &Function) -> Result<usize, Box<dyn Error>> {
-        if function.is_foreign {
-            Ok(function.offset_or_pointer)
-        } else {
-            Ok(function.offset_or_pointer + self.code_memory.as_ref().unwrap().as_ptr() as usize)
-        }
+    pub fn get_pointer(&self, function: &Function) -> Result<*const u8, Box<dyn Error>> {
+        Ok(function.pointer)
     }
 
-    pub fn get_function_pointer(&self, function: Function) -> Result<usize, Box<dyn Error>> {
+    pub fn get_function_pointer(&self, function: Function) -> Result<*const u8, Box<dyn Error>> {
         // Gets the absolute pointer to a function
         // if it is a foreign function, return the offset
         // if it is a local function, return the offset + the start of code_memory
-        if function.is_foreign {
-            Ok(function.offset_or_pointer)
-        } else {
-            Ok(function.offset_or_pointer + self.code_memory.as_ref().unwrap().as_ptr() as usize)
-        }
+        Ok(function.pointer)
     }
 
     pub fn get_jump_table_pointer(&self, function: Function) -> Result<usize, Box<dyn Error>> {
@@ -825,7 +829,7 @@ impl Compiler {
     pub fn add_jump_table_entry(
         &mut self,
         _index: usize,
-        pointer: usize,
+        pointer: *const u8,
     ) -> Result<usize, Box<dyn Error>> {
         let jump_table_offset = self.jump_table_offset;
         let memory = self.jump_table.take();
@@ -865,28 +869,9 @@ impl Compiler {
         Ok(jump_table_offset)
     }
 
-    pub fn add_code(&mut self, code: &[u8]) -> Result<usize, Box<dyn Error>> {
-        let start = self.code_offset;
-        let memory = self.code_memory.take();
-        let mut memory = memory.unwrap().make_mut().map_err(|(_, e)| e)?;
-        let buffer = &mut memory[self.code_offset..];
-
-        for (index, byte) in code.iter().enumerate() {
-            buffer[index] = *byte;
-        }
-
-        let size: usize = memory.size();
-        memory.flush(0..size)?;
-        memory.flush_icache()?;
-        self.code_offset += code.len();
-
-        let exec = memory.make_exec().unwrap_or_else(|(_map, e)| {
-            panic!("Failed to make mmap executable: {}", e);
-        });
-
-        self.code_memory = Some(exec);
-
-        Ok(start)
+    pub fn add_code(&mut self, code: &[u8]) -> Result<*const u8, Box<dyn Error>> {
+        let new_pointer = self.code_allocator.write_bytes(code);
+        Ok(new_pointer)
     }
 
     pub fn get_repr(&self, value: usize, depth: usize) -> Option<String> {
@@ -977,10 +962,11 @@ impl Compiler {
         let mut parser = Parser::new("".to_string(), string.to_string());
         let ast = parser.parse();
         let top_level = self.compile_ast(ast, "REPL_FUNCTION".to_string())?;
+        self.code_allocator.make_executable();
         if let Some(top_level) = top_level {
             let function = self.get_function_by_name(&top_level).unwrap();
             let function_pointer = self.get_pointer(function).unwrap();
-            Ok(function_pointer)
+            Ok(function_pointer as usize)
         } else {
             Ok(0)
         }
@@ -1020,6 +1006,7 @@ impl Compiler {
         if self.command_line_arguments.verbose {
             println!("Done compiling {:?}", file_name);
         }
+        self.code_allocator.make_executable();
         Ok(top_levels_to_run)
     }
 
@@ -1052,7 +1039,7 @@ impl Compiler {
             let error_fn_pointer = self.get_function_pointer(error_fn_pointer).unwrap();
 
             let runtime_ptr = self.get_runtime_ptr() as usize;
-            let mut arm = ir.compile(arm, error_fn_pointer, runtime_ptr);
+            let mut arm = ir.compile(arm, error_fn_pointer as usize, runtime_ptr);
             let max_locals = arm.max_locals as usize;
             self.upsert_function(Some(&top_level_name), &mut arm, max_locals)?;
             return Ok(Some(top_level_name));
@@ -1066,14 +1053,8 @@ impl Compiler {
             .iter()
             .find(|f| f.name == "trampoline")
             .unwrap();
-        let trampoline_jump_table_offset = trampoline.jump_table_offset;
-        let trampoline_offset = &self.jump_table.as_ref().unwrap()
-            [trampoline_jump_table_offset * 8..trampoline_jump_table_offset * 8 + 8];
 
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(trampoline_offset);
-        let trampoline_start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
-        unsafe { std::mem::transmute(trampoline_start) }
+        unsafe { std::mem::transmute(trampoline.pointer) }
     }
 
     pub fn add_string(&mut self, string_value: StringValue) -> Value {
@@ -1104,18 +1085,12 @@ impl Compiler {
         self.functions.iter().find(|f| f.name == name).cloned()
     }
 
-    pub fn get_function_by_pointer(&self, value: usize) -> Option<&Function> {
-        let offset = value.saturating_sub(self.code_memory.as_ref().unwrap().as_ptr() as usize);
-        self.functions
-            .iter()
-            .find(|f| f.offset_or_pointer == offset)
+    pub fn get_function_by_pointer(&self, value: *const u8) -> Option<&Function> {
+        self.functions.iter().find(|f| f.pointer == value)
     }
 
-    pub fn get_function_by_pointer_mut(&mut self, value: usize) -> Option<&mut Function> {
-        let offset = value - self.code_memory.as_ref().unwrap().as_ptr() as usize;
-        self.functions
-            .iter_mut()
-            .find(|f| f.offset_or_pointer == offset)
+    pub fn get_function_by_pointer_mut(&mut self, value: *const u8) -> Option<&mut Function> {
+        self.functions.iter_mut().find(|f| f.pointer == value)
     }
 
     pub fn property_access(
@@ -1387,12 +1362,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
             printer,
             command_line_arguments: command_line_arguments.clone(),
             compiler: Compiler {
-                code_memory: Some(
-                    MmapOptions::new(MmapOptions::page_size() * 10)
-                        .unwrap()
-                        .map()
-                        .unwrap(),
-                ),
+                code_allocator: CodeAllocator::new(),
                 code_offset: 0,
                 jump_table: Some(
                     MmapOptions::new(MmapOptions::page_size())
@@ -1515,8 +1485,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
 
     fn find_function_for_pc(&self, pc: usize) -> Option<&Function> {
         self.compiler.functions.iter().find(|f| {
-            let start =
-                f.offset_or_pointer + self.compiler.code_memory.as_ref().unwrap().as_ptr() as usize;
+            let start = f.pointer as usize;
             let end = start + f.size;
             pc >= start && pc < end
         })
@@ -1723,7 +1692,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         let num_free = free_variables.len();
         let function_definition = self
             .compiler
-            .get_function_by_pointer(BuiltInTypes::untag(function));
+            .get_function_by_pointer(BuiltInTypes::untag(function) as *const u8);
         if function_definition.is_none() {
             panic!("Function not found");
         }
@@ -1742,17 +1711,11 @@ impl<Alloc: Allocator> Runtime<Alloc> {
     #[allow(clippy::type_complexity)]
     pub fn get_function_base(&self, name: &str) -> Option<(u64, u64, fn(u64, u64) -> u64)> {
         let function = self.compiler.functions.iter().find(|f| f.name == name)?;
-        let jump_table_offset = function.jump_table_offset;
-        let offset = &self.compiler.jump_table.as_ref().unwrap()
-            [jump_table_offset * 8..jump_table_offset * 8 + 8];
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(offset);
-        let start = BuiltInTypes::untag(usize::from_le_bytes(bytes)) as *const u8;
 
         let trampoline = self.compiler.get_trampoline();
         let stack_pointer = self.get_stack_base();
 
-        Some((stack_pointer as u64, start as u64, trampoline))
+        Some((stack_pointer as u64, function.pointer as u64, trampoline))
     }
 
     pub fn get_function0(&self, name: &str) -> Option<Box<dyn Fn() -> u64>> {
@@ -1783,7 +1746,7 @@ impl<Alloc: Allocator> Runtime<Alloc> {
             .compiler
             .get_function_by_name("beagle.core/__call_fn")
             .unwrap();
-        let function_pointer = self.compiler.get_pointer(call_fn).unwrap();
+        let function_pointer = self.compiler.get_pointer(call_fn).unwrap() as usize;
 
         let new_stack = MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap();
         let stack_pointer = new_stack.as_ptr() as usize + STACK_SIZE;
@@ -1853,12 +1816,11 @@ impl<Alloc: Allocator> Runtime<Alloc> {
         // START and SIZE are hex numbers without 0x.
         // symbolname is the rest of the line, so it could contain special characters.
 
-        let memory_offset = self.compiler.code_memory.as_ref().unwrap().as_ptr() as usize;
         for function in self.compiler.functions.iter() {
             if function.is_foreign || function.is_builtin {
                 continue;
             }
-            let start = memory_offset + function.offset_or_pointer;
+            let start = function.pointer as usize;
             let size = function.size;
             let name = function.name.clone();
             let line = format!("{:x} {:x} {}\n", start, size, name);
