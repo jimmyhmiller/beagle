@@ -780,7 +780,7 @@ extern "C" fn eval<Alloc: Allocator>(runtime: *mut Runtime<Alloc>, code: usize) 
         }
         _ => panic!("Expected string, got {:?}", BuiltInTypes::get_kind(code)),
     };
-    let result = runtime.compiler.compile_string(&code).unwrap();
+    let result = runtime.compile_string(&code).unwrap();
     mem::forget(code);
     if result == 0 {
         return BuiltInTypes::null_value() as usize;
