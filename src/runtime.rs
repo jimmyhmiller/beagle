@@ -958,7 +958,7 @@ impl Compiler {
         }
     }
 
-    pub fn compile_string(&mut self, string: &str) -> Result<usize, Box<dyn Error>> {
+    fn compile_string(&mut self, string: &str) -> Result<usize, Box<dyn Error>> {
         let mut parser = Parser::new("".to_string(), string.to_string());
         let ast = parser.parse();
         let top_level = self.compile_ast(ast, "REPL_FUNCTION".to_string())?;
@@ -975,7 +975,7 @@ impl Compiler {
     // TODO: I'm going to need to change how this works at some point.
     // I want to be able to dynamically run these namespaces
     // not have this awkward compile returns top level names thing
-    pub fn compile(&mut self, file_name: &str) -> Result<Vec<String>, Box<dyn Error>> {
+    fn compile(&mut self, file_name: &str) -> Result<Vec<String>, Box<dyn Error>> {
         if self.command_line_arguments.verbose {
             println!("Compiling {:?}", file_name);
         }
@@ -1433,6 +1433,18 @@ impl<Alloc: Allocator> Runtime<Alloc> {
 
     pub fn pause_atom_ptr(&self) -> usize {
         self.is_paused.as_ptr() as usize
+    }
+
+    pub fn compile(&mut self, file_name: &str) -> Result<Vec<String>, Box<dyn Error>> {
+        let top_levels = self.compiler.compile(file_name);
+        self.memory.stack_map = self.compiler.stack_map.clone();
+        top_levels
+    }
+
+    pub fn compile_string(&mut self, string: &str) -> Result<usize, Box<dyn Error>> {
+        let function_pointer = self.compiler.compile_string(string);
+        self.memory.stack_map = self.compiler.stack_map.clone();
+        function_pointer
     }
 
     pub fn allocate(

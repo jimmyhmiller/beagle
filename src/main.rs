@@ -332,13 +332,12 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         }
         top_levels = runtime
             .get_mut()
-            .compiler
             .compile(exe_path.join("resources/std.bg").to_str().unwrap())?;
     }
 
     // TODO: Need better name for top_level
     // It should really be the top level of a namespace
-    let new_top_levels = runtime.get_mut().compiler.compile(&program)?;
+    let new_top_levels = runtime.get_mut().compile(&program)?;
     let current_namespace = runtime.get_mut().compiler.current_namespace_id();
     top_levels.extend(new_top_levels);
 
