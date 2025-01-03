@@ -20,6 +20,7 @@ pub mod ast;
 mod builtins;
 mod code_memory;
 pub mod common;
+mod compiler;
 mod gc;
 pub mod ir;
 pub mod machine_code;
@@ -29,7 +30,6 @@ mod primitives;
 mod register_allocation;
 pub mod runtime;
 mod types;
-mod compiler;
 
 #[derive(Debug, Encode, Decode)]
 pub struct Message {
@@ -129,9 +129,7 @@ fn compile_trampoline(runtime: &mut Runtime) {
         .add_function_mark_executable("trampoline".to_string(), &lang.compile_directly(), 0)
         .unwrap();
 
-    let function = runtime
-        .get_function_by_name_mut("trampoline")
-        .unwrap();
+    let function = runtime.get_function_by_name_mut("trampoline").unwrap();
     function.is_builtin = true;
 }
 
@@ -249,7 +247,6 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-
 cfg_if::cfg_if! {
     if #[cfg(feature = "compacting")] {
         cfg_if::cfg_if! {
@@ -294,8 +291,6 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     // but right now I just want something working
     let has_expect = args.test && source.contains("// Expect");
 
-
-
     let allocator = Alloc::new(get_allocate_options(&args));
     let printer: Box<dyn Printer> = if has_expect {
         Box::new(TestPrinter::new(Box::new(DefaultPrinter)))
@@ -313,24 +308,16 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         CompilerThread::new(receiver, runtime_pointer, args_clone).run();
     });
 
-    
     compile_trampoline(runtime.get_mut());
     compile_save_volatile_registers(runtime.get_mut());
-
 
     //TODO(Refactor)
     let runtime_pointer = runtime.get() as *const _;
 
-    runtime
-        .get_mut()
-        .set_runtime_pointer(runtime_pointer);
+    runtime.get_mut().set_runtime_pointer(runtime_pointer);
 
     let pause_atom_ptr = runtime.get_mut().pause_atom_ptr();
-    runtime
-        .get_mut()
-        .set_pause_atom_ptr(pause_atom_ptr);
-
-
+    runtime.get_mut().set_pause_atom_ptr(pause_atom_ptr);
 
     runtime.get_mut().install_builtins()?;
     let compile_time = Instant::now();
@@ -360,7 +347,6 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         println!("Compile time {:?}", compile_time.elapsed());
     }
 
-
     let time = Instant::now();
 
     for top_level in top_levels {
@@ -373,9 +359,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             );
         }
     }
-    runtime
-        .get_mut()
-        .set_current_namespace(current_namespace);
+    runtime.get_mut().set_current_namespace(current_namespace);
     let fully_qualified_main = runtime.get_mut().current_namespace_name() + "/main";
     if let Some(f) = runtime.get_mut().get_function0(&fully_qualified_main) {
         let result = f();

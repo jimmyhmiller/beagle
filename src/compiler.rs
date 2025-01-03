@@ -44,7 +44,7 @@ impl Compiler {
 
     pub fn allocate_fn_pointer(&mut self) -> usize {
         let allocate_fn_pointer = self.find_function("beagle.builtin/allocate").unwrap();
-        self.get_function_pointer(allocate_fn_pointer).unwrap() as usize
+        self.get_function_pointer(allocate_fn_pointer).unwrap()
     }
 
     pub fn set_runtime_pointer(&mut self, pointer: *const u8) {
@@ -64,7 +64,7 @@ impl Compiler {
         if let Some(top_level) = top_level {
             let function = self.get_function_by_name(&top_level).unwrap();
             let function_pointer = self.get_pointer_for_function(function).unwrap();
-            Ok(function_pointer as usize)
+            Ok(function_pointer)
         } else {
             Ok(0)
         }
@@ -137,7 +137,7 @@ impl Compiler {
             let error_fn_pointer = self.get_function_pointer(error_fn_pointer).unwrap();
 
             let runtime_ptr = self.get_runtime_ptr() as usize;
-            let mut arm = ir.compile(arm, error_fn_pointer as usize, runtime_ptr);
+            let mut arm = ir.compile(arm, error_fn_pointer, runtime_ptr);
             let max_locals = arm.max_locals as usize;
             self.upsert_function(Some(&top_level_name), &mut arm, max_locals)?;
             return Ok(Some(top_level_name));
@@ -322,9 +322,7 @@ impl Compiler {
 
     pub fn get_pointer_for_function(&self, function: &Function) -> Option<usize> {
         let runtime = unsafe { &**(self.runtime.get()) };
-        runtime
-            .get_pointer_for_function(function)
-            .map(|x| x as usize)
+        runtime.get_pointer_for_function(function)
     }
 
     pub fn find_function(&self, name: &str) -> Option<Function> {
