@@ -2,10 +2,7 @@ use ir::{Ir, Value, VirtualRegister};
 use std::collections::HashMap;
 
 use crate::{
-    arm::LowLevelArm,
-    ir::{self, Condition},
-    runtime::{Compiler, Enum, EnumVariant, Struct},
-    types::BuiltInTypes,
+    arm::LowLevelArm, compiler::Compiler, ir::{self, Condition}, runtime::{Enum, EnumVariant, Struct}, types::BuiltInTypes
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -451,7 +448,7 @@ impl<'a> AstCompiler<'a> {
                 let function = self.ir.function(Value::Function(function_pointer));
                 if let Some(name) = name {
                     let function_reg = self.ir.assign_new(function);
-                    let namespace_id = self.compiler.current_namespace_id();
+                    let namespace_id = self.current_namespace_id();
                     let reserved_namespace_slot = self.compiler.reserve_namespace_slot(&name);
                     self.store_namespaced_variable(
                         Value::RawValue(reserved_namespace_slot),
@@ -516,7 +513,7 @@ impl<'a> AstCompiler<'a> {
                 });
                 let namespace_id = self
                     .compiler
-                    .find_binding(self.compiler.current_namespace_id(), &name)
+                    .find_binding(self.current_namespace_id(), &name)
                     .unwrap_or_else(|| panic!("binding not found {}", name));
                 let value_reg = self.ir.assign_new(value);
                 self.store_namespaced_variable(Value::RawValue(namespace_id), value_reg);
@@ -1565,6 +1562,10 @@ impl<'a> AstCompiler<'a> {
 
     fn is_qualifed_function_name(&self, name: &str) -> bool {
         name.contains("/")
+    }
+    
+    fn current_namespace_id(&self) -> usize {
+        self.compiler.current_namespace_id()
     }
 }
 

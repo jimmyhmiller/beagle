@@ -4,6 +4,7 @@ use crate::machine_code::arm_codegen::{SP, X0, X1, X10, X2, X3, X4};
 use arm::LowLevelArm;
 use bincode::{config::standard, Decode, Encode};
 use clap::{command, Parser as ClapParser};
+use compiler::{blocking_channel, CompilerThread};
 #[allow(unused)]
 use gc::{
     compacting::CompactingHeap, mutex_allocator::MutexAllocator,
@@ -12,7 +13,7 @@ use gc::{
 use gc::{get_allocate_options, Allocator, StackMapDetails};
 use runtime::{DefaultPrinter, Printer, Runtime, TestPrinter};
 
-use std::{cell::UnsafeCell, env, error::Error, time::Instant};
+use std::{cell::UnsafeCell, env, error::Error, thread, time::Instant};
 
 mod arm;
 pub mod ast;
@@ -20,7 +21,6 @@ mod builtins;
 mod code_memory;
 pub mod common;
 mod gc;
-mod hamt;
 pub mod ir;
 pub mod machine_code;
 pub mod parser;
@@ -29,6 +29,7 @@ mod primitives;
 mod register_allocation;
 pub mod runtime;
 mod types;
+mod compiler;
 
 #[derive(Debug, Encode, Decode)]
 pub struct Message {
@@ -89,7 +90,7 @@ impl<T: Encode + Decode> Serialize for T {
     }
 }
 
-fn compile_trampoline<Alloc: Allocator>(runtime: &mut Runtime<Alloc>) {
+fn compile_trampoline(runtime: &mut Runtime) {
     let mut lang = LowLevelArm::new();
     // lang.breakpoint();
     lang.prelude(-2);
@@ -125,18 +126,16 @@ fn compile_trampoline<Alloc: Allocator>(runtime: &mut Runtime<Alloc>) {
     lang.ret();
 
     runtime
-        .compiler
-        .add_function_mark_executable(Some("trampoline"), &lang.compile_directly(), 0)
+        .add_function_mark_executable("trampoline".to_string(), &lang.compile_directly(), 0)
         .unwrap();
 
     let function = runtime
-        .compiler
         .get_function_by_name_mut("trampoline")
         .unwrap();
     function.is_builtin = true;
 }
 
-fn compile_save_volatile_registers<Alloc: Allocator>(runtime: &mut Runtime<Alloc>) {
+fn compile_save_volatile_registers(runtime: &mut Runtime) {
     let mut lang = LowLevelArm::new();
     // lang.breakpoint();
     lang.prelude(-2);
@@ -159,15 +158,13 @@ fn compile_save_volatile_registers<Alloc: Allocator>(runtime: &mut Runtime<Alloc
     lang.ret();
 
     runtime
-        .compiler
         .add_function_mark_executable(
-            Some("beagle.builtin/save_volatile_registers"),
+            "beagle.builtin/save_volatile_registers".to_string(),
             &lang.compile_directly(),
             0,
         )
         .unwrap();
     let function = runtime
-        .compiler
         .get_function_by_name_mut("beagle.builtin/save_volatile_registers")
         .unwrap();
     function.is_builtin = true;
@@ -252,6 +249,39 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+
+cfg_if::cfg_if! {
+    if #[cfg(feature = "compacting")] {
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "thread-safe")] {
+                pub type Alloc = MutexAllocator<CompactingHeap>;
+            } else {
+                pub type Alloc = CompactingHeap;
+            }
+        }
+    } else if #[cfg(feature = "simple-mark-and-sweep")] {
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "thread-safe")] {
+                pub type Alloc = MutexAllocator<SimpleMarkSweepHeap>;
+            } else {
+                pub type Alloc = SimpleMarkSweepHeap;
+            }
+        }
+    } else if #[cfg(feature = "simple-generation")] {
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "thread-safe")] {
+                pub type Alloc = MutexAllocator<SimpleGeneration>;
+            } else {
+                pub type Alloc = SimpleGeneration;
+            }
+        }
+    } else if #[cfg(feature = "thread-safe")] {
+        pub type Alloc = MutexAllocator<SimpleGeneration>;
+    } else {
+        pub type Alloc = SimpleGeneration;
+    }
+}
+
 fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     if args.program.is_none() {
         println!("No program provided");
@@ -264,37 +294,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     // but right now I just want something working
     let has_expect = args.test && source.contains("// Expect");
 
-    cfg_if::cfg_if! {
-        if #[cfg(feature = "compacting")] {
-            cfg_if::cfg_if! {
-                if #[cfg(feature = "thread-safe")] {
-                    type Alloc = MutexAllocator<CompactingHeap>;
-                } else {
-                    type Alloc = CompactingHeap;
-                }
-            }
-        } else if #[cfg(feature = "simple-mark-and-sweep")] {
-            cfg_if::cfg_if! {
-                if #[cfg(feature = "thread-safe")] {
-                    type Alloc = MutexAllocator<SimpleMarkSweepHeap>;
-                } else {
-                    type Alloc = SimpleMarkSweepHeap;
-                }
-            }
-        } else if #[cfg(feature = "simple-generation")] {
-            cfg_if::cfg_if! {
-                if #[cfg(feature = "thread-safe")] {
-                    type Alloc = MutexAllocator<SimpleGeneration>;
-                } else {
-                    type Alloc = SimpleGeneration;
-                }
-            }
-        } else if #[cfg(feature = "thread-safe")] {
-            type Alloc = MutexAllocator<SimpleGeneration>;
-        } else {
-            type Alloc = SimpleGeneration;
-        }
-    }
+
 
     let allocator = Alloc::new(get_allocate_options(&args));
     let printer: Box<dyn Printer> = if has_expect {
@@ -305,20 +305,32 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     let mut runtime = UnsafeCell::new(Runtime::new(args.clone(), allocator, printer));
 
+    let (sender, receiver) = blocking_channel();
+    let runtime_pointer = runtime.get() as *const _ as usize;
+    runtime.get_mut().set_compiler_channel(sender);
+    let args_clone = args.clone();
+    let _compiler_thread = thread::spawn(move || {
+        CompilerThread::new(receiver, runtime_pointer, args_clone).run();
+    });
+
+    
     compile_trampoline(runtime.get_mut());
     compile_save_volatile_registers(runtime.get_mut());
 
+
+    //TODO(Refactor)
     let runtime_pointer = runtime.get() as *const _;
+
     runtime
         .get_mut()
-        .compiler
         .set_runtime_pointer(runtime_pointer);
 
     let pause_atom_ptr = runtime.get_mut().pause_atom_ptr();
     runtime
         .get_mut()
-        .compiler
         .set_pause_atom_ptr(pause_atom_ptr);
+
+
 
     runtime.get_mut().install_builtins()?;
     let compile_time = Instant::now();
@@ -338,20 +350,16 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     // TODO: Need better name for top_level
     // It should really be the top level of a namespace
     let new_top_levels = runtime.get_mut().compile(&program)?;
-    let current_namespace = runtime.get_mut().compiler.current_namespace_id();
+    let current_namespace = runtime.get_mut().current_namespace_id();
     top_levels.extend(new_top_levels);
 
     runtime.get_mut().write_functions_to_pid_map();
 
-    runtime.get_mut().compiler.check_functions();
+    runtime.get_mut().check_functions();
     if args.show_times {
         println!("Compile time {:?}", compile_time.elapsed());
     }
 
-    // TODO: Do better
-    // If I'm compiling on the fly I need this to happen when I compile
-    // not just here
-    runtime.get_mut().memory.stack_map = runtime.get_mut().compiler.stack_map.clone();
 
     let time = Instant::now();
 
@@ -367,9 +375,8 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     }
     runtime
         .get_mut()
-        .compiler
         .set_current_namespace(current_namespace);
-    let fully_qualified_main = runtime.get_mut().compiler.current_namespace_name() + "/main";
+    let fully_qualified_main = runtime.get_mut().current_namespace_name() + "/main";
     if let Some(f) = runtime.get_mut().get_function0(&fully_qualified_main) {
         let result = f();
         runtime.get_mut().println(result as usize);
