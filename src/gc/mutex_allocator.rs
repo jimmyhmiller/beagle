@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::{error::Error, sync::Mutex};
 
 use crate::types::BuiltInTypes;
 
@@ -24,7 +24,7 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         &mut self,
         bytes: usize,
         kind: BuiltInTypes,
-    ) -> Result<AllocateAction, Box<dyn std::error::Error>> {
+    ) -> Result<AllocateAction, Box<dyn Error>> {
         if self.registered_threads == 0 {
             return self.alloc.try_allocate(bytes, kind);
         }

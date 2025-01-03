@@ -1,7 +1,5 @@
-use core::fmt;
 use std::{
     collections::HashMap,
-    env,
     error::Error,
     ffi::{c_void, CString},
     io::Write,
@@ -17,30 +15,12 @@ use libloading::Library;
 use mmap_rs::{Mmap, MmapMut, MmapOptions};
 
 use crate::{
-    arm::LowLevelArm,
-    builtins::{__pause, debugger},
-    code_memory::CodeAllocator,
-    gc::{AllocateAction, Allocator, AllocatorOptions, StackMap, StackMapDetails, STACK_SIZE},
-    ir::{StringValue, Value},
-    parser::Parser,
-    types::{BuiltInTypes, Header, HeapObject, Tagged},
-    CommandLineArguments, Data, Message,
+    builtins::{__pause, debugger}, compiler::{BlockingSender, CompilerMessage, CompilerResponse}, gc::{AllocateAction, Allocator, AllocatorOptions, StackMap, StackMapDetails, STACK_SIZE}, ir::StringValue, types::{BuiltInTypes, Header, HeapObject, Tagged}, Alloc, CommandLineArguments, Data, Message 
 };
 
 use std::cell::RefCell;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Function {
-    name: String,
-    pointer: *const u8,
-    jump_table_offset: usize,
-    is_foreign: bool,
-    pub is_builtin: bool,
-    pub needs_stack_pointer: bool,
-    is_defined: bool,
-    number_of_locals: usize,
-    size: usize,
-}
+
 
 #[derive(Debug, Clone)]
 pub struct Struct {
@@ -54,26 +34,26 @@ impl Struct {
     }
 }
 
-struct StructManager {
+pub struct StructManager {
     name_to_id: HashMap<String, usize>,
     structs: Vec<Struct>,
 }
 
 impl StructManager {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             name_to_id: HashMap::new(),
             structs: Vec::new(),
         }
     }
 
-    fn insert(&mut self, name: String, s: Struct) {
+    pub fn insert(&mut self, name: String, s: Struct) {
         let id = self.structs.len();
         self.name_to_id.insert(name.clone(), id);
         self.structs.push(s);
     }
 
-    fn get(&self, name: &str) -> Option<(usize, &Struct)> {
+    pub fn get(&self, name: &str) -> Option<(usize, &Struct)> {
         let id = self.name_to_id.get(name)?;
         self.structs.get(*id).map(|x| (*id, x))
     }
@@ -200,9 +180,23 @@ struct Namespace {
     aliases: HashMap<String, usize>,
 }
 
-pub struct Runtime<Alloc: Allocator> {
-    pub compiler: Compiler,
-    pub memory: Memory<Alloc>,
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Function {
+    pub name: String,
+    pub pointer: *const u8,
+    pub jump_table_offset: usize,
+    pub is_foreign: bool,
+    pub is_builtin: bool,
+    pub needs_stack_pointer: bool,
+    pub is_defined: bool,
+    pub number_of_locals: usize,
+    pub size: usize,
+}
+
+pub struct Runtime {
+    pub memory: Memory,
     pub libraries: Vec<Library>,
     #[allow(unused)]
     command_line_arguments: CommandLineArguments,
@@ -214,6 +208,17 @@ pub struct Runtime<Alloc: Allocator> {
     pub gc_lock: Mutex<()>,
     pub ffi_function_info: Vec<FFIInfo>,
     pub ffi_info_by_name: HashMap<String, usize>,
+    namespaces: NamespaceManager,
+    pub structs: StructManager,
+    pub enums: EnumManager,
+    pub string_constants: Vec<StringValue>,
+    // TODO: Do I need anything more than
+    // namespace manager? Shouldn't these functions
+    // and things be under that?
+    pub functions: Vec<Function>,
+    pub jump_table: Option<Mmap>,
+    pub jump_table_offset: usize,
+    compiler_channel: Option<BlockingSender<CompilerMessage, CompilerResponse>>,
 }
 
 pub struct MMapMutWithOffset {
@@ -302,7 +307,7 @@ thread_local! {
     pub static NATIVE_ARGUMENTS : RefCell<MMapMutWithOffset> = RefCell::new(MMapMutWithOffset::new());
 }
 
-pub struct Memory<Alloc: Allocator> {
+pub struct Memory {
     heap: Alloc,
     stacks: Vec<(ThreadId, MmapMut)>,
     pub join_handles: Vec<JoinHandle<u64>>,
@@ -312,7 +317,7 @@ pub struct Memory<Alloc: Allocator> {
     command_line_arguments: CommandLineArguments,
 }
 
-impl<Alloc: Allocator> Memory<Alloc> {
+impl Memory {
     fn active_threads(&mut self) -> usize {
         let mut completed_threads = vec![];
         for (index, thread) in self.join_handles.iter().enumerate() {
@@ -388,7 +393,7 @@ impl<Alloc: Allocator> Memory<Alloc> {
     }
 }
 
-impl<Alloc: Allocator> Allocator for Memory<Alloc> {
+impl Allocator for Memory {
     fn new(_options: AllocatorOptions) -> Self {
         unimplemented!("Not going to use this");
     }
@@ -436,26 +441,26 @@ pub struct Enum {
     pub variants: Vec<EnumVariant>,
 }
 
-struct EnumManager {
+pub struct EnumManager {
     name_to_id: HashMap<String, usize>,
     enums: Vec<Enum>,
 }
 
 impl EnumManager {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             name_to_id: HashMap::new(),
             enums: Vec::new(),
         }
     }
 
-    fn insert(&mut self, e: Enum) {
+    pub fn insert(&mut self, e: Enum) {
         let id = self.enums.len();
         self.name_to_id.insert(e.name.clone(), id);
         self.enums.push(e);
     }
 
-    fn get(&self, name: &str) -> Option<&Enum> {
+    pub fn get(&self, name: &str) -> Option<&Enum> {
         let id = self.name_to_id.get(name)?;
         self.enums.get(*id)
     }
@@ -542,668 +547,511 @@ impl NamespaceManager {
         namespace.ids.iter().position(|n| n == name)
     }
 
+    #[allow(unused)]
     fn get_namespace_name(&self, id: usize) -> Option<String> {
         self.id_to_name.get(&id).cloned()
     }
 }
 
-pub struct Compiler {
-    code_offset: usize,
-    code_allocator: CodeAllocator,
-    // TODO: Think about the jump table more
-    jump_table: Option<Mmap>,
-    // Do I need this offset?
-    jump_table_offset: usize,
-
-    property_look_up_cache: MmapMut,
-
-    structs: StructManager,
-    enums: EnumManager,
-    functions: Vec<Function>,
-    string_constants: Vec<StringValue>,
-    namespaces: NamespaceManager,
-    #[allow(unused)]
-    command_line_arguments: CommandLineArguments,
-    pub runtime_pointer: Option<*const u8>,
-    // TODO: Need to transfer these after I compiler to memory
-    // is there a better way?
-    // Should I pass runtime to all the compiler stuff?
-    pub stack_map: StackMap,
-    pub pause_atom_ptr: Option<usize>,
-    property_look_up_cache_offset: usize,
+#[allow(unused)]
+#[derive(Debug)]
+pub struct StackValue {
+    function: Option<String>,
+    details: StackMapDetails,
+    stack: Vec<usize>,
 }
 
-impl Compiler {
-    pub fn get_pause_atom(&self) -> usize {
-        self.pause_atom_ptr.unwrap_or(0)
-    }
-
-    pub fn set_pause_atom_ptr(&mut self, pointer: usize) {
-        self.pause_atom_ptr = Some(pointer);
-    }
-
-    pub fn get_runtime_ptr(&self) -> *const u8 {
-        self.runtime_pointer.unwrap()
-    }
-
-    pub fn allocate_fn_pointer(&mut self) -> usize {
-        let allocate_fn_pointer = self.find_function("beagle.builtin/allocate").unwrap();
-        self.get_function_pointer(allocate_fn_pointer).unwrap() as usize
-    }
-
-    pub fn set_runtime_pointer(&mut self, pointer: *const u8) {
-        self.runtime_pointer = Some(pointer);
-    }
-
-    pub fn add_foreign_function(
-        &mut self,
-        name: Option<&str>,
-        function: *const u8,
-    ) -> Result<usize, Box<dyn Error>> {
-        let index = self.functions.len();
-        let pointer = function;
-        let jump_table_offset = self.add_jump_table_entry(index, pointer)?;
-        self.functions.push(Function {
-            name: name.unwrap_or("<Anonymous>").to_string(),
-            pointer,
-            jump_table_offset,
-            is_foreign: true,
-            is_builtin: false,
-            needs_stack_pointer: false,
-            is_defined: true,
-            number_of_locals: 0,
-            size: 0,
-        });
-        debugger(Message {
-            kind: "foreign_function".to_string(),
-            data: Data::ForeignFunction {
-                name: name.unwrap_or("<Anonymous>").to_string(),
-                pointer: Self::get_function_pointer(self, self.functions.last().unwrap().clone())
-                    .unwrap() as usize,
+impl Runtime {
+    pub fn new(
+        command_line_arguments: CommandLineArguments,
+        allocator: Alloc,
+        printer: Box<dyn Printer>,
+    ) -> Self {
+        Self {
+            printer,
+            command_line_arguments: command_line_arguments.clone(),
+            memory: Memory {
+                heap: allocator,
+                stacks: vec![(
+                    std::thread::current().id(),
+                    MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap(),
+                )],
+                join_handles: vec![],
+                threads: vec![std::thread::current()],
+                command_line_arguments,
+                stack_map: StackMap::new(),
             },
-        });
-        let function_pointer =
-            Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
-        Ok(function_pointer as usize)
-    }
-    pub fn add_builtin_function(
-        &mut self,
-        name: &str,
-        function: *const u8,
-        needs_stack_pointer: bool,
-    ) -> Result<usize, Box<dyn Error>> {
-        let index = self.functions.len();
-        let pointer = function;
-
-        let jump_table_offset = self.add_jump_table_entry(index, pointer)?;
-        self.functions.push(Function {
-            name: name.to_string(),
-            pointer,
-            jump_table_offset,
-            is_foreign: true,
-            is_builtin: true,
-            needs_stack_pointer,
-            is_defined: true,
-            number_of_locals: 0,
-            size: 0,
-        });
-        let pointer =
-            Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
-        self.namespaces.add_binding(name, pointer as usize);
-        debugger(Message {
-            kind: "builtin_function".to_string(),
-            data: Data::BuiltinFunction {
-                name: name.to_string(),
-                pointer: pointer as usize,
-            },
-        });
-        Ok(self.functions.len() - 1)
-    }
-
-    pub fn upsert_function(
-        &mut self,
-        name: Option<&str>,
-        code: &mut LowLevelArm,
-        number_of_locals: usize,
-    ) -> Result<usize, Box<dyn Error>> {
-        let bytes = &(code.compile_to_bytes());
-        let mut already_defined = false;
-        let mut function_pointer = 0;
-        if name.is_some() {
-            for (index, function) in self.functions.iter_mut().enumerate() {
-                if function.name == name.unwrap() {
-                    function_pointer = self.overwrite_function(index, bytes)?;
-                    self.namespaces.add_binding(name.unwrap(), function_pointer);
-                    already_defined = true;
-                    break;
-                }
-            }
-        }
-        if !already_defined {
-            function_pointer = self.add_function(name, bytes, number_of_locals)?;
-        }
-        assert!(function_pointer != 0);
-
-        self.update_stack_map_information(code, function_pointer, name);
-
-        debugger(Message {
-            kind: "user_function".to_string(),
-            data: Data::UserFunction {
-                name: name.unwrap_or("<Anonymous>").to_string(),
-                pointer: function_pointer,
-                len: bytes.len(),
-            },
-        });
-        Ok(function_pointer)
-    }
-
-    fn update_stack_map_information(
-        &mut self,
-        code: &mut LowLevelArm,
-        function_pointer: usize,
-        name: Option<&str>,
-    ) {
-        let translated_stack_map = code.translate_stack_map(function_pointer);
-        let translated_stack_map: Vec<(usize, StackMapDetails)> = translated_stack_map
-            .iter()
-            .map(|(key, value)| {
-                (
-                    *key,
-                    StackMapDetails {
-                        current_stack_size: *value,
-                        number_of_locals: code.max_locals as usize,
-                        max_stack_size: code.max_stack_size as usize,
-                    },
-                )
-            })
-            .collect();
-
-        debugger(Message {
-            kind: "stack_map".to_string(),
-            data: Data::StackMap {
-                pc: function_pointer,
-                name: name.unwrap_or("<Anonymous>").to_string(),
-                stack_map: translated_stack_map.clone(),
-            },
-        });
-        self.stack_map.extend(translated_stack_map);
-    }
-
-    pub fn reserve_function(&mut self, name: &str) -> Result<Function, Box<dyn Error>> {
-        for function in self.functions.iter_mut() {
-            if function.name == name {
-                return Ok(function.clone());
-            }
-        }
-        let index = self.functions.len();
-        let jump_table_offset = self.add_jump_table_entry(index, std::ptr::null())?;
-        let function = Function {
-            name: name.to_string(),
-            pointer: std::ptr::null(),
-            jump_table_offset,
-            is_foreign: false,
-            is_builtin: false,
-            needs_stack_pointer: false,
-            is_defined: false,
-            number_of_locals: 0,
-            size: 0,
-        };
-        self.functions.push(function.clone());
-        Ok(function)
-    }
-
-    pub fn add_function_mark_executable(
-        &mut self,
-        name: Option<&str>,
-        code: &[u8],
-        number_of_locals: usize,
-    ) -> Result<usize, Box<dyn Error>> {
-        let result = self.add_function(name, code, number_of_locals);
-        self.code_allocator.make_executable();
-        result
-    }
-
-    pub fn add_function(
-        &mut self,
-        name: Option<&str>,
-        code: &[u8],
-        number_of_locals: usize,
-    ) -> Result<usize, Box<dyn Error>> {
-        let pointer = self.add_code(code)?;
-        let index = self.functions.len();
-        self.functions.push(Function {
-            name: name.unwrap_or("<Anonymous>").to_string(),
-            pointer,
+            libraries: vec![],
+            is_paused: AtomicUsize::new(0),
+            gc_lock: Mutex::new(()),
+            thread_state: Arc::new((
+                Mutex::new(ThreadState {
+                    paused_threads: 0,
+                    stack_pointers: vec![],
+                    c_calling_stack_pointers: HashMap::new(),
+                }),
+                Condvar::new(),
+            )),
+            ffi_function_info: vec![],
+            ffi_info_by_name: HashMap::new(),
+            namespaces: NamespaceManager::new(),
+            structs: StructManager::new(),
+            enums: EnumManager::new(),
+            string_constants: vec![],
+            jump_table: Some(
+                MmapOptions::new(MmapOptions::page_size())
+                    .unwrap()
+                    .map()
+                    .unwrap(),
+            ),
             jump_table_offset: 0,
-            is_foreign: false,
-            is_builtin: false,
-            needs_stack_pointer: false,
-            is_defined: true,
-            number_of_locals,
-            size: code.len(),
-        });
-        let function_pointer =
-            Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
-        let jump_table_offset = self.add_jump_table_entry(index, function_pointer)?;
-
-        self.functions[index].jump_table_offset = jump_table_offset;
-        if let Some(name) = name {
-            self.namespaces.add_binding(name, function_pointer as usize);
-        }
-        Ok(function_pointer as usize)
-    }
-
-    pub fn overwrite_function(
-        &mut self,
-        index: usize,
-        code: &[u8],
-    ) -> Result<usize, Box<dyn Error>> {
-        let pointer = self.add_code(code)?;
-        let function = &mut self.functions[index];
-        function.pointer = pointer;
-        let jump_table_offset = function.jump_table_offset;
-        let function_clone = function.clone();
-        let function_pointer = self.get_function_pointer(function_clone).unwrap();
-        self.modify_jump_table_entry(jump_table_offset, function_pointer as usize)?;
-        let function = &mut self.functions[index];
-        function.size = code.len();
-        function.is_defined = true;
-        Ok(function_pointer as usize)
-    }
-
-    pub fn get_pointer(&self, function: &Function) -> Result<*const u8, Box<dyn Error>> {
-        Ok(function.pointer)
-    }
-
-    pub fn get_function_pointer(&self, function: Function) -> Result<*const u8, Box<dyn Error>> {
-        // Gets the absolute pointer to a function
-        // if it is a foreign function, return the offset
-        // if it is a local function, return the offset + the start of code_memory
-        Ok(function.pointer)
-    }
-
-    pub fn get_jump_table_pointer(&self, function: Function) -> Result<usize, Box<dyn Error>> {
-        Ok(function.jump_table_offset * 8 + self.jump_table.as_ref().unwrap().as_ptr() as usize)
-    }
-
-    pub fn add_jump_table_entry(
-        &mut self,
-        _index: usize,
-        pointer: *const u8,
-    ) -> Result<usize, Box<dyn Error>> {
-        let jump_table_offset = self.jump_table_offset;
-        let memory = self.jump_table.take();
-        let mut memory = memory.unwrap().make_mut().map_err(|(_, e)| e)?;
-        let buffer = &mut memory[jump_table_offset * 8..];
-        let pointer = BuiltInTypes::Function.tag(pointer as isize) as usize;
-        // Write full usize to buffer
-        for (index, byte) in pointer.to_le_bytes().iter().enumerate() {
-            buffer[index] = *byte;
-        }
-        let mem = memory.make_read_only().unwrap_or_else(|(_map, e)| {
-            panic!("Failed to make mmap read_only: {}", e);
-        });
-        self.jump_table_offset += 1;
-        self.jump_table = Some(mem);
-        Ok(jump_table_offset)
-    }
-
-    fn modify_jump_table_entry(
-        &mut self,
-        jump_table_offset: usize,
-        function_pointer: usize,
-    ) -> Result<usize, Box<dyn Error>> {
-        let memory = self.jump_table.take();
-        let mut memory = memory.unwrap().make_mut().map_err(|(_, e)| e)?;
-        let buffer = &mut memory[jump_table_offset * 8..];
-
-        let function_pointer = BuiltInTypes::Function.tag(function_pointer as isize) as usize;
-        // Write full usize to buffer
-        for (index, byte) in function_pointer.to_le_bytes().iter().enumerate() {
-            buffer[index] = *byte;
-        }
-        let mem = memory.make_read_only().unwrap_or_else(|(_map, e)| {
-            panic!("Failed to make mmap read_only: {}", e);
-        });
-        self.jump_table = Some(mem);
-        Ok(jump_table_offset)
-    }
-
-    pub fn add_code(&mut self, code: &[u8]) -> Result<*const u8, Box<dyn Error>> {
-        let new_pointer = self.code_allocator.write_bytes(code);
-        Ok(new_pointer)
-    }
-
-    pub fn get_repr(&self, value: usize, depth: usize) -> Option<String> {
-        if depth > 10 {
-            return Some("...".to_string());
-        }
-        let tag = BuiltInTypes::get_kind(value);
-        match tag {
-            BuiltInTypes::Null => Some("null".to_string()),
-            BuiltInTypes::Int => Some(BuiltInTypes::untag_isize(value as isize).to_string()),
-            BuiltInTypes::Float => {
-                let value = BuiltInTypes::untag(value);
-                let value = value as *const f64;
-                let value = unsafe { *value.add(1) };
-                Some(value.to_string())
-            }
-            BuiltInTypes::String => {
-                let value = BuiltInTypes::untag(value);
-                let string = &self.string_constants[value];
-                Some(string.str.clone())
-            }
-            BuiltInTypes::Bool => {
-                let value = BuiltInTypes::untag(value);
-                if value == 0 {
-                    Some("false".to_string())
-                } else {
-                    Some("true".to_string())
-                }
-            }
-            BuiltInTypes::Function => Some("function".to_string()),
-            BuiltInTypes::Closure => {
-                let heap_object = HeapObject::from_tagged(value);
-                let function_pointer = heap_object.get_field(0);
-                let num_free = heap_object.get_field(1);
-                let num_locals = heap_object.get_field(2);
-                let free_variables = heap_object.get_fields()[3..].to_vec();
-                let mut repr = "Closure { ".to_string();
-                repr.push_str(&self.get_repr(function_pointer, depth + 1)?);
-                repr.push_str(", ");
-                repr.push_str(&num_free.to_string());
-                repr.push_str(", ");
-                repr.push_str(&num_locals.to_string());
-                repr.push_str(", [");
-                for value in free_variables {
-                    repr.push_str(&self.get_repr(value, depth + 1)?);
-                    repr.push_str(", ");
-                }
-                repr.push_str("] }");
-                Some(repr)
-            }
-            BuiltInTypes::HeapObject => {
-                // TODO: Once I change the setup for heap objects
-                // I need to figure out what kind of heap object I have
-                let object = HeapObject::from_tagged(value);
-                let header = object.get_header();
-
-                // TODO: Make this documented and good
-                match header.type_id {
-                    0 => {
-                        let struct_id = BuiltInTypes::untag(object.get_struct_id());
-                        let struct_value = self.structs.get_by_id(struct_id);
-                        Some(self.get_struct_repr(struct_value?, object.get_fields(), depth + 1)?)
-                    }
-                    1 => {
-                        let fields = object.get_fields();
-                        let mut repr = "[ ".to_string();
-                        for (index, field) in fields.iter().enumerate() {
-                            repr.push_str(&self.get_repr(*field, depth + 1)?);
-                            if index != fields.len() - 1 {
-                                repr.push_str(", ");
-                            }
-                        }
-                        repr.push_str(" ]");
-                        Some(repr)
-                    }
-                    2 => {
-                        let bytes = object.get_string_bytes();
-                        let string = std::str::from_utf8(bytes).unwrap();
-                        Some(string.to_string())
-                    }
-                    _ => Some("Unknown".to_string()),
-                }
-            }
+            functions: vec![],
+            compiler_channel: None,
         }
     }
 
-    fn compile_string(&mut self, string: &str) -> Result<usize, Box<dyn Error>> {
-        let mut parser = Parser::new("".to_string(), string.to_string());
-        let ast = parser.parse();
-        let top_level = self.compile_ast(ast, "REPL_FUNCTION".to_string())?;
-        self.code_allocator.make_executable();
-        if let Some(top_level) = top_level {
-            let function = self.get_function_by_name(&top_level).unwrap();
-            let function_pointer = self.get_pointer(function).unwrap();
-            Ok(function_pointer as usize)
+    pub fn print(&mut self, result: usize) {
+        let result = self.get_repr(result, 0).unwrap();
+        self.printer.print(result);
+    }
+
+    pub fn println(&mut self, result: usize) {
+        let result = self.get_repr(result, 0).unwrap();
+        self.printer.println(result);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.is_paused.load(std::sync::atomic::Ordering::Relaxed) == 1
+    }
+
+    pub fn pause_atom_ptr(&self) -> usize {
+        self.is_paused.as_ptr() as usize
+    }
+
+    pub fn compile(&mut self, file_name: &str) -> Result<Vec<String>, Box<dyn Error>> {
+        let response = self.compiler_channel.as_ref().unwrap().send(CompilerMessage::CompileFile(file_name.to_string()));
+        if let CompilerResponse::FunctionsToRun(functions) = response {
+            Ok(functions)
         } else {
-            Ok(0)
+            Err("Error compiling".into())
         }
     }
 
-    // TODO: I'm going to need to change how this works at some point.
-    // I want to be able to dynamically run these namespaces
-    // not have this awkward compile returns top level names thing
-    fn compile(&mut self, file_name: &str) -> Result<Vec<String>, Box<dyn Error>> {
-        if self.command_line_arguments.verbose {
-            println!("Compiling {:?}", file_name);
-        }
-        let parse_time = std::time::Instant::now();
-        let code = std::fs::read_to_string(file_name)
-            .unwrap_or_else(|_| panic!("Could not find file {:?}", file_name));
-        let mut parser = Parser::new(file_name.to_string(), code.to_string());
-        let ast = parser.parse();
-
-        if self.command_line_arguments.print_ast {
-            println!("{:#?}", ast);
-        }
-
-        if self.command_line_arguments.show_times {
-            println!("Parse time: {:?}", parse_time.elapsed());
-        }
-
-        let mut top_levels_to_run = self.compile_dependencies(&ast)?;
-
-        let top_level = self.compile_ast(
-            ast,
-            format!("{}/__top_level", self.current_namespace_name()),
-        )?;
-        if let Some(top_level) = top_level {
-            top_levels_to_run.push(top_level);
-        }
-
-        if self.command_line_arguments.verbose {
-            println!("Done compiling {:?}", file_name);
-        }
-        self.code_allocator.make_executable();
-        Ok(top_levels_to_run)
+    pub fn compile_string(&mut self, _string: &str) -> Result<usize, Box<dyn Error>> {
+        // let function_pointer = self.compiler.compile_string(string);
+        // self.memory.stack_map = self.compiler.stack_map.clone();
+        // function_pointer
+        todo!()
     }
 
-    fn compile_dependencies(
+    pub fn allocate(
         &mut self,
-        ast: &crate::ast::Ast,
-    ) -> Result<Vec<String>, Box<dyn Error>> {
-        let mut top_levels_to_run = vec![];
-        for import in ast.imports() {
-            let (name, _alias) = self.extract_import(&import);
-            if name == "beagle.core" || name == "beagle.primitive" || name == "beagle.builtin" {
+        bytes: usize,
+        stack_pointer: usize,
+        kind: BuiltInTypes,
+    ) -> Result<usize, Box<dyn Error>> {
+
+        let options = self.memory.heap.get_allocation_options();
+
+        if options.gc_always {
+            self.gc(stack_pointer);
+        }
+
+        let result = self.memory.heap.try_allocate(bytes, kind);
+
+        match result {
+            Ok(AllocateAction::Allocated(value)) => {
+                assert!(value.is_aligned());
+                let value = kind.tag(value as isize);
+                Ok(value as usize)
+            }
+            Ok(AllocateAction::Gc) => {
+                self.gc(stack_pointer);
+                let result = self.memory.heap.try_allocate(bytes, kind);
+                if let Ok(AllocateAction::Allocated(result)) = result {
+                    // tag
+                    assert!(result.is_aligned());
+                    let result = kind.tag(result as isize);
+                    Ok(result as usize)
+                } else {
+                    self.memory.heap.grow();
+                    // TODO: Detect loop here
+                    let pointer = self.allocate(bytes, stack_pointer, kind)?;
+                    // If we went down this path, our pointer is already tagged
+                    Ok(pointer)
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    unsafe fn buffer_between<T>(start: *const T, end: *const T) -> &'static [T] {
+        let len = end.offset_from(start);
+        slice::from_raw_parts(start, len as usize)
+    }
+
+    fn find_function_for_pc(&self, pc: usize) -> Option<&Function> {
+        self.functions.iter().find(|f| {
+            let start = f.pointer as usize;
+            let end = start + f.size;
+            pc >= start && pc < end
+        })
+    }
+
+    #[allow(unused)]
+    pub fn parse_stack_frames(&self, stack_pointer: usize) -> Vec<StackValue> {
+        let stack_base = self.get_stack_base();
+        let stack = unsafe {
+            Self::buffer_between(
+                (stack_pointer as *const usize).sub(1),
+                stack_base as *const usize,
+            )
+        };
+        println!("Stack: {:?}", stack);
+        let mut stack_frames = vec![];
+        let mut i = 0;
+        while i < stack.len() {
+            let value = stack[i];
+            if let Some(details) = self.memory.stack_map.find_stack_data(value) {
+                let mut frame_size = details.max_stack_size + details.number_of_locals;
+                if frame_size % 2 != 0 {
+                    frame_size += 1
+                }
+                let current_frame = &stack[i..i + frame_size + 1];
+                let stack_value = StackValue {
+                    function: self.find_function_for_pc(value).map(|f| f.name.clone()),
+                    details: details.clone(),
+                    stack: current_frame.to_vec(),
+                };
+                println!("Stack value: {:#?}", stack_value);
+                stack_frames.push(stack_value);
+                i += details.current_stack_size + details.number_of_locals + 1;
                 continue;
             }
-            let file_name = self.get_file_name_from_import(name);
-            let top_level = self.compile(&file_name)?;
-            top_levels_to_run.extend(top_level);
+            i += 1;
         }
-        Ok(top_levels_to_run)
+        stack_frames
     }
 
-    fn compile_ast(
-        &mut self,
-        ast: crate::ast::Ast,
-        top_level_name: String,
-    ) -> Result<Option<String>, Box<dyn Error>> {
-        let mut ir = ast.compile(self);
-        if ast.has_top_level() {
-            let arm = LowLevelArm::new();
-            let error_fn_pointer = self.find_function("beagle.builtin/throw_error").unwrap();
-            let error_fn_pointer = self.get_function_pointer(error_fn_pointer).unwrap();
+    pub fn gc(&mut self, stack_pointer: usize) {
+        if self.memory.threads.len() == 1 {
+            // If there is only one thread, that is us
+            // that means nothing else could spin up a thread in the mean time
+            // so there is no need to lock anything
+            self.memory.heap.gc(
+                &self.memory.stack_map,
+                &[(self.get_stack_base(), stack_pointer)],
+            );
 
-            let runtime_ptr = self.get_runtime_ptr() as usize;
-            let mut arm = ir.compile(arm, error_fn_pointer as usize, runtime_ptr);
-            let max_locals = arm.max_locals as usize;
-            self.upsert_function(Some(&top_level_name), &mut arm, max_locals)?;
-            return Ok(Some(top_level_name));
+            // duplicated below
+            // TODO: This whole thing is awful.
+            // I should be passing around the slot so I can just update the binding directly.
+            let relocations = self.memory.get_namespace_relocations();
+            for (namespace, values) in relocations {
+                for (old, new) in values {
+                    for (_, value) in self
+                        .namespaces
+                        .namespaces
+                        .get_mut(namespace)
+                        .unwrap()
+                        .get_mut()
+                        .unwrap()
+                        .bindings
+                        .iter_mut()
+                    {
+                        if *value == old {
+                            *value = new;
+                        }
+                    }
+                }
+            }
+            return;
         }
-        Ok(None)
-    }
 
-    pub fn get_trampoline(&self) -> fn(u64, u64) -> u64 {
-        let trampoline = self
-            .functions
-            .iter()
-            .find(|f| f.name == "trampoline")
-            .unwrap();
+        let locked = self.gc_lock.try_lock();
 
-        unsafe { std::mem::transmute(trampoline.pointer) }
-    }
+        if locked.is_err() {
+            match locked.as_ref().unwrap_err() {
+                TryLockError::WouldBlock => {
+                    drop(locked);
+                    unsafe { __pause(self as *mut Runtime, stack_pointer) };
+                }
+                TryLockError::Poisoned(e) => {
+                    panic!("Poisoned lock {:?}", e);
+                }
+            }
 
-    pub fn add_string(&mut self, string_value: StringValue) -> Value {
-        self.string_constants.push(string_value);
-        let offset = self.string_constants.len() - 1;
-        Value::StringConstantPtr(offset)
-    }
-
-    pub fn add_property_lookup(&mut self) -> usize {
-        if self.property_look_up_cache_offset >= self.property_look_up_cache.len() {
-            panic!("Property look up cache is full");
+            return;
         }
-        let location = unsafe {
-            self.property_look_up_cache
-                .as_ptr()
-                .add(self.property_look_up_cache_offset) as usize
-        };
-        self.property_look_up_cache_offset += 2 * 8;
-        location
-    }
-
-    pub fn find_function(&self, name: &str) -> Option<Function> {
-        assert!(
-            name.contains("/"),
-            "Function name should contain /: {:?}",
-            name
+        let result = self.is_paused.compare_exchange(
+            0,
+            1,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
         );
-        self.functions.iter().find(|f| f.name == name).cloned()
-    }
-
-    pub fn get_function_by_pointer(&self, value: *const u8) -> Option<&Function> {
-        self.functions.iter().find(|f| f.pointer == value)
-    }
-
-    pub fn get_function_by_pointer_mut(&mut self, value: *const u8) -> Option<&mut Function> {
-        self.functions.iter_mut().find(|f| f.pointer == value)
-    }
-
-    pub fn property_access(
-        &self,
-        struct_pointer: usize,
-        str_constant_ptr: usize,
-    ) -> (usize, usize) {
-        if BuiltInTypes::untag(struct_pointer) % 8 != 0 {
-            panic!("Not aligned");
+        if result != Ok(0) {
+            drop(locked);
+            unsafe { __pause(self as *mut Runtime, stack_pointer) };
+            return;
         }
-        let heap_object = HeapObject::from_tagged(struct_pointer);
-        let str_constant_ptr: usize = BuiltInTypes::untag(str_constant_ptr);
-        let string_value = &self.string_constants[str_constant_ptr];
-        let string = &string_value.str;
-        let struct_type_id = heap_object.get_struct_id();
-        let struct_type_id = BuiltInTypes::untag(struct_type_id);
-        let struct_value = self.structs.get_by_id(struct_type_id).unwrap();
-        let field_index = struct_value
-            .fields
-            .iter()
-            .position(|f| f == string)
-            .unwrap_or_else(|| panic!("Field {} not found in struct", string));
-        // Temporary +1 because I was writing size as the first field
-        // and I haven't changed that
-        (heap_object.get_field(field_index), field_index)
-    }
 
-    pub fn add_struct(&mut self, s: Struct) {
-        let name = s.name.clone();
-        // TODO: Namespace these
-        self.structs.insert(name.clone(), s);
-        // TODO: I need a "Struct" object that I can add here
-        // What I mean by this is a kind of meta object
-        // if you define a struct like this:
-        // struct Point { x y }
-        // and then you say let x = Point
-        // x is a struct object that describes the struct Point
+        let locked = locked.unwrap();
 
-        // grab the simple name for the binding
-        let (_, simple_name) = name.split_once("/").unwrap();
-        self.namespaces.add_binding(simple_name, 0);
-    }
-
-    pub fn add_enum(&mut self, e: Enum) {
-        let name = e.name.clone();
-        self.enums.insert(e);
-        // See comment about structs above
-        self.namespaces.add_binding(&name, 0);
-    }
-
-    pub fn get_enum(&self, name: &str) -> Option<&Enum> {
-        self.enums.get(name)
-    }
-
-    pub fn get_struct(&self, name: &str) -> Option<(usize, &Struct)> {
-        self.structs.get(name)
-    }
-
-    fn get_struct_repr(
-        &self,
-        struct_value: &Struct,
-        fields: &[usize],
-        depth: usize,
-    ) -> Option<String> {
-        // It should look like this
-        // struct_name { field1: value1, field2: value2 }
-        let simple_name = struct_value.name.split_once("/").unwrap().1;
-        let mut repr = simple_name.to_string();
-        if struct_value.fields.is_empty() {
-            return Some(repr);
+        let (lock, cvar) = &*self.thread_state;
+        let mut thread_state = lock.lock().unwrap();
+        while thread_state.paused_threads + thread_state.c_calling_stack_pointers.len()
+            < self.memory.active_threads()
+        {
+            thread_state = cvar.wait(thread_state).unwrap();
         }
-        repr.push_str(" { ");
-        for (index, field) in struct_value.fields.iter().enumerate() {
-            repr.push_str(field);
-            repr.push_str(": ");
-            let value = fields[index];
-            repr.push_str(&self.get_repr(value, depth + 1)?);
-            if index != struct_value.fields.len() - 1 {
-                repr.push_str(", ");
+
+        let mut stack_pointers = thread_state.stack_pointers.clone();
+        stack_pointers.push((self.get_stack_base(), stack_pointer));
+
+        drop(thread_state);
+
+        self.memory.heap.gc(&self.memory.stack_map, &stack_pointers);
+
+        // Duplicated from above becauase I can't borrow self twice
+        // TODO: This whole thing is awful.
+        // I should be passing around the slot so I can just update the binding directly.
+        let relocations = self.memory.get_namespace_relocations();
+        for (namespace, values) in relocations {
+            for (old, new) in values {
+                for (_, value) in self
+                    .namespaces
+                    .namespaces
+                    .get_mut(namespace)
+                    .unwrap()
+                    .get_mut()
+                    .unwrap()
+                    .bindings
+                    .iter_mut()
+                {
+                    if *value == old {
+                        *value = new;
+                    }
+                }
             }
         }
-        repr.push_str(" }");
-        Some(repr)
+
+        self.is_paused
+            .store(0, std::sync::atomic::Ordering::Release);
+
+        self.memory.active_threads();
+        for thread in self.memory.threads.iter() {
+            thread.unpark();
+        }
+
+        let mut thread_state = lock.lock().unwrap();
+        while thread_state.paused_threads > 0 {
+            let (state, timeout) = cvar
+                .wait_timeout(thread_state, Duration::from_millis(1))
+                .unwrap();
+            thread_state = state;
+
+            if timeout.timed_out() {
+                self.memory.active_threads();
+                for thread in self.memory.threads.iter() {
+                    // println!("Unparking thread {:?}", thread.thread().id());
+                    thread.unpark();
+                }
+            }
+        }
+        thread_state.clear();
+
+        drop(locked);
     }
 
-    pub fn check_functions(&self) {
-        let undefined_functions: Vec<&Function> =
-            self.functions.iter().filter(|f| !f.is_defined).collect();
-        if !undefined_functions.is_empty() {
-            panic!(
-                "Undefined functions: {:?} only have functions {:#?}",
-                undefined_functions
-                    .iter()
-                    .map(|f| f.name.clone())
-                    .collect::<Vec<String>>(),
-                self.functions
-                    .iter()
-                    .map(|f| f.name.clone())
-                    .collect::<Vec<String>>()
-            );
+    pub fn gc_add_root(&mut self, old: usize) {
+        if BuiltInTypes::is_heap_pointer(old) {
+            self.memory.heap.gc_add_root(old);
         }
     }
 
-    pub fn get_function_by_name(&self, name: &str) -> Option<&Function> {
-        self.functions.iter().find(|f| f.name == name)
+    pub fn register_parked_thread(&mut self, stack_pointer: usize) {
+        self.memory
+            .heap
+            .register_parked_thread(std::thread::current().id(), stack_pointer);
     }
 
-    pub fn get_function_by_name_mut(&mut self, name: &str) -> Option<&mut Function> {
-        self.functions.iter_mut().find(|f| f.name == name)
+    pub fn get_stack_base(&self) -> usize {
+        let current_thread = std::thread::current().id();
+        self.memory
+            .stacks
+            .iter()
+            .find(|(thread_id, _)| *thread_id == current_thread)
+            .map(|(_, stack)| stack.as_ptr() as usize + STACK_SIZE)
+            .unwrap()
     }
 
-    pub fn is_inline_primitive_function(&self, name: &str) -> bool {
-        name.starts_with("beagle.primitive/")
+    pub fn make_closure(
+        &mut self,
+        stack_pointer: usize,
+        function: usize,
+        free_variables: &[usize],
+    ) -> Result<usize, Box<dyn Error>> {
+        let len = 8 + 8 + 8 + free_variables.len() * 8;
+        let heap_pointer = self.allocate(len / 8, stack_pointer, BuiltInTypes::Closure)?;
+        let heap_object = HeapObject::from_tagged(heap_pointer);
+        let num_free = free_variables.len();
+        let function_definition = self
+            .get_function_by_pointer(BuiltInTypes::untag(function) as *const u8);
+        if function_definition.is_none() {
+            panic!("Function not found");
+        }
+        let function_definition = function_definition.unwrap();
+        let num_locals = function_definition.number_of_locals;
+
+        heap_object.write_field(0, function);
+        heap_object.write_field(1, BuiltInTypes::Int.tag(num_free as isize) as usize);
+        heap_object.write_field(2, BuiltInTypes::Int.tag(num_locals as isize) as usize);
+        for (index, value) in free_variables.iter().enumerate() {
+            heap_object.write_field((index + 3) as i32, *value);
+        }
+        Ok(heap_pointer)
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn get_function_base(&self, name: &str) -> Option<(u64, u64, fn(u64, u64) -> u64)> {
+        let function = self.functions.iter().find(|f| f.name == name)?;
+
+        let trampoline = self.get_trampoline();
+        let stack_pointer = self.get_stack_base();
+
+        Some((stack_pointer as u64, function.pointer as u64, trampoline))
+    }
+
+    pub fn get_function0(&self, name: &str) -> Option<Box<dyn Fn() -> u64>> {
+        let (stack_pointer, start, trampoline) = self.get_function_base(name)?;
+        Some(Box::new(move || trampoline(stack_pointer, start)))
+    }
+
+    #[allow(unused)]
+    fn get_function1(&self, name: &str) -> Option<Box<dyn Fn(u64) -> u64>> {
+        let (stack_pointer, start, trampoline_start) = self.get_function_base(name)?;
+        let f: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
+        Some(Box::new(move |arg1| f(stack_pointer, start, arg1)))
+    }
+
+    #[allow(unused)]
+    fn get_function2(&self, name: &str) -> Option<Box<dyn Fn(u64, u64) -> u64>> {
+        let (stack_pointer, start, trampoline_start) = self.get_function_base(name)?;
+        let f: fn(u64, u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
+        Some(Box::new(move |arg1, arg2| {
+            f(stack_pointer, start, arg1, arg2)
+        }))
+    }
+
+    pub fn new_thread(&mut self, f: usize) {
+        let trampoline = self.get_trampoline();
+        let trampoline: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline) };
+        let call_fn = self
+            .get_function_by_name("beagle.core/__call_fn")
+            .unwrap();
+        let function_pointer = self.get_pointer(call_fn).unwrap() as usize;
+
+        let new_stack = MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap();
+        let stack_pointer = new_stack.as_ptr() as usize + STACK_SIZE;
+        let thread_state = self.thread_state.clone();
+        let thread = thread::spawn(move || {
+            let result = trampoline(stack_pointer as u64, function_pointer as u64, f as u64);
+            // If we end while another thread is waiting for us to pause
+            // we need to notify that waiter so they can see we are dead.
+            let (_lock, cvar) = &*thread_state;
+            cvar.notify_one();
+            result
+        });
+
+        self.memory.stacks.push((thread.thread().id(), new_stack));
+        self.memory.heap.register_thread(thread.thread().id());
+        self.memory.threads.push(thread.thread().clone());
+        self.memory.join_handles.push(thread);
+    }
+
+    pub fn wait_for_other_threads(&mut self) {
+        if self.memory.join_handles.is_empty() {
+            return;
+        }
+        for thread in self.memory.join_handles.drain(..) {
+            thread.join().unwrap();
+        }
+        self.wait_for_other_threads();
+    }
+
+    pub fn get_pause_atom(&self) -> usize {
+        self.memory.heap.get_pause_pointer()
+    }
+
+    pub fn add_library(&mut self, lib: libloading::Library) -> usize {
+        self.libraries.push(lib);
+        self.libraries.len() - 1
+    }
+
+    pub fn copy_object(
+        &mut self,
+        from_object: HeapObject,
+        to_object: &mut HeapObject,
+    ) -> Result<usize, Box<dyn Error>> {
+        from_object.copy_full_object(to_object);
+        Ok(to_object.tagged_pointer())
+    }
+
+    pub fn copy_object_except_header(
+        &mut self,
+        from_object: HeapObject,
+        to_object: &mut HeapObject,
+    ) -> Result<usize, Box<dyn Error>> {
+        from_object.copy_object_except_header(to_object);
+        Ok(to_object.tagged_pointer())
+    }
+
+    pub fn write_functions_to_pid_map(&self) {
+        // https://github.com/torvalds/linux/blob/6485cf5ea253d40d507cd71253c9568c5470cd27/tools/perf/Documentation/jit-interface.txt
+        let pid = std::process::id();
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(format!("/tmp/perf-{}.map", pid))
+            .unwrap();
+        // Each line has the following format, fields separated with spaces:
+        // START SIZE symbolname
+        // START and SIZE are hex numbers without 0x.
+        // symbolname is the rest of the line, so it could contain special characters.
+
+        for function in self.functions.iter() {
+            if function.is_foreign || function.is_builtin {
+                continue;
+            }
+            let start = function.pointer as usize;
+            let size = function.size;
+            let name = function.name.clone();
+            let line = format!("{:x} {:x} {}\n", start, size, name);
+            file.write_all(line.as_bytes()).unwrap();
+        }
+    }
+
+    pub fn get_library(&self, library_id: usize) -> &libloading::Library {
+        let library_object = HeapObject::from_tagged(library_id);
+        let library_id = BuiltInTypes::untag(library_object.get_field(0));
+        &self.libraries[library_id]
+    }
+
+    pub fn add_ffi_function_info(&mut self, ffi_function_info: FFIInfo) -> usize {
+        self.ffi_function_info.push(ffi_function_info);
+        self.ffi_function_info.len() - 1
+    }
+
+    pub fn get_ffi_info(&self, ffi_info_id: usize) -> &FFIInfo {
+        self.ffi_function_info.get(ffi_info_id).unwrap()
+    }
+
+    pub fn add_ffi_info_by_name(&mut self, function_name: String, ffi_info_id: usize) {
+        self.ffi_info_by_name.insert(function_name, ffi_info_id);
+    }
+
+    pub fn find_ffi_info_by_name(&self, function_name: &str) -> Option<usize> {
+        self.ffi_info_by_name.get(function_name).cloned()
     }
 
     pub fn reserve_namespace_slot(&self, name: &str) -> usize {
@@ -1284,582 +1132,522 @@ impl Compiler {
         self.namespaces.get_namespace_id(name)
     }
 
-    /// TODO: Temporary please fix
-    fn get_file_name_from_import(&self, import_name: String) -> String {
-        let mut exe_path = env::current_exe().unwrap();
-        exe_path = exe_path.parent().unwrap().to_path_buf();
-        if !exe_path
-            .join(format!("resources/{}.bg", import_name))
-            .exists()
-        {
-            exe_path = exe_path.parent().unwrap().to_path_buf();
+    pub fn get_repr(&self, value: usize, depth: usize) -> Option<String> {
+        if depth > 10 {
+            return Some("...".to_string());
         }
-        exe_path
-            .join(format!("resources/{}.bg", import_name))
-            .to_str()
-            .unwrap()
-            .to_string()
-    }
-
-    pub fn get_namespace_from_alias(&self, alias: &str) -> Option<String> {
-        let current_namespace = self.get_current_namespace();
-        let namespace = current_namespace.lock().unwrap();
-        let id = namespace.aliases.get(alias)?;
-        let namespace_name = self.namespaces.get_namespace_name(*id)?;
-        Some(namespace_name)
-    }
-
-    pub fn get_string(&self, value: usize) -> String {
-        let value = BuiltInTypes::untag(value);
-        self.string_constants[value].str.clone()
-    }
-
-    fn extract_import(&self, import: &crate::ast::Ast) -> (String, String) {
-        match import {
-            crate::ast::Ast::Import {
-                library_name,
-                alias,
-            } => {
-                let library_name = library_name.to_string().replace("\"", "");
-                let alias = alias.as_ref().get_string();
-                (library_name, alias)
+        let tag = BuiltInTypes::get_kind(value);
+        match tag {
+            BuiltInTypes::Null => Some("null".to_string()),
+            BuiltInTypes::Int => Some(BuiltInTypes::untag_isize(value as isize).to_string()),
+            BuiltInTypes::Float => {
+                let value = BuiltInTypes::untag(value);
+                let value = value as *const f64;
+                let value = unsafe { *value.add(1) };
+                Some(value.to_string())
             }
-            _ => panic!("Not an import"),
+            BuiltInTypes::String => {
+                let value = BuiltInTypes::untag(value);
+                let string = &self.string_constants[value];
+                Some(string.str.clone())
+            }
+            BuiltInTypes::Bool => {
+                let value = BuiltInTypes::untag(value);
+                if value == 0 {
+                    Some("false".to_string())
+                } else {
+                    Some("true".to_string())
+                }
+            }
+            BuiltInTypes::Function => Some("function".to_string()),
+            BuiltInTypes::Closure => {
+                let heap_object = HeapObject::from_tagged(value);
+                let function_pointer = heap_object.get_field(0);
+                let num_free = heap_object.get_field(1);
+                let num_locals = heap_object.get_field(2);
+                let free_variables = heap_object.get_fields()[3..].to_vec();
+                let mut repr = "Closure { ".to_string();
+                repr.push_str(&self.get_repr(function_pointer, depth + 1)?);
+                repr.push_str(", ");
+                repr.push_str(&num_free.to_string());
+                repr.push_str(", ");
+                repr.push_str(&num_locals.to_string());
+                repr.push_str(", [");
+                for value in free_variables {
+                    repr.push_str(&self.get_repr(value, depth + 1)?);
+                    repr.push_str(", ");
+                }
+                repr.push_str("] }");
+                Some(repr)
+            }
+            BuiltInTypes::HeapObject => {
+                // TODO: Once I change the setup for heap objects
+                // I need to figure out what kind of heap object I have
+                let object = HeapObject::from_tagged(value);
+                let header = object.get_header();
+
+                // TODO: Make this documented and good
+                match header.type_id {
+                    0 => {
+                        let struct_id = BuiltInTypes::untag(object.get_struct_id());
+                        let struct_value = self.get_struct_by_id(struct_id);
+                        Some(self.get_struct_repr(struct_value?, object.get_fields(), depth + 1)?)
+                    }
+                    1 => {
+                        let fields = object.get_fields();
+                        let mut repr = "[ ".to_string();
+                        for (index, field) in fields.iter().enumerate() {
+                            repr.push_str(&self.get_repr(*field, depth + 1)?);
+                            if index != fields.len() - 1 {
+                                repr.push_str(", ");
+                            }
+                        }
+                        repr.push_str(" ]");
+                        Some(repr)
+                    }
+                    2 => {
+                        let bytes = object.get_string_bytes();
+                        let string = std::str::from_utf8(bytes).unwrap();
+                        Some(string.to_string())
+                    }
+                    _ => Some("Unknown".to_string()),
+                }
+            }
         }
     }
 
     pub fn get_struct_by_id(&self, struct_id: usize) -> Option<&Struct> {
         self.structs.get_by_id(struct_id)
     }
-}
 
-impl fmt::Debug for Compiler {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // TODO: Make this better
-        f.debug_struct("Compiler")
-            .field("code_offset", &self.code_offset)
-            .field("jump_table_offset", &self.jump_table_offset)
-            .field("functions", &self.functions)
-            .finish()
-    }
-}
-
-#[allow(unused)]
-#[derive(Debug)]
-pub struct StackValue {
-    function: Option<String>,
-    details: StackMapDetails,
-    stack: Vec<usize>,
-}
-
-impl<Alloc: Allocator> Runtime<Alloc> {
-    pub fn new(
-        command_line_arguments: CommandLineArguments,
-        allocator: Alloc,
-        printer: Box<dyn Printer>,
-    ) -> Self {
-        Self {
-            printer,
-            command_line_arguments: command_line_arguments.clone(),
-            compiler: Compiler {
-                code_allocator: CodeAllocator::new(),
-                code_offset: 0,
-                jump_table: Some(
-                    MmapOptions::new(MmapOptions::page_size())
-                        .unwrap()
-                        .map()
-                        .unwrap(),
-                ),
-                jump_table_offset: 0,
-                property_look_up_cache: MmapOptions::new(MmapOptions::page_size())
-                    .unwrap()
-                    .map_mut()
-                    .unwrap()
-                    .make_mut()
-                    .unwrap_or_else(|(_map, e)| {
-                        panic!("Failed to make mmap executable: {}", e);
-                    }),
-                property_look_up_cache_offset: 0,
-                structs: StructManager::new(),
-                enums: EnumManager::new(),
-                namespaces: NamespaceManager::new(),
-                functions: Vec::new(),
-                string_constants: vec![],
-                command_line_arguments: command_line_arguments.clone(),
-                runtime_pointer: None,
-                stack_map: StackMap::new(),
-                pause_atom_ptr: None,
-            },
-            memory: Memory {
-                heap: allocator,
-                stacks: vec![(
-                    std::thread::current().id(),
-                    MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap(),
-                )],
-                join_handles: vec![],
-                threads: vec![std::thread::current()],
-                command_line_arguments,
-                stack_map: StackMap::new(),
-            },
-            libraries: vec![],
-            is_paused: AtomicUsize::new(0),
-            gc_lock: Mutex::new(()),
-            thread_state: Arc::new((
-                Mutex::new(ThreadState {
-                    paused_threads: 0,
-                    stack_pointers: vec![],
-                    c_calling_stack_pointers: HashMap::new(),
-                }),
-                Condvar::new(),
-            )),
-            ffi_function_info: vec![],
-            ffi_info_by_name: HashMap::new(),
+    pub fn property_access(
+        &self,
+        struct_pointer: usize,
+        str_constant_ptr: usize,
+    ) -> (usize, usize) {
+        if BuiltInTypes::untag(struct_pointer) % 8 != 0 {
+            panic!("Not aligned");
         }
-    }
-
-    pub fn print(&mut self, result: usize) {
-        let result = self.compiler.get_repr(result, 0).unwrap();
-        self.printer.print(result);
-    }
-
-    pub fn println(&mut self, result: usize) {
-        let result = self.compiler.get_repr(result, 0).unwrap();
-        self.printer.println(result);
-    }
-
-    pub fn is_paused(&self) -> bool {
-        self.is_paused.load(std::sync::atomic::Ordering::Relaxed) == 1
-    }
-
-    pub fn pause_atom_ptr(&self) -> usize {
-        self.is_paused.as_ptr() as usize
-    }
-
-    pub fn compile(&mut self, file_name: &str) -> Result<Vec<String>, Box<dyn Error>> {
-        let top_levels = self.compiler.compile(file_name);
-        self.memory.stack_map = self.compiler.stack_map.clone();
-        top_levels
-    }
-
-    pub fn compile_string(&mut self, string: &str) -> Result<usize, Box<dyn Error>> {
-        let function_pointer = self.compiler.compile_string(string);
-        self.memory.stack_map = self.compiler.stack_map.clone();
-        function_pointer
-    }
-
-    pub fn allocate(
-        &mut self,
-        bytes: usize,
-        stack_pointer: usize,
-        kind: BuiltInTypes,
-    ) -> Result<usize, Box<dyn Error>> {
-        // TODO: I need to make it so that I can pass the ability to pause
-        // to the allocator. Maybe the allocator should have the pause atom?
-        // I need to think about how to abstract all these details out.
-        let options = self.memory.heap.get_allocation_options();
-
-        if options.gc_always {
-            self.gc(stack_pointer);
-        }
-
-        let result = self.memory.heap.try_allocate(bytes, kind);
-
-        match result {
-            Ok(AllocateAction::Allocated(value)) => {
-                assert!(value.is_aligned());
-                let value = kind.tag(value as isize);
-                Ok(value as usize)
-            }
-            Ok(AllocateAction::Gc) => {
-                self.gc(stack_pointer);
-                let result = self.memory.heap.try_allocate(bytes, kind);
-                if let Ok(AllocateAction::Allocated(result)) = result {
-                    // tag
-                    assert!(result.is_aligned());
-                    let result = kind.tag(result as isize);
-                    Ok(result as usize)
-                } else {
-                    self.memory.heap.grow();
-                    // TODO: Detect loop here
-                    let pointer = self.allocate(bytes, stack_pointer, kind)?;
-                    // If we went down this path, our pointer is already tagged
-                    Ok(pointer)
-                }
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    unsafe fn buffer_between<T>(start: *const T, end: *const T) -> &'static [T] {
-        let len = end.offset_from(start);
-        slice::from_raw_parts(start, len as usize)
-    }
-
-    fn find_function_for_pc(&self, pc: usize) -> Option<&Function> {
-        self.compiler.functions.iter().find(|f| {
-            let start = f.pointer as usize;
-            let end = start + f.size;
-            pc >= start && pc < end
-        })
-    }
-
-    #[allow(unused)]
-    pub fn parse_stack_frames(&self, stack_pointer: usize) -> Vec<StackValue> {
-        let stack_base = self.get_stack_base();
-        let stack = unsafe {
-            Self::buffer_between(
-                (stack_pointer as *const usize).sub(1),
-                stack_base as *const usize,
-            )
-        };
-        println!("Stack: {:?}", stack);
-        let mut stack_frames = vec![];
-        let mut i = 0;
-        while i < stack.len() {
-            let value = stack[i];
-            if let Some(details) = self.memory.stack_map.find_stack_data(value) {
-                let mut frame_size = details.max_stack_size + details.number_of_locals;
-                if frame_size % 2 != 0 {
-                    frame_size += 1
-                }
-                let current_frame = &stack[i..i + frame_size + 1];
-                let stack_value = StackValue {
-                    function: self.find_function_for_pc(value).map(|f| f.name.clone()),
-                    details: details.clone(),
-                    stack: current_frame.to_vec(),
-                };
-                println!("Stack value: {:#?}", stack_value);
-                stack_frames.push(stack_value);
-                i += details.current_stack_size + details.number_of_locals + 1;
-                continue;
-            }
-            i += 1;
-        }
-        stack_frames
-    }
-
-    pub fn gc(&mut self, stack_pointer: usize) {
-        if self.memory.threads.len() == 1 {
-            // If there is only one thread, that is us
-            // that means nothing else could spin up a thread in the mean time
-            // so there is no need to lock anything
-            self.memory.heap.gc(
-                &self.memory.stack_map,
-                &[(self.get_stack_base(), stack_pointer)],
-            );
-
-            // duplicated below
-            // TODO: This whole thing is awful.
-            // I should be passing around the slot so I can just update the binding directly.
-            let relocations = self.memory.get_namespace_relocations();
-            for (namespace, values) in relocations {
-                for (old, new) in values {
-                    for (_, value) in self
-                        .compiler
-                        .namespaces
-                        .namespaces
-                        .get_mut(namespace)
-                        .unwrap()
-                        .get_mut()
-                        .unwrap()
-                        .bindings
-                        .iter_mut()
-                    {
-                        if *value == old {
-                            *value = new;
-                        }
-                    }
-                }
-            }
-            return;
-        }
-
-        let locked = self.gc_lock.try_lock();
-
-        if locked.is_err() {
-            match locked.as_ref().unwrap_err() {
-                TryLockError::WouldBlock => {
-                    drop(locked);
-                    unsafe { __pause(self as *mut Runtime<Alloc>, stack_pointer) };
-                }
-                TryLockError::Poisoned(e) => {
-                    panic!("Poisoned lock {:?}", e);
-                }
-            }
-
-            return;
-        }
-        let result = self.is_paused.compare_exchange(
-            0,
-            1,
-            std::sync::atomic::Ordering::Relaxed,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        if result != Ok(0) {
-            drop(locked);
-            unsafe { __pause(self as *mut Runtime<Alloc>, stack_pointer) };
-            return;
-        }
-
-        let locked = locked.unwrap();
-
-        let (lock, cvar) = &*self.thread_state;
-        let mut thread_state = lock.lock().unwrap();
-        while thread_state.paused_threads + thread_state.c_calling_stack_pointers.len()
-            < self.memory.active_threads()
-        {
-            thread_state = cvar.wait(thread_state).unwrap();
-        }
-
-        let mut stack_pointers = thread_state.stack_pointers.clone();
-        stack_pointers.push((self.get_stack_base(), stack_pointer));
-
-        drop(thread_state);
-
-        self.memory.heap.gc(&self.memory.stack_map, &stack_pointers);
-
-        // Duplicated from above becauase I can't borrow self twice
-        // TODO: This whole thing is awful.
-        // I should be passing around the slot so I can just update the binding directly.
-        let relocations = self.memory.get_namespace_relocations();
-        for (namespace, values) in relocations {
-            for (old, new) in values {
-                for (_, value) in self
-                    .compiler
-                    .namespaces
-                    .namespaces
-                    .get_mut(namespace)
-                    .unwrap()
-                    .get_mut()
-                    .unwrap()
-                    .bindings
-                    .iter_mut()
-                {
-                    if *value == old {
-                        *value = new;
-                    }
-                }
-            }
-        }
-
-        self.is_paused
-            .store(0, std::sync::atomic::Ordering::Release);
-
-        self.memory.active_threads();
-        for thread in self.memory.threads.iter() {
-            thread.unpark();
-        }
-
-        let mut thread_state = lock.lock().unwrap();
-        while thread_state.paused_threads > 0 {
-            let (state, timeout) = cvar
-                .wait_timeout(thread_state, Duration::from_millis(1))
-                .unwrap();
-            thread_state = state;
-
-            if timeout.timed_out() {
-                self.memory.active_threads();
-                for thread in self.memory.threads.iter() {
-                    // println!("Unparking thread {:?}", thread.thread().id());
-                    thread.unpark();
-                }
-            }
-        }
-        thread_state.clear();
-
-        drop(locked);
-    }
-
-    pub fn gc_add_root(&mut self, old: usize) {
-        if BuiltInTypes::is_heap_pointer(old) {
-            self.memory.heap.gc_add_root(old);
-        }
-    }
-
-    pub fn register_parked_thread(&mut self, stack_pointer: usize) {
-        self.memory
-            .heap
-            .register_parked_thread(std::thread::current().id(), stack_pointer);
-    }
-
-    pub fn get_stack_base(&self) -> usize {
-        let current_thread = std::thread::current().id();
-        self.memory
-            .stacks
+        let heap_object = HeapObject::from_tagged(struct_pointer);
+        let str_constant_ptr: usize = BuiltInTypes::untag(str_constant_ptr);
+        let string_value = &self.string_constants[str_constant_ptr];
+        let string = &string_value.str;
+        let struct_type_id = heap_object.get_struct_id();
+        let struct_type_id = BuiltInTypes::untag(struct_type_id);
+        let struct_value = self.get_struct_by_id(struct_type_id).unwrap();
+        let field_index = struct_value
+            .fields
             .iter()
-            .find(|(thread_id, _)| *thread_id == current_thread)
-            .map(|(_, stack)| stack.as_ptr() as usize + STACK_SIZE)
-            .unwrap()
+            .position(|f| f == string)
+            .unwrap_or_else(|| panic!("Field {} not found in struct", string));
+        // Temporary +1 because I was writing size as the first field
+        // and I haven't changed that
+        (heap_object.get_field(field_index), field_index)
     }
 
-    pub fn make_closure(
-        &mut self,
-        stack_pointer: usize,
-        function: usize,
-        free_variables: &[usize],
-    ) -> Result<usize, Box<dyn Error>> {
-        let len = 8 + 8 + 8 + free_variables.len() * 8;
-        let heap_pointer = self.allocate(len / 8, stack_pointer, BuiltInTypes::Closure)?;
-        let heap_object = HeapObject::from_tagged(heap_pointer);
-        let num_free = free_variables.len();
-        let function_definition = self
-            .compiler
-            .get_function_by_pointer(BuiltInTypes::untag(function) as *const u8);
-        if function_definition.is_none() {
-            panic!("Function not found");
+    pub fn get_struct_repr(
+        &self,
+        struct_value: &Struct,
+        fields: &[usize],
+        depth: usize,
+    ) -> Option<String> {
+        // It should look like this
+        // struct_name { field1: value1, field2: value2 }
+        let simple_name = struct_value.name.split_once("/").unwrap().1;
+        let mut repr = simple_name.to_string();
+        if struct_value.fields.is_empty() {
+            return Some(repr);
         }
-        let function_definition = function_definition.unwrap();
-        let num_locals = function_definition.number_of_locals;
-
-        heap_object.write_field(0, function);
-        heap_object.write_field(1, BuiltInTypes::Int.tag(num_free as isize) as usize);
-        heap_object.write_field(2, BuiltInTypes::Int.tag(num_locals as isize) as usize);
-        for (index, value) in free_variables.iter().enumerate() {
-            heap_object.write_field((index + 3) as i32, *value);
-        }
-        Ok(heap_pointer)
-    }
-
-    #[allow(clippy::type_complexity)]
-    pub fn get_function_base(&self, name: &str) -> Option<(u64, u64, fn(u64, u64) -> u64)> {
-        let function = self.compiler.functions.iter().find(|f| f.name == name)?;
-
-        let trampoline = self.compiler.get_trampoline();
-        let stack_pointer = self.get_stack_base();
-
-        Some((stack_pointer as u64, function.pointer as u64, trampoline))
-    }
-
-    pub fn get_function0(&self, name: &str) -> Option<Box<dyn Fn() -> u64>> {
-        let (stack_pointer, start, trampoline) = self.get_function_base(name)?;
-        Some(Box::new(move || trampoline(stack_pointer, start)))
-    }
-
-    #[allow(unused)]
-    fn get_function1(&self, name: &str) -> Option<Box<dyn Fn(u64) -> u64>> {
-        let (stack_pointer, start, trampoline_start) = self.get_function_base(name)?;
-        let f: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
-        Some(Box::new(move |arg1| f(stack_pointer, start, arg1)))
-    }
-
-    #[allow(unused)]
-    fn get_function2(&self, name: &str) -> Option<Box<dyn Fn(u64, u64) -> u64>> {
-        let (stack_pointer, start, trampoline_start) = self.get_function_base(name)?;
-        let f: fn(u64, u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
-        Some(Box::new(move |arg1, arg2| {
-            f(stack_pointer, start, arg1, arg2)
-        }))
-    }
-
-    pub fn new_thread(&mut self, f: usize) {
-        let trampoline = self.compiler.get_trampoline();
-        let trampoline: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline) };
-        let call_fn = self
-            .compiler
-            .get_function_by_name("beagle.core/__call_fn")
-            .unwrap();
-        let function_pointer = self.compiler.get_pointer(call_fn).unwrap() as usize;
-
-        let new_stack = MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap();
-        let stack_pointer = new_stack.as_ptr() as usize + STACK_SIZE;
-        let thread_state = self.thread_state.clone();
-        let thread = thread::spawn(move || {
-            let result = trampoline(stack_pointer as u64, function_pointer as u64, f as u64);
-            // If we end while another thread is waiting for us to pause
-            // we need to notify that waiter so they can see we are dead.
-            let (_lock, cvar) = &*thread_state;
-            cvar.notify_one();
-            result
-        });
-
-        self.memory.stacks.push((thread.thread().id(), new_stack));
-        self.memory.heap.register_thread(thread.thread().id());
-        self.memory.threads.push(thread.thread().clone());
-        self.memory.join_handles.push(thread);
-    }
-
-    pub fn wait_for_other_threads(&mut self) {
-        if self.memory.join_handles.is_empty() {
-            return;
-        }
-        for thread in self.memory.join_handles.drain(..) {
-            thread.join().unwrap();
-        }
-        self.wait_for_other_threads();
-    }
-
-    pub fn get_pause_atom(&self) -> usize {
-        self.memory.heap.get_pause_pointer()
-    }
-
-    pub fn add_library(&mut self, lib: libloading::Library) -> usize {
-        self.libraries.push(lib);
-        self.libraries.len() - 1
-    }
-
-    pub fn copy_object(
-        &mut self,
-        from_object: HeapObject,
-        to_object: &mut HeapObject,
-    ) -> Result<usize, Box<dyn Error>> {
-        from_object.copy_full_object(to_object);
-        Ok(to_object.tagged_pointer())
-    }
-
-    pub fn copy_object_except_header(
-        &mut self,
-        from_object: HeapObject,
-        to_object: &mut HeapObject,
-    ) -> Result<usize, Box<dyn Error>> {
-        from_object.copy_object_except_header(to_object);
-        Ok(to_object.tagged_pointer())
-    }
-
-    pub fn write_functions_to_pid_map(&self) {
-        // https://github.com/torvalds/linux/blob/6485cf5ea253d40d507cd71253c9568c5470cd27/tools/perf/Documentation/jit-interface.txt
-        let pid = std::process::id();
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .open(format!("/tmp/perf-{}.map", pid))
-            .unwrap();
-        // Each line has the following format, fields separated with spaces:
-        // START SIZE symbolname
-        // START and SIZE are hex numbers without 0x.
-        // symbolname is the rest of the line, so it could contain special characters.
-
-        for function in self.compiler.functions.iter() {
-            if function.is_foreign || function.is_builtin {
-                continue;
+        repr.push_str(" { ");
+        for (index, field) in struct_value.fields.iter().enumerate() {
+            repr.push_str(field);
+            repr.push_str(": ");
+            let value = fields[index];
+            repr.push_str(&self.get_repr(value, depth + 1)?);
+            if index != struct_value.fields.len() - 1 {
+                repr.push_str(", ");
             }
-            let start = function.pointer as usize;
-            let size = function.size;
-            let name = function.name.clone();
-            let line = format!("{:x} {:x} {}\n", start, size, name);
-            file.write_all(line.as_bytes()).unwrap();
+        }
+        repr.push_str(" }");
+        Some(repr)
+    }
+    
+    pub fn get_string_literal(&self, value: usize) -> String {
+        let value = BuiltInTypes::untag(value);
+        self.string_constants[value].str.clone()
+    }
+
+
+    pub fn add_foreign_function(
+        &mut self,
+        name: Option<&str>,
+        function: *const u8,
+    ) -> Result<usize, Box<dyn Error>> {
+        let index = self.functions.len();
+        let pointer = function;
+        let jump_table_offset = self.add_jump_table_entry(index, pointer)?;
+        self.functions.push(Function {
+            name: name.unwrap_or("<Anonymous>").to_string(),
+            pointer,
+            jump_table_offset,
+            is_foreign: true,
+            is_builtin: false,
+            needs_stack_pointer: false,
+            is_defined: true,
+            number_of_locals: 0,
+            size: 0,
+        });
+        debugger(Message {
+            kind: "foreign_function".to_string(),
+            data: Data::ForeignFunction {
+                name: name.unwrap_or("<Anonymous>").to_string(),
+                pointer: Self::get_function_pointer(self, self.functions.last().unwrap().clone())
+                    .unwrap() as usize,
+            },
+        });
+        let function_pointer =
+            Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
+        Ok(function_pointer as usize)
+    }
+    pub fn add_builtin_function(
+        &mut self,
+        name: &str,
+        function: *const u8,
+        needs_stack_pointer: bool,
+    ) -> Result<usize, Box<dyn Error>> {
+        let index = self.functions.len();
+        let pointer = function;
+
+        let jump_table_offset = self.add_jump_table_entry(index, pointer)?;
+        self.functions.push(Function {
+            name: name.to_string(),
+            pointer,
+            jump_table_offset,
+            is_foreign: true,
+            is_builtin: true,
+            needs_stack_pointer,
+            is_defined: true,
+            number_of_locals: 0,
+            size: 0,
+        });
+        let pointer =
+            Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
+        // self.namespaces.add_binding(name, pointer as usize);
+        debugger(Message {
+            kind: "builtin_function".to_string(),
+            data: Data::BuiltinFunction {
+                name: name.to_string(),
+                pointer: pointer as usize,
+            },
+        });
+        Ok(self.functions.len() - 1)
+    }
+
+        pub fn update_stack_map_information(
+        &mut self,
+        stack_map: Vec<(usize, StackMapDetails)>,
+        function_pointer: usize,
+        name: Option<&str>,
+    ) {
+        debugger(Message {
+            kind: "stack_map".to_string(),
+            data: Data::StackMap {
+                pc: function_pointer,
+                name: name.unwrap_or("<Anonymous>").to_string(),
+                stack_map: stack_map.clone(),
+            },
+        });
+        self.memory.stack_map.extend(stack_map);
+    }
+
+    pub fn upsert_function(
+        &mut self,
+        name: Option<&str>,
+        pointer: *const u8,
+        size: usize,
+        number_of_locals: usize,
+        stack_map: Vec<(usize, StackMapDetails)>,
+    ) -> Result<usize, Box<dyn Error>> {
+        let mut already_defined = false;
+        let mut function_pointer = 0;
+        if name.is_some() {
+            for (index, function) in self.functions.iter_mut().enumerate() {
+                if function.name == name.unwrap() {
+                    function_pointer = self.overwrite_function(index, pointer, size)?;
+                    // self.namespaces.add_binding(name.unwrap(), function_pointer);
+                    already_defined = true;
+                    break;
+                }
+            }
+        }
+        if !already_defined {
+            function_pointer = self.add_function(name, pointer, size, number_of_locals)?;
+        }
+        assert!(function_pointer != 0);
+
+        self.update_stack_map_information(stack_map, function_pointer, name);
+
+        debugger(Message {
+            kind: "user_function".to_string(),
+            data: Data::UserFunction {
+                name: name.unwrap_or("<Anonymous>").to_string(),
+                pointer: function_pointer,
+                len: size,
+            },
+        });
+        Ok(function_pointer)
+    }
+
+    pub fn reserve_function(&mut self, name: &str) -> Result<Function, Box<dyn Error>> {
+        for function in self.functions.iter_mut() {
+            if function.name == name {
+                return Ok(function.clone());
+            }
+        }
+        let index = self.functions.len();
+        let jump_table_offset = self.add_jump_table_entry(index, std::ptr::null())?;
+        let function = Function {
+            name: name.to_string(),
+            pointer: std::ptr::null(),
+            jump_table_offset,
+            is_foreign: false,
+            is_builtin: false,
+            needs_stack_pointer: false,
+            is_defined: false,
+            number_of_locals: 0,
+            size: 0,
+        };
+        self.functions.push(function.clone());
+        Ok(function)
+    }
+
+    pub fn add_function(
+        &mut self,
+        name: Option<&str>,
+        pointer: *const u8,
+        size: usize,
+        number_of_locals: usize,
+    ) -> Result<usize, Box<dyn Error>> {
+        let index = self.functions.len();
+        self.functions.push(Function {
+            name: name.unwrap_or("<Anonymous>").to_string(),
+            pointer,
+            jump_table_offset: 0,
+            is_foreign: false,
+            is_builtin: false,
+            needs_stack_pointer: false,
+            is_defined: true,
+            number_of_locals,
+            size,
+        });
+        let function_pointer =
+            Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
+        let jump_table_offset = self.add_jump_table_entry(index, function_pointer)?;
+
+        self.functions[index].jump_table_offset = jump_table_offset;
+        if let Some(name) = name {
+            self.add_binding(name, function_pointer as usize);
+        }
+        Ok(function_pointer as usize)
+    }
+
+    pub fn overwrite_function(
+        &mut self,
+        index: usize,
+        pointer: *const u8,
+        size: usize,
+    ) -> Result<usize, Box<dyn Error>> {
+        let function = &mut self.functions[index];
+        function.pointer = pointer;
+        let jump_table_offset = function.jump_table_offset;
+        let function_clone = function.clone();
+        let function_pointer = self.get_function_pointer(function_clone).unwrap();
+        self.modify_jump_table_entry(jump_table_offset, function_pointer as usize)?;
+        let function = &mut self.functions[index];
+        function.size = size;
+        function.is_defined = true;
+        Ok(function_pointer as usize)
+    }
+
+    pub fn get_pointer(&self, function: &Function) -> Result<*const u8, Box<dyn Error>> {
+        Ok(function.pointer)
+    }
+
+    pub fn get_function_pointer(&self, function: Function) -> Result<*const u8, Box<dyn Error>> {
+        // Gets the absolute pointer to a function
+        // if it is a foreign function, return the offset
+        // if it is a local function, return the offset + the start of code_memory
+        Ok(function.pointer)
+    }
+
+    pub fn get_jump_table_pointer(&self, function: Function) -> Result<usize, Box<dyn Error>> {
+        Ok(function.jump_table_offset * 8 + self.jump_table.as_ref().unwrap().as_ptr() as usize)
+    }
+
+    pub fn add_jump_table_entry(
+        &mut self,
+        _index: usize,
+        pointer: *const u8,
+    ) -> Result<usize, Box<dyn Error>> {
+        let jump_table_offset = self.jump_table_offset;
+        let memory = self.jump_table.take();
+        let mut memory = memory.unwrap().make_mut().map_err(|(_, e)| e)?;
+        let buffer = &mut memory[jump_table_offset * 8..];
+        let pointer = BuiltInTypes::Function.tag(pointer as isize) as usize;
+        // Write full usize to buffer
+        for (index, byte) in pointer.to_le_bytes().iter().enumerate() {
+            buffer[index] = *byte;
+        }
+        let mem = memory.make_read_only().unwrap_or_else(|(_map, e)| {
+            panic!("Failed to make mmap read_only: {}", e);
+        });
+        self.jump_table_offset += 1;
+        self.jump_table = Some(mem);
+        Ok(jump_table_offset)
+    }
+
+    pub fn modify_jump_table_entry(
+        &mut self,
+        jump_table_offset: usize,
+        function_pointer: usize,
+    ) -> Result<usize, Box<dyn Error>> {
+        let memory = self.jump_table.take();
+        let mut memory = memory.unwrap().make_mut().map_err(|(_, e)| e)?;
+        let buffer = &mut memory[jump_table_offset * 8..];
+
+        let function_pointer = BuiltInTypes::Function.tag(function_pointer as isize) as usize;
+        // Write full usize to buffer
+        for (index, byte) in function_pointer.to_le_bytes().iter().enumerate() {
+            buffer[index] = *byte;
+        }
+        let mem = memory.make_read_only().unwrap_or_else(|(_map, e)| {
+            panic!("Failed to make mmap read_only: {}", e);
+        });
+        self.jump_table = Some(mem);
+        Ok(jump_table_offset)
+    }
+
+    pub fn find_function(&self, name: &str) -> Option<Function> {
+        assert!(
+            name.contains("/"),
+            "Function name should contain /: {:?}",
+            name
+        );
+        self.functions.iter().find(|f| f.name == name).cloned()
+    }
+
+    pub fn get_function_by_pointer(&self, value: *const u8) -> Option<&Function> {
+        self.functions.iter().find(|f| f.pointer == value)
+    }
+
+    pub fn get_function_by_pointer_mut(&mut self, value: *const u8) -> Option<&mut Function> {
+        self.functions.iter_mut().find(|f| f.pointer == value)
+    }
+
+    pub fn check_functions(&self) {
+        let undefined_functions: Vec<&Function> =
+            self.functions.iter().filter(|f| !f.is_defined).collect();
+        if !undefined_functions.is_empty() {
+            panic!(
+                "Undefined functions: {:?} only have functions {:#?}",
+                undefined_functions
+                    .iter()
+                    .map(|f| f.name.clone())
+                    .collect::<Vec<String>>(),
+                self.functions
+                    .iter()
+                    .map(|f| f.name.clone())
+                    .collect::<Vec<String>>()
+            );
         }
     }
 
-    pub fn get_library(&self, library_id: usize) -> &libloading::Library {
-        let library_object = HeapObject::from_tagged(library_id);
-        let library_id = BuiltInTypes::untag(library_object.get_field(0));
-        &self.libraries[library_id]
+    pub fn get_function_by_name(&self, name: &str) -> Option<&Function> {
+        self.functions.iter().find(|f| f.name == name)
     }
 
-    pub fn add_ffi_function_info(&mut self, ffi_function_info: FFIInfo) -> usize {
-        self.ffi_function_info.push(ffi_function_info);
-        self.ffi_function_info.len() - 1
+    pub fn get_function_by_name_mut(&mut self, name: &str) -> Option<&mut Function> {
+        self.functions.iter_mut().find(|f| f.name == name)
+    }
+    
+    pub fn add_function_mark_executable(&self, name: String, code: &[u8], number_of_locals: i32) -> Result<usize, Box<dyn Error>>  {
+        self.compiler_channel.as_ref().unwrap().send(
+            CompilerMessage::AddFunctionMarkExecutable(name.clone(), code.to_vec(), number_of_locals as usize)
+        );
+        Ok(self.get_function_by_name(&name).unwrap().pointer as usize)
+    }
+    
+    fn add_binding(&mut self, name: &str, function_pointer: usize) -> usize {
+        self.namespaces.add_binding(name, function_pointer)
     }
 
-    pub fn get_ffi_info(&self, ffi_info_id: usize) -> &FFIInfo {
-        self.ffi_function_info.get(ffi_info_id).unwrap()
+    pub fn get_trampoline(&self) -> fn(u64, u64) -> u64 {
+        let trampoline = self.get_function_by_name("trampoline").unwrap();
+
+        unsafe { std::mem::transmute(trampoline.pointer) }
+    }
+    
+    pub fn add_string(&mut self, string_value: StringValue) -> usize {
+        self.string_constants.push(string_value);
+        self.string_constants.len() - 1
+    }
+    
+    pub fn add_struct(&mut self, s: Struct) {
+        let name = s.name.clone();
+        // TODO: Namespace these
+        self.structs.insert(name.clone(), s);
+        // TODO: I need a "Struct" object that I can add here
+        // What I mean by this is a kind of meta object
+        // if you define a struct like this:
+        // struct Point { x y }
+        // and then you say let x = Point
+        // x is a struct object that describes the struct Point
+        // grab the simple name for the binding
+        let (_, simple_name) = name.split_once("/").unwrap();
+        self.add_binding(simple_name, 0);
+    }
+    
+    pub fn add_enum(&mut self, e: Enum) {
+        let name = e.name.clone();
+        self.enums.insert(e);
+        // See comment about structs above
+        self.add_binding(&name, 0);
     }
 
-    pub fn add_ffi_info_by_name(&mut self, function_name: String, ffi_info_id: usize) {
-        self.ffi_info_by_name.insert(function_name, ffi_info_id);
+    pub fn get_enum(&self, name: &str) -> Option<&Enum> {
+        self.enums.get(name)
+    }
+    
+    pub fn get_struct(&self, name: &str) -> Option<(usize, &Struct)> {
+        self.structs.get(name)
+    }
+    
+    pub fn get_namespace_from_alias(&self, alias: &str) -> Option<String> {
+        let current_namespace = self.current_namespace_name();
+        let current_namespace = self.get_namespace_id(current_namespace.as_str()).unwrap();
+        let current_namespace = self.namespaces.namespaces.get(current_namespace).unwrap();
+        let current_namespace = current_namespace.lock().unwrap();
+        let namespace_id = current_namespace.aliases.get(alias)?;
+        let namespace = self.namespaces.namespaces.get(*namespace_id).unwrap();
+        let namespace = namespace.lock().unwrap();
+        Some(namespace.name.clone())
+    }
+    
+    pub fn get_pointer_for_function(&self, function: &Function) -> Option<usize>  {
+        Some(function.pointer as usize)
     }
 
-    pub fn find_ffi_info_by_name(&self, function_name: &str) -> Option<usize> {
-        self.ffi_info_by_name.get(function_name).cloned()
+    pub fn set_compiler_channel(&mut self, compiler_channel: BlockingSender<CompilerMessage, CompilerResponse>) {
+        self.compiler_channel = Some(compiler_channel);
     }
+    
+    pub fn set_runtime_pointer(&mut self, runtime_pointer: *const Runtime) {
+        self.compiler_channel.as_ref().unwrap().send(CompilerMessage::SetRuntimePointer(runtime_pointer as usize));
+    }
+    
+    pub fn set_pause_atom_ptr(&self, pause_atom_ptr: usize) {
+        self.compiler_channel.as_ref().unwrap().send(CompilerMessage::SetPauseAtomPointer(pause_atom_ptr));
+    }
+
+
 }
