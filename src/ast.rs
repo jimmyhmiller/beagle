@@ -2,7 +2,11 @@ use ir::{Ir, Value, VirtualRegister};
 use std::collections::HashMap;
 
 use crate::{
-    arm::LowLevelArm, compiler::Compiler, ir::{self, Condition}, runtime::{Enum, EnumVariant, Struct}, types::BuiltInTypes
+    arm::LowLevelArm,
+    compiler::Compiler,
+    ir::{self, Condition},
+    runtime::{Enum, EnumVariant, Struct},
+    types::BuiltInTypes,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -379,7 +383,7 @@ impl<'a> AstCompiler<'a> {
                         .compiler
                         .get_function_pointer(pause_function.clone())
                         .unwrap();
-                    let pause_function = self.ir.assign_new(pause_function as usize);
+                    let pause_function = self.ir.assign_new(pause_function);
                     self.ir.call_builtin(
                         pause_function.into(),
                         vec![runtime_pointer_reg.into(), stack_pointer],
@@ -409,9 +413,7 @@ impl<'a> AstCompiler<'a> {
 
                 let runtime_ptr = self.compiler.get_runtime_ptr() as usize;
 
-                let mut code = self
-                    .ir
-                    .compile(lang, error_fn_pointer as usize, runtime_ptr);
+                let mut code = self.ir.compile(lang, error_fn_pointer, runtime_ptr);
 
                 let full_function_name = name
                     .clone()
@@ -566,7 +568,7 @@ impl<'a> AstCompiler<'a> {
                     .find_function("beagle.builtin/allocate")
                     .unwrap();
                 let allocate = self.compiler.get_function_pointer(allocate).unwrap();
-                let allocate = self.ir.assign_new(allocate as usize);
+                let allocate = self.ir.assign_new(allocate);
 
                 let size_reg = self.ir.assign_new(struct_type.size());
                 let stack_pointer = self.ir.get_stack_pointer_imm(0);
@@ -619,7 +621,7 @@ impl<'a> AstCompiler<'a> {
                     .find_function("beagle.builtin/allocate")
                     .unwrap();
                 let allocate = self.compiler.get_function_pointer(allocate).unwrap();
-                let allocate = self.ir.assign_new(allocate as usize);
+                let allocate = self.ir.assign_new(allocate);
 
                 let size_reg = self.ir.assign_new(struct_type.size());
                 let stack_pointer = self.ir.get_stack_pointer_imm(0);
@@ -939,7 +941,7 @@ impl<'a> AstCompiler<'a> {
                     .find_function("beagle.builtin/allocate_float")
                     .unwrap();
                 let allocate = self.compiler.get_function_pointer(allocate).unwrap();
-                let allocate = self.ir.assign_new(allocate as usize);
+                let allocate = self.ir.assign_new(allocate);
 
                 let runtime_pointer_reg = self.ir.assign_new(self.compiler.get_runtime_ptr());
 
@@ -1026,7 +1028,7 @@ impl<'a> AstCompiler<'a> {
     fn get_function(&mut self, function_name: &str) -> Value {
         let f = self.compiler.find_function(function_name).unwrap();
         let f = self.compiler.get_function_pointer(f).unwrap();
-        let f = self.ir.assign_new(f as usize);
+        let f = self.ir.assign_new(f);
         f.into()
     }
 
@@ -1221,7 +1223,7 @@ impl<'a> AstCompiler<'a> {
             .unwrap();
         let make_closure = self.compiler.get_function_pointer(make_closure).unwrap();
         let make_closure_reg = self.ir.volatile_register();
-        self.ir.assign(make_closure_reg, make_closure as usize);
+        self.ir.assign(make_closure_reg, make_closure);
         let function_pointer_reg = self.ir.volatile_register();
         self.ir
             .assign(function_pointer_reg, Value::RawValue(function_pointer));
@@ -1354,7 +1356,7 @@ impl<'a> AstCompiler<'a> {
             .unwrap_or_else(|| panic!("could not find function {}", arg));
         assert!(function.is_builtin);
         let function = self.compiler.get_function_pointer(function).unwrap();
-        let function = self.ir.assign_new(function as usize);
+        let function = self.ir.assign_new(function);
         let pointer_reg = self.ir.volatile_register();
         let pointer: Value = self.compiler.get_runtime_ptr().into();
         self.ir.assign(pointer_reg, pointer);
@@ -1563,7 +1565,7 @@ impl<'a> AstCompiler<'a> {
     fn is_qualifed_function_name(&self, name: &str) -> bool {
         name.contains("/")
     }
-    
+
     fn current_namespace_id(&self) -> usize {
         self.compiler.current_namespace_id()
     }

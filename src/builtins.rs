@@ -46,29 +46,19 @@ pub fn debugger(message: Message) {
     // Should make it is so we clean up this memory
 }
 
-pub unsafe extern "C" fn println_value(
-    runtime: *mut Runtime,
-    value: usize,
-) -> usize {
+pub unsafe extern "C" fn println_value(runtime: *mut Runtime, value: usize) -> usize {
     let runtime = unsafe { &mut *runtime };
     runtime.println(value);
     0b111
 }
 
-pub unsafe extern "C" fn print_value(
-    runtime: *mut Runtime,
-    value: usize,
-) -> usize {
+pub unsafe extern "C" fn print_value(runtime: *mut Runtime, value: usize) -> usize {
     let runtime = unsafe { &mut *runtime };
     runtime.print(value);
     0b111
 }
 
-extern "C" fn allocate(
-    runtime: *mut Runtime,
-    stack_pointer: usize,
-    size: usize,
-) -> usize {
+extern "C" fn allocate(runtime: *mut Runtime, stack_pointer: usize, size: usize) -> usize {
     let size = BuiltInTypes::untag(size);
     let runtime = unsafe { &mut *runtime };
 
@@ -81,11 +71,7 @@ extern "C" fn allocate(
     result
 }
 
-extern "C" fn allocate_float(
-    runtime: *mut Runtime,
-    stack_pointer: usize,
-    size: usize,
-) -> usize {
+extern "C" fn allocate_float(runtime: *mut Runtime, stack_pointer: usize, size: usize) -> usize {
     let runtime = unsafe { &mut *runtime };
     let value = BuiltInTypes::untag(size);
 
@@ -145,8 +131,7 @@ extern "C" fn property_access(
     property_cache_location: usize,
 ) -> usize {
     let runtime = unsafe { &mut *runtime };
-    let (result, index) = runtime
-        .property_access(struct_pointer, str_constant_ptr);
+    let (result, index) = runtime.property_access(struct_pointer, str_constant_ptr);
     let type_id = HeapObject::from_tagged(struct_pointer).get_struct_id();
     let buffer = unsafe { from_raw_parts_mut(property_cache_location as *mut usize, 2) };
     buffer[0] = type_id;
@@ -154,37 +139,25 @@ extern "C" fn property_access(
     result
 }
 
-pub unsafe extern "C" fn throw_error(
-    _runtime: *mut Runtime,
-    _stack_pointer: usize,
-) -> usize {
+pub unsafe extern "C" fn throw_error(_runtime: *mut Runtime, _stack_pointer: usize) -> usize {
     // let compiler = unsafe { &mut *compiler };
     panic!("Error!");
 }
 
-pub unsafe extern "C" fn gc(
-    runtime: *mut Runtime,
-    stack_pointer: usize,
-) -> usize {
+pub unsafe extern "C" fn gc(runtime: *mut Runtime, stack_pointer: usize) -> usize {
     let runtime = unsafe { &mut *runtime };
     runtime.gc(stack_pointer);
     BuiltInTypes::null_value() as usize
 }
 
-pub unsafe extern "C" fn gc_add_root(
-    runtime: *mut Runtime,
-    old: usize,
-) -> usize {
+pub unsafe extern "C" fn gc_add_root(runtime: *mut Runtime, old: usize) -> usize {
     let runtime = unsafe { &mut *runtime };
     runtime.gc_add_root(old);
     BuiltInTypes::null_value() as usize
 }
 
 #[allow(unused)]
-pub unsafe extern "C" fn new_thread(
-    runtime: *mut Runtime,
-    function: usize,
-) -> usize {
+pub unsafe extern "C" fn new_thread(runtime: *mut Runtime, function: usize) -> usize {
     #[cfg(feature = "thread-safe")]
     {
         let runtime = unsafe { &mut *runtime };
@@ -219,19 +192,13 @@ pub unsafe extern "C" fn get_binding(
     runtime.get_binding(namespace, slot)
 }
 
-pub unsafe extern "C" fn set_current_namespace(
-    runtime: *mut Runtime,
-    namespace: usize,
-) -> usize {
+pub unsafe extern "C" fn set_current_namespace(runtime: *mut Runtime, namespace: usize) -> usize {
     let runtime = unsafe { &mut *runtime };
     runtime.set_current_namespace(namespace);
     BuiltInTypes::null_value() as usize
 }
 
-pub unsafe extern "C" fn __pause(
-    runtime: *mut Runtime,
-    stack_pointer: usize,
-) -> usize {
+pub unsafe extern "C" fn __pause(runtime: *mut Runtime, stack_pointer: usize) -> usize {
     let runtime = unsafe { &mut *runtime };
 
     pause_current_thread(stack_pointer, runtime);
@@ -266,10 +233,7 @@ fn unpause_current_thread(runtime: &mut Runtime) {
     condvar.notify_one();
 }
 
-pub extern "C" fn register_c_call(
-    runtime: *mut Runtime,
-    stack_pointer: usize,
-) -> usize {
+pub extern "C" fn register_c_call(runtime: *mut Runtime, stack_pointer: usize) -> usize {
     let runtime = unsafe { &mut *runtime };
     let thread_state = runtime.thread_state.clone();
     let (lock, condvar) = &*thread_state;
@@ -294,31 +258,20 @@ pub extern "C" fn unregister_c_call(runtime: *mut Runtime) -> usize {
     BuiltInTypes::null_value() as usize
 }
 
-pub unsafe fn call_fn_1(
-    runtime: &Runtime,
-    function_name: &str,
-    arg1: usize,
-) -> usize {
+pub unsafe fn call_fn_1(runtime: &Runtime, function_name: &str, arg1: usize) -> usize {
     let save_volatile_registers = runtime
         .get_function_by_name("beagle.builtin/save_volatile_registers")
         .unwrap();
-    let save_volatile_registers = runtime
-        .get_pointer(save_volatile_registers)
-        .unwrap();
+    let save_volatile_registers = runtime.get_pointer(save_volatile_registers).unwrap();
     let save_volatile_registers: fn(usize, usize) -> usize =
         std::mem::transmute(save_volatile_registers);
 
-    let function = runtime
-        .get_function_by_name(function_name)
-        .unwrap();
+    let function = runtime.get_function_by_name(function_name).unwrap();
     let function = runtime.get_pointer(function).unwrap();
     save_volatile_registers(arg1, function as usize)
 }
 
-pub unsafe extern "C" fn load_library(
-    runtime: *mut Runtime,
-    name: usize,
-) -> usize {
+pub unsafe extern "C" fn load_library(runtime: *mut Runtime, name: usize) -> usize {
     let runtime = unsafe { &mut *runtime };
     let string = &runtime.get_string_literal(name);
     let lib = libloading::Library::new(string).unwrap();
@@ -351,10 +304,7 @@ pub fn map_ffi_type(runtime: &Runtime, value: usize) -> Type {
     }
 }
 
-pub fn map_beagle_type_to_ffi_type(
-    runtime: &Runtime,
-    value: usize,
-) -> FFIType {
+pub fn map_beagle_type_to_ffi_type(runtime: &Runtime, value: usize) -> FFIType {
     let heap_object = HeapObject::from_tagged(value);
     let struct_id = BuiltInTypes::untag(heap_object.get_struct_id());
     let struct_info = runtime
@@ -374,10 +324,7 @@ pub fn map_beagle_type_to_ffi_type(
     }
 }
 
-fn persistent_vector_to_array(
-    runtime: &Runtime,
-    vector: usize,
-) -> HeapObject {
+fn persistent_vector_to_array(runtime: &Runtime, vector: usize) -> HeapObject {
     // TODO: This isn't actually a safe thing to do. It allocates
     // which means that any pointers I had now could have moved.
     // I also am not sure I can from one of these runtime
@@ -658,10 +605,7 @@ pub unsafe extern "C" fn copy_from_to_object(
     to.tagged_pointer()
 }
 
-unsafe extern "C" fn ffi_allocate(
-    runtime: *mut Runtime,
-    size: usize,
-) -> usize {
+unsafe extern "C" fn ffi_allocate(runtime: *mut Runtime, size: usize) -> usize {
     let runtime = unsafe { &mut *runtime };
     // TODO: I intentionally don't want to manage this memory on the heap
     // I probably need a better answer than this
@@ -676,11 +620,7 @@ unsafe extern "C" fn ffi_allocate(
     call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", buffer)
 }
 
-unsafe extern "C" fn ffi_get_u32(
-    _runtime: *mut Runtime,
-    buffer: usize,
-    offset: usize,
-) -> usize {
+unsafe extern "C" fn ffi_get_u32(_runtime: *mut Runtime, buffer: usize, offset: usize) -> usize {
     // TODO: Make type safe
     let buffer_object = HeapObject::from_tagged(buffer);
     let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
@@ -717,11 +657,7 @@ unsafe extern "C" fn ffi_set_i16(
     BuiltInTypes::null_value() as usize
 }
 
-unsafe extern "C" fn ffi_get_i32(
-    _runtime: *mut Runtime,
-    buffer: usize,
-    offset: usize,
-) -> usize {
+unsafe extern "C" fn ffi_get_i32(_runtime: *mut Runtime, buffer: usize, offset: usize) -> usize {
     let buffer_object = HeapObject::from_tagged(buffer);
     let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
     let offset = BuiltInTypes::untag(offset);
@@ -791,23 +727,11 @@ extern "C" fn sleep(_runtime: *mut Runtime, time: usize) -> usize {
 
 impl Runtime {
     pub fn install_builtins(&mut self) -> Result<(), Box<dyn Error>> {
-        self.add_builtin_function(
-            "beagle.core/println",
-            println_value as *const u8,
-            false,
-        )?;
+        self.add_builtin_function("beagle.core/println", println_value as *const u8, false)?;
 
-        self.add_builtin_function(
-            "beagle.core/print",
-            print_value as *const u8,
-            false,
-        )?;
+        self.add_builtin_function("beagle.core/print", print_value as *const u8, false)?;
 
-        self.add_builtin_function(
-            "beagle.builtin/allocate",
-            allocate as *const u8,
-            true,
-        )?;
+        self.add_builtin_function("beagle.builtin/allocate", allocate as *const u8, true)?;
 
         self.add_builtin_function(
             "beagle.builtin/allocate_float",
@@ -821,11 +745,7 @@ impl Runtime {
             false,
         )?;
 
-        self.add_builtin_function(
-            "beagle.builtin/copy_object",
-            copy_object as *const u8,
-            true,
-        )?;
+        self.add_builtin_function("beagle.builtin/copy_object", copy_object as *const u8, true)?;
 
         self.add_builtin_function(
             "beagle.builtin/copy_from_to_object",
@@ -851,11 +771,7 @@ impl Runtime {
             false,
         )?;
 
-        self.add_builtin_function(
-            "beagle.builtin/assert!",
-            placeholder as *const u8,
-            false,
-        )?;
+        self.add_builtin_function("beagle.builtin/assert!", placeholder as *const u8, false)?;
 
         self.add_builtin_function("beagle.core/gc", gc as *const u8, true)?;
 
@@ -865,23 +781,11 @@ impl Runtime {
             false,
         )?;
 
-        self.add_builtin_function(
-            "beagle.core/thread",
-            new_thread as *const u8,
-            false,
-        )?;
+        self.add_builtin_function("beagle.core/thread", new_thread as *const u8, false)?;
 
-        self.add_builtin_function(
-            "beagle.ffi/load_library",
-            load_library as *const u8,
-            false,
-        )?;
+        self.add_builtin_function("beagle.ffi/load_library", load_library as *const u8, false)?;
 
-        self.add_builtin_function(
-            "beagle.ffi/get_function",
-            get_function as *const u8,
-            false,
-        )?;
+        self.add_builtin_function("beagle.ffi/get_function", get_function as *const u8, false)?;
 
         self.add_builtin_function(
             "beagle.ffi/call_ffi_info",
@@ -889,47 +793,19 @@ impl Runtime {
             false,
         )?;
 
-        self.add_builtin_function(
-            "beagle.ffi/allocate",
-            ffi_allocate as *const u8,
-            false,
-        )?;
+        self.add_builtin_function("beagle.ffi/allocate", ffi_allocate as *const u8, false)?;
 
-        self.add_builtin_function(
-            "beagle.ffi/get_u32",
-            ffi_get_u32 as *const u8,
-            false,
-        )?;
+        self.add_builtin_function("beagle.ffi/get_u32", ffi_get_u32 as *const u8, false)?;
 
-        self.add_builtin_function(
-            "beagle.ffi/set_i16",
-            ffi_set_i16 as *const u8,
-            false,
-        )?;
+        self.add_builtin_function("beagle.ffi/set_i16", ffi_set_i16 as *const u8, false)?;
 
-        self.add_builtin_function(
-            "beagle.ffi/set_i32",
-            ffi_set_i32 as *const u8,
-            false,
-        )?;
+        self.add_builtin_function("beagle.ffi/set_i32", ffi_set_i32 as *const u8, false)?;
 
-        self.add_builtin_function(
-            "beagle.ffi/get_i32",
-            ffi_get_i32 as *const u8,
-            false,
-        )?;
+        self.add_builtin_function("beagle.ffi/get_i32", ffi_get_i32 as *const u8, false)?;
 
-        self.add_builtin_function(
-            "beagle.ffi/get_string",
-            ffi_get_string as *const u8,
-            false,
-        )?;
+        self.add_builtin_function("beagle.ffi/get_string", ffi_get_string as *const u8, false)?;
 
-        self.add_builtin_function(
-            "beagle.builtin/__pause",
-            __pause as *const u8,
-            true,
-        )?;
+        self.add_builtin_function("beagle.builtin/__pause", __pause as *const u8, true)?;
 
         self.add_builtin_function(
             "beagle.builtin/__register_c_call",
@@ -967,17 +843,9 @@ impl Runtime {
             false,
         )?;
 
-        self.add_builtin_function(
-            "beagle.core/eval",
-            eval as *const u8,
-            false,
-        )?;
+        self.add_builtin_function("beagle.core/eval", eval as *const u8, false)?;
 
-        self.add_builtin_function(
-            "beagle.core/sleep",
-            sleep as *const u8,
-            false,
-        )?;
+        self.add_builtin_function("beagle.core/sleep", sleep as *const u8, false)?;
 
         Ok(())
     }

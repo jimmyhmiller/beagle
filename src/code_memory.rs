@@ -9,6 +9,12 @@ pub struct CodeAllocator {
     used_pages: Option<Mmap>,
 }
 
+impl Default for CodeAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CodeAllocator {
     pub fn new() -> Self {
         let unused_pages = MmapOptions::new(MmapOptions::page_size() * 100000)

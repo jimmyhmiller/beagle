@@ -15,12 +15,15 @@ use libloading::Library;
 use mmap_rs::{Mmap, MmapMut, MmapOptions};
 
 use crate::{
-    builtins::{__pause, debugger}, compiler::{BlockingSender, CompilerMessage, CompilerResponse}, gc::{AllocateAction, Allocator, AllocatorOptions, StackMap, StackMapDetails, STACK_SIZE}, ir::StringValue, types::{BuiltInTypes, Header, HeapObject, Tagged}, Alloc, CommandLineArguments, Data, Message 
+    builtins::{__pause, debugger},
+    compiler::{BlockingSender, CompilerMessage, CompilerResponse},
+    gc::{AllocateAction, Allocator, AllocatorOptions, StackMap, StackMapDetails, STACK_SIZE},
+    ir::StringValue,
+    types::{BuiltInTypes, Header, HeapObject, Tagged},
+    Alloc, CommandLineArguments, Data, Message,
 };
 
 use std::cell::RefCell;
-
-
 
 #[derive(Debug, Clone)]
 pub struct Struct {
@@ -37,6 +40,12 @@ impl Struct {
 pub struct StructManager {
     name_to_id: HashMap<String, usize>,
     structs: Vec<Struct>,
+}
+
+impl Default for StructManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StructManager {
@@ -179,8 +188,6 @@ struct Namespace {
     #[allow(unused)]
     aliases: HashMap<String, usize>,
 }
-
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
@@ -446,6 +453,12 @@ pub struct EnumManager {
     enums: Vec<Enum>,
 }
 
+impl Default for EnumManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EnumManager {
     pub fn new() -> Self {
         Self {
@@ -629,7 +642,11 @@ impl Runtime {
     }
 
     pub fn compile(&mut self, file_name: &str) -> Result<Vec<String>, Box<dyn Error>> {
-        let response = self.compiler_channel.as_ref().unwrap().send(CompilerMessage::CompileFile(file_name.to_string()));
+        let response = self
+            .compiler_channel
+            .as_ref()
+            .unwrap()
+            .send(CompilerMessage::CompileFile(file_name.to_string()));
         if let CompilerResponse::FunctionsToRun(functions) = response {
             Ok(functions)
         } else {
@@ -650,7 +667,6 @@ impl Runtime {
         stack_pointer: usize,
         kind: BuiltInTypes,
     ) -> Result<usize, Box<dyn Error>> {
-
         let options = self.memory.heap.get_allocation_options();
 
         if options.gc_always {
@@ -895,8 +911,8 @@ impl Runtime {
         let heap_pointer = self.allocate(len / 8, stack_pointer, BuiltInTypes::Closure)?;
         let heap_object = HeapObject::from_tagged(heap_pointer);
         let num_free = free_variables.len();
-        let function_definition = self
-            .get_function_by_pointer(BuiltInTypes::untag(function) as *const u8);
+        let function_definition =
+            self.get_function_by_pointer(BuiltInTypes::untag(function) as *const u8);
         if function_definition.is_none() {
             panic!("Function not found");
         }
@@ -946,9 +962,7 @@ impl Runtime {
     pub fn new_thread(&mut self, f: usize) {
         let trampoline = self.get_trampoline();
         let trampoline: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline) };
-        let call_fn = self
-            .get_function_by_name("beagle.core/__call_fn")
-            .unwrap();
+        let call_fn = self.get_function_by_name("beagle.core/__call_fn").unwrap();
         let function_pointer = self.get_pointer(call_fn).unwrap() as usize;
 
         let new_stack = MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap();
@@ -1271,12 +1285,11 @@ impl Runtime {
         repr.push_str(" }");
         Some(repr)
     }
-    
+
     pub fn get_string_literal(&self, value: usize) -> String {
         let value = BuiltInTypes::untag(value);
         self.string_constants[value].str.clone()
     }
-
 
     pub fn add_foreign_function(
         &mut self,
@@ -1343,7 +1356,7 @@ impl Runtime {
         Ok(self.functions.len() - 1)
     }
 
-        pub fn update_stack_map_information(
+    pub fn update_stack_map_information(
         &mut self,
         stack_map: Vec<(usize, StackMapDetails)>,
         function_pointer: usize,
@@ -1569,14 +1582,24 @@ impl Runtime {
     pub fn get_function_by_name_mut(&mut self, name: &str) -> Option<&mut Function> {
         self.functions.iter_mut().find(|f| f.name == name)
     }
-    
-    pub fn add_function_mark_executable(&self, name: String, code: &[u8], number_of_locals: i32) -> Result<usize, Box<dyn Error>>  {
-        self.compiler_channel.as_ref().unwrap().send(
-            CompilerMessage::AddFunctionMarkExecutable(name.clone(), code.to_vec(), number_of_locals as usize)
-        );
+
+    pub fn add_function_mark_executable(
+        &self,
+        name: String,
+        code: &[u8],
+        number_of_locals: i32,
+    ) -> Result<usize, Box<dyn Error>> {
+        self.compiler_channel
+            .as_ref()
+            .unwrap()
+            .send(CompilerMessage::AddFunctionMarkExecutable(
+                name.clone(),
+                code.to_vec(),
+                number_of_locals as usize,
+            ));
         Ok(self.get_function_by_name(&name).unwrap().pointer as usize)
     }
-    
+
     fn add_binding(&mut self, name: &str, function_pointer: usize) -> usize {
         self.namespaces.add_binding(name, function_pointer)
     }
@@ -1586,12 +1609,12 @@ impl Runtime {
 
         unsafe { std::mem::transmute(trampoline.pointer) }
     }
-    
+
     pub fn add_string(&mut self, string_value: StringValue) -> usize {
         self.string_constants.push(string_value);
         self.string_constants.len() - 1
     }
-    
+
     pub fn add_struct(&mut self, s: Struct) {
         let name = s.name.clone();
         // TODO: Namespace these
@@ -1606,7 +1629,7 @@ impl Runtime {
         let (_, simple_name) = name.split_once("/").unwrap();
         self.add_binding(simple_name, 0);
     }
-    
+
     pub fn add_enum(&mut self, e: Enum) {
         let name = e.name.clone();
         self.enums.insert(e);
@@ -1617,11 +1640,11 @@ impl Runtime {
     pub fn get_enum(&self, name: &str) -> Option<&Enum> {
         self.enums.get(name)
     }
-    
+
     pub fn get_struct(&self, name: &str) -> Option<(usize, &Struct)> {
         self.structs.get(name)
     }
-    
+
     pub fn get_namespace_from_alias(&self, alias: &str) -> Option<String> {
         let current_namespace = self.current_namespace_name();
         let current_namespace = self.get_namespace_id(current_namespace.as_str()).unwrap();
@@ -1632,22 +1655,29 @@ impl Runtime {
         let namespace = namespace.lock().unwrap();
         Some(namespace.name.clone())
     }
-    
-    pub fn get_pointer_for_function(&self, function: &Function) -> Option<usize>  {
+
+    pub fn get_pointer_for_function(&self, function: &Function) -> Option<usize> {
         Some(function.pointer as usize)
     }
 
-    pub fn set_compiler_channel(&mut self, compiler_channel: BlockingSender<CompilerMessage, CompilerResponse>) {
+    pub fn set_compiler_channel(
+        &mut self,
+        compiler_channel: BlockingSender<CompilerMessage, CompilerResponse>,
+    ) {
         self.compiler_channel = Some(compiler_channel);
     }
-    
+
     pub fn set_runtime_pointer(&mut self, runtime_pointer: *const Runtime) {
-        self.compiler_channel.as_ref().unwrap().send(CompilerMessage::SetRuntimePointer(runtime_pointer as usize));
+        self.compiler_channel
+            .as_ref()
+            .unwrap()
+            .send(CompilerMessage::SetRuntimePointer(runtime_pointer as usize));
     }
-    
+
     pub fn set_pause_atom_ptr(&self, pause_atom_ptr: usize) {
-        self.compiler_channel.as_ref().unwrap().send(CompilerMessage::SetPauseAtomPointer(pause_atom_ptr));
+        self.compiler_channel
+            .as_ref()
+            .unwrap()
+            .send(CompilerMessage::SetPauseAtomPointer(pause_atom_ptr));
     }
-
-
 }
