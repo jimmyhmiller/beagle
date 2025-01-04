@@ -273,6 +273,7 @@ impl<T> SyncWrapper<T> {
         unsafe { &*self.value.get() }
     }
 
+    #[allow(clippy::mut_from_ref)]
     /// Get a mutable reference to the wrapped value.
     /// Safety: You must ensure exclusive access when mutating this value.
     pub fn get_mut(&self) -> &mut T {
@@ -755,9 +756,8 @@ impl Runtime {
         if self.compiler_channel.is_none() {
             let (sender, receiver) = blocking_channel();
             let args_clone = self.command_line_arguments.clone();
-            let runtime_pointer = self as *const Runtime as usize;
             let compiler_thread = thread::spawn(move || {
-                CompilerThread::new(receiver, runtime_pointer, args_clone).run();
+                CompilerThread::new(receiver, args_clone).run();
             });
             self.compiler_channel = Some(sender);
             self.compiler_thread = Some(compiler_thread);
@@ -931,7 +931,7 @@ impl Runtime {
             match locked.as_ref().unwrap_err() {
                 TryLockError::WouldBlock => {
                     drop(locked);
-                    unsafe { __pause(self as *mut Runtime, stack_pointer) };
+                    unsafe { __pause(stack_pointer) };
                 }
                 TryLockError::Poisoned(e) => {
                     panic!("Poisoned lock {:?}", e);
@@ -948,7 +948,7 @@ impl Runtime {
         );
         if result != Ok(0) {
             drop(locked);
-            unsafe { __pause(self as *mut Runtime, stack_pointer) };
+            unsafe { __pause(stack_pointer) };
             return;
         }
 
@@ -1808,13 +1808,6 @@ impl Runtime {
         compiler_channel: BlockingSender<CompilerMessage, CompilerResponse>,
     ) {
         self.compiler_channel = Some(compiler_channel);
-    }
-
-    pub fn set_runtime_pointer(&mut self, runtime_pointer: *const Runtime) {
-        self.compiler_channel
-            .as_ref()
-            .unwrap()
-            .send(CompilerMessage::SetRuntimePointer(runtime_pointer as usize));
     }
 
     pub fn set_pause_atom_ptr(&self, pause_atom_ptr: usize) {

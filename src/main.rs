@@ -317,10 +317,6 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     compile_trampoline(runtime);
     compile_save_volatile_registers(runtime);
 
-    //TODO(Refactor)
-    let runtime_pointer = runtime as *const _;
-    runtime.set_runtime_pointer(runtime_pointer);
-
     let pause_atom_ptr = runtime.pause_atom_ptr();
     runtime.set_pause_atom_ptr(pause_atom_ptr);
 
@@ -449,6 +445,7 @@ impl<T> SyncUnsafeCell<T> {
         unsafe { &*self.value.get() }
     }
 
+    #[allow(clippy::mut_from_ref)]
     pub fn get_mut(&self) -> &mut T {
         unsafe { &mut *self.value.get() }
     }
@@ -462,3 +459,7 @@ impl<T> SyncUnsafeCell<T> {
 unsafe impl<T: ?Sized + Sync> Sync for SyncUnsafeCell<T> {}
 
 pub static RUNTIME: OnceLock<SyncUnsafeCell<Runtime>> = OnceLock::new();
+
+pub fn get_runtime() -> &'static SyncUnsafeCell<Runtime> {
+    RUNTIME.get().unwrap()
+}

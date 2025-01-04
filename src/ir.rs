@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use crate::arm::FmovDirection;
-use crate::machine_code::arm_codegen::{Register, X0, X1};
+use crate::machine_code::arm_codegen::{Register, X0};
 
 use crate::register_allocation::simple::SimpleRegisterAllocator;
 use crate::types::BuiltInTypes;
@@ -561,13 +561,12 @@ pub struct Ir {
     label_names: Vec<String>,
     label_locations: HashMap<usize, usize>,
     pub num_locals: usize,
-    runtime_pointer: usize,
     allocate_fn_pointer: usize,
     after_return: Label,
 }
 
 impl Ir {
-    pub fn new(runtime_pointer: usize, allocate_fn_pointer: usize) -> Self {
+    pub fn new(allocate_fn_pointer: usize) -> Self {
         let mut me = Self {
             register_index: 0,
             instructions: vec![],
@@ -575,7 +574,6 @@ impl Ir {
             label_names: vec![],
             label_locations: HashMap::new(),
             num_locals: 0,
-            runtime_pointer,
             allocate_fn_pointer,
             after_return: Label { index: 0 },
         };
@@ -933,12 +931,7 @@ impl Ir {
             .insert(self.instructions.len(), label.index);
     }
 
-    pub fn compile(
-        &mut self,
-        mut lang: LowLevelArm,
-        error_fn_pointer: usize,
-        runtime_ptr: usize,
-    ) -> LowLevelArm {
+    pub fn compile(&mut self, mut lang: LowLevelArm, error_fn_pointer: usize) -> LowLevelArm {
         // println!("{:#?}", self.instructions);
         lang.set_max_locals(self.num_locals);
         // lang.breakpoint();
@@ -981,8 +974,7 @@ impl Ir {
         lang.write_label(lang_after_return);
         let register = lang.canonical_volatile_registers[0];
         lang.mov_64(register, error_fn_pointer as isize);
-        lang.mov_64(X0, runtime_ptr as isize);
-        lang.get_stack_pointer_imm(X1, 0);
+        lang.get_stack_pointer_imm(X0, 0);
         lang.call(register);
         lang
     }
@@ -1802,10 +1794,9 @@ impl Ir {
     }
 
     fn allocate(&mut self, size: Value) -> Value {
-        let runtime_pointer = self.assign_new(Value::Pointer(self.runtime_pointer));
         let stack_pointer = self.get_stack_pointer_imm(0);
         let f = self.assign_new(Value::Function(self.allocate_fn_pointer));
-        self.call_builtin(f.into(), vec![runtime_pointer.into(), stack_pointer, size])
+        self.call_builtin(f.into(), vec![stack_pointer, size])
     }
 
     fn insert_label(&mut self, name: &str, label: Label) -> usize {
