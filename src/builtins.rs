@@ -14,6 +14,7 @@ use libffi::{
 
 use crate::{
     gc::Allocator,
+    get_runtime,
     runtime::{FFIInfo, FFIType, RawPtr, Runtime, SyncWrapper},
     types::{BuiltInTypes, HeapObject},
     Message, Serialize,
@@ -46,21 +47,21 @@ pub fn debugger(message: Message) {
     // Should make it is so we clean up this memory
 }
 
-pub unsafe extern "C" fn println_value(runtime: *mut Runtime, value: usize) -> usize {
-    let runtime = unsafe { &mut *runtime };
+pub unsafe extern "C" fn println_value(value: usize) -> usize {
+    let runtime = get_runtime().get_mut();
     runtime.println(value);
     0b111
 }
 
-pub unsafe extern "C" fn print_value(runtime: *mut Runtime, value: usize) -> usize {
-    let runtime = unsafe { &mut *runtime };
+pub unsafe extern "C" fn print_value(value: usize) -> usize {
+    let runtime = get_runtime().get_mut();
     runtime.print(value);
     0b111
 }
 
-extern "C" fn allocate(runtime: *mut Runtime, stack_pointer: usize, size: usize) -> usize {
+extern "C" fn allocate(stack_pointer: usize, size: usize) -> usize {
     let size = BuiltInTypes::untag(size);
-    let runtime = unsafe { &mut *runtime };
+    let runtime = get_runtime().get_mut();
 
     let result = runtime
         .allocate(size, stack_pointer, BuiltInTypes::HeapObject)
@@ -71,8 +72,8 @@ extern "C" fn allocate(runtime: *mut Runtime, stack_pointer: usize, size: usize)
     result
 }
 
-extern "C" fn allocate_float(runtime: *mut Runtime, stack_pointer: usize, size: usize) -> usize {
-    let runtime = unsafe { &mut *runtime };
+extern "C" fn allocate_float(stack_pointer: usize, size: usize) -> usize {
+    let runtime = get_runtime().get_mut();
     let value = BuiltInTypes::untag(size);
 
     let result = runtime
@@ -84,11 +85,7 @@ extern "C" fn allocate_float(runtime: *mut Runtime, stack_pointer: usize, size: 
     result
 }
 
-extern "C" fn fill_object_fields(
-    _runtime: *mut Runtime,
-    object_pointer: usize,
-    value: usize,
-) -> usize {
+extern "C" fn fill_object_fields(object_pointer: usize, value: usize) -> usize {
     let mut object = HeapObject::from_tagged(object_pointer);
     let raw_slice = object.get_fields_mut();
     raw_slice.fill(value);
@@ -96,13 +93,12 @@ extern "C" fn fill_object_fields(
 }
 
 extern "C" fn make_closure(
-    runtime: *mut Runtime,
     stack_pointer: usize,
     function: usize,
     num_free: usize,
     free_variable_pointer: usize,
 ) -> usize {
-    let runtime = unsafe { &mut *runtime };
+    let runtime = get_runtime().get_mut();
     if BuiltInTypes::get_kind(function) != BuiltInTypes::Function {
         panic!(
             "Expected function, got {:?}",
@@ -125,12 +121,11 @@ extern "C" fn make_closure(
 }
 
 extern "C" fn property_access(
-    runtime: *mut Runtime,
     struct_pointer: usize,
     str_constant_ptr: usize,
     property_cache_location: usize,
 ) -> usize {
-    let runtime = unsafe { &mut *runtime };
+    let runtime = get_runtime().get_mut();
     let (result, index) = runtime.property_access(struct_pointer, str_constant_ptr);
     let type_id = HeapObject::from_tagged(struct_pointer).get_struct_id();
     let buffer = unsafe { from_raw_parts_mut(property_cache_location as *mut usize, 2) };
@@ -139,28 +134,28 @@ extern "C" fn property_access(
     result
 }
 
-pub unsafe extern "C" fn throw_error(_runtime: *mut Runtime, _stack_pointer: usize) -> usize {
+pub unsafe extern "C" fn throw_error(_stack_pointer: usize) -> usize {
     // let compiler = unsafe { &mut *compiler };
     panic!("Error!");
 }
 
-pub unsafe extern "C" fn gc(runtime: *mut Runtime, stack_pointer: usize) -> usize {
-    let runtime = unsafe { &mut *runtime };
+pub unsafe extern "C" fn gc(stack_pointer: usize) -> usize {
+    let runtime = get_runtime().get_mut();
     runtime.gc(stack_pointer);
     BuiltInTypes::null_value() as usize
 }
 
-pub unsafe extern "C" fn gc_add_root(runtime: *mut Runtime, old: usize) -> usize {
-    let runtime = unsafe { &mut *runtime };
+pub unsafe extern "C" fn gc_add_root(old: usize) -> usize {
+    let runtime = get_runtime().get_mut();
     runtime.gc_add_root(old);
     BuiltInTypes::null_value() as usize
 }
 
 #[allow(unused)]
-pub unsafe extern "C" fn new_thread(runtime: *mut Runtime, function: usize) -> usize {
+pub unsafe extern "C" fn new_thread(function: usize) -> usize {
     #[cfg(feature = "thread-safe")]
     {
-        let runtime = unsafe { &mut *runtime };
+        let runtime = get_runtime().get_mut();
         runtime.new_thread(function);
         BuiltInTypes::null_value() as usize
     }
@@ -170,36 +165,28 @@ pub unsafe extern "C" fn new_thread(runtime: *mut Runtime, function: usize) -> u
     }
 }
 
-pub unsafe extern "C" fn update_binding(
-    runtime: *mut Runtime,
-    namespace_slot: usize,
-    value: usize,
-) -> usize {
-    let runtime = unsafe { &mut *runtime };
+pub unsafe extern "C" fn update_binding(namespace_slot: usize, value: usize) -> usize {
+    let runtime = get_runtime().get_mut();
     let namespace_id = runtime.current_namespace_id();
     runtime.memory.add_namespace_root(namespace_id, value);
     runtime.update_binding(namespace_slot, value);
     BuiltInTypes::null_value() as usize
 }
 
-pub unsafe extern "C" fn get_binding(
-    runtime: *mut Runtime,
-    namespace: usize,
-    slot: usize,
-) -> usize {
-    let runtime = unsafe { &mut *runtime };
+pub unsafe extern "C" fn get_binding(namespace: usize, slot: usize) -> usize {
+    let runtime = get_runtime().get_mut();
 
     runtime.get_binding(namespace, slot)
 }
 
-pub unsafe extern "C" fn set_current_namespace(runtime: *mut Runtime, namespace: usize) -> usize {
-    let runtime = unsafe { &mut *runtime };
+pub unsafe extern "C" fn set_current_namespace(namespace: usize) -> usize {
+    let runtime = get_runtime().get_mut();
     runtime.set_current_namespace(namespace);
     BuiltInTypes::null_value() as usize
 }
 
-pub unsafe extern "C" fn __pause(runtime: *mut Runtime, stack_pointer: usize) -> usize {
-    let runtime = unsafe { &mut *runtime };
+pub unsafe extern "C" fn __pause(stack_pointer: usize) -> usize {
+    let runtime = get_runtime().get_mut();
 
     pause_current_thread(stack_pointer, runtime);
 
@@ -208,10 +195,11 @@ pub unsafe extern "C" fn __pause(runtime: *mut Runtime, stack_pointer: usize) ->
         thread::park();
     }
 
-    unpause_current_thread(runtime);
-
     // Apparently, I can't count on this not unparking
     // I need some other mechanism to know that things are ready
+    unpause_current_thread(runtime);
+
+
     BuiltInTypes::null_value() as usize
 }
 
@@ -233,8 +221,8 @@ fn unpause_current_thread(runtime: &mut Runtime) {
     condvar.notify_one();
 }
 
-pub extern "C" fn register_c_call(runtime: *mut Runtime, stack_pointer: usize) -> usize {
-    let runtime = unsafe { &mut *runtime };
+pub extern "C" fn register_c_call(stack_pointer: usize) -> usize {
+    let runtime = get_runtime().get_mut();
     let thread_state = runtime.thread_state.clone();
     let (lock, condvar) = &*thread_state;
     let mut state = lock.lock().unwrap();
@@ -244,8 +232,8 @@ pub extern "C" fn register_c_call(runtime: *mut Runtime, stack_pointer: usize) -
     BuiltInTypes::null_value() as usize
 }
 
-pub extern "C" fn unregister_c_call(runtime: *mut Runtime) -> usize {
-    let runtime = unsafe { &mut *runtime };
+pub extern "C" fn unregister_c_call(_runtime: *mut Runtime) -> usize {
+    let runtime = get_runtime().get_mut();
     let thread_state = runtime.thread_state.clone();
     let (lock, condvar) = &*thread_state;
     let mut state = lock.lock().unwrap();
@@ -271,8 +259,8 @@ pub unsafe fn call_fn_1(runtime: &Runtime, function_name: &str, arg1: usize) -> 
     save_volatile_registers(arg1, function as usize)
 }
 
-pub unsafe extern "C" fn load_library(runtime: *mut Runtime, name: usize) -> usize {
-    let runtime = unsafe { &mut *runtime };
+pub unsafe extern "C" fn load_library(name: usize) -> usize {
+    let runtime = get_runtime().get_mut();
     let string = &runtime.get_string_literal(name);
     let lib = libloading::Library::new(string).unwrap();
     let id = runtime.add_library(lib);
@@ -324,13 +312,13 @@ pub fn map_beagle_type_to_ffi_type(runtime: &Runtime, value: usize) -> FFIType {
     }
 }
 
-fn persistent_vector_to_array(runtime: &Runtime, vector: usize) -> HeapObject {
+fn persistent_vector_to_array(_runtime: &Runtime, vector: usize) -> HeapObject {
     // TODO: This isn't actually a safe thing to do. It allocates
     // which means that any pointers I had now could have moved.
     // I also am not sure I can from one of these runtime
     // functions end up in another runtime function
     // Because then I have multiple mutable references it runtime.
-    let tagged = unsafe { call_fn_1(runtime, "persistent_vector/to_array", vector) };
+    let tagged = unsafe { call_fn_1(_runtime, "persistent_vector/to_array", vector) };
     HeapObject::from_tagged(tagged)
 }
 
@@ -369,13 +357,12 @@ extern "C" fn sdl_poll_event(buffer: *const u32) -> usize {
 // a rust vector and then map the types
 
 pub extern "C" fn get_function(
-    runtime: *mut Runtime,
     library_struct: usize,
     function_name: usize,
     types: usize,
     return_type: usize,
 ) -> usize {
-    let runtime = unsafe { &mut *runtime };
+    let runtime = get_runtime().get_mut();
     let library = runtime.get_library(library_struct);
     let function_name = runtime.get_string_literal(function_name);
 
@@ -457,7 +444,6 @@ pub extern "C" fn get_function(
 // TODO: Fix this to allow multiple arguments
 // instead of hardcoding 0
 pub unsafe extern "C" fn call_ffi_info(
-    runtime: *mut Runtime,
     ffi_info_id: usize,
     a1: usize,
     a2: usize,
@@ -466,7 +452,7 @@ pub unsafe extern "C" fn call_ffi_info(
     a5: usize,
     a6: usize,
 ) -> usize {
-    let runtime = unsafe { &mut *runtime };
+    let runtime = get_runtime().get_mut();
     let ffi_info_id = BuiltInTypes::untag(ffi_info_id);
     let ffi_info = runtime.get_ffi_info(ffi_info_id).clone();
     let code_ptr = ffi_info.function;
@@ -593,12 +579,8 @@ pub unsafe extern "C" fn call_ffi_info(
     return_value
 }
 
-pub unsafe extern "C" fn copy_object(
-    runtime: *mut Runtime,
-    stack_pointer: usize,
-    object_pointer: usize,
-) -> usize {
-    let runtime = unsafe { &mut *runtime };
+pub unsafe extern "C" fn copy_object(stack_pointer: usize, object_pointer: usize) -> usize {
+    let runtime = get_runtime().get_mut();
     // runtime.gc_add_root(object_pointer);
     let object = HeapObject::from_tagged(object_pointer);
     let header = object.get_header();
@@ -609,12 +591,8 @@ pub unsafe extern "C" fn copy_object(
     runtime.copy_object(object, &mut to_object).unwrap()
 }
 
-pub unsafe extern "C" fn copy_from_to_object(
-    runtime: *mut Runtime,
-    from: usize,
-    to: usize,
-) -> usize {
-    let runtime = unsafe { &mut *runtime };
+pub unsafe extern "C" fn copy_from_to_object(from: usize, to: usize) -> usize {
+    let runtime = get_runtime().get_mut();
     if from == BuiltInTypes::null_value() as usize {
         return to;
     }
@@ -626,8 +604,8 @@ pub unsafe extern "C" fn copy_from_to_object(
     to.tagged_pointer()
 }
 
-unsafe extern "C" fn ffi_allocate(runtime: *mut Runtime, size: usize) -> usize {
-    let runtime = unsafe { &mut *runtime };
+unsafe extern "C" fn ffi_allocate(size: usize) -> usize {
+    let runtime = get_runtime().get_mut();
     // TODO: I intentionally don't want to manage this memory on the heap
     // I probably need a better answer than this
     // but for now we are just going to leak memory
@@ -641,7 +619,7 @@ unsafe extern "C" fn ffi_allocate(runtime: *mut Runtime, size: usize) -> usize {
     call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", buffer)
 }
 
-unsafe extern "C" fn ffi_get_u32(_runtime: *mut Runtime, buffer: usize, offset: usize) -> usize {
+unsafe extern "C" fn ffi_get_u32(buffer: usize, offset: usize) -> usize {
     // TODO: Make type safe
     let buffer_object = HeapObject::from_tagged(buffer);
     let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
@@ -650,12 +628,7 @@ unsafe extern "C" fn ffi_get_u32(_runtime: *mut Runtime, buffer: usize, offset: 
     BuiltInTypes::Int.tag(value as isize) as usize
 }
 
-unsafe extern "C" fn ffi_set_i32(
-    _runtime: *mut Runtime,
-    buffer: usize,
-    offset: usize,
-    value: usize,
-) -> usize {
+unsafe extern "C" fn ffi_set_i32(buffer: usize, offset: usize, value: usize) -> usize {
     let buffer_object = HeapObject::from_tagged(buffer);
     let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
     let offset = BuiltInTypes::untag(offset);
@@ -664,12 +637,7 @@ unsafe extern "C" fn ffi_set_i32(
     BuiltInTypes::null_value() as usize
 }
 
-unsafe extern "C" fn ffi_set_i16(
-    _runtime: *mut Runtime,
-    buffer: usize,
-    offset: usize,
-    value: usize,
-) -> usize {
+unsafe extern "C" fn ffi_set_i16(buffer: usize, offset: usize, value: usize) -> usize {
     let buffer_object = HeapObject::from_tagged(buffer);
     let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
     let offset = BuiltInTypes::untag(offset);
@@ -678,7 +646,7 @@ unsafe extern "C" fn ffi_set_i16(
     BuiltInTypes::null_value() as usize
 }
 
-unsafe extern "C" fn ffi_get_i32(_runtime: *mut Runtime, buffer: usize, offset: usize) -> usize {
+unsafe extern "C" fn ffi_get_i32(buffer: usize, offset: usize) -> usize {
     let buffer_object = HeapObject::from_tagged(buffer);
     let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
     let offset = BuiltInTypes::untag(offset);
@@ -686,13 +654,8 @@ unsafe extern "C" fn ffi_get_i32(_runtime: *mut Runtime, buffer: usize, offset: 
     BuiltInTypes::Int.tag(value as isize) as usize
 }
 
-unsafe extern "C" fn ffi_get_string(
-    runtime: *mut Runtime,
-    buffer: usize,
-    offset: usize,
-    len: usize,
-) -> usize {
-    let runtime = unsafe { &mut *runtime };
+unsafe extern "C" fn ffi_get_string(buffer: usize, offset: usize, len: usize) -> usize {
+    let runtime = get_runtime().get_mut();
     let buffer_object = HeapObject::from_tagged(buffer);
     let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
     let offset = BuiltInTypes::untag(offset);
@@ -710,16 +673,16 @@ extern "C" fn placeholder() -> usize {
     BuiltInTypes::null_value() as usize
 }
 
-extern "C" fn wait_for_input(runtime: *mut Runtime) -> usize {
+extern "C" fn wait_for_input(_runtime: *mut Runtime) -> usize {
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).unwrap();
-    let runtime = unsafe { &mut *runtime };
+    let runtime = get_runtime().get_mut();
     let string = runtime.memory.alloc_string(input);
     string.unwrap().into()
 }
 
-extern "C" fn eval(runtime: *mut Runtime, code: usize) -> usize {
-    let runtime = unsafe { &mut *runtime };
+extern "C" fn eval(code: usize) -> usize {
+    let runtime = get_runtime().get_mut();
     let code = match BuiltInTypes::get_kind(code) {
         BuiltInTypes::String => runtime.get_string_literal(code),
         BuiltInTypes::HeapObject => {
@@ -740,7 +703,7 @@ extern "C" fn eval(runtime: *mut Runtime, code: usize) -> usize {
     f()
 }
 
-extern "C" fn sleep(_runtime: *mut Runtime, time: usize) -> usize {
+extern "C" fn sleep(time: usize) -> usize {
     let time = BuiltInTypes::untag(time);
     std::thread::sleep(std::time::Duration::from_millis(time as u64));
     BuiltInTypes::null_value() as usize

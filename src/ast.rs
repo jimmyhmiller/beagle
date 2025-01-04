@@ -145,10 +145,7 @@ impl Ast {
     pub fn compile(&self, compiler: &mut Compiler) -> Ir {
         let mut ast_compiler = AstCompiler {
             ast: self.clone(),
-            ir: Ir::new(
-                compiler.get_runtime_ptr() as usize,
-                compiler.allocate_fn_pointer(),
-            ),
+            ir: Ir::new(compiler.allocate_fn_pointer()),
             name: None,
             compiler,
             context: vec![],
@@ -290,10 +287,7 @@ impl<'a> AstCompiler<'a> {
 
         self.tail_position();
         self.call_compile(&Box::new(self.ast.clone()));
-        let mut ir = Ir::new(
-            self.compiler.get_runtime_ptr() as usize,
-            self.compiler.allocate_fn_pointer(),
-        );
+        let mut ir = Ir::new(self.compiler.allocate_fn_pointer());
         std::mem::swap(&mut ir, &mut self.ir);
         ir
     }
@@ -326,13 +320,8 @@ impl<'a> AstCompiler<'a> {
                 } else {
                     None
                 };
-                let old_ir = std::mem::replace(
-                    &mut self.ir,
-                    Ir::new(
-                        self.compiler.get_runtime_ptr() as usize,
-                        self.compiler.allocate_fn_pointer(),
-                    ),
-                );
+                let old_ir =
+                    std::mem::replace(&mut self.ir, Ir::new(self.compiler.allocate_fn_pointer()));
                 let old_name = self.name.clone();
                 self.name = name.clone();
                 if is_not_top_level {
@@ -373,7 +362,6 @@ impl<'a> AstCompiler<'a> {
                         should_pause_atom,
                         Value::RawValue(0),
                     );
-                    let runtime_pointer_reg = self.ir.assign_new(self.compiler.get_runtime_ptr());
                     let stack_pointer = self.ir.get_stack_pointer_imm(0);
                     let pause_function = self
                         .compiler
@@ -384,10 +372,8 @@ impl<'a> AstCompiler<'a> {
                         .get_function_pointer(pause_function.clone())
                         .unwrap();
                     let pause_function = self.ir.assign_new(pause_function);
-                    self.ir.call_builtin(
-                        pause_function.into(),
-                        vec![runtime_pointer_reg.into(), stack_pointer],
-                    );
+                    self.ir
+                        .call_builtin(pause_function.into(), vec![stack_pointer]);
                     self.ir.write_label(skip_pause);
                 }
 
@@ -411,9 +397,7 @@ impl<'a> AstCompiler<'a> {
                     .get_function_pointer(error_fn_pointer)
                     .unwrap();
 
-                let runtime_ptr = self.compiler.get_runtime_ptr() as usize;
-
-                let mut code = self.ir.compile(lang, error_fn_pointer, runtime_ptr);
+                let mut code = self.ir.compile(lang, error_fn_pointer);
 
                 let full_function_name = name
                     .clone()
@@ -561,8 +545,6 @@ impl<'a> AstCompiler<'a> {
                     }
                 }
 
-                let runtime_pointer_reg = self.ir.assign_new(self.compiler.get_runtime_ptr());
-
                 let allocate = self
                     .compiler
                     .find_function("beagle.builtin/allocate")
@@ -573,10 +555,9 @@ impl<'a> AstCompiler<'a> {
                 let size_reg = self.ir.assign_new(struct_type.size());
                 let stack_pointer = self.ir.get_stack_pointer_imm(0);
 
-                let struct_ptr = self.ir.call_builtin(
-                    allocate.into(),
-                    vec![runtime_pointer_reg.into(), stack_pointer, size_reg.into()],
-                );
+                let struct_ptr = self
+                    .ir
+                    .call_builtin(allocate.into(), vec![stack_pointer, size_reg.into()]);
 
                 let struct_pointer = self.ir.untag(struct_ptr);
                 self.ir.write_struct_id(struct_pointer, struct_id);
@@ -614,8 +595,6 @@ impl<'a> AstCompiler<'a> {
                     }
                 }
 
-                let runtime_pointer_reg = self.ir.assign_new(self.compiler.get_runtime_ptr());
-
                 let allocate = self
                     .compiler
                     .find_function("beagle.builtin/allocate")
@@ -626,10 +605,9 @@ impl<'a> AstCompiler<'a> {
                 let size_reg = self.ir.assign_new(struct_type.size());
                 let stack_pointer = self.ir.get_stack_pointer_imm(0);
 
-                let struct_ptr = self.ir.call_builtin(
-                    allocate.into(),
-                    vec![runtime_pointer_reg.into(), stack_pointer, size_reg.into()],
-                );
+                let struct_ptr = self
+                    .ir
+                    .call_builtin(allocate.into(), vec![stack_pointer, size_reg.into()]);
 
                 let struct_pointer = self.ir.untag(struct_ptr);
                 self.ir.write_struct_id(struct_pointer, struct_id);
@@ -943,15 +921,12 @@ impl<'a> AstCompiler<'a> {
                 let allocate = self.compiler.get_function_pointer(allocate).unwrap();
                 let allocate = self.ir.assign_new(allocate);
 
-                let runtime_pointer_reg = self.ir.assign_new(self.compiler.get_runtime_ptr());
-
                 let size_reg = self.ir.assign_new(1);
                 let stack_pointer = self.ir.get_stack_pointer_imm(0);
 
-                let float_pointer = self.ir.call_builtin(
-                    allocate.into(),
-                    vec![runtime_pointer_reg.into(), stack_pointer, size_reg.into()],
-                );
+                let float_pointer = self
+                    .ir
+                    .call_builtin(allocate.into(), vec![stack_pointer, size_reg.into()]);
 
                 let float_pointer = self.ir.untag(float_pointer);
                 self.ir.write_small_object_header(float_pointer);
@@ -1047,17 +1022,11 @@ impl<'a> AstCompiler<'a> {
 
         let builtin = function.is_builtin;
         let needs_stack_pointer = function.needs_stack_pointer;
-        if builtin {
-            let pointer_reg = self.ir.volatile_register();
-            let pointer: Value = self.compiler.get_runtime_ptr().into();
-            self.ir.assign(pointer_reg, pointer);
-            args.insert(0, pointer_reg.into());
-        }
         if needs_stack_pointer {
             let stack_pointer_reg = self.ir.volatile_register();
             let stack_pointer = self.ir.get_stack_pointer_imm(0);
             self.ir.assign(stack_pointer_reg, stack_pointer);
-            args.insert(1, stack_pointer);
+            args.insert(0, stack_pointer);
         }
 
         let jump_table_pointer = self.compiler.get_jump_table_pointer(function).unwrap();
@@ -1228,14 +1197,11 @@ impl<'a> AstCompiler<'a> {
         self.ir
             .assign(function_pointer_reg, Value::RawValue(function_pointer));
 
-        let runtime_pointer_reg = self.ir.assign_new(self.compiler.get_runtime_ptr());
-
         let stack_pointer = self.ir.get_stack_pointer_imm(0);
 
         self.ir.call(
             make_closure_reg.into(),
             vec![
-                runtime_pointer_reg.into(),
                 stack_pointer,
                 function_pointer_reg.into(),
                 num_free_reg.into(),
@@ -1349,7 +1315,6 @@ impl<'a> AstCompiler<'a> {
     }
 
     pub fn call_builtin(&mut self, arg: &str, args: Vec<Value>) -> Value {
-        let mut args = args;
         let function = self
             .compiler
             .find_function(arg)
@@ -1357,10 +1322,6 @@ impl<'a> AstCompiler<'a> {
         assert!(function.is_builtin);
         let function = self.compiler.get_function_pointer(function).unwrap();
         let function = self.ir.assign_new(function);
-        let pointer_reg = self.ir.volatile_register();
-        let pointer: Value = self.compiler.get_runtime_ptr().into();
-        self.ir.assign(pointer_reg, pointer);
-        args.insert(0, pointer_reg.into());
         self.ir.call_builtin(function.into(), args)
     }
 

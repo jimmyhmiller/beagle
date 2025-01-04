@@ -2,15 +2,15 @@ use crate::{
     arm::LowLevelArm,
     code_memory::CodeAllocator,
     gc::{StackMap, StackMapDetails},
+    get_runtime,
     ir::{StringValue, Value},
     parser::Parser,
-    runtime::{Enum, Function, Runtime, Struct},
+    runtime::{Enum, Function, Struct},
     CommandLineArguments,
 };
 
 use mmap_rs::{MmapMut, MmapOptions};
 use std::{
-    cell::UnsafeCell,
     env,
     error::Error,
     fmt,
@@ -22,11 +22,9 @@ pub struct Compiler {
     pub code_allocator: CodeAllocator,
     pub property_look_up_cache: MmapMut,
     pub command_line_arguments: CommandLineArguments,
-    pub runtime_pointer: Option<*const u8>,
     pub stack_map: StackMap,
     pub pause_atom_ptr: Option<usize>,
     pub property_look_up_cache_offset: usize,
-    pub runtime: UnsafeCell<*mut Runtime>,
 }
 
 impl Compiler {
@@ -42,7 +40,6 @@ impl Compiler {
                 panic!("Failed to make mmap mutable: {}", e);
             });
         self.property_look_up_cache_offset = 0;
-        self.runtime_pointer = None;
         self.stack_map = StackMap::new();
         self.pause_atom_ptr = None;
     }
@@ -55,17 +52,9 @@ impl Compiler {
         self.pause_atom_ptr = Some(pointer);
     }
 
-    pub fn get_runtime_ptr(&self) -> *const u8 {
-        self.runtime_pointer.unwrap()
-    }
-
     pub fn allocate_fn_pointer(&mut self) -> usize {
         let allocate_fn_pointer = self.find_function("beagle.builtin/allocate").unwrap();
         self.get_function_pointer(allocate_fn_pointer).unwrap()
-    }
-
-    pub fn set_runtime_pointer(&mut self, pointer: *const u8) {
-        self.runtime_pointer = Some(pointer);
     }
 
     pub fn add_code(&mut self, code: &[u8]) -> Result<*const u8, Box<dyn Error>> {
@@ -153,8 +142,7 @@ impl Compiler {
             let error_fn_pointer = self.find_function("beagle.builtin/throw_error").unwrap();
             let error_fn_pointer = self.get_function_pointer(error_fn_pointer).unwrap();
 
-            let runtime_ptr = self.get_runtime_ptr() as usize;
-            let mut arm = ir.compile(arm, error_fn_pointer, runtime_ptr);
+            let mut arm = ir.compile(arm, error_fn_pointer);
             let max_locals = arm.max_locals as usize;
             self.upsert_function(Some(&top_level_name), &mut arm, max_locals)?;
             return Ok(Some(top_level_name));
@@ -163,7 +151,7 @@ impl Compiler {
     }
 
     pub fn add_string(&mut self, string_value: StringValue) -> Value {
-        let runtime = unsafe { &mut **(self.runtime.get_mut()) };
+        let runtime = get_runtime().get_mut();
         let offset = runtime.add_string(string_value);
         Value::StringConstantPtr(offset)
     }
@@ -183,22 +171,22 @@ impl Compiler {
 
     // TODO: All of this seems bad
     pub fn add_struct(&mut self, s: Struct) {
-        let runtime = unsafe { &mut **(self.runtime.get_mut()) };
+        let runtime = get_runtime().get_mut();
         runtime.add_struct(s);
     }
 
     pub fn add_enum(&mut self, e: Enum) {
-        let runtime = unsafe { &mut **(self.runtime.get_mut()) };
+        let runtime = get_runtime().get_mut();
         runtime.add_enum(e);
     }
 
     pub fn get_enum(&self, name: &str) -> Option<&Enum> {
-        let runtime = unsafe { &**(self.runtime.get()) };
+        let runtime = get_runtime().get_mut();
         runtime.get_enum(name)
     }
 
     pub fn get_struct(&self, _name: &str) -> Option<(usize, &Struct)> {
-        let runtime = unsafe { &**(self.runtime.get()) };
+        let runtime = get_runtime().get_mut();
         runtime.get_struct(_name)
     }
 
@@ -238,62 +226,62 @@ impl Compiler {
     }
 
     pub fn get_struct_by_id(&self, struct_id: usize) -> Option<&Struct> {
-        let runtime = unsafe { &mut **(self.runtime.get()) };
+        let runtime = get_runtime().get_mut();
         runtime.get_struct_by_id(struct_id)
     }
 
     pub fn current_namespace_name(&self) -> String {
-        let runtime = unsafe { &**(self.runtime.get()) };
+        let runtime = get_runtime().get_mut();
         runtime.current_namespace_name()
     }
 
     pub fn reserve_namespace_slot(&mut self, name: &str) -> usize {
-        let runtime = unsafe { &mut **(self.runtime.get_mut()) };
+        let runtime = get_runtime().get_mut();
         runtime.reserve_namespace_slot(name)
     }
 
     pub fn find_binding(&self, current_namespace_id: usize, name: &str) -> Option<usize> {
-        let runtime = unsafe { &mut **(self.runtime.get()) };
+        let runtime = get_runtime().get_mut();
         runtime.find_binding(current_namespace_id, name)
     }
 
     pub fn reserve_namespace(&mut self, name: String) -> usize {
-        let runtime = unsafe { &mut **(self.runtime.get_mut()) };
+        let runtime = get_runtime().get_mut();
         runtime.reserve_namespace(name)
     }
 
     pub fn add_alias(&mut self, library_name: String, alias: String) {
-        let runtime = unsafe { &mut **(self.runtime.get_mut()) };
+        let runtime = get_runtime().get_mut();
         runtime.add_alias(library_name, alias);
     }
 
     pub fn current_namespace_id(&self) -> usize {
-        let runtime = unsafe { &**(self.runtime.get()) };
+        let runtime = get_runtime().get();
         runtime.current_namespace_id()
     }
 
     pub fn get_namespace_from_alias(&self, alias: &str) -> Option<String> {
-        let runtime = unsafe { &**(self.runtime.get()) };
+        let runtime = get_runtime().get();
         runtime.get_namespace_from_alias(alias)
     }
 
     pub fn global_namespace_id(&self) -> usize {
-        let runtime = unsafe { &**(self.runtime.get()) };
+        let runtime = get_runtime().get();
         runtime.global_namespace_id()
     }
 
     pub fn get_namespace_id(&self, namespace_name: &str) -> Option<usize> {
-        let runtime = unsafe { &**(self.runtime.get()) };
+        let runtime = get_runtime().get();
         runtime.get_namespace_id(namespace_name)
     }
 
     pub fn set_current_namespace(&mut self, namespace_id: usize) {
-        let runtime = unsafe { &mut **(self.runtime.get_mut()) };
+        let runtime = get_runtime().get_mut();
         runtime.set_current_namespace(namespace_id);
     }
 
     pub fn get_function_pointer(&self, f: Function) -> Option<usize> {
-        let runtime = unsafe { &**(self.runtime.get()) };
+        let runtime = get_runtime().get();
         runtime.get_function_pointer(f).ok().map(|x| x as usize)
     }
 
@@ -305,7 +293,7 @@ impl Compiler {
     ) -> Result<usize, Box<dyn Error>> {
         let code = arm.compile_to_bytes();
         let pointer = self.add_code(&code)?;
-        let runtime = unsafe { &mut **(self.runtime.get_mut()) };
+        let runtime = get_runtime().get_mut();
         // TODO: Before this we did some weird stuff of mapping over the stack_map details
         // and I don't remember why
         let stack_map = arm
@@ -332,33 +320,33 @@ impl Compiler {
         max_locals: usize,
     ) -> Result<usize, Box<dyn Error>> {
         let pointer = self.add_code(&code)?;
-        let runtime = unsafe { &mut **(self.runtime.get_mut()) };
+        let runtime = get_runtime().get_mut();
         let stack_map = vec![];
         runtime.upsert_function(function_name, pointer, code.len(), max_locals, stack_map)
     }
 
     pub fn get_pointer_for_function(&self, function: &Function) -> Option<usize> {
-        let runtime = unsafe { &**(self.runtime.get()) };
+        let runtime = get_runtime().get();
         runtime.get_pointer_for_function(function)
     }
 
     pub fn find_function(&self, name: &str) -> Option<Function> {
-        let runtime = unsafe { &**(self.runtime.get()) };
+        let runtime = get_runtime().get();
         runtime.find_function(name)
     }
 
     pub fn get_jump_table_pointer(&self, function: Function) -> Option<usize> {
-        let runtime = unsafe { &**(self.runtime.get()) };
+        let runtime = get_runtime().get();
         runtime.get_jump_table_pointer(function).ok()
     }
 
     pub fn get_function_by_name(&self, name: &str) -> Option<&Function> {
-        let runtime = unsafe { &**(self.runtime.get()) };
+        let runtime = get_runtime().get();
         runtime.get_function_by_name(name)
     }
 
     pub fn reserve_function(&mut self, full_function_name: &str) -> Option<Function> {
-        let runtime = unsafe { &mut **(self.runtime.get_mut()) };
+        let runtime = get_runtime().get_mut();
         runtime.reserve_function(full_function_name).ok()
     }
 }
@@ -375,7 +363,6 @@ pub enum CompilerMessage {
     CompileFile(String),
     AddFunctionMarkExecutable(String, Vec<u8>, usize),
     SetPauseAtomPointer(usize),
-    SetRuntimePointer(usize),
     Reset,
 }
 
@@ -393,7 +380,6 @@ pub struct CompilerThread {
 impl CompilerThread {
     pub fn new(
         channel: BlockingReceiver<CompilerMessage, CompilerResponse>,
-        runtime_pointer: usize,
         command_line_arguments: CommandLineArguments,
     ) -> Self {
         CompilerThread {
@@ -410,13 +396,8 @@ impl CompilerThread {
                     }),
                 property_look_up_cache_offset: 0,
                 command_line_arguments: command_line_arguments.clone(),
-                runtime_pointer: None,
                 stack_map: StackMap::new(),
                 pause_atom_ptr: None,
-                runtime: {
-                    let runtime = runtime_pointer as *mut Runtime;
-                    UnsafeCell::new(runtime)
-                },
             },
             channel,
         }
@@ -439,10 +420,6 @@ impl CompilerThread {
                         self.compiler.set_pause_atom_ptr(pointer);
                         work_done.mark_done(CompilerResponse::Done);
                     }
-                    CompilerMessage::SetRuntimePointer(pointer) => {
-                        self.compiler.set_runtime_pointer(pointer as *const u8);
-                        work_done.mark_done(CompilerResponse::Done);
-                    }
                     CompilerMessage::AddFunctionMarkExecutable(name, code, max_locals) => {
                         self.compiler
                             .upsert_function_bytes(Some(&name), code, max_locals)
@@ -463,7 +440,6 @@ impl CompilerThread {
     }
 }
 
-/// A sender that blocks until the receiver marks the message as processed.
 pub struct BlockingSender<T, R> {
     inner: SyncSender<(T, SyncSender<R>)>,
 }
@@ -476,21 +452,17 @@ impl<T, R> BlockingSender<T, R> {
     }
 }
 
-/// A receiver that retrieves messages and provides a `WorkDone` handle to mark completion.
 pub struct BlockingReceiver<T, R> {
     inner: Receiver<(T, SyncSender<R>)>,
 }
 
 impl<T, R> BlockingReceiver<T, R> {
-    /// Receives a message and returns it along with a `WorkDone` handle.
     pub fn receive(&self) -> Result<(T, WorkDone<R>), mpsc::RecvError> {
         let (message, done_tx) = self.inner.recv()?;
         Ok((message, WorkDone { done_tx }))
     }
 }
 
-/// Creates a new blocking channel.
-/// The sender will block until the receiver marks the message as done.
 pub fn blocking_channel<T, R>() -> (BlockingSender<T, R>, BlockingReceiver<T, R>) {
     let (sender, receiver) = mpsc::sync_channel(0);
     (
@@ -498,14 +470,11 @@ pub fn blocking_channel<T, R>() -> (BlockingSender<T, R>, BlockingReceiver<T, R>
         BlockingReceiver { inner: receiver },
     )
 }
-
-/// A handle provided to the receiver to mark the message as processed.
 pub struct WorkDone<R> {
     done_tx: SyncSender<R>,
 }
 
 impl<R> WorkDone<R> {
-    /// Marks the message as processed, allowing the sender to continue.
     pub fn mark_done(self, result: R) {
         self.done_tx.send(result).unwrap();
     }
