@@ -30,6 +30,23 @@ pub struct Compiler {
 }
 
 impl Compiler {
+    pub fn reset(&mut self) {
+        self.code_offset = 0;
+        self.code_allocator = CodeAllocator::new();
+        self.property_look_up_cache = MmapOptions::new(MmapOptions::page_size())
+            .unwrap()
+            .map_mut()
+            .unwrap()
+            .make_mut()
+            .unwrap_or_else(|(_map, e)| {
+                panic!("Failed to make mmap mutable: {}", e);
+            });
+        self.property_look_up_cache_offset = 0;
+        self.runtime_pointer = None;
+        self.stack_map = StackMap::new();
+        self.pause_atom_ptr = None;
+    }
+
     pub fn get_pause_atom(&self) -> usize {
         self.pause_atom_ptr.unwrap_or(0)
     }
@@ -359,6 +376,7 @@ pub enum CompilerMessage {
     AddFunctionMarkExecutable(String, Vec<u8>, usize),
     SetPauseAtomPointer(usize),
     SetRuntimePointer(usize),
+    Reset,
 }
 
 pub enum CompilerResponse {
@@ -430,6 +448,10 @@ impl CompilerThread {
                             .upsert_function_bytes(Some(&name), code, max_locals)
                             .unwrap();
                         self.compiler.code_allocator.make_executable();
+                        work_done.mark_done(CompilerResponse::Done);
+                    }
+                    CompilerMessage::Reset => {
+                        self.compiler.reset();
                         work_done.mark_done(CompilerResponse::Done);
                     }
                 },

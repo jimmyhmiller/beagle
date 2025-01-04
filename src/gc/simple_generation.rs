@@ -16,6 +16,9 @@ struct Segment {
     memory_range: std::ops::Range<*const u8>,
 }
 
+unsafe impl Send for Segment {}
+unsafe impl Sync for Segment {}
+
 impl Segment {
     fn new(size: usize) -> Self {
         let memory = MmapOptions::new(size)

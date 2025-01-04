@@ -1,4 +1,5 @@
 use std::{
+    cell::UnsafeCell,
     collections::HashMap,
     error::Error,
     ffi::{c_void, CString},
@@ -10,13 +11,15 @@ use std::{
     vec,
 };
 
-use libffi::{low::CodePtr, middle::Cif};
+use libffi::middle::Cif;
 use libloading::Library;
 use mmap_rs::{Mmap, MmapMut, MmapOptions};
 
 use crate::{
     builtins::{__pause, debugger},
-    compiler::{BlockingSender, CompilerMessage, CompilerResponse},
+    compiler::{
+        blocking_channel, BlockingSender, CompilerMessage, CompilerResponse, CompilerThread,
+    },
     gc::{AllocateAction, Allocator, AllocatorOptions, StackMap, StackMapDetails, STACK_SIZE},
     ir::StringValue,
     types::{BuiltInTypes, Header, HeapObject, Tagged},
@@ -72,11 +75,12 @@ impl StructManager {
     }
 }
 
-pub trait Printer {
+pub trait Printer: Send + Sync {
     fn print(&mut self, value: String);
     fn println(&mut self, value: String);
     // Gross just for testing. I'll need to do better;
     fn get_output(&self) -> Vec<String>;
+    fn reset(&mut self);
 }
 
 pub struct DefaultPrinter;
@@ -91,6 +95,10 @@ impl Printer for DefaultPrinter {
     }
 
     fn get_output(&self) -> Vec<String> {
+        unimplemented!("We don't store this in the default")
+    }
+
+    fn reset(&mut self) {
         unimplemented!("We don't store this in the default")
     }
 }
@@ -123,6 +131,10 @@ impl Printer for TestPrinter {
     fn get_output(&self) -> Vec<String> {
         self.output.clone()
     }
+
+    fn reset(&mut self) {
+        self.output.clear();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,8 +152,8 @@ pub enum FFIType {
 #[derive(Debug, Clone)]
 pub struct FFIInfo {
     pub name: String,
-    pub function: CodePtr,
-    pub cif: Cif,
+    pub function: RawPtr<u8>,
+    pub cif: SyncWrapper<Cif>,
     pub number_of_arguments: usize,
     pub argument_types: Vec<FFIType>,
     pub return_type: FFIType,
@@ -189,10 +201,93 @@ struct Namespace {
     aliases: HashMap<String, usize>,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct RawPtr<T> {
+    pub ptr: *const T,
+}
+
+unsafe impl<T> Sync for RawPtr<T> {}
+unsafe impl<T> Send for RawPtr<T> {}
+
+impl<T> RawPtr<T> {
+    pub fn new(ptr: *const T) -> Self {
+        Self { ptr }
+    }
+
+    pub fn get(&self) -> *const T {
+        self.ptr
+    }
+}
+
+impl<T> From<RawPtr<T>> for usize {
+    fn from(raw_ptr: RawPtr<T>) -> Self {
+        raw_ptr.ptr as usize
+    }
+}
+
+impl<T> From<RawPtr<T>> for u64 {
+    fn from(raw_ptr: RawPtr<T>) -> Self {
+        raw_ptr.ptr as u64
+    }
+}
+
+impl<T, R> From<*const R> for RawPtr<T> {
+    fn from(ptr: *const R) -> Self {
+        Self {
+            ptr: ptr as *const T,
+        }
+    }
+}
+
+impl<T, R> From<RawPtr<T>> for *const R {
+    fn from(ptr: RawPtr<T>) -> Self {
+        ptr.ptr as *const R
+    }
+}
+
+#[derive(Debug)]
+pub struct SyncWrapper<T> {
+    value: UnsafeCell<T>,
+}
+
+impl<T> Clone for SyncWrapper<T>
+where
+    T: Clone,
+{
+    fn clone(&self) -> Self {
+        Self::new(self.get().clone())
+    }
+}
+
+impl<T> SyncWrapper<T> {
+    /// Create a new `SyncWrapper`.
+    pub const fn new(value: T) -> Self {
+        Self {
+            value: UnsafeCell::new(value),
+        }
+    }
+
+    /// Get a reference to the wrapped value.
+    /// Safety: You must ensure proper synchronization when accessing this value.
+    pub fn get(&self) -> &T {
+        unsafe { &*self.value.get() }
+    }
+
+    /// Get a mutable reference to the wrapped value.
+    /// Safety: You must ensure exclusive access when mutating this value.
+    pub fn get_mut(&self) -> &mut T {
+        unsafe { &mut *self.value.get() }
+    }
+}
+
+/// Unsafe implementation of `Sync` because `UnsafeCell` is inherently not `Sync`.
+unsafe impl<T> Sync for SyncWrapper<T> {}
+unsafe impl<T> Send for SyncWrapper<T> {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
     pub name: String,
-    pub pointer: *const u8,
+    pub pointer: RawPtr<u8>,
     pub jump_table_offset: usize,
     pub is_foreign: bool,
     pub is_builtin: bool,
@@ -200,32 +295,6 @@ pub struct Function {
     pub is_defined: bool,
     pub number_of_locals: usize,
     pub size: usize,
-}
-
-pub struct Runtime {
-    pub memory: Memory,
-    pub libraries: Vec<Library>,
-    #[allow(unused)]
-    command_line_arguments: CommandLineArguments,
-    pub printer: Box<dyn Printer>,
-    // TODO: I don't have any code that looks at u8, just always u64
-    // so that's why I need usize
-    pub is_paused: AtomicUsize,
-    pub thread_state: Arc<(Mutex<ThreadState>, Condvar)>,
-    pub gc_lock: Mutex<()>,
-    pub ffi_function_info: Vec<FFIInfo>,
-    pub ffi_info_by_name: HashMap<String, usize>,
-    namespaces: NamespaceManager,
-    pub structs: StructManager,
-    pub enums: EnumManager,
-    pub string_constants: Vec<StringValue>,
-    // TODO: Do I need anything more than
-    // namespace manager? Shouldn't these functions
-    // and things be under that?
-    pub functions: Vec<Function>,
-    pub jump_table: Option<Mmap>,
-    pub jump_table_offset: usize,
-    compiler_channel: Option<BlockingSender<CompilerMessage, CompilerResponse>>,
 }
 
 pub struct MMapMutWithOffset {
@@ -325,6 +394,18 @@ pub struct Memory {
 }
 
 impl Memory {
+    fn reset(&mut self) {
+        let options = self.heap.get_allocation_options();
+        self.heap = Alloc::new(options);
+        self.stacks = vec![(
+            std::thread::current().id(),
+            MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap(),
+        )];
+        self.join_handles = vec![];
+        self.threads = vec![std::thread::current()];
+        self.stack_map = StackMap::new();
+    }
+
     fn active_threads(&mut self) -> usize {
         let mut completed_threads = vec![];
         for (index, thread) in self.join_handles.iter().enumerate() {
@@ -574,6 +655,33 @@ pub struct StackValue {
     stack: Vec<usize>,
 }
 
+pub struct Runtime {
+    pub memory: Memory,
+    pub libraries: Vec<Library>,
+    #[allow(unused)]
+    command_line_arguments: CommandLineArguments,
+    pub printer: Box<dyn Printer>,
+    // TODO: I don't have any code that looks at u8, just always u64
+    // so that's why I need usize
+    pub is_paused: AtomicUsize,
+    pub thread_state: Arc<(Mutex<ThreadState>, Condvar)>,
+    pub gc_lock: Mutex<()>,
+    pub ffi_function_info: Vec<FFIInfo>,
+    pub ffi_info_by_name: HashMap<String, usize>,
+    namespaces: NamespaceManager,
+    pub structs: StructManager,
+    pub enums: EnumManager,
+    pub string_constants: Vec<StringValue>,
+    // TODO: Do I need anything more than
+    // namespace manager? Shouldn't these functions
+    // and things be under that?
+    pub functions: Vec<Function>,
+    pub jump_table: Option<Mmap>,
+    pub jump_table_offset: usize,
+    compiler_channel: Option<BlockingSender<CompilerMessage, CompilerResponse>>,
+    compiler_thread: Option<JoinHandle<()>>,
+}
+
 impl Runtime {
     pub fn new(
         command_line_arguments: CommandLineArguments,
@@ -620,6 +728,39 @@ impl Runtime {
             jump_table_offset: 0,
             functions: vec![],
             compiler_channel: None,
+            compiler_thread: None,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.memory.reset();
+        self.namespaces = NamespaceManager::new();
+        self.structs = StructManager::new();
+        self.enums = EnumManager::new();
+        self.string_constants.clear();
+        self.functions.clear();
+        self.jump_table = Some(
+            MmapOptions::new(MmapOptions::page_size())
+                .unwrap()
+                .map()
+                .unwrap(),
+        );
+        self.jump_table_offset = 0;
+        self.printer.reset();
+        self.ffi_function_info.clear();
+        self.ffi_info_by_name.clear();
+    }
+
+    pub fn start_compiler_thread(&mut self) {
+        if self.compiler_channel.is_none() {
+            let (sender, receiver) = blocking_channel();
+            let args_clone = self.command_line_arguments.clone();
+            let runtime_pointer = self as *const Runtime as usize;
+            let compiler_thread = thread::spawn(move || {
+                CompilerThread::new(receiver, runtime_pointer, args_clone).run();
+            });
+            self.compiler_channel = Some(sender);
+            self.compiler_thread = Some(compiler_thread);
         }
     }
 
@@ -708,7 +849,7 @@ impl Runtime {
 
     fn find_function_for_pc(&self, pc: usize) -> Option<&Function> {
         self.functions.iter().find(|f| {
-            let start = f.pointer as usize;
+            let start = f.pointer.into();
             let end = start + f.size;
             pc >= start && pc < end
         })
@@ -935,7 +1076,7 @@ impl Runtime {
         let trampoline = self.get_trampoline();
         let stack_pointer = self.get_stack_base();
 
-        Some((stack_pointer as u64, function.pointer as u64, trampoline))
+        Some((stack_pointer as u64, function.pointer.into(), trampoline))
     }
 
     pub fn get_function0(&self, name: &str) -> Option<Box<dyn Fn() -> u64>> {
@@ -1037,7 +1178,7 @@ impl Runtime {
             if function.is_foreign || function.is_builtin {
                 continue;
             }
-            let start = function.pointer as usize;
+            let start: usize = function.pointer.into();
             let size = function.size;
             let name = function.name.clone();
             let line = format!("{:x} {:x} {}\n", start, size, name);
@@ -1301,7 +1442,7 @@ impl Runtime {
         let jump_table_offset = self.add_jump_table_entry(index, pointer)?;
         self.functions.push(Function {
             name: name.unwrap_or("<Anonymous>").to_string(),
-            pointer,
+            pointer: pointer.into(),
             jump_table_offset,
             is_foreign: true,
             is_builtin: false,
@@ -1334,7 +1475,7 @@ impl Runtime {
         let jump_table_offset = self.add_jump_table_entry(index, pointer)?;
         self.functions.push(Function {
             name: name.to_string(),
-            pointer,
+            pointer: pointer.into(),
             jump_table_offset,
             is_foreign: true,
             is_builtin: true,
@@ -1421,7 +1562,7 @@ impl Runtime {
         let jump_table_offset = self.add_jump_table_entry(index, std::ptr::null())?;
         let function = Function {
             name: name.to_string(),
-            pointer: std::ptr::null(),
+            pointer: RawPtr::new(std::ptr::null()),
             jump_table_offset,
             is_foreign: false,
             is_builtin: false,
@@ -1444,7 +1585,7 @@ impl Runtime {
         let index = self.functions.len();
         self.functions.push(Function {
             name: name.unwrap_or("<Anonymous>").to_string(),
-            pointer,
+            pointer: pointer.into(),
             jump_table_offset: 0,
             is_foreign: false,
             is_builtin: false,
@@ -1471,7 +1612,7 @@ impl Runtime {
         size: usize,
     ) -> Result<usize, Box<dyn Error>> {
         let function = &mut self.functions[index];
-        function.pointer = pointer;
+        function.pointer = pointer.into();
         let jump_table_offset = function.jump_table_offset;
         let function_clone = function.clone();
         let function_pointer = self.get_function_pointer(function_clone).unwrap();
@@ -1483,14 +1624,14 @@ impl Runtime {
     }
 
     pub fn get_pointer(&self, function: &Function) -> Result<*const u8, Box<dyn Error>> {
-        Ok(function.pointer)
+        Ok(function.pointer.into())
     }
 
     pub fn get_function_pointer(&self, function: Function) -> Result<*const u8, Box<dyn Error>> {
         // Gets the absolute pointer to a function
         // if it is a foreign function, return the offset
         // if it is a local function, return the offset + the start of code_memory
-        Ok(function.pointer)
+        Ok(function.pointer.into())
     }
 
     pub fn get_jump_table_pointer(&self, function: Function) -> Result<usize, Box<dyn Error>> {
@@ -1550,11 +1691,13 @@ impl Runtime {
     }
 
     pub fn get_function_by_pointer(&self, value: *const u8) -> Option<&Function> {
-        self.functions.iter().find(|f| f.pointer == value)
+        self.functions.iter().find(|f| f.pointer == value.into())
     }
 
     pub fn get_function_by_pointer_mut(&mut self, value: *const u8) -> Option<&mut Function> {
-        self.functions.iter_mut().find(|f| f.pointer == value)
+        self.functions
+            .iter_mut()
+            .find(|f| f.pointer == value.into())
     }
 
     pub fn check_functions(&self) {
@@ -1597,7 +1740,7 @@ impl Runtime {
                 code.to_vec(),
                 number_of_locals as usize,
             ));
-        Ok(self.get_function_by_name(&name).unwrap().pointer as usize)
+        Ok(self.get_function_by_name(&name).unwrap().pointer.into())
     }
 
     fn add_binding(&mut self, name: &str, function_pointer: usize) -> usize {
@@ -1657,7 +1800,7 @@ impl Runtime {
     }
 
     pub fn get_pointer_for_function(&self, function: &Function) -> Option<usize> {
-        Some(function.pointer as usize)
+        Some(function.pointer.into())
     }
 
     pub fn set_compiler_channel(
