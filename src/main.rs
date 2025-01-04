@@ -4,7 +4,6 @@ use crate::machine_code::arm_codegen::{SP, X0, X1, X10, X2, X3, X4};
 use arm::LowLevelArm;
 use bincode::{config::standard, Decode, Encode};
 use clap::{command, Parser as ClapParser};
-use compiler::{blocking_channel, CompilerThread};
 #[allow(unused)]
 use gc::{
     compacting::CompactingHeap, mutex_allocator::MutexAllocator,
@@ -13,7 +12,7 @@ use gc::{
 use gc::{get_allocate_options, Allocator, StackMapDetails};
 use runtime::{DefaultPrinter, Printer, Runtime, TestPrinter};
 
-use std::{cell::UnsafeCell, env, error::Error, thread, time::Instant};
+use std::{cell::UnsafeCell, env, error::Error, sync::OnceLock, time::Instant};
 
 mod arm;
 pub mod ast;
@@ -243,6 +242,7 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             no_std: args.no_std,
         };
         main_inner(args).ok();
+        RUNTIME.get().unwrap().get_mut().reset();
     }
     Ok(())
 }
@@ -291,35 +291,40 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     // but right now I just want something working
     let has_expect = args.test && source.contains("// Expect");
 
-    let allocator = Alloc::new(get_allocate_options(&args));
-    let printer: Box<dyn Printer> = if has_expect {
-        Box::new(TestPrinter::new(Box::new(DefaultPrinter)))
-    } else {
-        Box::new(DefaultPrinter)
-    };
-
-    let mut runtime = UnsafeCell::new(Runtime::new(args.clone(), allocator, printer));
-
-    let (sender, receiver) = blocking_channel();
-    let runtime_pointer = runtime.get() as *const _ as usize;
-    runtime.get_mut().set_compiler_channel(sender);
     let args_clone = args.clone();
-    let _compiler_thread = thread::spawn(move || {
-        CompilerThread::new(receiver, runtime_pointer, args_clone).run();
+    RUNTIME.get_or_init(|| {
+        let allocator = Alloc::new(get_allocate_options(&args_clone.clone()));
+        let printer: Box<dyn Printer> = if has_expect {
+            Box::new(TestPrinter::new(Box::new(DefaultPrinter)))
+        } else {
+            Box::new(DefaultPrinter)
+        };
+
+        SyncUnsafeCell::new(Runtime::new(args_clone, allocator, printer))
     });
 
-    compile_trampoline(runtime.get_mut());
-    compile_save_volatile_registers(runtime.get_mut());
+    // let allocator = Alloc::new(get_allocate_options(&args));
+    // let printer: Box<dyn Printer> = if has_expect {
+    //     Box::new(TestPrinter::new(Box::new(DefaultPrinter)))
+    // } else {
+    //     Box::new(DefaultPrinter)
+    // };
+
+    let runtime = RUNTIME.get().unwrap().get_mut();
+
+    runtime.start_compiler_thread();
+
+    compile_trampoline(runtime);
+    compile_save_volatile_registers(runtime);
 
     //TODO(Refactor)
-    let runtime_pointer = runtime.get() as *const _;
+    let runtime_pointer = runtime as *const _;
+    runtime.set_runtime_pointer(runtime_pointer);
 
-    runtime.get_mut().set_runtime_pointer(runtime_pointer);
+    let pause_atom_ptr = runtime.pause_atom_ptr();
+    runtime.set_pause_atom_ptr(pause_atom_ptr);
 
-    let pause_atom_ptr = runtime.get_mut().pause_atom_ptr();
-    runtime.get_mut().set_pause_atom_ptr(pause_atom_ptr);
-
-    runtime.get_mut().install_builtins()?;
+    runtime.install_builtins()?;
     let compile_time = Instant::now();
 
     let mut top_levels = vec![];
@@ -329,20 +334,18 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         if !exe_path.join("resources/std.bg").exists() {
             exe_path = exe_path.parent().unwrap().to_path_buf();
         }
-        top_levels = runtime
-            .get_mut()
-            .compile(exe_path.join("resources/std.bg").to_str().unwrap())?;
+        top_levels = runtime.compile(exe_path.join("resources/std.bg").to_str().unwrap())?;
     }
 
     // TODO: Need better name for top_level
     // It should really be the top level of a namespace
-    let new_top_levels = runtime.get_mut().compile(&program)?;
-    let current_namespace = runtime.get_mut().current_namespace_id();
+    let new_top_levels = runtime.compile(&program)?;
+    let current_namespace = runtime.current_namespace_id();
     top_levels.extend(new_top_levels);
 
-    runtime.get_mut().write_functions_to_pid_map();
+    runtime.write_functions_to_pid_map();
 
-    runtime.get_mut().check_functions();
+    runtime.check_functions();
     if args.show_times {
         println!("Compile time {:?}", compile_time.elapsed());
     }
@@ -350,7 +353,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     let time = Instant::now();
 
     for top_level in top_levels {
-        if let Some(f) = runtime.get_mut().get_function0(&top_level) {
+        if let Some(f) = runtime.get_function0(&top_level) {
             f();
         } else {
             panic!(
@@ -359,11 +362,11 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             );
         }
     }
-    runtime.get_mut().set_current_namespace(current_namespace);
-    let fully_qualified_main = runtime.get_mut().current_namespace_name() + "/main";
-    if let Some(f) = runtime.get_mut().get_function0(&fully_qualified_main) {
+    runtime.set_current_namespace(current_namespace);
+    let fully_qualified_main = runtime.current_namespace_name() + "/main";
+    if let Some(f) = runtime.get_function0(&fully_qualified_main) {
         let result = f();
-        runtime.get_mut().println(result as usize);
+        runtime.println(result as usize);
     } else if args.debug {
         println!("No main function");
     }
@@ -376,13 +379,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         let source = std::fs::read_to_string(program)?;
         let expected = get_expect(&source);
         let expected = expected.trim();
-        let printed = runtime
-            .get_mut()
-            .printer
-            .get_output()
-            .join("")
-            .trim()
-            .to_string();
+        let printed = runtime.printer.get_output().join("").trim().to_string();
         if printed != expected {
             println!("Expected: \n{}\n", expected);
             println!("Got: \n{}\n", printed);
@@ -394,7 +391,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     loop {
         // take the list of threads so we are not holding a borrow on the compiler
         // use mem::replace to swap out the threads with an empty vec
-        let threads = std::mem::take(&mut runtime.get_mut().memory.join_handles);
+        let threads = std::mem::take(&mut runtime.memory.join_handles);
         if threads.is_empty() {
             break;
         }
@@ -437,3 +434,31 @@ fn try_all_examples() -> Result<(), Box<dyn Error>> {
     run_all_tests(args)?;
     Ok(())
 }
+#[repr(transparent)]
+pub struct SyncUnsafeCell<T: ?Sized> {
+    value: UnsafeCell<T>,
+}
+impl<T> SyncUnsafeCell<T> {
+    pub fn new(value: T) -> Self {
+        Self {
+            value: UnsafeCell::new(value),
+        }
+    }
+
+    pub fn get(&self) -> &T {
+        unsafe { &*self.value.get() }
+    }
+
+    pub fn get_mut(&self) -> &mut T {
+        unsafe { &mut *self.value.get() }
+    }
+
+    pub fn reset(&self, value: T) {
+        unsafe {
+            *self.value.get() = value;
+        }
+    }
+}
+unsafe impl<T: ?Sized + Sync> Sync for SyncUnsafeCell<T> {}
+
+pub static RUNTIME: OnceLock<SyncUnsafeCell<Runtime>> = OnceLock::new();
