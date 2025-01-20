@@ -1,14 +1,17 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
+use bincode::{Decode, Encode};
+
 use crate::arm::FmovDirection;
+use crate::ast::IRRange;
 use crate::machine_code::arm_codegen::{Register, X0};
 
 use crate::register_allocation::simple::SimpleRegisterAllocator;
 use crate::types::BuiltInTypes;
 use crate::{arm::LowLevelArm, common::Label};
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Encode, Decode)]
 pub enum Condition {
     LessThanOrEqual,
     LessThan,
@@ -18,7 +21,7 @@ pub enum Condition {
     GreaterThanOrEqual,
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Encode, Decode)]
 pub enum Value {
     Register(VirtualRegister),
     TaggedConstant(isize),
@@ -43,7 +46,7 @@ impl Value {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Encode, Decode)]
 pub struct VirtualRegister {
     pub argument: Option<usize>,
     pub index: usize,
@@ -95,7 +98,7 @@ pub struct StringValue {
     pub str: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Encode, Decode)]
 pub enum Instruction {
     Sub(Value, Value, Value),
     AddInt(Value, Value, Value),
@@ -553,6 +556,21 @@ impl Instruction {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub struct MachineCodeRange {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl MachineCodeRange {
+    fn new(start_machine_code: usize, end_machine_code: usize) -> Self {
+        Self {
+            start: start_machine_code,
+            end: end_machine_code,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Ir {
     register_index: usize,
@@ -563,6 +581,8 @@ pub struct Ir {
     pub num_locals: usize,
     allocate_fn_pointer: usize,
     after_return: Label,
+    pub ir_to_machine_code_range: Vec<(usize, MachineCodeRange)>,
+    pub ir_range_to_token_range: Vec<(crate::ast::TokenRange, IRRange)>,
 }
 
 impl Ir {
@@ -576,10 +596,16 @@ impl Ir {
             num_locals: 0,
             allocate_fn_pointer,
             after_return: Label { index: 0 },
+            ir_to_machine_code_range: vec![],
+            ir_range_to_token_range: vec![],
         };
 
         me.insert_label("after_return", me.after_return);
         me
+    }
+
+    pub fn current_position(&self) -> usize {
+        self.instructions.len()
     }
 
     fn next_register(&mut self, argument: Option<usize>, volatile: bool) -> VirtualRegister {
@@ -932,6 +958,7 @@ impl Ir {
     }
 
     pub fn compile(&mut self, mut lang: LowLevelArm, error_fn_pointer: usize) -> LowLevelArm {
+        debug_assert!(!self.ir_range_to_token_range.is_empty());
         // println!("{:#?}", self.instructions);
         lang.set_max_locals(self.num_locals);
         // lang.breakpoint();
@@ -957,11 +984,13 @@ impl Ir {
             self.instructions.clone(),
             self.num_locals,
             self.label_locations.clone(),
+            self.ir_range_to_token_range.clone(),
         );
         simple_register_allocator.simplify_registers();
-        self.instructions = simple_register_allocator.instructions.clone();
+        self.instructions = simple_register_allocator.resulting_instructions.clone();
         self.num_locals = simple_register_allocator.max_num_locals;
         self.label_locations = simple_register_allocator.label_locations.clone();
+        self.ir_range_to_token_range = simple_register_allocator.ir_range_to_token_range.clone();
 
         self.compile_instructions(&mut lang, exit, before_prelude, after_prelude);
 
@@ -995,6 +1024,7 @@ impl Ir {
         }
 
         for (index, instruction) in self.instructions.iter().enumerate() {
+            let start_machine_code = lang.current_position();
             let label = self.label_locations.get(&index);
             if let Some(label) = label {
                 lang.write_label(ir_label_to_lang_label[&self.labels[*label]]);
@@ -1482,6 +1512,11 @@ impl Ir {
                     lang.shift_right_imm(dest, value, BuiltInTypes::tag_size());
                 }
             }
+            let end_machine_code = lang.current_position();
+            self.ir_to_machine_code_range.push((
+                index,
+                MachineCodeRange::new(start_machine_code, end_machine_code),
+            ));
         }
     }
 

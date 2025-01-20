@@ -71,6 +71,18 @@ impl CodeAllocator {
                     .add(self.current_offset);
                 std::ptr::copy_nonoverlapping(bytes.as_ptr(), start, bytes.len());
                 self.current_offset += bytes.len();
+
+                // I think this should align 16 bytes
+                // but I might be wrong and I need to fix something going wrong
+                // I know that if I had any functions to my lldb libs
+                // I get some weird error. I thought it might be alignment
+                // but it could be that compilation is crossing a page
+                // boundary and this code isn't dealing with that
+                // correctly
+                if self.current_offset % 2 != 0 {
+                    self.current_offset += 1;
+                }
+
                 start
             } else {
                 let (first, second) = bytes.split_at(bytes_remaining);
@@ -80,7 +92,9 @@ impl CodeAllocator {
                     .unwrap()
                     .as_mut_ptr()
                     .add(self.current_offset);
+
                 std::ptr::copy_nonoverlapping(first.as_ptr(), start, first.len());
+                self.current_offset += first.len();
                 self.mark_page_as_pending();
                 self.write_bytes(second);
                 start

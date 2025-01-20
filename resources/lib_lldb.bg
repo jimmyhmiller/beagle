@@ -1,0 +1,266 @@
+namespace lib_lldb
+
+import "beagle.ffi" as ffi
+import "beagle.primitive" as primitive
+
+
+let _lldb = ffi/load_library("/Users/jimmyhmiller/Documents/Code/open-source/lldb-sys.rs/src/liblldb_bindings.dylib")
+let _initialize = ffi/get_function(_lldb, "SBDebuggerInitialize", [], ffi/Type.Void)
+let _debugger_create = ffi/get_function(_lldb, "SBDebuggerCreate", [ffi/Type.U32], ffi/Type.Pointer)
+let _debugger_set_async = ffi/get_function(_lldb, "SBDebuggerSetAsync", [ffi/Type.Pointer, ffi/Type.U32], ffi/Type.Void)
+let _debugger_create_target2 = ffi/get_function(_lldb, "SBDebuggerCreateTarget2", [ffi/Type.Pointer, ffi/Type.String], ffi/Type.Pointer)
+let _target_is_valid = ffi/get_function(_lldb, "SBTargetIsValid", [ffi/Type.Pointer], ffi/Type.U32)
+let _target_find_functions = ffi/get_function(_lldb, "SBTargetFindFunctions", [ffi/Type.Pointer, ffi/Type.String, ffi/Type.U32], ffi/Type.Pointer)
+let _symbol_context_list_get_size = ffi/get_function(_lldb, "SBSymbolContextListGetSize", [ffi/Type.Pointer], ffi/Type.U32)
+let _symbol_context_list_get_context_at_index = ffi/get_function(_lldb, "SBSymbolContextListGetContextAtIndex", [ffi/Type.Pointer, ffi/Type.U32], ffi/Type.Pointer)
+let _target_breakpoint_create_by_name = ffi/get_function(_lldb, "SBTargetBreakpointCreateByName", [ffi/Type.Pointer, ffi/Type.String, ffi/Type.String], ffi/Type.Pointer)
+let _breakpoint_set_enabled = ffi/get_function(_lldb, "SBBreakpointSetEnabled", [ffi/Type.Pointer, ffi/Type.U32], ffi/Type.Void)
+let _target_enable_all_breakpoints = ffi/get_function(_lldb, "SBTargetEnableAllBreakpoints", [ffi/Type.Pointer], ffi/Type.U32)
+let _create_sb_launch_info = ffi/get_function(_lldb, "CreateSBLaunchInfo", [ffi/Type.Pointer], ffi/Type.Pointer)
+let _target_launch2 = ffi/get_function(_lldb, "SBTargetLaunch2", [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer], ffi/Type.Pointer)
+let _create_sb_error = ffi/get_function(_lldb, "CreateSBError", [], ffi/Type.Pointer)
+let _launch_info_set_launch_flags = ffi/get_function(_lldb, "SBLaunchInfoSetLaunchFlags", [ffi/Type.Pointer, ffi/Type.U32], ffi/Type.Void)
+let _process_get_state = ffi/get_function(_lldb, "SBProcessGetState", [ffi/Type.Pointer], ffi/Type.U32)
+let _process_get_thread_by_index_id = ffi/get_function(_lldb, "SBProcessGetThreadByIndexID", [ffi/Type.Pointer, ffi/Type.U32], ffi/Type.Pointer)
+let _thread_get_selected_frame = ffi/get_function(_lldb, "SBThreadGetSelectedFrame", [ffi/Type.Pointer], ffi/Type.Pointer)
+let _frame_get_pc = ffi/get_function(_lldb, "SBFrameGetPC", [ffi/Type.Pointer], ffi/Type.U64)
+//pub fn SBFrameGetPCAddress(instance: SBFrameRef) -> SBAddressRef;
+let _frame_get_pc_address = ffi/get_function(_lldb, "SBFrameGetPCAddress", [ffi/Type.Pointer], ffi/Type.Pointer)
+let _thread_step_instruction = ffi/get_function(_lldb, "SBThreadStepInstruction", [ffi/Type.Pointer, ffi/Type.U32, ffi/Type.Pointer], ffi/Type.Void)
+let _error_get_c_string = ffi/get_function(_lldb, "SBErrorGetCString", [ffi/Type.Pointer], ffi/Type.String)
+let _error_success = ffi/get_function(_lldb, "SBErrorSuccess", [ffi/Type.Pointer], ffi/Type.U32)
+
+
+
+
+// pub fn SBTargetGetInstructionsWithFlavor(
+//     instance: SBTargetRef,
+//     base_addr: SBAddressRef,
+//     flavor_string: *const ::std::os::raw::c_char,
+//     buf: *mut ::std::os::raw::c_void,
+//     size: usize,
+// ) -> SBInstructionListRef;
+
+let _target_get_instructions_with_flavor = ffi/get_function(
+    _lldb,
+    "SBTargetGetInstructionsWithFlavor",
+    [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.String, ffi/Type.Pointer, ffi/Type.U64],
+    ffi/Type.Pointer
+)
+
+// pub fn SBInstructionListGetSize(instance: SBInstructionListRef) -> usize;
+let _instruction_list_get_size = ffi/get_function(_lldb, "SBInstructionListGetSize", [ffi/Type.Pointer], ffi/Type.U64)
+
+// pub fn SBInstructionListGetInstructionAtIndex(
+//     instance: SBInstructionListRef,
+//     idx: u32,
+// ) -> SBInstructionRef;
+
+let _instruction_list_get_instruction_at_index = ffi/get_function(
+    _lldb,
+    "SBInstructionListGetInstructionAtIndex",
+    [ffi/Type.Pointer, ffi/Type.U32],
+    ffi/Type.Pointer
+)
+
+
+
+// pub fn SBInstructionGetAddress(instance: SBInstructionRef) -> SBAddressRef;
+// pub fn SBInstructionGetMnemonic(
+//     instance: SBInstructionRef,
+//     target: SBTargetRef,
+// ) -> *const ::std::os::raw::c_char;
+// pub fn SBInstructionGetOperands(
+//     instance: SBInstructionRef,
+//     target: SBTargetRef,
+// ) -> *const ::std::os::raw::c_char;
+// pub fn SBInstructionGetComment(
+//     instance: SBInstructionRef,
+//     target: SBTargetRef,
+// ) -> *const ::std::os::raw::c_char;
+
+let _instruction_get_address = ffi/get_function(_lldb, "SBInstructionGetAddress", [ffi/Type.Pointer], ffi/Type.Pointer)
+let _instruction_get_mnemonic = ffi/get_function(_lldb, "SBInstructionGetMnemonic", [ffi/Type.Pointer, ffi/Type.Pointer], ffi/Type.String)
+let _instruction_get_operands = ffi/get_function(_lldb, "SBInstructionGetOperands", [ffi/Type.Pointer, ffi/Type.Pointer], ffi/Type.String)
+let _instruction_get_comment = ffi/get_function(_lldb, "SBInstructionGetComment", [ffi/Type.Pointer, ffi/Type.Pointer], ffi/Type.String)
+
+
+// pub fn SBAddressGetLoadAddress(instance: SBAddressRef, target: SBTargetRef) -> lldb_addr_t;
+let _address_get_load_address = ffi/get_function(_lldb, "SBAddressGetLoadAddress", [ffi/Type.Pointer, ffi/Type.Pointer], ffi/Type.U64)
+
+
+// pub fn SBProcessReadMemory(
+//     instance: SBProcessRef,
+//     addr: lldb_addr_t,
+//     buf: *mut ::std::os::raw::c_void,
+//     size: usize,
+//     error: SBErrorRef,
+// ) -> usize;
+let _process_read_memory = ffi/get_function(
+    _lldb,
+    "SBProcessReadMemory",
+    [ffi/Type.Pointer, ffi/Type.U64, ffi/Type.Pointer, ffi/Type.U64, ffi/Type.Pointer],
+    ffi/Type.U64
+)
+
+
+fn initialize() {
+    _initialize()
+}
+
+fn create_debugger() {
+    _debugger_create(0)
+}
+
+fn set_async(debugger, async?) {
+    _debugger_set_async(debugger, if async? { 1 } else { 0 })
+}
+
+fn create_target(debugger, filename) {
+    _debugger_create_target2(debugger, filename)
+}
+
+fn is_target_valid(target) {
+    _target_is_valid(target) == 1
+}
+
+fn find_functions(target, name, mask) {
+    _target_find_functions(target, name, mask)
+}
+
+fn get_symbol_list_size(list) {
+    _symbol_context_list_get_size(list)
+}
+
+fn get_context_at_index(list, idx) {
+    _symbol_context_list_get_context_at_index(list, idx)
+}
+
+fn create_breakpoint(target, symbol_name, module_name) {
+    _target_breakpoint_create_by_name(target, symbol_name, module_name)
+}
+
+fn set_breakpoint_enabled(breakpoint, enable?) {
+    _breakpoint_set_enabled(breakpoint, if enable? { 1 } else { 0 })
+}
+
+fn enable_all_breakpoints(target) {
+    _target_enable_all_breakpoints(target)
+}
+
+fn create_launch_info(argv) {
+    _create_sb_launch_info(argv)
+}
+
+fn launch_target(target, launch_info, error) {
+    _target_launch2(target, launch_info, error)
+}
+
+fn create_error() {
+    _create_sb_error()
+}
+
+fn set_launch_flags(launch_info, flags) {
+    _launch_info_set_launch_flags(launch_info, flags)
+}
+
+fn get_process_state(process) {
+    _process_get_state(process)
+}
+
+fn get_thread_by_index(process, idx) {
+    _process_get_thread_by_index_id(process, idx)
+}
+
+fn get_selected_frame(thread) {
+    _thread_get_selected_frame(thread)
+}
+
+fn get_pc(frame) {
+    _frame_get_pc(frame)
+}
+
+fn get_pc_address(frame) {
+    _frame_get_pc_address(frame)
+}
+
+fn step_instruction(thread, step_over, error) {
+    _thread_step_instruction(thread, if step_over { 1 } else { 0 }, error)
+}
+
+fn error?(error) {
+    _error_success(error) == 1
+}
+
+fn get_error_message(error) {
+    _error_get_c_string(error)
+}
+
+let process_stopped = 5;
+let stop_at_entry = 4
+
+fn get_instructions_raw(process, target, base_address) {
+    let flavor = "intel"
+    let size = 1024
+    let loaded_address = _address_get_load_address(base_address, target)
+    println(loaded_address)
+    let buffer = ffi/allocate(size)
+    let error = create_error()
+    _process_read_memory(process, loaded_address, buffer, size, error)
+
+    _target_get_instructions_with_flavor(target, base_address, flavor, buffer, size)
+}
+
+fn get_instruction_list_size(list) {
+    _instruction_list_get_size(list)
+}
+
+fn get_instruction_at_index(list, idx) {
+    _instruction_list_get_instruction_at_index(list, idx)
+}
+
+struct Instruction {
+    address
+    mnemonic
+    operands
+    comment
+}
+
+fn get_instruction_info(instruction, target) {
+    let address = _instruction_get_address(instruction)
+    let address = _address_get_load_address(address, target)
+    let mnemonic = _instruction_get_mnemonic(instruction, target)
+    let operands = _instruction_get_operands(instruction, target)
+    let comment = _instruction_get_comment(instruction, target)
+
+    Instruction {
+        address: address,
+        mnemonic: mnemonic,
+        operands: operands,
+        comment: comment
+    }
+}
+
+fn get_instructions_helper(list, target, result, count, i) {
+    if i == count {
+        result
+    } else {
+        let instruction = get_instruction_at_index(list, i)
+        let info = get_instruction_info(instruction, target)
+        let new_result = push(result, info)
+        get_instructions_helper(list, target, new_result, count, i + 1)
+    }
+}
+
+fn get_instructions(process, target, base_address) {
+    println("HERE!")
+    let raw_instructions = get_instructions_raw(process, target, base_address)
+    println("got raw")
+    let size = get_instruction_list_size(raw_instructions)
+    println(size)
+
+    get_instructions_helper(raw_instructions, target, [], size, 0)
+}
+   
+   
+

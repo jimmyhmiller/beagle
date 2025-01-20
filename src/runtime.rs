@@ -147,6 +147,7 @@ pub enum FFIType {
     String,
     Void,
     U16,
+    U64,
 }
 
 #[derive(Debug, Clone)]
@@ -346,6 +347,16 @@ impl MMapMutWithOffset {
         unsafe { self.mmap.as_ptr().add(start) as *const u32 }
     }
 
+    pub fn write_u64(&mut self, value: u64) -> *const u64 {
+        let start = self.offset;
+        let bytes = value.to_le_bytes();
+        for byte in bytes {
+            self.mmap[self.offset] = byte;
+            self.offset += 1;
+        }
+        unsafe { self.mmap.as_ptr().add(start) as *const u64 }
+    }
+
     pub fn write_i32(&mut self, value: i32) -> *const i32 {
         let start = self.offset;
         let bytes = value.to_le_bytes();
@@ -456,6 +467,12 @@ impl Memory {
     pub fn write_u32(&mut self, value: u32) -> &u32 {
         let mut result: *const u32 = &0;
         NATIVE_ARGUMENTS.with(|memory| result = memory.borrow_mut().write_u32(value));
+        unsafe { &*result }
+    }
+
+    pub fn write_u64(&mut self, value: u64) -> &u64 {
+        let mut result: *const u64 = &0;
+        NATIVE_ARGUMENTS.with(|memory| result = memory.borrow_mut().write_u64(value));
         unsafe { &*result }
     }
 
@@ -756,9 +773,12 @@ impl Runtime {
         if self.compiler_channel.is_none() {
             let (sender, receiver) = blocking_channel();
             let args_clone = self.command_line_arguments.clone();
-            let compiler_thread = thread::spawn(move || {
-                CompilerThread::new(receiver, args_clone).run();
-            });
+            let compiler_thread = thread::Builder::new()
+                .name("Beagle Compiler".to_string())
+                .spawn(move || {
+                    CompilerThread::new(receiver, args_clone).run();
+                })
+                .unwrap();
             self.compiler_channel = Some(sender);
             self.compiler_thread = Some(compiler_thread);
         }
@@ -796,10 +816,16 @@ impl Runtime {
     }
 
     pub fn compile_string(&mut self, _string: &str) -> Result<usize, Box<dyn Error>> {
-        // let function_pointer = self.compiler.compile_string(string);
-        // self.memory.stack_map = self.compiler.stack_map.clone();
-        // function_pointer
-        todo!()
+        let response = self
+            .compiler_channel
+            .as_ref()
+            .unwrap()
+            .send(CompilerMessage::CompileString(_string.to_string()));
+        if let CompilerResponse::FunctionPointer(pointer) = response {
+            Ok(pointer)
+        } else {
+            Err("Error compiling".into())
+        }
     }
 
     pub fn allocate(
@@ -1363,7 +1389,7 @@ impl Runtime {
                     2 => {
                         let bytes = object.get_string_bytes();
                         let string = std::str::from_utf8(bytes).unwrap();
-                        Some(string.to_string())
+                        Some(format!("\"{}\"", string))
                     }
                     _ => Some("Unknown".to_string()),
                 }

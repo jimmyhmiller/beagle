@@ -700,28 +700,28 @@ pub enum ArmAsm {
         rd: Register,
     },
 }
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum LdpGenSelector {
     PostIndex,
     PreIndex,
     SignedOffset,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum LdrImmGenSelector {
     PostIndex,
     PreIndex,
     UnsignedOffset,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum StpGenSelector {
     PostIndex,
     PreIndex,
     SignedOffset,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum StrImmGenSelector {
     PostIndex,
     PreIndex,

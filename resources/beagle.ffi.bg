@@ -25,6 +25,7 @@ enum Type {
     U8,
     U16,
     U32,
+    U64,
     I32,
     Pointer,
     MutablePointer,

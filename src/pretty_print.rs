@@ -1,6 +1,12 @@
 use std::collections::HashMap;
 
-use crate::ir::{Instruction, Value, VirtualRegister};
+use crate::{
+    ir::{Condition, Instruction, Value, VirtualRegister},
+    machine_code::arm_codegen::{
+        ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector,
+        StrImmGenSelector, X29,
+    },
+};
 
 pub trait PrettyPrint {
     fn pretty_print(&self) -> String;
@@ -169,7 +175,7 @@ impl PrettyPrint for Instruction {
             }
             Instruction::Call(value, value1, vec, _) => {
                 format!(
-                    "call {}, {}, {}",
+                    "{} <- call {}, {}",
                     value.pretty_print(),
                     value1.pretty_print(),
                     vec.pretty_print()
@@ -436,6 +442,646 @@ impl PrettyPrint for Vec<Instruction> {
             result.push('\n');
         }
         result
+    }
+}
+
+impl PrettyPrint for Vec<ArmAsm> {
+    fn pretty_print(&self) -> String {
+        let mut result = String::new();
+        for instruction in self {
+            result.push_str(&instruction.pretty_print());
+            result.push('\n');
+        }
+        result
+    }
+}
+
+impl PrettyPrint for Register {
+    fn pretty_print(&self) -> String {
+        if self.size != Size::S64 {
+            panic!("Need to deal with size since I'm using it now");
+        }
+        match self.index {
+            0 => "x0".to_string(),
+            1 => "x1".to_string(),
+            2 => "x2".to_string(),
+            3 => "x3".to_string(),
+            4 => "x4".to_string(),
+            5 => "x5".to_string(),
+            6 => "x6".to_string(),
+            7 => "x7".to_string(),
+            8 => "x8".to_string(),
+            9 => "x9".to_string(),
+            10 => "x10".to_string(),
+            11 => "x11".to_string(),
+            12 => "x12".to_string(),
+            13 => "x13".to_string(),
+            14 => "x14".to_string(),
+            15 => "x15".to_string(),
+            16 => "x16".to_string(),
+            17 => "x17".to_string(),
+            18 => "x18".to_string(),
+            19 => "x19".to_string(),
+            20 => "x20".to_string(),
+            21 => "x21".to_string(),
+            22 => "x22".to_string(),
+            23 => "x23".to_string(),
+            24 => "x24".to_string(),
+            25 => "x25".to_string(),
+            26 => "x26".to_string(),
+            27 => "x27".to_string(),
+            28 => "x28".to_string(),
+            29 => "x29".to_string(),
+            30 => "x30".to_string(),
+            31 => "xZ".to_string(),
+            x => format!("??x{}", x),
+        }
+    }
+}
+
+impl PrettyPrint for Condition {
+    fn pretty_print(&self) -> String {
+        match self {
+            Condition::LessThanOrEqual => "le".to_string(),
+            Condition::LessThan => "lt".to_string(),
+            Condition::Equal => "eq".to_string(),
+            Condition::NotEqual => "ne".to_string(),
+            Condition::GreaterThan => "gt".to_string(),
+            Condition::GreaterThanOrEqual => "ge".to_string(),
+        }
+    }
+}
+
+impl PrettyPrint for ArmAsm {
+    fn pretty_print(&self) -> String {
+        match self {
+            ArmAsm::AddAddsubImm {
+                sf: _,
+                sh,
+                imm12,
+                rn,
+                rd,
+            } => {
+                if *sh != 0 {
+                    panic!("Need to deal with shift since I'm using it now");
+                }
+                format!(
+                    "add {}, {}, {}",
+                    rd.pretty_print(),
+                    rn.pretty_print(),
+                    imm12
+                )
+            }
+            ArmAsm::AddAddsubShift {
+                sf: _,
+                shift,
+                rm,
+                imm6: _,
+                rn,
+                rd,
+            } => {
+                if *shift != 0 {
+                    panic!("Need to deal with shift since I'm using it now");
+                }
+                format!(
+                    "add {}, {}, {}",
+                    rd.pretty_print(),
+                    rn.pretty_print(),
+                    rm.pretty_print()
+                )
+            }
+            ArmAsm::AndLogImm {
+                sf: _,
+                n: _,
+                immr,
+                imms: _,
+                rn,
+                rd,
+            } => {
+                // TODO: Print better
+                format!("and {}, {}, {}", rd.pretty_print(), rn.pretty_print(), immr)
+            }
+            ArmAsm::AndLogShift {
+                sf: _,
+                shift,
+                rm,
+                imm6,
+                rn,
+                rd,
+            } => {
+                if *shift != 0 || *imm6 != 0 {
+                    panic!("Need to deal with shift and imm6 since I'm using it now");
+                }
+                format!(
+                    "and {}, {}, {}",
+                    rd.pretty_print(),
+                    rn.pretty_print(),
+                    rm.pretty_print()
+                )
+            }
+            ArmAsm::BCond { imm19, cond } => {
+                if *cond == 14 {
+                    return format!("b 0x{:x}", imm19);
+                }
+                let condition = Condition::arm_condition_from_i32(*cond);
+                format!("b{} 0x{:x}", condition.pretty_print(), imm19)
+            }
+            ArmAsm::Bl { imm26 } => {
+                format!("bl 0x{:x}", imm26)
+            }
+            ArmAsm::Blr { rn } => {
+                format!("blr {}", rn.pretty_print())
+            }
+            ArmAsm::Brk { imm16 } => {
+                format!("brk {}", imm16)
+            }
+            ArmAsm::Cas {
+                size,
+                l,
+                rs,
+                o0,
+                rn,
+                rt,
+            } => {
+                if *size != 0b11 || *l != 1 || *o0 != 1 {
+                    panic!("Need to deal with size, l and o0 since I'm using it now");
+                }
+                format!(
+                    "cas {}, {}, {}",
+                    rt.pretty_print(),
+                    rn.pretty_print(),
+                    rs.pretty_print()
+                )
+            }
+            ArmAsm::CmpSubsAddsubShift {
+                sf: _,
+                shift,
+                rm,
+                imm6,
+                rn,
+            } => {
+                if *shift != 0 || *imm6 != 0 {
+                    panic!("Need to deal with shift and imm6 since I'm using it now");
+                }
+                format!("cmp {}, {}", rn.pretty_print(), rm.pretty_print())
+            }
+            ArmAsm::CsetCsinc { sf: _, cond, rd } => {
+                let condition = Condition::arm_condition_from_i32(*cond);
+                format!("cset {}, {}", rd.pretty_print(), condition.pretty_print())
+            }
+            ArmAsm::Ldar { size, rn, rt } => {
+                if *size != 0b11 {
+                    panic!("Need to deal with size since I'm using it now");
+                }
+                format!("ldar {}, {}", rt.pretty_print(), rn.pretty_print())
+            }
+            ArmAsm::LdpGen {
+                opc,
+                imm7,
+                rt2,
+                rn,
+                rt,
+                class_selector,
+            } => {
+                if *opc != 0b10 || *class_selector != LdpGenSelector::PostIndex {
+                    panic!("Need to deal with opc and class_selector since I'm using it now");
+                }
+                format!(
+                    "ldp {}, {}, [{}], #{}",
+                    rt.pretty_print(),
+                    rt2.pretty_print(),
+                    rn.pretty_print(),
+                    imm7
+                )
+            }
+            ArmAsm::LdrImmGen {
+                size,
+                imm9,
+                rn,
+                rt,
+                imm12,
+                class_selector,
+            } => {
+                if *size != 0b11
+                    || *class_selector != LdrImmGenSelector::UnsignedOffset
+                    || *imm9 != 0
+                {
+                    panic!(
+                        "Need to deal with size and class_selector and imm9 since I'm using it now"
+                    );
+                }
+                format!(
+                    "ldr {}, [{} #{}], ",
+                    rt.pretty_print(),
+                    rn.pretty_print(),
+                    imm12
+                )
+            }
+            ArmAsm::LdrRegGen {
+                size,
+                rm,
+                option,
+                s,
+                rn,
+                rt,
+            } => {
+                if *size != 0b11 || *option != 0b11 || *s != 0 {
+                    panic!("Need to deal with size, option and s since I'm using it now");
+                }
+                format!(
+                    "ldr {}, [{} {}]",
+                    rt.pretty_print(),
+                    rn.pretty_print(),
+                    rm.pretty_print()
+                )
+            }
+            ArmAsm::LdurGen { size, imm9, rn, rt } => {
+                if *size != 0b11 {
+                    panic!("Need to deal with size since I'm using it now");
+                }
+                format!(
+                    "ldur {}, [{} #{}]",
+                    rt.pretty_print(),
+                    rn.pretty_print(),
+                    imm9
+                )
+            }
+            ArmAsm::LslLslv { sf: _, rm, rn, rd } => {
+                format!(
+                    "lsl {}, {}, {}",
+                    rd.pretty_print(),
+                    rn.pretty_print(),
+                    rm.pretty_print()
+                )
+            }
+            ArmAsm::LslUbfm {
+                sf: _,
+                n: _,
+                immr: _,
+                imms,
+                rn,
+                rd,
+            } => {
+                format!("lsl {}, {}, {}", rd.pretty_print(), rn.pretty_print(), imms)
+            }
+            ArmAsm::LsrUbfm {
+                sf: _,
+                n: _,
+                immr: _,
+                imms: _,
+                rn: _,
+                rd: _,
+            } => {
+                unimplemented!("Need to implement LsrUbfm")
+            }
+            ArmAsm::LsrLsrv {
+                sf: _,
+                rm: _,
+                rn: _,
+                rd: _,
+            } => {
+                unimplemented!("Need to implement LsrUbfm")
+            }
+            ArmAsm::AsrAsrv { sf: _, rm, rn, rd } => {
+                format!(
+                    "asr {}, {}, {}",
+                    rd.pretty_print(),
+                    rn.pretty_print(),
+                    rm.pretty_print()
+                )
+            }
+            ArmAsm::AsrSbfm {
+                sf: _,
+                n,
+                immr: _,
+                imms,
+                rn,
+                rd,
+            } => {
+                // imms: 0b111111
+                if *n != 1 || *imms != 0b111111 {
+                    panic!("Need to deal with n and imms since I'm using it now");
+                }
+                format!("asr {}, {}, {}", rd.pretty_print(), rn.pretty_print(), imms)
+            }
+            ArmAsm::EorLogShift {
+                sf: _,
+                shift,
+                rm,
+                imm6,
+                rn,
+                rd,
+            } => {
+                // shift: 0,
+                // imm6: 0,
+                if *shift != 0 || *imm6 != 0 {
+                    panic!("Need to deal with shift and imm6 since I'm using it now");
+                }
+                format!(
+                    "eor {}, {}, {}",
+                    rd.pretty_print(),
+                    rn.pretty_print(),
+                    rm.pretty_print()
+                )
+            }
+            ArmAsm::Madd {
+                sf: _,
+                rm,
+                ra,
+                rn,
+                rd,
+            } => {
+                format!(
+                    "madd {}, {}, {}, {}",
+                    rd.pretty_print(),
+                    rn.pretty_print(),
+                    ra.pretty_print(),
+                    rm.pretty_print()
+                )
+            }
+            ArmAsm::MovAddAddsubImm { sf: _, rn, rd } => {
+                format!("mov {}, {}", rd.pretty_print(), rn.pretty_print())
+            }
+            ArmAsm::MovOrrLogShift { sf: _, rm, rd } => {
+                format!("mov {}, {}", rd.pretty_print(), rm.pretty_print())
+            }
+            ArmAsm::Movk {
+                sf: _,
+                hw,
+                imm16,
+                rd,
+            } => {
+                // MOVK  <Wd>, #<imm>{, LSL #<shift>}
+                format!("movk {}, {} {{ #{} }}", rd.pretty_print(), imm16, hw)
+            }
+            ArmAsm::Movz {
+                sf: _,
+                hw,
+                imm16,
+                rd,
+            } => {
+                // hw: 0,
+                if *hw != 0 {
+                    panic!("Need to deal with hw since I'm using it now");
+                }
+                format!("movz {}, {}", rd.pretty_print(), imm16)
+            }
+            ArmAsm::OrrLogShift {
+                sf: _,
+                shift,
+                rm,
+                imm6,
+                rn,
+                rd,
+            } => {
+                // shift: 0,
+                // imm6: 0,
+                if *shift != 0 || *imm6 != 0 {
+                    panic!("Need to deal with shift and imm6 since I'm using it now");
+                }
+                format!(
+                    "orr {}, {}, {}",
+                    rd.pretty_print(),
+                    rn.pretty_print(),
+                    rm.pretty_print()
+                )
+            }
+            ArmAsm::Ret { rn } => {
+                format!("ret {}", rn.pretty_print())
+            }
+            ArmAsm::Sdiv { sf: _, rm, rn, rd } => {
+                format!(
+                    "sdiv {}, {}, {}",
+                    rd.pretty_print(),
+                    rn.pretty_print(),
+                    rm.pretty_print()
+                )
+            }
+            ArmAsm::Stlr { size, rn, rt } => {
+                if *size != 0b11 {
+                    panic!("Need to deal with size since I'm using it now");
+                }
+                format!("stlr {}, {}", rt.pretty_print(), rn.pretty_print())
+            }
+            ArmAsm::StpGen {
+                opc,
+                imm7,
+                rt2,
+                rn,
+                rt,
+                class_selector,
+            } => {
+                // opc: 0b10,
+                // class_selector: StpGenSelector::PreIndex,
+                if *opc != 0b10 || *class_selector != StpGenSelector::PreIndex {
+                    panic!("Need to deal with opc and class_selector since I'm using it now");
+                }
+                format!(
+                    "stp {}, {}, [{}], #{}",
+                    rt.pretty_print(),
+                    rt2.pretty_print(),
+                    rn.pretty_print(),
+                    imm7
+                )
+            }
+            ArmAsm::StrImmGen {
+                size,
+                imm9,
+                rn,
+                rt,
+                imm12,
+                class_selector,
+            } => {
+                // size: 0b11,
+                // imm9: 0, // not used
+                // class_selector: StrImmGenSelector::UnsignedOffset,
+                if *size != 0b11
+                    || *class_selector != StrImmGenSelector::UnsignedOffset
+                    || *imm9 != 0
+                {
+                    panic!(
+                        "Need to deal with size and class_selector and imm9 since I'm using it now"
+                    );
+                }
+                format!(
+                    "str {}, [{} #{}], ",
+                    rt.pretty_print(),
+                    rn.pretty_print(),
+                    imm12
+                )
+            }
+            ArmAsm::StrRegGen {
+                size,
+                rm,
+                option,
+                s,
+                rn,
+                rt,
+            } => {
+                // size: 0b11,
+                // option: 0b11,
+                // s: 0b0,
+                if *size != 0b11 || *option != 0b11 || *s != 0 {
+                    panic!("Need to deal with size, option and s since I'm using it now");
+                }
+                format!(
+                    "str {}, [{} {}]",
+                    rt.pretty_print(),
+                    rn.pretty_print(),
+                    rm.pretty_print()
+                )
+            }
+            ArmAsm::SturGen { size, imm9, rn, rt } => {
+                // size: 0b11,
+                // rn: X29,
+                if *size != 0b11 || *rn != X29 {
+                    panic!("Need to deal with size and rn since I'm using it now");
+                }
+                format!(
+                    "stur {}, [{} #{}]",
+                    rt.pretty_print(),
+                    rn.pretty_print(),
+                    imm9
+                )
+            }
+            ArmAsm::SubAddsubImm {
+                sf: _,
+                sh,
+                imm12,
+                rn,
+                rd,
+            } => {
+                // sh: 0,
+                if *sh != 0 {
+                    panic!("Need to deal with shift since I'm using it now");
+                }
+                format!(
+                    "sub {}, {}, {}",
+                    rd.pretty_print(),
+                    rn.pretty_print(),
+                    imm12
+                )
+            }
+            ArmAsm::SubAddsubShift {
+                sf: _,
+                shift,
+                rm,
+                imm6,
+                rn,
+                rd,
+            } => {
+                // shift: 0,
+                // imm6: 0,
+                if *shift != 0 || *imm6 != 0 {
+                    panic!("Need to deal with shift and imm6 since I'm using it now");
+                }
+                format!(
+                    "sub {}, {}, {}",
+                    rd.pretty_print(),
+                    rn.pretty_print(),
+                    rm.pretty_print()
+                )
+            }
+            ArmAsm::SubsAddsubShift {
+                sf: _,
+                shift,
+                rm,
+                imm6,
+                rn,
+                rd,
+            } => {
+                // shift: 0,
+                // imm6: 0,
+                if *shift != 0 || *imm6 != 0 {
+                    panic!("Need to deal with shift and imm6 since I'm using it now");
+                }
+                format!(
+                    "subs {}, {}, {}",
+                    rd.pretty_print(),
+                    rn.pretty_print(),
+                    rm.pretty_print()
+                )
+            }
+            ArmAsm::FmovFloat { ftype, rn, rd } => {
+                if *ftype != 0b01 {
+                    panic!("Need to deal with ftype since I'm using it now");
+                }
+                format!("fmov {}, {}", rd.pretty_print(), rn.pretty_print())
+            }
+            ArmAsm::FmovFloatGen {
+                sf: _,
+                ftype,
+                rmode,
+                opcode,
+                rn,
+                rd,
+            } => {
+                // ftype: 0b01,
+                // rmode: 0b00,
+                let direction = if *opcode == 0b111 {
+                    "FromGeneralToFloat"
+                } else if *opcode == 0b110 {
+                    "FromFloatToGeneral"
+                } else {
+                    panic!("Need to deal with opcode since I'm using it now");
+                };
+                if *ftype != 0b01 || *rmode != 0b00 {
+                    panic!("Need to deal with ftype and rmode since I'm using it now");
+                }
+                // TODO: Fix this to actually change registers
+                format!(
+                    "fmov {}, {}, {:?}",
+                    rd.pretty_print(),
+                    rn.pretty_print(),
+                    direction
+                )
+            }
+            ArmAsm::FaddFloat { ftype, rm, rn, rd } => {
+                // ftype: 0b01,
+                if *ftype != 0b01 {
+                    panic!("Need to deal with ftype since I'm using it now");
+                }
+                format!(
+                    "fadd {}, {}, {}",
+                    rd.pretty_print(),
+                    rn.pretty_print(),
+                    rm.pretty_print()
+                )
+            }
+            ArmAsm::FsubFloat { ftype, rm, rn, rd } => {
+                if *ftype != 0b01 {
+                    panic!("Need to deal with ftype since I'm using it now");
+                }
+                format!(
+                    "fsub {}, {}, {}",
+                    rd.pretty_print(),
+                    rn.pretty_print(),
+                    rm.pretty_print()
+                )
+            }
+            ArmAsm::FmulFloat { ftype, rm, rn, rd } => {
+                if *ftype != 0b01 {
+                    panic!("Need to deal with ftype since I'm using it now");
+                }
+                format!(
+                    "fmul {}, {}, {}",
+                    rd.pretty_print(),
+                    rn.pretty_print(),
+                    rm.pretty_print()
+                )
+            }
+            ArmAsm::FdivFloat { ftype, rm, rn, rd } => {
+                if *ftype != 0b01 {
+                    panic!("Need to deal with ftype since I'm using it now");
+                }
+                format!(
+                    "fdiv {}, {}, {}",
+                    rd.pretty_print(),
+                    rn.pretty_print(),
+                    rm.pretty_print()
+                )
+            }
+        }
     }
 }
 

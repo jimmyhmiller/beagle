@@ -1,5 +1,7 @@
-What is the proper split between runtime and compiler?
-
-I need my runtime to be thread-safe. So maybe I should have the compiler have a reference to the runtime? Then the compiler could be single threaded and to get it to do work you pass it on the queue. But to lookup information about the runtime or to add features, it just directly accesses it. I could maybe refactor to this point by making a shared data structure at first?
-
-I'm not reall sure as this whole thing is a bit of a mess. Especially the namespace vs function/structs/enums business.
+Right now I'm just doing the top level ir
+But the way my mapping is working, I have token range to ir range.
+But since my compilation unit is per function
+I actually have token_range to many different irs
+I think I need to make it so that each time I compile a function I make a new mapping.
+But I also keep the top level one.
+So now, for each file I will have {file_name, function_name, instructions, mapping}

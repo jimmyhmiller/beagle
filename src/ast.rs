@@ -3,149 +3,252 @@ use std::collections::HashMap;
 
 use crate::{
     arm::LowLevelArm,
+    builtins::debugger,
     compiler::Compiler,
     ir::{self, Condition},
+    pretty_print::PrettyPrint,
     runtime::{Enum, EnumVariant, Struct},
     types::BuiltInTypes,
+    Data, Message,
 };
+
+type TokenPosition = usize;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TokenRange {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl TokenRange {
+    pub fn new(start: usize, end: usize) -> Self {
+        TokenRange { start, end }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ast {
     Program {
         elements: Vec<Ast>,
+        token_range: TokenRange,
     },
     Function {
         name: Option<String>,
         // TODO: Change this to a Vec<Ast>
         args: Vec<String>,
         body: Vec<Ast>,
+        token_range: TokenRange,
     },
     Struct {
         name: String,
         fields: Vec<Ast>,
+        token_range: TokenRange,
     },
     Enum {
         name: String,
         variants: Vec<Ast>,
+        token_range: TokenRange,
     },
     EnumVariant {
         name: String,
         fields: Vec<Ast>,
+        token_range: TokenRange,
     },
     EnumStaticVariant {
         name: String,
+        token_range: TokenRange,
     },
     If {
         condition: Box<Ast>,
         then: Vec<Ast>,
         else_: Vec<Ast>,
+        token_range: TokenRange,
     },
     Condition {
         operator: Condition,
         left: Box<Ast>,
         right: Box<Ast>,
+        token_range: TokenRange,
     },
     Add {
         left: Box<Ast>,
         right: Box<Ast>,
+        token_range: TokenRange,
     },
     Sub {
         left: Box<Ast>,
         right: Box<Ast>,
+        token_range: TokenRange,
     },
     Mul {
         left: Box<Ast>,
         right: Box<Ast>,
+        token_range: TokenRange,
     },
     Div {
         left: Box<Ast>,
         right: Box<Ast>,
+        token_range: TokenRange,
     },
     Recurse {
         args: Vec<Ast>,
+        token_range: TokenRange,
     },
     TailRecurse {
         args: Vec<Ast>,
+        token_range: TokenRange,
     },
     Call {
         name: String,
         args: Vec<Ast>,
+        token_range: TokenRange,
     },
-    Let(Box<Ast>, Box<Ast>),
-    IntegerLiteral(i64),
-    FloatLiteral(f64),
-    Identifier(String),
-    String(String),
-    True,
-    False,
+    Let {
+        name: Box<Ast>,
+        value: Box<Ast>,
+        token_range: TokenRange,
+    },
+    IntegerLiteral(i64, TokenPosition),
+    FloatLiteral(f64, TokenPosition),
+    Identifier(String, TokenPosition),
+    String(String, TokenPosition),
+    True(TokenPosition),
+    False(TokenPosition),
     StructCreation {
         name: String,
         fields: Vec<(String, Ast)>,
+        token_range: TokenRange,
     },
     PropertyAccess {
         object: Box<Ast>,
         property: Box<Ast>,
+        token_range: TokenRange,
     },
-    Null,
+    Null(TokenPosition),
     EnumCreation {
         name: String,
         variant: String,
         fields: Vec<(String, Ast)>,
+        token_range: TokenRange,
     },
     Namespace {
         name: String,
+        token_range: TokenRange,
     },
     Import {
         library_name: String,
         alias: Box<Ast>,
+        token_range: TokenRange,
     },
     ShiftLeft {
         left: Box<Ast>,
         right: Box<Ast>,
+        token_range: TokenRange,
     },
     ShiftRight {
         left: Box<Ast>,
         right: Box<Ast>,
+        token_range: TokenRange,
     },
     ShiftRightZero {
         left: Box<Ast>,
         right: Box<Ast>,
+        token_range: TokenRange,
     },
     BitWiseAnd {
         left: Box<Ast>,
         right: Box<Ast>,
+        token_range: TokenRange,
     },
     BitWiseOr {
         left: Box<Ast>,
         right: Box<Ast>,
+        token_range: TokenRange,
     },
     BitWiseXor {
         left: Box<Ast>,
         right: Box<Ast>,
+        token_range: TokenRange,
     },
     And {
         left: Box<Ast>,
         right: Box<Ast>,
+        token_range: TokenRange,
     },
     Or {
         left: Box<Ast>,
         right: Box<Ast>,
+        token_range: TokenRange,
     },
-    Array(Vec<Ast>),
+    Array {
+        array: Vec<Ast>,
+        token_range: TokenRange,
+    },
     IndexOperator {
         array: Box<Ast>,
         index: Box<Ast>,
+        token_range: TokenRange,
     },
     Loop {
         body: Vec<Ast>,
+        token_range: TokenRange,
     },
 }
 
 impl Ast {
-    pub fn compile(&self, compiler: &mut Compiler) -> Ir {
+    pub fn token_range(&self) -> TokenRange {
+        match self {
+            Ast::Program { token_range, .. }
+            | Ast::Function { token_range, .. }
+            | Ast::Struct { token_range, .. }
+            | Ast::Enum { token_range, .. }
+            | Ast::EnumVariant { token_range, .. }
+            | Ast::EnumStaticVariant { token_range, .. }
+            | Ast::If { token_range, .. }
+            | Ast::Condition { token_range, .. }
+            | Ast::Add { token_range, .. }
+            | Ast::Sub { token_range, .. }
+            | Ast::Mul { token_range, .. }
+            | Ast::Div { token_range, .. }
+            | Ast::Recurse { token_range, .. }
+            | Ast::TailRecurse { token_range, .. }
+            | Ast::Call { token_range, .. }
+            | Ast::Let { token_range, .. }
+            | Ast::Namespace { token_range, .. }
+            | Ast::Import { token_range, .. }
+            | Ast::ShiftLeft { token_range, .. }
+            | Ast::ShiftRight { token_range, .. }
+            | Ast::ShiftRightZero { token_range, .. }
+            | Ast::BitWiseAnd { token_range, .. }
+            | Ast::BitWiseOr { token_range, .. }
+            | Ast::BitWiseXor { token_range, .. }
+            | Ast::And { token_range, .. }
+            | Ast::Or { token_range, .. }
+            | Ast::Array { token_range, .. }
+            | Ast::IndexOperator { token_range, .. }
+            | Ast::Loop { token_range, .. }
+            | Ast::StructCreation { token_range, .. }
+            | Ast::PropertyAccess { token_range, .. }
+            | Ast::EnumCreation { token_range, .. } => *token_range,
+            Ast::IntegerLiteral(_, position)
+            | Ast::FloatLiteral(_, position)
+            | Ast::Identifier(_, position)
+            | Ast::String(_, position)
+            | Ast::True(position)
+            | Ast::False(position)
+            | Ast::Null(position) => TokenRange::new(*position, *position),
+        }
+    }
+    pub fn compile(
+        &self,
+        compiler: &mut Compiler,
+        file_name: &str,
+    ) -> (Ir, Vec<(TokenRange, IRRange)>) {
         let mut ast_compiler = AstCompiler {
             ast: self.clone(),
+            file_name: file_name.to_string(),
             ir: Ir::new(compiler.allocate_fn_pointer()),
+            ir_range_to_token_range: vec![Vec::new()],
             name: None,
             compiler,
             context: vec![],
@@ -158,10 +261,15 @@ impl Ast {
                 in_function: false,
             },
             environment_stack: vec![Environment::new()],
+            current_token_info: vec![],
+            last_accounted_for_ir: 0,
         };
 
         // println!("{:#?}", compiler);
-        ast_compiler.compile()
+        (
+            ast_compiler.compile(),
+            ast_compiler.ir_range_to_token_range.pop().unwrap(),
+        )
     }
 
     pub fn has_top_level(&self) -> bool {
@@ -178,7 +286,7 @@ impl Ast {
 
     pub fn nodes(&self) -> &Vec<Ast> {
         match self {
-            Ast::Program { elements } => elements,
+            Ast::Program { elements, .. } => elements,
             _ => panic!("Only works on program"),
         }
     }
@@ -192,8 +300,8 @@ impl Ast {
 
     pub fn get_string(&self) -> String {
         match self {
-            Ast::String(str) => str.replace("\"", ""),
-            Ast::Identifier(str) => str.to_string(),
+            Ast::String(str, _) => str.replace("\"", ""),
+            Ast::Identifier(str, _) => str.to_string(),
             _ => panic!("Expected string"),
         }
     }
@@ -240,12 +348,19 @@ impl Environment {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct IRRange {
+    pub start: usize,
+    pub end: usize,
+}
+
 #[derive(Debug)]
 pub struct AstCompiler<'a> {
     pub ast: Ast,
     pub ir: Ir,
     pub name: Option<String>,
     pub compiler: &'a mut Compiler,
+    pub file_name: String,
     // This feels dumb and complicated. But my brain
     // won't let me think of a better way
     // I know there is one.
@@ -253,6 +368,9 @@ pub struct AstCompiler<'a> {
     pub current_context: Context,
     pub next_context: Context,
     pub environment_stack: Vec<Environment>,
+    pub current_token_info: Vec<(TokenRange, usize)>,
+    pub ir_range_to_token_range: Vec<Vec<(TokenRange, IRRange)>>,
+    pub last_accounted_for_ir: usize,
 }
 
 impl<'a> AstCompiler<'a> {
@@ -275,9 +393,12 @@ impl<'a> AstCompiler<'a> {
     pub fn call_compile(&mut self, ast: &Ast) -> Value {
         self.context.push(self.current_context.clone());
         self.current_context = self.next_context.clone();
+        self.push_current_token(ast.token_range());
         let result = self.compile_to_ir(ast);
+        self.pop_current_token();
         self.next_context = self.current_context.clone();
         self.current_context = self.context.pop().unwrap();
+
         result
     }
 
@@ -287,13 +408,14 @@ impl<'a> AstCompiler<'a> {
 
         self.tail_position();
         self.call_compile(&Box::new(self.ast.clone()));
+
         let mut ir = Ir::new(self.compiler.allocate_fn_pointer());
         std::mem::swap(&mut ir, &mut self.ir);
         ir
     }
     pub fn compile_to_ir(&mut self, ast: &Ast) -> Value {
         match ast.clone() {
-            Ast::Program { elements } => {
+            Ast::Program { elements, .. } => {
                 let mut last = Value::TaggedConstant(0);
                 for ast in elements.iter() {
                     self.tail_position();
@@ -301,7 +423,9 @@ impl<'a> AstCompiler<'a> {
                 }
                 self.ir.ret(last)
             }
-            Ast::Function { name, args, body } => {
+            Ast::Function {
+                name, args, body, ..
+            } => {
                 self.create_new_environment();
 
                 let is_not_top_level = self.environment_stack.len() > 2;
@@ -323,6 +447,8 @@ impl<'a> AstCompiler<'a> {
                 let old_ir =
                     std::mem::replace(&mut self.ir, Ir::new(self.compiler.allocate_fn_pointer()));
                 let old_name = self.name.clone();
+                self.ir_range_to_token_range.push(Vec::new());
+
                 self.name = name.clone();
                 if is_not_top_level {
                     let name = "<closure_context>";
@@ -380,7 +506,7 @@ impl<'a> AstCompiler<'a> {
                 for ast in body[..body.len().saturating_sub(1)].iter() {
                     self.call_compile(&Box::new(ast));
                 }
-                let last = body.last().unwrap_or(&Ast::Null);
+                let last = body.last().unwrap_or(&Ast::Null(0));
                 let return_value = self.call_compile(&Box::new(last));
                 self.ir.ret(return_value);
 
@@ -397,7 +523,11 @@ impl<'a> AstCompiler<'a> {
                     .get_function_pointer(error_fn_pointer)
                     .unwrap();
 
+                let token_map = self.ir_range_to_token_range.pop().unwrap();
+                self.ir.ir_range_to_token_range = token_map.clone();
+
                 let mut code = self.ir.compile(lang, error_fn_pointer);
+                let token_map = self.ir.ir_range_to_token_range.clone();
 
                 let full_function_name = name
                     .clone()
@@ -409,6 +539,48 @@ impl<'a> AstCompiler<'a> {
                     .unwrap();
 
                 code.share_label_info_debug(function_pointer);
+
+                debugger(Message {
+                    kind: "ir".to_string(),
+                    data: Data::Ir {
+                        function_pointer,
+                        file_name: self.file_name.clone(),
+                        instructions: self
+                            .ir
+                            .instructions
+                            .iter()
+                            .map(|x| x.pretty_print())
+                            .collect(),
+                        token_range_to_ir_range: token_map
+                            .iter()
+                            .map(|(token_range, ir_range)| {
+                                (
+                                    (token_range.start, token_range.end),
+                                    (ir_range.start, ir_range.end),
+                                )
+                            })
+                            .collect(),
+                    },
+                });
+
+                let pretty_arm_instructions =
+                    code.instructions.iter().map(|x| x.pretty_print()).collect();
+                let ir_to_machine_code_range = self
+                    .ir
+                    .ir_to_machine_code_range
+                    .iter()
+                    .map(|(ir, machine_range)| (*ir, (machine_range.start, machine_range.end)))
+                    .collect();
+
+                debugger(crate::Message {
+                    kind: "asm".to_string(),
+                    data: Data::Arm {
+                        function_pointer,
+                        file_name: self.file_name.clone(),
+                        instructions: pretty_arm_instructions,
+                        ir_to_machine_code_range,
+                    },
+                });
 
                 self.ir = old_ir;
 
@@ -437,7 +609,7 @@ impl<'a> AstCompiler<'a> {
                     let namespace_id = self.current_namespace_id();
                     let reserved_namespace_slot = self.compiler.reserve_namespace_slot(&name);
                     self.store_namespaced_variable(
-                        Value::RawValue(reserved_namespace_slot),
+                        Value::TaggedConstant(reserved_namespace_slot as isize),
                         function_reg,
                     );
                     self.insert_variable(
@@ -455,7 +627,7 @@ impl<'a> AstCompiler<'a> {
                 function
             }
 
-            Ast::Loop { body } => {
+            Ast::Loop { body, .. } => {
                 let loop_start = self.ir.label("loop_start");
                 self.ir.write_label(loop_start);
                 for ast in body.iter() {
@@ -464,29 +636,41 @@ impl<'a> AstCompiler<'a> {
                 self.ir.jump(loop_start);
                 Value::Null
             }
-            Ast::Struct { name: _, fields: _ } => {
+            Ast::Struct {
+                name: _, fields: _, ..
+            } => {
                 // TODO: This should probably return the struct value
                 // A concept I don't yet have
                 Value::Null
             }
-            Ast::Enum { name, variants } => {
+            Ast::Enum {
+                name,
+                variants,
+                token_range,
+            } => {
                 let mut struct_fields: Vec<(String, Ast)> = vec![];
                 for variant in variants.iter() {
                     match variant {
-                        Ast::EnumVariant { name, fields: _ } => {
+                        Ast::EnumVariant {
+                            name, fields: _, ..
+                        } => {
                             // TODO: These should be functions??
                             // Maybe I should have a concept of a struct/data creator
                             // that gets called with named arguments like that?
                             // I'm not sure
                             // I think my whole setup here is janky. But I want things working first
-                            struct_fields.push((name.clone(), Ast::Null));
+                            struct_fields.push((name.clone(), Ast::Null(0)));
                         }
-                        Ast::EnumStaticVariant { name: variant_name } => {
+                        Ast::EnumStaticVariant {
+                            name: variant_name,
+                            token_range,
+                        } => {
                             struct_fields.push((
                                 variant_name.clone(),
                                 Ast::StructCreation {
                                     name: format!("{}.{}", name, variant_name),
                                     fields: vec![],
+                                    token_range: *token_range,
                                 },
                             ));
                         }
@@ -496,27 +680,34 @@ impl<'a> AstCompiler<'a> {
                 let value = self.call_compile(&Ast::StructCreation {
                     name: name.clone(),
                     fields: struct_fields,
+                    token_range,
                 });
                 let namespace_id = self
                     .compiler
                     .find_binding(self.current_namespace_id(), &name)
                     .unwrap_or_else(|| panic!("binding not found {}", name));
                 let value_reg = self.ir.assign_new(value);
-                self.store_namespaced_variable(Value::RawValue(namespace_id), value_reg);
+                self.store_namespaced_variable(
+                    Value::TaggedConstant(namespace_id as isize),
+                    value_reg,
+                );
                 // TODO: This should probably return the enum value
                 // A concept I don't yet have
                 Value::Null
             }
-            Ast::EnumVariant { name: _, fields: _ } => {
+            Ast::EnumVariant {
+                name: _, fields: _, ..
+            } => {
                 panic!("Shouldn't get here")
             }
-            Ast::EnumStaticVariant { name: _ } => {
+            Ast::EnumStaticVariant { name: _, .. } => {
                 panic!("Shouldn't get here")
             }
             Ast::EnumCreation {
                 name,
                 variant,
                 fields,
+                ..
             } => {
                 let (namespace, name) = self.get_namespace_name_and_name(&name);
                 let field_results = fields
@@ -566,7 +757,7 @@ impl<'a> AstCompiler<'a> {
                 self.ir
                     .tag(struct_pointer, BuiltInTypes::HeapObject.get_tag())
             }
-            Ast::StructCreation { name, fields } => {
+            Ast::StructCreation { name, fields, .. } => {
                 let (namespace, name) = self.get_namespace_name_and_name(&name);
                 for field in fields.iter() {
                     self.not_tail_position();
@@ -620,7 +811,9 @@ impl<'a> AstCompiler<'a> {
                 self.ir
                     .tag(struct_pointer, BuiltInTypes::HeapObject.get_tag())
             }
-            Ast::Array(elements) => {
+            Ast::Array {
+                array: elements, ..
+            } => {
                 // Let's stary by just adding a popping for simplicity
                 for element in elements.iter() {
                     self.not_tail_position();
@@ -651,7 +844,7 @@ impl<'a> AstCompiler<'a> {
 
                 vector_register.into()
             }
-            Ast::Namespace { name } => {
+            Ast::Namespace { name, .. } => {
                 let namespace_id = self.compiler.reserve_namespace(name);
                 let namespace_id = Value::RawValue(namespace_id);
                 let namespace_id = self.ir.assign_new(namespace_id);
@@ -663,12 +856,15 @@ impl<'a> AstCompiler<'a> {
             Ast::Import {
                 library_name,
                 alias,
+                ..
             } => {
                 self.compiler
                     .add_alias(library_name, (*alias).get_string().to_string());
                 Value::Null
             }
-            Ast::PropertyAccess { object, property } => {
+            Ast::PropertyAccess {
+                object, property, ..
+            } => {
                 let object = self.call_compile(object.as_ref());
                 let object = self.ir.assign_new(object);
                 let untagged_object = self.ir.untag(object.into());
@@ -696,7 +892,7 @@ impl<'a> AstCompiler<'a> {
                 self.ir.jump(exit_property_access);
 
                 self.ir.write_label(slow_property_path);
-                let property = if let Ast::Identifier(name) = property.as_ref() {
+                let property = if let Ast::Identifier(name, _) = property.as_ref() {
                     name.clone()
                 } else {
                     panic!("Expected identifier")
@@ -714,7 +910,7 @@ impl<'a> AstCompiler<'a> {
 
                 result.into()
             }
-            Ast::IndexOperator { array, index } => {
+            Ast::IndexOperator { array, index, .. } => {
                 let get = self.get_function("persistent_vector/get");
                 let array = self.call_compile(array.as_ref());
                 let index = self.call_compile(index.as_ref());
@@ -726,6 +922,7 @@ impl<'a> AstCompiler<'a> {
                 condition,
                 then,
                 else_,
+                ..
             } => {
                 let condition = self.call_compile(&condition);
 
@@ -756,7 +953,7 @@ impl<'a> AstCompiler<'a> {
 
                 result_reg.into()
             }
-            Ast::And { left, right } => {
+            Ast::And { left, right, .. } => {
                 let result_reg = self.ir.volatile_register();
                 self.ir.assign(result_reg, Value::False);
                 let short_circuit = self.ir.label("short_circuit_and");
@@ -768,7 +965,7 @@ impl<'a> AstCompiler<'a> {
                 self.ir.write_label(short_circuit);
                 result_reg.into()
             }
-            Ast::Or { left, right } => {
+            Ast::Or { left, right, .. } => {
                 let result_reg = self.ir.volatile_register();
                 self.ir.assign(result_reg, Value::True);
                 let short_circuit = self.ir.label("short_circuit_or");
@@ -780,77 +977,77 @@ impl<'a> AstCompiler<'a> {
                 self.ir.write_label(short_circuit);
                 result_reg.into()
             }
-            Ast::Add { left, right } => {
+            Ast::Add { left, right, .. } => {
                 self.not_tail_position();
                 let left = self.call_compile(&left);
                 self.not_tail_position();
                 let right = self.call_compile(&right);
                 self.ir.add_any(left, right)
             }
-            Ast::Sub { left, right } => {
+            Ast::Sub { left, right, .. } => {
                 self.not_tail_position();
                 let left = self.call_compile(&left);
                 self.not_tail_position();
                 let right = self.call_compile(&right);
                 self.ir.sub_any(left, right)
             }
-            Ast::Mul { left, right } => {
+            Ast::Mul { left, right, .. } => {
                 self.not_tail_position();
                 let left = self.call_compile(&left);
                 self.not_tail_position();
                 let right = self.call_compile(&right);
                 self.ir.mul_any(left, right)
             }
-            Ast::Div { left, right } => {
+            Ast::Div { left, right, .. } => {
                 self.not_tail_position();
                 let left = self.call_compile(&left);
                 self.not_tail_position();
                 let right = self.call_compile(&right);
                 self.ir.div_any(left, right)
             }
-            Ast::ShiftLeft { left, right } => {
+            Ast::ShiftLeft { left, right, .. } => {
                 self.not_tail_position();
                 let left = self.call_compile(&left);
                 self.not_tail_position();
                 let right = self.call_compile(&right);
                 self.ir.shift_left(left, right)
             }
-            Ast::ShiftRight { left, right } => {
+            Ast::ShiftRight { left, right, .. } => {
                 self.not_tail_position();
                 let left = self.call_compile(&left);
                 self.not_tail_position();
                 let right = self.call_compile(&right);
                 self.ir.shift_right(left, right)
             }
-            Ast::ShiftRightZero { left, right } => {
+            Ast::ShiftRightZero { left, right, .. } => {
                 self.not_tail_position();
                 let left = self.call_compile(&left);
                 self.not_tail_position();
                 let right = self.call_compile(&right);
                 self.ir.shift_right_zero(left, right)
             }
-            Ast::BitWiseAnd { left, right } => {
+            Ast::BitWiseAnd { left, right, .. } => {
                 self.not_tail_position();
                 let left = self.call_compile(&left);
                 self.not_tail_position();
                 let right = self.call_compile(&right);
                 self.ir.bitwise_and(left, right)
             }
-            Ast::BitWiseOr { left, right } => {
+            Ast::BitWiseOr { left, right, .. } => {
                 self.not_tail_position();
                 let left = self.call_compile(&left);
                 self.not_tail_position();
                 let right = self.call_compile(&right);
                 self.ir.bitwise_or(left, right)
             }
-            Ast::BitWiseXor { left, right } => {
+            Ast::BitWiseXor { left, right, .. } => {
                 self.not_tail_position();
                 let left = self.call_compile(&left);
                 self.not_tail_position();
                 let right = self.call_compile(&right);
                 self.ir.bitwise_xor(left, right)
             }
-            Ast::Recurse { args } | Ast::TailRecurse { args } => {
+            Ast::Recurse { args, .. } | Ast::TailRecurse { args, .. } => {
                 let args = args
                     .iter()
                     .map(|arg| {
@@ -864,13 +1061,18 @@ impl<'a> AstCompiler<'a> {
                     self.ir.recurse(args)
                 }
             }
-            Ast::Call { name, args } => {
+            Ast::Call {
+                name,
+                args,
+                token_range,
+            } => {
                 let name = self.get_qualified_function_name(&name);
+
                 if self.name_matches(&name) {
                     if self.is_tail_position() {
-                        return self.call_compile(&Ast::TailRecurse { args });
+                        return self.call_compile(&Ast::TailRecurse { args, token_range });
                     } else {
-                        return self.call_compile(&Ast::Recurse { args });
+                        return self.call_compile(&Ast::Recurse { args, token_range });
                     }
                 }
 
@@ -910,8 +1112,8 @@ impl<'a> AstCompiler<'a> {
                     self.compile_standard_function_call(name, args)
                 }
             }
-            Ast::IntegerLiteral(n) => Value::TaggedConstant(n as isize),
-            Ast::FloatLiteral(n) => {
+            Ast::IntegerLiteral(n, _) => Value::TaggedConstant(n as isize),
+            Ast::FloatLiteral(n, _) => {
                 // floats are heap allocated
                 // Sadly I have to do this to avoid loss of percision
                 let allocate = self
@@ -934,23 +1136,22 @@ impl<'a> AstCompiler<'a> {
 
                 self.ir.tag(float_pointer, BuiltInTypes::Float.get_tag())
             }
-            Ast::Identifier(name) => {
+            Ast::Identifier(name, _) => {
                 let reg = &self.get_variable_alloc_free_variable(&name);
                 self.resolve_variable(reg)
                     .unwrap_or_else(|_| panic!("Could not resolve variable {}", name))
             }
-            Ast::Let(name, value) => {
-                if let Ast::Identifier(name) = name.as_ref() {
+            Ast::Let { name, value, .. } => {
+                if let Ast::Identifier(name, _) = name.as_ref() {
                     if self.environment_stack.len() == 1 {
                         self.not_tail_position();
                         let value = self.call_compile(&value);
                         self.not_tail_position();
-                        let reg = self.ir.volatile_register();
-                        self.ir.assign(reg, value);
+                        let reg = self.ir.assign_new(value);
                         let namespace_id = self.compiler.current_namespace_id();
                         let reserved_namespace_slot = self.compiler.reserve_namespace_slot(name);
                         self.store_namespaced_variable(
-                            Value::RawValue(reserved_namespace_slot),
+                            Value::TaggedConstant(reserved_namespace_slot as isize),
                             reg,
                         );
                         self.insert_variable(
@@ -983,6 +1184,7 @@ impl<'a> AstCompiler<'a> {
                 operator,
                 left,
                 right,
+                ..
             } => {
                 self.not_tail_position();
                 let a = self.call_compile(&left);
@@ -990,13 +1192,13 @@ impl<'a> AstCompiler<'a> {
                 let b = self.call_compile(&right);
                 self.ir.compare(a, b, operator)
             }
-            Ast::String(str) => {
+            Ast::String(str, _) => {
                 let constant_ptr = self.string_constant(str);
                 self.ir.load_string_constant(constant_ptr)
             }
-            Ast::True => Value::True,
-            Ast::False => Value::False,
-            Ast::Null => Value::Null,
+            Ast::True(_) => Value::True,
+            Ast::False(_) => Value::False,
+            Ast::Null(_) => Value::Null,
         }
     }
 
@@ -1314,20 +1516,13 @@ impl<'a> AstCompiler<'a> {
         self.environment_stack.last_mut().unwrap()
     }
 
-    pub fn call_builtin(&mut self, arg: &str, args: Vec<Value>) -> Value {
-        let function = self
-            .compiler
-            .find_function(arg)
-            .unwrap_or_else(|| panic!("could not find function {}", arg));
-        assert!(function.is_builtin);
-        let function = self.compiler.get_function_pointer(function).unwrap();
-        let function = self.ir.assign_new(function);
-        self.ir.call_builtin(function.into(), args)
+    pub fn call_builtin(&mut self, name: &str, args: Vec<Value>) -> Value {
+        self.compile_standard_function_call(name.to_string(), args)
     }
 
     fn first_pass(&mut self, ast: &Ast) {
         match ast {
-            Ast::Program { elements } => {
+            Ast::Program { elements, .. } => {
                 for ast in elements.iter() {
                     self.first_pass(ast);
                 }
@@ -1336,6 +1531,7 @@ impl<'a> AstCompiler<'a> {
                 name,
                 args: _,
                 body: _,
+                ..
             } => {
                 if let Some(name) = name {
                     let full_function_name = self.compiler.current_namespace_name() + "/" + name;
@@ -1344,14 +1540,14 @@ impl<'a> AstCompiler<'a> {
                     panic!("Why do we have a top level function without a name? Is that allowed?");
                 }
             }
-            Ast::Struct { name, fields } => {
+            Ast::Struct { name, fields, .. } => {
                 let (namespace, name) = self.get_namespace_name_and_name(name);
                 self.compiler.add_struct(Struct {
                     name: format!("{}/{}", namespace, name),
                     fields: fields
                         .iter()
                         .map(|field| {
-                            if let Ast::Identifier(name) = field {
+                            if let Ast::Identifier(name, _) = field {
                                 name.clone()
                             } else {
                                 panic!("Expected identifier got {:?}", field)
@@ -1360,18 +1556,18 @@ impl<'a> AstCompiler<'a> {
                         .collect(),
                 });
             }
-            Ast::Enum { name, variants } => {
+            Ast::Enum { name, variants, .. } => {
                 let (namespace, name) = self.get_namespace_name_and_name(name);
                 let enum_repr = Enum {
                     name: format!("{}/{}", namespace, name),
                     variants: variants
                         .iter()
                         .map(|variant| match variant {
-                            Ast::EnumVariant { name, fields } => {
+                            Ast::EnumVariant { name, fields, .. } => {
                                 let fields = fields
                                     .iter()
                                     .map(|field| {
-                                        if let Ast::Identifier(name) = field {
+                                        if let Ast::Identifier(name, _) = field {
                                             name.clone()
                                         } else {
                                             panic!("Expected identifier got {:?}", field)
@@ -1383,7 +1579,7 @@ impl<'a> AstCompiler<'a> {
                                     fields,
                                 }
                             }
-                            Ast::EnumStaticVariant { name } => {
+                            Ast::EnumStaticVariant { name, .. } => {
                                 EnumVariant::StaticVariant { name: name.clone() }
                             }
                             _ => panic!("Expected enum variant got {:?}", variant),
@@ -1397,8 +1593,10 @@ impl<'a> AstCompiler<'a> {
                     fields: variants
                         .iter()
                         .map(|variant| match variant {
-                            Ast::EnumVariant { name, fields: _ } => name.clone(),
-                            Ast::EnumStaticVariant { name } => name.clone(),
+                            Ast::EnumVariant {
+                                name, fields: _, ..
+                            } => name.clone(),
+                            Ast::EnumStaticVariant { name, .. } => name.clone(),
                             _ => panic!("Expected enum variant got {:?}", variant),
                         })
                         .collect(),
@@ -1410,6 +1608,7 @@ impl<'a> AstCompiler<'a> {
                         Ast::EnumVariant {
                             name: variant_name,
                             fields,
+                            ..
                         } => {
                             let (namespace, name) = self.get_namespace_name_and_name(&name);
                             self.compiler.add_struct(Struct {
@@ -1417,7 +1616,7 @@ impl<'a> AstCompiler<'a> {
                                 fields: fields
                                     .iter()
                                     .map(|field| {
-                                        if let Ast::Identifier(name) = field {
+                                        if let Ast::Identifier(name, _) = field {
                                             name.clone()
                                         } else {
                                             panic!("Expected identifier got {:?}", field)
@@ -1426,7 +1625,9 @@ impl<'a> AstCompiler<'a> {
                                     .collect(),
                             })
                         }
-                        Ast::EnumStaticVariant { name: variant_name } => {
+                        Ast::EnumStaticVariant {
+                            name: variant_name, ..
+                        } => {
                             let (namespace, name) = self.get_namespace_name_and_name(&name);
                             self.compiler.add_struct(Struct {
                                 name: format!("{}/{}.{}", namespace, name, variant_name),
@@ -1437,8 +1638,10 @@ impl<'a> AstCompiler<'a> {
                     }
                 }
             }
-            Ast::Let(_, _) => {}
-            Ast::Namespace { name } => {
+            Ast::Let {
+                name: _, value: _, ..
+            } => {}
+            Ast::Namespace { name, .. } => {
                 let namespace_id = self.compiler.reserve_namespace(name.clone());
                 self.compiler.set_current_namespace(namespace_id);
             }
@@ -1447,7 +1650,7 @@ impl<'a> AstCompiler<'a> {
     }
 
     fn store_namespaced_variable(&mut self, slot: Value, reg: VirtualRegister) {
-        let slot = self.ir.assign_new(slot);
+        let slot: VirtualRegister = self.ir.assign_new(slot);
         self.call_builtin(
             "beagle.builtin/update_binding",
             vec![slot.into(), reg.into()],
@@ -1469,8 +1672,8 @@ impl<'a> AstCompiler<'a> {
                 Ok(self.ir.read_field(arg0, index.into()))
             }
             VariableLocation::NamespaceVariable(namespace, slot) => {
-                let slot = self.ir.assign_new(Value::RawValue(*slot));
-                let namespace = self.ir.assign_new(Value::RawValue(*namespace));
+                let slot = self.ir.assign_new(*slot);
+                let namespace = self.ir.assign_new(*namespace);
                 Ok(self.call_builtin(
                     "beagle.builtin/get_binding",
                     vec![namespace.into(), slot.into()],
@@ -1530,16 +1733,24 @@ impl<'a> AstCompiler<'a> {
     fn current_namespace_id(&self) -> usize {
         self.compiler.current_namespace_id()
     }
-}
 
-impl From<i64> for Ast {
-    fn from(val: i64) -> Self {
-        Ast::IntegerLiteral(val)
+    fn push_current_token(&mut self, token_range: TokenRange) {
+        self.current_token_info
+            .push((token_range, self.ir.instructions.len()));
     }
-}
 
-impl From<&'static str> for Ast {
-    fn from(val: &'static str) -> Self {
-        Ast::String(val.to_string())
+    fn pop_current_token(&mut self) {
+        let (token_position, starting_ir_position) = self.current_token_info.pop().unwrap();
+        let ending_ir = self.ir.instructions.len();
+        self.ir_range_to_token_range.last_mut().unwrap().push((
+            TokenRange {
+                start: token_position.start,
+                end: token_position.end,
+            },
+            IRRange {
+                start: starting_ir_position,
+                end: ending_ir,
+            },
+        ));
     }
 }

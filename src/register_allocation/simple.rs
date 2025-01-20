@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::ir::{Instruction, Value, VirtualRegister};
+use crate::{
+    ast::{IRRange, TokenRange},
+    ir::{Instruction, Value, VirtualRegister},
+};
 
 // TODO: Clean this up
 // I don't actually use multiplex lifetime
@@ -34,6 +37,8 @@ pub struct SimpleRegisterAllocator {
     pub num_locals: usize,
     pub max_num_locals: usize,
     pub label_locations: HashMap<usize, usize>,
+    pub resulting_instructions: Vec<Instruction>,
+    pub ir_range_to_token_range: Vec<(TokenRange, IRRange)>,
 }
 
 fn physical(index: usize) -> VirtualRegister {
@@ -50,7 +55,9 @@ impl SimpleRegisterAllocator {
         instructions: Vec<Instruction>,
         num_locals: usize,
         label_locations: HashMap<usize, usize>,
+        ir_range_to_token_range: Vec<(TokenRange, IRRange)>,
     ) -> Self {
+        let instruction_len = instructions.len();
         let lifetimes = Self::get_register_lifetime(&instructions);
         let physical_registers: Vec<VirtualRegister> = (19..=28).map(physical).collect();
 
@@ -63,6 +70,8 @@ impl SimpleRegisterAllocator {
             num_locals,
             max_num_locals: num_locals,
             label_locations,
+            resulting_instructions: Vec::with_capacity(instruction_len),
+            ir_range_to_token_range,
         }
     }
     fn get_free_register(&mut self) -> Option<VirtualRegister> {
@@ -82,7 +91,6 @@ impl SimpleRegisterAllocator {
     // But things are working which is honestly, a bit suprising
     pub fn simplify_registers(&mut self) {
         let mut cloned_instructions = self.instructions.clone();
-        let mut resulting_instructions: Vec<Instruction> = vec![];
         let mut spilled_registers: HashMap<VirtualRegister, usize> = HashMap::new();
         let mut to_free = vec![];
         let init_free_count = self.free_registers.len();
@@ -99,7 +107,8 @@ impl SimpleRegisterAllocator {
                 if let Some(local_offset) = spilled_registers.get(&register) {
                     if let Some(new_register) = self.get_free_register() {
                         self.allocated_registers.insert(register, new_register);
-                        resulting_instructions.push(Instruction::LoadLocal(
+                        self.extend_token_range(self.resulting_instructions.len());
+                        self.resulting_instructions.push(Instruction::LoadLocal(
                             Value::Register(new_register),
                             Value::Local(*local_offset),
                         ));
@@ -160,7 +169,8 @@ impl SimpleRegisterAllocator {
                             } else {
                                 // panic!("Spilling isn't working properly yet");
                                 let (register, spilled) = self.spill(&mut spilled_registers);
-                                let index = resulting_instructions
+                                let index = self
+                                    .resulting_instructions
                                     .iter()
                                     .enumerate()
                                     .rev()
@@ -172,7 +182,8 @@ impl SimpleRegisterAllocator {
                                         }
                                     })
                                     .unwrap();
-                                resulting_instructions.insert(index + 1, spilled);
+                                self.extend_token_range(index + 1);
+                                self.resulting_instructions.insert(index + 1, spilled);
                                 debug_assert!(
                                     self.free_registers.len() + self.allocated_registers.len()
                                         >= init_free_count,
@@ -218,41 +229,45 @@ impl SimpleRegisterAllocator {
                     // println!("===============");
                     let dest_clone = *dest;
                     if !self.allocated_registers.is_empty() {
-                        for register in self.allocated_registers.values() {
+                        for register in self.allocated_registers.clone().values() {
                             if let Value::Register(dest) = dest_clone {
                                 if dest == *register {
                                     continue;
                                 }
                             }
-                            resulting_instructions
+                            self.extend_token_range(self.resulting_instructions.len());
+                            self.resulting_instructions
                                 .push(Instruction::PushStack(Value::Register(*register)));
                         }
-                        resulting_instructions.push(instruction.clone());
-                        for register in self.allocated_registers.values().rev() {
+                        self.resulting_instructions.push(instruction.clone());
+                        for register in self.allocated_registers.clone().values().rev() {
                             if let Value::Register(dest) = dest_clone {
                                 if dest == *register {
                                     continue;
                                 }
                             }
-                            resulting_instructions
+                            self.extend_token_range(self.resulting_instructions.len());
+                            self.resulting_instructions
                                 .push(Instruction::PopStack(Value::Register(*register)));
                         }
                     } else {
-                        resulting_instructions.push(instruction.clone());
+                        self.resulting_instructions.push(instruction.clone());
                     }
                 }
                 _ => {
-                    resulting_instructions.push(instruction.clone());
+                    self.resulting_instructions.push(instruction.clone());
                 }
             }
 
             if let Instruction::Assign(register, _) = self.instructions[instruction_index] {
-                if let Instruction::Assign(new_register, _) = resulting_instructions.last().unwrap()
+                if let Instruction::Assign(new_register, _) =
+                    self.resulting_instructions.last().unwrap().clone()
                 {
                     if let Some(local_offset) = spilled_registers.get(&register) {
-                        resulting_instructions.push(Instruction::StoreLocal(
+                        self.extend_token_range(self.resulting_instructions.len());
+                        self.resulting_instructions.push(Instruction::StoreLocal(
                             Value::Local(*local_offset),
-                            Value::Register(*new_register),
+                            Value::Register(new_register),
                         ));
                     }
                 }
@@ -260,13 +275,12 @@ impl SimpleRegisterAllocator {
         }
 
         let mut new_labels: HashMap<usize, usize> = HashMap::new();
-        for (index, instruction) in resulting_instructions.iter().enumerate() {
+        for (index, instruction) in self.resulting_instructions.iter().enumerate() {
             if let Instruction::Label(label) = instruction {
                 new_labels.insert(index + 1, label.index);
             }
         }
 
-        self.instructions = resulting_instructions;
         self.lifetimes = Self::get_register_lifetime(&self.instructions);
         self.label_locations = new_labels;
     }
@@ -367,6 +381,17 @@ impl SimpleRegisterAllocator {
                 current_instruction = *end;
             }
             println!("\n");
+        }
+    }
+
+    fn extend_token_range(&mut self, index: usize) {
+        for (_, ir_range) in self.ir_range_to_token_range.iter_mut() {
+            if index < ir_range.start {
+                ir_range.start += 1;
+            }
+            if index < ir_range.end {
+                ir_range.end += 1;
+            }
         }
     }
 }

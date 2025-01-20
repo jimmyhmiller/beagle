@@ -135,6 +135,15 @@ fn shift_right(dest: Register, a: Register, b: Register) -> ArmAsm {
     }
 }
 
+fn shift_right_zero(dest: Register, a: Register, b: Register) -> ArmAsm {
+    ArmAsm::AsrAsrv {
+        sf: dest.sf(),
+        rm: b,
+        rn: a,
+        rd: dest,
+    }
+}
+
 fn xor(dest: Register, a: Register, b: Register) -> ArmAsm {
     ArmAsm::EorLogShift {
         sf: dest.sf(),
@@ -143,15 +152,6 @@ fn xor(dest: Register, a: Register, b: Register) -> ArmAsm {
         rn: a,
         rd: dest,
         imm6: 0,
-    }
-}
-
-fn shift_right_zero(dest: Register, a: Register, b: Register) -> ArmAsm {
-    ArmAsm::AsrAsrv {
-        sf: dest.sf(),
-        rm: b,
-        rn: a,
-        rd: dest,
     }
 }
 
@@ -312,7 +312,7 @@ pub fn compare(a: Register, b: Register) -> ArmAsm {
 
 impl Condition {
     #[allow(unused)]
-    fn arm_condition(&self) -> i32 {
+    pub fn arm_condition(&self) -> i32 {
         match self {
             Condition::Equal => 0,
             Condition::NotEqual => 1,
@@ -322,7 +322,7 @@ impl Condition {
             Condition::GreaterThanOrEqual => 10,
         }
     }
-    fn arm_inverted_condition(&self) -> i32 {
+    pub fn arm_inverted_condition(&self) -> i32 {
         match self {
             Condition::Equal => 1,
             Condition::NotEqual => 0,
@@ -330,6 +330,18 @@ impl Condition {
             Condition::LessThanOrEqual => 11,
             Condition::GreaterThan => 10,
             Condition::GreaterThanOrEqual => 12,
+        }
+    }
+
+    pub fn arm_condition_from_i32(i: i32) -> Self {
+        match i {
+            0 => Condition::Equal,
+            1 => Condition::NotEqual,
+            11 => Condition::LessThan,
+            13 => Condition::LessThanOrEqual,
+            12 => Condition::GreaterThan,
+            10 => Condition::GreaterThanOrEqual,
+            _ => panic!("Invalid condition"),
         }
     }
 }
@@ -1185,5 +1197,9 @@ impl LowLevelArm {
             .find(|(_, label)| *label == arg)
             .map(|(index, _)| Label { index })
             .expect("Could not find label")
+    }
+
+    pub fn current_position(&self) -> usize {
+        self.instructions.len()
     }
 }

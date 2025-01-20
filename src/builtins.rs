@@ -1,7 +1,7 @@
 use core::panic;
 use std::{
     error::Error,
-    ffi::c_void,
+    ffi::{c_void, CStr},
     mem::{self, transmute},
     slice::{from_raw_parts, from_raw_parts_mut},
     thread,
@@ -34,17 +34,29 @@ pub unsafe extern "C" fn debugger_info(buffer: *const u8, length: usize) {
     black_box(length);
 }
 
+#[macro_export]
+macro_rules! debug_only {
+    ($($code:tt)*) => {
+        #[cfg(debug_assertions)]
+        {
+            $($code)*
+        }
+    };
+}
+
 pub fn debugger(message: Message) {
-    let message = message.to_binary();
-    let ptr = message.as_ptr();
-    let length = message.len();
-    mem::forget(message);
-    unsafe {
-        debugger_info(ptr, length);
+    debug_only! {
+        let message = message.to_binary();
+        let ptr = message.as_ptr();
+        let length = message.len();
+        mem::forget(message);
+        unsafe {
+            debugger_info(ptr, length);
+        }
+        #[allow(unused)]
+        let message = unsafe { from_raw_parts(ptr, length) };
+        // Should make it is so we clean up this memory
     }
-    #[allow(unused)]
-    let message = unsafe { from_raw_parts(ptr, length) };
-    // Should make it is so we clean up this memory
 }
 
 pub unsafe extern "C" fn println_value(value: usize) -> usize {
@@ -165,17 +177,23 @@ pub unsafe extern "C" fn new_thread(function: usize) -> usize {
     }
 }
 
+// I don't know what the deal is here
+
+#[no_mangle]
 pub unsafe extern "C" fn update_binding(namespace_slot: usize, value: usize) -> usize {
     let runtime = get_runtime().get_mut();
+    let namespace_slot = BuiltInTypes::untag(namespace_slot);
     let namespace_id = runtime.current_namespace_id();
     runtime.memory.add_namespace_root(namespace_id, value);
     runtime.update_binding(namespace_slot, value);
     BuiltInTypes::null_value() as usize
 }
 
+#[no_mangle]
 pub unsafe extern "C" fn get_binding(namespace: usize, slot: usize) -> usize {
     let runtime = get_runtime().get_mut();
-
+    let namespace = BuiltInTypes::untag(namespace);
+    let slot = BuiltInTypes::untag(slot);
     runtime.get_binding(namespace, slot)
 }
 
@@ -198,7 +216,6 @@ pub unsafe extern "C" fn __pause(stack_pointer: usize) -> usize {
     // Apparently, I can't count on this not unparking
     // I need some other mechanism to know that things are ready
     unpause_current_thread(runtime);
-
 
     BuiltInTypes::null_value() as usize
 }
@@ -283,6 +300,7 @@ pub fn map_ffi_type(runtime: &Runtime, value: usize) -> Type {
         "Type.U8" => Type::u8(),
         "Type.U16" => Type::u16(),
         "Type.U32" => Type::u32(),
+        "Type.U64" => Type::u64(),
         "Type.I32" => Type::i32(),
         "Type.Pointer" => Type::pointer(),
         "Type.MutablePointer" => Type::pointer(),
@@ -303,6 +321,7 @@ pub fn map_beagle_type_to_ffi_type(runtime: &Runtime, value: usize) -> FFIType {
         "Type.U8" => FFIType::U8,
         "Type.U16" => FFIType::U16,
         "Type.U32" => FFIType::U32,
+        "Type.U64" => FFIType::U64,
         "Type.I32" => FFIType::I32,
         "Type.Pointer" => FFIType::Pointer,
         "Type.MutablePointer" => FFIType::MutablePointer,
@@ -365,6 +384,9 @@ pub extern "C" fn get_function(
     let runtime = get_runtime().get_mut();
     let library = runtime.get_library(library_struct);
     let function_name = runtime.get_string_literal(function_name);
+    if function_name == "SBBreakpointSetEnabled" {
+        println!("got here");
+    }
 
     // TODO: I should actually cache the closure, but I don't want to do that and mess up gc
     if let Some(ffi_info_id) = runtime.find_ffi_info_by_name(&function_name) {
@@ -491,6 +513,12 @@ pub unsafe extern "C" fn call_ffi_info(
                         .write_u32(BuiltInTypes::untag(*argument) as u32);
                     argument_pointers.push(arg(pointer));
                 }
+                FFIType::U64 => {
+                    let pointer = runtime
+                        .memory
+                        .write_u64(BuiltInTypes::untag(*argument) as u64);
+                    argument_pointers.push(arg(pointer));
+                }
                 FFIType::I32 => {
                     let pointer = runtime
                         .memory
@@ -498,13 +526,24 @@ pub unsafe extern "C" fn call_ffi_info(
                     argument_pointers.push(arg(pointer));
                 }
 
-                FFIType::Pointer | FFIType::MutablePointer | FFIType::String | FFIType::Void => {
+                FFIType::Pointer => {
+                    if *argument == 0 {
+                        argument_pointers.push(arg(&std::ptr::null_mut::<c_void>()));
+                    } else {
+                        let heap_object = HeapObject::from_tagged(*argument);
+                        let buffer = BuiltInTypes::untag(heap_object.get_field(0));
+                        let pointer = runtime.memory.write_pointer(buffer);
+                        argument_pointers.push(arg(pointer));
+                    }
+                }
+
+                FFIType::MutablePointer | FFIType::String | FFIType::Void => {
                     panic!("Expected pointer, got {:?}", ffi_type);
                 }
             },
             BuiltInTypes::HeapObject => {
                 if ffi_type != &FFIType::Pointer && ffi_type != &FFIType::MutablePointer {
-                    panic!("Expected pointer, got {:?}", ffi_type);
+                    panic!("Got pointer, expected {:?}", ffi_type);
                 }
                 // TODO: Make this type safe
                 let heap_object = HeapObject::from_tagged(*argument);
@@ -548,6 +587,13 @@ pub unsafe extern "C" fn call_ffi_info(
                 .call::<u32>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
             BuiltInTypes::Int.tag(result as isize) as usize
         }
+        FFIType::U64 => {
+            let result = ffi_info
+                .cif
+                .get()
+                .call::<u64>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
+            BuiltInTypes::Int.tag(result as isize) as usize
+        }
         FFIType::I32 => {
             let result = ffi_info
                 .cif
@@ -572,7 +618,20 @@ pub unsafe extern "C" fn call_ffi_info(
             call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", pointer_value)
         }
         FFIType::String => {
-            todo!()
+            let result = ffi_info
+                .cif
+                .get()
+                .call::<*mut u8>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
+            if result.is_null() {
+                return BuiltInTypes::null_value() as usize;
+            }
+            let c_string = unsafe { CStr::from_ptr(result as *const i8) };
+            let string = c_string.to_str().unwrap();
+            runtime
+                .memory
+                .alloc_string(string.to_string())
+                .unwrap()
+                .into()
         }
     };
     runtime.memory.clear_native_arguments();
