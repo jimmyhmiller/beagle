@@ -30,14 +30,14 @@ mod register_allocation;
 pub mod runtime;
 mod types;
 
-#[derive(Debug, Encode, Decode)]
+#[derive(Debug, Encode, Decode, Clone)]
 pub struct Message {
     kind: String,
     data: Data,
 }
 
 // TODO: This should really live on the debugger side of things
-#[derive(Debug, Encode, Decode)]
+#[derive(Debug, Encode, Decode, Clone)]
 enum Data {
     ForeignFunction {
         name: String,
@@ -70,6 +70,23 @@ enum Data {
         bytes: usize,
         stack_pointer: usize,
         kind: String,
+    },
+    Tokens {
+        file_name: String,
+        tokens: Vec<String>,
+        token_line_column_map: Vec<(usize, usize)>,
+    },
+    Ir {
+        function_pointer: usize,
+        file_name: String,
+        instructions: Vec<String>,
+        token_range_to_ir_range: Vec<((usize, usize), (usize, usize))>,
+    },
+    Arm {
+        function_pointer: usize,
+        file_name: String,
+        instructions: Vec<String>,
+        ir_to_machine_code_range: Vec<(usize, (usize, usize))>,
     },
 }
 
@@ -292,6 +309,7 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     let has_expect = args.test && source.contains("// Expect");
 
     let args_clone = args.clone();
+
     RUNTIME.get_or_init(|| {
         let allocator = Alloc::new(get_allocate_options(&args_clone.clone()));
         let printer: Box<dyn Printer> = if has_expect {
@@ -300,7 +318,8 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             Box::new(DefaultPrinter)
         };
 
-        SyncUnsafeCell::new(Runtime::new(args_clone, allocator, printer))
+        let runtime = Runtime::new(args_clone, allocator, printer);
+        SyncUnsafeCell::new(runtime)
     });
 
     // let allocator = Alloc::new(get_allocate_options(&args));

@@ -22,8 +22,11 @@
                     "kind": "bin"
                 }
             },
-            "args": ["resources/enum_test.bg"],
-            "cwd": "${workspaceFolder}"
+            "args": ["resources/lldb_wrapper.bg"],
+            "cwd": "${workspaceFolder}",
+            // "preRunCommands": [
+            //     "command script import .vscode/rust_prettifier_for_lldb.py"
+            // ],
         },
         {
             "type": "lldb",
@@ -43,6 +46,7 @@
             },
             "args": [],
             "cwd": "${workspaceFolder}"
+
         }
     ]
 }

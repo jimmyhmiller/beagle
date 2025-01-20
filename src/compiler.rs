@@ -1,12 +1,15 @@
 use crate::{
     arm::LowLevelArm,
+    builtins::debugger,
     code_memory::CodeAllocator,
+    debug_only,
     gc::{StackMap, StackMapDetails},
     get_runtime,
     ir::{StringValue, Value},
     parser::Parser,
+    pretty_print::PrettyPrint,
     runtime::{Enum, Function, Struct},
-    CommandLineArguments,
+    CommandLineArguments, Data, Message,
 };
 
 use mmap_rs::{MmapMut, MmapOptions};
@@ -18,7 +21,6 @@ use std::{
 };
 
 pub struct Compiler {
-    pub code_offset: usize,
     pub code_allocator: CodeAllocator,
     pub property_look_up_cache: MmapMut,
     pub command_line_arguments: CommandLineArguments,
@@ -29,7 +31,6 @@ pub struct Compiler {
 
 impl Compiler {
     pub fn reset(&mut self) {
-        self.code_offset = 0;
         self.code_allocator = CodeAllocator::new();
         self.property_look_up_cache = MmapOptions::new(MmapOptions::page_size())
             .unwrap()
@@ -65,7 +66,7 @@ impl Compiler {
     pub fn compile_string(&mut self, string: &str) -> Result<usize, Box<dyn Error>> {
         let mut parser = Parser::new("".to_string(), string.to_string());
         let ast = parser.parse();
-        let top_level = self.compile_ast(ast, "REPL_FUNCTION".to_string())?;
+        let top_level = self.compile_ast(ast, "REPL_FUNCTION".to_string(), "repl")?;
         self.code_allocator.make_executable();
         if let Some(top_level) = top_level {
             let function = self.get_function_by_name(&top_level).unwrap();
@@ -102,6 +103,7 @@ impl Compiler {
         let top_level = self.compile_ast(
             ast,
             format!("{}/__top_level", self.current_namespace_name()),
+            file_name,
         )?;
         if let Some(top_level) = top_level {
             top_levels_to_run.push(top_level);
@@ -135,16 +137,53 @@ impl Compiler {
         &mut self,
         ast: crate::ast::Ast,
         top_level_name: String,
+        file_name: &str,
     ) -> Result<Option<String>, Box<dyn Error>> {
-        let mut ir = ast.compile(self);
+        let (mut ir, token_map) = ast.compile(self, file_name);
         if ast.has_top_level() {
             let arm = LowLevelArm::new();
             let error_fn_pointer = self.find_function("beagle.builtin/throw_error").unwrap();
             let error_fn_pointer = self.get_function_pointer(error_fn_pointer).unwrap();
 
+            ir.ir_range_to_token_range = token_map.clone();
             let mut arm = ir.compile(arm, error_fn_pointer);
+            let token_map = ir.ir_range_to_token_range.clone();
             let max_locals = arm.max_locals as usize;
-            self.upsert_function(Some(&top_level_name), &mut arm, max_locals)?;
+            let function_pointer =
+                self.upsert_function(Some(&top_level_name), &mut arm, max_locals)?;
+            debug_only! {
+                debugger(Message {
+                    kind: "ir".to_string(),
+                    data: Data::Ir {
+                        function_pointer,
+                        file_name: file_name.to_string(),
+                        instructions: ir.instructions.iter().map(|x| x.pretty_print()).collect(),
+                        token_range_to_ir_range: token_map
+                            .iter()
+                            .map(|(token, ir)| ((token.start, token.end), (ir.start, ir.end)))
+                            .collect(),
+                    },
+                });
+
+                let pretty_arm_instructions =
+                    arm.instructions.iter().map(|x| x.pretty_print()).collect();
+                let ir_to_machine_code_range = ir
+                    .ir_to_machine_code_range
+                    .iter()
+                    .map(|(ir, machine_range)| (*ir, (machine_range.start, machine_range.end)))
+                    .collect();
+
+                debugger(crate::Message {
+                    kind: "asm".to_string(),
+                    data: Data::Arm {
+                        function_pointer,
+                        file_name: file_name.to_string(),
+                        instructions: pretty_arm_instructions,
+                        ir_to_machine_code_range,
+                    },
+                });
+            }
+
             return Ok(Some(top_level_name));
         }
         Ok(None)
@@ -216,6 +255,7 @@ impl Compiler {
             crate::ast::Ast::Import {
                 library_name,
                 alias,
+                ..
             } => {
                 let library_name = library_name.to_string().replace("\"", "");
                 let alias = alias.as_ref().get_string();
@@ -385,7 +425,6 @@ impl CompilerThread {
         CompilerThread {
             compiler: Compiler {
                 code_allocator: CodeAllocator::new(),
-                code_offset: 0,
                 property_look_up_cache: MmapOptions::new(MmapOptions::page_size())
                     .unwrap()
                     .map_mut()

@@ -1,0 +1,87 @@
+namespace lldb_wrapper
+
+import "beagle.builtin" as builtin
+import "lib_lldb" as lldb
+
+
+// TODO: Thist code fails in lib_lldb with an update binding
+// unsure of the cause right now
+
+struct State {
+    process
+    target
+}
+
+let state = State {
+    process: 0,
+    target: 0
+}
+
+fn loop_state() {
+    let current_state = deref(state)
+    let process = current_state.process
+    let target = current_state.target
+
+    let process_state = lldb/get_process_state(process)
+    if process_state == lldb/process_stopped {
+        println("Process stopped")
+    }
+
+    let thread = lldb/get_thread_by_index(process, 1)
+    let frame = lldb/get_selected_frame(thread)
+    let pc = lldb/get_pc(frame)
+    println(pc)
+
+    let error = lldb/create_error()
+    lldb/step_instruction(thread, false, error)
+
+    if lldb/error?(error) {
+        let error_string = lldb/get_error_message(error)
+        println(error_string)
+    }
+
+    let frame = lldb/get_selected_frame(thread)
+    let pc = lldb/get_pc_address(frame)
+    println(pc)
+    println(frame)
+
+    println(lldb/get_instructions(process, target, pc))
+
+    builtin/wait_for_input()
+    loop_state()
+}
+
+fn main() {
+    lldb/initialize()
+    let debugger = lldb/create_debugger()
+    lldb/set_async(debugger, false)
+
+    let target = lldb/create_target(debugger, "/Users/jimmyhmiller/Documents/Code/beagle/target/debug/main")
+    println(lldb/is_target_valid(target))
+
+    let functions = lldb/find_functions(target, "debugger_info", 2)
+    let size = lldb/get_symbol_list_size(functions)
+    println(size)
+
+    let first_function = lldb/get_context_at_index(functions, 0)
+
+    let breakpoint = lldb/create_breakpoint(target, "debugger_info", "main")
+    lldb/set_breakpoint_enabled(breakpoint, true)
+    lldb/enable_all_breakpoints(target)
+
+    let launch_info = lldb/create_launch_info(0)
+    lldb/set_launch_flags(launch_info, lldb/stop_at_entry)
+
+    let error = lldb/create_error()
+    let process = lldb/launch_target(target, launch_info, error)
+
+    let process_state = lldb/get_process_state(process)
+    swap!(state, fn(s) {
+        State {
+            process: process,
+            target: target
+        }
+    })
+
+    loop_state()
+}
