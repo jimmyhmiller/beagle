@@ -253,9 +253,15 @@ impl Tokenizer {
         let start = self.position;
         self.consume(input_bytes);
         while !self.at_end(input_bytes) && !self.is_quote(input_bytes) {
+            // TOOD: Better escape handling
+            if self.current_byte(input_bytes) == b'\\' {
+                self.consume(input_bytes);
+                if self.current_byte(input_bytes) == b'"' {
+                    self.consume(input_bytes);
+                }
+            }
             self.consume(input_bytes);
         }
-        // TODO: Deal with escapes
         if !self.at_end(input_bytes) {
             self.consume(input_bytes);
         }

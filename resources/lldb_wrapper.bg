@@ -85,3 +85,55 @@ fn main() {
 
     loop_state()
 }
+
+enum Data {
+    ForeignFunction {
+        name
+        pointer
+    },
+    BuiltinFunction {
+        name
+        pointer
+    },
+    HeapSegmentPointer {
+        pointer
+    },
+    UserFunction {
+        name
+        pointer
+        len
+    },
+    Label {
+        label
+        function_pointer
+        label_index
+        label_location
+    },
+    StackMap {
+        pc
+        name
+        stack_map
+    },
+    Allocate {
+        bytes
+        stack_pointer
+        kind
+    },
+    Tokens {
+        file_name
+        tokens
+        token_line_column_map
+    },
+    Ir {
+        function_pointer
+        file_name
+        instructions
+        token_range_to_ir_range
+    },
+    Arm {
+        function_pointer
+        file_name
+        instructions
+        ir_to_machine_code_range
+    }
+}

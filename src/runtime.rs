@@ -1330,6 +1330,9 @@ impl Runtime {
             BuiltInTypes::String => {
                 let value = BuiltInTypes::untag(value);
                 let string = &self.string_constants[value];
+                if depth > 0 {
+                    return Some(format!("\"{}\"", string.str));
+                }
                 Some(string.str.clone())
             }
             BuiltInTypes::Bool => {
@@ -1424,6 +1427,34 @@ impl Runtime {
         // Temporary +1 because I was writing size as the first field
         // and I haven't changed that
         (heap_object.get_field(field_index), field_index)
+    }
+
+    pub fn write_field(
+        &self,
+        struct_pointer: usize,
+        str_constant_ptr: usize,
+        value: usize,
+    ) -> usize {
+        if BuiltInTypes::untag(struct_pointer) % 8 != 0 {
+            panic!("Not aligned");
+        }
+        let heap_object = HeapObject::from_tagged(struct_pointer);
+        let str_constant_ptr: usize = BuiltInTypes::untag(str_constant_ptr);
+        let string_value = &self.string_constants[str_constant_ptr];
+        let string = &string_value.str;
+        let struct_type_id = heap_object.get_struct_id();
+        let struct_type_id = BuiltInTypes::untag(struct_type_id);
+        let struct_value = self.get_struct_by_id(struct_type_id).unwrap();
+        let field_index = struct_value
+            .fields
+            .iter()
+            .position(|f| f == string)
+            .unwrap_or_else(|| panic!("Field {} not found in struct", string));
+        // Temporary +1 because I was writing size as the first field
+        // and I haven't changed that
+
+        heap_object.write_field(field_index as i32, value);
+        field_index
     }
 
     pub fn get_struct_repr(
