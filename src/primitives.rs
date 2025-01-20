@@ -1,5 +1,7 @@
+use std::ops::Deref;
+
 use crate::{
-    ast::AstCompiler,
+    ast::{Ast, AstCompiler},
     ir::{Condition, Value},
     types::{BuiltInTypes, Header},
 };
@@ -123,7 +125,108 @@ impl<'a> AstCompiler<'a> {
                 self.ir
                     .compare(tag, heap_object_tag.into(), Condition::Equal)
             }
+            "beagle.primitive/set!" => {
+                let pointer = args[0];
+                let value = args[1];
+                self.ir.heap_store(pointer, value);
+                Value::Null
+            }
             _ => panic!("Unknown inline primitive function {}", name),
         }
+    }
+
+    pub fn should_not_evaluate_arguments(&self, name: &str) -> bool {
+        if name == "beagle.primitive/set!" {
+            return true;
+        }
+        false
+    }
+
+    pub fn compile_macro_like_primitive(&mut self, name: String, args: Vec<Ast>) -> Value {
+        if name != "beagle.primitive/set!" {
+            panic!("Unknown macro-like primitive {}", name);
+        }
+
+        if args.len() != 2 {
+            // TODO: Error handling properly
+            panic!("set! expects 2 arguments, got {}", args.len());
+        }
+
+        let property_access = &args[0];
+        if !matches!(property_access, Ast::PropertyAccess { .. }) {
+            panic!("set! expects a property access as the first argument");
+        };
+
+        let Ast::PropertyAccess {
+            object,
+            property,
+            token_range: _,
+        } = property_access
+        else {
+            panic!("set! expects a property access as the first argument");
+        };
+
+        let object = object.deref();
+        if !matches!(object, Ast::Identifier { .. }) {
+            panic!("set! expects an identifier as the first argument for now");
+        }
+
+        let property = property.deref();
+        if !matches!(property, Ast::Identifier { .. }) {
+            panic!("set! expects an identifier as the second argument for now");
+        }
+
+        let object = self.call_compile(object);
+        let value = self.call_compile(&args[1]);
+
+        let object = self.ir.assign_new(object);
+        self.call_builtin("beagle.builtin/gc_add_root", vec![object.into()]);
+        let untagged_object = self.ir.untag(object.into());
+        // self.ir.breakpoint();
+        let struct_id = self.ir.read_struct_id(untagged_object);
+        let property_location = Value::RawValue(self.compiler.add_property_lookup());
+        let property_location = self.ir.assign_new(property_location);
+        let property_value = self.ir.load_from_heap(property_location.into(), 0);
+        let result = self.ir.assign_new(0);
+
+        let exit_property_access = self.ir.label("exit_property_access");
+        let slow_property_path = self.ir.label("slow_property_path");
+        // self.ir.jump(slow_property_path);
+        self.ir.jump_if(
+            slow_property_path,
+            Condition::NotEqual,
+            struct_id,
+            property_value,
+        );
+
+        let property_offset = self.ir.load_from_heap(property_location.into(), 1);
+        self.ir
+            .write_field_dynamic(untagged_object, property_offset, value);
+
+        self.ir.jump(exit_property_access);
+
+        self.ir.write_label(slow_property_path);
+        let property = if let Ast::Identifier(name, _) = property {
+            name.clone()
+        } else {
+            panic!("Expected identifier")
+        };
+        let constant_ptr = self.string_constant(property);
+        let constant_ptr = self.ir.assign_new(constant_ptr);
+        let call_result = self.call_builtin(
+            "beagle.builtin/write_field",
+            vec![
+                object.into(),
+                constant_ptr.into(),
+                property_location.into(),
+                value,
+            ],
+        );
+
+        self.ir.assign(result, call_result);
+
+        self.ir.write_label(exit_property_access);
+
+        Value::Null
     }
 }

@@ -1,0 +1,25 @@
+namespace "mutable"
+
+import "beagle.primitive" as primitive
+
+struct Tokenizer {
+    input
+    position
+}
+
+fn consume(tokenizer) {
+    primitive/set!(tokenizer.position, tokenizer.position + 1)
+}
+
+fn main() {
+    let tokenizer = Tokenizer {
+        input: "{ \"key\": \"value\" }",
+        position: 0
+    }
+
+    println(tokenizer)
+    consume(tokenizer)
+    println(tokenizer)
+    consume(tokenizer)
+   
+}

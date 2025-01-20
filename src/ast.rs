@@ -1076,6 +1076,10 @@ impl<'a> AstCompiler<'a> {
                     }
                 }
 
+                if self.should_not_evaluate_arguments(&name) {
+                    return self.compile_macro_like_primitive(name, args);
+                }
+
                 let args: Vec<Value> = args
                     .iter()
                     .map(|arg| {
@@ -1496,7 +1500,7 @@ impl<'a> AstCompiler<'a> {
         None
     }
 
-    fn string_constant(&mut self, str: String) -> Value {
+    pub fn string_constant(&mut self, str: String) -> Value {
         self.compiler.add_string(ir::StringValue { str })
     }
 

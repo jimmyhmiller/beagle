@@ -183,9 +183,9 @@ fn main() {
 // 10
 // false
 // Example Struct Value
-// [ ExampleStruct { value: Example Struct Value } ]
-// [ ExampleStruct { value: Example Struct Value } ]
-// [ ExampleStruct { value: Example Struct Value2 } ]
+// [ ExampleStruct { value: "Example Struct Value" } ]
+// [ ExampleStruct { value: "Example Struct Value" } ]
+// [ ExampleStruct { value: "Example Struct Value2" } ]
 // [ 43 ]
 // [ 42, 44 ]
 // done

@@ -146,6 +146,21 @@ extern "C" fn property_access(
     result
 }
 
+extern "C" fn write_field(
+    struct_pointer: usize,
+    str_constant_ptr: usize,
+    property_cache_location: usize,
+    value: usize,
+) -> usize {
+    let runtime = get_runtime().get_mut();
+    let index = runtime.write_field(struct_pointer, str_constant_ptr, value);
+    let type_id = HeapObject::from_tagged(struct_pointer).get_struct_id();
+    let buffer = unsafe { from_raw_parts_mut(property_cache_location as *mut usize, 2) };
+    buffer[0] = type_id;
+    buffer[1] = index * 8;
+    BuiltInTypes::null_value() as usize
+}
+
 pub unsafe extern "C" fn throw_error(_stack_pointer: usize) -> usize {
     // let compiler = unsafe { &mut *compiler };
     panic!("Error!");
@@ -805,6 +820,12 @@ impl Runtime {
         self.add_builtin_function(
             "beagle.builtin/property_access",
             property_access as *const u8,
+            false,
+        )?;
+
+        self.add_builtin_function(
+            "beagle.builtin/write_field",
+            write_field as *const u8,
             false,
         )?;
 

@@ -566,6 +566,11 @@ impl Ir {
         self.heap_load_with_reg_offset(struct_pointer, incremented)
     }
 
+    pub fn write_field_dynamic(&mut self, struct_pointer: Value, index: Value, field: Value) {
+        let incremented = self.add_int(index, 1);
+        self.heap_store_with_reg_offset(struct_pointer, field, incremented);
+    }
+
     pub fn write_small_object_header(&mut self, small_object_pointer: Value) {
         // We are going to set the least significant bits to 0b10
         // The 1 bit there will tell us that this object doesn't
