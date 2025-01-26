@@ -1,0 +1,15 @@
+namespace "protocol_test"
+
+import "persistent_vector" as vector
+
+protocol Indexed {
+    fn get(coll, index)
+}
+
+extend vector/PersistentVector with Indexed {
+    fn get(vec, index) {
+        vector/get(vec, index)
+    }
+}
+
+

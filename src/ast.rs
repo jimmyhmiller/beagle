@@ -58,6 +58,22 @@ pub enum Ast {
         name: String,
         token_range: TokenRange,
     },
+    Protocol {
+        name: String,
+        body: Vec<Ast>,
+        token_range: TokenRange,
+    },
+    Extend {
+        target_type: String,
+        protocol: String,
+        body: Vec<Ast>,
+        token_range: TokenRange,
+    },
+    FunctionStub {
+        name: String,
+        args: Vec<String>,
+        token_range: TokenRange,
+    },
     If {
         condition: Box<Ast>,
         then: Vec<Ast>,
@@ -204,6 +220,9 @@ impl Ast {
             | Ast::Enum { token_range, .. }
             | Ast::EnumVariant { token_range, .. }
             | Ast::EnumStaticVariant { token_range, .. }
+            | Ast::Protocol { token_range, .. }
+            | Ast::Extend { token_range, .. }
+            | Ast::FunctionStub { token_range, .. }
             | Ast::If { token_range, .. }
             | Ast::Condition { token_range, .. }
             | Ast::Add { token_range, .. }
@@ -702,6 +721,17 @@ impl<'a> AstCompiler<'a> {
             }
             Ast::EnumStaticVariant { name: _, .. } => {
                 panic!("Shouldn't get here")
+            }
+            Ast::Protocol { name: _, body: _, token_range: _ } => {
+                Value::Null
+            }
+            Ast::FunctionStub {
+                name: _, args: _, ..
+            } => {
+                panic!("Shouldn't get here")
+            }
+            Ast::Extend { target_type: _, protocol: _ , body: _ , token_range: _ } => {
+                Value::Null
             }
             Ast::EnumCreation {
                 name,

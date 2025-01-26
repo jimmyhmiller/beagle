@@ -62,6 +62,9 @@ pub enum Token {
     Import,
     As,
     And,
+    Protocol,
+    Extend,
+    With,
 }
 impl Token {
     fn is_binary_operator(&self) -> bool {
@@ -134,7 +137,10 @@ impl Token {
             Token::Enum => "enum".to_string(),
             Token::Namespace => "namespace".to_string(),
             Token::Import => "import".to_string(),
+            Token::Protocol => "protocol".to_string(),
+            Token::Extend => "extend".to_string(),
             Token::As => "as".to_string(),
+            Token::With => "with".to_string(),
             Token::Comment((start, end))
             | Token::Atom((start, end))
             | Token::Spaces((start, end))
@@ -381,6 +387,9 @@ impl Tokenizer {
             b"." => Token::Dot,
             b"namespace" => Token::Namespace,
             b"import" => Token::Import,
+            b"protocol" => Token::Protocol,
+            b"extend" => Token::Extend,
+            b"with" => Token::With,
             b"as" => Token::As,
             _ => Token::Atom((start, self.position)),
         }
@@ -638,6 +647,8 @@ impl Parser {
             Token::If => Some(self.parse_if()),
             Token::Namespace => Some(self.parse_namespace()),
             Token::Import => Some(self.parse_import()),
+            Token::Protocol => Some(self.parse_protocol()),
+            Token::Extend => Some(self.parse_extend()),
             Token::Atom((start, end)) => {
                 let start_position = self.position;
                 // Gross
@@ -795,6 +806,137 @@ impl Parser {
         }
     }
 
+        
+    fn parse_protocol(&mut self) -> Ast {
+        let start_position = self.position;
+        self.move_to_next_atom();
+        let name = match self.current_token() {
+            Token::Atom((start, end)) => {
+                // Gross
+                String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
+            }
+            _ => panic!("Expected protocol name"),
+        };
+        self.move_to_next_non_whitespace();
+        self.expect_open_curly();
+        let body = self.parse_protocol_body();
+        self.expect_close_curly();
+        let end_position = self.position;
+        Ast::Protocol {
+            name,
+            body,
+            token_range: TokenRange::new(start_position, end_position),
+        }
+    }
+
+    fn parse_protocol_body(&mut self) -> Vec<Ast> {
+        let mut result = Vec::new();
+        self.skip_whitespace();
+        while !self.at_end() && !self.is_close_curly() {
+            self.skip_spaces();
+            result.push(self.parse_protocol_member());
+            self.skip_spaces();
+            if !self.is_close_curly() {
+                self.data_delimiter();
+            }
+            self.skip_spaces();
+        }
+        result
+    }
+
+    fn parse_protocol_member(&mut self) -> Ast {
+        match self.current_token() {
+           Token::Fn => {
+                self.consume();
+                self.move_to_next_non_whitespace();
+                let name = match self.current_token() {
+                     Token::Atom((start, end)) => {
+                          // Gross
+                          String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
+                     }
+                     _ => panic!("Expected protocol member name"),
+                };
+                self.move_to_next_non_whitespace();
+                self.expect_open_paren();
+                let args = self.parse_args();
+                self.expect_close_paren();
+                if self.is_open_curly() {
+                    let body = self.parse_block();
+                    let end_position = self.position;
+                    Ast::Function {
+                        name: Some(name),
+                        args,
+                        body,
+                        token_range: TokenRange::new(self.position, end_position),
+                    }
+                } else {
+                    let end_position = self.position;
+                    Ast::FunctionStub  {
+                        name,
+                        args,
+                        token_range: TokenRange::new(self.position, end_position),
+                    }
+                }
+
+           }
+           _ => panic!("Expected protocol member")
+        }
+    }
+
+
+    fn parse_extend(&mut self) -> Ast {
+        let start_position = self.position;
+        self.move_to_next_atom();
+        let target_type = match self.current_token() {
+            Token::Atom((start, end)) => {
+                // Gross
+                String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
+            }
+            _ => panic!("Expected extend name"),
+        };
+        self.move_to_next_non_whitespace();
+        self.expect_with();
+        self.move_to_next_non_whitespace();
+        let protocol = match self.current_token() {
+            Token::Atom((start, end)) => {
+                // Gross
+                String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
+            }
+            _ => panic!("Expected extend name"),
+        };
+        self.move_to_next_non_whitespace();
+        self.expect_open_curly();
+        let body = self.parse_extend_body();
+        self.expect_close_curly();
+        let end_position = self.position;
+        Ast::Extend {
+            target_type,
+            protocol,
+            body,
+            token_range: TokenRange::new(start_position, end_position),
+        }
+    }
+
+    fn parse_extend_body(&mut self) -> Vec<Ast> {
+        let mut result = Vec::new();
+        self.skip_whitespace();
+        while !self.at_end() && !self.is_close_curly() {
+            self.skip_spaces();
+            result.push(self.parse_extend_member());
+            self.skip_spaces();
+            if !self.is_close_curly() {
+                self.data_delimiter();
+            }
+            self.skip_spaces();
+        }
+        result
+    }
+
+    fn parse_extend_member(&mut self) -> Ast {
+        self.parse_function()
+    }
+
+
     fn parse_enum(&mut self) -> Ast {
         let start_position = self.position;
         self.move_to_next_atom();
@@ -856,6 +998,19 @@ impl Parser {
                 self.get_token_repr(),
                 line,
                 column
+            );
+        }
+    }
+
+    fn expect_with(&mut self) {
+        self.skip_whitespace();
+        if self.is_with() {
+            self.consume();
+        } else {
+            panic!(
+                "Expected with {:?} at {}",
+                self.get_token_repr(),
+                self.current_location()
             );
         }
     }
@@ -1152,6 +1307,13 @@ impl Parser {
         }
     }
 
+    fn is_with(&self) -> bool {
+        match self.current_token() {
+            Token::With => true,
+            _ => false,
+        }
+    }
+
     fn current_token(&self) -> Token {
         if self.position >= self.tokens.len() {
             Token::Never
@@ -1204,6 +1366,7 @@ impl Parser {
             token_range: TokenRange::new(start_position, end_position),
         }
     }
+    
 
     fn parse_call(&mut self, name: String, start_position: usize) -> Ast {
         self.expect_open_paren();
@@ -1555,6 +1718,11 @@ impl Parser {
     fn is_close_bracket(&self) -> bool {
         self.current_token() == Token::CloseBracket
     }
+
+    
+
+    
+  
 }
 
 #[test]
