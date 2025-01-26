@@ -1,0 +1,15 @@
+namespace string
+
+
+
+fn main() {
+    let x = "test"
+    println(x)
+    // TODO: I want to make indexed operations
+    // work on strings.
+    // Right now, I am assuming persistent vectors
+    // I should definitely make this extensible.
+    // Given that, I think I need impl and/or protocols
+    // Protocols honestly probably make sense
+}
+

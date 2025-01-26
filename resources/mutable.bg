@@ -17,9 +17,4 @@ fn main() {
         position: 0
     }
 
-    println(tokenizer)
-    consume(tokenizer)
-    println(tokenizer)
-    consume(tokenizer)
-   
 }
