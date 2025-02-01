@@ -142,7 +142,7 @@ fn compile_trampoline(runtime: &mut Runtime) {
     lang.ret();
 
     runtime
-        .add_function_mark_executable("trampoline".to_string(), &lang.compile_directly(), 0)
+        .add_function_mark_executable("trampoline".to_string(), &lang.compile_directly(), 0, 3)
         .unwrap();
 
     let function = runtime.get_function_by_name_mut("trampoline").unwrap();
@@ -176,6 +176,7 @@ fn compile_save_volatile_registers(runtime: &mut Runtime) {
             "beagle.builtin/save_volatile_registers".to_string(),
             &lang.compile_directly(),
             0,
+            2,
         )
         .unwrap();
     let function = runtime
@@ -369,6 +370,10 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     }
 
     let time = Instant::now();
+
+    if args.program.unwrap() == "resources/array_literal.bg" {
+        println!("Running {:?}", top_levels);
+    }
 
     for top_level in top_levels {
         if let Some(f) = runtime.get_function0(&top_level) {

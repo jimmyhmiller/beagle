@@ -161,7 +161,7 @@ extern "C" fn write_field(
     BuiltInTypes::null_value() as usize
 }
 
-pub unsafe extern "C" fn throw_error(_stack_pointer: usize) -> usize {
+pub unsafe extern "C" fn throw_error() -> usize {
     // let compiler = unsafe { &mut *compiler };
     panic!("Error!");
 }
@@ -200,7 +200,7 @@ pub unsafe extern "C" fn update_binding(namespace_slot: usize, value: usize) -> 
     let namespace_slot = BuiltInTypes::untag(namespace_slot);
     let namespace_id = runtime.current_namespace_id();
     runtime.memory.add_namespace_root(namespace_id, value);
-    runtime.update_binding(namespace_slot, value);
+    runtime.update_binding(namespace_id, namespace_slot, value);
     BuiltInTypes::null_value() as usize
 }
 
@@ -264,7 +264,7 @@ pub extern "C" fn register_c_call(stack_pointer: usize) -> usize {
     BuiltInTypes::null_value() as usize
 }
 
-pub extern "C" fn unregister_c_call(_runtime: *mut Runtime) -> usize {
+pub extern "C" fn unregister_c_call() -> usize {
     let runtime = get_runtime().get_mut();
     let thread_state = runtime.thread_state.clone();
     let (lock, condvar) = &*thread_state;
@@ -747,7 +747,7 @@ extern "C" fn placeholder() -> usize {
     BuiltInTypes::null_value() as usize
 }
 
-extern "C" fn wait_for_input(_runtime: *mut Runtime) -> usize {
+extern "C" fn wait_for_input() -> usize {
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).unwrap();
     let runtime = get_runtime().get_mut();
@@ -783,133 +783,199 @@ extern "C" fn sleep(time: usize) -> usize {
     BuiltInTypes::null_value() as usize
 }
 
+extern "C" fn register_extension(
+    struct_name: usize,
+    protocol_name: usize,
+    method_name: usize,
+    f: usize,
+) -> usize {
+    let runtime = get_runtime().get_mut();
+    // TOOD: For right now I'm going to store these at the runtime level
+    // But I think I actually want to store this information in the
+    // protocol struct instead of out of band
+    let struct_name = runtime.get_string_literal(struct_name);
+    let protocol_name = runtime.get_string_literal(protocol_name);
+    let method_name = runtime.get_string_literal(method_name);
+
+    let struct_name = runtime.resolve(struct_name);
+    let protocol_name = runtime.resolve(protocol_name);
+
+    runtime.add_protocol_info(&protocol_name, &struct_name, &method_name, f);
+
+    runtime.compile_protocol_method(&protocol_name, &method_name);
+
+    BuiltInTypes::null_value() as usize
+}
+
 impl Runtime {
     pub fn install_builtins(&mut self) -> Result<(), Box<dyn Error>> {
-        self.add_builtin_function("beagle.core/println", println_value as *const u8, false)?;
+        self.add_builtin_function("beagle.core/println", println_value as *const u8, false, 1)?;
 
-        self.add_builtin_function("beagle.core/print", print_value as *const u8, false)?;
+        self.add_builtin_function("beagle.core/print", print_value as *const u8, false, 1)?;
 
-        self.add_builtin_function("beagle.builtin/allocate", allocate as *const u8, true)?;
+        self.add_builtin_function("beagle.builtin/allocate", allocate as *const u8, true, 2)?;
 
         self.add_builtin_function(
             "beagle.builtin/allocate_float",
             allocate_float as *const u8,
             true,
+            2,
         )?;
 
         self.add_builtin_function(
             "beagle.builtin/fill_object_fields",
             fill_object_fields as *const u8,
             false,
+            2,
         )?;
 
-        self.add_builtin_function("beagle.builtin/copy_object", copy_object as *const u8, true)?;
+        self.add_builtin_function(
+            "beagle.builtin/copy_object",
+            copy_object as *const u8,
+            true,
+            2,
+        )?;
 
         self.add_builtin_function(
             "beagle.builtin/copy_from_to_object",
             copy_from_to_object as *const u8,
             false,
+            2,
         )?;
 
         self.add_builtin_function(
             "beagle.builtin/make_closure",
             make_closure as *const u8,
             true,
+            4,
         )?;
 
         self.add_builtin_function(
             "beagle.builtin/property_access",
             property_access as *const u8,
             false,
+            3,
         )?;
 
         self.add_builtin_function(
             "beagle.builtin/write_field",
             write_field as *const u8,
             false,
+            3,
         )?;
 
         self.add_builtin_function(
             "beagle.builtin/throw_error",
             throw_error as *const u8,
             false,
+            0,
         )?;
 
-        self.add_builtin_function("beagle.builtin/assert!", placeholder as *const u8, false)?;
+        self.add_builtin_function("beagle.builtin/assert!", placeholder as *const u8, false, 0)?;
 
-        self.add_builtin_function("beagle.core/gc", gc as *const u8, true)?;
+        self.add_builtin_function("beagle.core/gc", gc as *const u8, true, 1)?;
 
         self.add_builtin_function(
             "beagle.builtin/gc_add_root",
             gc_add_root as *const u8,
             false,
+            1,
         )?;
 
-        self.add_builtin_function("beagle.core/thread", new_thread as *const u8, false)?;
+        self.add_builtin_function("beagle.core/thread", new_thread as *const u8, false, 1)?;
 
-        self.add_builtin_function("beagle.ffi/load_library", load_library as *const u8, false)?;
+        self.add_builtin_function(
+            "beagle.ffi/load_library",
+            load_library as *const u8,
+            false,
+            1,
+        )?;
 
-        self.add_builtin_function("beagle.ffi/get_function", get_function as *const u8, false)?;
+        self.add_builtin_function(
+            "beagle.ffi/get_function",
+            get_function as *const u8,
+            false,
+            4,
+        )?;
 
         self.add_builtin_function(
             "beagle.ffi/call_ffi_info",
             call_ffi_info as *const u8,
             false,
+            7,
         )?;
 
-        self.add_builtin_function("beagle.ffi/allocate", ffi_allocate as *const u8, false)?;
+        self.add_builtin_function("beagle.ffi/allocate", ffi_allocate as *const u8, false, 1)?;
 
-        self.add_builtin_function("beagle.ffi/get_u32", ffi_get_u32 as *const u8, false)?;
+        self.add_builtin_function("beagle.ffi/get_u32", ffi_get_u32 as *const u8, false, 2)?;
 
-        self.add_builtin_function("beagle.ffi/set_i16", ffi_set_i16 as *const u8, false)?;
+        self.add_builtin_function("beagle.ffi/set_i16", ffi_set_i16 as *const u8, false, 3)?;
 
-        self.add_builtin_function("beagle.ffi/set_i32", ffi_set_i32 as *const u8, false)?;
+        self.add_builtin_function("beagle.ffi/set_i32", ffi_set_i32 as *const u8, false, 3)?;
 
-        self.add_builtin_function("beagle.ffi/get_i32", ffi_get_i32 as *const u8, false)?;
+        self.add_builtin_function("beagle.ffi/get_i32", ffi_get_i32 as *const u8, false, 2)?;
 
-        self.add_builtin_function("beagle.ffi/get_string", ffi_get_string as *const u8, false)?;
+        self.add_builtin_function(
+            "beagle.ffi/get_string",
+            ffi_get_string as *const u8,
+            false,
+            3,
+        )?;
 
-        self.add_builtin_function("beagle.builtin/__pause", __pause as *const u8, true)?;
+        self.add_builtin_function("beagle.builtin/__pause", __pause as *const u8, true, 1)?;
 
         self.add_builtin_function(
             "beagle.builtin/__register_c_call",
             register_c_call as *const u8,
             true,
+            1,
         )?;
 
         self.add_builtin_function(
             "beagle.builtin/__unregister_c_call",
             unregister_c_call as *const u8,
             false,
+            0,
         )?;
 
         self.add_builtin_function(
             "beagle.builtin/update_binding",
             update_binding as *const u8,
             false,
+            2,
         )?;
 
         self.add_builtin_function(
             "beagle.builtin/get_binding",
             get_binding as *const u8,
             false,
+            2,
         )?;
 
         self.add_builtin_function(
             "beagle.builtin/set_current_namespace",
             set_current_namespace as *const u8,
             false,
+            1,
         )?;
 
         self.add_builtin_function(
             "beagle.builtin/wait_for_input",
             wait_for_input as *const u8,
             false,
+            0,
         )?;
 
-        self.add_builtin_function("beagle.core/eval", eval as *const u8, false)?;
+        self.add_builtin_function("beagle.core/eval", eval as *const u8, false, 1)?;
 
-        self.add_builtin_function("beagle.core/sleep", sleep as *const u8, false)?;
+        self.add_builtin_function("beagle.core/sleep", sleep as *const u8, false, 1)?;
+
+        self.add_builtin_function(
+            "beagle.builtin/register_extension",
+            register_extension as *const u8,
+            false,
+            4,
+        )?;
 
         Ok(())
     }

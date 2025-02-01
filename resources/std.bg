@@ -1,8 +1,39 @@
 namespace beagle.core;
 import "beagle.primitive" as primitive
-// This might be a bit circularish. Not sure.
-// TODO: I need to namespace this stuff properly
-import "persistent_vector" as persistent_vector
+// TODO: I need to figure out how I deal with the circular nature
+// of having persistent vector not be in this namespace
+// One answer is to have dynamic imports
+// so that after I define the things persistent vector depends on
+// I can import it dynamically
+
+// I need to think about execution order as well
+// If I import a namespace, does that namespaces top level
+// get called before I compile the current namespace
+// It seems like it should.
+// But I need to do that on the calling thread
+// so I will need some back and forth going on there
+
+// TODO: This is hack because 0 is making the fast path cache activate
+// fix by changing id or filling the cache
+struct NEVER{}
+
+struct Struct {
+    name
+    id
+}
+
+struct Protocol {
+    name
+}
+
+protocol Indexed {
+    fn get(coll, index)
+}
+
+protocol Push {
+    fn push(coll, value)
+}
+
 
 // This may seem weird
 // but we need our runtime to know
@@ -46,12 +77,17 @@ fn atom(value) {
     Atom { value: value }
 }
 
-
-// TODO: Need a way to re-export rather than wrap
-fn get(coll, i) {
-    persistent_vector/get(coll, i)
+fn instance_of(value, type) {
+    primitive/read_struct_id(value) == type.id
 }
 
-fn push(coll, value) {
-    persistent_vector/push(coll, value)
-}
+
+// // TODO: Need a way to re-export rather than wrap
+// fn get(coll, i) {
+//     persistent_vector/get(coll, i)
+// }
+
+// fn push(coll, value) {
+//     persistent_vector/push(coll, value)
+// }
+

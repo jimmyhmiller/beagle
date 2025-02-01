@@ -1,4 +1,5 @@
 namespace array_literals
+import "persistent_vector" as vector
 
 struct ExampleStruct {
     value
@@ -12,7 +13,7 @@ fn with_side_effect(x) {
 fn main() {
     let x = [1, 2, 3]
     println(x)
-    let y = [2 + 2 - 3, ExampleStruct { value: 2}, with_side_effect(3), with_side_effect(4)]
+    let y = [2 + 2 - 3, ExampleStruct { value: 2 }, with_side_effect(3), with_side_effect(4)]
     println(y)
     let q = []
     println(q)

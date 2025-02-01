@@ -806,7 +806,6 @@ impl Parser {
         }
     }
 
-        
     fn parse_protocol(&mut self) -> Ast {
         let start_position = self.position;
         self.move_to_next_atom();
@@ -846,15 +845,15 @@ impl Parser {
 
     fn parse_protocol_member(&mut self) -> Ast {
         match self.current_token() {
-           Token::Fn => {
+            Token::Fn => {
                 self.consume();
                 self.move_to_next_non_whitespace();
                 let name = match self.current_token() {
-                     Token::Atom((start, end)) => {
-                          // Gross
-                          String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
-                     }
-                     _ => panic!("Expected protocol member name"),
+                    Token::Atom((start, end)) => {
+                        // Gross
+                        String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
+                    }
+                    _ => panic!("Expected protocol member name"),
                 };
                 self.move_to_next_non_whitespace();
                 self.expect_open_paren();
@@ -871,18 +870,16 @@ impl Parser {
                     }
                 } else {
                     let end_position = self.position;
-                    Ast::FunctionStub  {
+                    Ast::FunctionStub {
                         name,
                         args,
                         token_range: TokenRange::new(self.position, end_position),
                     }
                 }
-
-           }
-           _ => panic!("Expected protocol member")
+            }
+            _ => panic!("Expected protocol member"),
         }
     }
-
 
     fn parse_extend(&mut self) -> Ast {
         let start_position = self.position;
@@ -933,9 +930,9 @@ impl Parser {
     }
 
     fn parse_extend_member(&mut self) -> Ast {
+        self.skip_whitespace();
         self.parse_function()
     }
-
 
     fn parse_enum(&mut self) -> Ast {
         let start_position = self.position;
@@ -1344,6 +1341,13 @@ impl Parser {
             }
             self.consume();
         }
+        if name.is_empty() {
+            panic!(
+                "Unexpected token {:?} at {}",
+                self.current_token(),
+                self.current_location()
+            );
+        }
         self.consume();
         let end_position = self.position;
         Ast::Namespace {
@@ -1366,7 +1370,6 @@ impl Parser {
             token_range: TokenRange::new(start_position, end_position),
         }
     }
-    
 
     fn parse_call(&mut self, name: String, start_position: usize) -> Ast {
         self.expect_open_paren();
@@ -1718,11 +1721,6 @@ impl Parser {
     fn is_close_bracket(&self) -> bool {
         self.current_token() == Token::CloseBracket
     }
-
-    
-
-    
-  
 }
 
 #[test]

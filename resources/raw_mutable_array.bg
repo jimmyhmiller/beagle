@@ -2,6 +2,7 @@ namespace raw_mutable_array
 import "beagle.builtin" as builtin
 import "beagle.primitive" as primitive
 
+
 fn allocate_array_unsafe(size) {
     let array = builtin/allocate(size)
     builtin/fill_object_fields(array, null)

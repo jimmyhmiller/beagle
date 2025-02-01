@@ -71,6 +71,11 @@ impl<'a> AstCompiler<'a> {
                 let value = self.ir.and_imm(value, 0x0000_0000_0000_FFFF);
                 self.ir.tag(value, BuiltInTypes::Int.get_tag())
             }
+            "beagle.primitive/read_struct_id" => {
+                let pointer = args[0];
+                let pointer = self.ir.untag(pointer);
+                self.ir.read_struct_id(pointer)
+            }
             "beagle.primitive/write_field" => {
                 // self.ir.breakpoint();
                 let pointer = args[0];

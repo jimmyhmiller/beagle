@@ -22,7 +22,7 @@
                     "kind": "bin"
                 }
             },
-            "args": ["--print-parse", "resources/protocol_test.bg"],
+            "args": ["resources/persistent_vector.bg"],
             "cwd": "${workspaceFolder}",
             // "preRunCommands": [
             //     "command script import .vscode/rust_prettifier_for_lldb.py"
