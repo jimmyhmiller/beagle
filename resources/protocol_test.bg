@@ -68,3 +68,16 @@ fn main() {
     println(get_y(size))
     "done"
 }
+
+// Expect
+// Struct { name: "persistent_vector/PersistentVector", id: 5 }
+// Protocol { name: "beagle.core/Indexed" }
+// 2
+// 5
+// true
+// false
+// 1
+// 2
+// 3
+// 4
+// done
