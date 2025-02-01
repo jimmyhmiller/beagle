@@ -78,7 +78,7 @@ fn atom(value) {
 }
 
 fn instance_of(value, type) {
-    primitive/read_struct_id(value) == type.id
+    primitive/is_object(value) && primitive/read_struct_id(value) == type.id
 }
 
 

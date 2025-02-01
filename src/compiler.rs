@@ -510,8 +510,6 @@ impl Compiler {
             }],
             token_range: TokenRange::new(0, 0),
         };
-
-        // println!("{:#?}", ast);
         self.compile_ast(ast, None, "test").unwrap();
         self.code_allocator.make_executable();
         self.set_current_namespace(current_namespace_id);
