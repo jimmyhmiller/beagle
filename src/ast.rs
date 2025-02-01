@@ -554,7 +554,12 @@ impl<'a> AstCompiler<'a> {
 
                 let function_pointer = self
                     .compiler
-                    .upsert_function(full_function_name.as_deref(), &mut code, self.ir.num_locals)
+                    .upsert_function(
+                        full_function_name.as_deref(),
+                        &mut code,
+                        self.ir.num_locals,
+                        args.len(),
+                    )
                     .unwrap();
 
                 code.share_label_info_debug(function_pointer);
@@ -656,11 +661,35 @@ impl<'a> AstCompiler<'a> {
                 Value::Null
             }
             Ast::Struct {
-                name: _, fields: _, ..
+                name, fields: _, ..
             } => {
-                // TODO: This should probably return the struct value
-                // A concept I don't yet have
-                Value::Null
+                // TODO: I need a store the fields, but I'm too lazy to make the
+                // array right now
+                let fully_qualified_name =
+                    format!("{}/{}", self.compiler.current_namespace_name(), name);
+                let (struct_id, _) = self
+                    .compiler
+                    .get_struct(&fully_qualified_name)
+                    .unwrap_or_else(|| panic!("Struct not found {}", name));
+
+                let value = self.call_compile(&Ast::StructCreation {
+                    name: "beagle.core/Struct".to_string(),
+                    fields: vec![
+                        ("name".to_string(), Ast::String(fully_qualified_name, 0)),
+                        ("id".to_string(), Ast::IntegerLiteral(struct_id as i64, 0)),
+                    ],
+                    token_range: ast.token_range(),
+                });
+                let namespace_id = self
+                    .compiler
+                    .find_binding(self.current_namespace_id(), &name)
+                    .unwrap_or_else(|| panic!("binding not found {}", name));
+                let value_reg = self.ir.assign_new(value);
+                self.store_namespaced_variable(
+                    Value::TaggedConstant(namespace_id as isize),
+                    value_reg,
+                );
+                value
             }
             Ast::Enum {
                 name,
@@ -722,15 +751,102 @@ impl<'a> AstCompiler<'a> {
             Ast::EnumStaticVariant { name: _, .. } => {
                 panic!("Shouldn't get here")
             }
-            Ast::Protocol { name: _, body: _, token_range: _ } => {
-                Value::Null
+            Ast::Protocol {
+                name,
+                body,
+                token_range: _,
+            } => {
+                for ast in body.iter() {
+                    self.call_compile(ast);
+                }
+                let fully_qualified_name =
+                    format!("{}/{}", self.compiler.current_namespace_name(), name);
+                let value = self.call_compile(&Ast::StructCreation {
+                    name: "beagle.core/Protocol".to_string(),
+                    fields: vec![("name".to_string(), Ast::String(fully_qualified_name, 0))],
+                    token_range: ast.token_range(),
+                });
+                let reserved_namespace_slot = self.compiler.reserve_namespace_slot(&name);
+                let value_reg = self.ir.assign_new(value);
+                self.store_namespaced_variable(
+                    Value::TaggedConstant(reserved_namespace_slot as isize),
+                    value_reg,
+                );
+                value
             }
             Ast::FunctionStub {
-                name: _, args: _, ..
+                name,
+                args,
+                token_range,
             } => {
-                panic!("Shouldn't get here")
+                // TODO: I should store funcitons in slots instead of a big global list
+                // let namespace_slot = self.compiler.find_binding(self.compiler.current_namespace_id(), &name).unwrap();
+                // let namespace_slot = Value::TaggedConstant(namespace_slot as isize);
+
+                self.call_compile(&Ast::Function {
+                    name: Some(name),
+                    args,
+                    body: vec![Ast::Null(0)],
+                    token_range,
+                });
+                Value::Null
             }
-            Ast::Extend { target_type: _, protocol: _ , body: _ , token_range: _ } => {
+            Ast::Extend {
+                target_type,
+                protocol,
+                body,
+                token_range: _,
+            } => {
+                for ast in body.iter() {
+                    if let Ast::Function {
+                        name, args, body, ..
+                    } = ast
+                    {
+                        let name = name.clone().unwrap();
+                        // TODO: Hygiene
+                        let new_name = format!("{}_{}", target_type, name);
+                        self.call_compile(&Ast::Function {
+                            name: Some(new_name.clone()),
+                            args: args.clone(),
+                            body: body.clone(),
+                            token_range: ast.token_range(),
+                        });
+                        let fully_qualified_name =
+                            format!("{}/{}", self.compiler.current_namespace_name(), new_name);
+                        let function = self
+                            .compiler
+                            .get_function_by_name(&fully_qualified_name)
+                            .unwrap();
+                        let function_pointer = self
+                            .compiler
+                            .get_function_pointer(function.clone())
+                            .unwrap();
+                        let function_pointer = Value::RawValue(
+                            BuiltInTypes::Function.tag(function_pointer as isize) as usize,
+                        );
+                        // builtin/register_extension(PersistentVector.name, Indexed.name, "get", get)
+                        // TODO: I need to fully resolve the target_type and protocol if they are aliased
+                        let target_type = self.string_constant(target_type.clone());
+                        let target_type = self.ir.assign_new(target_type);
+                        let protocol = self.string_constant(protocol.clone());
+                        let protocol = self.ir.assign_new(protocol);
+                        let name = self.string_constant(name.clone());
+                        let name = self.ir.assign_new(name);
+                        let function_pointer = self.ir.assign_new(function_pointer);
+                        self.call_builtin(
+                            "beagle.builtin/register_extension",
+                            vec![
+                                target_type.into(),
+                                protocol.into(),
+                                name.into(),
+                                function_pointer.into(),
+                            ],
+                        );
+                    } else {
+                        panic!("Expected function");
+                    }
+                }
+
                 Value::Null
             }
             Ast::EnumCreation {
@@ -927,7 +1043,8 @@ impl<'a> AstCompiler<'a> {
                 } else {
                     panic!("Expected identifier")
                 };
-                let constant_ptr = self.string_constant(property);
+
+                let constant_ptr = self.string_constant(property.clone());
                 let constant_ptr = self.ir.assign_new(constant_ptr);
                 let call_result = self.call_builtin(
                     "beagle.builtin/property_access",
@@ -1476,11 +1593,17 @@ impl<'a> AstCompiler<'a> {
                 slot,
             ))
         } else {
+            // TODO: The global vs beagle.core is ugly
+            let global_id = self.compiler.global_namespace_id();
             self.compiler
                 .find_binding(self.compiler.global_namespace_id(), name)
-                .map(|slot| {
-                    VariableLocation::NamespaceVariable(self.compiler.global_namespace_id(), slot)
+                .map(|slot| (global_id, slot))
+                .or_else(|| {
+                    let beagle_core = self.compiler.get_namespace_id("beagle.core")?;
+                    let slot = self.compiler.find_binding(beagle_core, name)?;
+                    Some((beagle_core, slot))
                 })
+                .map(|(id, slot)| VariableLocation::NamespaceVariable(id, slot))
         }
     }
 
@@ -1563,13 +1686,15 @@ impl<'a> AstCompiler<'a> {
             }
             Ast::Function {
                 name,
-                args: _,
+                args,
                 body: _,
                 ..
             } => {
                 if let Some(name) = name {
                     let full_function_name = self.compiler.current_namespace_name() + "/" + name;
-                    self.compiler.reserve_function(&full_function_name).unwrap();
+                    self.compiler
+                        .reserve_function(&full_function_name, args.len())
+                        .unwrap();
                 } else {
                     panic!("Why do we have a top level function without a name? Is that allowed?");
                 }
@@ -1678,6 +1803,28 @@ impl<'a> AstCompiler<'a> {
             Ast::Namespace { name, .. } => {
                 let namespace_id = self.compiler.reserve_namespace(name.clone());
                 self.compiler.set_current_namespace(namespace_id);
+            }
+            Ast::Protocol {
+                name,
+                body,
+                token_range: _,
+            } => {
+                self.compiler.reserve_namespace_slot(name);
+                for ast in body.iter() {
+                    self.first_pass(ast);
+                }
+            }
+            Ast::FunctionStub {
+                name,
+                args,
+                token_range: _,
+            } => {
+                // TODO: Functions should just be stored in the namespace slot
+                // self.compiler.reserve_namespace_slot(&name);
+                let full_function_name = self.compiler.current_namespace_name() + "/" + name;
+                self.compiler
+                    .reserve_function(&full_function_name, args.len())
+                    .unwrap();
             }
             _ => {}
         }

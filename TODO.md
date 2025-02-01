@@ -28,3 +28,6 @@
     * I like the latter but it has issues.
     * The former is more structured and probably faster as I can specialize
 * I need a way to do iterator/seqs/whatever
+* I need to move current_namespace from runtime to compiler
+* I really need to solve this whole namespace vs function thing and fix that problem
+* How could I make what I'm doing with protocols a general feature? I would want the ability to do codegen in reaction to registering extensions. But I also want the ability for the optimizer to figure out that we can specialize on type.

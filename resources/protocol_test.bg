@@ -1,15 +1,70 @@
-namespace "protocol_test"
+namespace protocol_test
 
 import "persistent_vector" as vector
+import "beagle.builtin" as builtin
+import "beagle.primitive" as primitive
 
-protocol Indexed {
-    fn get(coll, index)
+
+
+struct Point {
+    x
+    y
 }
 
-extend vector/PersistentVector with Indexed {
-    fn get(vec, index) {
-        vector/get(vec, index)
+struct Size {
+    width
+    height
+}
+
+protocol Axis {
+    fn get_x(self)
+    fn get_y(self)
+}
+
+
+extend Point with Axis {
+    fn get_x(self) {
+        self.x
+    }
+
+    fn get_y(self) {
+        self.y
     }
 }
 
+extend Size with Axis {
+    fn get_x(self) {
+        self.width
+    }
 
+    fn get_y(self) {
+        self.height
+    }
+}
+
+fn main() {
+    println(vector/PersistentVector)
+    println(Indexed)
+    let x = [2];
+    println(x[0])
+    println(primitive/read_struct_id(x))
+    println(instance_of(x, vector/PersistentVector))
+    println(instance_of(2, vector/PersistentVector))
+
+
+    let point = Point {
+        x: 1,
+        y: 2
+    }
+
+    let size = Size {
+        width: 3,
+        height: 4
+    }
+
+    println(get_x(point))
+    println(get_y(point))
+    println(get_x(size))
+    println(get_y(size))
+    "done"
+}

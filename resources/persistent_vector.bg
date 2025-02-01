@@ -1,6 +1,7 @@
 namespace persistent_vector
 import "raw_mutable_array" as array
 import "beagle.primitive" as primitive
+import "beagle.builtin" as builtin
 
 
 struct PersistentVector {
@@ -255,6 +256,19 @@ fn vec() {
     EMPTY
 }
 
+extend PersistentVector with Indexed {
+    fn get(vec, index) {
+        get(vec, index)
+    }
+}
+
+extend PersistentVector with Push {
+    fn push(vec, value) {
+        push(vec, value)
+    }
+}
+
+
 fn main() {
     let vec1 = EMPTY
     println(vec1)
@@ -269,6 +283,7 @@ fn main() {
     println(array2)
     "done"
 }
+
 
 // Expect
 // PersistentVector { count: 0, shift: 5, root: [  ], tail: [  ] }

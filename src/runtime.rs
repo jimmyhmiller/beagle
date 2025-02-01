@@ -297,6 +297,7 @@ pub struct Function {
     pub is_defined: bool,
     pub number_of_locals: usize,
     pub size: usize,
+    pub number_of_args: usize,
 }
 
 pub struct MMapMutWithOffset {
@@ -638,6 +639,10 @@ impl NamespaceManager {
         self.namespaces.get(self.current_namespace).unwrap()
     }
 
+    fn get_namespace_by_id(&self, id: usize) -> Option<&Mutex<Namespace>> {
+        self.namespaces.get(id)
+    }
+
     fn set_current_namespace(&mut self, id: usize) {
         self.current_namespace = id;
     }
@@ -673,6 +678,13 @@ pub struct StackValue {
     stack: Vec<usize>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProtocolMethodInfo {
+    pub method_name: String,
+    pub _type: String,
+    pub fn_pointer: usize,
+}
+
 pub struct Runtime {
     pub memory: Memory,
     pub libraries: Vec<Library>,
@@ -698,6 +710,7 @@ pub struct Runtime {
     pub jump_table_offset: usize,
     compiler_channel: Option<BlockingSender<CompilerMessage, CompilerResponse>>,
     compiler_thread: Option<JoinHandle<()>>,
+    protocol_info: HashMap<String, Vec<ProtocolMethodInfo>>,
 }
 
 impl Runtime {
@@ -747,6 +760,7 @@ impl Runtime {
             functions: vec![],
             compiler_channel: None,
             compiler_thread: None,
+            protocol_info: HashMap::new(),
         }
     }
 
@@ -767,6 +781,11 @@ impl Runtime {
         self.printer.reset();
         self.ffi_function_info.clear();
         self.ffi_info_by_name.clear();
+        self.compiler_channel
+            .as_mut()
+            .unwrap()
+            .send(CompilerMessage::Reset);
+        self.protocol_info.clear();
     }
 
     pub fn start_compiler_thread(&mut self) {
@@ -1244,8 +1263,13 @@ impl Runtime {
         self.namespaces.current_namespace
     }
 
-    pub fn update_binding(&mut self, namespace_slot: usize, value: usize) {
-        let mut namespace = self.namespaces.get_current_namespace().lock().unwrap();
+    pub fn update_binding(&mut self, namespace_id: usize, namespace_slot: usize, value: usize) {
+        let mut namespace = self
+            .namespaces
+            .get_namespace_by_id(namespace_id)
+            .unwrap()
+            .lock()
+            .unwrap();
         let name = namespace.ids.get(namespace_slot).unwrap().clone();
         namespace.bindings.insert(name, value);
     }
@@ -1265,12 +1289,8 @@ impl Runtime {
         self.namespaces.set_current_namespace(namespace);
     }
 
-    pub fn find_binding(&self, current_namespace_id: usize, name: &str) -> Option<usize> {
-        let namespace = self
-            .namespaces
-            .namespaces
-            .get(current_namespace_id)
-            .unwrap();
+    pub fn find_binding(&self, namespace_id: usize, name: &str) -> Option<usize> {
+        let namespace = self.namespaces.namespaces.get(namespace_id).unwrap();
         let namespace = namespace.lock().unwrap();
         namespace.ids.iter().position(|n| n == name)
     }
@@ -1493,6 +1513,7 @@ impl Runtime {
         &mut self,
         name: Option<&str>,
         function: *const u8,
+        number_of_args: usize,
     ) -> Result<usize, Box<dyn Error>> {
         let index = self.functions.len();
         let pointer = function;
@@ -1507,6 +1528,7 @@ impl Runtime {
             is_defined: true,
             number_of_locals: 0,
             size: 0,
+            number_of_args,
         });
         debugger(Message {
             kind: "foreign_function".to_string(),
@@ -1525,6 +1547,7 @@ impl Runtime {
         name: &str,
         function: *const u8,
         needs_stack_pointer: bool,
+        number_of_args: usize,
     ) -> Result<usize, Box<dyn Error>> {
         let index = self.functions.len();
         let pointer = function;
@@ -1540,6 +1563,7 @@ impl Runtime {
             is_defined: true,
             number_of_locals: 0,
             size: 0,
+            number_of_args,
         });
         let pointer =
             Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
@@ -1571,6 +1595,22 @@ impl Runtime {
         self.memory.stack_map.extend(stack_map);
     }
 
+    pub fn replace_function_binding(&mut self, name: String, pointer: usize) {
+        let untagged_pointer = BuiltInTypes::untag(pointer) as *const u8;
+        let existing_function = self.get_function_by_pointer(untagged_pointer);
+        if existing_function.is_none() {
+            panic!("Function not found");
+        }
+        let existing_function = existing_function.unwrap().clone();
+        for (index, function) in self.functions.iter_mut().enumerate() {
+            if function.name == name {
+                self.overwrite_function(index, untagged_pointer, existing_function.size)
+                    .unwrap();
+                break;
+            }
+        }
+    }
+
     pub fn upsert_function(
         &mut self,
         name: Option<&str>,
@@ -1578,6 +1618,7 @@ impl Runtime {
         size: usize,
         number_of_locals: usize,
         stack_map: Vec<(usize, StackMapDetails)>,
+        number_of_args: usize,
     ) -> Result<usize, Box<dyn Error>> {
         let mut already_defined = false;
         let mut function_pointer = 0;
@@ -1592,7 +1633,8 @@ impl Runtime {
             }
         }
         if !already_defined {
-            function_pointer = self.add_function(name, pointer, size, number_of_locals)?;
+            function_pointer =
+                self.add_function(name, pointer, size, number_of_locals, number_of_args)?;
         }
         assert!(function_pointer != 0);
 
@@ -1609,7 +1651,11 @@ impl Runtime {
         Ok(function_pointer)
     }
 
-    pub fn reserve_function(&mut self, name: &str) -> Result<Function, Box<dyn Error>> {
+    pub fn reserve_function(
+        &mut self,
+        name: &str,
+        number_of_args: usize,
+    ) -> Result<Function, Box<dyn Error>> {
         for function in self.functions.iter_mut() {
             if function.name == name {
                 return Ok(function.clone());
@@ -1627,6 +1673,7 @@ impl Runtime {
             is_defined: false,
             number_of_locals: 0,
             size: 0,
+            number_of_args,
         };
         self.functions.push(function.clone());
         Ok(function)
@@ -1638,6 +1685,7 @@ impl Runtime {
         pointer: *const u8,
         size: usize,
         number_of_locals: usize,
+        number_of_args: usize,
     ) -> Result<usize, Box<dyn Error>> {
         let index = self.functions.len();
         self.functions.push(Function {
@@ -1650,6 +1698,7 @@ impl Runtime {
             is_defined: true,
             number_of_locals,
             size,
+            number_of_args,
         });
         let function_pointer =
             Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
@@ -1788,6 +1837,7 @@ impl Runtime {
         name: String,
         code: &[u8],
         number_of_locals: i32,
+        number_of_args: usize,
     ) -> Result<usize, Box<dyn Error>> {
         self.compiler_channel
             .as_ref()
@@ -1796,6 +1846,7 @@ impl Runtime {
                 name.clone(),
                 code.to_vec(),
                 number_of_locals as usize,
+                number_of_args,
             ));
         Ok(self.get_function_by_name(&name).unwrap().pointer.into())
     }
@@ -1811,6 +1862,13 @@ impl Runtime {
     }
 
     pub fn add_string(&mut self, string_value: StringValue) -> usize {
+        if let Some(index) = self
+            .string_constants
+            .iter()
+            .position(|s| s.str == string_value.str)
+        {
+            return index;
+        }
         self.string_constants.push(string_value);
         self.string_constants.len() - 1
     }
@@ -1872,5 +1930,72 @@ impl Runtime {
             .as_ref()
             .unwrap()
             .send(CompilerMessage::SetPauseAtomPointer(pause_atom_ptr));
+    }
+
+    pub fn add_protocol_info(
+        &mut self,
+        protocol_name: &str,
+        struct_name: &str,
+        method_name: &str,
+        f: usize,
+    ) {
+        // TODO: When do I deal with duplicates?
+        self.protocol_info
+            .entry(protocol_name.to_string())
+            .or_default()
+            .push(ProtocolMethodInfo {
+                _type: struct_name.to_string(),
+                method_name: method_name.to_string(),
+                fn_pointer: f,
+            });
+    }
+
+    pub fn compile_protocol_method(&self, protocol_name: &str, method_name: &str) -> usize {
+        let protocol_info = self.protocol_info.get(protocol_name).unwrap();
+        let method_info: Vec<ProtocolMethodInfo> = protocol_info
+            .iter()
+            .filter(|m| m.method_name == method_name)
+            .cloned()
+            .collect();
+        self.compiler_channel
+            .as_ref()
+            .unwrap()
+            .send(CompilerMessage::CompileProtocolMethod(
+                protocol_name.to_string(),
+                method_name.to_string(),
+                method_info,
+            ));
+
+        0
+    }
+
+    pub fn resolve(&self, struct_name: String) -> String {
+        if !struct_name.contains("/") {
+            let current_namespace_name = self.current_namespace_name();
+            let current_namespace_id = self
+                .get_namespace_id(current_namespace_name.as_str())
+                .unwrap();
+            let find_binding = self.find_binding(current_namespace_id, struct_name.as_str());
+            if find_binding.is_some() {
+                return format!("{}/{}", current_namespace_name, struct_name);
+            }
+            let beagle_core = self.get_namespace_id("beagle.core").unwrap();
+            let find_binding = self.find_binding(beagle_core, struct_name.as_str());
+            if find_binding.is_some() {
+                return format!("beagle.core/{}", struct_name);
+            }
+            panic!("Cannot resolve {}", struct_name);
+        }
+        let (namespace_or_alias, struct_name) = struct_name.split_once("/").unwrap();
+
+        let namespace_from_alias = self.get_namespace_from_alias(namespace_or_alias);
+        if namespace_from_alias.is_some() {
+            return format!("{}/{}", namespace_from_alias.unwrap(), struct_name);
+        }
+        let namespace_id = self.get_namespace_id(namespace_or_alias);
+        if namespace_id.is_some() {
+            return format!("{}/{}", namespace_or_alias, struct_name);
+        }
+        panic!("Cannot resolve {}", struct_name);
     }
 }
