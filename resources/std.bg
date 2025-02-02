@@ -45,6 +45,10 @@ protocol Push {
     fn push(coll, value)
 }
 
+protocol Length {
+    fn length(coll)
+}
+
 
 // This may seem weird
 // but we need our runtime to know
@@ -102,6 +106,12 @@ fn instance_of(value, type) {
 extend String with Indexed {
     fn get(str, i) {
         builtin/get_string_index(str, i)
+    }
+}
+
+extend String with Length {
+    fn length(str) {
+        builtin/get_string_length(str)
     }
 }
 

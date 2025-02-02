@@ -183,6 +183,28 @@ impl Default for Tokenizer {
     }
 }
 
+fn stripslashes(s: &str) -> String {
+    let mut n = String::new();
+
+    let mut chars = s.chars();
+
+    while let Some(c) = chars.next() {
+        n.push(match c {
+            '\\' => {
+                let next = chars.next();
+                if let Some(c) = next {
+                    c
+                } else {
+                    c
+                }
+            },
+            c => c,
+        });
+    }
+
+    n
+}
+
 impl Tokenizer {
     pub fn new() -> Tokenizer {
         Tokenizer {
@@ -675,8 +697,12 @@ impl Parser {
             }
             Token::String((start, end)) => {
                 // Gross
-                let value =
+                let mut value =
                     String::from_utf8(self.source[start + 1..end - 1].as_bytes().to_vec()).unwrap();
+                // TODO: Test escapes properly
+                // Maybe token shouldn't have a range but an actual string value
+                // Or I do both
+                value = stripslashes(&value);
                 let position = self.consume();
                 Some(Ast::String(value, position))
             }

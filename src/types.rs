@@ -458,6 +458,10 @@ impl HeapObject {
     }
 
     pub fn get_struct_id(&self) -> usize {
+        self.get_type_data()
+    }
+
+    pub fn get_type_data(&self) -> usize {
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
         let header = unsafe { *pointer };
