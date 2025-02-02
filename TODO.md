@@ -101,3 +101,11 @@ note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose bac
 thread caused non-unwinding panic. aborting.
 error: test failed, to rerun pass `--bin main`
 ```
+
+
+* My janky after_return error stuff is actually calling the start of the function
+* I'm guessing this is a side-effect of messing up labels after register allocation
+* I am going to either 1. get rid of string constants all together or 2. return a pointer to an object that looks identical whether it is a string constant or not. I could have a buffer of memory that stores my string constants. I'm not sure the correct answer here
+* I need to resolve this problem where persistent_vector isn't loaded by std and can't be statically imported because of Struct
+    * I could add dynamic imports after top level of beagle.core runs
+    * I could explicitly add multiple standard things that get loaded

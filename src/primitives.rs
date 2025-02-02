@@ -66,7 +66,9 @@ impl<'a> AstCompiler<'a> {
                 let header = self.ir.load_from_heap(pointer, 0);
                 // mask and shift so we get the size
                 let size_offset = Header::type_id_offset();
-                let value = self.ir.shift_right_imm(header, (size_offset * 8) as i32);
+                let value = self
+                    .ir
+                    .shift_right_imm_raw(header, (size_offset * 8) as i32);
 
                 let value = self.ir.and_imm(value, 0x0000_0000_0000_FFFF);
                 self.ir.tag(value, BuiltInTypes::Int.get_tag())
@@ -127,6 +129,16 @@ impl<'a> AstCompiler<'a> {
                 let heap_object_tag = self
                     .ir
                     .assign_new(Value::RawValue(BuiltInTypes::HeapObject.get_tag() as usize));
+                self.ir
+                    .compare(tag, heap_object_tag.into(), Condition::Equal)
+            }
+            "beagle.primitive/is_string_constant" => {
+                let pointer = args[0];
+                // check the tag of the pointer
+                let tag = self.ir.get_tag(pointer);
+                let heap_object_tag = self
+                    .ir
+                    .assign_new(Value::RawValue(BuiltInTypes::String.get_tag() as usize));
                 self.ir
                     .compare(tag, heap_object_tag.into(), Condition::Equal)
             }

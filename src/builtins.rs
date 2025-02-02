@@ -97,6 +97,28 @@ extern "C" fn allocate_float(stack_pointer: usize, size: usize) -> usize {
     result
 }
 
+extern "C" fn get_string_index(string: usize, index: usize) -> usize {
+    let runtime = get_runtime().get_mut();
+    if BuiltInTypes::get_kind(string) == BuiltInTypes::String {
+        let string = runtime.get_string_literal(string);
+        let index = BuiltInTypes::untag(index);
+        let result = string.chars().nth(index).unwrap();
+        let result = result.to_string();
+        runtime.memory.allocate_string(result).unwrap().into()
+    } else {
+        // we have a heap allocated string
+        let string = HeapObject::from_tagged(string);
+        // TODO: Type safety
+        // We are just going to assert that the type_id == 2
+        assert!(string.get_type_id() == 2);
+        let string = string.get_string_bytes();
+        let index = BuiltInTypes::untag(index);
+        let result = string.get(index).unwrap();
+        let result = result.to_string();
+        runtime.memory.allocate_string(result).unwrap().into()
+    }
+}
+
 extern "C" fn fill_object_fields(object_pointer: usize, value: usize) -> usize {
     let mut object = HeapObject::from_tagged(object_pointer);
     let raw_slice = object.get_fields_mut();
@@ -644,7 +666,7 @@ pub unsafe extern "C" fn call_ffi_info(
             let string = c_string.to_str().unwrap();
             runtime
                 .memory
-                .alloc_string(string.to_string())
+                .allocate_string(string.to_string())
                 .unwrap()
                 .into()
         }
@@ -738,7 +760,7 @@ unsafe extern "C" fn ffi_get_string(buffer: usize, offset: usize, len: usize) ->
     let string = std::str::from_utf8(slice).unwrap();
     runtime
         .memory
-        .alloc_string(string.to_string())
+        .allocate_string(string.to_string())
         .unwrap()
         .into()
 }
@@ -751,7 +773,7 @@ extern "C" fn wait_for_input() -> usize {
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).unwrap();
     let runtime = get_runtime().get_mut();
-    let string = runtime.memory.alloc_string(input);
+    let string = runtime.memory.allocate_string(input);
     string.unwrap().into()
 }
 
@@ -975,6 +997,13 @@ impl Runtime {
             register_extension as *const u8,
             false,
             4,
+        )?;
+
+        self.add_builtin_function(
+            "beagle.builtin/get_string_index",
+            get_string_index as *const u8,
+            false,
+            2,
         )?;
 
         Ok(())
