@@ -375,6 +375,13 @@ impl PrettyPrint for Instruction {
                     value1.pretty_print()
                 )
             }
+            Instruction::ShiftRightImmRaw(value, value1, _) => {
+                format!(
+                    "shift_right_imm_raw {}, {}, _",
+                    value.pretty_print(),
+                    value1.pretty_print()
+                )
+            }
             Instruction::AndImm(value, value1, _) => {
                 format!(
                     "and_imm {}, {}, _",

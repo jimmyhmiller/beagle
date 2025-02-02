@@ -427,17 +427,21 @@ impl Memory {
             }
         }
         for index in completed_threads.iter().rev() {
-            let thread_id = self.join_handles.get(*index).unwrap().thread().id();
-            self.stacks.retain(|(id, _)| *id != thread_id);
-            self.threads.retain(|t| t.id() != thread_id);
-            self.join_handles.remove(*index);
-            self.heap.remove_thread(thread_id);
+            if let Some(thread) = self.join_handles.get(*index) {
+                let thread_id = thread.thread().id();
+                self.stacks.retain(|(id, _)| *id != thread_id);
+                self.threads.retain(|t| t.id() != thread_id);
+                self.join_handles.remove(*index);
+                self.heap.remove_thread(thread_id);
+            } else {
+                println!("Inconsistent join_handles state {:?}", self.join_handles);
+            }
         }
 
         self.join_handles.len()
     }
 
-    pub fn alloc_string(&mut self, string: String) -> Result<Tagged, Box<dyn Error>> {
+    pub fn allocate_string(&mut self, string: String) -> Result<Tagged, Box<dyn Error>> {
         let bytes = string.as_bytes();
         let words = bytes.len() / 8 + 1;
         let pointer = self.heap.allocate(words, BuiltInTypes::HeapObject)?;
@@ -1412,7 +1416,10 @@ impl Runtime {
                     2 => {
                         let bytes = object.get_string_bytes();
                         let string = std::str::from_utf8(bytes).unwrap();
-                        Some(format!("\"{}\"", string))
+                        if depth > 0 {
+                            return Some(format!("\"{}\"", string));
+                        }
+                        Some(string.to_string())
                     }
                     _ => Some("Unknown".to_string()),
                 }

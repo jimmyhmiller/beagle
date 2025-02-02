@@ -152,6 +152,7 @@ pub enum Instruction {
     MulFloat(Value, Value, Value),
     DivFloat(Value, Value, Value),
     ShiftRightImm(Value, Value, i32),
+    ShiftRightImmRaw(Value, Value, i32),
     AndImm(Value, Value, u64),
     ShiftLeft(Value, Value, Value),
     ShiftRight(Value, Value, Value),
@@ -319,6 +320,9 @@ impl Instruction {
                 get_registers!(a, b, c)
             }
             Instruction::ShiftRightImm(a, b, _) => {
+                get_registers!(a, b)
+            }
+            Instruction::ShiftRightImmRaw(a, b, _) => {
                 get_registers!(a, b)
             }
             Instruction::AndImm(a, b, _) => {
@@ -506,6 +510,7 @@ impl Instruction {
             | Instruction::FmovGeneralToFloat(value, value1)
             | Instruction::FmovFloatToGeneral(value, value1)
             | Instruction::ShiftRightImm(value, value1, _)
+            | Instruction::ShiftRightImmRaw(value, value1, _)
             | Instruction::AndImm(value, value1, _)
             | Instruction::JumpIf(_, _, value, value1) => {
                 replace_register!(value, old_register, new_register);
@@ -828,6 +833,17 @@ impl Ir {
         destination.into()
     }
 
+    pub fn shift_right_imm_raw(&mut self, a: Value, b: i32) -> Value {
+        let a = self.assign_new(a);
+        let destination = self.volatile_register();
+        self.instructions.push(Instruction::ShiftRightImmRaw(
+            destination.into(),
+            a.into(),
+            b,
+        ));
+        destination.into()
+    }
+
     pub fn and_imm(&mut self, a: Value, b: u64) -> Value {
         let a = self.assign_new(a);
         let destination = self.volatile_register();
@@ -1095,6 +1111,11 @@ impl Ir {
 
                     lang.guard_integer(dest, value, self.after_return);
 
+                    lang.shift_right_imm(dest, value, *shift);
+                }
+                Instruction::ShiftRightImmRaw(dest, value, shift) => {
+                    let value = value.try_into().unwrap();
+                    let dest = dest.try_into().unwrap();
                     lang.shift_right_imm(dest, value, *shift);
                 }
                 Instruction::AndImm(dest, value, imm) => {

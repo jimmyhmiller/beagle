@@ -459,8 +459,6 @@ impl Compiler {
             .name
             .clone();
 
-        
-
         Ast::If {
             condition: Box::new(Ast::Call {
                 name: "beagle.core/instance_of".to_string(),

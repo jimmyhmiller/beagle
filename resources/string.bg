@@ -1,10 +1,15 @@
 namespace string
 
+import "persistent_vector" as vector
+import "beagle.builtin" as builtin
+
 
 
 fn main() {
     let x = "test"
     println(x)
+
+    println(x[0])
     // TODO: I want to make indexed operations
     // work on strings.
     // Right now, I am assuming persistent vectors

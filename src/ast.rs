@@ -786,7 +786,11 @@ impl<'a> AstCompiler<'a> {
                 self.call_compile(&Ast::Function {
                     name: Some(name),
                     args,
-                    body: vec![Ast::Null(0)],
+                    body: vec![Ast::Call {
+                        name: "beagle.builtin/throw_error".to_string(),
+                        args: vec![],
+                        token_range,
+                    }],
                     token_range,
                 });
                 Value::Null
@@ -915,6 +919,7 @@ impl<'a> AstCompiler<'a> {
                 let (struct_id, struct_type) = self
                     .compiler
                     .get_struct(&format!("{}/{}", namespace, name))
+                    .or_else(|| self.compiler.get_struct(&format!("beagle.core/{}", name)))
                     .unwrap_or_else(|| panic!("Struct not found {}/{}", namespace, name));
 
                 let mut field_order: Vec<usize> = vec![];
@@ -968,9 +973,7 @@ impl<'a> AstCompiler<'a> {
                     self.ir.push_to_stack(reg.into());
                 }
 
-                let vec = self.get_function("persistent_vector/vec");
-
-                let vector_pointer = self.ir.call(vec, vec![]);
+                let vector_pointer = self.call("persistent_vector/vec", vec![]);
 
                 let push = self.get_function("persistent_vector/push");
                 let vector_register = self.ir.assign_new(vector_pointer);
@@ -1058,12 +1061,11 @@ impl<'a> AstCompiler<'a> {
                 result.into()
             }
             Ast::IndexOperator { array, index, .. } => {
-                let get = self.get_function("persistent_vector/get");
                 let array = self.call_compile(array.as_ref());
                 let index = self.call_compile(index.as_ref());
                 let array = self.ir.assign_new(array);
                 let index = self.ir.assign_new(index);
-                self.ir.call(get, vec![array.into(), index.into()])
+                self.call("beagle.core/get", vec![array.into(), index.into()])
             }
             Ast::If {
                 condition,
@@ -1260,7 +1262,7 @@ impl<'a> AstCompiler<'a> {
                         panic!("Not qualified and didn't find it {}", name);
                     }
                 } else {
-                    self.compile_standard_function_call(name, args)
+                    self.call(&name, args)
                 }
             }
             Ast::IntegerLiteral(n, _) => Value::TaggedConstant(n as isize),
@@ -1360,7 +1362,7 @@ impl<'a> AstCompiler<'a> {
         f.into()
     }
 
-    fn compile_standard_function_call(&mut self, name: String, mut args: Vec<Value>) -> Value {
+    fn call(&mut self, name: &str, mut args: Vec<Value>) -> Value {
         assert!(
             name.contains("/"),
             "Function name should be fully qualified {}",
@@ -1369,7 +1371,7 @@ impl<'a> AstCompiler<'a> {
 
         // TODO: I shouldn't just assume the function will exist
         // unless I have a good plan for dealing with when it doesn't
-        let function = self.compiler.find_function(&name);
+        let function = self.compiler.find_function(name);
 
         let function = function.unwrap_or_else(|| panic!("Could not find function {}", name));
 
@@ -1674,7 +1676,7 @@ impl<'a> AstCompiler<'a> {
     }
 
     pub fn call_builtin(&mut self, name: &str, args: Vec<Value>) -> Value {
-        self.compile_standard_function_call(name.to_string(), args)
+        self.call(name, args)
     }
 
     fn first_pass(&mut self, ast: &Ast) {
