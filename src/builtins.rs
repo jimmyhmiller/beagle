@@ -119,6 +119,20 @@ extern "C" fn get_string_index(string: usize, index: usize) -> usize {
     }
 }
 
+extern "C" fn get_string_length(string: usize) -> usize {
+    let runtime = get_runtime().get_mut();
+    if BuiltInTypes::get_kind(string) == BuiltInTypes::String {
+        // TODO: Make faster
+        let string = runtime.get_string_literal(string);
+        BuiltInTypes::Int.tag(string.len() as isize) as usize
+    } else {
+        // we have a heap allocated string
+        let string = HeapObject::from_tagged(string);
+        let length = string.get_type_data();
+        BuiltInTypes::Int.tag(length as isize) as usize
+    }
+}
+
 extern "C" fn fill_object_fields(object_pointer: usize, value: usize) -> usize {
     let mut object = HeapObject::from_tagged(object_pointer);
     let raw_slice = object.get_fields_mut();
@@ -1004,6 +1018,13 @@ impl Runtime {
             get_string_index as *const u8,
             false,
             2,
+        )?;
+
+        self.add_builtin_function(
+            "beagle.builtin/get_string_length",
+            get_string_length as *const u8,
+            false,
+            1,
         )?;
 
         Ok(())

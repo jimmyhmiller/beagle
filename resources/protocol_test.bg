@@ -5,7 +5,6 @@ import "beagle.builtin" as builtin
 import "beagle.primitive" as primitive
 
 
-
 struct Point {
     x
     y

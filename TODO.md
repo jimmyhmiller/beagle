@@ -109,3 +109,5 @@ error: test failed, to rerun pass `--bin main`
 * I need to resolve this problem where persistent_vector isn't loaded by std and can't be statically imported because of Struct
     * I could add dynamic imports after top level of beagle.core runs
     * I could explicitly add multiple standard things that get loaded
+* I really need to do some design on loops. As I'm trying to do real stuff, I want them
+* I should probably try some project euler problems as small bits of code I need to properly support

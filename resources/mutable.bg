@@ -1,4 +1,4 @@
-namespace "mutable"
+namespace mutable
 
 import "beagle.primitive" as primitive
 
@@ -8,6 +8,7 @@ struct Tokenizer {
 }
 
 fn consume(tokenizer) {
+    // TODO: I don't like that this is primitive here
     primitive/set!(tokenizer.position, tokenizer.position + 1)
 }
 
@@ -17,4 +18,21 @@ fn main() {
         position: 0
     }
 
+    println(tokenizer.input[tokenizer.position])
+    consume(tokenizer)
+    print("<")
+    print(tokenizer.input[tokenizer.position])
+    println(">")
+    consume(tokenizer)
+    println(tokenizer.input[tokenizer.position])
+    println(length(tokenizer.input))
+    "done"
+
 }
+
+// Expect
+// {
+// < >
+// "
+// 18
+// done
