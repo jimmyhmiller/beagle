@@ -31,6 +31,9 @@ fn panic_if_not_array(message, array) {
 fn write_field(array, index, value) {
     panic_if_not_array("write", array)
     if index < 0 || index >= primitive/size(array) {
+        println(array)
+        println(index)
+        println(primitive/size(array))
         primitive/panic("Index out of bounds")
     }
     write_field_unsafe(array, index, value)

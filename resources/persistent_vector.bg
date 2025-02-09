@@ -11,12 +11,6 @@ struct PersistentVector {
     tail
 }
 
-// TODO:
-// This was all failing because of this namespace
-// constant here. My GC was not working correctly with it
-// This was true for both generational and compacting
-// Based on the stuff I did with extra roots
-// I need to make namespace roots more sensible
 let EMPTY = PersistentVector {
     count: 0
     shift: 5

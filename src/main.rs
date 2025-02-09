@@ -300,7 +300,7 @@ cfg_if::cfg_if! {
     }
 }
 
-fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
+fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     if args.program.is_none() {
         println!("No program provided");
         return Ok(());
@@ -313,6 +313,10 @@ fn main_inner(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     let has_expect = args.test && source.contains("// Expect");
 
     let args_clone = args.clone();
+
+    if source.contains("// no-std") {
+        args.no_std = true;
+    }
 
     RUNTIME.get_or_init(|| {
         let allocator = Alloc::new(get_allocate_options(&args_clone.clone()));

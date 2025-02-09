@@ -13,7 +13,7 @@ use libffi::{
 };
 
 use crate::{
-    gc::Allocator,
+    gc::{Allocator, STACK_SIZE},
     get_runtime,
     runtime::{FFIInfo, FFIType, RawPtr, Runtime, SyncWrapper},
     types::{BuiltInTypes, HeapObject},
@@ -197,8 +197,30 @@ extern "C" fn write_field(
     BuiltInTypes::null_value() as usize
 }
 
-pub unsafe extern "C" fn throw_error() -> usize {
-    // let compiler = unsafe { &mut *compiler };
+pub unsafe extern "C" fn throw_error(stack_pointer: usize) -> usize {
+    let runtime = get_runtime().get_mut();
+    let stack_base = runtime.get_stack_base();
+    let stack_end = stack_base;
+    // let current_stack_pointer = current_stack_pointer & !0b111;
+    let distance_till_end = stack_end - stack_pointer;
+    let num_64_till_end = (distance_till_end / 8) + 1;
+    let stack_begin = stack_end - STACK_SIZE;
+    let stack = unsafe { std::slice::from_raw_parts(stack_begin as *const usize, STACK_SIZE / 8) };
+    let stack = &stack[stack.len() - num_64_till_end..];
+
+    for value in stack.iter() {
+        for function in runtime.functions.iter() {
+            let function_size = function.size;
+            let function_start = usize::from(function.pointer);
+            let range = function_start..function_start + function_size;
+            if range.contains(value) {
+                println!("Function: {:?}", function.name);
+            }
+        }
+    }
+
+    // println!("Stack: {:?}", stack);
+
     panic!("Error!");
 }
 
@@ -435,9 +457,6 @@ pub extern "C" fn get_function(
     let runtime = get_runtime().get_mut();
     let library = runtime.get_library(library_struct);
     let function_name = runtime.get_string_literal(function_name);
-    if function_name == "SBBreakpointSetEnabled" {
-        println!("got here");
-    }
 
     // TODO: I should actually cache the closure, but I don't want to do that and mess up gc
     if let Some(ffi_info_id) = runtime.find_ffi_info_by_name(&function_name) {
@@ -843,6 +862,10 @@ extern "C" fn register_extension(
     BuiltInTypes::null_value() as usize
 }
 
+extern "C" fn hash(value: usize) -> usize {
+    BuiltInTypes::Int.tag(value as isize) as usize
+}
+
 impl Runtime {
     pub fn install_builtins(&mut self) -> Result<(), Box<dyn Error>> {
         self.add_builtin_function("beagle.core/println", println_value as *const u8, false, 1)?;
@@ -903,8 +926,8 @@ impl Runtime {
         self.add_builtin_function(
             "beagle.builtin/throw_error",
             throw_error as *const u8,
-            false,
-            0,
+            true,
+            1,
         )?;
 
         self.add_builtin_function("beagle.builtin/assert!", placeholder as *const u8, false, 0)?;
@@ -1026,6 +1049,8 @@ impl Runtime {
             false,
             1,
         )?;
+
+        self.add_builtin_function("beagle.builtin/hash", hash as *const u8, false, 1)?;
 
         Ok(())
     }

@@ -7,7 +7,7 @@ use crate::arm::FmovDirection;
 use crate::ast::IRRange;
 use crate::machine_code::arm_codegen::{Register, X0};
 
-use crate::register_allocation::simple::SimpleRegisterAllocator;
+use crate::register_allocation::linear_scan::LinearScan;
 use crate::types::BuiltInTypes;
 use crate::{arm::LowLevelArm, common::Label};
 
@@ -24,6 +24,7 @@ pub enum Condition {
 #[derive(Debug, Copy, Clone, Encode, Decode)]
 pub enum Value {
     Register(VirtualRegister),
+    Spill(VirtualRegister, usize),
     TaggedConstant(isize),
     RawValue(usize),
     // TODO: Think of a better representation
@@ -31,7 +32,6 @@ pub enum Value {
     Function(usize),
     Pointer(usize),
     Local(usize),
-    FreeVariable(usize),
     True,
     False,
     Null,
@@ -104,8 +104,9 @@ pub enum Instruction {
     AddInt(Value, Value, Value),
     Mul(Value, Value, Value),
     Div(Value, Value, Value),
-    Assign(VirtualRegister, Value),
+    Assign(Value, Value),
     Recurse(Value, Vec<Value>),
+    RecurseWithSaves(Value, Vec<Value>, Vec<Value>),
     TailRecurse(Value, Vec<Value>),
     JumpIf(Label, Condition, Value, Value),
     Jump(Label),
@@ -119,6 +120,7 @@ pub enum Instruction {
     LoadConstant(Value, Value),
     // bool is builtin?
     Call(Value, Value, Vec<Value>, bool),
+    CallWithSaves(Value, Value, Vec<Value>, bool, Vec<Value>),
     HeapLoad(Value, Value, i32),
     HeapLoadReg(Value, Value, Value),
     HeapStore(Value, Value),
@@ -127,7 +129,6 @@ pub enum Instruction {
     RegisterArgument(Value),
     PushStack(Value),
     PopStack(Value),
-    LoadFreeVariable(Value, usize),
     GetStackPointer(Value, Value),
     GetStackPointerImm(Value, isize),
     GetTag(Value, Value),
@@ -251,7 +252,7 @@ macro_rules! replace_register {
     ($x:expr, $old_register:expr, $new_register:expr) => {
         if let Value::Register(register) = $x {
             if *register == $old_register {
-                *register = $new_register;
+                *$x = $new_register;
             }
         }
     };
@@ -336,6 +337,19 @@ impl Instruction {
                 }
                 result
             }
+            Instruction::RecurseWithSaves(a, args, saves) => {
+                let mut result: Vec<VirtualRegister> =
+                    args.iter().filter_map(|arg| get_registers!(arg)).collect();
+                for save in saves {
+                    if let Ok(register) = save.try_into() {
+                        result.push(register);
+                    }
+                }
+                if let Ok(register) = a.try_into() {
+                    result.push(register);
+                }
+                result
+            }
             Instruction::TailRecurse(a, args) => {
                 let mut result: Vec<VirtualRegister> =
                     args.iter().filter_map(|arg| get_registers!(arg)).collect();
@@ -347,6 +361,22 @@ impl Instruction {
             Instruction::Call(a, b, args, _) => {
                 let mut result: Vec<VirtualRegister> =
                     args.iter().filter_map(|arg| get_registers!(arg)).collect();
+                if let Ok(register) = a.try_into() {
+                    result.push(register);
+                }
+                if let Ok(register) = b.try_into() {
+                    result.push(register);
+                }
+                result
+            }
+            Instruction::CallWithSaves(a, b, args, _, saves) => {
+                let mut result: Vec<VirtualRegister> =
+                    args.iter().filter_map(|arg| get_registers!(arg)).collect();
+                for save in saves {
+                    if let Ok(register) = save.try_into() {
+                        result.push(register);
+                    }
+                }
                 if let Ok(register) = a.try_into() {
                     result.push(register);
                 }
@@ -431,9 +461,6 @@ impl Instruction {
             Instruction::PopStack(a) => {
                 get_register!(a)
             }
-            Instruction::LoadFreeVariable(a, _) => {
-                get_register!(a)
-            }
             Instruction::GetStackPointer(a, b) => {
                 get_registers!(a, b)
             }
@@ -455,11 +482,8 @@ impl Instruction {
         }
     }
 
-    pub fn replace_register(
-        &mut self,
-        old_register: VirtualRegister,
-        new_register: VirtualRegister,
-    ) {
+    // TODO: Replace with get_registers_mut
+    pub fn replace_register(&mut self, old_register: VirtualRegister, new_register: Value) {
         match self {
             Instruction::Label(_) => {}
             Instruction::HeapStoreByteOffsetMasked(value, value1, value2, value3, _, _, _) => {
@@ -523,7 +547,6 @@ impl Instruction {
             | Instruction::RegisterArgument(value)
             | Instruction::PushStack(value)
             | Instruction::PopStack(value)
-            | Instruction::LoadFreeVariable(value, _)
             | Instruction::GetStackPointerImm(value, _)
             | Instruction::CurrentStackPosition(value)
             | Instruction::ExtendLifeTime(value) => {
@@ -531,15 +554,22 @@ impl Instruction {
             }
 
             Instruction::Assign(virtual_register, value) => {
-                if *virtual_register == old_register {
-                    *virtual_register = new_register;
-                }
+                replace_register!(virtual_register, old_register, new_register);
                 replace_register!(value, old_register, new_register);
             }
             Instruction::Recurse(value, vec) => {
                 replace_register!(value, old_register, new_register);
                 for value in vec {
                     replace_register!(value, old_register, new_register);
+                }
+            }
+            Instruction::RecurseWithSaves(value, vec, saves) => {
+                replace_register!(value, old_register, new_register);
+                for value in vec {
+                    replace_register!(value, old_register, new_register);
+                }
+                for save in saves {
+                    replace_register!(save, old_register, new_register);
                 }
             }
             Instruction::TailRecurse(value, vec) => {
@@ -553,6 +583,17 @@ impl Instruction {
                 replace_register!(value1, old_register, new_register);
                 for value in vec {
                     replace_register!(value, old_register, new_register);
+                }
+            }
+
+            Instruction::CallWithSaves(value, value1, vec, _, saves) => {
+                replace_register!(value, old_register, new_register);
+                replace_register!(value1, old_register, new_register);
+                for value in vec {
+                    replace_register!(value, old_register, new_register);
+                }
+                for save in saves {
+                    replace_register!(save, old_register, new_register);
                 }
             }
 
@@ -920,7 +961,7 @@ impl Ir {
         A: Into<Value>,
     {
         self.instructions
-            .push(Instruction::Assign(dest, val.into()));
+            .push(Instruction::Assign(dest.into(), val.into()));
     }
 
     pub fn assign_new_force<A>(&mut self, val: A) -> VirtualRegister
@@ -932,7 +973,8 @@ impl Ir {
         // like it is for atomics
         let val = val.into();
         let register = self.next_register(None, false);
-        self.instructions.push(Instruction::Assign(register, val));
+        self.instructions
+            .push(Instruction::Assign(Value::Register(register), val));
         register
     }
 
@@ -945,7 +987,8 @@ impl Ir {
             return register;
         }
         let register = self.next_register(None, false);
-        self.instructions.push(Instruction::Assign(register, val));
+        self.instructions
+            .push(Instruction::Assign(register.into(), val));
         register
     }
 
@@ -975,7 +1018,8 @@ impl Ir {
 
     pub fn compile(&mut self, mut lang: LowLevelArm, error_fn_pointer: usize) -> LowLevelArm {
         debug_assert!(!self.ir_range_to_token_range.is_empty());
-        // println!("{:#?}", self.instructions);
+
+        // TODO(Spill): I need to add spills here
         lang.set_max_locals(self.num_locals);
         // lang.breakpoint();
 
@@ -996,18 +1040,25 @@ impl Ir {
 
         let exit = lang.new_label("exit");
 
-        let mut simple_register_allocator = SimpleRegisterAllocator::new(
-            self.instructions.clone(),
-            self.num_locals,
-            self.label_locations.clone(),
-            self.ir_range_to_token_range.clone(),
-        );
-        simple_register_allocator.simplify_registers();
-        self.instructions = simple_register_allocator.resulting_instructions.clone();
-        self.num_locals = simple_register_allocator.max_num_locals;
-        self.label_locations = simple_register_allocator.label_locations.clone();
-        self.ir_range_to_token_range = simple_register_allocator.ir_range_to_token_range.clone();
+        let mut linear_scan = LinearScan::new(self.instructions.clone());
+        linear_scan.allocate();
+        self.instructions = linear_scan.instructions.clone();
+        let num_spills = linear_scan.location.len();
+        self.num_locals += num_spills;
 
+        // let mut simple_register_allocator = SimpleRegisterAllocator::new(
+        //     self.instructions.clone(),
+        //     self.num_locals,
+        //     self.label_locations.clone(),
+        //     self.ir_range_to_token_range.clone(),
+        // );
+        // simple_register_allocator.simplify_registers();
+        // self.instructions = simple_register_allocator.resulting_instructions.clone();
+        // self.num_locals = simple_register_allocator.max_num_locals;
+        // self.label_locations = simple_register_allocator.label_locations.clone();
+        // self.ir_range_to_token_range = simple_register_allocator.ir_range_to_token_range.clone();
+
+        // println!("{}", self.instructions.pretty_print());
         self.compile_instructions(&mut lang, exit, before_prelude, after_prelude);
 
         lang.write_label(exit);
@@ -1022,6 +1073,31 @@ impl Ir {
         lang.get_stack_pointer_imm(X0, 0);
         lang.call(register);
         lang
+    }
+
+    pub fn value_to_register(&self, value: &Value, lang: &mut LowLevelArm) -> Register {
+        match value {
+            Value::Register(register) => Register::from_index(register.index),
+            Value::Spill(_register, index) => {
+                let temp_reg = lang.temporary_register();
+                lang.load_local(temp_reg, (*index + self.num_locals) as i32);
+                temp_reg
+            }
+            _ => panic!("Expected register"),
+        }
+    }
+
+    fn store_spill(&self, dest: Register, dest_spill: Option<usize>, lang: &mut LowLevelArm) {
+        if let Some(dest_spill) = dest_spill {
+            lang.store_local(dest, (dest_spill + self.num_locals) as i32);
+        }
+    }
+
+    fn dest_spill(&self, dest: &Value) -> Option<usize> {
+        match dest {
+            Value::Spill(_, index) => Some(*index),
+            _ => None,
+        }
     }
 
     fn compile_instructions(
@@ -1053,9 +1129,10 @@ impl Ir {
                 Instruction::Label(_) => {}
                 Instruction::ExtendLifeTime(_) => {}
                 Instruction::Sub(dest, a, b) => {
-                    let a = a.try_into().unwrap();
-                    let b = b.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let a = self.value_to_register(a, lang);
+                    let b = self.value_to_register(b, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
 
                     lang.guard_integer(dest, a, self.after_return);
                     lang.guard_integer(dest, b, self.after_return);
@@ -1066,18 +1143,22 @@ impl Ir {
                     lang.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
                     lang.shift_left_imm(a, a, BuiltInTypes::tag_size());
                     lang.shift_left_imm(b, b, BuiltInTypes::tag_size());
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::AddInt(dest, a, b) => {
-                    let a = a.try_into().unwrap();
-                    let b = b.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let a = self.value_to_register(a, lang);
+                    let b = self.value_to_register(b, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
 
                     lang.add(dest, a, b);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::Mul(dest, a, b) => {
-                    let a = a.try_into().unwrap();
-                    let b = b.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let a = self.value_to_register(a, lang);
+                    let b = self.value_to_register(b, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
 
                     // lang.breakpoint();
                     lang.guard_integer(dest, a, self.after_return);
@@ -1089,11 +1170,13 @@ impl Ir {
                     lang.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
                     lang.shift_left_imm(a, a, BuiltInTypes::tag_size());
                     lang.shift_left_imm(b, b, BuiltInTypes::tag_size());
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::Div(dest, a, b) => {
-                    let a = a.try_into().unwrap();
-                    let b = b.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let a = self.value_to_register(a, lang);
+                    let b = self.value_to_register(b, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
 
                     lang.guard_integer(dest, a, self.after_return);
                     lang.guard_integer(dest, b, self.after_return);
@@ -1104,29 +1187,37 @@ impl Ir {
                     lang.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
                     lang.shift_left_imm(a, a, BuiltInTypes::tag_size());
                     lang.shift_left_imm(b, b, BuiltInTypes::tag_size());
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::ShiftRightImm(dest, value, shift) => {
-                    let value = value.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let value = self.value_to_register(value, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
 
                     lang.guard_integer(dest, value, self.after_return);
 
                     lang.shift_right_imm(dest, value, *shift);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::ShiftRightImmRaw(dest, value, shift) => {
-                    let value = value.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let value = self.value_to_register(value, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.shift_right_imm(dest, value, *shift);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::AndImm(dest, value, imm) => {
-                    let value = value.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let value = self.value_to_register(value, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.and_imm(dest, value, *imm);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::ShiftLeft(dest, a, b) => {
-                    let a = a.try_into().unwrap();
-                    let b = b.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let a = self.value_to_register(a, lang);
+                    let b = self.value_to_register(b, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
 
                     lang.guard_integer(dest, a, self.after_return);
                     lang.guard_integer(dest, b, self.after_return);
@@ -1137,11 +1228,13 @@ impl Ir {
                     lang.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
                     lang.shift_left_imm(a, a, BuiltInTypes::tag_size());
                     lang.shift_left_imm(b, b, BuiltInTypes::tag_size());
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::ShiftRight(dest, a, b) => {
-                    let a = a.try_into().unwrap();
-                    let b = b.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let a = self.value_to_register(a, lang);
+                    let b = self.value_to_register(b, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
 
                     lang.guard_integer(dest, a, self.after_return);
                     lang.guard_integer(dest, b, self.after_return);
@@ -1152,11 +1245,13 @@ impl Ir {
                     lang.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
                     lang.shift_left_imm(a, a, BuiltInTypes::tag_size());
                     lang.shift_left_imm(b, b, BuiltInTypes::tag_size());
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::ShiftRightZero(dest, a, b) => {
-                    let a = a.try_into().unwrap();
-                    let b = b.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let a = self.value_to_register(a, lang);
+                    let b = self.value_to_register(b, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
 
                     lang.guard_integer(dest, a, self.after_return);
                     lang.guard_integer(dest, b, self.after_return);
@@ -1168,171 +1263,231 @@ impl Ir {
                     lang.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
                     lang.shift_left_imm(a, a, BuiltInTypes::tag_size());
                     lang.shift_left_imm(b, b, BuiltInTypes::tag_size());
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::And(dest, a, b) => {
-                    let a = a.try_into().unwrap();
-                    let b = b.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let a = self.value_to_register(a, lang);
+                    let b = self.value_to_register(b, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.and(dest, a, b);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::Or(dest, a, b) => {
-                    let a = a.try_into().unwrap();
-                    let b = b.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let a = self.value_to_register(a, lang);
+                    let b = self.value_to_register(b, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.or(dest, a, b);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::Xor(dest, a, b) => {
-                    let a = a.try_into().unwrap();
-                    let b = b.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let a = self.value_to_register(a, lang);
+                    let b = self.value_to_register(b, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.xor(dest, a, b);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::GuardInt(dest, value, label) => {
-                    let value = value.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let value = self.value_to_register(value, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.guard_integer(dest, value, ir_label_to_lang_label[label]);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::GuardFloat(dest, value, label) => {
-                    let value = value.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let value = self.value_to_register(value, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.guard_float(dest, value, ir_label_to_lang_label[label]);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::FmovGeneralToFloat(dest, src) => {
-                    let src = src.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let src = self.value_to_register(src, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.fmov(dest, src, FmovDirection::FromGeneralToFloat);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::FmovFloatToGeneral(dest, src) => {
-                    let src = src.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let src = self.value_to_register(src, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.fmov(dest, src, FmovDirection::FromFloatToGeneral);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::AddFloat(dest, a, b) => {
-                    let a = a.try_into().unwrap();
-                    let b = b.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let a = self.value_to_register(a, lang);
+                    let b = self.value_to_register(b, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.fadd(dest, a, b);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::SubFloat(dest, a, b) => {
-                    let a = a.try_into().unwrap();
-                    let b = b.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let a = self.value_to_register(a, lang);
+                    let b = self.value_to_register(b, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.fsub(dest, a, b);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::MulFloat(dest, a, b) => {
-                    let a = a.try_into().unwrap();
-                    let b = b.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let a = self.value_to_register(a, lang);
+                    let b = self.value_to_register(b, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.fmul(dest, a, b);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::DivFloat(dest, a, b) => {
-                    let a = a.try_into().unwrap();
-                    let b = b.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let a = self.value_to_register(a, lang);
+                    let b = self.value_to_register(b, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.fdiv(dest, a, b);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::Assign(dest, val) => {
-                    let dest = dest.try_into().unwrap();
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     match val {
-                        Value::Register(virt_reg) => {
-                            let register = virt_reg.try_into().unwrap();
+                        Value::Register(_virt_reg) => {
+                            let register = self.value_to_register(val, lang);
                             lang.mov_reg(dest, register);
+                            self.store_spill(dest, dest_spill, lang);
                         }
                         Value::TaggedConstant(i) => {
                             let tagged = BuiltInTypes::construct_int(*i);
                             lang.mov_64(dest, tagged);
+                            self.store_spill(dest, dest_spill, lang);
                         }
                         Value::StringConstantPtr(ptr) => {
                             let tagged = BuiltInTypes::String.tag(*ptr as isize);
                             lang.mov_64(dest, tagged);
+                            self.store_spill(dest, dest_spill, lang);
                         }
                         Value::Function(id) => {
                             let function = BuiltInTypes::Function.tag(*id as isize);
                             lang.mov_64(dest, function);
+                            self.store_spill(dest, dest_spill, lang);
                         }
                         Value::Pointer(ptr) => {
                             lang.mov_64(dest, *ptr as isize);
+                            self.store_spill(dest, dest_spill, lang);
                         }
                         Value::RawValue(value) => {
                             lang.mov_64(dest, *value as isize);
+                            self.store_spill(dest, dest_spill, lang);
                         }
                         Value::True => {
                             lang.mov_64(dest, BuiltInTypes::construct_boolean(true));
+                            self.store_spill(dest, dest_spill, lang);
                         }
                         Value::False => {
                             lang.mov_64(dest, BuiltInTypes::construct_boolean(false));
+                            self.store_spill(dest, dest_spill, lang);
                         }
                         Value::Local(local) => lang.load_local(dest, *local as i32),
-                        Value::FreeVariable(free_variable) => {
-                            // The idea here is that I would store free variables after the locals on the stack
-                            // Need to make sure I preserve that space
-                            // and that at this point in the program I know how many locals there are.
-                            lang.load_from_stack(
-                                dest,
-                                -((*free_variable + self.num_locals + 1) as i32),
-                            );
-                        }
                         Value::Null => {
                             lang.mov_64(dest, 0b111_isize);
+                            self.store_spill(dest, dest_spill, lang);
                         }
+                        Value::Spill(_register, _index) => todo!(),
                     }
                 }
                 Instruction::LoadConstant(dest, val) => {
-                    let val = val.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let val = self.value_to_register(val, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.mov_reg(dest, val);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::LoadLocal(dest, local) => {
-                    let dest = dest.try_into().unwrap();
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     let local = local.as_local();
                     lang.load_local(dest, local as i32);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::StoreLocal(dest, value) => {
-                    let value = value.try_into().unwrap();
+                    let value = self.value_to_register(value, lang);
                     lang.store_local(value, dest.as_local() as i32);
                 }
                 Instruction::LoadTrue(dest) => {
-                    let dest = dest.try_into().unwrap();
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.mov_64(dest, BuiltInTypes::construct_boolean(true));
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::LoadFalse(dest) => {
-                    let dest = dest.try_into().unwrap();
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.mov_64(dest, BuiltInTypes::construct_boolean(false));
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::StoreFloat(dest, temp, value) => {
-                    let dest = dest.try_into().unwrap();
-                    let temp = temp.try_into().unwrap();
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
+                    let temp = self.value_to_register(temp, lang);
                     lang.mov_64(temp, value.to_bits() as isize);
                     // The header is the first field, so offset is 1
-                    lang.store_on_heap(dest, temp, 1)
+                    lang.store_on_heap(dest, temp, 1);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::Recurse(dest, args) => {
                     // TODO: Clean up duplication
                     for (index, arg) in args.iter().enumerate().rev() {
-                        let arg = arg.try_into().unwrap();
+                        let arg = self.value_to_register(arg, lang);
                         lang.mov_reg(lang.arg(index as u8), arg);
                     }
                     lang.recurse(before_prelude);
-                    let dest = dest.try_into().unwrap();
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.mov_reg(dest, lang.ret_reg());
+                    self.store_spill(dest, dest_spill, lang);
+                }
+                Instruction::RecurseWithSaves(dest, args, saves) => {
+                    // TODO: Clean up duplication
+                    for save in saves.iter() {
+                        let save = self.value_to_register(save, lang);
+                        lang.push_to_stack(save);
+                    }
+                    for (index, arg) in args.iter().enumerate().rev() {
+                        let arg = self.value_to_register(arg, lang);
+                        lang.mov_reg(lang.arg(index as u8), arg);
+                    }
+                    lang.recurse(before_prelude);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
+                    lang.mov_reg(dest, lang.ret_reg());
+                    self.store_spill(dest, dest_spill, lang);
+
+                    for save in saves.iter().rev() {
+                        let save = self.value_to_register(save, lang);
+                        lang.pop_from_stack(save);
+                    }
                 }
                 Instruction::TailRecurse(dest, args) => {
                     for (index, arg) in args.iter().enumerate().rev() {
-                        let arg = arg.try_into().unwrap();
+                        let arg = self.value_to_register(arg, lang);
                         lang.mov_reg(lang.arg(index as u8), arg);
                     }
                     lang.jump(after_prelude);
-                    let dest = dest.try_into().unwrap();
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.mov_reg(dest, lang.ret_reg());
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::Call(dest, function, args, builtin) => {
                     for (arg_index, arg) in args.iter().enumerate().rev() {
-                        let arg = arg.try_into().unwrap();
+                        let arg = self.value_to_register(arg, lang);
                         lang.mov_reg(lang.arg(arg_index as u8), arg);
                     }
                     // TODO: I am not actually checking any tags here
                     // or unmasking or anything. Just straight up calling it
-                    let function = function.try_into().unwrap();
+                    let function = self.value_to_register(function, lang);
                     lang.shift_right_imm(function, function, BuiltInTypes::tag_size());
                     if *builtin {
                         lang.call_builtin(function);
@@ -1340,24 +1495,61 @@ impl Ir {
                         lang.call(function);
                     }
 
-                    let dest = dest.try_into().unwrap();
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.mov_reg(dest, lang.ret_reg());
+                    self.store_spill(dest, dest_spill, lang);
+                }
+                Instruction::CallWithSaves(dest, function, args, builtin, saves) => {
+                    for save in saves.iter() {
+                        let save = self.value_to_register(save, lang);
+                        lang.push_to_stack(save);
+                    }
+
+                    // TODO: Deduplicate copied from save
+                    for (arg_index, arg) in args.iter().enumerate().rev() {
+                        let arg = self.value_to_register(arg, lang);
+                        lang.mov_reg(lang.arg(arg_index as u8), arg);
+                    }
+                    // TODO: I am not actually checking any tags here
+                    // or unmasking or anything. Just straight up calling it
+                    let function = self.value_to_register(function, lang);
+                    lang.shift_right_imm(function, function, BuiltInTypes::tag_size());
+                    if *builtin {
+                        lang.call_builtin(function);
+                    } else {
+                        lang.call(function);
+                    }
+
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
+                    lang.mov_reg(dest, lang.ret_reg());
+                    self.store_spill(dest, dest_spill, lang);
+
+                    for save in saves.iter().rev() {
+                        let save = self.value_to_register(save, lang);
+                        lang.pop_from_stack(save);
+                    }
                 }
                 Instruction::Compare(dest, a, b, condition) => {
-                    let a = a.try_into().unwrap();
-                    let b = b.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let a = self.value_to_register(a, lang);
+                    let b = self.value_to_register(b, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.compare_bool(*condition, dest, a, b);
+                    self.store_spill(dest, dest_spill, lang);
                 }
-                Instruction::Tag(destination, a, b) => {
-                    let a = a.try_into().unwrap();
-                    let b = b.try_into().unwrap();
-                    let dest = destination.try_into().unwrap();
+                Instruction::Tag(dest, a, b) => {
+                    let a = self.value_to_register(a, lang);
+                    let b = self.value_to_register(b, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.tag_value(dest, a, b);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::JumpIf(label, condition, a, b) => {
-                    let a = a.try_into().unwrap();
-                    let b = b.try_into().unwrap();
+                    let a = self.value_to_register(a, lang);
+                    let b = self.value_to_register(b, lang);
                     let label = ir_label_to_lang_label.get(label).unwrap();
                     lang.compare(a, b);
                     match condition {
@@ -1374,8 +1566,8 @@ impl Ir {
                     lang.jump(*label);
                 }
                 Instruction::Ret(value) => match value {
-                    Value::Register(virt_reg) => {
-                        let register = virt_reg.try_into().unwrap();
+                    Value::Register(_virt_reg) => {
+                        let register = self.value_to_register(value, lang);
                         if register == lang.ret_reg() {
                             lang.jump(exit);
                         } else {
@@ -1418,50 +1610,53 @@ impl Ir {
                         lang.load_local(lang.ret_reg(), *local as i32);
                         lang.jump(exit);
                     }
-                    Value::FreeVariable(free_variable) => {
-                        lang.load_from_stack(
-                            lang.ret_reg(),
-                            -((*free_variable + self.num_locals + 1) as i32),
-                        );
-                        lang.jump(exit);
-                    }
+                    Value::Spill(_register, _index) => todo!(),
                 },
                 Instruction::HeapLoad(dest, ptr, offset) => {
-                    let ptr = ptr.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let ptr = self.value_to_register(ptr, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.load_from_heap(dest, ptr, *offset);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::AtomicLoad(dest, ptr) => {
-                    let ptr = ptr.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    // TODO: Does the spill work properly here?
+                    let ptr = self.value_to_register(ptr, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.atomic_load(dest, ptr);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::AtomicStore(ptr, val) => {
-                    let ptr = ptr.try_into().unwrap();
-                    let val = val.try_into().unwrap();
+                    let ptr = self.value_to_register(ptr, lang);
+                    let val = self.value_to_register(val, lang);
                     lang.atomic_store(ptr, val);
                 }
                 Instruction::CompareAndSwap(dest, ptr, val) => {
-                    let ptr = ptr.try_into().unwrap();
-                    let val = val.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let ptr = self.value_to_register(ptr, lang);
+                    let val = self.value_to_register(val, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.compare_and_swap(dest, ptr, val);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::HeapLoadReg(dest, ptr, offset) => {
-                    let ptr = ptr.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
-                    let offset = offset.try_into().unwrap();
+                    let ptr = self.value_to_register(ptr, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
+                    let offset = self.value_to_register(offset, lang);
                     lang.load_from_heap_with_reg_offset(dest, ptr, offset);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::HeapStore(ptr, val) => {
-                    let ptr = ptr.try_into().unwrap();
-                    let val = val.try_into().unwrap();
+                    let ptr = self.value_to_register(ptr, lang);
+                    let val = self.value_to_register(val, lang);
                     lang.store_on_heap(ptr, val, 0);
                 }
 
                 Instruction::HeapStoreOffset(ptr, val, offset) => {
-                    let ptr = ptr.try_into().unwrap();
-                    let val = val.try_into().unwrap();
+                    let ptr = self.value_to_register(ptr, lang);
+                    let val = self.value_to_register(val, lang);
                     lang.store_on_heap(ptr, val, *offset as i32);
                 }
                 Instruction::HeapStoreByteOffsetMasked(
@@ -1476,12 +1671,12 @@ impl Ir {
                     // We are trying to write to a specific byte in a word
                     // We need to load the word, mask out the byte, or in the new value
                     // and then store it back
-                    let ptr = ptr.try_into().unwrap();
-                    let val = val.try_into().unwrap();
-                    let dest = temp1.try_into().unwrap();
+                    let ptr = self.value_to_register(ptr, lang);
+                    let val = self.value_to_register(val, lang);
+                    let dest = self.value_to_register(temp1, lang);
                     // lang.breakpoint();
                     lang.load_from_heap(dest, ptr, *offset as i32);
-                    let mask_register = temp2.try_into().unwrap();
+                    let mask_register = self.value_to_register(temp2, lang);
                     lang.mov_64(mask_register, *mask as isize);
                     lang.and(dest, dest, mask_register);
                     lang.free_register(mask_register);
@@ -1491,46 +1686,52 @@ impl Ir {
                     lang.free_register(dest);
                 }
                 Instruction::HeapStoreOffsetReg(ptr, val, offset) => {
-                    let ptr = ptr.try_into().unwrap();
-                    let val = val.try_into().unwrap();
-                    let offset = offset.try_into().unwrap();
+                    let ptr = self.value_to_register(ptr, lang);
+                    let val = self.value_to_register(val, lang);
+                    let offset = self.value_to_register(offset, lang);
                     lang.store_to_heap_with_reg_offset(ptr, val, offset);
                 }
                 Instruction::RegisterArgument(_arg) => {}
                 Instruction::PushStack(val) => {
-                    let val = val.try_into().unwrap();
+                    let val = self.value_to_register(val, lang);
                     lang.push_to_stack(val);
                 }
                 Instruction::PopStack(val) => {
-                    let val = val.try_into().unwrap();
+                    let val = self.value_to_register(val, lang);
                     lang.pop_from_stack(val);
                 }
-                Instruction::LoadFreeVariable(dest, free_variable) => {
-                    let dest = dest.try_into().unwrap();
-                    lang.load_from_stack(dest, (*free_variable + self.num_locals) as i32);
-                }
                 Instruction::GetStackPointer(dest, offset) => {
-                    let dest = dest.try_into().unwrap();
-                    let offset = offset.try_into().unwrap();
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
+                    let offset = self.value_to_register(offset, lang);
                     lang.get_stack_pointer(dest, offset);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::GetStackPointerImm(dest, offset) => {
-                    let dest = dest.try_into().unwrap();
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.get_stack_pointer_imm(dest, *offset);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::CurrentStackPosition(dest) => {
-                    let dest = dest.try_into().unwrap();
-                    lang.get_current_stack_position(dest)
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
+                    lang.get_current_stack_position(dest);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::GetTag(dest, value) => {
-                    let value = value.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let value = self.value_to_register(value, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.get_tag(dest, value);
+                    self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::Untag(dest, value) => {
-                    let value = value.try_into().unwrap();
-                    let dest = dest.try_into().unwrap();
+                    let value = self.value_to_register(value, lang);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
                     lang.shift_right_imm(dest, value, BuiltInTypes::tag_size());
+                    self.store_spill(dest, dest_spill, lang);
                 }
             }
             let end_machine_code = lang.current_position();
@@ -1712,13 +1913,6 @@ impl Ir {
     pub fn register_argument(&mut self, reg: VirtualRegister) {
         self.instructions
             .push(Instruction::RegisterArgument(reg.into()));
-    }
-
-    pub fn load_free_variable(&mut self, reg: VirtualRegister, index: usize) {
-        self.instructions.push(Instruction::LoadLocal(
-            reg.into(),
-            Value::FreeVariable(index),
-        ));
     }
 
     pub fn get_stack_pointer(&mut self, offset: Value) -> Value {

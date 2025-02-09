@@ -197,7 +197,7 @@ fn stripslashes(s: &str) -> String {
                 } else {
                     c
                 }
-            },
+            }
             c => c,
         });
     }
@@ -496,7 +496,7 @@ impl Tokenizer {
         while !self.at_end(input_bytes) {
             if let Some(token) = self.parse_single(input_bytes) {
                 result.push(token);
-                token_line_column_map.push((self.position, self.column));
+                token_line_column_map.push((self.line, self.column));
             }
         }
         self.position = 0;
@@ -1496,6 +1496,18 @@ impl Parser {
         if self.is_else() {
             self.consume();
             self.skip_whitespace();
+            if self.is_if() {
+                self.consume();
+                let else_ = vec![self.parse_if()];
+                let end_position = self.position;
+                return Ast::If {
+                    condition,
+                    then,
+                    else_,
+                    token_range: TokenRange::new(start_position, end_position),
+                };
+            }
+            self.skip_whitespace();
             let else_ = self.parse_block();
             let end_position = self.position;
             Ast::If {
@@ -1518,6 +1530,13 @@ impl Parser {
     fn is_else(&self) -> bool {
         match self.current_token() {
             Token::Else => true,
+            _ => false,
+        }
+    }
+
+    fn is_if(&self) -> bool {
+        match self.current_token() {
+            Token::If => true,
             _ => false,
         }
     }
