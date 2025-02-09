@@ -2,8 +2,8 @@ use crate::{
     builtins::debugger,
     machine_code::arm_codegen::{
         ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector,
-        StrImmGenSelector, SP, X0, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29, X30,
-        ZERO_REGISTER,
+        StrImmGenSelector, SP, X0, X10, X11, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29,
+        X30, X9, ZERO_REGISTER,
     },
     types::BuiltInTypes,
 };
@@ -477,6 +477,8 @@ pub struct LowLevelArm {
     // This means, we should be able to walk the stack
     // and figure out where to look for potential roots
     pub stack_map: HashMap<usize, usize>,
+    free_temporary_registers: Vec<Register>,
+    canonical_temporary_registers: Vec<Register>,
 }
 
 impl Default for LowLevelArm {
@@ -487,15 +489,18 @@ impl Default for LowLevelArm {
 
 impl LowLevelArm {
     pub fn new() -> Self {
-        // https://github.com/apple/swift/blob/main/docs/ABI/CallConvSummary.rst#arm64
+        // https://github.com/swiftlang/swift/blob/716cc5cedf0b8638225bebf86bddc6a1295388f4/docs/ABI/CallingConventionSummary.rst#arm64
         let canonical_volatile_registers = vec![X19, X20, X21, X22, X23, X24, X25, X26, X27, X28];
+        let temporary_registers = vec![X9, X10, X11];
         LowLevelArm {
             instructions: vec![],
             label_locations: HashMap::new(),
             label_index: 0,
             labels: vec![],
             canonical_volatile_registers: canonical_volatile_registers.clone(),
+            canonical_temporary_registers: temporary_registers.clone(),
             free_volatile_registers: canonical_volatile_registers,
+            free_temporary_registers: temporary_registers,
             allocated_volatile_registers: vec![],
             stack_size: 0,
             max_stack_size: 0,
@@ -915,6 +920,21 @@ impl LowLevelArm {
         self.allocated_volatile_registers.push(next_register);
         next_register
     }
+
+    pub fn temporary_register(&mut self) -> Register {
+        let next_register = self
+            .free_temporary_registers
+            .pop()
+            .expect("No free registers!");
+        self.free_temporary_registers.push(next_register);
+        next_register
+    }
+
+    pub fn clear_temporary_registers(&mut self) {
+        // TODO: Just use an index. this is wasteful
+        self.free_temporary_registers = self.canonical_temporary_registers.clone();
+    }
+
     pub fn free_register(&mut self, reg: Register) {
         // TODO: Properly fix the fact that the zero
         // register is being put in the volatile list

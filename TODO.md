@@ -111,3 +111,5 @@ error: test failed, to rerun pass `--bin main`
     * I could explicitly add multiple standard things that get loaded
 * I really need to do some design on loops. As I'm trying to do real stuff, I want them
 * I should probably try some project euler problems as small bits of code I need to properly support
+* I have enough information I should be able to give exact code that causes any error, even crashes
+* I should also be able to step by lines in my debugger

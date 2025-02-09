@@ -44,7 +44,7 @@ fn main() {
     let thing = Thing {
         a: 1,
         b: 2
-    }   
+    }
 
     let tree = bottomUpTree(2)
 

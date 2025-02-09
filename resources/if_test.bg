@@ -75,6 +75,53 @@ fn main() {
         13
     }
     println(y)
+
+    let x = if false {
+        false
+    } else if true {
+        14
+    } else {
+        false
+    }
+    println(x)
+
+    let x = if false {
+        println("not here")
+        false
+    } else if false {
+        println("not here")
+        false
+    } else {
+        15
+    }
+    println(x)
+
+    let x = if false {
+        println("not here")
+        false
+    } else if false {
+        println("not here")
+        false
+    } else if false {
+        println("not here")
+        false
+    } else {
+        16
+    }
+    println(x)
+
+    let x = if true {
+        17
+    } else if false {
+        println("not here")
+        false
+    } else if false {
+        println("not here")
+        false
+    } else {
+        println("not here")
+    }
+    println(x)
     "done"
 }
 
@@ -92,4 +139,8 @@ fn main() {
 // 11
 // 12
 // 13
+// 14
+// 15
+// 16
+// 17
 // done

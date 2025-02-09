@@ -22,10 +22,10 @@ impl PrettyPrint for Value {
             Value::StringConstantPtr(value) => format!("string_constant_ptr{}", value),
             Value::Local(value) => format!("local{}", value),
             Value::Function(f) => format!("function{}", f),
-            Value::FreeVariable(f) => format!("free_variable{}", f),
             Value::True => "true".to_string(),
             Value::False => "false".to_string(),
             Value::Null => "null".to_string(),
+            Value::Spill(value, index) => format!("spill({}, {})", value.pretty_print(), index),
         }
     }
 }
@@ -120,6 +120,14 @@ impl PrettyPrint for Instruction {
             Instruction::Recurse(value, vec) => {
                 format!("recurse {}, {}", value.pretty_print(), vec.pretty_print())
             }
+            Instruction::RecurseWithSaves(value, vec, saves) => {
+                format!(
+                    "recurse_with_saves {}, {}, {}",
+                    value.pretty_print(),
+                    vec.pretty_print(),
+                    saves.pretty_print()
+                )
+            }
             Instruction::TailRecurse(value, vec) => {
                 format!(
                     "tail_recurse {}, {}",
@@ -181,6 +189,15 @@ impl PrettyPrint for Instruction {
                     vec.pretty_print()
                 )
             }
+            Instruction::CallWithSaves(value, value1, vec, _, saves) => {
+                format!(
+                    "{} <- call_with_saves {}, {}, {}",
+                    value.pretty_print(),
+                    value1.pretty_print(),
+                    vec.pretty_print(),
+                    saves.pretty_print()
+                )
+            }
             Instruction::HeapLoad(value, value1, _) => {
                 format!(
                     "heap_load {}, {}, _",
@@ -225,9 +242,6 @@ impl PrettyPrint for Instruction {
             }
             Instruction::PopStack(value) => {
                 format!("pop_stack {}", value.pretty_print())
-            }
-            Instruction::LoadFreeVariable(value, _) => {
-                format!("load_free_variable {}, _", value.pretty_print())
             }
             Instruction::GetStackPointer(value, value1) => {
                 format!(

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+use core::panic;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::{
@@ -123,7 +125,7 @@ impl SimpleRegisterAllocator {
                 }
 
                 if let Some(allocated_register) = self.allocated_registers.get(&register) {
-                    instruction.replace_register(register, *allocated_register);
+                    instruction.replace_register(register, Value::Register(*allocated_register));
                 }
                 let lifetime = self.lifetimes.get(&register).cloned();
 
@@ -138,7 +140,8 @@ impl SimpleRegisterAllocator {
                                     is_physical: true,
                                 };
                                 self.allocated_registers.insert(register, new_register);
-                                instruction.replace_register(register, new_register);
+                                instruction
+                                    .replace_register(register, Value::Register(new_register));
                                 self.multiplex_lifetime
                                     .entry(new_register)
                                     .or_default()
@@ -153,7 +156,8 @@ impl SimpleRegisterAllocator {
                                 break;
                             } else if let Some(new_register) = self.get_free_register() {
                                 self.allocated_registers.insert(register, new_register);
-                                instruction.replace_register(register, new_register);
+                                instruction
+                                    .replace_register(register, Value::Register(new_register));
                                 self.multiplex_lifetime
                                     .entry(new_register)
                                     .or_default()
@@ -263,11 +267,14 @@ impl SimpleRegisterAllocator {
                 if let Instruction::Assign(new_register, _) =
                     self.resulting_instructions.last().unwrap().clone()
                 {
+                    let Value::Register(register) = register else {
+                        panic!("Not a register");
+                    };
                     if let Some(local_offset) = spilled_registers.get(&register) {
                         self.extend_token_range(self.resulting_instructions.len());
                         self.resulting_instructions.push(Instruction::StoreLocal(
                             Value::Local(*local_offset),
-                            Value::Register(new_register),
+                            new_register,
                         ));
                     }
                 }

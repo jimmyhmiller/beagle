@@ -1,5 +1,6 @@
 namespace math_test
 
+// no-std
 
 fn main() {
     println(5 + 3);

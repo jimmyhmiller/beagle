@@ -1,0 +1,608 @@
+namespace persistent_map
+import "beagle.builtin" as builtin
+import "beagle.primitive" as primitive
+import "raw_mutable_array" as array
+
+struct persistent_map_struct {
+    count
+    root
+}
+
+struct collision_children_ctx {
+    node
+    sub_index1
+    sub_index2
+    shift
+    key
+    val
+    node_hash
+    added_leaf_box
+}
+
+let empty = persistent_map_struct {
+    count: 0
+    root: null
+}
+
+fn map() {
+    empty
+}
+
+fn count(pm) {
+    pm.count
+}
+
+fn mask(h, s) {
+    (h >>> s) & 31
+}
+
+fn bitpos(x) {
+    1 << x
+}
+
+fn is_bitmap_indexed_node(n) {
+    if n == null {
+        false
+    } else {
+        if array/is_array(n) {
+            let t = array/read_field(n, 0)
+            t == 0
+        } else {
+            false
+        }
+    }
+}
+
+fn is_collision_node(n) {
+    if n == null {
+        false
+    } else {
+        if array/is_array(n) {
+            let t = array/read_field(n, 0)
+            t == 1
+        } else {
+            false
+        }
+    }
+}
+
+// --- structs for partial fields could go here, but arrays are used for the variable portion ---
+
+fn new_bitmap_indexed_node(bm, child_arr) {
+    let ccount = array/count(child_arr)
+    let node_arr = array/new_array(2 + ccount)
+
+    array/write_field(node_arr, 0, 0)
+    array/write_field(node_arr, 1, bm)
+    let i = 0
+    let copy_result = copy_children(node_arr, child_arr, i)
+    println("copy_result")
+    println(copy_result)
+    copy_result
+}
+
+fn copy_children(node_arr, child_arr, i) {
+    println("copy_children")
+    println(node_arr)
+    println(child_arr)
+    println(i)
+    if i == array/count(child_arr) {
+        node_arr
+    } else {
+        array/write_field(node_arr, 2 + i, array/read_field(child_arr, i))
+        copy_children(node_arr, child_arr, i + 1)
+    }
+}
+
+fn new_collision_node(h, c, kv_arr) {
+    let needed = 3 + (2 * c)
+    let node_arr = array/new_array(needed)
+    array/write_field(node_arr, 0, 1)
+    array/write_field(node_arr, 1, h)
+    array/write_field(node_arr, 2, c)
+    copy_collision_pairs(node_arr, kv_arr, 0)
+}
+
+fn copy_collision_pairs(node_arr, kv_arr, idx) {
+    if idx == array/count(kv_arr) {
+        node_arr
+    } else {
+        array/write_field(node_arr, 3 + idx, array/read_field(kv_arr, idx))
+        copy_collision_pairs(node_arr, kv_arr, idx + 1)
+    }
+}
+
+fn collision_count(n) {
+    array/read_field(n, 2)
+}
+
+fn collision_hash(n) {
+    array/read_field(n, 1)
+}
+
+fn node_bitmap(n) {
+    array/read_field(n, 1)
+}
+
+fn index_from_bitmap(bm, bit) {
+    popcount_below(bm & (bit - 1))
+}
+
+// simple popcount
+fn popcount_below(x) {
+    if x == 0 {
+        0
+    } else {
+        1 + popcount_below(x & (x - 1))
+    }
+}
+
+fn node_children_array(n) {
+    let cnt = array/count(n) - 2
+    let out = array/new_array(cnt)
+    copy_node_children(n, out, 0)
+}
+
+fn copy_node_children(n, out, i) {
+    if i == array/count(out) {
+        out
+    } else {
+        array/write_field(out, i, array/read_field(n, i + 2))
+        copy_node_children(n, out, i + 1)
+    }
+}
+
+fn bitmap_indexed_node_child(n, i) {
+    array/read_field(n, 2 + i)
+}
+
+fn collision_key(n, i) {
+    array/read_field(n, 3 + (2 * i))
+}
+
+fn collision_val(n, i) {
+    array/read_field(n, 3 + (2 * i) + 1)
+}
+
+fn assoc(pm, k, v) {
+    let h = builtin/hash(k)
+
+    if pm.root == null {
+        let new_root = new_collision_node(h, 1, make_kv_array(k, v))
+        persistent_map_struct {
+            count: 1
+            root: new_root
+        }
+    } else {
+
+        let added_leaf_box = array/new_array(1)
+        array/write_field(added_leaf_box, 0, 0)
+        let new_root = assoc_node(pm.root, 0, h, k, v, added_leaf_box)
+        println("NEW ROOT")
+        println(new_root)
+        let old_val = array/read_field(added_leaf_box, 0)
+        persistent_map_struct {
+            count: pm.count + (if old_val == 1 { 1 } else { 0 })
+            root: new_root
+        }
+    }
+}
+
+fn make_kv_array(k, v) {
+    let arr = array/new_array(2)
+    array/write_field(arr, 0, k)
+    array/write_field(arr, 1, v)
+    arr
+}
+
+// 1) assoc_node
+fn assoc_node(n, shift, h, k, v, added_leaf_box) {
+    if n == null {
+        println("null case")
+        let bit_map_node = assoc_bitmap_node(null, shift, h, k, v, added_leaf_box)
+        println("bit_map_node")
+        println(bit_map_node)
+        bit_map_node
+    } else if is_bitmap_indexed_node(n) {
+        println("bitmap case")
+        assoc_bitmap_node(n, shift, h, k, v, added_leaf_box)
+    } else if is_collision_node(n) {
+        println("collision case")
+        let result = assoc_collision_node(n, shift, h, k, v, added_leaf_box)
+        println("collision case end")
+        println(result)
+        result
+    } else {
+        println("key_val case")
+        assoc_key_val_node(n, shift, h, k, v, added_leaf_box)
+    }
+}
+
+// 2) assoc_bitmap_node
+fn assoc_bitmap_node(n, shift, h, k, v, added_leaf_box) {
+    if n == null {
+        let bit = bitpos(mask(h, shift))
+        let arr = array/new_array(2)
+        array/write_field(arr, 0, k)
+        array/write_field(arr, 1, v)
+        array/write_field(added_leaf_box, 0, 1)
+        new_bitmap_indexed_node(bit, arr)
+    } else {
+        let bm = node_bitmap(n)
+        let bit = bitpos(mask(h, shift))
+        let idx = index_from_bitmap(bm, bit)
+        let ex = (bm & bit) != 0
+        let child_arr = node_children_array(n)
+        let sub_n = if ex { array/read_field(child_arr, 2 * idx) } else { null }
+        let new_sub = if ex {
+            if is_bitmap_indexed_node(sub_n) || is_collision_node(sub_n) {
+                assoc_node(sub_n, shift + 5, h, k, v, added_leaf_box)
+            } else {
+                assoc_key_val_node(sub_n, shift, h, k, v, added_leaf_box)
+            }
+        } else {
+            assoc_node(null, shift + 5, h, k, v, added_leaf_box)
+        }
+        println("Here!!!!!!!!!")
+        if ex {
+            let new_child_arr = array/copy_array(child_arr)
+            array/write_field(new_child_arr, 2 * idx, new_sub)
+            new_bitmap_indexed_node(bm, new_child_arr)
+        } else {
+            let new_len = array/count(child_arr) + 2
+            let inserted = array/new_array(new_len)
+            insert_key_val_child(child_arr, inserted, new_sub, idx)
+            println(inserted)
+            let new_bm = bm | bit
+            println("new_bm")
+            println(new_bm)
+            new_bitmap_indexed_node(new_bm, inserted)
+        }
+    }
+}
+
+// 3) assoc_key_val_node
+fn assoc_key_val_node(pair, shift, h, k, v, added_leaf_box) {
+    let ek = array/read_field(pair, 0)
+    let ev = array/read_field(pair, 1)
+    let eh = builtin/hash(ek)
+    if eq(ek, k) {
+        let updated = array/copy_array(pair)
+        array/write_field(updated, 1, v)
+        updated
+    } else {
+        if eh == h {
+            let new_coll = new_collision_node(h, 2, make_kv_array(ek, ev))
+            array/write_field(new_coll, 3 + 2, k)
+            array/write_field(new_coll, 3 + 3, v)
+            array/write_field(added_leaf_box, 0, 1)
+            new_coll
+        } else {
+            let new_n = assoc_bitmap_node(null, shift, eh, ek, ev, added_leaf_box)
+            array/write_field(added_leaf_box, 0, 0)
+            assoc_bitmap_node(new_n, shift, h, k, v, added_leaf_box)
+        }
+    }
+}
+
+fn assoc_collision_node(n, shift, h, k, v, added_leaf_box) {
+    if is_collision_node(n) == false {
+        assoc_bitmap_node(n, shift, h, k, v, added_leaf_box)
+    } else {
+        let nh = collision_hash(n)
+        if nh == h {
+            let ccount = collision_count(n)
+            let idx = find_collision_key_index(n, ccount, k)
+            if idx >= 0 {
+                let new_n = array/copy_array(n)
+                array/write_field(new_n, 3 + (2 * idx) + 1, v)
+                new_n
+            } else {
+                let new_count = ccount + 1
+                let new_size = 3 + (2 * new_count)
+                let new_n = array/new_array(new_size)
+                // IT BREAKS HERE!
+                // It is literally just this function call that breaks things
+                // This is the simpliest I can make it and still break
+                // copy_collision_array(1, 1, 2 * 3)
+                copy_collision_array(n, new_n, 3 + (2 * ccount))
+                // I'm guessing it is register allocation.
+                array/write_field(new_n, 3 + 2 * ccount, k)
+                array/write_field(new_n, 3 + 2 * ccount + 1, v)
+                array/write_field(new_n, 0, 1)
+                array/write_field(new_n, 1, nh)
+                array/write_field(new_n, 2, new_count)
+                array/write_field(added_leaf_box, 0, 1)
+                new_n
+            }
+        } else {
+            let result = convert_collision_to_bitmap(n, shift, h, k, v, added_leaf_box)
+            println("assoc_collision_node")
+            println(result)
+            result
+        }
+    }
+}
+
+fn find_collision_key_index(n, ccount, k) {
+    find_collision_key_index_loop(n, k, 0, ccount)
+}
+
+fn find_collision_key_index_loop(n, k, i, ccount) {
+    if i == ccount {
+        -1
+    } else {
+        let kk = collision_key(n, i)
+        if eq(kk, k) {
+            i
+        } else {
+            find_collision_key_index_loop(n, k, i + 1, ccount)
+        }
+    }
+}
+
+fn eq(a, b) {
+    a == b
+}
+
+fn copy_collision_array(old_n, new_n, items) {
+    let i = 0
+    copy_collision_array_loop(old_n, new_n, i, items)
+}
+
+fn copy_collision_array_loop(old_n, new_n, i, limit) {
+    if i == limit {
+        new_n
+    } else {
+        array/write_field(new_n, 3 + i, array/read_field(old_n, 3 + i))
+        copy_collision_array_loop(old_n, new_n, i + 1, limit)
+    }
+}
+
+fn convert_collision_to_bitmap(n, shift, h, k, v, added_leaf_box) {
+    let ccount = collision_count(n)
+    if ccount == 1 {
+        let k0 = collision_key(n, 0)
+        let v0 = collision_val(n, 0)
+        let h0 = collision_hash(n)
+        let new_n = assoc_bitmap_node(null, shift, h0, k0, v0, added_leaf_box)
+        array/write_field(added_leaf_box, 0, 0)
+        let result = assoc_bitmap_node(new_n, shift, h, k, v, added_leaf_box)
+        println("Convert collision to bitmap")
+        println(result)
+        result
+    } else {
+        let new_n = array/new_array(2)
+        array/write_field(new_n, 0, 0)
+        let node_h = collision_hash(n)
+        let sub_index1 = mask(node_h, shift)
+        let sub_index2 = mask(h, shift)
+        let bit1 = bitpos(sub_index1)
+        let bit2 = bitpos(sub_index2)
+        let combo = bit1 | bit2
+        array/write_field(new_n, 1, combo)
+        let child_size = if bit1 == bit2 { 2 } else { 4 }
+        let child_arr = array/new_array(child_size)
+        let ctx = collision_children_ctx {
+            node: n
+            sub_index1: sub_index1
+            sub_index2: sub_index2
+            shift: shift
+            key: k
+            val: v
+            node_hash: node_h
+            added_leaf_box: added_leaf_box
+        }
+        fill_two_collision_children(child_arr, ctx)
+        expand_bitmap_node_with_children(new_n, child_arr)
+    }
+}
+
+fn expand_bitmap_node_with_children(bitmap_node, child_arr) {
+    let c = array/count(child_arr)
+    let size = 2 + c
+    let out = array/new_array(size)
+    array/write_field(out, 0, array/read_field(bitmap_node, 0))
+    array/write_field(out, 1, array/read_field(bitmap_node, 1))
+    let i = 0
+    copy_node_children2(out, child_arr, i)
+}
+
+fn copy_node_children2(out, child_arr, i) {
+    if i == array/count(child_arr) {
+        out
+    } else {
+        array/write_field(out, 2 + i, array/read_field(child_arr, i))
+        copy_node_children2(out, child_arr, i + 1)
+    }
+}
+
+fn fill_two_collision_children(child_arr, ctx) {
+    let s1 = ctx.sub_index1
+    let s2 = ctx.sub_index2
+    let n = ctx.node
+    let k = ctx.key
+    let v = ctx.val
+    let nh = ctx.node_hash
+    let shift = ctx.shift
+    let box_ = ctx.added_leaf_box
+
+    if s1 == s2 {
+        let new_coll = new_collision_node(nh, collision_count(n), extract_pairs(n))
+        array/write_field(box_, 0, 1)
+        let updated = assoc_collision_node(new_coll, shift + 5, builtin/hash(k), k, v, box_)
+        array/write_field(child_arr, 0, updated)
+        if array/count(child_arr) == 2 {
+            array/write_field(child_arr, 1, null)
+        } else {
+            array/write_field(child_arr, 1, null)
+            array/write_field(child_arr, 2, null)
+            array/write_field(child_arr, 3, null)
+        }
+        child_arr
+    } else {
+        if s1 < s2 {
+            array/write_field(child_arr, 0, n)
+            let nc = new_collision_node(builtin/hash(k), 1, make_kv_array(k, v))
+            array/write_field(child_arr, 1, nc)
+            if array/count(child_arr) > 2 {
+                array/write_field(child_arr, 2, null)
+                array/write_field(child_arr, 3, null)
+            }
+            array/write_field(box_, 0, 0)
+            child_arr
+        } else {
+            let nc = new_collision_node(builtin/hash(k), 1, make_kv_array(k, v))
+            array/write_field(child_arr, 0, nc)
+            array/write_field(child_arr, 1, n)
+            if array/count(child_arr) > 2 {
+                array/write_field(child_arr, 2, null)
+                array/write_field(child_arr, 3, null)
+            }
+            array/write_field(box_, 0, 0)
+            child_arr
+        }
+    }
+}
+
+fn extract_pairs(n) {
+    let ccount = collision_count(n)
+    let pc = 2 * ccount
+    let out = array/new_array(pc)
+    copy_collision_array_no_hdr(n, out, ccount, 0)
+}
+
+fn copy_collision_array_no_hdr(n, out, ccount, i) {
+    if i == ccount {
+        out
+    } else {
+        array/write_field(out, 2 * i, collision_key(n, i))
+        array/write_field(out, 2 * i + 1, collision_val(n, i))
+        copy_collision_array_no_hdr(n, out, ccount, i + 1)
+    }
+}
+
+
+fn insert_key_val_child(old_arr, new_arr, new_node, idx) {
+    let l_old = array/count(old_arr)
+    let pref = 2 * idx
+    let i = 0
+    copy_prefix(old_arr, new_arr, i, pref)
+    array/write_field(new_arr, pref, new_node)
+    copy_suffix(old_arr, new_arr, pref, l_old)
+}
+
+fn copy_prefix(old_arr, new_arr, i, limit) {
+    if i == limit {
+        new_arr
+    } else {
+        array/write_field(new_arr, i, array/read_field(old_arr, i))
+        copy_prefix(old_arr, new_arr, i + 1, limit)
+    }
+}
+
+fn copy_suffix(old_arr, new_arr, start, l_old) {
+    let i = start
+    copy_suffix_loop(old_arr, new_arr, i, l_old)
+}
+
+fn copy_suffix_loop(old_arr, new_arr, i, l_old) {
+    if i == l_old {
+        new_arr
+    } else {
+        array/write_field(new_arr, i + 2, array/read_field(old_arr, i))
+        copy_suffix_loop(old_arr, new_arr, i + 1, l_old)
+    }
+}
+
+fn get(pm, k) {
+    if pm.root == null {
+        null
+    } else {
+        let h = builtin/hash(k)
+        find_node(pm.root, k, h, 0)
+    }
+}
+
+fn find_node(n, k, h, shift) {
+    if n == null {
+        null
+    } else {
+        if is_bitmap_indexed_node(n) {
+            find_bitmap_node(n, k, h, shift)
+        } else {
+            find_collision_node(n, k, h, shift)
+        }
+    }
+}
+
+fn find_bitmap_node(n, k, h, shift) {
+    let bm = node_bitmap(n)
+    let bit = bitpos(mask(h, shift))
+    if (bm & bit) == 0 {
+        null
+    } else {
+        let idx = index_from_bitmap(bm, bit)
+        let child = bitmap_indexed_node_child(n, idx)
+        if is_bitmap_indexed_node(child) || is_collision_node(child) {
+            find_node(child, k, h, shift + 5)
+        } else {
+            if array/is_array(child) {
+                let ck = array/read_field(child, 0)
+                let cv = array/read_field(child, 1)
+                if eq(k, ck) {
+                    cv
+                } else {
+                    null
+                }
+            } else {
+                null
+            }
+        }
+    }
+}
+
+fn find_collision_node(n, k, h, shift) {
+    if is_collision_node(n) == false {
+        null
+    } else {
+        let nh = collision_hash(n)
+        if nh == h {
+            let ccount = collision_count(n)
+            lookup_collision(n, k, 0, ccount)
+        } else {
+            null
+        }
+    }
+}
+
+fn lookup_collision(n, k, i, ccount) {
+    if i == ccount {
+        null
+    } else {
+        let ck = collision_key(n, i)
+        let cv = collision_val(n, i)
+        if eq(ck, k) {
+            cv
+        } else {
+            lookup_collision(n, k, i + 1, ccount)
+        }
+    }
+}
+
+fn main() {
+    // This isn't working yet but I did fix the
+    // issues with register allocation
+    let pm = map()
+    let pm2 = assoc(pm, "foo", 42)
+    println(get(pm2, "foo"))
+    let pm3 = assoc(pm2, "bar", 100)
+    println(pm3)
+    let val_foo = get(pm3, "foo")
+    // println(val_foo)
+    // let val_bar = get(pm3, "bar")
+    // println(val_bar)
+    // let pm4 = assoc(pm3, "baz", 999)
+    // println(get(pm4, "baz"))
+    // println(count(pm4))
+}
