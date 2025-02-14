@@ -94,6 +94,8 @@ fn atom(value) {
 
 // TODO: If I move the || on the next line,
 // my parser is unhappy
+// TODO: Need to make sure type is instance_of Struct
+// but how do I do that in a reasonable way?
 fn instance_of(value, type) {
     (primitive/is_object(value) && 
         (

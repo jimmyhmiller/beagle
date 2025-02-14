@@ -1,0 +1,23 @@
+namespace equal_test
+
+struct Thing {
+    x
+    y
+}
+
+fn main() {
+    let x = Thing {
+        x: 1
+        y: 2
+    }
+
+    let y = Thing {
+        x: 1
+        y: 2
+    }
+
+    // This needs to be true
+    // In general, I need structural equality
+    println(x == y)
+    "done"
+}

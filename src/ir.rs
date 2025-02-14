@@ -1019,9 +1019,14 @@ impl Ir {
     pub fn compile(&mut self, mut lang: LowLevelArm, error_fn_pointer: usize) -> LowLevelArm {
         debug_assert!(!self.ir_range_to_token_range.is_empty());
 
-        // TODO(Spill): I need to add spills here
-        lang.set_max_locals(self.num_locals);
         // lang.breakpoint();
+
+        let mut linear_scan = LinearScan::new(self.instructions.clone(), self.num_locals);
+        linear_scan.allocate();
+        self.instructions = linear_scan.instructions.clone();
+        let num_spills = linear_scan.location.len();
+        self.num_locals += num_spills;
+        lang.set_max_locals(self.num_locals);
 
         let before_prelude = lang.new_label("before_prelude");
         lang.write_label(before_prelude);
@@ -1040,12 +1045,7 @@ impl Ir {
 
         let exit = lang.new_label("exit");
 
-        let mut linear_scan = LinearScan::new(self.instructions.clone());
-        linear_scan.allocate();
-        self.instructions = linear_scan.instructions.clone();
-        let num_spills = linear_scan.location.len();
-        self.num_locals += num_spills;
-
+    
         // let mut simple_register_allocator = SimpleRegisterAllocator::new(
         //     self.instructions.clone(),
         //     self.num_locals,
@@ -1389,12 +1389,20 @@ impl Ir {
                             lang.mov_64(dest, BuiltInTypes::construct_boolean(false));
                             self.store_spill(dest, dest_spill, lang);
                         }
-                        Value::Local(local) => lang.load_local(dest, *local as i32),
+                        Value::Local(local) => {
+                            lang.load_local(dest, *local as i32);
+                            self.store_spill(dest, dest_spill, lang);
+                        }
                         Value::Null => {
                             lang.mov_64(dest, 0b111_isize);
                             self.store_spill(dest, dest_spill, lang);
                         }
-                        Value::Spill(_register, _index) => todo!(),
+                        Value::Spill(_register, index) => {
+                            let temp_reg = lang.temporary_register();
+                            lang.load_local(temp_reg, (*index + self.num_locals) as i32);
+                            lang.mov_reg(dest, temp_reg);
+                            self.store_spill(dest, dest_spill, lang);
+                        }
                     }
                 }
                 Instruction::LoadConstant(dest, val) => {
