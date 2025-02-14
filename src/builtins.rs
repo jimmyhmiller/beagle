@@ -1,10 +1,6 @@
 use core::panic;
 use std::{
-    error::Error,
-    ffi::{c_void, CStr},
-    mem::{self, transmute},
-    slice::{from_raw_parts, from_raw_parts_mut},
-    thread,
+    error::Error, ffi::{c_void, CStr}, hash::{DefaultHasher, Hasher}, mem::{self, transmute}, slice::{from_raw_parts, from_raw_parts_mut}, thread
 };
 
 use libffi::{
@@ -21,6 +17,7 @@ use crate::{
 };
 
 use std::hint::black_box;
+use std::hash::Hash;
 
 #[allow(unused)]
 #[no_mangle]
@@ -863,7 +860,32 @@ extern "C" fn register_extension(
 }
 
 extern "C" fn hash(value: usize) -> usize {
-    BuiltInTypes::Int.tag(value as isize) as usize
+    let tag = BuiltInTypes::get_kind(value);
+    match tag {
+        BuiltInTypes::Int => {
+            let mut s = DefaultHasher::new();
+            value.hash(&mut s);
+            BuiltInTypes::Int.tag(s.finish() as isize) as usize
+        },
+        BuiltInTypes::HeapObject => {
+            let heap_object = HeapObject::from_tagged(value);
+            let fields = heap_object.get_fields();
+            let mut s = DefaultHasher::new();
+            for field in fields {
+                field.hash(&mut s);
+            }
+            BuiltInTypes::Int.tag(s.finish() as isize) as usize
+        }
+        BuiltInTypes::String => {
+            let runtime = get_runtime().get_mut();
+            let string = runtime.get_string_literal(value);
+            let mut s = DefaultHasher::new();
+            string.hash(&mut s);
+            BuiltInTypes::Int.tag(s.finish() as isize) as usize
+        }
+        _ => panic!("Expected int or heap object, got {:?}", tag),
+        
+    }
 }
 
 impl Runtime {

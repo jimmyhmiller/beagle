@@ -25,7 +25,7 @@ fn physical(index: usize) -> VirtualRegister {
 }
 
 impl LinearScan {
-    pub fn new(instructions: Vec<Instruction>) -> Self {
+    pub fn new(instructions: Vec<Instruction>, num_locals: usize) -> Self {
         let lifetimes = Self::get_register_lifetime(&instructions);
         let physical_registers: Vec<VirtualRegister> = (19..=28).map(physical).collect();
         let max_registers = physical_registers.len();
@@ -37,7 +37,7 @@ impl LinearScan {
             free_registers: physical_registers,
             max_registers,
             location: HashMap::new(),
-            stack_slot: 0,
+            stack_slot: num_locals + 1,
         }
     }
 
@@ -297,7 +297,7 @@ fn test_example() {
     let add35 = ir.add_int(add34, add23);
     ir.ret(add35);
 
-    let mut linear_scan = LinearScan::new(ir.instructions.clone());
+    let mut linear_scan = LinearScan::new(ir.instructions.clone(), 0);
     linear_scan.allocate();
     println!("{:#?}", linear_scan.allocated_registers);
     println!("=======");

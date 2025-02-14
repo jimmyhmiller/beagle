@@ -365,6 +365,7 @@ impl Compiler {
                 (
                     *key,
                     StackMapDetails {
+                        function_name: function_name.map(|x| x.to_string()),
                         current_stack_size: *value,
                         number_of_locals: arm.max_locals as usize,
                         max_stack_size: arm.max_stack_size as usize,

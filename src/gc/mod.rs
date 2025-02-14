@@ -11,6 +11,7 @@ pub mod simple_mark_and_sweep;
 
 #[derive(Debug, Encode, Decode, Clone)]
 pub struct StackMapDetails {
+    pub function_name: Option<String>,
     pub number_of_locals: usize,
     pub current_stack_size: usize,
     pub max_stack_size: usize,

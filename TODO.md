@@ -113,3 +113,4 @@ error: test failed, to rerun pass `--bin main`
 * I should probably try some project euler problems as small bits of code I need to properly support
 * I have enough information I should be able to give exact code that causes any error, even crashes
 * I should also be able to step by lines in my debugger
+* There are a lot of shortcuts I think I'm taking right now. My register allocated doesn't reuse spilled slots. I null initialize all of them right now. I also don't write back to them when they go out of scope, but that means my gc will think they are still alive even if they aren't, so things only go out of scope at the end of a function. Eventually I need to fix all of this.

@@ -1,0 +1,56 @@
+namespace register_allocation_test
+
+fn is_bitmap_indexed_node(n) {
+    false
+}
+
+fn is_collision_node(n) {
+    false
+}
+
+fn is_pair_node(n) {
+    true
+}
+
+fn assoc_bitmap_node(n, shift, h, k, v, added_leaf_box) {
+    println("assoc_bitmap_node")
+}
+
+fn assoc_collision_node(n, shift, h, k, v, added_leaf_box) {
+    println("assoc_collision_node")
+}
+
+fn assoc_key_val_node(n, shift, h, k, v, added_leaf_box) {
+    println("assoc_key_val_node")
+    println(added_leaf_box)
+}
+
+fn assoc_node(n, shift, h, k, v, added_leaf_box) {
+    if n == null {
+        // brand-new node
+        assoc_bitmap_node(null, shift, h, k, v, added_leaf_box)
+    } else if is_bitmap_indexed_node(n) {
+        assoc_bitmap_node(n, shift, h, k, v, added_leaf_box)
+    } else if is_collision_node(n) {
+        assoc_collision_node(n, shift, h, k, v, added_leaf_box)
+    } else if is_pair_node(n) {
+        println("Calling here")
+        // I have confirmed this bug here is because of spilling
+        // added_leaf is spilled and something in my logic
+        // println(added_leaf_box)
+        assoc_key_val_node(n, shift, h, k, v, added_leaf_box)
+    } else {
+        // Fallback (should rarely occur if all logic is correct)
+        assoc_key_val_node(n, shift, h, k, v, added_leaf_box)
+    }
+}
+
+fn main() {
+    let n = 1
+    let shift = 0
+    let h = 0
+    let k = 0
+    let v = 0
+    let added_leaf_box = 42
+    assoc_node(n, shift, h, k, v, added_leaf_box)
+}
