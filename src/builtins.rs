@@ -946,6 +946,18 @@ extern "C" fn hash(value: usize) -> usize {
     }
 }
 
+extern "C" fn pop_count(value: usize) -> usize {
+    let tag = BuiltInTypes::get_kind(value);
+    match tag {
+        BuiltInTypes::Int => {
+            let value = BuiltInTypes::untag(value);
+            let count = value.count_ones();
+            BuiltInTypes::Int.tag(count as isize) as usize
+        }
+        _ => panic!("Expected int, got {:?}", tag),
+    }
+}
+
 impl Runtime {
     pub fn install_builtins(&mut self) -> Result<(), Box<dyn Error>> {
         self.add_builtin_function("beagle.core/println", println_value as *const u8, false, 1)?;
@@ -1135,6 +1147,8 @@ impl Runtime {
         )?;
 
         self.add_builtin_function("beagle.builtin/hash", hash as *const u8, false, 1)?;
+
+        self.add_builtin_function("beagle.builtin/pop_count", pop_count as *const u8, false, 1)?;
 
         Ok(())
     }

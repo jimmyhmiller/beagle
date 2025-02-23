@@ -109,15 +109,7 @@ fn collision_val(n, i) {
 }
 
 fn index_from_bitmap(bm, bit) {
-    popcount_below(bm & (bit - 1))
-}
-
-fn popcount_below(x) {
-    if x == 0 {
-        0
-    } else {
-        1 + popcount_below(x & (x - 1))
-    }
+    builtin/pop_count(bm & (bit - 1))
 }
 
 fn make_kv_array(k, v) {
@@ -240,7 +232,7 @@ fn assoc_key_val_node(pair, shift, h, k, v, added_leaf_box) {
     let ek = pair.key
     let ev = pair.val
     let eh = builtin/hash(ek)
-    if eq(ek, k) {
+    if ek == k {
         // Overwrite existing
         new_pair_node(ek, v)
     } else {
@@ -305,7 +297,7 @@ fn find_collision_key_index_loop(n, k, i, ccount) {
         -1
     } else {
         let kk = collision_key(n, i)
-        if eq(kk, k) {
+        if kk == k {
             i
         } else {
             find_collision_key_index_loop(n, k, i + 1, ccount)
@@ -409,7 +401,7 @@ fn find_node(n, k, h, shift) {
     } else if is_pair_node(n) {
         let ck = n.key
         let cv = n.val
-        if eq(k, ck) {
+        if k == ck {
             cv
         } else {
             null
@@ -448,17 +440,12 @@ fn lookup_collision(n, k, i, ccount) {
     } else {
         let ck = collision_key(n, i)
         let cv = collision_val(n, i)
-        if eq(ck, k) {
+        if ck == k {
             cv
         } else {
             lookup_collision(n, k, i + 1, ccount)
         }
     }
-}
-
-// TODO: Remove this
-fn eq(a, b) {
-    a == b
 }
 
 fn insert_many(pm, i, max) {
