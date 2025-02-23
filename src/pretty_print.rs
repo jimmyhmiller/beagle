@@ -26,6 +26,7 @@ impl PrettyPrint for Value {
             Value::False => "false".to_string(),
             Value::Null => "null".to_string(),
             Value::Spill(value, index) => format!("spill({}, {})", value.pretty_print(), index),
+            Value::Stack(value) => format!("stack{}", value),
         }
     }
 }

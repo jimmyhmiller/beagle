@@ -473,7 +473,8 @@ impl<'a> AstCompiler<'a> {
                     let name = "<closure_context>";
                     let reg = self.ir.arg(0);
                     let local = self.find_or_insert_local(name);
-                    self.ir.store_local(local, reg);
+                    let reg = self.ir.assign_new(reg);
+                    self.ir.store_local(local, reg.into());
                     let local = VariableLocation::Local(local);
                     self.register_arg_location(0, local.clone());
                     self.insert_variable(name.to_string(), local);
@@ -485,7 +486,8 @@ impl<'a> AstCompiler<'a> {
                     }
                     let reg = self.ir.arg(index);
                     let local = self.find_or_insert_local(&arg.clone());
-                    self.ir.store_local(local, reg);
+                    let reg = self.ir.assign_new(reg);
+                    self.ir.store_local(local, reg.into());
                     let local = VariableLocation::Local(local);
                     self.register_arg_location(index, local.clone());
                     self.insert_variable(arg.clone(), local);
@@ -614,7 +616,7 @@ impl<'a> AstCompiler<'a> {
                     );
                     if let Some(VariableLocation::Local(index)) = variable_locaton {
                         let reg = self.ir.assign_new(function);
-                        self.ir.store_local(index, reg);
+                        self.ir.store_local(index, reg.into());
                     }
                     self.pop_environment();
                     if variable_locaton.is_some() && name.is_some() {
@@ -644,7 +646,7 @@ impl<'a> AstCompiler<'a> {
 
                 if let Some(VariableLocation::Local(index)) = variable_locaton {
                     let reg = self.ir.assign_new(function);
-                    self.ir.store_local(index, reg);
+                    self.ir.store_local(index, reg.into());
                 }
                 self.pop_environment();
 
@@ -1322,7 +1324,7 @@ impl<'a> AstCompiler<'a> {
                         let reg = self.ir.volatile_register();
                         self.ir.assign(reg, value);
                         let local_index = self.find_or_insert_local(name);
-                        self.ir.store_local(local_index, reg);
+                        self.ir.store_local(local_index, reg.into());
                         self.insert_variable(
                             name.to_string(),
                             VariableLocation::Local(local_index),
