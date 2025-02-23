@@ -1045,7 +1045,6 @@ impl Ir {
 
         let exit = lang.new_label("exit");
 
-    
         // let mut simple_register_allocator = SimpleRegisterAllocator::new(
         //     self.instructions.clone(),
         //     self.num_locals,

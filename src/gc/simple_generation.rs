@@ -140,6 +140,7 @@ pub struct SimpleGeneration {
     additional_roots: Vec<usize>,
     namespace_roots: Vec<(usize, usize)>,
     relocated_namespace_roots: Vec<(usize, Vec<(usize, usize)>)>,
+    temporary_roots: Vec<Option<usize>>,
     atomic_pause: [u8; 8],
     options: AllocatorOptions,
 }
@@ -162,6 +163,7 @@ impl Allocator for SimpleGeneration {
             additional_roots: vec![],
             namespace_roots: vec![],
             relocated_namespace_roots: vec![],
+            temporary_roots: vec![],
             atomic_pause: [0; 8],
             options,
         }
@@ -216,6 +218,23 @@ impl Allocator for SimpleGeneration {
     fn get_allocation_options(&self) -> AllocatorOptions {
         self.options
     }
+
+    fn register_temporary_root(&mut self, root: usize) -> usize {
+        for (i, temp_root) in self.temporary_roots.iter_mut().enumerate() {
+            if temp_root.is_none() {
+                *temp_root = Some(root);
+                return i;
+            }
+        }
+        self.temporary_roots.push(Some(root));
+        self.temporary_roots.len() - 1
+    }
+
+    fn unregister_temporary_root(&mut self, id: usize) -> usize {
+        let value = self.temporary_roots[id];
+        self.temporary_roots[id] = None;
+        value.unwrap()
+    }
 }
 
 impl SimpleGeneration {
@@ -233,6 +252,8 @@ impl SimpleGeneration {
     }
 
     fn minor_gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
+        unsafe { self.copy_all(self.temporary_roots.iter().flatten().cloned().collect()) };
+
         let start = std::time::Instant::now();
         for (stack_base, stack_pointer) in stack_pointers.iter() {
             let roots = self.gather_roots(*stack_base, stack_map, *stack_pointer);

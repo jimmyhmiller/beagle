@@ -54,6 +54,7 @@ enum Data {
         name: String,
         pointer: usize,
         len: usize,
+        number_of_arguments: usize,
     },
     Label {
         label: String,
@@ -393,7 +394,7 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     let fully_qualified_main = runtime.current_namespace_name() + "/main";
     if let Some(f) = runtime.get_function0(&fully_qualified_main) {
         let result = f();
-        runtime.println(result as usize);
+        runtime.println(result as usize).unwrap();
     } else if args.debug {
         println!("No main function");
     }

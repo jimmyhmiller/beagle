@@ -17,7 +17,7 @@ pub struct StackMapDetails {
     pub max_stack_size: usize,
 }
 
-pub const STACK_SIZE: usize = 1024 * 1024 * 32;
+pub const STACK_SIZE: usize = 1024 * 1024 * 128;
 
 #[derive(Debug, Clone)]
 pub struct StackMap {
@@ -98,6 +98,8 @@ pub trait Allocator {
 
     fn grow(&mut self);
     fn gc_add_root(&mut self, old: usize);
+    fn register_temporary_root(&mut self, root: usize) -> usize;
+    fn unregister_temporary_root(&mut self, id: usize) -> usize;
     fn add_namespace_root(&mut self, namespace_id: usize, root: usize);
     // TODO: Get rid of allocation
     fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)>;

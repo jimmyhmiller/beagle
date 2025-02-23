@@ -3,6 +3,11 @@ import "beagle.builtin" as builtin
 import "beagle.primitive" as primitive
 import "raw_mutable_array" as array
 
+
+// TODO: ChatGPT wrote this
+// It's bad
+// Going to rewrite
+
 struct PersistentMapStruct {
     count
     root
@@ -22,17 +27,6 @@ struct CollisionNode {
     hash
     c
     kv_arr
-}
-
-struct CollisionChildrenCtx {
-    node
-    sub_index1
-    sub_index2
-    shift
-    key
-    val
-    node_hash
-    added_leaf_box
 }
 
 let empty = PersistentMapStruct {
@@ -165,8 +159,8 @@ fn assoc_node(n, shift, h, k, v, added_leaf_box) {
     } else if is_pair_node(n) {
         assoc_key_val_node(n, shift, h, k, v, added_leaf_box)
     } else {
-        // Fallback (should rarely occur if all logic is correct)
-        assoc_key_val_node(n, shift, h, k, v, added_leaf_box)
+        println(n)
+        builtin/throw_error()
     }
 }
 
@@ -349,55 +343,34 @@ fn convert_collision_to_bitmap(n, shift, h, k, v, added_leaf_box) {
         let combo = bit1 | bit2
         let child_size = if bit1 == bit2 { 1 } else { 2 }
         let child_arr = array/new_array(child_size)
-        let ctx = CollisionChildrenCtx {
-            node: n
-            sub_index1: sub_index1
-            sub_index2: sub_index2
-            shift: shift
-            key: k
-            val: v
-            node_hash: node_h
-            added_leaf_box: added_leaf_box
+
+        if sub_index1 == sub_index2 {
+            // same bit -> keep collisions together
+            let new_coll = new_collision_node(node_h, collision_count(n), extract_pairs(n))
+            array/write_field(box_, 0, 1)
+            let updated = assoc_collision_node(new_coll, shift + 5, builtin/hash(k), k, v, box_)
+            array/write_field(child_arr, 0, updated)
+            child_arr
+        } else {
+            // distinct bits -> 2 children
+            if s1 < s2 {
+                array/write_field(child_arr, 0, n)
+                let nc = new_collision_node(builtin/hash(k), 1, make_kv_array(k, v))
+                array/write_field(child_arr, 1, nc)
+                array/write_field(box_, 0, 0)
+                child_arr
+            } else {
+                let nc = new_collision_node(builtin/hash(k), 1, make_kv_array(k, v))
+                array/write_field(child_arr, 0, nc)
+                array/write_field(child_arr, 1, n)
+                array/write_field(box_, 0, 0)
+                child_arr
+            }
         }
-        fill_two_collision_children(child_arr, ctx)
         new_bitmap_indexed_node(combo, child_arr)
     }
 }
 
-fn fill_two_collision_children(child_arr, ctx) {
-    let s1 = ctx.sub_index1
-    let s2 = ctx.sub_index2
-    let n = ctx.node
-    let k = ctx.key
-    let v = ctx.val
-    let nh = ctx.node_hash
-    let shift = ctx.shift
-    let box_ = ctx.added_leaf_box
-
-    if s1 == s2 {
-        // same bit -> keep collisions together
-        let new_coll = new_collision_node(nh, collision_count(n), extract_pairs(n))
-        array/write_field(box_, 0, 1)
-        let updated = assoc_collision_node(new_coll, shift + 5, builtin/hash(k), k, v, box_)
-        array/write_field(child_arr, 0, updated)
-        child_arr
-    } else {
-        // distinct bits -> 2 children
-        if s1 < s2 {
-            array/write_field(child_arr, 0, n)
-            let nc = new_collision_node(builtin/hash(k), 1, make_kv_array(k, v))
-            array/write_field(child_arr, 1, nc)
-            array/write_field(box_, 0, 0)
-            child_arr
-        } else {
-            let nc = new_collision_node(builtin/hash(k), 1, make_kv_array(k, v))
-            array/write_field(child_arr, 0, nc)
-            array/write_field(child_arr, 1, n)
-            array/write_field(box_, 0, 0)
-            child_arr
-        }
-    }
-}
 
 fn extract_pairs(n) {
     let ccount = collision_count(n)
@@ -484,11 +457,6 @@ fn lookup_collision(n, k, i, ccount) {
 }
 
 // TODO: Remove this
-// But also, I don't have eq defined for much
-// Strings are only equal back happenstance
-// integers work
-// structs don't do structural equality
-// need to implement egal
 fn eq(a, b) {
     a == b
 }
@@ -538,6 +506,8 @@ fn main() {
     println(get(pm7, 999)) 
     "done"
 }
+
+
 
 // Expect
 // PersistentMapStruct { count: 0, root: null }

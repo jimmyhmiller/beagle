@@ -19,6 +19,14 @@ impl BuiltInTypes {
         0b111
     }
 
+    pub fn true_value() -> isize {
+        Self::construct_boolean(true)
+    }
+
+    pub fn false_value() -> isize {
+        Self::construct_boolean(false)
+    }
+
     pub fn tag(&self, value: isize) -> isize {
         let value = value << 3;
         let tag = self.get_tag();

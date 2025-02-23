@@ -12,17 +12,17 @@
                 "args": [
                     "build",
                     // "--release",
-                    "--profile=release-with-debug",
+                    // "--profile=release-with-debug",
                     "--bin=main",
                     "--package=main",
-                    "--features=compacting,thread-safe"
+                    "--features=simple-generation,thread-safe"
                 ],
                 "filter": {
                     "name": "main",
                     "kind": "bin"
                 }
             },
-            "args": ["resources/equal_test.bg"],
+            "args": ["resources/map_benchmark.bg"],
             "cwd": "${workspaceFolder}",
             // "preRunCommands": [
             //     "command script import .vscode/rust_prettifier_for_lldb.py"

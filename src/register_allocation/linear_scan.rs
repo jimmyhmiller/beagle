@@ -206,7 +206,8 @@ impl LinearScan {
                 // we want to add them to the list of saves
                 let mut saves = Vec::new();
                 for (original_register, (start, end)) in self.lifetimes.iter() {
-                    if *start < i && *end > i + 1 && !self.location.contains_key(original_register) {
+                    if *start < i && *end > i + 1 && !self.location.contains_key(original_register)
+                    {
                         let register = self.allocated_registers.get(original_register).unwrap();
                         // if register.index == 20 {
                         //     println!("20");
@@ -219,17 +220,12 @@ impl LinearScan {
                         saves.push(Value::Register(*register));
                     }
                 }
-                *instruction = Instruction::CallWithSaves(
-                    *dest,
-                    *f,
-                    args.clone(),
-                    *builtin,
-                    saves,
-                );
+                *instruction = Instruction::CallWithSaves(*dest, *f, args.clone(), *builtin, saves);
             } else if let Instruction::Recurse(dest, args) = instruction {
                 let mut saves = Vec::new();
                 for (original_register, (start, end)) in self.lifetimes.iter() {
-                    if *start < i && *end > i + 1 && !self.location.contains_key(original_register) {
+                    if *start < i && *end > i + 1 && !self.location.contains_key(original_register)
+                    {
                         let register = self.allocated_registers.get(original_register).unwrap();
                         if let Value::Register(dest) = dest {
                             if dest == register {
