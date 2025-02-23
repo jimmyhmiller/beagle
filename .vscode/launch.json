@@ -22,7 +22,7 @@
                     "kind": "bin"
                 }
             },
-            "args": ["resources/map_benchmark.bg"],
+            "args": ["resources/many_args_test.bg"],
             "cwd": "${workspaceFolder}",
             // "preRunCommands": [
             //     "command script import .vscode/rust_prettifier_for_lldb.py"

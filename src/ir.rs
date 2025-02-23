@@ -25,6 +25,7 @@ pub enum Condition {
 pub enum Value {
     Register(VirtualRegister),
     Spill(VirtualRegister, usize),
+    Stack(isize),
     TaggedConstant(isize),
     RawValue(usize),
     // TODO: Think of a better representation
@@ -665,8 +666,12 @@ impl Ir {
         register
     }
 
-    pub fn arg(&mut self, n: usize) -> VirtualRegister {
-        self.next_register(Some(n), true)
+    pub fn arg(&mut self, n: usize) -> Value {
+        if n >= 8 {
+            return Value::Stack(((n - 8) + 2) as isize);
+        }
+        let register = self.next_register(Some(n), true);
+        Value::Register(register)
     }
 
     pub fn volatile_register(&mut self) -> VirtualRegister {
@@ -1082,7 +1087,7 @@ impl Ir {
                 lang.load_local(temp_reg, (*index + self.num_locals) as i32);
                 temp_reg
             }
-            _ => panic!("Expected register"),
+            _ => panic!("Expected register got {:?}", value),
         }
     }
 
@@ -1402,6 +1407,10 @@ impl Ir {
                             lang.mov_reg(dest, temp_reg);
                             self.store_spill(dest, dest_spill, lang);
                         }
+                        Value::Stack(offset) => {
+                            lang.load_from_stack(dest, *offset as i32);
+                            self.store_spill(dest, dest_spill, lang);
+                        }
                     }
                 }
                 Instruction::LoadConstant(dest, val) => {
@@ -1516,7 +1525,11 @@ impl Ir {
                     // TODO: Deduplicate copied from save
                     for (arg_index, arg) in args.iter().enumerate().rev() {
                         let arg = self.value_to_register(arg, lang);
-                        lang.mov_reg(lang.arg(arg_index as u8), arg);
+                        if arg_index < 8 {
+                            lang.mov_reg(lang.arg(arg_index as u8), arg);
+                        } else {
+                            lang.push_to_stack(arg);
+                        }
                     }
                     // TODO: I am not actually checking any tags here
                     // or unmasking or anything. Just straight up calling it
@@ -1617,7 +1630,16 @@ impl Ir {
                         lang.load_local(lang.ret_reg(), *local as i32);
                         lang.jump(exit);
                     }
-                    Value::Spill(_register, _index) => todo!(),
+                    Value::Spill(_register, index) => {
+                        let temp_reg = lang.temporary_register();
+                        lang.load_local(temp_reg, (*index + self.num_locals) as i32);
+                        lang.mov_reg(lang.ret_reg(), temp_reg);
+                        lang.jump(exit);
+                    },
+                    Value::Stack(offset) => {
+                        lang.load_from_stack(lang.ret_reg(), *offset as i32);
+                        lang.jump(exit);
+                    }
                 },
                 Instruction::HeapLoad(dest, ptr, offset) => {
                     let ptr = self.value_to_register(ptr, lang);
@@ -1884,11 +1906,11 @@ impl Ir {
         dest
     }
 
-    pub fn store_local(&mut self, local_index: usize, reg: VirtualRegister) {
+    pub fn store_local(&mut self, local_index: usize, reg: Value) {
         self.increment_locals(local_index);
         self.instructions.push(Instruction::StoreLocal(
             Value::Local(local_index),
-            reg.into(),
+            reg,
         ));
     }
 
