@@ -62,6 +62,26 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         drop(lock)
     }
 
+    fn register_temporary_root(&mut self, root: usize) -> usize {
+        if self.registered_threads == 0 {
+            return self.alloc.register_temporary_root(root);
+        }
+        let lock = self.mutex.lock().unwrap();
+        let result = self.alloc.register_temporary_root(root);
+        drop(lock);
+        result
+    }
+
+    fn unregister_temporary_root(&mut self, id: usize) -> usize {
+        if self.registered_threads == 0 {
+            return self.alloc.unregister_temporary_root(id);
+        }
+        let lock = self.mutex.lock().unwrap();
+        let result = self.alloc.unregister_temporary_root(id);
+        drop(lock);
+        result
+    }
+
     fn add_namespace_root(&mut self, namespace_id: usize, root: usize) {
         if self.registered_threads == 0 {
             return self.alloc.add_namespace_root(namespace_id, root);

@@ -1,3 +1,6 @@
+use libffi::middle::Cif;
+use libloading::Library;
+use mmap_rs::{Mmap, MmapMut, MmapOptions};
 use std::{
     cell::UnsafeCell,
     collections::HashMap,
@@ -10,10 +13,6 @@ use std::{
     time::Duration,
     vec,
 };
-
-use libffi::middle::Cif;
-use libloading::Library;
-use mmap_rs::{Mmap, MmapMut, MmapOptions};
 
 use crate::{
     builtins::{__pause, debugger},
@@ -412,7 +411,7 @@ impl Memory {
         self.heap = Alloc::new(options);
         self.stacks = vec![(
             std::thread::current().id(),
-            MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap(),
+            create_stack_with_protected_page_after(STACK_SIZE),
         )];
         self.join_handles = vec![];
         self.threads = vec![std::thread::current()];
@@ -527,6 +526,14 @@ impl Allocator for Memory {
 
     fn gc_add_root(&mut self, old: usize) {
         self.heap.gc_add_root(old)
+    }
+
+    fn register_temporary_root(&mut self, root: usize) -> usize {
+        self.heap.register_temporary_root(root)
+    }
+
+    fn unregister_temporary_root(&mut self, id: usize) -> usize {
+        self.heap.unregister_temporary_root(id)
     }
 
     fn add_namespace_root(&mut self, namespace_id: usize, root: usize) {
@@ -717,6 +724,23 @@ pub struct Runtime {
     protocol_info: HashMap<String, Vec<ProtocolMethodInfo>>,
 }
 
+pub fn create_stack_with_protected_page_after(stack_size: usize) -> MmapMut {
+    let page_size = MmapOptions::page_size();
+    let stack_size = stack_size + page_size;
+    let stack = MmapOptions::new(stack_size).unwrap().map_mut().unwrap();
+    // because the stack grows down we will protect the first page
+    // so that if we go over the stack we will get a segfault
+    let protected_area = &stack[0..page_size];
+    unsafe {
+        libc::mprotect(
+            protected_area.as_ptr() as *mut c_void,
+            page_size,
+            libc::PROT_NONE,
+        );
+    }
+    stack
+}
+
 impl Runtime {
     pub fn new(
         command_line_arguments: CommandLineArguments,
@@ -730,7 +754,7 @@ impl Runtime {
                 heap: allocator,
                 stacks: vec![(
                     std::thread::current().id(),
-                    MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap(),
+                    create_stack_with_protected_page_after(STACK_SIZE),
                 )],
                 join_handles: vec![],
                 threads: vec![std::thread::current()],
@@ -812,9 +836,10 @@ impl Runtime {
         self.printer.print(result);
     }
 
-    pub fn println(&mut self, result: usize) {
-        let result = self.get_repr(result, 0).unwrap();
+    pub fn println(&mut self, pointer: usize) -> Result<(), Box<dyn Error>> {
+        let result = self.get_repr(pointer, 0).ok_or("Error printing")?;
         self.printer.println(result);
+        Ok(())
     }
 
     pub fn is_paused(&self) -> bool {
@@ -1073,6 +1098,14 @@ impl Runtime {
         if BuiltInTypes::is_heap_pointer(old) {
             self.memory.heap.gc_add_root(old);
         }
+    }
+
+    pub fn register_temporary_root(&mut self, root: usize) -> usize {
+        self.memory.heap.register_temporary_root(root)
+    }
+
+    pub fn unregister_temporary_root(&mut self, id: usize) -> usize {
+        self.memory.heap.unregister_temporary_root(id)
     }
 
     pub fn register_parked_thread(&mut self, stack_pointer: usize) {
@@ -1397,6 +1430,12 @@ impl Runtime {
                 // TODO: Make this documented and good
                 match header.type_id {
                     0 => {
+                        if header.opaque {
+                            println!("=====================");
+                            println!("{:?} {:?}", header, BuiltInTypes::untag(value) as *const u8);
+                            println!("=====================");
+                            return Some("ErrorOpaque".to_string());
+                        }
                         let struct_id = BuiltInTypes::untag(object.get_struct_id());
                         let struct_value = self.get_struct_by_id(struct_id);
                         Some(self.get_struct_repr(struct_value?, object.get_fields(), depth + 1)?)
@@ -1435,9 +1474,9 @@ impl Runtime {
         &self,
         struct_pointer: usize,
         str_constant_ptr: usize,
-    ) -> (usize, usize) {
+    ) -> Result<(usize, usize), Box<dyn Error>> {
         if BuiltInTypes::untag(struct_pointer) % 8 != 0 {
-            panic!("Not aligned");
+            return Err("Not aligned".into());
         }
         let heap_object = HeapObject::from_tagged(struct_pointer);
         let str_constant_ptr: usize = BuiltInTypes::untag(str_constant_ptr);
@@ -1450,10 +1489,91 @@ impl Runtime {
             .fields
             .iter()
             .position(|f| f == string)
-            .unwrap_or_else(|| panic!("Field {} not found in struct", string));
-        // Temporary +1 because I was writing size as the first field
-        // and I haven't changed that
-        (heap_object.get_field(field_index), field_index)
+            .ok_or("Field not found")?;
+        Ok((heap_object.get_field(field_index), field_index))
+    }
+
+    pub fn type_of(&self, value: usize) -> usize {
+        let tag = BuiltInTypes::get_kind(value);
+        match tag {
+            BuiltInTypes::Null => todo!(),
+            BuiltInTypes::Int => todo!(),
+            BuiltInTypes::Float => todo!(),
+            BuiltInTypes::String => todo!(),
+            BuiltInTypes::Bool => todo!(),
+            BuiltInTypes::Function => todo!(),
+            BuiltInTypes::Closure => todo!(),
+            BuiltInTypes::HeapObject => {
+                let heap_object = HeapObject::from_tagged(value);
+                let struct_type_id = heap_object.get_struct_id();
+                let struct_type_id = BuiltInTypes::untag(struct_type_id);
+                let struct_value = self.get_struct_by_id(struct_type_id).unwrap();
+                let struct_name = struct_value.name.clone();
+                let (namespace_name, struct_name) = struct_name.split_once("/").unwrap();
+                let namespace_id = self.get_namespace_id(namespace_name).unwrap();
+                let slot = self.find_binding(namespace_id, struct_name).unwrap();
+
+                self.get_binding(namespace_id, slot)
+            }
+        }
+    }
+
+    pub fn equals(&self, a: usize, b: usize) -> bool {
+        if a == b {
+            return true;
+        }
+        let mut a_tag = BuiltInTypes::get_kind(a);
+        let mut b_tag = BuiltInTypes::get_kind(b);
+        // TODO: Make this pluggeable by having a protocol for it
+        // so that we can have equality for hashmaps and vectors
+        // without custom handling. I can probably do this by just calling
+        // this as the default implementation for the protocol
+        // I don't have that concept right now.
+
+        if b_tag == BuiltInTypes::String && a_tag == BuiltInTypes::HeapObject {
+            (a_tag, b_tag) = (b_tag, a_tag);
+        }
+
+        if a_tag == BuiltInTypes::HeapObject && b_tag == BuiltInTypes::String {
+            let a_object = HeapObject::from_tagged(a);
+            if a_object.get_struct_id() != 2 {
+                return false;
+            }
+            let b_string = self.get_string_literal(b);
+            let a_string = a_object.get_string_bytes();
+            let a_string = std::str::from_utf8(a_string).unwrap();
+            return a_string == b_string;
+        }
+        if a_tag != b_tag {
+            return false;
+        }
+        match a_tag {
+            BuiltInTypes::Null => true,
+            BuiltInTypes::Int => a == b,
+            BuiltInTypes::Float => a == b,
+            BuiltInTypes::String => a == b,
+            BuiltInTypes::Bool => a == b,
+            BuiltInTypes::Function => a == b,
+            BuiltInTypes::Closure => a == b,
+            BuiltInTypes::HeapObject => {
+                let a_object = HeapObject::from_tagged(a);
+                let b_object = HeapObject::from_tagged(b);
+                if a_object.get_struct_id() != b_object.get_struct_id() {
+                    return false;
+                }
+                let a_fields = a_object.get_fields();
+                let b_fields = b_object.get_fields();
+                if a_fields.len() != b_fields.len() {
+                    return false;
+                }
+                for (a, b) in a_fields.iter().zip(b_fields.iter()) {
+                    if !self.equals(*a, *b) {
+                        return false;
+                    }
+                }
+                true
+            }
+        }
     }
 
     pub fn write_field(
@@ -1653,6 +1773,7 @@ impl Runtime {
                 name: name.unwrap_or("<Anonymous>").to_string(),
                 pointer: function_pointer,
                 len: size,
+                number_of_arguments: number_of_args,
             },
         });
         Ok(function_pointer)

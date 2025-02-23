@@ -1,6 +1,11 @@
 use core::panic;
 use std::{
-    error::Error, ffi::{c_void, CStr}, hash::{DefaultHasher, Hasher}, mem::{self, transmute}, slice::{from_raw_parts, from_raw_parts_mut}, thread
+    error::Error,
+    ffi::{c_void, CStr},
+    hash::{DefaultHasher, Hasher},
+    mem::{self, transmute},
+    slice::{from_raw_parts, from_raw_parts_mut},
+    thread,
 };
 
 use libffi::{
@@ -16,8 +21,8 @@ use crate::{
     Message, Serialize,
 };
 
-use std::hint::black_box;
 use std::hash::Hash;
+use std::hint::black_box;
 
 #[allow(unused)]
 #[no_mangle]
@@ -58,7 +63,12 @@ pub fn debugger(message: Message) {
 
 pub unsafe extern "C" fn println_value(value: usize) -> usize {
     let runtime = get_runtime().get_mut();
-    runtime.println(value);
+    let result = runtime.println(value);
+    if let Err(error) = result {
+        let stack_pointer = get_current_stack_pointer();
+        println!("Error: {:?}", error);
+        unsafe { throw_error(stack_pointer) };
+    }
     0b111
 }
 
@@ -165,18 +175,52 @@ extern "C" fn make_closure(
         .unwrap()
 }
 
+pub fn get_current_stack_pointer() -> usize {
+    use core::arch::asm;
+    let sp: usize;
+    unsafe {
+        asm!(
+            "mov {0}, sp",
+            out(reg) sp
+        );
+    }
+    sp
+}
 extern "C" fn property_access(
     struct_pointer: usize,
     str_constant_ptr: usize,
     property_cache_location: usize,
 ) -> usize {
     let runtime = get_runtime().get_mut();
-    let (result, index) = runtime.property_access(struct_pointer, str_constant_ptr);
+    let (result, index) = runtime
+        .property_access(struct_pointer, str_constant_ptr)
+        .unwrap_or_else(|error| {
+            let stack_pointer = get_current_stack_pointer();
+            println!("Error: {:?}", error);
+            unsafe {
+                throw_error(stack_pointer);
+            };
+            panic!("Error: {:?}", error);
+        });
     let type_id = HeapObject::from_tagged(struct_pointer).get_struct_id();
     let buffer = unsafe { from_raw_parts_mut(property_cache_location as *mut usize, 2) };
     buffer[0] = type_id;
     buffer[1] = index * 8;
     result
+}
+
+extern "C" fn type_of(struct_pointer: usize) -> usize {
+    let runtime = get_runtime().get_mut();
+    runtime.type_of(struct_pointer)
+}
+
+extern "C" fn equals(a: usize, b: usize) -> usize {
+    let runtime = get_runtime().get_mut();
+    if runtime.equals(a, b) {
+        BuiltInTypes::true_value() as usize
+    } else {
+        BuiltInTypes::false_value() as usize
+    }
 }
 
 extern "C" fn write_field(
@@ -195,6 +239,11 @@ extern "C" fn write_field(
 }
 
 pub unsafe extern "C" fn throw_error(stack_pointer: usize) -> usize {
+    print_stack(stack_pointer);
+    panic!("Error!");
+}
+
+fn print_stack(stack_pointer: usize) {
     let runtime = get_runtime().get_mut();
     let stack_base = runtime.get_stack_base();
     let stack_end = stack_base;
@@ -203,7 +252,9 @@ pub unsafe extern "C" fn throw_error(stack_pointer: usize) -> usize {
     let num_64_till_end = (distance_till_end / 8) + 1;
     let stack_begin = stack_end - STACK_SIZE;
     let stack = unsafe { std::slice::from_raw_parts(stack_begin as *const usize, STACK_SIZE / 8) };
-    let stack = &stack[stack.len() - num_64_till_end..];
+    // saturating so if we are outside the stack, we just see the whole stack.
+    let start = stack.len().saturating_sub(num_64_till_end);
+    let stack = &stack[start..];
 
     for value in stack.iter() {
         for function in runtime.functions.iter() {
@@ -215,10 +266,6 @@ pub unsafe extern "C" fn throw_error(stack_pointer: usize) -> usize {
             }
         }
     }
-
-    // println!("Stack: {:?}", stack);
-
-    panic!("Error!");
 }
 
 pub unsafe extern "C" fn gc(stack_pointer: usize) -> usize {
@@ -707,14 +754,26 @@ pub unsafe extern "C" fn call_ffi_info(
 
 pub unsafe extern "C" fn copy_object(stack_pointer: usize, object_pointer: usize) -> usize {
     let runtime = get_runtime().get_mut();
-    // runtime.gc_add_root(object_pointer);
-    let object = HeapObject::from_tagged(object_pointer);
-    let header = object.get_header();
-    let size = header.size as usize;
-    let kind = BuiltInTypes::get_kind(object_pointer);
-    let to_pointer = runtime.allocate(size, stack_pointer, kind).unwrap();
+    let object_pointer_id = runtime.register_temporary_root(object_pointer);
+    let to_pointer = {
+        let object = HeapObject::from_tagged(object_pointer);
+        let header = object.get_header();
+        let size = header.size as usize;
+        let kind = BuiltInTypes::get_kind(object_pointer);
+        runtime.allocate(size, stack_pointer, kind).unwrap()
+    };
+    let object_pointer = runtime.unregister_temporary_root(object_pointer_id);
     let mut to_object = HeapObject::from_tagged(to_pointer);
-    runtime.copy_object(object, &mut to_object).unwrap()
+    let object = HeapObject::from_tagged(object_pointer);
+    let result = runtime.copy_object(object, &mut to_object);
+    if let Err(error) = result {
+        let stack_pointer = get_current_stack_pointer();
+        println!("Error: {:?}", error);
+        unsafe { throw_error(stack_pointer) };
+        panic!("error")
+    } else {
+        result.unwrap()
+    }
 }
 
 pub unsafe extern "C" fn copy_from_to_object(from: usize, to: usize) -> usize {
@@ -866,7 +925,7 @@ extern "C" fn hash(value: usize) -> usize {
             let mut s = DefaultHasher::new();
             value.hash(&mut s);
             BuiltInTypes::Int.tag(s.finish() as isize) as usize
-        },
+        }
         BuiltInTypes::HeapObject => {
             let heap_object = HeapObject::from_tagged(value);
             let fields = heap_object.get_fields();
@@ -884,7 +943,6 @@ extern "C" fn hash(value: usize) -> usize {
             BuiltInTypes::Int.tag(s.finish() as isize) as usize
         }
         _ => panic!("Expected int or heap object, got {:?}", tag),
-        
     }
 }
 
@@ -937,6 +995,10 @@ impl Runtime {
             false,
             3,
         )?;
+
+        self.add_builtin_function("beagle.core/type_of", type_of as *const u8, false, 1)?;
+
+        self.add_builtin_function("beagle.core/equals", equals as *const u8, false, 2)?;
 
         self.add_builtin_function(
             "beagle.builtin/write_field",

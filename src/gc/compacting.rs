@@ -1,6 +1,7 @@
 use core::panic;
 use std::{error::Error, mem, slice};
 
+use libc::mprotect;
 use mmap_rs::{MmapMut, MmapOptions};
 
 use crate::types::{BuiltInTypes, HeapObject, Word};
@@ -203,12 +204,41 @@ impl Space {
         self.scale_factor *= 2;
         self.scale_factor = self.scale_factor.min(64);
     }
+
+    fn protect(&mut self) {
+        for segment in self.segments.iter_mut() {
+            // for each segment we are going to mprotect None
+            // so that we can't write to it anymore
+            unsafe {
+                mprotect(
+                    segment.memory.as_ptr() as *mut _,
+                    segment.size,
+                    libc::PROT_NONE,
+                )
+            };
+        }
+    }
+
+    fn unprotect(&mut self) {
+        for segment in self.segments.iter_mut() {
+            // for each segment we are going to mprotect None
+            // so that we can't write to it anymore
+            unsafe {
+                mprotect(
+                    segment.memory.as_ptr() as *mut _,
+                    segment.size,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                )
+            };
+        }
+    }
 }
 
 pub struct CompactingHeap {
     from_space: Space,
     to_space: Space,
     namespace_roots: Vec<(usize, usize)>,
+    temporary_roots: Vec<Option<usize>>,
     namespace_relocations: Vec<(usize, Vec<(usize, usize)>)>,
     options: AllocatorOptions,
 }
@@ -224,6 +254,7 @@ impl Allocator for CompactingHeap {
             namespace_roots: vec![],
             namespace_relocations: vec![],
             options,
+            temporary_roots: vec![],
         }
     }
 
@@ -240,10 +271,38 @@ impl Allocator for CompactingHeap {
     // TODO: Still got bugs here
     // Simple cases work, but not all cases
     fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
+        #[cfg(debug_assertions)]
+        {
+            self.to_space.unprotect();
+        }
         if !self.options.gc {
             return;
         }
         let start = std::time::Instant::now();
+        // TODO: Make this better. I don't like the need to remember
+        // to copy_remaining
+        let (start_segment, start_offset) = self.to_space.current_position();
+        let mut temporary_roots_to_update: Vec<(usize, usize)> = vec![];
+        for (i, root) in self.temporary_roots.clone().iter().enumerate() {
+            if let Some(root) = root {
+                if BuiltInTypes::is_heap_pointer(*root) {
+                    let untagged = BuiltInTypes::untag(*root);
+                    if !self.to_space.contains(untagged as *const u8)
+                        && !self.from_space.contains(untagged as *const u8)
+                    {
+                        panic!("Pointer is not in either space");
+                    }
+                    let new_root = unsafe { self.copy_using_cheneys_algorithm(*root) };
+                    temporary_roots_to_update.push((i, new_root));
+                }
+            }
+        }
+        unsafe { self.copy_remaining(start_segment, start_offset) };
+
+        for (i, new_root) in temporary_roots_to_update.iter() {
+            self.temporary_roots[*i] = Some(*new_root);
+        }
+
         for (stack_base, stack_pointer) in stack_pointers.iter() {
             let roots = self.gather_roots(*stack_base, stack_map, *stack_pointer);
             let new_roots = unsafe { self.copy_all(roots.iter().map(|x| x.1).collect()) };
@@ -274,6 +333,11 @@ impl Allocator for CompactingHeap {
         mem::swap(&mut self.from_space, &mut self.to_space);
 
         self.to_space.clear();
+        // Only do this when debug mode
+        #[cfg(debug_assertions)]
+        {
+            self.to_space.protect();
+        }
         if self.options.print_stats {
             println!("GC took: {:?}", start.elapsed());
         }
@@ -304,6 +368,23 @@ impl Allocator for CompactingHeap {
     fn get_allocation_options(&self) -> AllocatorOptions {
         self.options
     }
+
+    fn register_temporary_root(&mut self, root: usize) -> usize {
+        for (i, temp_root) in self.temporary_roots.iter_mut().enumerate() {
+            if temp_root.is_none() {
+                *temp_root = Some(root);
+                return i;
+            }
+        }
+        self.temporary_roots.push(Some(root));
+        self.temporary_roots.len() - 1
+    }
+
+    fn unregister_temporary_root(&mut self, id: usize) -> usize {
+        let value = self.temporary_roots[id];
+        self.temporary_roots[id] = None;
+        value.unwrap()
+    }
 }
 
 impl CompactingHeap {
@@ -329,6 +410,12 @@ impl CompactingHeap {
         // I should think about how to get rid of this allocation at the very least.
         let mut new_roots = vec![];
         for root in roots.iter() {
+            let untagged = BuiltInTypes::untag(*root);
+            if !self.to_space.contains(untagged as *const u8)
+                && !self.from_space.contains(untagged as *const u8)
+            {
+                panic!("Pointer is not in either space");
+            }
             new_roots.push(self.copy_using_cheneys_algorithm(*root));
         }
 
@@ -360,6 +447,18 @@ impl CompactingHeap {
 
     unsafe fn copy_using_cheneys_algorithm(&mut self, root: usize) -> usize {
         let heap_object = HeapObject::from_tagged(root);
+        let untagged = BuiltInTypes::untag(root);
+
+        debug_assert!(
+            self.to_space.contains(untagged as *const u8)
+                || self.from_space.contains(untagged as *const u8),
+            "Pointer is not in to space"
+        );
+
+        if self.to_space.contains(untagged as *const u8) {
+            debug_assert!(untagged % 8 == 0, "Pointer is not aligned");
+            return root;
+        }
 
         if !heap_object.is_zero_size() && !heap_object.is_opaque_object() {
             // TODO(DuplicatingOpaque)

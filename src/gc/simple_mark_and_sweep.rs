@@ -75,6 +75,7 @@ pub struct SimpleMarkSweepHeap {
     free_list: Vec<FreeListEntry>,
     namespace_roots: Vec<(usize, usize)>,
     options: AllocatorOptions,
+    temporary_roots: Vec<Option<usize>>,
 }
 
 impl Allocator for SimpleMarkSweepHeap {
@@ -117,6 +118,23 @@ impl Allocator for SimpleMarkSweepHeap {
     fn get_allocation_options(&self) -> AllocatorOptions {
         self.options
     }
+
+    fn register_temporary_root(&mut self, root: usize) -> usize {
+        for (i, temp_root) in self.temporary_roots.iter_mut().enumerate() {
+            if temp_root.is_none() {
+                *temp_root = Some(root);
+                return i;
+            }
+        }
+        self.temporary_roots.push(Some(root));
+        self.temporary_roots.len() - 1
+    }
+
+    fn unregister_temporary_root(&mut self, id: usize) -> usize {
+        let value = self.temporary_roots[id];
+        self.temporary_roots[id] = None;
+        value.unwrap()
+    }
 }
 
 impl SimpleMarkSweepHeap {
@@ -136,6 +154,7 @@ impl SimpleMarkSweepHeap {
             free_list: vec![],
             namespace_roots: vec![],
             options,
+            temporary_roots: vec![],
         }
     }
 
