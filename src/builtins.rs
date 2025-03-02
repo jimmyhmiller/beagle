@@ -946,6 +946,22 @@ extern "C" fn hash(value: usize) -> usize {
     }
 }
 
+extern "C" fn many_args(a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize, a7: usize, a8: usize, a9: usize, a10: usize, a11: usize) -> usize {
+    let a1 = BuiltInTypes::untag(a1);
+    let a2 = BuiltInTypes::untag(a2);
+    let a3 = BuiltInTypes::untag(a3);
+    let a4 = BuiltInTypes::untag(a4);
+    let a5 = BuiltInTypes::untag(a5);
+    let a6 = BuiltInTypes::untag(a6);
+    let a7 = BuiltInTypes::untag(a7);
+    let a8 = BuiltInTypes::untag(a8);
+    let a9 = BuiltInTypes::untag(a9);
+    let a10 = BuiltInTypes::untag(a10);
+    let a11 = BuiltInTypes::untag(a11);
+    let result = a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11;
+    BuiltInTypes::Int.tag(result as isize) as usize
+}
+
 extern "C" fn pop_count(value: usize) -> usize {
     let tag = BuiltInTypes::get_kind(value);
     match tag {
@@ -960,6 +976,9 @@ extern "C" fn pop_count(value: usize) -> usize {
 
 impl Runtime {
     pub fn install_builtins(&mut self) -> Result<(), Box<dyn Error>> {
+
+        self.add_builtin_function("beagle.__internal_test__/many_args", many_args as *const u8, false, 9)?;
+
         self.add_builtin_function("beagle.core/println", println_value as *const u8, false, 1)?;
 
         self.add_builtin_function("beagle.core/print", print_value as *const u8, false, 1)?;

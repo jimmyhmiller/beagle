@@ -668,7 +668,7 @@ impl Ir {
 
     pub fn arg(&mut self, n: usize) -> Value {
         if n >= 8 {
-            return Value::Stack((n as isize) - 7 + 2);
+            return Value::Stack((n as isize) - 8 + 2);
         }
         let register = self.next_register(Some(n), true);
         Value::Register(register)
@@ -1498,6 +1498,7 @@ impl Ir {
                     self.store_spill(dest, dest_spill, lang);
                 }
                 Instruction::Call(dest, function, args, builtin) => {
+                    // TODO: I think I should never hit this with how my register allocator works
                     for (arg_index, arg) in args.iter().enumerate().rev() {
                         let arg = self.value_to_register(arg, lang);
                         if arg_index < 8 {
@@ -1533,7 +1534,7 @@ impl Ir {
                         if arg_index < 8 {
                             lang.mov_reg(lang.arg(arg_index as u8), arg);
                         } else {
-                            lang.push_to_end_of_stack(arg, (arg_index as i32) - 7);
+                            lang.push_to_end_of_stack(arg, (arg_index as i32) - 8);
                         }
                     }
                     // TODO: I am not actually checking any tags here

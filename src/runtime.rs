@@ -612,6 +612,7 @@ impl NamespaceManager {
         };
         s.add_namespace("beagle.primitive");
         s.add_namespace("beagle.builtin");
+        s.add_namespace("beagle.__internal_test__");
         s
     }
 
