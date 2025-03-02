@@ -1,0 +1,20 @@
+namespace extra_map_test
+import "persistent_map" as pm
+import "beagle.builtin" as builtin
+import "beagle.primitive" as primitive
+import "raw_mutable_array" as array
+
+fn test_assoc_node_bitmap() {
+    let pm = pm/assoc(pm/map(), "key1", "value1")
+    let added_leaf_box = array/new_array(1)
+    array/write_field(added_leaf_box, 0, 0)
+    let h = builtin/hash("key2")
+    let result = pm/assoc_node(pm.root, 0, h, "key2", "value2", added_leaf_box)
+    println(result)
+    println(array/read_field(added_leaf_box, 0))
+}
+
+
+fn main() {
+    test_assoc_node_bitmap()
+}

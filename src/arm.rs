@@ -478,6 +478,7 @@ pub struct LowLevelArm {
     // and figure out where to look for potential roots
     pub stack_map: HashMap<usize, usize>,
     free_temporary_registers: Vec<Register>,
+    allocated_temporary_registers: Vec<Register>,
     canonical_temporary_registers: Vec<Register>,
 }
 
@@ -501,6 +502,7 @@ impl LowLevelArm {
             canonical_temporary_registers: temporary_registers.clone(),
             free_volatile_registers: canonical_volatile_registers,
             free_temporary_registers: temporary_registers,
+            allocated_temporary_registers: vec![],
             allocated_volatile_registers: vec![],
             stack_size: 0,
             max_stack_size: 0,
@@ -677,6 +679,25 @@ impl LowLevelArm {
             rn: X29,
             rt: destination,
         });
+    }
+
+    pub fn load_from_stack_beginning(&mut self, destination: Register, offset: i32) {
+        self.instructions.push(ArmAsm::LdurGen {
+            size: 0b11,
+            imm9: offset * 8,
+            rn: X29,
+            rt: destination,
+        });
+    }
+
+    pub fn push_to_end_of_stack(&mut self, reg: Register, offset: i32) {
+        self.max_stack_size += 1;
+        self.instructions.push(ArmAsm::SturGen {
+            size: 0b11,
+            imm9: offset * 8,
+            rn: SP,
+            rt: reg,
+        })
     }
 
     pub fn pop_from_stack_indexed(&mut self, reg: Register, offset: i32) {
@@ -926,13 +947,14 @@ impl LowLevelArm {
             .free_temporary_registers
             .pop()
             .expect("No free registers!");
-        self.free_temporary_registers.push(next_register);
+        self.allocated_temporary_registers.push(next_register);
         next_register
     }
 
     pub fn clear_temporary_registers(&mut self) {
         // TODO: Just use an index. this is wasteful
         self.free_temporary_registers = self.canonical_temporary_registers.clone();
+        self.allocated_temporary_registers = vec![];
     }
 
     pub fn free_register(&mut self, reg: Register) {
@@ -967,15 +989,6 @@ impl LowLevelArm {
 
     pub fn ret_reg(&self) -> Register {
         X0
-    }
-
-    pub fn padded_max_locals(&mut self) -> usize {
-        let mut max = self.max_locals as u64;
-        let remainder = max % 2;
-        if remainder != 0 {
-            max += 1;
-        }
-        max as usize
     }
 
     pub fn patch_prelude_and_epilogue(&mut self) {

@@ -1,15 +1,16 @@
 namespace register_allocation_test
 
+// no-std
 fn is_bitmap_indexed_node(n) {
     false
 }
 
 fn is_collision_node(n) {
-    false
+    true
 }
 
 fn is_pair_node(n) {
-    true
+    false
 }
 
 fn assoc_bitmap_node(n, shift, h, k, v, added_leaf_box) {
@@ -32,12 +33,9 @@ fn assoc_node(n, shift, h, k, v, added_leaf_box) {
     } else if is_bitmap_indexed_node(n) {
         assoc_bitmap_node(n, shift, h, k, v, added_leaf_box)
     } else if is_collision_node(n) {
+        // It is now failing here
         assoc_collision_node(n, shift, h, k, v, added_leaf_box)
     } else if is_pair_node(n) {
-        println("Calling here")
-        // I have confirmed this bug here is because of spilling
-        // added_leaf is spilled and something in my logic
-        // println(added_leaf_box)
         assoc_key_val_node(n, shift, h, k, v, added_leaf_box)
     } else {
         // Fallback (should rarely occur if all logic is correct)

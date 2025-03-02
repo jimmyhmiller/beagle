@@ -37,7 +37,7 @@ impl LinearScan {
             free_registers: physical_registers,
             max_registers,
             location: HashMap::new(),
-            stack_slot: num_locals + 1,
+            stack_slot: num_locals,
         }
     }
 

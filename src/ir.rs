@@ -668,7 +668,7 @@ impl Ir {
 
     pub fn arg(&mut self, n: usize) -> Value {
         if n >= 8 {
-            return Value::Stack(((n - 8) + 2) as isize);
+            return Value::Stack((n as isize) - 7 + 2);
         }
         let register = self.next_register(Some(n), true);
         Value::Register(register)
@@ -1084,7 +1084,7 @@ impl Ir {
             Value::Register(register) => Register::from_index(register.index),
             Value::Spill(_register, index) => {
                 let temp_reg = lang.temporary_register();
-                lang.load_local(temp_reg, (*index + self.num_locals) as i32);
+                lang.load_local(temp_reg, *index as i32);
                 temp_reg
             }
             _ => panic!("Expected register got {:?}", value),
@@ -1093,7 +1093,7 @@ impl Ir {
 
     fn store_spill(&self, dest: Register, dest_spill: Option<usize>, lang: &mut LowLevelArm) {
         if let Some(dest_spill) = dest_spill {
-            lang.store_local(dest, (dest_spill + self.num_locals) as i32);
+            lang.store_local(dest, dest_spill as i32);
         }
     }
 
@@ -1125,6 +1125,7 @@ impl Ir {
             if let Some(label) = label {
                 lang.write_label(ir_label_to_lang_label[&self.labels[*label]]);
             }
+            lang.clear_temporary_registers();
             // println!("instruction {:?}", instruction);
             match instruction {
                 Instruction::Breakpoint => {
@@ -1403,12 +1404,12 @@ impl Ir {
                         }
                         Value::Spill(_register, index) => {
                             let temp_reg = lang.temporary_register();
-                            lang.load_local(temp_reg, (*index + self.num_locals) as i32);
+                            lang.load_local(temp_reg, (*index) as i32);
                             lang.mov_reg(dest, temp_reg);
                             self.store_spill(dest, dest_spill, lang);
                         }
                         Value::Stack(offset) => {
-                            lang.load_from_stack(dest, *offset as i32);
+                            lang.load_from_stack_beginning(dest, *offset as i32);
                             self.store_spill(dest, dest_spill, lang);
                         }
                     }
@@ -1499,7 +1500,11 @@ impl Ir {
                 Instruction::Call(dest, function, args, builtin) => {
                     for (arg_index, arg) in args.iter().enumerate().rev() {
                         let arg = self.value_to_register(arg, lang);
-                        lang.mov_reg(lang.arg(arg_index as u8), arg);
+                        if arg_index < 8 {
+                            lang.mov_reg(lang.arg(arg_index as u8), arg);
+                        } else {
+                            lang.push_to_end_of_stack(arg, (arg_index as i32) - 7);
+                        }
                     }
                     // TODO: I am not actually checking any tags here
                     // or unmasking or anything. Just straight up calling it
@@ -1528,7 +1533,7 @@ impl Ir {
                         if arg_index < 8 {
                             lang.mov_reg(lang.arg(arg_index as u8), arg);
                         } else {
-                            lang.push_to_stack(arg);
+                            lang.push_to_end_of_stack(arg, (arg_index as i32) - 7);
                         }
                     }
                     // TODO: I am not actually checking any tags here
@@ -1632,12 +1637,12 @@ impl Ir {
                     }
                     Value::Spill(_register, index) => {
                         let temp_reg = lang.temporary_register();
-                        lang.load_local(temp_reg, (*index + self.num_locals) as i32);
+                        lang.load_local(temp_reg, (*index) as i32);
                         lang.mov_reg(lang.ret_reg(), temp_reg);
                         lang.jump(exit);
-                    },
+                    }
                     Value::Stack(offset) => {
-                        lang.load_from_stack(lang.ret_reg(), *offset as i32);
+                        lang.load_from_stack_beginning(lang.ret_reg(), *offset as i32);
                         lang.jump(exit);
                     }
                 },
@@ -1703,6 +1708,7 @@ impl Ir {
                     let ptr = self.value_to_register(ptr, lang);
                     let val = self.value_to_register(val, lang);
                     let dest = self.value_to_register(temp1, lang);
+
                     // lang.breakpoint();
                     lang.load_from_heap(dest, ptr, *offset as i32);
                     let mask_register = self.value_to_register(temp2, lang);
@@ -1908,10 +1914,8 @@ impl Ir {
 
     pub fn store_local(&mut self, local_index: usize, reg: Value) {
         self.increment_locals(local_index);
-        self.instructions.push(Instruction::StoreLocal(
-            Value::Local(local_index),
-            reg,
-        ));
+        self.instructions
+            .push(Instruction::StoreLocal(Value::Local(local_index), reg));
     }
 
     pub fn load_local(&mut self, reg: VirtualRegister, local_index: usize) -> Value {
