@@ -4,7 +4,7 @@ use crate::{
     ir::{Condition, Instruction, Value, VirtualRegister},
     machine_code::arm_codegen::{
         ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector,
-        StrImmGenSelector, X29,
+        StrImmGenSelector,
     },
 };
 
@@ -956,7 +956,7 @@ impl PrettyPrint for ArmAsm {
             ArmAsm::SturGen { size, imm9, rn, rt } => {
                 // size: 0b11,
                 // rn: X29,
-                if *size != 0b11 || *rn != X29 {
+                if *size != 0b11 {
                     panic!("Need to deal with size and rn since I'm using it now");
                 }
                 format!(

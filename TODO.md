@@ -116,3 +116,5 @@ error: test failed, to rerun pass `--bin main`
 * There are a lot of shortcuts I think I'm taking right now. My register allocated doesn't reuse spilled slots. I null initialize all of them right now. I also don't write back to them when they go out of scope, but that means my gc will think they are still alive even if they aren't, so things only go out of scope at the end of a function. Eventually I need to fix all of this.
 * Allow protocols to have a default function they call (eq is a good example)
 * Make it so that `==` compiles to a function call testing equality
+* Apparently my testing if a variable exists doesn't reset when I make a new function
+    * so if function1 has a variable a10, the next function thinks that variable existss

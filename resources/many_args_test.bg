@@ -1,18 +1,28 @@
 namespace many_args_test
 
 import "beagle.primitive" as primitive
-// no-std
 
 fn f(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10) {
     a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10
 }
 
-// TODO: Make this work with gc
-// I think what will happen is that we won't know
-// about this pointer so it will be gc'd
-// We will need to add these to the stack map
+fn many_args_but_last_is_heap_object(a1, a2, a3, a4, a5, a6, a7, a8, a9) {
+    a9
+}
+
+struct Thing {
+    x
+    y
+}
+
 
 fn main() {
     println(f(1, 2, 3, 4, 5, 6, 7, 8, 9, 10))
+    println(many_args_but_last_is_heap_object(1, 2, 3, 4, 5, 6, 7, 8, Thing { x: 9, y: 10 }))
     "done"
 }
+
+// Expect
+// 55
+// Thing { x: 9, y: 10 }
+// done
