@@ -136,7 +136,7 @@ impl Compiler {
         let mut top_levels_to_run = vec![];
         for import in ast.imports() {
             let (name, _alias) = self.extract_import(&import);
-            if name == "beagle.core" || name == "beagle.primitive" || name == "beagle.builtin" {
+            if name == "beagle.core" || name == "beagle.primitive" || name == "beagle.builtin" || name == "beagle.__internal_test__" {
                 continue;
             }
             let file_name = self.get_file_name_from_import(name);
