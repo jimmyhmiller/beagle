@@ -220,6 +220,7 @@ impl Allocator for SimpleGeneration {
     }
 
     fn register_temporary_root(&mut self, root: usize) -> usize {
+        debug_assert!(self.temporary_roots.len() < 10, "Too many temporary roots");
         for (i, temp_root) in self.temporary_roots.iter_mut().enumerate() {
             if temp_root.is_none() {
                 *temp_root = Some(root);

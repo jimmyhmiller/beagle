@@ -2,11 +2,23 @@
 // Need to deal with failure?
 // Maybe not at the token level?
 
+use std::cmp::max;
+
 use crate::{
     ast::{Ast, TokenRange},
     builtins::debugger,
     Data,
 };
+
+
+#[test]
+fn struct_creation() {
+    let source = "tokenizer.input[tokenizer.position]
+    let action = Action.run { speed: 5 }";
+    let mut parser = Parser::new("test".to_string(), source.to_string());
+    let ast = parser.parse();
+    println!("{:#?}", ast);
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Token {
@@ -36,6 +48,7 @@ pub enum Token {
     Minus,
     Mul,
     Div,
+    Concat,
     True,
     False,
     Null,
@@ -79,6 +92,7 @@ impl Token {
             | Token::Minus
             | Token::Mul
             | Token::Div
+            | Token::Concat
             | Token::ShiftRight
             | Token::ShiftRightZero
             | Token::ShiftLeft
@@ -86,9 +100,7 @@ impl Token {
             | Token::BitWiseOr
             | Token::BitWiseXor
             | Token::Or
-            | Token::And
-            | Token::OpenBracket
-            | Token::Dot => true,
+            | Token::And => true,
             _ => false,
         }
     }
@@ -120,6 +132,7 @@ impl Token {
             Token::Minus => "-".to_string(),
             Token::Mul => "*".to_string(),
             Token::Div => "/".to_string(),
+            Token::Concat => "++".to_string(),
             Token::True => "true".to_string(),
             Token::False => "false".to_string(),
             Token::Null => "null".to_string(),
@@ -282,11 +295,8 @@ impl Tokenizer {
         self.consume(input_bytes);
         while !self.at_end(input_bytes) && !self.is_quote(input_bytes) {
             // TOOD: Better escape handling
-            if self.current_byte(input_bytes) == b'\\' {
+            if self.current_byte(input_bytes) == b'\\' && self.peek(input_bytes).unwrap() == b'"' {
                 self.consume(input_bytes);
-                if self.current_byte(input_bytes) == b'"' {
-                    self.consume(input_bytes);
-                }
             }
             self.consume(input_bytes);
         }
@@ -389,6 +399,7 @@ impl Tokenizer {
             b">" => Token::GreaterThan,
             b">=" => Token::GreaterThanOrEqual,
             b"+" => Token::Plus,
+            b"++" => Token::Concat,
             b"-" => Token::Minus,
             b"*" => Token::Mul,
             b"/" => Token::Div,
@@ -577,7 +588,7 @@ impl Parser {
     fn parse_elements(&mut self) -> Vec<Ast> {
         let mut result = Vec::new();
         while !self.at_end() {
-            if let Some(elem) = self.parse_expression(0, true) {
+            if let Some(elem) = self.parse_expression(0, true, true) {
                 result.push(elem);
             } else {
                 break;
@@ -615,8 +626,9 @@ impl Parser {
             Token::ShiftLeft | Token::ShiftRight | Token::ShiftRightZero => {
                 (90, Associativity::Left)
             }
+
             // Dot (e.g., for member access) should have very high precedence.
-            Token::Dot => (100, Associativity::Left),
+            Token::Dot | Token::OpenBracket | Token::OpenCurly => (100, Associativity::Left),
             // Default for unrecognized tokens.
             _ => (0, Associativity::Left),
         }
@@ -624,15 +636,34 @@ impl Parser {
 
     // Based on
     // https://eli.thegreenplace.net/2012/08/02/parsing-expressions-by-precedence-climbing
-    fn parse_expression(&mut self, min_precedence: usize, should_skip: bool) -> Option<Ast> {
+    fn parse_expression(&mut self, min_precedence: usize, should_skip: bool, struct_creation_allowed: bool) -> Option<Ast> {
+        let mut min_precedence = min_precedence;
         if should_skip {
             self.skip_whitespace();
         }
         if self.at_end() {
             return None;
         }
-        let mut lhs = self.parse_atom(min_precedence)?;
 
+        let mut lhs = self.parse_atom(min_precedence)?;
+        // TODO: this is ugly
+        self.skip_spaces();
+
+
+        let old_min_precedence = min_precedence;
+        while self.is_postfix(&lhs, struct_creation_allowed) && self.get_precedence().0 > min_precedence {
+            let (precedence, associativity) = self.get_precedence();
+            let next_min_precedence = if matches!(associativity, Associativity::Left) {
+                precedence + 1
+            } else {
+                precedence
+            };
+            lhs = self.parse_postfix(lhs, next_min_precedence, struct_creation_allowed)?;
+            self.skip_spaces();
+        }
+        min_precedence = old_min_precedence;
+
+        // TODO: This is ugly
         self.skip_spaces();
         loop {
             if self.at_end()
@@ -652,7 +683,7 @@ impl Parser {
             };
 
             self.move_to_next_non_whitespace();
-            let rhs = self.parse_expression(next_min_precedence, true)?;
+            let rhs = self.parse_expression(next_min_precedence, true, struct_creation_allowed)?;
 
             lhs = self.compose_binary_op(lhs.clone(), current_token, rhs, min_precedence);
         }
@@ -745,7 +776,7 @@ impl Parser {
                 self.move_to_next_non_whitespace();
                 self.expect_equal();
                 self.move_to_next_non_whitespace();
-                let value = self.parse_expression(0, true).unwrap();
+                let value = self.parse_expression(0, true, true).unwrap();
                 let end_position = self.position;
                 Some(Ast::Let {
                     name: Box::new(Ast::Identifier(name, name_position)),
@@ -759,7 +790,7 @@ impl Parser {
             }
             Token::OpenParen => {
                 self.consume();
-                let result = self.parse_expression(0, true);
+                let result = self.parse_expression(0, true, true);
                 self.expect_close_paren();
                 result
             }
@@ -1043,12 +1074,10 @@ impl Parser {
         if self.is_close_bracket() {
             self.consume();
         } else {
-            let (line, column) = self.token_line_column_map[self.position];
             panic!(
-                "Expected close bracket {:?} at {}:{}",
+                "Expected close bracket {:?} at {}",
                 self.get_token_repr(),
-                line,
-                column
+                self.current_location()
             );
         }
     }
@@ -1271,7 +1300,7 @@ impl Parser {
         let mut result = Vec::new();
         self.skip_whitespace();
         while !self.at_end() && !self.is_close_curly() {
-            if let Some(elem) = self.parse_expression(0, true) {
+            if let Some(elem) = self.parse_expression(0, true, true) {
                 result.push(elem);
             } else {
                 break;
@@ -1401,7 +1430,7 @@ impl Parser {
         self.expect_open_paren();
         let mut args = Vec::new();
         while !self.at_end() && !self.is_close_paren() {
-            if let Some(arg) = self.parse_expression(0, true) {
+            if let Some(arg) = self.parse_expression(0, true, true) {
                 args.push(arg);
                 self.skip_whitespace();
                 if !self.is_close_paren() {
@@ -1455,7 +1484,7 @@ impl Parser {
                 self.skip_spaces();
                 self.expect_colon();
                 self.skip_spaces();
-                let value = self.parse_expression(0, false).unwrap();
+                let value = self.parse_expression(0, false, true).unwrap();
                 if !self.is_close_curly() {
                     self.data_delimiter();
                 }
@@ -1490,7 +1519,7 @@ impl Parser {
     fn parse_if(&mut self) -> Ast {
         let start_position = self.position;
         self.move_to_next_non_whitespace();
-        let condition = Box::new(self.parse_expression(1, true).unwrap());
+        let condition = Box::new(self.parse_expression(1, true, false).unwrap());
         let then = self.parse_block();
         self.move_to_next_non_whitespace();
         if self.is_else() {
@@ -1564,10 +1593,9 @@ impl Parser {
                 right: Box::new(rhs),
                 token_range,
             },
-            Token::EqualEqual => Ast::Condition {
-                operator: crate::ir::Condition::Equal,
-                left: Box::new(lhs),
-                right: Box::new(rhs),
+            Token::EqualEqual => Ast::Call {
+                name: "beagle.core/equal".to_string(),
+                args: vec![lhs, rhs],
                 token_range,
             },
             Token::NotEqual => Ast::Condition {
@@ -1648,41 +1676,7 @@ impl Parser {
                 right: Box::new(rhs),
                 token_range,
             },
-            Token::Dot => {
-                assert!(
-                    matches!(rhs, Ast::Identifier(_, _)),
-                    "Expected identifier got {:?}",
-                    rhs
-                );
-                let rhs = match rhs {
-                    Ast::Identifier(name, position) => Ast::Identifier(name, position),
-                    _ => panic!("Not an identifier"),
-                };
-
-                if self.is_open_curly() && min_precedence == 0 {
-                    self.expect_open_curly();
-                    let fields = self.parse_struct_fields_creations();
-                    self.expect_close_curly();
-                    Ast::EnumCreation {
-                        name: match lhs {
-                            Ast::Identifier(name, _) => name,
-                            _ => panic!("Not an identifier"),
-                        },
-                        variant: match rhs {
-                            Ast::Identifier(name, _) => name,
-                            _ => panic!("Not an identifier"),
-                        },
-                        fields,
-                        token_range,
-                    }
-                } else {
-                    Ast::PropertyAccess {
-                        object: Box::new(lhs),
-                        property: Box::new(rhs),
-                        token_range,
-                    }
-                }
-            }
+    
             Token::OpenBracket => {
                 let index = Box::new(rhs);
                 self.expect_close_bracket();
@@ -1692,6 +1686,11 @@ impl Parser {
                     token_range,
                 }
             }
+            Token::Concat => Ast::Call {
+                name: "beagle.core/string_concat".to_string(),
+                args: vec![lhs, rhs],
+                token_range,
+            },
             _ => panic!("Exepcted binary op got {:?}", current_token),
         }
     }
@@ -1749,7 +1748,7 @@ impl Parser {
         self.consume();
         let mut elements = Vec::new();
         while !self.at_end() && !self.is_close_bracket() {
-            elements.push(self.parse_expression(0, true).unwrap());
+            elements.push(self.parse_expression(0, true, true).unwrap());
             self.skip_whitespace();
             if !self.is_close_bracket() {
                 self.expect_comma();
@@ -1765,6 +1764,126 @@ impl Parser {
 
     fn is_close_bracket(&self) -> bool {
         self.current_token() == Token::CloseBracket
+    }
+    
+
+    // TODO: I tried to fix this parse, I completely broke lots of things
+    // need to get it back into working order around postfix operations and
+    // my hacks for struct creation
+
+    fn is_postfix(&self, lhs: &Ast, struct_creation_allowed: bool) -> bool {
+        match self.current_token() {
+            Token::Dot | Token::OpenParen | Token::OpenBracket => true,
+            Token::OpenCurly => {
+                if matches!(lhs, Ast::Identifier(_, _) | Ast::PropertyAccess { .. }) {
+                    true && struct_creation_allowed
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn parse_postfix(&mut self, lhs: Ast, min_precedence: usize, struct_creation_allowed: bool) -> Option<Ast> {
+        match self.current_token() {
+            Token::Dot => {
+                self.consume();
+                let rhs = self.parse_expression(min_precedence, true, struct_creation_allowed)?;
+                let start_position = lhs.token_range().start;
+                let end_position = rhs.token_range().end + 1;
+                let token_range = TokenRange::new(start_position, end_position);
+                if matches!(rhs, Ast::StructCreation { .. }) {
+                    // turn this into enum creation
+                    match rhs {
+                        Ast::StructCreation {
+                            name,
+                            fields,
+                            token_range,
+                        } => Some(Ast::EnumCreation {
+                            name: if let Ast::Identifier(name, _) = lhs {
+                                name
+                            } else {
+                                panic!("Expected identifier")
+                            },
+                            variant: name,
+                            fields,
+                            token_range,
+                        }),
+                        _ => panic!("Expected struct creation"),
+                    }
+                } else {
+                    Some(Ast::PropertyAccess {
+                        object: Box::new(lhs),
+                        property: Box::new(rhs),
+                        token_range,
+                    })
+                }
+            }
+            Token::OpenParen => {
+                let position = self.consume();
+                let mut args = Vec::new();
+                while !self.at_end() && !self.is_close_paren() {
+                    args.push(self.parse_expression(0, true, true).unwrap());
+                    self.skip_whitespace();
+                    if !self.is_close_paren() {
+                        self.expect_comma();
+                    }
+                }
+                self.expect_close_paren();
+                Some(Ast::Call {
+                    name: match lhs {
+                        Ast::Identifier(name, _) => name,
+                        _ => panic!("Expected identifier"),
+                    },
+                    args,
+                    token_range: TokenRange::new(position, self.position),
+                })
+            }
+            Token::OpenBracket => {
+                let position = self.consume();
+                let index = self.parse_expression(0, true, true).unwrap();
+                self.expect_close_bracket();
+                Some(Ast::IndexOperator {
+                    array: Box::new(lhs),
+                    index: Box::new(index),
+                    token_range: TokenRange::new(position, self.position),
+                })
+            }
+            Token::OpenCurly => {
+                let position = self.consume();
+                let fields = self.parse_struct_fields_creations();
+                self.expect_close_curly();
+                match lhs {
+                    Ast::Identifier(name, _) => Some(Ast::StructCreation {
+                        name,
+                        fields,
+                        token_range: TokenRange::new(position, self.position),
+                    }),
+                    Ast::PropertyAccess { object, property, token_range } => {
+                        // TODO: Ugly
+                        let enum_name = match *property {
+                            Ast::Identifier(name, _) => name,
+                            _ => panic!("Expected identifier"),
+                        };
+                        let parent_name = match *object {
+                            Ast::Identifier(name, _) => name,
+                            _ => panic!("Expected identifier"),
+                        };
+                        Some(Ast::EnumCreation {
+                            name: parent_name,
+                            variant: enum_name,
+                            fields,
+                            token_range,
+                        })
+
+                    }
+                    _ => panic!("Expected identifier"),
+                }
+            
+            }
+            _ => None,
+        }
     }
 }
 
@@ -1920,6 +2039,18 @@ fn parse_enum_creation_complex() {
 }
 
 #[test]
+fn parse_property_access_if() {
+    let ast = parse! {
+        "
+
+        if action.speed >= 3 {
+            println(\"Fast\")
+        }"
+    };
+    println!("{:#?}", ast);
+}
+
+#[test]
 fn test_parsing_ast() {
     let ast = parse! {
         "array/read_field(node, (index >>> level) & 31)"
@@ -1937,6 +2068,8 @@ fn parse_struct_creation() {
     };
     println!("{:#?}", ast);
 }
+
+
 
 #[test]
 fn parse_expression() {

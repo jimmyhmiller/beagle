@@ -140,6 +140,24 @@ extern "C" fn get_string_length(string: usize) -> usize {
     }
 }
 
+extern "C" fn string_concat(a: usize, b: usize) -> usize {
+    let runtime = get_runtime().get_mut();
+    let a = runtime.get_string(a);
+    let b = runtime.get_string(b);
+    let result = a + &b;
+    runtime.memory.allocate_string(result).unwrap().into()
+}
+
+extern "C" fn substring(string: usize, start: usize, length: usize) -> usize {
+    let runtime = get_runtime().get_mut();
+    let string = runtime.get_string(string);
+    let start = BuiltInTypes::untag(start);
+    let length = BuiltInTypes::untag(length);
+    let bytes = &string[start..start + length];
+    let result = runtime.memory.allocate_string(bytes.to_string()).unwrap().into();
+    result
+}
+
 extern "C" fn fill_object_fields(object_pointer: usize, value: usize) -> usize {
     let mut object = HeapObject::from_tagged(object_pointer);
     let raw_slice = object.get_fields_mut();
@@ -200,7 +218,6 @@ extern "C" fn property_access(
             unsafe {
                 throw_error(stack_pointer);
             };
-            panic!("Error: {:?}", error);
         });
     let type_id = HeapObject::from_tagged(struct_pointer).get_struct_id();
     let buffer = unsafe { from_raw_parts_mut(property_cache_location as *mut usize, 2) };
@@ -214,9 +231,9 @@ extern "C" fn type_of(struct_pointer: usize) -> usize {
     runtime.type_of(struct_pointer)
 }
 
-extern "C" fn equals(a: usize, b: usize) -> usize {
+extern "C" fn equal(a: usize, b: usize) -> usize {
     let runtime = get_runtime().get_mut();
-    if runtime.equals(a, b) {
+    if runtime.equal(a, b) {
         BuiltInTypes::true_value() as usize
     } else {
         BuiltInTypes::false_value() as usize
@@ -238,7 +255,7 @@ extern "C" fn write_field(
     BuiltInTypes::null_value() as usize
 }
 
-pub unsafe extern "C" fn throw_error(stack_pointer: usize) -> usize {
+pub unsafe extern "C" fn throw_error(stack_pointer: usize) -> ! {
     print_stack(stack_pointer);
     panic!("Error!");
 }
@@ -770,7 +787,6 @@ pub unsafe extern "C" fn copy_object(stack_pointer: usize, object_pointer: usize
         let stack_pointer = get_current_stack_pointer();
         println!("Error: {:?}", error);
         unsafe { throw_error(stack_pointer) };
-        panic!("error")
     } else {
         result.unwrap()
     }
@@ -928,6 +944,13 @@ extern "C" fn hash(value: usize) -> usize {
         }
         BuiltInTypes::HeapObject => {
             let heap_object = HeapObject::from_tagged(value);
+            if heap_object.get_header().type_id == 2 {
+                let bytes = heap_object.get_string_bytes();
+                let string = std::str::from_utf8(bytes).unwrap();
+                let mut s = DefaultHasher::new();
+                string.hash(&mut s);
+                return BuiltInTypes::Int.tag(s.finish() as isize) as usize;
+            }
             let fields = heap_object.get_fields();
             let mut s = DefaultHasher::new();
             for field in fields {
@@ -1029,7 +1052,7 @@ impl Runtime {
 
         self.add_builtin_function("beagle.core/type_of", type_of as *const u8, false, 1)?;
 
-        self.add_builtin_function("beagle.core/equals", equals as *const u8, false, 2)?;
+        self.add_builtin_function("beagle.core/equal", equal as *const u8, false, 2)?;
 
         self.add_builtin_function(
             "beagle.builtin/write_field",
@@ -1164,6 +1187,10 @@ impl Runtime {
             false,
             1,
         )?;
+
+        self.add_builtin_function("beagle.core/string_concat", string_concat as *const u8, false, 2)?;
+
+        self.add_builtin_function("beagle.core/substring", substring as *const u8, false, 3)?;
 
         self.add_builtin_function("beagle.builtin/hash", hash as *const u8, false, 1)?;
 

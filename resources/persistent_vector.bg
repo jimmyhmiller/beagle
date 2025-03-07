@@ -264,7 +264,7 @@ extend PersistentVector with Push {
 
 
 fn main() {
-    let vec1 = EMPTY
+    let vec1 = vec()
     println(vec1)
     gc()
     println(vec1)

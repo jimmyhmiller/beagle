@@ -39,6 +39,7 @@ impl Struct {
     }
 }
 
+
 pub struct StructManager {
     name_to_id: HashMap<String, usize>,
     structs: Vec<Struct>,
@@ -1100,6 +1101,7 @@ impl Runtime {
             self.memory.heap.gc_add_root(old);
         }
     }
+    
 
     pub fn register_temporary_root(&mut self, root: usize) -> usize {
         self.memory.heap.register_temporary_root(root)
@@ -1490,7 +1492,7 @@ impl Runtime {
             .fields
             .iter()
             .position(|f| f == string)
-            .ok_or("Field not found")?;
+            .ok_or(format!("Field not found {} for struct {:?}", string, struct_value))?;
         Ok((heap_object.get_field(field_index), field_index))
     }
 
@@ -1519,7 +1521,9 @@ impl Runtime {
         }
     }
 
-    pub fn equals(&self, a: usize, b: usize) -> bool {
+    pub fn  equal(&self, a: usize, b: usize) -> bool {
+        let mut a = a;
+        let mut b = b;
         if a == b {
             return true;
         }
@@ -1531,16 +1535,17 @@ impl Runtime {
         // this as the default implementation for the protocol
         // I don't have that concept right now.
 
-        if b_tag == BuiltInTypes::String && a_tag == BuiltInTypes::HeapObject {
+        if a_tag == BuiltInTypes::String && b_tag == BuiltInTypes::HeapObject {
             (a_tag, b_tag) = (b_tag, a_tag);
+            (a, b) = (b, a);
         }
 
         if a_tag == BuiltInTypes::HeapObject && b_tag == BuiltInTypes::String {
             let a_object = HeapObject::from_tagged(a);
-            if a_object.get_struct_id() != 2 {
+            if a_object.get_type_id() != 2 {
                 return false;
             }
-            let b_string = self.get_string_literal(b);
+            let b_string = self.get_str_literal(b);
             let a_string = a_object.get_string_bytes();
             let a_string = std::str::from_utf8(a_string).unwrap();
             return a_string == b_string;
@@ -1568,7 +1573,7 @@ impl Runtime {
                     return false;
                 }
                 for (a, b) in a_fields.iter().zip(b_fields.iter()) {
-                    if !self.equals(*a, *b) {
+                    if !self.equal(*a, *b) {
                         return false;
                     }
                 }
@@ -1635,6 +1640,27 @@ impl Runtime {
     pub fn get_string_literal(&self, value: usize) -> String {
         let value = BuiltInTypes::untag(value);
         self.string_constants[value].str.clone()
+    }
+
+    pub fn get_str_literal<'a>(&'a self, value: usize) -> &'a str {
+        let value = BuiltInTypes::untag(value);
+        &self.string_constants[value].str
+    }
+
+    pub fn get_string(&self, value: usize) -> String {
+        let tag = BuiltInTypes::get_kind(value);
+        if tag == BuiltInTypes::String {
+            self.get_string_literal(value)
+        } else if tag == BuiltInTypes::HeapObject {
+            let heap_object = HeapObject::from_tagged(value);
+            if heap_object.get_type_id() != 2 {
+                panic!("Not a string");
+            }
+            let bytes = heap_object.get_string_bytes();
+            std::str::from_utf8(bytes).unwrap().to_string()
+        } else {
+            panic!("Not a string");
+        }
     }
 
     pub fn add_foreign_function(

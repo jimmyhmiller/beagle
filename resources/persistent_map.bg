@@ -391,6 +391,13 @@ fn get(pm, k) {
     }
 }
 
+extend PersistentMapStruct with Indexed {
+    fn get(map, index) {
+        get(map, index)
+    }
+}
+
+
 fn find_node(n, k, h, shift) {
     if n == null {
         null

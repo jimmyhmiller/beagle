@@ -22,11 +22,11 @@
                     "kind": "bin"
                 }
             },
-            "args": ["resources/many_args_test.bg"],
+            "args": ["resources/mutable.bg"],
             "cwd": "${workspaceFolder}",
-            // "preRunCommands": [
-            //     "command script import .vscode/rust_prettifier_for_lldb.py"
-            // ],
+            "preRunCommands": [
+                "command script import .vscode/rust_prettifier_for_lldb.py"
+            ],
         },
         {
             "type": "lldb",
@@ -45,7 +45,10 @@
                 }
             },
             "args": [],
-            "cwd": "${workspaceFolder}"
+            "cwd": "${workspaceFolder}",
+            "preRunCommands": [
+                "command script import .vscode/rust_prettifier_for_lldb.py"
+            ],
 
         }
     ]
