@@ -2,23 +2,11 @@
 // Need to deal with failure?
 // Maybe not at the token level?
 
-use std::cmp::max;
-
 use crate::{
     ast::{Ast, TokenRange},
     builtins::debugger,
     Data,
 };
-
-
-#[test]
-fn struct_creation() {
-    let source = "tokenizer.input[tokenizer.position]
-    let action = Action.run { speed: 5 }";
-    let mut parser = Parser::new("test".to_string(), source.to_string());
-    let ast = parser.parse();
-    println!("{:#?}", ast);
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Token {
@@ -636,7 +624,12 @@ impl Parser {
 
     // Based on
     // https://eli.thegreenplace.net/2012/08/02/parsing-expressions-by-precedence-climbing
-    fn parse_expression(&mut self, min_precedence: usize, should_skip: bool, struct_creation_allowed: bool) -> Option<Ast> {
+    fn parse_expression(
+        &mut self,
+        min_precedence: usize,
+        should_skip: bool,
+        struct_creation_allowed: bool,
+    ) -> Option<Ast> {
         let mut min_precedence = min_precedence;
         if should_skip {
             self.skip_whitespace();
@@ -649,9 +642,10 @@ impl Parser {
         // TODO: this is ugly
         self.skip_spaces();
 
-
         let old_min_precedence = min_precedence;
-        while self.is_postfix(&lhs, struct_creation_allowed) && self.get_precedence().0 > min_precedence {
+        while self.is_postfix(&lhs, struct_creation_allowed)
+            && self.get_precedence().0 > min_precedence
+        {
             let (precedence, associativity) = self.get_precedence();
             let next_min_precedence = if matches!(associativity, Associativity::Left) {
                 precedence + 1
@@ -685,7 +679,7 @@ impl Parser {
             self.move_to_next_non_whitespace();
             let rhs = self.parse_expression(next_min_precedence, true, struct_creation_allowed)?;
 
-            lhs = self.compose_binary_op(lhs.clone(), current_token, rhs, min_precedence);
+            lhs = self.compose_binary_op(lhs.clone(), current_token, rhs);
         }
 
         Some(lhs)
@@ -1570,13 +1564,7 @@ impl Parser {
         }
     }
 
-    fn compose_binary_op(
-        &mut self,
-        lhs: Ast,
-        current_token: Token,
-        rhs: Ast,
-        min_precedence: usize,
-    ) -> Ast {
+    fn compose_binary_op(&mut self, lhs: Ast, current_token: Token, rhs: Ast) -> Ast {
         let start_position = lhs.token_range().start;
         let end_position = rhs.token_range().end + 1;
         let token_range = TokenRange::new(start_position, end_position);
@@ -1676,7 +1664,7 @@ impl Parser {
                 right: Box::new(rhs),
                 token_range,
             },
-    
+
             Token::OpenBracket => {
                 let index = Box::new(rhs);
                 self.expect_close_bracket();
@@ -1765,7 +1753,6 @@ impl Parser {
     fn is_close_bracket(&self) -> bool {
         self.current_token() == Token::CloseBracket
     }
-    
 
     // TODO: I tried to fix this parse, I completely broke lots of things
     // need to get it back into working order around postfix operations and
@@ -1776,7 +1763,7 @@ impl Parser {
             Token::Dot | Token::OpenParen | Token::OpenBracket => true,
             Token::OpenCurly => {
                 if matches!(lhs, Ast::Identifier(_, _) | Ast::PropertyAccess { .. }) {
-                    true && struct_creation_allowed
+                    struct_creation_allowed
                 } else {
                     false
                 }
@@ -1785,7 +1772,12 @@ impl Parser {
         }
     }
 
-    fn parse_postfix(&mut self, lhs: Ast, min_precedence: usize, struct_creation_allowed: bool) -> Option<Ast> {
+    fn parse_postfix(
+        &mut self,
+        lhs: Ast,
+        min_precedence: usize,
+        struct_creation_allowed: bool,
+    ) -> Option<Ast> {
         match self.current_token() {
             Token::Dot => {
                 self.consume();
@@ -1860,7 +1852,11 @@ impl Parser {
                         fields,
                         token_range: TokenRange::new(position, self.position),
                     }),
-                    Ast::PropertyAccess { object, property, token_range } => {
+                    Ast::PropertyAccess {
+                        object,
+                        property,
+                        token_range,
+                    } => {
                         // TODO: Ugly
                         let enum_name = match *property {
                             Ast::Identifier(name, _) => name,
@@ -1876,11 +1872,9 @@ impl Parser {
                             fields,
                             token_range,
                         })
-
                     }
                     _ => panic!("Expected identifier"),
                 }
-            
             }
             _ => None,
         }
@@ -2068,8 +2062,6 @@ fn parse_struct_creation() {
     };
     println!("{:#?}", ast);
 }
-
-
 
 #[test]
 fn parse_expression() {
