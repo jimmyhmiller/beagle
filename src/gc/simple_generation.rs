@@ -5,8 +5,8 @@ use mmap_rs::{MmapMut, MmapOptions};
 use crate::types::{BuiltInTypes, HeapObject, Word};
 
 use super::{
-    simple_mark_and_sweep::SimpleMarkSweepHeap, AllocateAction, Allocator, AllocatorOptions,
-    StackMap, STACK_SIZE,
+    AllocateAction, Allocator, AllocatorOptions, STACK_SIZE, StackMap,
+    simple_mark_and_sweep::SimpleMarkSweepHeap,
 };
 
 struct Segment {
@@ -108,7 +108,13 @@ impl Space {
         let offset = segment.offset;
         let full_size = size.to_bytes() + HeapObject::header_size();
         if offset + full_size > segment.size {
-            panic!("We should only be here if we think we can allocate: full_size: {}, offset: {}, segment.size: {}, diff {}", full_size, offset, segment.size, segment.size - offset);
+            panic!(
+                "We should only be here if we think we can allocate: full_size: {}, offset: {}, segment.size: {}, diff {}",
+                full_size,
+                offset,
+                segment.size,
+                segment.size - offset
+            );
         }
         let pointer = self.write_object(self.segment_offset, offset, size);
         self.increment_current_offset(full_size);
@@ -320,14 +326,16 @@ impl SimpleGeneration {
     }
 
     unsafe fn copy_all(&mut self, roots: Vec<usize>) -> Vec<usize> {
-        let mut new_roots = vec![];
-        for root in roots.iter() {
-            new_roots.push(self.copy(*root));
+        unsafe {
+            let mut new_roots = vec![];
+            for root in roots.iter() {
+                new_roots.push(self.copy(*root));
+            }
+
+            self.copy_remaining();
+
+            new_roots
         }
-
-        self.copy_remaining();
-
-        new_roots
     }
 
     fn copy_remaining(&mut self) {
@@ -345,44 +353,48 @@ impl SimpleGeneration {
     }
 
     unsafe fn copy(&mut self, root: usize) -> usize {
-        let heap_object = HeapObject::from_tagged(root);
+        unsafe {
+            let heap_object = HeapObject::from_tagged(root);
 
-        if !self.young.contains(heap_object.get_pointer()) {
-            return root;
-        }
-
-        // if it is marked we have already copied it
-        // We now know that the first field is a pointer
-        if heap_object.marked() {
-            let first_field = heap_object.get_field(0);
-            assert!(BuiltInTypes::is_heap_pointer(first_field));
-            assert!(!self
-                .young
-                .contains(BuiltInTypes::untag(first_field) as *const u8));
-            return first_field;
-        }
-
-        let data = heap_object.get_full_object_data();
-        let new_pointer = self.old.copy_data_to_offset(data);
-        debug_assert!(new_pointer as usize % 8 == 0, "Pointer is not aligned");
-        // update header of original object to now be the forwarding pointer
-        let tagged_new = BuiltInTypes::get_kind(root).tag(new_pointer as isize) as usize;
-
-        if heap_object.is_zero_size() {
-            return tagged_new;
-        }
-        let first_field = heap_object.get_field(0);
-        if let Some(heap_object) = HeapObject::try_from_tagged(first_field) {
             if !self.young.contains(heap_object.get_pointer()) {
+                return root;
+            }
+
+            // if it is marked we have already copied it
+            // We now know that the first field is a pointer
+            if heap_object.marked() {
+                let first_field = heap_object.get_field(0);
+                assert!(BuiltInTypes::is_heap_pointer(first_field));
+                assert!(
+                    !self
+                        .young
+                        .contains(BuiltInTypes::untag(first_field) as *const u8)
+                );
+                return first_field;
+            }
+
+            let data = heap_object.get_full_object_data();
+            let new_pointer = self.old.copy_data_to_offset(data);
+            debug_assert!(new_pointer as usize % 8 == 0, "Pointer is not aligned");
+            // update header of original object to now be the forwarding pointer
+            let tagged_new = BuiltInTypes::get_kind(root).tag(new_pointer as isize) as usize;
+
+            if heap_object.is_zero_size() {
                 return tagged_new;
             }
-            self.copy(first_field);
-        }
+            let first_field = heap_object.get_field(0);
+            if let Some(heap_object) = HeapObject::try_from_tagged(first_field) {
+                if !self.young.contains(heap_object.get_pointer()) {
+                    return tagged_new;
+                }
+                self.copy(first_field);
+            }
 
-        heap_object.write_field(0, tagged_new);
-        heap_object.mark();
-        self.copied.push(HeapObject::from_untagged(new_pointer));
-        tagged_new
+            heap_object.write_field(0, tagged_new);
+            heap_object.mark();
+            self.copied.push(HeapObject::from_untagged(new_pointer));
+            tagged_new
+        }
     }
 
     fn move_objects_referenced_from_old_to_old(&mut self, old_object: &mut HeapObject) {

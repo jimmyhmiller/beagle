@@ -3,9 +3,9 @@
 // Maybe not at the token level?
 
 use crate::{
+    Data,
     ast::{Ast, TokenRange},
     builtins::debugger,
-    Data,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,11 +193,7 @@ fn stripslashes(s: &str) -> String {
         n.push(match c {
             '\\' => {
                 let next = chars.next();
-                if let Some(c) = next {
-                    c
-                } else {
-                    c
-                }
+                if let Some(c) = next { c } else { c }
             }
             c => c,
         });
@@ -261,7 +257,7 @@ impl Tokenizer {
         input_bytes[self.position]
     }
 
-    pub fn next_n_bytes<'a>(&'a self, n: usize, input_bytes: &'a [u8]) -> &[u8] {
+    pub fn next_n_bytes(self, n: usize, input_bytes: &[u8]) -> &[u8] {
         // truncate if n is too large
         &input_bytes[self.position..std::cmp::min(self.position + n, input_bytes.len())]
     }
@@ -1383,7 +1379,7 @@ impl Parser {
                 }
                 Token::Atom((start, end)) => {
                     name.push_str(
-                        &String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap(),
+                        core::str::from_utf8(self.source[start..end].as_bytes()).unwrap(),
                     );
                 }
                 _ => panic!("Expected atom"),

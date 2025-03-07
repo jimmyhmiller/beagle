@@ -1,4 +1,5 @@
 use crate::{
+    CommandLineArguments, Data, Message,
     arm::LowLevelArm,
     ast::{Ast, TokenRange},
     builtins::debugger,
@@ -11,7 +12,6 @@ use crate::{
     pretty_print::PrettyPrint,
     runtime::{Enum, Function, ProtocolMethodInfo, Struct},
     types::BuiltInTypes,
-    CommandLineArguments, Data, Message,
 };
 
 use mmap_rs::{MmapMut, MmapOptions};

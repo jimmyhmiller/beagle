@@ -2,6 +2,7 @@ use ir::{Ir, Value, VirtualRegister};
 use std::collections::HashMap;
 
 use crate::{
+    Data, Message,
     arm::LowLevelArm,
     builtins::debugger,
     compiler::Compiler,
@@ -9,7 +10,6 @@ use crate::{
     pretty_print::PrettyPrint,
     runtime::{Enum, EnumVariant, Struct},
     types::BuiltInTypes,
-    Data, Message,
 };
 
 type TokenPosition = usize;
@@ -392,7 +392,7 @@ pub struct AstCompiler<'a> {
     pub last_accounted_for_ir: usize,
 }
 
-impl<'a> AstCompiler<'a> {
+impl AstCompiler<'_> {
     pub fn tail_position(&mut self) {
         self.next_context.tail_position = true;
     }

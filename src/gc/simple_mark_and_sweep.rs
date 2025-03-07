@@ -1,12 +1,12 @@
 use crate::{
+    Data, Message,
     builtins::debugger,
     types::{BuiltInTypes, HeapObject, Word},
-    Data, Message,
 };
 use mmap_rs::{MmapMut, MmapOptions};
 use std::error::Error;
 
-use super::{AllocateAction, Allocator, AllocatorOptions, StackMap, STACK_SIZE};
+use super::{AllocateAction, Allocator, AllocatorOptions, STACK_SIZE, StackMap};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 struct FreeListEntry {

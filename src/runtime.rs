@@ -5,24 +5,24 @@ use std::{
     cell::UnsafeCell,
     collections::HashMap,
     error::Error,
-    ffi::{c_void, CString},
+    ffi::{CString, c_void},
     io::Write,
     slice::{self},
-    sync::{atomic::AtomicUsize, Arc, Condvar, Mutex, TryLockError},
+    sync::{Arc, Condvar, Mutex, TryLockError, atomic::AtomicUsize},
     thread::{self, JoinHandle, Thread, ThreadId},
     time::Duration,
     vec,
 };
 
 use crate::{
+    Alloc, CommandLineArguments, Data, Message,
     builtins::{__pause, debugger},
     compiler::{
-        blocking_channel, BlockingSender, CompilerMessage, CompilerResponse, CompilerThread,
+        BlockingSender, CompilerMessage, CompilerResponse, CompilerThread, blocking_channel,
     },
-    gc::{AllocateAction, Allocator, AllocatorOptions, StackMap, StackMapDetails, STACK_SIZE},
+    gc::{AllocateAction, Allocator, AllocatorOptions, STACK_SIZE, StackMap, StackMapDetails},
     ir::StringValue,
     types::{BuiltInTypes, Header, HeapObject, Tagged},
-    Alloc, CommandLineArguments, Data, Message,
 };
 
 use std::cell::RefCell;
@@ -918,8 +918,10 @@ impl Runtime {
     }
 
     unsafe fn buffer_between<T>(start: *const T, end: *const T) -> &'static [T] {
-        let len = end.offset_from(start);
-        slice::from_raw_parts(start, len as usize)
+        unsafe {
+            let len = end.offset_from(start);
+            slice::from_raw_parts(start, len as usize)
+        }
     }
 
     fn find_function_for_pc(&self, pc: usize) -> Option<&Function> {

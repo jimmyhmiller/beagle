@@ -7,7 +7,7 @@ use crate::{
 };
 
 // TODO: I'd rather this be on Ir I think?
-impl<'a> AstCompiler<'a> {
+impl AstCompiler<'_> {
     pub fn compile_inline_primitive_function(&mut self, name: &str, args: Vec<Value>) -> Value {
         match name {
             "beagle.primitive/deref" => {

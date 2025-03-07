@@ -738,11 +738,11 @@ impl ArmAsm {
                 rd,
             } => {
                 0b0_0_0_100010_0_000000000000_00000_00000
-                    | (*sf as u32) << 31
-                    | (*sh as u32) << 22
-                    | truncate_imm::<_, 12>(*imm12) << 10
-                    | rn << 5
-                    | rd << 0
+                    | ((*sf as u32) << 31)
+                    | ((*sh as u32) << 22)
+                    | (truncate_imm::<_, 12>(*imm12) << 10)
+                    | (rn << 5)
+                    | (rd << 0)
             }
             ArmAsm::AddAddsubShift {
                 sf,
@@ -753,12 +753,12 @@ impl ArmAsm {
                 rd,
             } => {
                 0b0_0_0_01011_00_0_00000_000000_00000_00000
-                    | (*sf as u32) << 31
-                    | (*shift as u32) << 22
-                    | rm << 16
-                    | truncate_imm::<_, 6>(*imm6) << 10
-                    | rn << 5
-                    | rd << 0
+                    | ((*sf as u32) << 31)
+                    | ((*shift as u32) << 22)
+                    | (rm << 16)
+                    | (truncate_imm::<_, 6>(*imm6) << 10)
+                    | (rn << 5)
+                    | (rd << 0)
             }
             ArmAsm::AndLogImm {
                 sf,
@@ -769,12 +769,12 @@ impl ArmAsm {
                 rd,
             } => {
                 0b0_00_100100_0_000000_000000_00000_00000
-                    | (*sf as u32) << 31
-                    | (*n as u32) << 22
-                    | (*immr as u32) << 16
-                    | (*imms as u32) << 10
-                    | rn << 5
-                    | rd << 0
+                    | ((*sf as u32) << 31)
+                    | ((*n as u32) << 22)
+                    | ((*immr as u32) << 16)
+                    | ((*imms as u32) << 10)
+                    | (rn << 5)
+                    | (rd << 0)
             }
             ArmAsm::AndLogShift {
                 sf,
@@ -785,23 +785,25 @@ impl ArmAsm {
                 rd,
             } => {
                 0b0_00_01010_00_0_00000_000000_00000_00000
-                    | (*sf as u32) << 31
-                    | (*shift as u32) << 22
-                    | rm << 16
-                    | truncate_imm::<_, 6>(*imm6) << 10
-                    | rn << 5
-                    | rd << 0
+                    | ((*sf as u32) << 31)
+                    | ((*shift as u32) << 22)
+                    | (rm << 16)
+                    | (truncate_imm::<_, 6>(*imm6) << 10)
+                    | (rn << 5)
+                    | (rd << 0)
             }
             ArmAsm::BCond { imm19, cond } => {
                 0b0101010_0_0000000000000000000_0_0000
-                    | truncate_imm::<_, 19>(*imm19) << 5
-                    | (*cond as u32) << 0
+                    | (truncate_imm::<_, 19>(*imm19) << 5)
+                    | ((*cond as u32) << 0)
             }
             ArmAsm::Bl { imm26 } => {
-                0b1_00101_00000000000000000000000000 | truncate_imm::<_, 26>(*imm26) << 0
+                0b1_00101_00000000000000000000000000 | (truncate_imm::<_, 26>(*imm26) << 0)
             }
-            ArmAsm::Blr { rn } => 0b1101011_0_0_01_11111_0000_0_0_00000_00000 | rn << 5,
-            ArmAsm::Brk { imm16 } => 0b11010100_001_0000000000000000_000_00 | (*imm16 as u32) << 5,
+            ArmAsm::Blr { rn } => 0b1101011_0_0_01_11111_0000_0_0_00000_00000 | (rn << 5),
+            ArmAsm::Brk { imm16 } => {
+                0b11010100_001_0000000000000000_000_00 | ((*imm16 as u32) << 5)
+            }
             ArmAsm::Cas {
                 size,
                 l,
@@ -811,12 +813,12 @@ impl ArmAsm {
                 rt,
             } => {
                 0b00_0010001_0_1_00000_0_11111_00000_00000
-                    | (*size as u32) << 30
-                    | (*l as u32) << 22
-                    | rs << 16
-                    | (*o0 as u32) << 15
-                    | rn << 5
-                    | rt << 0
+                    | ((*size as u32) << 30)
+                    | ((*l as u32) << 22)
+                    | (rs << 16)
+                    | ((*o0 as u32) << 15)
+                    | (rn << 5)
+                    | (rt << 0)
             }
             ArmAsm::CmpSubsAddsubShift {
                 sf,
@@ -826,23 +828,23 @@ impl ArmAsm {
                 rn,
             } => {
                 0b0_1_1_01011_00_0_00000_000000_00000_11111
-                    | (*sf as u32) << 31
-                    | (*shift as u32) << 22
-                    | rm << 16
-                    | truncate_imm::<_, 6>(*imm6) << 10
-                    | rn << 5
+                    | ((*sf as u32) << 31)
+                    | ((*shift as u32) << 22)
+                    | (rm << 16)
+                    | (truncate_imm::<_, 6>(*imm6) << 10)
+                    | (rn << 5)
             }
             ArmAsm::CsetCsinc { sf, cond, rd } => {
                 0b0_0_0_11010100_11111_0000_0_1_11111_00000
-                    | (*sf as u32) << 31
-                    | (*cond as u32) << 12
-                    | rd << 0
+                    | ((*sf as u32) << 31)
+                    | ((*cond as u32) << 12)
+                    | (rd << 0)
             }
             ArmAsm::Ldar { size, rn, rt } => {
                 0b00_001000_1_1_0_11111_1_11111_00000_00000
-                    | (*size as u32) << 30
-                    | rn << 5
-                    | rt << 0
+                    | ((*size as u32) << 30)
+                    | (rn << 5)
+                    | (rt << 0)
             }
             ArmAsm::LdpGen {
                 opc,
@@ -854,27 +856,27 @@ impl ArmAsm {
             } => match class_selector {
                 LdpGenSelector::PostIndex => {
                     0b00_101_0_001_1_0000000_00000_00000_00000
-                        | (*opc as u32) << 30
-                        | truncate_imm::<_, 7>(*imm7) << 15
-                        | rt2 << 10
-                        | rn << 5
-                        | rt << 0
+                        | ((*opc as u32) << 30)
+                        | (truncate_imm::<_, 7>(*imm7) << 15)
+                        | (rt2 << 10)
+                        | (rn << 5)
+                        | (rt << 0)
                 }
                 LdpGenSelector::PreIndex => {
                     0b00_101_0_011_1_0000000_00000_00000_00000
-                        | (*opc as u32) << 30
-                        | truncate_imm::<_, 7>(*imm7) << 15
-                        | rt2 << 10
-                        | rn << 5
-                        | rt << 0
+                        | ((*opc as u32) << 30)
+                        | (truncate_imm::<_, 7>(*imm7) << 15)
+                        | (rt2 << 10)
+                        | (rn << 5)
+                        | (rt << 0)
                 }
                 LdpGenSelector::SignedOffset => {
                     0b00_101_0_010_1_0000000_00000_00000_00000
-                        | (*opc as u32) << 30
-                        | truncate_imm::<_, 7>(*imm7) << 15
-                        | rt2 << 10
-                        | rn << 5
-                        | rt << 0
+                        | ((*opc as u32) << 30)
+                        | (truncate_imm::<_, 7>(*imm7) << 15)
+                        | (rt2 << 10)
+                        | (rn << 5)
+                        | (rt << 0)
                 }
             },
             ArmAsm::LdrImmGen {
@@ -887,24 +889,24 @@ impl ArmAsm {
             } => match class_selector {
                 LdrImmGenSelector::PostIndex => {
                     0b00_111_0_00_01_0_000000000_01_00000_00000
-                        | (*size as u32) << 30
-                        | truncate_imm::<_, 9>(*imm9) << 12
-                        | rn << 5
-                        | rt << 0
+                        | ((*size as u32) << 30)
+                        | (truncate_imm::<_, 9>(*imm9) << 12)
+                        | (rn << 5)
+                        | (rt << 0)
                 }
                 LdrImmGenSelector::PreIndex => {
                     0b00_111_0_00_01_0_000000000_11_00000_00000
-                        | (*size as u32) << 30
-                        | truncate_imm::<_, 9>(*imm9) << 12
-                        | rn << 5
-                        | rt << 0
+                        | ((*size as u32) << 30)
+                        | (truncate_imm::<_, 9>(*imm9) << 12)
+                        | (rn << 5)
+                        | (rt << 0)
                 }
                 LdrImmGenSelector::UnsignedOffset => {
                     0b00_111_0_01_01_000000000000_00000_00000
-                        | (*size as u32) << 30
-                        | truncate_imm::<_, 12>(*imm12) << 10
-                        | rn << 5
-                        | rt << 0
+                        | ((*size as u32) << 30)
+                        | (truncate_imm::<_, 12>(*imm12) << 10)
+                        | (rn << 5)
+                        | (rt << 0)
                 }
             },
             ArmAsm::LdrRegGen {
@@ -916,33 +918,33 @@ impl ArmAsm {
                 rt,
             } => {
                 0b00_111_0_00_01_1_00000_000_0_10_00000_00000
-                    | (*size as u32) << 30
-                    | rm << 16
-                    | (*option as u32) << 13
-                    | (*s as u32) << 12
-                    | rn << 5
-                    | rt << 0
+                    | ((*size as u32) << 30)
+                    | (rm << 16)
+                    | ((*option as u32) << 13)
+                    | ((*s as u32) << 12)
+                    | (rn << 5)
+                    | (rt << 0)
             }
             ArmAsm::LdurGen { size, imm9, rn, rt } => {
                 0b00_111_0_00_01_0_000000000_00_00000_00000
-                    | (*size as u32) << 30
-                    | truncate_imm::<_, 9>(*imm9) << 12
-                    | rn << 5
-                    | rt << 0
+                    | ((*size as u32) << 30)
+                    | (truncate_imm::<_, 9>(*imm9) << 12)
+                    | (rn << 5)
+                    | (rt << 0)
             }
             ArmAsm::LsrLsrv { sf, rm, rn, rd } => {
                 0b0_0_0_11010110_00000_0010_01_00000_00000
-                    | (*sf as u32) << 31
-                    | rm << 16
-                    | rn << 5
-                    | rd << 0
+                    | ((*sf as u32) << 31)
+                    | (rm << 16)
+                    | (rn << 5)
+                    | (rd << 0)
             }
             ArmAsm::AsrAsrv { sf, rm, rn, rd } => {
                 0b0_0_0_11010110_00000_0010_10_00000_00000
-                    | (*sf as u32) << 31
-                    | rm << 16
-                    | rn << 5
-                    | rd << 0
+                    | ((*sf as u32) << 31)
+                    | (rm << 16)
+                    | (rn << 5)
+                    | (rd << 0)
             }
             ArmAsm::AsrSbfm {
                 sf,
@@ -953,12 +955,12 @@ impl ArmAsm {
                 rd,
             } => {
                 0b0_00_100110_0_000000_000000_00000_00000
-                    | (*sf as u32) << 31
-                    | (*n as u32) << 22
-                    | (*immr as u32) << 16
-                    | (*imms as u32) << 10
-                    | rn << 5
-                    | rd << 0
+                    | ((*sf as u32) << 31)
+                    | ((*n as u32) << 22)
+                    | ((*immr as u32) << 16)
+                    | ((*imms as u32) << 10)
+                    | (rn << 5)
+                    | (rd << 0)
             }
             ArmAsm::LslUbfm {
                 sf,
@@ -969,19 +971,19 @@ impl ArmAsm {
                 rd,
             } => {
                 0b0_10_100110_0_000000_000000_00000_00000
-                    | (*sf as u32) << 31
-                    | (*n as u32) << 22
-                    | (*immr as u32) << 16
-                    | (*imms as u32) << 10
-                    | rn << 5
-                    | rd << 0
+                    | ((*sf as u32) << 31)
+                    | ((*n as u32) << 22)
+                    | ((*immr as u32) << 16)
+                    | ((*imms as u32) << 10)
+                    | (rn << 5)
+                    | (rd << 0)
             }
             ArmAsm::LslLslv { sf, rm, rn, rd } => {
                 0b0_0_0_11010110_00000_0010_00_00000_00000
-                    | (*sf as u32) << 31
-                    | rm << 16
-                    | rn << 5
-                    | rd << 0
+                    | ((*sf as u32) << 31)
+                    | (rm << 16)
+                    | (rn << 5)
+                    | (rd << 0)
             }
             ArmAsm::LsrUbfm {
                 sf,
@@ -992,12 +994,12 @@ impl ArmAsm {
                 rd,
             } => {
                 0b0_10_100110_0_000000_000000_00000_00000
-                    | (*sf as u32) << 31
-                    | (*n as u32) << 22
-                    | (*immr as u32) << 16
-                    | (*imms as u32) << 10
-                    | rn << 5
-                    | rd << 0
+                    | ((*sf as u32) << 31)
+                    | ((*n as u32) << 22)
+                    | ((*immr as u32) << 16)
+                    | ((*imms as u32) << 10)
+                    | (rn << 5)
+                    | (rd << 0)
             }
             ArmAsm::EorLogShift {
                 sf,
@@ -1008,40 +1010,46 @@ impl ArmAsm {
                 rd,
             } => {
                 0b0_10_01010_00_0_00000_000000_00000_00000
-                    | (*sf as u32) << 31
-                    | (*shift as u32) << 22
-                    | rm << 16
-                    | truncate_imm::<_, 6>(*imm6) << 10
-                    | rn << 5
-                    | rd << 0
+                    | ((*sf as u32) << 31)
+                    | ((*shift as u32) << 22)
+                    | (rm << 16)
+                    | (truncate_imm::<_, 6>(*imm6) << 10)
+                    | (rn << 5)
+                    | (rd << 0)
             }
             ArmAsm::Madd { sf, rm, ra, rn, rd } => {
                 0b0_00_11011_000_00000_0_00000_00000_00000
-                    | (*sf as u32) << 31
-                    | rm << 16
-                    | ra << 10
-                    | rn << 5
-                    | rd << 0
+                    | ((*sf as u32) << 31)
+                    | (rm << 16)
+                    | (ra << 10)
+                    | (rn << 5)
+                    | (rd << 0)
             }
             ArmAsm::MovAddAddsubImm { sf, rn, rd } => {
-                0b0_0_0_100010_0_000000000000_00000_00000 | (*sf as u32) << 31 | rn << 5 | rd << 0
+                0b0_0_0_100010_0_000000000000_00000_00000
+                    | ((*sf as u32) << 31)
+                    | (rn << 5)
+                    | (rd << 0)
             }
             ArmAsm::MovOrrLogShift { sf, rm, rd } => {
-                0b0_01_01010_00_0_00000_000000_11111_00000 | (*sf as u32) << 31 | rm << 16 | rd << 0
+                0b0_01_01010_00_0_00000_000000_11111_00000
+                    | ((*sf as u32) << 31)
+                    | (rm << 16)
+                    | (rd << 0)
             }
             ArmAsm::Movk { sf, hw, imm16, rd } => {
                 0b0_11_100101_00_0000000000000000_00000
-                    | (*sf as u32) << 31
-                    | (*hw as u32) << 21
-                    | (*imm16 as u32) << 5
-                    | rd << 0
+                    | ((*sf as u32) << 31)
+                    | ((*hw as u32) << 21)
+                    | ((*imm16 as u32) << 5)
+                    | (rd << 0)
             }
             ArmAsm::Movz { sf, hw, imm16, rd } => {
                 0b0_10_100101_00_0000000000000000_00000
-                    | (*sf as u32) << 31
-                    | (*hw as u32) << 21
-                    | (*imm16 as u32) << 5
-                    | rd << 0
+                    | ((*sf as u32) << 31)
+                    | ((*hw as u32) << 21)
+                    | ((*imm16 as u32) << 5)
+                    | (rd << 0)
             }
             ArmAsm::OrrLogShift {
                 sf,
@@ -1052,26 +1060,26 @@ impl ArmAsm {
                 rd,
             } => {
                 0b0_01_01010_00_0_00000_000000_00000_00000
-                    | (*sf as u32) << 31
-                    | (*shift as u32) << 22
-                    | rm << 16
-                    | truncate_imm::<_, 6>(*imm6) << 10
-                    | rn << 5
-                    | rd << 0
+                    | ((*sf as u32) << 31)
+                    | ((*shift as u32) << 22)
+                    | (rm << 16)
+                    | (truncate_imm::<_, 6>(*imm6) << 10)
+                    | (rn << 5)
+                    | (rd << 0)
             }
-            ArmAsm::Ret { rn } => 0b1101011_0_0_10_11111_0000_0_0_00000_00000 | rn << 5,
+            ArmAsm::Ret { rn } => 0b1101011_0_0_10_11111_0000_0_0_00000_00000 | (rn << 5),
             ArmAsm::Sdiv { sf, rm, rn, rd } => {
                 0b0_0_0_11010110_00000_00001_1_00000_00000
-                    | (*sf as u32) << 31
-                    | rm << 16
-                    | rn << 5
-                    | rd << 0
+                    | ((*sf as u32) << 31)
+                    | (rm << 16)
+                    | (rn << 5)
+                    | (rd << 0)
             }
             ArmAsm::Stlr { size, rn, rt } => {
                 0b00_001000_1_0_0_11111_1_11111_00000_00000
-                    | (*size as u32) << 30
-                    | rn << 5
-                    | rt << 0
+                    | ((*size as u32) << 30)
+                    | (rn << 5)
+                    | (rt << 0)
             }
             ArmAsm::StpGen {
                 opc,
@@ -1083,27 +1091,27 @@ impl ArmAsm {
             } => match class_selector {
                 StpGenSelector::PostIndex => {
                     0b00_101_0_001_0_0000000_00000_00000_00000
-                        | (*opc as u32) << 30
-                        | truncate_imm::<_, 7>(*imm7) << 15
-                        | rt2 << 10
-                        | rn << 5
-                        | rt << 0
+                        | ((*opc as u32) << 30)
+                        | (truncate_imm::<_, 7>(*imm7) << 15)
+                        | (rt2 << 10)
+                        | (rn << 5)
+                        | (rt << 0)
                 }
                 StpGenSelector::PreIndex => {
                     0b00_101_0_011_0_0000000_00000_00000_00000
-                        | (*opc as u32) << 30
-                        | truncate_imm::<_, 7>(*imm7) << 15
-                        | rt2 << 10
-                        | rn << 5
-                        | rt << 0
+                        | ((*opc as u32) << 30)
+                        | (truncate_imm::<_, 7>(*imm7) << 15)
+                        | (rt2 << 10)
+                        | (rn << 5)
+                        | (rt << 0)
                 }
                 StpGenSelector::SignedOffset => {
                     0b00_101_0_010_0_0000000_00000_00000_00000
-                        | (*opc as u32) << 30
-                        | truncate_imm::<_, 7>(*imm7) << 15
-                        | rt2 << 10
-                        | rn << 5
-                        | rt << 0
+                        | ((*opc as u32) << 30)
+                        | (truncate_imm::<_, 7>(*imm7) << 15)
+                        | (rt2 << 10)
+                        | (rn << 5)
+                        | (rt << 0)
                 }
             },
             ArmAsm::StrImmGen {
@@ -1116,24 +1124,24 @@ impl ArmAsm {
             } => match class_selector {
                 StrImmGenSelector::PostIndex => {
                     0b00_111_0_00_00_0_000000000_01_00000_00000
-                        | (*size as u32) << 30
-                        | truncate_imm::<_, 9>(*imm9) << 12
-                        | rn << 5
-                        | rt << 0
+                        | ((*size as u32) << 30)
+                        | (truncate_imm::<_, 9>(*imm9) << 12)
+                        | (rn << 5)
+                        | (rt << 0)
                 }
                 StrImmGenSelector::PreIndex => {
                     0b00_111_0_00_00_0_000000000_11_00000_00000
-                        | (*size as u32) << 30
-                        | truncate_imm::<_, 9>(*imm9) << 12
-                        | rn << 5
-                        | rt << 0
+                        | ((*size as u32) << 30)
+                        | (truncate_imm::<_, 9>(*imm9) << 12)
+                        | (rn << 5)
+                        | (rt << 0)
                 }
                 StrImmGenSelector::UnsignedOffset => {
                     0b00_111_0_01_00_000000000000_00000_00000
-                        | (*size as u32) << 30
-                        | truncate_imm::<_, 12>(*imm12) << 10
-                        | rn << 5
-                        | rt << 0
+                        | ((*size as u32) << 30)
+                        | (truncate_imm::<_, 12>(*imm12) << 10)
+                        | (rn << 5)
+                        | (rt << 0)
                 }
             },
             ArmAsm::StrRegGen {
@@ -1145,19 +1153,19 @@ impl ArmAsm {
                 rt,
             } => {
                 0b00_111_0_00_00_1_00000_000_0_10_00000_00000
-                    | (*size as u32) << 30
-                    | rm << 16
-                    | (*option as u32) << 13
-                    | (*s as u32) << 12
-                    | rn << 5
-                    | rt << 0
+                    | ((*size as u32) << 30)
+                    | (rm << 16)
+                    | ((*option as u32) << 13)
+                    | ((*s as u32) << 12)
+                    | (rn << 5)
+                    | (rt << 0)
             }
             ArmAsm::SturGen { size, imm9, rn, rt } => {
                 0b00_111_0_00_00_0_000000000_00_00000_00000
-                    | (*size as u32) << 30
-                    | truncate_imm::<_, 9>(*imm9) << 12
-                    | rn << 5
-                    | rt << 0
+                    | ((*size as u32) << 30)
+                    | (truncate_imm::<_, 9>(*imm9) << 12)
+                    | (rn << 5)
+                    | (rt << 0)
             }
             ArmAsm::SubAddsubImm {
                 sf,
@@ -1167,11 +1175,11 @@ impl ArmAsm {
                 rd,
             } => {
                 0b0_1_0_100010_0_000000000000_00000_00000
-                    | (*sf as u32) << 31
-                    | (*sh as u32) << 22
-                    | truncate_imm::<_, 12>(*imm12) << 10
-                    | rn << 5
-                    | rd << 0
+                    | ((*sf as u32) << 31)
+                    | ((*sh as u32) << 22)
+                    | (truncate_imm::<_, 12>(*imm12) << 10)
+                    | (rn << 5)
+                    | (rd << 0)
             }
             ArmAsm::SubAddsubShift {
                 sf,
@@ -1182,12 +1190,12 @@ impl ArmAsm {
                 rd,
             } => {
                 0b0_1_0_01011_00_0_00000_000000_00000_00000
-                    | (*sf as u32) << 31
-                    | (*shift as u32) << 22
-                    | rm << 16
-                    | truncate_imm::<_, 6>(*imm6) << 10
-                    | rn << 5
-                    | rd << 0
+                    | ((*sf as u32) << 31)
+                    | ((*shift as u32) << 22)
+                    | (rm << 16)
+                    | (truncate_imm::<_, 6>(*imm6) << 10)
+                    | (rn << 5)
+                    | (rd << 0)
             }
             ArmAsm::SubsAddsubShift {
                 sf,
@@ -1198,18 +1206,18 @@ impl ArmAsm {
                 rd,
             } => {
                 0b0_1_1_01011_00_0_00000_000000_00000_00000
-                    | (*sf as u32) << 31
-                    | (*shift as u32) << 22
-                    | rm << 16
-                    | truncate_imm::<_, 6>(*imm6) << 10
-                    | rn << 5
-                    | rd << 0
+                    | ((*sf as u32) << 31)
+                    | ((*shift as u32) << 22)
+                    | (rm << 16)
+                    | (truncate_imm::<_, 6>(*imm6) << 10)
+                    | (rn << 5)
+                    | (rd << 0)
             }
             ArmAsm::FmovFloat { ftype, rn, rd } => {
                 0b0_0_0_11110_00_1_0000_00_10000_00000_00000
-                    | (*ftype as u32) << 22
-                    | rn << 5
-                    | rd << 0
+                    | ((*ftype as u32) << 22)
+                    | (rn << 5)
+                    | (rd << 0)
             }
             ArmAsm::FmovFloatGen {
                 sf,
@@ -1220,40 +1228,40 @@ impl ArmAsm {
                 rd,
             } => {
                 0b0_0_0_11110_00_1_00_000_000000_00000_00000
-                    | (*sf as u32) << 31
-                    | (*ftype as u32) << 22
-                    | (*rmode as u32) << 19
-                    | (*opcode as u32) << 16
-                    | rn << 5
-                    | rd << 0
+                    | ((*sf as u32) << 31)
+                    | ((*ftype as u32) << 22)
+                    | ((*rmode as u32) << 19)
+                    | ((*opcode as u32) << 16)
+                    | (rn << 5)
+                    | (rd << 0)
             }
             ArmAsm::FaddFloat { ftype, rm, rn, rd } => {
                 0b0_0_0_11110_00_1_00000_001_0_10_00000_00000
-                    | (*ftype as u32) << 22
-                    | rm << 16
-                    | rn << 5
-                    | rd << 0
+                    | ((*ftype as u32) << 22)
+                    | (rm << 16)
+                    | (rn << 5)
+                    | (rd << 0)
             }
             ArmAsm::FsubFloat { ftype, rm, rn, rd } => {
                 0b0_0_0_11110_00_1_00000_001_1_10_00000_00000
-                    | (*ftype as u32) << 22
-                    | rm << 16
-                    | rn << 5
-                    | rd << 0
+                    | ((*ftype as u32) << 22)
+                    | (rm << 16)
+                    | (rn << 5)
+                    | (rd << 0)
             }
             ArmAsm::FmulFloat { ftype, rm, rn, rd } => {
                 0b0_0_0_11110_00_1_00000_0_000_10_00000_00000
-                    | (*ftype as u32) << 22
-                    | rm << 16
-                    | rn << 5
-                    | rd << 0
+                    | ((*ftype as u32) << 22)
+                    | (rm << 16)
+                    | (rn << 5)
+                    | (rd << 0)
             }
             ArmAsm::FdivFloat { ftype, rm, rn, rd } => {
                 0b0_0_0_11110_00_1_00000_0001_10_00000_00000
-                    | (*ftype as u32) << 22
-                    | rm << 16
-                    | rn << 5
-                    | rd << 0
+                    | ((*ftype as u32) << 22)
+                    | (rm << 16)
+                    | (rn << 5)
+                    | (rd << 0)
             }
         }
     }
