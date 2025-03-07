@@ -1046,7 +1046,7 @@ impl<'a> AstCompiler<'a> {
                 let property = if let Ast::Identifier(name, _) = property.as_ref() {
                     name.clone()
                 } else {
-                    panic!("Expected identifier")
+                    panic!("Expected identifier got {:?}", property)
                 };
 
                 let constant_ptr = self.string_constant(property.clone());
