@@ -154,8 +154,12 @@ extern "C" fn substring(string: usize, start: usize, length: usize) -> usize {
     let start = BuiltInTypes::untag(start);
     let length = BuiltInTypes::untag(length);
     let bytes = &string[start..start + length];
-    let result = runtime.memory.allocate_string(bytes.to_string()).unwrap().into();
-    result
+
+    runtime
+        .memory
+        .allocate_string(bytes.to_string())
+        .unwrap()
+        .into()
 }
 
 extern "C" fn fill_object_fields(object_pointer: usize, value: usize) -> usize {
@@ -969,7 +973,19 @@ extern "C" fn hash(value: usize) -> usize {
     }
 }
 
-extern "C" fn many_args(a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize, a7: usize, a8: usize, a9: usize, a10: usize, a11: usize) -> usize {
+extern "C" fn many_args(
+    a1: usize,
+    a2: usize,
+    a3: usize,
+    a4: usize,
+    a5: usize,
+    a6: usize,
+    a7: usize,
+    a8: usize,
+    a9: usize,
+    a10: usize,
+    a11: usize,
+) -> usize {
     let a1 = BuiltInTypes::untag(a1);
     let a2 = BuiltInTypes::untag(a2);
     let a3 = BuiltInTypes::untag(a3);
@@ -999,8 +1015,12 @@ extern "C" fn pop_count(value: usize) -> usize {
 
 impl Runtime {
     pub fn install_builtins(&mut self) -> Result<(), Box<dyn Error>> {
-
-        self.add_builtin_function("beagle.__internal_test__/many_args", many_args as *const u8, false, 9)?;
+        self.add_builtin_function(
+            "beagle.__internal_test__/many_args",
+            many_args as *const u8,
+            false,
+            9,
+        )?;
 
         self.add_builtin_function("beagle.core/println", println_value as *const u8, false, 1)?;
 
@@ -1188,7 +1208,12 @@ impl Runtime {
             1,
         )?;
 
-        self.add_builtin_function("beagle.core/string_concat", string_concat as *const u8, false, 2)?;
+        self.add_builtin_function(
+            "beagle.core/string_concat",
+            string_concat as *const u8,
+            false,
+            2,
+        )?;
 
         self.add_builtin_function("beagle.core/substring", substring as *const u8, false, 3)?;
 

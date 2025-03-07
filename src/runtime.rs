@@ -39,7 +39,6 @@ impl Struct {
     }
 }
 
-
 pub struct StructManager {
     name_to_id: HashMap<String, usize>,
     structs: Vec<Struct>,
@@ -1101,7 +1100,6 @@ impl Runtime {
             self.memory.heap.gc_add_root(old);
         }
     }
-    
 
     pub fn register_temporary_root(&mut self, root: usize) -> usize {
         self.memory.heap.register_temporary_root(root)
@@ -1492,7 +1490,10 @@ impl Runtime {
             .fields
             .iter()
             .position(|f| f == string)
-            .ok_or(format!("Field not found {} for struct {:?}", string, struct_value))?;
+            .ok_or(format!(
+                "Field not found {} for struct {:?}",
+                string, struct_value
+            ))?;
         Ok((heap_object.get_field(field_index), field_index))
     }
 
@@ -1521,7 +1522,7 @@ impl Runtime {
         }
     }
 
-    pub fn  equal(&self, a: usize, b: usize) -> bool {
+    pub fn equal(&self, a: usize, b: usize) -> bool {
         let mut a = a;
         let mut b = b;
         if a == b {
@@ -1642,7 +1643,7 @@ impl Runtime {
         self.string_constants[value].str.clone()
     }
 
-    pub fn get_str_literal<'a>(&'a self, value: usize) -> &'a str {
+    pub fn get_str_literal(&self, value: usize) -> &str {
         let value = BuiltInTypes::untag(value);
         &self.string_constants[value].str
     }
