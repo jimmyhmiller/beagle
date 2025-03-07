@@ -2,7 +2,7 @@ use std::{error::Error, thread::ThreadId};
 
 use bincode::{Decode, Encode};
 
-use crate::{types::BuiltInTypes, CommandLineArguments};
+use crate::{CommandLineArguments, types::BuiltInTypes};
 
 pub mod compacting;
 pub mod mutex_allocator;

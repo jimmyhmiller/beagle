@@ -94,7 +94,7 @@ impl Space {
         &self,
         segment_index: usize,
         offset: usize,
-    ) -> impl Iterator<Item = HeapObject> {
+    ) -> impl Iterator<Item = HeapObject> + use<> {
         ObjectIterator {
             space: self,
             segment_index,
@@ -404,96 +404,102 @@ impl CompactingHeap {
     }
 
     unsafe fn copy_all(&mut self, roots: Vec<usize>) -> Vec<usize> {
-        let (start_segment, start_offset) = self.to_space.current_position();
-        // TODO: Is this vec the best way? Probably not
-        // I could hand this the pointers to the stack location
-        // then resolve what they point to and update them?
-        // I should think about how to get rid of this allocation at the very least.
-        let mut new_roots = vec![];
-        for root in roots.iter() {
-            let untagged = BuiltInTypes::untag(*root);
-            if !self.to_space.contains(untagged as *const u8)
-                && !self.from_space.contains(untagged as *const u8)
-            {
-                panic!("Pointer is not in either space");
+        unsafe {
+            let (start_segment, start_offset) = self.to_space.current_position();
+            // TODO: Is this vec the best way? Probably not
+            // I could hand this the pointers to the stack location
+            // then resolve what they point to and update them?
+            // I should think about how to get rid of this allocation at the very least.
+            let mut new_roots = vec![];
+            for root in roots.iter() {
+                let untagged = BuiltInTypes::untag(*root);
+                if !self.to_space.contains(untagged as *const u8)
+                    && !self.from_space.contains(untagged as *const u8)
+                {
+                    panic!("Pointer is not in either space");
+                }
+                new_roots.push(self.copy_using_cheneys_algorithm(*root));
             }
-            new_roots.push(self.copy_using_cheneys_algorithm(*root));
+
+            self.copy_remaining(start_segment, start_offset);
+
+            new_roots
         }
-
-        self.copy_remaining(start_segment, start_offset);
-
-        new_roots
     }
 
     unsafe fn copy_remaining(&mut self, start_segment: usize, start_offset: usize) {
-        for mut object in self
-            .to_space
-            .object_iter_from_position(start_segment, start_offset)
-        {
-            if object.marked() {
-                panic!("We are copying to this space, nothing should be marked");
-            }
-            if object.is_opaque_object() || object.is_zero_size() {
-                // TODO(DuplicatingOpaque): I think right now I'm duplicating opaque objects
-                // Once I have a good means of visualizing that, it would be obvious
-                continue;
-            }
-            for datum in object.get_fields_mut() {
-                if BuiltInTypes::is_heap_pointer(*datum) {
-                    *datum = self.copy_using_cheneys_algorithm(*datum);
+        unsafe {
+            for mut object in self
+                .to_space
+                .object_iter_from_position(start_segment, start_offset)
+            {
+                if object.marked() {
+                    panic!("We are copying to this space, nothing should be marked");
+                }
+                if object.is_opaque_object() || object.is_zero_size() {
+                    // TODO(DuplicatingOpaque): I think right now I'm duplicating opaque objects
+                    // Once I have a good means of visualizing that, it would be obvious
+                    continue;
+                }
+                for datum in object.get_fields_mut() {
+                    if BuiltInTypes::is_heap_pointer(*datum) {
+                        *datum = self.copy_using_cheneys_algorithm(*datum);
+                    }
                 }
             }
         }
     }
 
     unsafe fn copy_using_cheneys_algorithm(&mut self, root: usize) -> usize {
-        let heap_object = HeapObject::from_tagged(root);
-        let untagged = BuiltInTypes::untag(root);
+        unsafe {
+            let heap_object = HeapObject::from_tagged(root);
+            let untagged = BuiltInTypes::untag(root);
 
-        debug_assert!(
-            self.to_space.contains(untagged as *const u8)
-                || self.from_space.contains(untagged as *const u8),
-            "Pointer is not in to space"
-        );
+            debug_assert!(
+                self.to_space.contains(untagged as *const u8)
+                    || self.from_space.contains(untagged as *const u8),
+                "Pointer is not in to space"
+            );
 
-        if self.to_space.contains(untagged as *const u8) {
-            debug_assert!(untagged % 8 == 0, "Pointer is not aligned");
-            return root;
-        }
+            if self.to_space.contains(untagged as *const u8) {
+                debug_assert!(untagged % 8 == 0, "Pointer is not aligned");
+                return root;
+            }
 
-        if !heap_object.is_zero_size() && !heap_object.is_opaque_object() {
-            // TODO(DuplicatingOpaque)
-            let first_field = heap_object.get_field(0);
-            if BuiltInTypes::is_heap_pointer(heap_object.get_field(0)) {
-                let untagged_data = BuiltInTypes::untag(first_field);
-                if self.to_space.contains(untagged_data as *const u8) {
-                    debug_assert!(untagged_data % 8 == 0, "Pointer is not aligned");
-                    return first_field;
+            if !heap_object.is_zero_size() && !heap_object.is_opaque_object() {
+                // TODO(DuplicatingOpaque)
+                let first_field = heap_object.get_field(0);
+                if BuiltInTypes::is_heap_pointer(heap_object.get_field(0)) {
+                    let untagged_data = BuiltInTypes::untag(first_field);
+                    if self.to_space.contains(untagged_data as *const u8) {
+                        debug_assert!(untagged_data % 8 == 0, "Pointer is not aligned");
+                        return first_field;
+                    }
                 }
             }
-        }
-        if heap_object.is_zero_size() || heap_object.is_opaque_object() {
-            // TODO(DuplicatingOpaque)
+            if heap_object.is_zero_size() || heap_object.is_opaque_object() {
+                // TODO(DuplicatingOpaque)
+                let data = heap_object.get_full_object_data();
+                let new_pointer = self.to_space.copy_data_to_offset(data);
+                let tagged_new = BuiltInTypes::get_kind(root).tag(new_pointer) as usize;
+                return tagged_new;
+            }
+            let first_field = heap_object.get_field(0);
+            if BuiltInTypes::is_heap_pointer(first_field) {
+                let untagged = BuiltInTypes::untag(first_field);
+                if !self.from_space.contains(untagged as *const u8) {
+                    heap_object.write_field(0, self.copy_using_cheneys_algorithm(first_field));
+                }
+            }
             let data = heap_object.get_full_object_data();
             let new_pointer = self.to_space.copy_data_to_offset(data);
+            debug_assert!(new_pointer % 8 == 0, "Pointer is not aligned");
+            // update header of original object to now be the forwarding pointer
             let tagged_new = BuiltInTypes::get_kind(root).tag(new_pointer) as usize;
-            return tagged_new;
+            heap_object.write_field(0, tagged_new);
+            // heap_object.mark();
+            tagged_new
         }
-        let first_field = heap_object.get_field(0);
-        if BuiltInTypes::is_heap_pointer(first_field) {
-            let untagged = BuiltInTypes::untag(first_field);
-            if !self.from_space.contains(untagged as *const u8) {
-                heap_object.write_field(0, self.copy_using_cheneys_algorithm(first_field));
-            }
-        }
-        let data = heap_object.get_full_object_data();
-        let new_pointer = self.to_space.copy_data_to_offset(data);
-        debug_assert!(new_pointer % 8 == 0, "Pointer is not aligned");
-        // update header of original object to now be the forwarding pointer
-        let tagged_new = BuiltInTypes::get_kind(root).tag(new_pointer) as usize;
-        heap_object.write_field(0, tagged_new);
-        // heap_object.mark();
-        tagged_new
     }
 
     // Stolen from simple mark and sweep
@@ -545,15 +551,17 @@ impl CompactingHeap {
 }
 
 unsafe fn buffer_between<'a, T>(start: *mut T, end: *mut T) -> &'a mut [T] {
-    let len = end.offset_from(start);
-    slice::from_raw_parts_mut(start, len as usize)
+    unsafe {
+        let len = end.offset_from(start);
+        slice::from_raw_parts_mut(start, len as usize)
+    }
 }
 
 fn get_live_stack<'a>(stack_base: usize, stack_pointer: usize) -> &'a mut [usize] {
-    return unsafe {
+    unsafe {
         buffer_between(
             (stack_pointer as *mut usize).sub(1),
             stack_base as *mut usize,
         )
-    };
+    }
 }

@@ -1,15 +1,15 @@
 #![allow(clippy::match_like_matches_macro)]
 #![allow(clippy::missing_safety_doc)]
-use crate::machine_code::arm_codegen::{SP, X0, X1, X10, X2, X3, X4};
+use crate::machine_code::arm_codegen::{SP, X0, X1, X2, X3, X4, X10};
 use arm::LowLevelArm;
-use bincode::{config::standard, Decode, Encode};
-use clap::{command, Parser as ClapParser};
+use bincode::{Decode, Encode, config::standard};
+use clap::{Parser as ClapParser, command};
+use gc::{Allocator, StackMapDetails, get_allocate_options};
 #[allow(unused)]
 use gc::{
     compacting::CompactingHeap, mutex_allocator::MutexAllocator,
     simple_generation::SimpleGeneration, simple_mark_and_sweep::SimpleMarkSweepHeap,
 };
-use gc::{get_allocate_options, Allocator, StackMapDetails};
 use runtime::{DefaultPrinter, Printer, Runtime, TestPrinter};
 
 use std::{cell::UnsafeCell, env, error::Error, sync::OnceLock, time::Instant};
@@ -97,7 +97,7 @@ trait Serialize {
     fn from_binary(data: &[u8]) -> Self;
 }
 
-impl<T: Encode + Decode> Serialize for T {
+impl<T: Encode + Decode<()>> Serialize for T {
     fn to_binary(&self) -> Vec<u8> {
         bincode::encode_to_vec(self, standard()).unwrap()
     }

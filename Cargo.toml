@@ -1,7 +1,7 @@
 [package]
 name = "main"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 build = "build.rs"
 
 
@@ -16,7 +16,7 @@ debug-assertions = true
 # It would be great to get rid of all these dependencies
 [dependencies]
 mmap-rs = "0.6.1"
-bincode =  { version = "2.0.0-rc.3", features = ["derive"] }
+bincode =  { version = "2.0.0", features = ["derive"] }
 clap = { version = "4.5.8", features = ["derive"] }
 cfg-if = "1.0.0"
 libloading = "0.8.5"

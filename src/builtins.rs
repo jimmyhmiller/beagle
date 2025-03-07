@@ -1,7 +1,7 @@
 use core::panic;
 use std::{
     error::Error,
-    ffi::{c_void, CStr},
+    ffi::{CStr, c_void},
     hash::{DefaultHasher, Hasher},
     mem::{self, transmute},
     slice::{from_raw_parts, from_raw_parts_mut},
@@ -10,22 +10,22 @@ use std::{
 
 use libffi::{
     low::CodePtr,
-    middle::{arg, Cif, Type},
+    middle::{Cif, Type, arg},
 };
 
 use crate::{
+    Message, Serialize,
     gc::{Allocator, STACK_SIZE},
     get_runtime,
     runtime::{FFIInfo, FFIType, RawPtr, Runtime, SyncWrapper},
     types::{BuiltInTypes, HeapObject},
-    Message, Serialize,
 };
 
 use std::hash::Hash;
 use std::hint::black_box;
 
 #[allow(unused)]
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[inline(never)]
 /// # Safety
 ///
@@ -317,7 +317,7 @@ pub unsafe extern "C" fn new_thread(function: usize) -> usize {
 
 // I don't know what the deal is here
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn update_binding(namespace_slot: usize, value: usize) -> usize {
     let runtime = get_runtime().get_mut();
     let namespace_slot = BuiltInTypes::untag(namespace_slot);
@@ -327,7 +327,7 @@ pub unsafe extern "C" fn update_binding(namespace_slot: usize, value: usize) -> 
     BuiltInTypes::null_value() as usize
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn get_binding(namespace: usize, slot: usize) -> usize {
     let runtime = get_runtime().get_mut();
     let namespace = BuiltInTypes::untag(namespace);
@@ -407,7 +407,7 @@ pub unsafe fn call_fn_1(runtime: &Runtime, function_name: &str, arg1: usize) -> 
         .unwrap();
     let save_volatile_registers = runtime.get_pointer(save_volatile_registers).unwrap();
     let save_volatile_registers: fn(usize, usize) -> usize =
-        std::mem::transmute(save_volatile_registers);
+        unsafe { std::mem::transmute(save_volatile_registers) };
 
     let function = runtime.get_function_by_name(function_name).unwrap();
     let function = runtime.get_pointer(function).unwrap();
@@ -417,14 +417,16 @@ pub unsafe fn call_fn_1(runtime: &Runtime, function_name: &str, arg1: usize) -> 
 pub unsafe extern "C" fn load_library(name: usize) -> usize {
     let runtime = get_runtime().get_mut();
     let string = &runtime.get_string_literal(name);
-    let lib = libloading::Library::new(string).unwrap();
+    let lib = unsafe { libloading::Library::new(string).unwrap() };
     let id = runtime.add_library(lib);
 
-    call_fn_1(
-        runtime,
-        "beagle.ffi/__make_lib_struct",
-        BuiltInTypes::Int.tag(id as isize) as usize,
-    )
+    unsafe {
+        call_fn_1(
+            runtime,
+            "beagle.ffi/__make_lib_struct",
+            BuiltInTypes::Int.tag(id as isize) as usize,
+        )
+    }
 }
 
 pub fn map_ffi_type(runtime: &Runtime, value: usize) -> Type {
@@ -609,168 +611,170 @@ pub unsafe extern "C" fn call_ffi_info(
     a5: usize,
     a6: usize,
 ) -> usize {
-    let runtime = get_runtime().get_mut();
-    let ffi_info_id = BuiltInTypes::untag(ffi_info_id);
-    let ffi_info = runtime.get_ffi_info(ffi_info_id).clone();
-    let code_ptr = ffi_info.function;
-    let arguments = [a1, a2, a3, a4, a5, a6];
-    let args = &arguments[..ffi_info.number_of_arguments];
-    let argument_types = ffi_info.argument_types;
-    let mut argument_pointers = vec![];
+    unsafe {
+        let runtime = get_runtime().get_mut();
+        let ffi_info_id = BuiltInTypes::untag(ffi_info_id);
+        let ffi_info = runtime.get_ffi_info(ffi_info_id).clone();
+        let code_ptr = ffi_info.function;
+        let arguments = [a1, a2, a3, a4, a5, a6];
+        let args = &arguments[..ffi_info.number_of_arguments];
+        let argument_types = ffi_info.argument_types;
+        let mut argument_pointers = vec![];
 
-    for (argument, ffi_type) in args.iter().zip(argument_types.iter()) {
-        let kind = BuiltInTypes::get_kind(*argument);
-        match kind {
-            BuiltInTypes::String => {
-                if ffi_type != &FFIType::String {
-                    panic!("Expected string, got {:?}", ffi_type);
+        for (argument, ffi_type) in args.iter().zip(argument_types.iter()) {
+            let kind = BuiltInTypes::get_kind(*argument);
+            match kind {
+                BuiltInTypes::String => {
+                    if ffi_type != &FFIType::String {
+                        panic!("Expected string, got {:?}", ffi_type);
+                    }
+                    let string = runtime.get_string_literal(*argument);
+                    let string = runtime.memory.write_c_string(string);
+                    argument_pointers.push(arg(&string));
                 }
-                let string = runtime.get_string_literal(*argument);
-                let string = runtime.memory.write_c_string(string);
-                argument_pointers.push(arg(&string));
-            }
-            BuiltInTypes::Int => match ffi_type {
-                FFIType::U8 => {
-                    let pointer = runtime
-                        .memory
-                        .write_u8(BuiltInTypes::untag(*argument) as u8);
-                    argument_pointers.push(arg(pointer));
-                }
-                FFIType::U16 => {
-                    let pointer = runtime
-                        .memory
-                        .write_u16(BuiltInTypes::untag(*argument) as u16);
-                    argument_pointers.push(arg(pointer));
-                }
-                FFIType::U32 => {
-                    let pointer = runtime
-                        .memory
-                        .write_u32(BuiltInTypes::untag(*argument) as u32);
-                    argument_pointers.push(arg(pointer));
-                }
-                FFIType::U64 => {
-                    let pointer = runtime
-                        .memory
-                        .write_u64(BuiltInTypes::untag(*argument) as u64);
-                    argument_pointers.push(arg(pointer));
-                }
-                FFIType::I32 => {
-                    let pointer = runtime
-                        .memory
-                        .write_i32(BuiltInTypes::untag(*argument) as i32);
-                    argument_pointers.push(arg(pointer));
-                }
-
-                FFIType::Pointer => {
-                    if *argument == 0 {
-                        argument_pointers.push(arg(&std::ptr::null_mut::<c_void>()));
-                    } else {
-                        let heap_object = HeapObject::from_tagged(*argument);
-                        let buffer = BuiltInTypes::untag(heap_object.get_field(0));
-                        let pointer = runtime.memory.write_pointer(buffer);
+                BuiltInTypes::Int => match ffi_type {
+                    FFIType::U8 => {
+                        let pointer = runtime
+                            .memory
+                            .write_u8(BuiltInTypes::untag(*argument) as u8);
                         argument_pointers.push(arg(pointer));
                     }
-                }
+                    FFIType::U16 => {
+                        let pointer = runtime
+                            .memory
+                            .write_u16(BuiltInTypes::untag(*argument) as u16);
+                        argument_pointers.push(arg(pointer));
+                    }
+                    FFIType::U32 => {
+                        let pointer = runtime
+                            .memory
+                            .write_u32(BuiltInTypes::untag(*argument) as u32);
+                        argument_pointers.push(arg(pointer));
+                    }
+                    FFIType::U64 => {
+                        let pointer = runtime
+                            .memory
+                            .write_u64(BuiltInTypes::untag(*argument) as u64);
+                        argument_pointers.push(arg(pointer));
+                    }
+                    FFIType::I32 => {
+                        let pointer = runtime
+                            .memory
+                            .write_i32(BuiltInTypes::untag(*argument) as i32);
+                        argument_pointers.push(arg(pointer));
+                    }
 
-                FFIType::MutablePointer | FFIType::String | FFIType::Void => {
-                    panic!("Expected pointer, got {:?}", ffi_type);
+                    FFIType::Pointer => {
+                        if *argument == 0 {
+                            argument_pointers.push(arg(&std::ptr::null_mut::<c_void>()));
+                        } else {
+                            let heap_object = HeapObject::from_tagged(*argument);
+                            let buffer = BuiltInTypes::untag(heap_object.get_field(0));
+                            let pointer = runtime.memory.write_pointer(buffer);
+                            argument_pointers.push(arg(pointer));
+                        }
+                    }
+
+                    FFIType::MutablePointer | FFIType::String | FFIType::Void => {
+                        panic!("Expected pointer, got {:?}", ffi_type);
+                    }
+                },
+                BuiltInTypes::HeapObject => {
+                    if ffi_type != &FFIType::Pointer && ffi_type != &FFIType::MutablePointer {
+                        panic!("Got pointer, expected {:?}", ffi_type);
+                    }
+                    // TODO: Make this type safe
+                    let heap_object = HeapObject::from_tagged(*argument);
+                    let buffer = BuiltInTypes::untag(heap_object.get_field(0));
+                    let pointer = runtime.memory.write_pointer(buffer);
+                    argument_pointers.push(arg(pointer));
                 }
-            },
-            BuiltInTypes::HeapObject => {
-                if ffi_type != &FFIType::Pointer && ffi_type != &FFIType::MutablePointer {
-                    panic!("Got pointer, expected {:?}", ffi_type);
+                _ => {
+                    runtime.print(*argument);
+                    panic!("Unsupported type: {:?}", kind)
                 }
-                // TODO: Make this type safe
-                let heap_object = HeapObject::from_tagged(*argument);
-                let buffer = BuiltInTypes::untag(heap_object.get_field(0));
-                let pointer = runtime.memory.write_pointer(buffer);
-                argument_pointers.push(arg(pointer));
-            }
-            _ => {
-                runtime.print(*argument);
-                panic!("Unsupported type: {:?}", kind)
             }
         }
+
+        let return_value = match ffi_info.return_type {
+            FFIType::Void => {
+                ffi_info
+                    .cif
+                    .get()
+                    .call::<()>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
+                BuiltInTypes::null_value() as usize
+            }
+            FFIType::U8 => {
+                let result = ffi_info
+                    .cif
+                    .get()
+                    .call::<u8>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
+                BuiltInTypes::Int.tag(result as isize) as usize
+            }
+            FFIType::U16 => {
+                let result = ffi_info
+                    .cif
+                    .get()
+                    .call::<u16>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
+                BuiltInTypes::Int.tag(result as isize) as usize
+            }
+            FFIType::U32 => {
+                let result = ffi_info
+                    .cif
+                    .get()
+                    .call::<u32>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
+                BuiltInTypes::Int.tag(result as isize) as usize
+            }
+            FFIType::U64 => {
+                let result = ffi_info
+                    .cif
+                    .get()
+                    .call::<u64>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
+                BuiltInTypes::Int.tag(result as isize) as usize
+            }
+            FFIType::I32 => {
+                let result = ffi_info
+                    .cif
+                    .get()
+                    .call::<i32>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
+                BuiltInTypes::Int.tag(result as isize) as usize
+            }
+            FFIType::Pointer => {
+                let result = ffi_info
+                    .cif
+                    .get()
+                    .call::<*mut u8>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
+                let pointer_value = BuiltInTypes::Int.tag(result as isize) as usize;
+                call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", pointer_value)
+            }
+            FFIType::MutablePointer => {
+                let result = ffi_info
+                    .cif
+                    .get()
+                    .call::<*mut u8>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
+                let pointer_value = BuiltInTypes::Int.tag(result as isize) as usize;
+                call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", pointer_value)
+            }
+            FFIType::String => {
+                let result = ffi_info
+                    .cif
+                    .get()
+                    .call::<*mut u8>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
+                if result.is_null() {
+                    return BuiltInTypes::null_value() as usize;
+                }
+                let c_string = CStr::from_ptr(result as *const i8);
+                let string = c_string.to_str().unwrap();
+                runtime
+                    .memory
+                    .allocate_string(string.to_string())
+                    .unwrap()
+                    .into()
+            }
+        };
+        runtime.memory.clear_native_arguments();
+        return_value
     }
-
-    let return_value = match ffi_info.return_type {
-        FFIType::Void => {
-            ffi_info
-                .cif
-                .get()
-                .call::<()>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
-            BuiltInTypes::null_value() as usize
-        }
-        FFIType::U8 => {
-            let result = ffi_info
-                .cif
-                .get()
-                .call::<u8>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
-            BuiltInTypes::Int.tag(result as isize) as usize
-        }
-        FFIType::U16 => {
-            let result = ffi_info
-                .cif
-                .get()
-                .call::<u16>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
-            BuiltInTypes::Int.tag(result as isize) as usize
-        }
-        FFIType::U32 => {
-            let result = ffi_info
-                .cif
-                .get()
-                .call::<u32>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
-            BuiltInTypes::Int.tag(result as isize) as usize
-        }
-        FFIType::U64 => {
-            let result = ffi_info
-                .cif
-                .get()
-                .call::<u64>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
-            BuiltInTypes::Int.tag(result as isize) as usize
-        }
-        FFIType::I32 => {
-            let result = ffi_info
-                .cif
-                .get()
-                .call::<i32>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
-            BuiltInTypes::Int.tag(result as isize) as usize
-        }
-        FFIType::Pointer => {
-            let result = ffi_info
-                .cif
-                .get()
-                .call::<*mut u8>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
-            let pointer_value = BuiltInTypes::Int.tag(result as isize) as usize;
-            call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", pointer_value)
-        }
-        FFIType::MutablePointer => {
-            let result = ffi_info
-                .cif
-                .get()
-                .call::<*mut u8>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
-            let pointer_value = BuiltInTypes::Int.tag(result as isize) as usize;
-            call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", pointer_value)
-        }
-        FFIType::String => {
-            let result = ffi_info
-                .cif
-                .get()
-                .call::<*mut u8>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
-            if result.is_null() {
-                return BuiltInTypes::null_value() as usize;
-            }
-            let c_string = unsafe { CStr::from_ptr(result as *const i8) };
-            let string = c_string.to_str().unwrap();
-            runtime
-                .memory
-                .allocate_string(string.to_string())
-                .unwrap()
-                .into()
-        }
-    };
-    runtime.memory.clear_native_arguments();
-    return_value
 }
 
 pub unsafe extern "C" fn copy_object(stack_pointer: usize, object_pointer: usize) -> usize {
@@ -810,68 +814,80 @@ pub unsafe extern "C" fn copy_from_to_object(from: usize, to: usize) -> usize {
 }
 
 unsafe extern "C" fn ffi_allocate(size: usize) -> usize {
-    let runtime = get_runtime().get_mut();
-    // TODO: I intentionally don't want to manage this memory on the heap
-    // I probably need a better answer than this
-    // but for now we are just going to leak memory
-    let size = BuiltInTypes::untag(size);
+    unsafe {
+        let runtime = get_runtime().get_mut();
+        // TODO: I intentionally don't want to manage this memory on the heap
+        // I probably need a better answer than this
+        // but for now we are just going to leak memory
+        let size = BuiltInTypes::untag(size);
 
-    let mut buffer: Vec<u8> = vec![0; size];
-    let buffer_ptr: *mut c_void = buffer.as_mut_ptr() as *mut c_void;
-    std::mem::forget(buffer);
+        let mut buffer: Vec<u8> = vec![0; size];
+        let buffer_ptr: *mut c_void = buffer.as_mut_ptr() as *mut c_void;
+        std::mem::forget(buffer);
 
-    let buffer = BuiltInTypes::Int.tag(buffer_ptr as isize) as usize;
-    call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", buffer)
+        let buffer = BuiltInTypes::Int.tag(buffer_ptr as isize) as usize;
+        call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", buffer)
+    }
 }
 
 unsafe extern "C" fn ffi_get_u32(buffer: usize, offset: usize) -> usize {
-    // TODO: Make type safe
-    let buffer_object = HeapObject::from_tagged(buffer);
-    let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
-    let offset = BuiltInTypes::untag(offset);
-    let value = *(buffer.add(offset) as *const u32);
-    BuiltInTypes::Int.tag(value as isize) as usize
+    unsafe {
+        // TODO: Make type safe
+        let buffer_object = HeapObject::from_tagged(buffer);
+        let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+        let offset = BuiltInTypes::untag(offset);
+        let value = *(buffer.add(offset) as *const u32);
+        BuiltInTypes::Int.tag(value as isize) as usize
+    }
 }
 
 unsafe extern "C" fn ffi_set_i32(buffer: usize, offset: usize, value: usize) -> usize {
-    let buffer_object = HeapObject::from_tagged(buffer);
-    let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
-    let offset = BuiltInTypes::untag(offset);
-    let value = BuiltInTypes::untag(value) as i32;
-    *(buffer.add(offset) as *mut i32) = value;
-    BuiltInTypes::null_value() as usize
+    unsafe {
+        let buffer_object = HeapObject::from_tagged(buffer);
+        let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+        let offset = BuiltInTypes::untag(offset);
+        let value = BuiltInTypes::untag(value) as i32;
+        *(buffer.add(offset) as *mut i32) = value;
+        BuiltInTypes::null_value() as usize
+    }
 }
 
 unsafe extern "C" fn ffi_set_i16(buffer: usize, offset: usize, value: usize) -> usize {
-    let buffer_object = HeapObject::from_tagged(buffer);
-    let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
-    let offset = BuiltInTypes::untag(offset);
-    let value = BuiltInTypes::untag(value) as i16;
-    *(buffer.add(offset) as *mut i16) = value;
-    BuiltInTypes::null_value() as usize
+    unsafe {
+        let buffer_object = HeapObject::from_tagged(buffer);
+        let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+        let offset = BuiltInTypes::untag(offset);
+        let value = BuiltInTypes::untag(value) as i16;
+        *(buffer.add(offset) as *mut i16) = value;
+        BuiltInTypes::null_value() as usize
+    }
 }
 
 unsafe extern "C" fn ffi_get_i32(buffer: usize, offset: usize) -> usize {
-    let buffer_object = HeapObject::from_tagged(buffer);
-    let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
-    let offset = BuiltInTypes::untag(offset);
-    let value = *(buffer.add(offset) as *const i32);
-    BuiltInTypes::Int.tag(value as isize) as usize
+    unsafe {
+        let buffer_object = HeapObject::from_tagged(buffer);
+        let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+        let offset = BuiltInTypes::untag(offset);
+        let value = *(buffer.add(offset) as *const i32);
+        BuiltInTypes::Int.tag(value as isize) as usize
+    }
 }
 
 unsafe extern "C" fn ffi_get_string(buffer: usize, offset: usize, len: usize) -> usize {
-    let runtime = get_runtime().get_mut();
-    let buffer_object = HeapObject::from_tagged(buffer);
-    let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
-    let offset = BuiltInTypes::untag(offset);
-    let len = BuiltInTypes::untag(len);
-    let slice = std::slice::from_raw_parts(buffer.add(offset), len);
-    let string = std::str::from_utf8(slice).unwrap();
-    runtime
-        .memory
-        .allocate_string(string.to_string())
-        .unwrap()
-        .into()
+    unsafe {
+        let runtime = get_runtime().get_mut();
+        let buffer_object = HeapObject::from_tagged(buffer);
+        let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+        let offset = BuiltInTypes::untag(offset);
+        let len = BuiltInTypes::untag(len);
+        let slice = std::slice::from_raw_parts(buffer.add(offset), len);
+        let string = std::str::from_utf8(slice).unwrap();
+        runtime
+            .memory
+            .allocate_string(string.to_string())
+            .unwrap()
+            .into()
+    }
 }
 
 extern "C" fn placeholder() -> usize {

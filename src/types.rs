@@ -97,11 +97,7 @@ impl BuiltInTypes {
 
     pub fn construct_boolean(value: bool) -> isize {
         let bool = BuiltInTypes::Bool;
-        if value {
-            bool.tag(1)
-        } else {
-            bool.tag(0)
-        }
+        if value { bool.tag(1) } else { bool.tag(0) }
     }
 
     pub fn construct_float(x: f64) -> isize {
