@@ -34,7 +34,11 @@ impl BuiltInTypes {
     }
 
     pub fn tagged(&self, value: usize) -> Tagged {
-        Tagged(self.tag(value as isize) as usize)
+        if BuiltInTypes::is_heap_pointer(value) {
+            Tagged(value)
+        } else {
+            Tagged(self.tag(value as isize) as usize)
+        }
     }
 
     pub fn get_tag(&self) -> isize {

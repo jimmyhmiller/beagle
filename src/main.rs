@@ -214,6 +214,8 @@ pub struct CommandLineArguments {
     no_std: bool,
     #[clap(long, default_value = "false")]
     print_parse: bool,
+    #[clap(long, default_value = "false")]
+    print_builtin_calls: bool,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -262,6 +264,7 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             verbose: args.verbose,
             no_std: args.no_std,
             print_parse: args.print_parse,
+            print_builtin_calls: args.print_builtin_calls,
         };
         main_inner(args).ok();
         RUNTIME.get().unwrap().get_mut().reset();
@@ -459,6 +462,7 @@ fn try_all_examples() -> Result<(), Box<dyn Error>> {
         verbose: false,
         no_std: false,
         print_parse: false,
+        print_builtin_calls: false,
     };
     run_all_tests(args)?;
     Ok(())

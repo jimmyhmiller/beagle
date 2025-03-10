@@ -80,20 +80,6 @@ pub trait Allocator {
         kind: BuiltInTypes,
     ) -> Result<AllocateAction, Box<dyn Error>>;
 
-    #[allow(unused)]
-    fn allocate(&mut self, words: usize, kind: BuiltInTypes) -> Result<*const u8, Box<dyn Error>> {
-        match self.try_allocate(words, kind)? {
-            AllocateAction::Allocated(pointer) => Ok(pointer),
-            AllocateAction::Gc => {
-                self.gc(&StackMap::new(), &[]);
-                self.try_allocate(words, kind).map(|action| match action {
-                    AllocateAction::Allocated(pointer) => pointer,
-                    AllocateAction::Gc => panic!("Shouldn't happen"),
-                })
-            }
-        }
-    }
-
     fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]);
 
     fn grow(&mut self);

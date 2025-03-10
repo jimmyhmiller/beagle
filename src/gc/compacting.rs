@@ -271,13 +271,15 @@ impl Allocator for CompactingHeap {
     // TODO: Still got bugs here
     // Simple cases work, but not all cases
     fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
+        if !self.options.gc {
+            return;
+        }
+
         #[cfg(debug_assertions)]
         {
             self.to_space.unprotect();
         }
-        if !self.options.gc {
-            return;
-        }
+
         let start = std::time::Instant::now();
         // TODO: Make this better. I don't like the need to remember
         // to copy_remaining

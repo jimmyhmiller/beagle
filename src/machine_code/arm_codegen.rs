@@ -468,7 +468,6 @@ pub enum ArmAsm {
         rd: Register,
     },
     /// MOV (to/from SP) -- A64
-
     /// MOV  <Wd|WSP>, <Wn|WSP>
     /// ADD <Wd|WSP>, <Wn|WSP>, #0
     /// MOV  <Xd|SP>, <Xn|SP>
