@@ -72,6 +72,13 @@ pub unsafe extern "C" fn println_value(value: usize) -> usize {
     0b111
 }
 
+#[inline(always)]
+fn print_call_builtin(runtime: &Runtime, name: &str) {
+    debug_only!(if runtime.get_command_line_args().print_builtin_calls {
+        println!("Calling: {}", name);
+    });
+}
+
 pub unsafe extern "C" fn print_value(value: usize) -> usize {
     let runtime = get_runtime().get_mut();
     runtime.print(value);
@@ -104,15 +111,20 @@ extern "C" fn allocate_float(stack_pointer: usize, size: usize) -> usize {
     result
 }
 
-extern "C" fn get_string_index(string: usize, index: usize) -> usize {
+extern "C" fn get_string_index(stack_pointer: usize, string: usize, index: usize) -> usize {
+    print_call_builtin(get_runtime().get(), "get_string_index");
     let runtime = get_runtime().get_mut();
     if BuiltInTypes::get_kind(string) == BuiltInTypes::String {
         let string = runtime.get_string_literal(string);
         let index = BuiltInTypes::untag(index);
         let result = string.chars().nth(index).unwrap();
         let result = result.to_string();
-        runtime.memory.allocate_string(result).unwrap().into()
+        runtime
+            .allocate_string(stack_pointer, result)
+            .unwrap()
+            .into()
     } else {
+        let object_pointer_id = runtime.register_temporary_root(string);
         // we have a heap allocated string
         let string = HeapObject::from_tagged(string);
         // TODO: Type safety
@@ -122,11 +134,17 @@ extern "C" fn get_string_index(string: usize, index: usize) -> usize {
         let index = BuiltInTypes::untag(index);
         let result = string.get(index).unwrap();
         let result = result.to_string();
-        runtime.memory.allocate_string(result).unwrap().into()
+        let result = runtime
+            .allocate_string(stack_pointer, result)
+            .unwrap()
+            .into();
+        runtime.unregister_temporary_root(object_pointer_id);
+        result
     }
 }
 
 extern "C" fn get_string_length(string: usize) -> usize {
+    print_call_builtin(get_runtime().get(), "get_string_length");
     let runtime = get_runtime().get_mut();
     if BuiltInTypes::get_kind(string) == BuiltInTypes::String {
         // TODO: Make faster
@@ -140,29 +158,36 @@ extern "C" fn get_string_length(string: usize) -> usize {
     }
 }
 
-extern "C" fn string_concat(a: usize, b: usize) -> usize {
+extern "C" fn string_concat(stack_pointer: usize, a: usize, b: usize) -> usize {
+    print_call_builtin(get_runtime().get(), "string_concat");
     let runtime = get_runtime().get_mut();
     let a = runtime.get_string(a);
     let b = runtime.get_string(b);
     let result = a + &b;
-    runtime.memory.allocate_string(result).unwrap().into()
-}
-
-extern "C" fn substring(string: usize, start: usize, length: usize) -> usize {
-    let runtime = get_runtime().get_mut();
-    let string = runtime.get_string(string);
-    let start = BuiltInTypes::untag(start);
-    let length = BuiltInTypes::untag(length);
-    let bytes = &string[start..start + length];
-
     runtime
-        .memory
-        .allocate_string(bytes.to_string())
+        .allocate_string(stack_pointer, result)
         .unwrap()
         .into()
 }
 
+extern "C" fn substring(stack_pointer: usize, string: usize, start: usize, length: usize) -> usize {
+    print_call_builtin(get_runtime().get(), "substring");
+    let runtime = get_runtime().get_mut();
+    let string_pointer = runtime.register_temporary_root(string);
+    let string = runtime.get_string(string);
+    let start = BuiltInTypes::untag(start);
+    let length = BuiltInTypes::untag(length);
+    let bytes = &string[start..start + length];
+    let result = runtime
+        .allocate_string(stack_pointer, bytes.to_string())
+        .unwrap()
+        .into();
+    runtime.unregister_temporary_root(string_pointer);
+    result
+}
+
 extern "C" fn fill_object_fields(object_pointer: usize, value: usize) -> usize {
+    print_call_builtin(get_runtime().get(), "fill_object_fields");
     let mut object = HeapObject::from_tagged(object_pointer);
     let raw_slice = object.get_fields_mut();
     raw_slice.fill(value);
@@ -175,6 +200,7 @@ extern "C" fn make_closure(
     num_free: usize,
     free_variable_pointer: usize,
 ) -> usize {
+    print_call_builtin(get_runtime().get(), "make_closure");
     let runtime = get_runtime().get_mut();
     if BuiltInTypes::get_kind(function) != BuiltInTypes::Function {
         panic!(
@@ -231,11 +257,13 @@ extern "C" fn property_access(
 }
 
 extern "C" fn type_of(struct_pointer: usize) -> usize {
+    print_call_builtin(get_runtime().get(), "type_of");
     let runtime = get_runtime().get_mut();
     runtime.type_of(struct_pointer)
 }
 
 extern "C" fn equal(a: usize, b: usize) -> usize {
+    print_call_builtin(get_runtime().get(), "equal");
     let runtime = get_runtime().get_mut();
     if runtime.equal(a, b) {
         BuiltInTypes::true_value() as usize
@@ -319,6 +347,7 @@ pub unsafe extern "C" fn new_thread(function: usize) -> usize {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn update_binding(namespace_slot: usize, value: usize) -> usize {
+    print_call_builtin(get_runtime().get(), "update_binding");
     let runtime = get_runtime().get_mut();
     let namespace_slot = BuiltInTypes::untag(namespace_slot);
     let namespace_id = runtime.current_namespace_id();
@@ -402,6 +431,10 @@ pub extern "C" fn unregister_c_call() -> usize {
 }
 
 pub unsafe fn call_fn_1(runtime: &Runtime, function_name: &str, arg1: usize) -> usize {
+    print_call_builtin(
+        runtime,
+        format!("{} {}", "call_fn_1", function_name).as_str(),
+    );
     let save_volatile_registers = runtime
         .get_function_by_name("beagle.builtin/save_volatile_registers")
         .unwrap();
@@ -483,32 +516,6 @@ fn persistent_vector_to_array(_runtime: &Runtime, vector: usize) -> HeapObject {
 
 fn array_to_vec(object: HeapObject) -> Vec<usize> {
     object.get_fields().to_vec()
-}
-
-#[allow(unused)]
-extern "C" fn create_window_placeholder(
-    title: *const i8,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    flags: u32,
-) -> usize {
-    let title = unsafe { std::ffi::CStr::from_ptr(title).to_str().unwrap() };
-    println!("Arguments {:?}", (title, x, y, w, h, flags));
-    0
-}
-
-#[allow(unused)]
-extern "C" fn sdl_render_fill_rect_placeholder(renderer: *const u32, rect: *const u32) -> usize {
-    println!("Arguments {:?}", (renderer, rect));
-    0
-}
-
-#[allow(unused)]
-extern "C" fn sdl_poll_event(buffer: *const u32) -> usize {
-    println!("Arguments {:?}", buffer);
-    0
 }
 
 // TODO:
@@ -603,6 +610,7 @@ pub extern "C" fn get_function(
 // TODO: Fix this to allow multiple arguments
 // instead of hardcoding 0
 pub unsafe extern "C" fn call_ffi_info(
+    stack_pointer: usize,
     ffi_info_id: usize,
     a1: usize,
     a2: usize,
@@ -766,8 +774,7 @@ pub unsafe extern "C" fn call_ffi_info(
                 let c_string = CStr::from_ptr(result as *const i8);
                 let string = c_string.to_str().unwrap();
                 runtime
-                    .memory
-                    .allocate_string(string.to_string())
+                    .allocate_string(stack_pointer, string.to_string())
                     .unwrap()
                     .into()
             }
@@ -873,7 +880,12 @@ unsafe extern "C" fn ffi_get_i32(buffer: usize, offset: usize) -> usize {
     }
 }
 
-unsafe extern "C" fn ffi_get_string(buffer: usize, offset: usize, len: usize) -> usize {
+unsafe extern "C" fn ffi_get_string(
+    stack_pointer: usize,
+    buffer: usize,
+    offset: usize,
+    len: usize,
+) -> usize {
     unsafe {
         let runtime = get_runtime().get_mut();
         let buffer_object = HeapObject::from_tagged(buffer);
@@ -883,8 +895,7 @@ unsafe extern "C" fn ffi_get_string(buffer: usize, offset: usize, len: usize) ->
         let slice = std::slice::from_raw_parts(buffer.add(offset), len);
         let string = std::str::from_utf8(slice).unwrap();
         runtime
-            .memory
-            .allocate_string(string.to_string())
+            .allocate_string(stack_pointer, string.to_string())
             .unwrap()
             .into()
     }
@@ -894,11 +905,11 @@ extern "C" fn placeholder() -> usize {
     BuiltInTypes::null_value() as usize
 }
 
-extern "C" fn wait_for_input() -> usize {
+extern "C" fn wait_for_input(stack_pointer: usize) -> usize {
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).unwrap();
     let runtime = get_runtime().get_mut();
-    let string = runtime.memory.allocate_string(input);
+    let string = runtime.allocate_string(stack_pointer, input);
     string.unwrap().into()
 }
 
@@ -955,6 +966,7 @@ extern "C" fn register_extension(
 }
 
 extern "C" fn hash(value: usize) -> usize {
+    print_call_builtin(get_runtime().get(), "hash");
     let tag = BuiltInTypes::get_kind(value);
     match tag {
         BuiltInTypes::Int => {
@@ -1018,6 +1030,7 @@ extern "C" fn many_args(
 }
 
 extern "C" fn pop_count(value: usize) -> usize {
+    print_call_builtin(get_runtime().get(), "pop_count");
     let tag = BuiltInTypes::get_kind(value);
     match tag {
         BuiltInTypes::Int => {
@@ -1134,8 +1147,8 @@ impl Runtime {
         self.add_builtin_function(
             "beagle.ffi/call_ffi_info",
             call_ffi_info as *const u8,
-            false,
-            7,
+            true,
+            8,
         )?;
 
         self.add_builtin_function("beagle.ffi/allocate", ffi_allocate as *const u8, false, 1)?;
@@ -1151,8 +1164,8 @@ impl Runtime {
         self.add_builtin_function(
             "beagle.ffi/get_string",
             ffi_get_string as *const u8,
-            false,
-            3,
+            true,
+            4,
         )?;
 
         self.add_builtin_function("beagle.builtin/__pause", __pause as *const u8, true, 1)?;
@@ -1195,8 +1208,8 @@ impl Runtime {
         self.add_builtin_function(
             "beagle.builtin/wait_for_input",
             wait_for_input as *const u8,
-            false,
-            0,
+            true,
+            1,
         )?;
 
         self.add_builtin_function("beagle.core/eval", eval as *const u8, false, 1)?;
@@ -1213,8 +1226,8 @@ impl Runtime {
         self.add_builtin_function(
             "beagle.builtin/get_string_index",
             get_string_index as *const u8,
-            false,
-            2,
+            true,
+            3,
         )?;
 
         self.add_builtin_function(
@@ -1227,11 +1240,11 @@ impl Runtime {
         self.add_builtin_function(
             "beagle.core/string_concat",
             string_concat as *const u8,
-            false,
-            2,
+            true,
+            3,
         )?;
 
-        self.add_builtin_function("beagle.core/substring", substring as *const u8, false, 3)?;
+        self.add_builtin_function("beagle.core/substring", substring as *const u8, true, 4)?;
 
         self.add_builtin_function("beagle.builtin/hash", hash as *const u8, false, 1)?;
 

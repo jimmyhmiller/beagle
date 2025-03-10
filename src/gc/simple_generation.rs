@@ -177,10 +177,10 @@ impl Allocator for SimpleGeneration {
 
     fn try_allocate(
         &mut self,
-        bytes: usize,
+        words: usize,
         kind: BuiltInTypes,
     ) -> Result<AllocateAction, Box<dyn Error>> {
-        let pointer = self.allocate_inner(bytes, kind)?;
+        let pointer = self.allocate_inner(words, kind)?;
         Ok(pointer)
     }
 
@@ -247,10 +247,10 @@ impl Allocator for SimpleGeneration {
 impl SimpleGeneration {
     fn allocate_inner(
         &mut self,
-        bytes: usize,
+        words: usize,
         _kind: BuiltInTypes,
     ) -> Result<AllocateAction, Box<dyn Error>> {
-        let size = Word::from_word(bytes);
+        let size = Word::from_word(words);
         if self.young.can_allocate(size) {
             Ok(AllocateAction::Allocated(self.young.allocate(size)?))
         } else {

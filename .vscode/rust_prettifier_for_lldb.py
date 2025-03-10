@@ -1109,3 +1109,29 @@ class StdHashSetSynthProvider(StdHashMapSynthProvider):
 def __lldb_init_module(debugger_obj, internal_dict):  # pyright: ignore
     initialize_category(debugger_obj, internal_dict)
     print(f"loaded rust-prettifier-for-lldb from {__file__}")
+
+
+def load_perf_map(map_file):
+    addr_map = {}
+    with open(map_file, "r") as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) < 3:
+                continue
+            addr_map[int(parts[0], 16)] = parts[2]  # Convert start address to int
+    return addr_map
+
+def resolve_stack(map_file):
+    target = lldb.debugger.GetSelectedTarget()
+    thread = lldb.thread
+    addr_map = load_perf_map(map_file)
+
+    for frame in thread.frames:
+        pc = frame.pc  # Program counter (return address)
+        sym = None
+        for start_addr in sorted(addr_map.keys(), reverse=True):
+            if pc >= start_addr:
+                sym = addr_map[start_addr]
+                break
+
+        print(f"Frame {frame.idx}: {sym or '??'} @ {hex(pc)}")

@@ -26,7 +26,8 @@ fn peek(tokenizer) {
     if tokenizer.position >= tokenizer.length {
         ""
     } else {
-        tokenizer.input[tokenizer.position]
+        let result = tokenizer.input[tokenizer.position]
+        result
     }
 }
 

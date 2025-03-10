@@ -440,11 +440,9 @@ impl Memory {
         self.join_handles.len()
     }
 
-    pub fn allocate_string(&mut self, string: String) -> Result<Tagged, Box<dyn Error>> {
-        let bytes = string.as_bytes();
+    fn allocate_string(&mut self, bytes: &[u8], pointer: usize) -> Result<Tagged, Box<dyn Error>> {
+        let mut heap_object = HeapObject::from_tagged(pointer);
         let words = bytes.len() / 8 + 1;
-        let pointer = self.heap.allocate(words, BuiltInTypes::HeapObject)?;
-        let mut heap_object = HeapObject::from_untagged(pointer);
         heap_object.writer_header_direct(Header {
             type_id: 2,
             type_data: bytes.len() as u32,
@@ -453,7 +451,7 @@ impl Memory {
             marked: false,
         });
         heap_object.write_fields(bytes);
-        Ok(BuiltInTypes::HeapObject.tagged(pointer as usize))
+        Ok(BuiltInTypes::HeapObject.tagged(pointer))
     }
 
     pub fn write_c_string(&mut self, string: String) -> *mut i8 {
@@ -510,10 +508,10 @@ impl Allocator for Memory {
 
     fn try_allocate(
         &mut self,
-        bytes: usize,
+        words: usize,
         kind: BuiltInTypes,
     ) -> Result<AllocateAction, Box<dyn Error>> {
-        self.heap.try_allocate(bytes, kind)
+        self.heap.try_allocate(words, kind)
     }
 
     fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
@@ -877,9 +875,21 @@ impl Runtime {
         }
     }
 
+    pub fn allocate_string(
+        &mut self,
+        stack_pointer: usize,
+        string: String,
+    ) -> Result<Tagged, Box<dyn Error>> {
+        let bytes = string.as_bytes();
+        let words = bytes.len() / 8 + 1;
+        let pointer = self.allocate(words, stack_pointer, BuiltInTypes::HeapObject)?;
+        let pointer = self.memory.allocate_string(bytes, pointer)?;
+        Ok(pointer)
+    }
+
     pub fn allocate(
         &mut self,
-        bytes: usize,
+        words: usize,
         stack_pointer: usize,
         kind: BuiltInTypes,
     ) -> Result<usize, Box<dyn Error>> {
@@ -889,7 +899,7 @@ impl Runtime {
             self.gc(stack_pointer);
         }
 
-        let result = self.memory.heap.try_allocate(bytes, kind);
+        let result = self.memory.heap.try_allocate(words, kind);
 
         match result {
             Ok(AllocateAction::Allocated(value)) => {
@@ -899,7 +909,7 @@ impl Runtime {
             }
             Ok(AllocateAction::Gc) => {
                 self.gc(stack_pointer);
-                let result = self.memory.heap.try_allocate(bytes, kind);
+                let result = self.memory.heap.try_allocate(words, kind);
                 if let Ok(AllocateAction::Allocated(result)) = result {
                     // tag
                     assert!(result.is_aligned());
@@ -908,7 +918,7 @@ impl Runtime {
                 } else {
                     self.memory.heap.grow();
                     // TODO: Detect loop here
-                    let pointer = self.allocate(bytes, stack_pointer, kind)?;
+                    let pointer = self.allocate(words, stack_pointer, kind)?;
                     // If we went down this path, our pointer is already tagged
                     Ok(pointer)
                 }
@@ -1374,7 +1384,7 @@ impl Runtime {
     }
 
     pub fn get_repr(&self, value: usize, depth: usize) -> Option<String> {
-        if depth > 10 {
+        if depth > 100 {
             return Some("...".to_string());
         }
         let tag = BuiltInTypes::get_kind(value);
@@ -1699,6 +1709,7 @@ impl Runtime {
             Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
         Ok(function_pointer as usize)
     }
+
     pub fn add_builtin_function(
         &mut self,
         name: &str,
@@ -2155,5 +2166,9 @@ impl Runtime {
             return format!("{}/{}", namespace_or_alias, struct_name);
         }
         panic!("Cannot resolve {}", struct_name);
+    }
+
+    pub fn get_command_line_args(&self) -> &CommandLineArguments {
+        &self.command_line_arguments
     }
 }
