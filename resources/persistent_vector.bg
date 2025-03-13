@@ -262,6 +262,33 @@ extend PersistentVector with Push {
     }
 }
 
+extend PersistentVector with Format {
+    fn format(vec) {
+        if vec.count == 0 {
+            "[]"
+        } else {
+            format_vector(vec, 0, "[")
+        }
+    }
+}
+
+fn format_vector(vec, idx, acc) {
+    if idx >= vec.count {
+        acc ++ "]"
+    } else {
+        let val = get(vec, idx)
+        let val_str = format(val)
+        
+        let new_acc = if idx == 0 {
+            acc ++ val_str
+        } else {
+            acc ++ ", " ++ val_str
+        }
+        
+        format_vector(vec, idx + 1, new_acc)
+    }
+}
+
 
 fn main() {
     let vec1 = vec()

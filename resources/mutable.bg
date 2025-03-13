@@ -1,7 +1,3 @@
-// A faster JSON parser with tail-recursion instead of while loops.
-// Avoids building strings char by char. We detect spans via recursion,
-// then use substring at the end to get the final string/number/etc.
-
 namespace mutable
 
 import "beagle.primitive" as primitive
@@ -14,7 +10,7 @@ struct Tokenizer {
     length
 }
 
-fn makeTokenizer(input) {
+fn make_tokenizer(input) {
     Tokenizer {
         input: input,
         position: 0,
@@ -36,223 +32,200 @@ fn consume(tokenizer) {
     tokenizer
 }
 
-// Tail-recursive function to skip all whitespace.
-fn skipWhitespace(tokenizer) {
+fn skip_whitespace(tokenizer) {
     if tokenizer.position >= tokenizer.length {
         tokenizer
     } else {
         let c = peek(tokenizer)
         if c == " " || c == "\n" || c == "\t" || c == "\r" {
-            skipWhitespace(consume(tokenizer))
+            skip_whitespace(consume(tokenizer))
         } else {
             tokenizer
         }
     }
 }
 
-// Finds the position of the next quote, consuming until we see it or run out.
-fn findStringEnd(tokenizer) {
+fn find_string_end(tokenizer) {
     if tokenizer.position >= tokenizer.length {
-        // Return current position (means no closing quote found)
         tokenizer.position
     } else {
         let c = peek(tokenizer)
         if c == "\"" {
             tokenizer.position
         } else {
-            findStringEnd(consume(tokenizer))
+            find_string_end(consume(tokenizer))
         }
     }
 }
 
-fn parseString(tokenizer) {
-    // consume the leading quote
+fn parse_string(tokenizer) {
     consume(tokenizer)
-    let startPos = tokenizer.position
-    let endPos = findStringEnd(tokenizer)
-    let strVal = substring(tokenizer.input, startPos, endPos - startPos)
-    // consume the closing quote if we haven't hit the end
+    let start_pos = tokenizer.position
+    let end_pos = find_string_end(tokenizer)
+    let str_val = substring(tokenizer.input, start_pos, end_pos - start_pos)
     if tokenizer.position < tokenizer.length {
         consume(tokenizer)
     }
-    strVal
+    str_val
 }
 
-fn isDigitChar(c) {
-    c == "0" || c == "1" || c == "2" || c == "3" || c == "4" ||
-    c == "5" || c == "6" || c == "7" || c == "8" || c == "9"
+fn is_digit_char(c) {
+    c == "0" || 
+    c == "1" || 
+    c == "2" || 
+    c == "3" || 
+    c == "4" || 
+    c == "5" || 
+    c == "6" || 
+    c == "7" || 
+    c == "8" ||
+    c == "9"
 }
 
-// Tail-recursive function to scan a number's span.
-fn findNumberEnd(tokenizer) {
+fn find_number_end(tokenizer) {
     if tokenizer.position >= tokenizer.length {
         tokenizer.position
     } else {
         let c = peek(tokenizer)
-        // numeric, decimal point, or minus sign
-        if isDigitChar(c) || c == "." || c == "-" {
-            findNumberEnd(consume(tokenizer))
+        if is_digit_char(c) || c == "." || c == "-" {
+            find_number_end(consume(tokenizer))
         } else {
             tokenizer.position
         }
     }
 }
 
-fn parseNumber(tokenizer) {
-    let startPos = tokenizer.position
-    let endPos = findNumberEnd(tokenizer)
-    substring(tokenizer.input, startPos, endPos - startPos)
+fn parse_number(tokenizer) {
+    let start_pos = tokenizer.position
+    let end_pos = find_number_end(tokenizer)
+    substring(tokenizer.input, start_pos, end_pos - start_pos)
 }
 
-// Generic tail-recursive function to scan letters for booleans or null.
-fn findWordEnd(tokenizer) {
+fn find_word_end(tokenizer) {
     if tokenizer.position >= tokenizer.length {
         tokenizer.position
     } else {
         let c = peek(tokenizer)
-        // a..z only
         if c >= "a" && c <= "z" {
-            findWordEnd(consume(tokenizer))
+            find_word_end(consume(tokenizer))
         } else {
             tokenizer.position
         }
     }
 }
 
-fn parseBoolean(tokenizer) {
-    let startPos = tokenizer.position
-    let endPos = findWordEnd(tokenizer)
-    substring(tokenizer.input, startPos, endPos - startPos)
+fn parse_true(tokenizer) {
+    consume(tokenizer)
+    true
 }
 
-fn parseNull(tokenizer) {
-    let startPos = tokenizer.position
-    let endPos = findWordEnd(tokenizer)
-    substring(tokenizer.input, startPos, endPos - startPos)
+fn parse_false(tokenizer) {
+    primitive/set!(tokenizer.position, tokenizer.position + 5)
+    false
 }
 
-// Dispatch to correct type based on first non-whitespace char
-fn parseValue(tokenizer) {
-    let t = skipWhitespace(tokenizer)
-    let c = peek(t)
+fn parse_null(tokenizer) {
+    primitive/set!(tokenizer.position, tokenizer.position + 4)
+    null
+}
+
+fn parse_value(tokenizer) {
+    let tokenizer = skip_whitespace(tokenizer)
+    let c = peek(tokenizer)
     if c == "{" {
-        parseObject(t)
+        parse_object(tokenizer)
     } else if c == "[" {
-        parseArray(t)
+        parse_array(tokenizer)
     } else if c == "\"" {
-        parseString(t)
-    } else if c == "t" || c == "f" {
-        parseBoolean(t)
+        parse_string(tokenizer)
+    } else if c == "t" {
+        parse_true(tokenizer)
+    } else if c == "f" {
+        parse_false(tokenizer)
     } else if c == "n" {
-        parseNull(t)
+        parse_null(tokenizer)
     } else {
-        parseNumber(t)
+        parse_number(tokenizer)
     }
 }
 
-// Parse object by reading pairs until '}' or no more pairs
-fn parseObject(tokenizer) {
-    consume(tokenizer) // consume '{'
-    let t = skipWhitespace(tokenizer)
-
-    if peek(t) == "}" {
-        consume(t) // consume '}'
+fn parse_object(tokenizer) {
+    consume(tokenizer)
+    let tokenizer = skip_whitespace(tokenizer)
+    if peek(tokenizer) == "}" {
+        consume(tokenizer)
         pm/map()
     } else {
-        parseObjectLoop(t, pm/map())
+        parse_object_loop(tokenizer, pm/map())
     }
 }
 
-fn parseObjectLoop(tokenizer, outMap) {
-    let t = skipWhitespace(tokenizer)
-    // key must be string
-    let key = parseString(t)
-    let afterKey = skipWhitespace(t)
-    // consume ':'
-    consume(afterKey)
-    let afterColon = skipWhitespace(afterKey)
-
-    let val = parseValue(afterColon)
-    let newMap = pm/assoc(outMap, key, val)
-
-    let afterVal = skipWhitespace(afterColon)
-    let c = peek(afterVal)
+fn parse_object_loop(tokenizer, out_map) {
+    let tokenizer = skip_whitespace(tokenizer)
+    let key = parse_string(tokenizer)
+    let after_key = skip_whitespace(tokenizer)
+    consume(after_key)
+    let after_colon = skip_whitespace(after_key)
+    let val = parse_value(after_colon)
+    let new_map = pm/assoc(out_map, key, val)
+    let after_val = skip_whitespace(after_colon)
+    let c = peek(after_val)
     if c == "," {
-        // consume comma
-        consume(afterVal)
-        let nextT = skipWhitespace(afterVal)
-        let c2 = peek(nextT)
-        if c2 == "}" {
-            // consume '}' if that's what's next
-            consume(nextT)
-            newMap
-        } else {
-            parseObjectLoop(nextT, newMap)
-        }
-    } else if c == "}" {
-        consume(afterVal)
-        newMap
+        consume(after_val)
+        parse_object_loop(skip_whitespace(after_val), new_map)
     } else {
-        // Malformed or trailing content, just return
-        newMap
+        if c == "}" {
+            consume(after_val)
+        }
+        new_map
     }
 }
 
-// Parse array by reading comma-separated values until ']'
-fn parseArray(tokenizer) {
-    consume(tokenizer) // consume '['
-    let t = skipWhitespace(tokenizer)
-    if peek(t) == "]" {
-        consume(t)
+fn parse_array(tokenizer) {
+    consume(tokenizer)
+    let tokenizer = skip_whitespace(tokenizer)
+    if peek(tokenizer) == "]" {
+        consume(tokenizer)
         pv/vec()
     } else {
-        parseArrayLoop(t, pv/vec())
+        parse_array_loop(tokenizer, pv/vec())
     }
 }
 
-fn parseArrayLoop(tokenizer, outVec) {
-    let t = skipWhitespace(tokenizer)
-    let val = parseValue(t)
-    let newVec = pv/push(outVec, val)
-    let afterVal = skipWhitespace(t)
-    let c = peek(afterVal)
-
+fn parse_array_loop(tokenizer, out_vec) {
+    let tokenizer = skip_whitespace(tokenizer)
+    let val = parse_value(tokenizer)
+    let new_vec = pv/push(out_vec, val)
+    let after_val = skip_whitespace(tokenizer)
+    let c = peek(after_val)
     if c == "," {
-        // consume comma
-        consume(afterVal)
-        let nextT = skipWhitespace(afterVal)
-        let c2 = peek(nextT)
-        if c2 == "]" {
-            consume(nextT)
-            newVec
-        } else {
-            parseArrayLoop(nextT, newVec)
-        }
-    } else if c == "]" {
-        consume(afterVal)
-        newVec
+        consume(after_val)
+        parse_array_loop(skip_whitespace(after_val), new_vec)
     } else {
-        newVec
+        if c == "]" {
+            consume(after_val)
+        }
+        new_vec
     }
 }
 
-fn parseJSON(input) {
-    let tokenizer = makeTokenizer(input)
-    parseValue(tokenizer)
+fn parse_json(input) {
+    let tokenizer = make_tokenizer(input)
+    parse_value(tokenizer)
 }
 
-// Tail-recursive loop to parse repeatedly
-fn parseNTimes(input, n) {
+fn parse_n_times(input, n) {
     if n == 0 {
         ""
     } else {
-        parseJSON(input)
-        parseNTimes(input, n - 1)
+        parse_json(input)
+        parse_n_times(input, n - 1)
     }
 }
 
 fn main() {
-    let input = "{\"key1\": \"value1\", \"key2\": [1, 2, 3], \"key3\": {\"key4\": 4}}"
-    parseNTimes(input, 100000)
+    let input = read_full_file("/Users/jimmyhmiller/Downloads/10mb.json")
+    let output = parse_json(input)
+    println(format(output))
     "done"
 }

@@ -759,7 +759,36 @@ impl AstCompiler<'_> {
                 token_range: _,
             } => {
                 for ast in body.iter() {
-                    self.call_compile(ast);
+                    if matches!(ast, Ast::Function { .. }) {
+                        self.call_compile(ast);
+                        // TODO: This is not great, but I am just trying to get things working
+                        let Ast::Function {
+                            name: function_name,
+                            ..
+                        } = ast
+                        else {
+                            panic!("Expected function")
+                        };
+                        let function = self
+                            .compiler
+                            .get_function_by_name(&format!(
+                                "{}/{}",
+                                self.compiler.current_namespace_name(),
+                                function_name.clone().unwrap()
+                            ))
+                            .unwrap();
+                        let fully_qualified_name = format!(
+                            "{}/{}_{}",
+                            self.compiler.current_namespace_name(),
+                            name,
+                            function_name.clone().unwrap()
+                        );
+
+                        self.compiler
+                            .add_function_alias(&fully_qualified_name, function);
+                    } else {
+                        self.call_compile(ast);
+                    }
                 }
                 let fully_qualified_name =
                     format!("{}/{}", self.compiler.current_namespace_name(), name);

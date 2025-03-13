@@ -41,6 +41,20 @@ extend Size with Axis {
     }
 }
 
+
+protocol Format {
+    fn format(self) {
+        "no format"
+    }
+}
+
+extend String with Format {
+    fn format(self) {
+        self
+    }
+}
+
+
 fn main() {
     println(vector/PersistentVector)
     println(Indexed)
@@ -65,6 +79,8 @@ fn main() {
     println(get_y(point))
     println(get_x(size))
     println(get_y(size))
+    println(format("test"))
+    println(format(2))
     "done"
 }
 
@@ -79,4 +95,6 @@ fn main() {
 // 2
 // 3
 // 4
+// test
+// no format
 // done

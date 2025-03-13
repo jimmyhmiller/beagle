@@ -72,6 +72,20 @@ pub unsafe extern "C" fn println_value(value: usize) -> usize {
     0b111
 }
 
+pub unsafe extern "C" fn to_string(stack_pointer: usize, value: usize) -> usize {
+    let runtime = get_runtime().get_mut();
+    let result = runtime.get_repr(value, 0);
+    if result.is_none() {
+        let stack_pointer = get_current_stack_pointer();
+        unsafe { throw_error(stack_pointer) };
+    }
+    let result = result.unwrap();
+    runtime
+        .allocate_string(stack_pointer, result)
+        .unwrap()
+        .into()
+}
+
 #[inline(always)]
 fn print_call_builtin(runtime: &Runtime, name: &str) {
     debug_only!(if runtime.get_command_line_args().print_builtin_calls {
@@ -130,9 +144,10 @@ extern "C" fn get_string_index(stack_pointer: usize, string: usize, index: usize
         // TODO: Type safety
         // We are just going to assert that the type_id == 2
         assert!(string.get_type_id() == 2);
-        let string = string.get_string_bytes();
         let index = BuiltInTypes::untag(index);
-        let result = string.get(index).unwrap();
+        let string = string.get_string_bytes();
+        // TODO: This will break with unicode
+        let result = string[index] as char;
         let result = result.to_string();
         let result = runtime
             .allocate_string(stack_pointer, result)
@@ -174,16 +189,13 @@ extern "C" fn substring(stack_pointer: usize, string: usize, start: usize, lengt
     print_call_builtin(get_runtime().get(), "substring");
     let runtime = get_runtime().get_mut();
     let string_pointer = runtime.register_temporary_root(string);
-    let string = runtime.get_string(string);
     let start = BuiltInTypes::untag(start);
     let length = BuiltInTypes::untag(length);
-    let bytes = &string[start..start + length];
-    let result = runtime
-        .allocate_string(stack_pointer, bytes.to_string())
-        .unwrap()
-        .into();
+    let string = runtime
+        .get_substring(stack_pointer, string, start, length)
+        .unwrap();
     runtime.unregister_temporary_root(string_pointer);
-    result
+    string.into()
 }
 
 extern "C" fn fill_object_fields(object_pointer: usize, value: usize) -> usize {
@@ -913,6 +925,14 @@ extern "C" fn wait_for_input(stack_pointer: usize) -> usize {
     string.unwrap().into()
 }
 
+extern "C" fn read_full_file(stack_pointer: usize, file_name: usize) -> usize {
+    let runtime = get_runtime().get_mut();
+    let file_name = runtime.get_string(file_name);
+    let file = std::fs::read_to_string(file_name).unwrap();
+    let string = runtime.allocate_string(stack_pointer, file);
+    string.unwrap().into()
+}
+
 extern "C" fn eval(code: usize) -> usize {
     let runtime = get_runtime().get_mut();
     let code = match BuiltInTypes::get_kind(code) {
@@ -978,7 +998,7 @@ extern "C" fn hash(value: usize) -> usize {
             let heap_object = HeapObject::from_tagged(value);
             if heap_object.get_header().type_id == 2 {
                 let bytes = heap_object.get_string_bytes();
-                let string = std::str::from_utf8(bytes).unwrap();
+                let string = unsafe { std::str::from_utf8_unchecked(bytes) };
                 let mut s = DefaultHasher::new();
                 string.hash(&mut s);
                 return BuiltInTypes::Int.tag(s.finish() as isize) as usize;
@@ -1054,6 +1074,8 @@ impl Runtime {
         self.add_builtin_function("beagle.core/println", println_value as *const u8, false, 1)?;
 
         self.add_builtin_function("beagle.core/print", print_value as *const u8, false, 1)?;
+
+        self.add_builtin_function("beagle.core/to_string", to_string as *const u8, true, 2)?;
 
         self.add_builtin_function("beagle.builtin/allocate", allocate as *const u8, true, 2)?;
 
@@ -1249,6 +1271,13 @@ impl Runtime {
         self.add_builtin_function("beagle.builtin/hash", hash as *const u8, false, 1)?;
 
         self.add_builtin_function("beagle.builtin/pop_count", pop_count as *const u8, false, 1)?;
+
+        self.add_builtin_function(
+            "beagle.core/read_full_file",
+            read_full_file as *const u8,
+            true,
+            2,
+        )?;
 
         Ok(())
     }

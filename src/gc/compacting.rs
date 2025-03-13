@@ -151,15 +151,16 @@ impl Space {
         );
     }
 
-    fn can_allocate(&mut self, size: usize) -> bool {
+    fn can_allocate(&mut self, words: usize) -> bool {
+        let bytes = Word::from_word(words).to_bytes() + HeapObject::header_size();
         let segment = self.segments.get(self.segment_offset).unwrap();
-        let current_segment = segment.offset + size + 8 < segment.size;
+        let current_segment = segment.offset + bytes < segment.size;
         if current_segment {
             return true;
         }
         while self.segment_offset < self.segments.len() {
             let segment = self.segments.get(self.segment_offset).unwrap();
-            if segment.offset + size + 8 < segment.size {
+            if segment.offset + bytes < segment.size {
                 return true;
             }
             self.segment_offset += 1;
@@ -260,10 +261,10 @@ impl Allocator for CompactingHeap {
 
     fn try_allocate(
         &mut self,
-        bytes: usize,
+        words: usize,
         kind: BuiltInTypes,
     ) -> Result<AllocateAction, Box<dyn Error>> {
-        let pointer = self.allocate_inner(bytes, kind, self.options)?;
+        let pointer = self.allocate_inner(words, kind, self.options)?;
 
         Ok(pointer)
     }
@@ -394,12 +395,12 @@ impl CompactingHeap {
     #[allow(clippy::too_many_arguments)]
     fn allocate_inner(
         &mut self,
-        bytes: usize,
+        words: usize,
         _kind: BuiltInTypes,
         _options: AllocatorOptions,
     ) -> Result<AllocateAction, Box<dyn Error>> {
-        if self.from_space.can_allocate(bytes) {
-            Ok(AllocateAction::Allocated(self.from_space.allocate(bytes)?))
+        if self.from_space.can_allocate(words) {
+            Ok(AllocateAction::Allocated(self.from_space.allocate(words)?))
         } else {
             Ok(AllocateAction::Gc)
         }

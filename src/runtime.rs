@@ -1384,7 +1384,7 @@ impl Runtime {
     }
 
     pub fn get_repr(&self, value: usize, depth: usize) -> Option<String> {
-        if depth > 100 {
+        if depth > 10 {
             return Some("...".to_string());
         }
         let tag = BuiltInTypes::get_kind(value);
@@ -1467,7 +1467,7 @@ impl Runtime {
                     }
                     2 => {
                         let bytes = object.get_string_bytes();
-                        let string = std::str::from_utf8(bytes).unwrap();
+                        let string = unsafe { std::str::from_utf8_unchecked(bytes) };
                         if depth > 0 {
                             return Some(format!("\"{}\"", string));
                         }
@@ -1560,7 +1560,7 @@ impl Runtime {
             }
             let b_string = self.get_str_literal(b);
             let a_string = a_object.get_string_bytes();
-            let a_string = std::str::from_utf8(a_string).unwrap();
+            let a_string = unsafe { std::str::from_utf8_unchecked(a_string) };
             return a_string == b_string;
         }
         if a_tag != b_tag {
@@ -1670,7 +1670,33 @@ impl Runtime {
                 panic!("Not a string");
             }
             let bytes = heap_object.get_string_bytes();
-            std::str::from_utf8(bytes).unwrap().to_string()
+            unsafe { std::str::from_utf8_unchecked(bytes).to_string() }
+        } else {
+            panic!("Not a string");
+        }
+    }
+
+    pub fn get_substring(
+        &mut self,
+        stack_pointer: usize,
+        string: usize,
+        start: usize,
+        length: usize,
+    ) -> Result<Tagged, Box<dyn Error>> {
+        let tag = BuiltInTypes::get_kind(string);
+        if tag == BuiltInTypes::String {
+            let string = self.get_str_literal(string);
+            let string = string[start..start + length].to_string();
+            self.allocate_string(stack_pointer, string)
+        } else if tag == BuiltInTypes::HeapObject {
+            let heap_object = HeapObject::from_tagged(string);
+            if heap_object.get_type_id() != 2 {
+                panic!("Not a string");
+            }
+            let bytes = heap_object.get_string_bytes();
+            let string = unsafe { std::str::from_utf8_unchecked(bytes) };
+            let string = string[start..start + length].to_string();
+            self.allocate_string(stack_pointer, string)
         } else {
             panic!("Not a string");
         }

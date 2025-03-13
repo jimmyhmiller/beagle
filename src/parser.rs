@@ -193,7 +193,17 @@ fn stripslashes(s: &str) -> String {
         n.push(match c {
             '\\' => {
                 let next = chars.next();
-                if let Some(c) = next { c } else { c }
+                if let Some(c) = next {
+                    match c {
+                        'n' => '\n',
+                        'r' => '\r',
+                        't' => '\t',
+                        '0' => '\0',
+                        _ => c,
+                    }
+                } else {
+                    c
+                }
             }
             c => c,
         });
@@ -882,7 +892,7 @@ impl Parser {
             self.skip_spaces();
             result.push(self.parse_protocol_member());
             self.skip_spaces();
-            if !self.is_close_curly() {
+            if !self.is_close_curly() && self.peek_next_non_whitespace() != Token::CloseCurly {
                 self.data_delimiter();
             }
             self.skip_spaces();
@@ -906,6 +916,7 @@ impl Parser {
                 self.expect_open_paren();
                 let args = self.parse_args();
                 self.expect_close_paren();
+                self.skip_spaces();
                 if self.is_open_curly() {
                     let body = self.parse_block();
                     let end_position = self.position;
@@ -1023,6 +1034,16 @@ impl Parser {
         while !self.at_end() && (self.is_space() || self.is_comment()) {
             self.consume();
         }
+    }
+
+    fn peek_next_non_whitespace(&mut self) -> Token {
+        let starting_position = self.position;
+        while !self.at_end() && (self.is_space() || self.is_comment()) {
+            self.consume();
+        }
+        let result = self.current_token();
+        self.position = starting_position;
+        result
     }
 
     fn skip_whitespace(&mut self) {
