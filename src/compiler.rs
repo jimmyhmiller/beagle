@@ -407,6 +407,19 @@ impl Compiler {
         )
     }
 
+    pub fn add_function_alias(&self, alias: &str, function: &Function) {
+        let runtime = get_runtime().get_mut();
+        runtime
+            .add_function(
+                Some(alias),
+                usize::from(function.pointer) as *const u8,
+                function.size,
+                function.number_of_locals,
+                function.number_of_args,
+            )
+            .unwrap();
+    }
+
     pub fn get_pointer_for_function(&self, function: &Function) -> Option<usize> {
         let runtime = get_runtime().get();
         runtime.get_pointer_for_function(function)
@@ -445,10 +458,22 @@ impl Compiler {
 
     fn build_method_if_chain(
         &mut self,
+        default_method: Option<&Function>,
         protocol_methods: Vec<ProtocolMethodInfo>,
         args: Vec<String>,
     ) -> Ast {
         if protocol_methods.is_empty() {
+            if let Some(default_method) = default_method {
+                let function_name = default_method.name.clone();
+                return Ast::Call {
+                    name: function_name,
+                    args: args
+                        .iter()
+                        .map(|x| Ast::Identifier(x.to_string(), 0))
+                        .collect(),
+                    token_range: TokenRange::new(0, 0),
+                };
+            }
             return Ast::Call {
                 name: "beagle.builtin/throw_error".to_string(),
                 args: vec![],
@@ -481,7 +506,11 @@ impl Compiler {
                     .collect(),
                 token_range: TokenRange::new(0, 0),
             }],
-            else_: vec![self.build_method_if_chain(protocol_methods[1..].to_vec(), args)],
+            else_: vec![self.build_method_if_chain(
+                default_method,
+                protocol_methods[1..].to_vec(),
+                args,
+            )],
             token_range: TokenRange::new(0, 0),
         }
     }
@@ -493,8 +522,11 @@ impl Compiler {
         protocol_methods: Vec<ProtocolMethodInfo>,
     ) {
         let runtime = get_runtime().get_mut();
-        let (protocol_namespace, _protocol_name) = protocol_name.split_once("/").unwrap();
+        let (protocol_namespace, protocol_name) = protocol_name.split_once("/").unwrap();
         let full_method_name = format!("{}/{}", protocol_namespace, method_name);
+        let fully_qualified_name =
+            format!("{}/{}_{}", protocol_namespace, protocol_name, method_name);
+        let default_method = runtime.get_function_by_name(&fully_qualified_name);
         let function = self.find_function(&full_method_name).unwrap();
         let args: Vec<String> = (0..function.number_of_args)
             .map(|x| format!("arg{}", x))
@@ -508,7 +540,7 @@ impl Compiler {
             elements: vec![Ast::Function {
                 name: Some(method_name.clone()),
                 args: args.clone(),
-                body: vec![self.build_method_if_chain(protocol_methods, args)],
+                body: vec![self.build_method_if_chain(default_method, protocol_methods, args)],
                 token_range: TokenRange::new(0, 0),
             }],
             token_range: TokenRange::new(0, 0),

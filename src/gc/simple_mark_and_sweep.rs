@@ -260,40 +260,41 @@ impl SimpleMarkSweepHeap {
         true
     }
 
-    fn add_free(&mut self, entry: FreeListEntry) {
-        assert!(
-            entry.size <= self.space.segments[entry.segment].size,
-            "Size is too big"
-        );
-        // TODO: If a whole segment is free
-        // I need a fast path where I don't have to update free list
-
+    fn add_frees(&mut self, entries: Vec<FreeListEntry>) {
+        let mut remaining_entries = vec![];
         for current_entry in self.free_list.iter_mut() {
-            if *current_entry == entry {
-                println!("Double free!");
-            }
+            for entry in entries.iter() {
+                if current_entry == entry {
+                    println!("Double free!");
+                }
+                if current_entry.segment != entry.segment {
+                    continue;
+                }
 
-            if current_entry.segment == entry.segment
-                && current_entry.offset + current_entry.size == entry.offset
-            {
-                current_entry.size += entry.size;
-                return;
-            }
-            if current_entry.segment == entry.segment
-                && entry.offset + entry.size == current_entry.offset
-            {
-                current_entry.offset = entry.offset;
-                current_entry.size += entry.size;
-                return;
+                if current_entry.segment == entry.segment
+                    && current_entry.offset + current_entry.size == entry.offset
+                {
+                    current_entry.size += entry.size;
+                    return;
+                }
+                if current_entry.segment == entry.segment
+                    && entry.offset + entry.size == current_entry.offset
+                {
+                    current_entry.offset = entry.offset;
+                    current_entry.size += entry.size;
+                    return;
+                }
+                remaining_entries.push(entry);
             }
         }
-        if entry.offset == 0 && entry.size == self.space.segments[entry.segment].offset {
-            self.space.segments[entry.segment].offset = 0;
-        } else {
-            self.free_list.push(entry);
-        }
 
-        debug_assert!(self.all_disjoint(), "Free list is not disjoint");
+        for entry in remaining_entries {
+            if entry.offset == 0 && entry.size == self.space.segments[entry.segment].offset {
+                self.space.segments[entry.segment].offset = 0;
+            } else {
+                self.free_list.push(*entry);
+            }
+        }
     }
 
     fn current_offset(&self) -> usize {
@@ -472,9 +473,8 @@ impl SimpleMarkSweepHeap {
             }
         }
 
-        for entry in free_entries {
-            self.add_free(entry);
-        }
+        self.add_frees(free_entries);
+        debug_assert!(self.all_disjoint(), "Free list is not disjoint");
     }
 
     fn can_allocate(&mut self, bytes: usize) -> bool {

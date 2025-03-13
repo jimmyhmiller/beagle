@@ -49,6 +49,17 @@ protocol Length {
     fn length(coll)
 }
 
+protocol Format {
+    fn format(self) {
+        to_string(self)
+    }
+}
+
+extend String with Format {
+    fn format(self) {
+        "\"" ++ self ++ "\""
+    }
+}
 
 // This may seem weird
 // but we need our runtime to know

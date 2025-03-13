@@ -333,6 +333,11 @@ impl HeapObject {
         unsafe { std::slice::from_raw_parts(pointer, bytes) }
     }
 
+    pub fn get_str_unchecked(&self) -> &str {
+        let bytes = self.get_string_bytes();
+        unsafe { std::str::from_utf8_unchecked(bytes) }
+    }
+
     pub fn get_full_object_data(&self) -> &[u8] {
         let size = self.full_size();
         let untagged = self.untagged();
