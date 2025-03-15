@@ -510,7 +510,7 @@ fn collect_keys_collision(n, keys_vec, idx, ccount) {
 
 
 extend PersistentMap with Format {
-    fn format(map) {
+    fn format(map, depth) {
         if map.count == 0 {
             "{}"
         } else {
@@ -527,8 +527,8 @@ fn format_entries(map, keys_vec, idx, acc) {
         let key = array/read_field(keys_vec, idx)
         let val = get(map, key)
         
-        let key_str = format(key)
-        let val_str = format(val)
+        let key_str = format(key, 1)
+        let val_str = format(val, 1)
         
         let entry = key_str ++ ": " ++ val_str
         
@@ -586,7 +586,7 @@ fn main() {
 
 
 // Expect
-// PersistentMap { count: 0, root: null }
+// {}
 // 1
 // 1
 // 1

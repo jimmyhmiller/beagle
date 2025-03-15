@@ -3,22 +3,22 @@ namespace math_test
 // no-std
 
 fn main() {
-    println(5 + 3);
-    println(5 - 3);
-    println(5 * 3);
-    println(5 / 3);
-    println(5 + 3 * 2);
-    println((5 + 3) * 2);
-    println(5 + 3 / 2);
-    println((5 + 3) / 2);
-    println(5 * 3 + 2);
-    println(5 * (3 + 2));
-    println(5 * 3 / 2);
-    println(5 * (3 / 2));
-    println(5 / 3 * 2);
-    println(5 / (3 * 2));
-    println(5 / 3 / 2);
-    println(5 / (3 / 2));
+    _println(5 + 3);
+    _println(5 - 3);
+    _println(5 * 3);
+    _println(5 / 3);
+    _println(5 + 3 * 2);
+    _println((5 + 3) * 2);
+    _println(5 + 3 / 2);
+    _println((5 + 3) / 2);
+    _println(5 * 3 + 2);
+    _println(5 * (3 + 2));
+    _println(5 * 3 / 2);
+    _println(5 * (3 / 2));
+    _println(5 / 3 * 2);
+    _println(5 / (3 * 2));
+    _println(5 / 3 / 2);
+    _println(5 / (3 / 2));
     "done"
 }
 

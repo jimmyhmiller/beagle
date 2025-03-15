@@ -1,9 +1,13 @@
 namespace ffi_test
 
+// TODO: I need to fix my std library dependence on persistent_vector
+import "persistent_vector" as vec
 import "beagle.ffi" as ffi
 import "beagle.primitive" as primitive
 import "repl_test" as repl
 import "socket_test" as socket
+
+
 
 struct State {
     rect_x
@@ -158,13 +162,10 @@ fn main() {
     })
     println("Starting")
     sdl_init(32)
-    println("SDL Initialized")
 
     let window = sdl_create_window("SDL2 Window", 100, 100, 640, 480, 4)
-    println("Window Created")
 
     let renderer = sdl_create_renderer(window, -1, 2)
-    println("Renderer Created")
 
     // Allocate memory for event buffer and rect
     let buffer = ffi/allocate(56)

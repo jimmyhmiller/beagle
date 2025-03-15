@@ -17,8 +17,17 @@ struct Pointer {
     ptr
 }
 
+struct Buffer {
+    ptr
+    size
+}
+
 fn __make_pointer_struct(ptr) {
     Pointer { ptr: ptr }
+}
+
+fn __make_buffer_struct(ptr, size) {
+    Buffer { ptr: ptr, size: size }
 }
 
 enum Type {
@@ -31,6 +40,9 @@ enum Type {
     MutablePointer,
     String,
     Void,
+    Structure {
+        types
+    }
 }
 
 // TODO: I could make a function that maps between a type an integer

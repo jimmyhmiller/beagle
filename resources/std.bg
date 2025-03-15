@@ -50,14 +50,18 @@ protocol Length {
 }
 
 protocol Format {
-    fn format(self) {
+    fn format(self, depth) {
         to_string(self)
     }
 }
 
 extend String with Format {
-    fn format(self) {
-        "\"" ++ self ++ "\""
+    fn format(self, depth) {
+        if depth > 0 {
+            "\"" ++ self ++ "\""
+        } else {
+            self
+        }
     }
 }
 
@@ -138,3 +142,10 @@ extend String with Length {
 //     persistent_vector/push(coll, value)
 // }
 
+fn println(value) {
+    _println(format(value, 0))
+}
+
+fn print(value) {
+    _print(format(value, 0))
+}

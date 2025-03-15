@@ -263,7 +263,7 @@ extend PersistentVector with Push {
 }
 
 extend PersistentVector with Format {
-    fn format(vec) {
+    fn format(vec, depth) {
         if vec.count == 0 {
             "[]"
         } else {
@@ -277,7 +277,7 @@ fn format_vector(vec, idx, acc) {
         acc ++ "]"
     } else {
         let val = get(vec, idx)
-        let val_str = format(val)
+        let val_str = format(val, 1)
         
         let new_acc = if idx == 0 {
             acc ++ val_str
@@ -288,6 +288,14 @@ fn format_vector(vec, idx, acc) {
         format_vector(vec, idx + 1, new_acc)
     }
 }
+
+extend PersistentVector with Length {
+    fn length(vec) {
+        count(vec)
+    }
+}
+
+
 
 
 fn main() {
@@ -307,8 +315,8 @@ fn main() {
 
 
 // Expect
-// PersistentVector { count: 0, shift: 5, root: [  ], tail: [  ] }
-// PersistentVector { count: 0, shift: 5, root: [  ], tail: [  ] }
+// []
+// []
 // worked!
 // worked!
 // [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 ]

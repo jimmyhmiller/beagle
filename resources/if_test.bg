@@ -1,5 +1,7 @@
 namespace if_test
 
+import "beagle.primitive" as primitive
+
 fn side_effect() {
     println("side effect")
     true

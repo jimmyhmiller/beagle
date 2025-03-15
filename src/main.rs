@@ -10,6 +10,7 @@ use gc::{
     compacting::CompactingHeap, mutex_allocator::MutexAllocator,
     simple_generation::SimpleGeneration, simple_mark_and_sweep::SimpleMarkSweepHeap,
 };
+use nanoserde::SerJson;
 use runtime::{DefaultPrinter, Printer, Runtime, TestPrinter};
 
 use std::{cell::UnsafeCell, env, error::Error, sync::OnceLock, time::Instant};
@@ -30,14 +31,14 @@ mod register_allocation;
 pub mod runtime;
 mod types;
 
-#[derive(Debug, Encode, Decode, Clone)]
+#[derive(Debug, Encode, Decode, Clone, SerJson)]
 pub struct Message {
     kind: String,
     data: Data,
 }
 
 // TODO: This should really live on the debugger side of things
-#[derive(Debug, Encode, Decode, Clone)]
+#[derive(Debug, Encode, Decode, Clone, SerJson)]
 enum Data {
     ForeignFunction {
         name: String,
@@ -182,6 +183,42 @@ fn compile_save_volatile_registers(runtime: &mut Runtime) {
         .unwrap();
     let function = runtime
         .get_function_by_name_mut("beagle.builtin/save_volatile_registers")
+        .unwrap();
+    function.is_builtin = true;
+}
+
+fn compile_save_volatile_registers2(runtime: &mut Runtime) {
+    let mut lang = LowLevelArm::new();
+    // lang.breakpoint();
+    lang.prelude(-2);
+
+    lang.sub_stack_pointer((lang.canonical_volatile_registers.len() + 2) as i32);
+
+    for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
+        lang.store_on_stack(*reg, -((i + 3) as i32));
+    }
+
+    lang.call(X2);
+
+    for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
+        lang.load_from_stack(*reg, -((i + 3) as i32));
+    }
+
+    lang.add_stack_pointer((lang.canonical_volatile_registers.len() + 2) as i32);
+
+    lang.epilogue(2);
+    lang.ret();
+
+    runtime
+        .add_function_mark_executable(
+            "beagle.builtin/save_volatile_registers2".to_string(),
+            &lang.compile_directly(),
+            0,
+            3,
+        )
+        .unwrap();
+    let function = runtime
+        .get_function_by_name_mut("beagle.builtin/save_volatile_registers2")
         .unwrap();
     function.is_builtin = true;
 }
@@ -347,6 +384,7 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     compile_trampoline(runtime);
     compile_save_volatile_registers(runtime);
+    compile_save_volatile_registers2(runtime);
 
     let pause_atom_ptr = runtime.pause_atom_ptr();
     runtime.set_pause_atom_ptr(pause_atom_ptr);

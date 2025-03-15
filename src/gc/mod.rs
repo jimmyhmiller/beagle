@@ -1,6 +1,7 @@
 use std::{error::Error, thread::ThreadId};
 
 use bincode::{Decode, Encode};
+use nanoserde::SerJson;
 
 use crate::{CommandLineArguments, types::BuiltInTypes};
 
@@ -9,7 +10,7 @@ pub mod mutex_allocator;
 pub mod simple_generation;
 pub mod simple_mark_and_sweep;
 
-#[derive(Debug, Encode, Decode, Clone)]
+#[derive(Debug, Encode, Decode, SerJson, Clone)]
 pub struct StackMapDetails {
     pub function_name: Option<String>,
     pub number_of_locals: usize,
