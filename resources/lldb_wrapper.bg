@@ -2,6 +2,8 @@ namespace lldb_wrapper
 
 import "beagle.builtin" as builtin
 import "lib_lldb" as lldb
+import "slow_json_parser" as json
+import "beagle.ffi" as ffi
 
 
 // TODO: Thist code fails in lib_lldb with an update binding
@@ -10,12 +12,14 @@ import "lib_lldb" as lldb
 struct State {
     process
     target
+    function_names
 }
 
-let state = State {
+let state = atom(State {
     process: 0,
-    target: 0
-}
+    target: 0,
+    function_names: [],
+})
 
 fn loop_state() {
     let current_state = deref(state)
@@ -23,54 +27,170 @@ fn loop_state() {
     let target = current_state.target
 
     let process_state = lldb/get_process_state(process)
-    if process_state == lldb/process_stopped {
-        println("Process stopped")
+    if process_state != lldb/process_stopped {
+        println("Waiting for process to stop")
+        sleep(3000)
+        if process_state != lldb/process_exited {
+            loop_state()
+        }
+        println("Exited")
+    } else {
+
+        let thread = lldb/get_thread_by_index(process, 2)
+        let frame = lldb/get_selected_frame(thread)
+        let pc = lldb/get_pc(frame)
+        let function_name = lldb/get_function_name(frame)
+
+        if function_name == "debugger_info" {
+            let frame = lldb/get_selected_frame(thread)
+            let pc = lldb/get_pc_address(frame)
+            let x1 = lldb/get_register_value(lldb/find_register(frame, "x0"))
+            let x2 = lldb/get_register_value(lldb/find_register(frame, "x1"))
+            let data = lldb/get_memory(process, x1, x2)
+            let data = json/parse(data)
+            if data["kind"] == "user_function" {
+                let function_name = data["data"]["UserFunction"]["name"]
+                swap!(state, fn(s) {
+                    State {
+                        process: s.process,
+                        target: s.target,
+                        function_names: push(s.function_names, function_name)
+                    }
+                })
+            }
+        }
+
+        lldb/continue(process)
+        if process_state != lldb/process_exited {
+            loop_state()
+        }
     }
-
-    let thread = lldb/get_thread_by_index(process, 1)
-    let frame = lldb/get_selected_frame(thread)
-    let pc = lldb/get_pc(frame)
-    println(pc)
-
-    let error = lldb/create_error()
-    lldb/step_instruction(thread, false, error)
-
-    if lldb/error?(error) {
-        let error_string = lldb/get_error_message(error)
-        println(error_string)
-    }
-
-    let frame = lldb/get_selected_frame(thread)
-    let pc = lldb/get_pc_address(frame)
-    println(pc)
-    println(frame)
-
-    println(lldb/get_instructions(process, target, pc))
-
-    builtin/wait_for_input()
-    loop_state()
 }
 
-fn main() {
+let sdl = ffi/load_library("/opt/homebrew/lib/libSDL2-2.0.0.dylib")
+let sdl_init = ffi/get_function(sdl, "SDL_Init", [ffi/Type.U32], ffi/Type.I32)
+let sdl_create_window = ffi/get_function(
+    sdl,
+    "SDL_CreateWindow",
+    [ffi/Type.String, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.U32],
+    ffi/Type.Pointer
+)
+
+let sdl_destroy_window = ffi/get_function(
+    sdl,
+    "SDL_DestroyWindow",
+    [ffi/Type.Pointer],
+    ffi/Type.Void
+)
+
+let sdl_create_renderer = ffi/get_function(
+    sdl,
+    "SDL_CreateRenderer",
+    [ffi/Type.Pointer, ffi/Type.I32, ffi/Type.U32],
+    ffi/Type.Pointer
+)
+let sdl_set_render_draw_color = ffi/get_function(
+    sdl,
+    "SDL_SetRenderDrawColor",
+    [ffi/Type.Pointer, ffi/Type.U8, ffi/Type.U8, ffi/Type.U8, ffi/Type.U8],
+    ffi/Type.I32
+)
+let sdl_render_clear = ffi/get_function(sdl, "SDL_RenderClear", [ffi/Type.Pointer], ffi/Type.I32)
+let sdl_render_present = ffi/get_function(sdl, "SDL_RenderPresent", [ffi/Type.Pointer], ffi/Type.Void)
+let sdl_poll_event = ffi/get_function(sdl, "SDL_PollEvent", [ffi/Type.Pointer], ffi/Type.I32)
+let sdl_delay = ffi/get_function(sdl, "SDL_Delay", [ffi/Type.U32], ffi/Type.Void)
+let sdl_render_fill_rect = ffi/get_function(
+    sdl,
+    "SDL_RenderFillRect",
+    [ffi/Type.Pointer, ffi/Type.Pointer],
+    ffi/Type.I32
+)
+
+let sdl_get_window_size = ffi/get_function(
+    sdl,
+    "SDL_GetWindowSize",
+    [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer],
+    ffi/Type.Void
+)
+
+let sdl_ttf = ffi/load_library("/opt/homebrew/lib/libSDL2_ttf-2.0.0.dylib")
+let ttf_init = ffi/get_function(sdl_ttf, "TTF_Init", [], ffi/Type.I32)
+let ttf_open_font = ffi/get_function(
+    sdl_ttf, 
+    "TTF_OpenFont", 
+    [ffi/Type.String, ffi/Type.I32], 
+    ffi/Type.Pointer
+)
+let ttf_render_text_blended = ffi/get_function(
+    sdl_ttf, 
+    "TTF_RenderText_Blended", 
+    [ffi/Type.Pointer, ffi/Type.String, ffi/Type.Structure { types: [ffi/Type.U8, ffi/Type.U8, ffi/Type.U8, ffi/Type.U8 ]}], 
+    ffi/Type.Pointer
+)
+let ttf_close_font = ffi/get_function(
+    sdl_ttf, 
+    "TTF_Quit", 
+    [], 
+    ffi/Type.Void
+)
+
+// Additional SDL functions for handling textures
+let sdl_create_texture_from_surface = ffi/get_function(
+    sdl, 
+    "SDL_CreateTextureFromSurface", 
+    [ffi/Type.Pointer, ffi/Type.Pointer], 
+    ffi/Type.Pointer
+)
+let sdl_free_surface = ffi/get_function(
+    sdl, 
+    "SDL_FreeSurface", 
+    [ffi/Type.Pointer], 
+    ffi/Type.Void
+)
+let sdl_render_copy = ffi/get_function(
+    sdl, 
+    "SDL_RenderCopy", 
+    [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer], 
+    ffi/Type.I32
+)
+let sdl_destroy_texture = ffi/get_function(
+    sdl,
+    "SDL_DestroyTexture",
+    [ffi/Type.Pointer],
+    ffi/Type.Void
+)
+
+// Get the texture dimensions (not surface!)
+let sdl_query_texture = ffi/get_function(
+    sdl, "SDL_QueryTexture",
+    [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer],
+    ffi/Type.I32
+)
+
+let sdl_get_error = ffi/get_function(
+    sdl, "SDL_GetError",
+    [], ffi/Type.String
+)
+
+fn start_debugger_thread() {
     lldb/initialize()
     let debugger = lldb/create_debugger()
     lldb/set_async(debugger, false)
 
     let target = lldb/create_target(debugger, "/Users/jimmyhmiller/Documents/Code/beagle/target/debug/main")
-    println(lldb/is_target_valid(target))
 
     let functions = lldb/find_functions(target, "debugger_info", 2)
     let size = lldb/get_symbol_list_size(functions)
-    println(size)
 
     let first_function = lldb/get_context_at_index(functions, 0)
 
     let breakpoint = lldb/create_breakpoint(target, "debugger_info", "main")
     lldb/set_breakpoint_enabled(breakpoint, true)
-    lldb/enable_all_breakpoints(target)
+    let result = lldb/enable_all_breakpoints(target)
+
 
     let launch_info = lldb/create_launch_info(0)
-    lldb/set_launch_flags(launch_info, lldb/stop_at_entry)
+    lldb/add_args(launch_info, ["/Users/jimmyhmiller/Documents/Code/beagle/resources/if_test.bg"])
 
     let error = lldb/create_error()
     let process = lldb/launch_target(target, launch_info, error)
@@ -79,61 +199,102 @@ fn main() {
     swap!(state, fn(s) {
         State {
             process: process,
-            target: target
+            target: target,
+            function_names: s.function_names
         }
     })
-
-    loop_state()
+    thread(loop_state)
 }
 
-enum Data {
-    ForeignFunction {
-        name
-        pointer
-    },
-    BuiltinFunction {
-        name
-        pointer
-    },
-    HeapSegmentPointer {
-        pointer
-    },
-    UserFunction {
-        name
-        pointer
-        len
-    },
-    Label {
-        label
-        function_pointer
-        label_index
-        label_location
-    },
-    StackMap {
-        pc
-        name
-        stack_map
-    },
-    Allocate {
-        bytes
-        stack_pointer
-        kind
-    },
-    Tokens {
-        file_name
-        tokens
-        token_line_column_map
-    },
-    Ir {
-        function_pointer
-        file_name
-        instructions
-        token_range_to_ir_range
-    },
-    Arm {
-        function_pointer
-        file_name
-        instructions
-        ir_to_machine_code_range
+
+fn for_each(vector, f) {
+    let length = length(vector)
+    for_each_helper(vector, f, 0, length)
+}
+
+fn for_each_helper(vector, f, i, length) {
+    if i < length {
+        f(get(vector, i), i)
+        for_each_helper(vector, f, i + 1, length)
     }
+}
+
+fn gui_loop(window, buffer, renderer, font) {
+    sdl_poll_event(buffer)
+    let status = ffi/get_u32(buffer, 0)
+    let width_ptr = ffi/allocate(4)
+    let height_ptr = ffi/allocate(4)
+    sdl_get_window_size(window, width_ptr, height_ptr)
+
+    let new_width = ffi/get_i32(width_ptr, 0)
+    let new_height = ffi/get_i32(height_ptr, 0)
+
+    sdl_set_render_draw_color(renderer, 0, 0, 0, 255)
+    sdl_render_clear(renderer)
+
+    // Create a white color for the text
+    let white = ffi/allocate(4)
+    ffi/set_u8(white, 0, 255) // r
+    ffi/set_u8(white, 1, 255) // g
+    ffi/set_u8(white, 2, 255) // b
+    ffi/set_u8(white, 3, 0)   // a
+
+    let state = deref(state)
+    let function_names = state.function_names
+    for_each(function_names, fn (name, i) {
+        let surface_message = ttf_render_text_blended(font, name, white)
+        let message = sdl_create_texture_from_surface(renderer, surface_message)
+        let text_width_ptr = ffi/allocate(4)
+        let text_height_ptr = ffi/allocate(4)
+        let result = sdl_query_texture(message, 0, 0, text_width_ptr, text_height_ptr)
+
+        let text_width = ffi/get_i32(text_width_ptr, 0)
+        let text_height = ffi/get_i32(text_height_ptr, 0)
+        let message_rect = ffi/allocate(16)
+
+        ffi/set_i32(message_rect, 0, 20)        // x position
+        ffi/set_i32(message_rect, 4, (text_height + 10) * i)        // y position
+        ffi/set_i32(message_rect, 8, text_width)  // Correct width
+        ffi/set_i32(message_rect, 12, text_height) // Correct height
+
+        sdl_render_copy(renderer, message, 0, message_rect)
+        sdl_free_surface(surface_message)
+        sdl_destroy_texture(message)
+        ffi/deallocate(message_rect)
+        ffi/deallocate(text_width_ptr)
+        ffi/deallocate(text_height_ptr)
+    })
+
+
+
+    sdl_render_present(renderer)
+
+    // Clean up
+
+    ffi/deallocate(white)
+
+    ffi/deallocate(width_ptr)
+    ffi/deallocate(height_ptr)
+
+    sdl_delay(16)
+    if status != 256 {
+        gui_loop(window, buffer, renderer, font)
+    } else {
+        sdl_destroy_window(window)
+    }
+}
+
+fn main() {
+    start_debugger_thread()
+    sdl_init(32)
+    ttf_init()
+    
+    // Load a font - using a common system font on macOS
+    let font = ttf_open_font("/Users/jimmyhmiller/Library/Fonts/UbuntuMono-Regular.ttf", 64)
+    
+    let window = sdl_create_window("SDL2 Window", 100, 100, 640, 480, 8228)
+    let renderer = sdl_create_renderer(window, -1, 2)
+    let buffer = ffi/allocate(56)
+    
+    gui_loop(window, buffer, renderer, font)
 }

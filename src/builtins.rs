@@ -48,7 +48,16 @@ macro_rules! debug_only {
 
 pub fn debugger(message: Message) {
     debug_only! {
-        let message = message.to_binary();
+        let serialized_message : Vec<u8>;
+        #[cfg(feature="json")] {
+        use nanoserde::SerJson;
+            let serialized : String = SerJson::serialize_json(&message);
+            serialized_message = serialized.into_bytes();
+        }
+        #[cfg(not(feature="json"))] {
+            serialized_message = message.to_binary();
+        }
+        let message = serialized_message;
         let ptr = message.as_ptr();
         let length = message.len();
         mem::forget(message);
@@ -84,6 +93,17 @@ pub unsafe extern "C" fn to_string(stack_pointer: usize, value: usize) -> usize 
         .allocate_string(stack_pointer, result)
         .unwrap()
         .into()
+}
+
+pub unsafe extern "C" fn to_number(_stack_pointer: usize, value: usize) -> usize {
+    let runtime = get_runtime().get_mut();
+    let string = runtime.get_string(value);
+    if string.contains(".") {
+        todo!()
+    } else {
+        let result = string.parse::<isize>().unwrap();
+        BuiltInTypes::Int.tag(result) as usize
+    }
 }
 
 #[inline(always)]
@@ -459,6 +479,23 @@ pub unsafe fn call_fn_1(runtime: &Runtime, function_name: &str, arg1: usize) -> 
     save_volatile_registers(arg1, function as usize)
 }
 
+pub unsafe fn call_fn_2(runtime: &Runtime, function_name: &str, arg1: usize, arg2: usize) -> usize {
+    print_call_builtin(
+        runtime,
+        format!("{} {}", "call_fn_2", function_name).as_str(),
+    );
+    let save_volatile_registers = runtime
+        .get_function_by_name("beagle.builtin/save_volatile_registers2")
+        .unwrap();
+    let save_volatile_registers = runtime.get_pointer(save_volatile_registers).unwrap();
+    let save_volatile_registers: fn(usize, usize, usize) -> usize =
+        unsafe { std::mem::transmute(save_volatile_registers) };
+
+    let function = runtime.get_function_by_name(function_name).unwrap();
+    let function = runtime.get_pointer(function).unwrap();
+    save_volatile_registers(arg1, arg2, function as usize)
+}
+
 pub unsafe extern "C" fn load_library(name: usize) -> usize {
     let runtime = get_runtime().get_mut();
     let string = &runtime.get_string_literal(name);
@@ -491,6 +528,12 @@ pub fn map_ffi_type(runtime: &Runtime, value: usize) -> Type {
         "Type.MutablePointer" => Type::pointer(),
         "Type.String" => Type::pointer(),
         "Type.Void" => Type::void(),
+        "Type.Structure" => {
+            let types = heap_object.get_field(0);
+            let types = array_to_vec(persistent_vector_to_array(runtime, types));
+            let fields: Vec<Type> = types.iter().map(|t| map_ffi_type(runtime, *t)).collect();
+            Type::structure(fields)
+        }
         _ => panic!("Unknown type: {}", name),
     }
 }
@@ -512,6 +555,15 @@ pub fn map_beagle_type_to_ffi_type(runtime: &Runtime, value: usize) -> FFIType {
         "Type.MutablePointer" => FFIType::MutablePointer,
         "Type.String" => FFIType::String,
         "Type.Void" => FFIType::Void,
+        "Type.Structure" => {
+            let types = heap_object.get_field(0);
+            let types = array_to_vec(persistent_vector_to_array(runtime, types));
+            let fields: Vec<FFIType> = types
+                .iter()
+                .map(|t| map_beagle_type_to_ffi_type(runtime, *t))
+                .collect();
+            FFIType::Structure(fields)
+        }
         _ => panic!("Unknown type: {}", name),
     }
 }
@@ -555,13 +607,13 @@ pub extern "C" fn get_function(
     let code_ptr = unsafe { CodePtr(func_ptr.try_as_raw_ptr().unwrap()) };
 
     // use std::ffi::c_void;
-    // let code_ptr = if function_name == "SDL_RenderFillRect" {
-    //     CodePtr(sdl_render_fill_rect_placeholder as *mut c_void)
+    // let code_ptr = if function_name == "SBTargetBreakpointCreateByName" {
+    //     CodePtr(create_breakpointer_placeholder as *mut c_void)
     // } else {
     //     unsafe { CodePtr(func_ptr.try_as_raw_ptr().unwrap()) }
     // };
 
-    let types: Vec<usize> = array_to_vec(persistent_vector_to_array(runtime, types)).to_vec();
+    let types: Vec<usize> = array_to_vec(persistent_vector_to_array(runtime, types));
 
     let lib_ffi_types: Vec<Type> = types.iter().map(|t| map_ffi_type(runtime, *t)).collect();
     let number_of_arguments = lib_ffi_types.len();
@@ -644,13 +696,20 @@ pub unsafe extern "C" fn call_ffi_info(
         for (argument, ffi_type) in args.iter().zip(argument_types.iter()) {
             let kind = BuiltInTypes::get_kind(*argument);
             match kind {
+                BuiltInTypes::Null => {
+                    if ffi_type != &FFIType::Pointer {
+                        panic!("Expected pointer, got {:?}", ffi_type);
+                    }
+                    argument_pointers.push(arg(&std::ptr::null_mut::<c_void>()));
+                }
                 BuiltInTypes::String => {
                     if ffi_type != &FFIType::String {
                         panic!("Expected string, got {:?}", ffi_type);
                     }
                     let string = runtime.get_string_literal(*argument);
                     let string = runtime.memory.write_c_string(string);
-                    argument_pointers.push(arg(&string));
+                    let pointer = runtime.memory.write_pointer(string as usize);
+                    argument_pointers.push(arg(pointer));
                 }
                 BuiltInTypes::Int => match ffi_type {
                     FFIType::U8 => {
@@ -685,7 +744,7 @@ pub unsafe extern "C" fn call_ffi_info(
                     }
 
                     FFIType::Pointer => {
-                        if *argument == 0 {
+                        if BuiltInTypes::untag(*argument) == 0 {
                             argument_pointers.push(arg(&std::ptr::null_mut::<c_void>()));
                         } else {
                             let heap_object = HeapObject::from_tagged(*argument);
@@ -695,19 +754,44 @@ pub unsafe extern "C" fn call_ffi_info(
                         }
                     }
 
-                    FFIType::MutablePointer | FFIType::String | FFIType::Void => {
+                    FFIType::MutablePointer
+                    | FFIType::String
+                    | FFIType::Void
+                    | FFIType::Structure(_) => {
                         panic!("Expected pointer, got {:?}", ffi_type);
                     }
                 },
                 BuiltInTypes::HeapObject => {
-                    if ffi_type != &FFIType::Pointer && ffi_type != &FFIType::MutablePointer {
-                        panic!("Got pointer, expected {:?}", ffi_type);
+                    match ffi_type {
+                        FFIType::Pointer | FFIType::MutablePointer => {
+                            let heap_object = HeapObject::from_tagged(*argument);
+                            let buffer = BuiltInTypes::untag(heap_object.get_field(0));
+                            let pointer = runtime.memory.write_pointer(buffer);
+                            argument_pointers.push(arg(pointer));
+                        }
+                        FFIType::Structure(_types) => {
+                            // We are going to asume for now now that we pass a buffer.
+                            // We are going to write that buffer to our memory and then pass the pointer
+                            // like we would any number
+                            let heap_object = HeapObject::from_tagged(*argument);
+                            let buffer = BuiltInTypes::untag(heap_object.get_field(0));
+                            let size = BuiltInTypes::untag(heap_object.get_field(1));
+                            let pointer = runtime.memory.write_buffer(buffer, size);
+                            argument_pointers.push(arg(pointer));
+                        }
+                        FFIType::String => {
+                            let string = runtime.get_string(*argument);
+                            let string = runtime.memory.write_c_string(string);
+                            let pointer = runtime.memory.write_pointer(string as usize);
+                            argument_pointers.push(arg(pointer));
+                        }
+                        _ => {
+                            panic!(
+                                "Got HeapObject. Expected matching type of pointer or structure or string but got {:?}",
+                                ffi_type
+                            );
+                        }
                     }
-                    // TODO: Make this type safe
-                    let heap_object = HeapObject::from_tagged(*argument);
-                    let buffer = BuiltInTypes::untag(heap_object.get_field(0));
-                    let pointer = runtime.memory.write_pointer(buffer);
-                    argument_pointers.push(arg(pointer));
                 }
                 _ => {
                     runtime.print(*argument);
@@ -790,6 +874,9 @@ pub unsafe extern "C" fn call_ffi_info(
                     .unwrap()
                     .into()
             }
+            FFIType::Structure(_) => {
+                todo!()
+            }
         };
         runtime.memory.clear_native_arguments();
         return_value
@@ -845,7 +932,18 @@ unsafe extern "C" fn ffi_allocate(size: usize) -> usize {
         std::mem::forget(buffer);
 
         let buffer = BuiltInTypes::Int.tag(buffer_ptr as isize) as usize;
-        call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", buffer)
+        let size = BuiltInTypes::Int.tag(size as isize) as usize;
+        call_fn_2(runtime, "beagle.ffi/__make_buffer_struct", buffer, size)
+    }
+}
+
+unsafe extern "C" fn ffi_deallocate(buffer: usize) -> usize {
+    unsafe {
+        let buffer_object = HeapObject::from_tagged(buffer);
+        let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+        let size = BuiltInTypes::untag(buffer_object.get_field(1));
+        let _buffer = Vec::from_raw_parts(buffer, size, size);
+        BuiltInTypes::null_value() as usize
     }
 }
 
@@ -857,6 +955,19 @@ unsafe extern "C" fn ffi_get_u32(buffer: usize, offset: usize) -> usize {
         let offset = BuiltInTypes::untag(offset);
         let value = *(buffer.add(offset) as *const u32);
         BuiltInTypes::Int.tag(value as isize) as usize
+    }
+}
+
+unsafe extern "C" fn ffi_set_u8(buffer: usize, offset: usize, value: usize) -> usize {
+    unsafe {
+        let buffer_object = HeapObject::from_tagged(buffer);
+        let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+        let offset = BuiltInTypes::untag(offset);
+        let value = BuiltInTypes::untag(value);
+        assert!(value <= u8::MAX as usize);
+        let value = value as u8;
+        *(buffer.add(offset)) = value;
+        BuiltInTypes::null_value() as usize
     }
 }
 
@@ -910,6 +1021,54 @@ unsafe extern "C" fn ffi_get_string(
             .allocate_string(stack_pointer, string.to_string())
             .unwrap()
             .into()
+    }
+}
+
+unsafe extern "C" fn ffi_create_array(
+    _stack_pointer: usize,
+    ffi_type: usize,
+    array: usize,
+) -> usize {
+    unsafe {
+        let runtime = get_runtime().get_mut();
+        let ffi_type = map_beagle_type_to_ffi_type(runtime, ffi_type);
+        let array = HeapObject::from_tagged(array);
+        let fields = array.get_fields();
+        let size = fields.len();
+        let mut buffer: Vec<*mut i8> = Vec::with_capacity(size);
+        for field in fields {
+            match ffi_type {
+                FFIType::U8 => todo!(),
+                FFIType::U16 => todo!(),
+                FFIType::U32 => todo!(),
+                FFIType::U64 => todo!(),
+                FFIType::I32 => todo!(),
+                FFIType::Pointer => {
+                    todo!()
+                }
+                FFIType::MutablePointer => {
+                    todo!()
+                }
+                FFIType::Structure(_) => {
+                    todo!()
+                }
+                FFIType::String => {
+                    let string = runtime.get_string(*field);
+                    let string_pointer = runtime.memory.write_c_string(string);
+                    buffer.push(string_pointer);
+                }
+                FFIType::Void => panic!("Cannot create array of void"),
+            }
+        }
+        // null terminate array
+        buffer.push(std::ptr::null_mut());
+
+        // For now we are intentionally leaking memory
+
+        let buffer_ptr: *mut c_void = buffer.as_mut_ptr() as *mut c_void;
+        std::mem::forget(buffer);
+        let buffer = BuiltInTypes::Int.tag(buffer_ptr as isize) as usize;
+        call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", buffer)
     }
 }
 
@@ -1071,11 +1230,12 @@ impl Runtime {
             9,
         )?;
 
-        self.add_builtin_function("beagle.core/println", println_value as *const u8, false, 1)?;
+        self.add_builtin_function("beagle.core/_println", println_value as *const u8, false, 1)?;
 
-        self.add_builtin_function("beagle.core/print", print_value as *const u8, false, 1)?;
+        self.add_builtin_function("beagle.core/_print", print_value as *const u8, false, 1)?;
 
         self.add_builtin_function("beagle.core/to_string", to_string as *const u8, true, 2)?;
+        self.add_builtin_function("beagle.core/to_number", to_number as *const u8, true, 2)?;
 
         self.add_builtin_function("beagle.builtin/allocate", allocate as *const u8, true, 2)?;
 
@@ -1174,12 +1334,20 @@ impl Runtime {
         )?;
 
         self.add_builtin_function("beagle.ffi/allocate", ffi_allocate as *const u8, false, 1)?;
+        self.add_builtin_function(
+            "beagle.ffi/deallocate",
+            ffi_deallocate as *const u8,
+            false,
+            1,
+        )?;
 
         self.add_builtin_function("beagle.ffi/get_u32", ffi_get_u32 as *const u8, false, 2)?;
 
         self.add_builtin_function("beagle.ffi/set_i16", ffi_set_i16 as *const u8, false, 3)?;
 
         self.add_builtin_function("beagle.ffi/set_i32", ffi_set_i32 as *const u8, false, 3)?;
+
+        self.add_builtin_function("beagle.ffi/set_u8", ffi_set_u8 as *const u8, false, 3)?;
 
         self.add_builtin_function("beagle.ffi/get_i32", ffi_get_i32 as *const u8, false, 2)?;
 
@@ -1188,6 +1356,13 @@ impl Runtime {
             ffi_get_string as *const u8,
             true,
             4,
+        )?;
+
+        self.add_builtin_function(
+            "beagle.ffi/create_array",
+            ffi_create_array as *const u8,
+            true,
+            3,
         )?;
 
         self.add_builtin_function("beagle.builtin/__pause", __pause as *const u8, true, 1)?;

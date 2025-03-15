@@ -1,4 +1,4 @@
-namespace mutable
+namespace slow_json_parser
 
 import "beagle.primitive" as primitive
 import "persistent_map" as pm
@@ -98,7 +98,8 @@ fn find_number_end(tokenizer) {
 fn parse_number(tokenizer) {
     let start_pos = tokenizer.position
     let end_pos = find_number_end(tokenizer)
-    substring(tokenizer.input, start_pos, end_pos - start_pos)
+    let number_string = substring(tokenizer.input, start_pos, end_pos - start_pos)
+    to_number(number_string)
 }
 
 fn find_word_end(tokenizer) {
@@ -209,23 +210,15 @@ fn parse_array_loop(tokenizer, out_vec) {
     }
 }
 
-fn parse_json(input) {
+fn parse(input) {
     let tokenizer = make_tokenizer(input)
     parse_value(tokenizer)
 }
 
-fn parse_n_times(input, n) {
-    if n == 0 {
-        ""
-    } else {
-        parse_json(input)
-        parse_n_times(input, n - 1)
-    }
-}
 
 fn main() {
-    let input = read_full_file("/Users/jimmyhmiller/Downloads/10mb.json")
-    let output = parse_json(input)
-    println(format(output))
+    let input = "{\"a\": [1, 2, 3], \"b\": {\"c\": 4, \"d\": 5}, \"e\": true, \"f\": false, \"g\": null}"
+    let output = parse(input)
+    println(output)
     "done"
 }

@@ -2,6 +2,7 @@ namespace lib_lldb
 
 import "beagle.ffi" as ffi
 import "beagle.primitive" as primitive
+import "persistent_vector" as vector
 
 
 let _lldb = ffi/load_library("/Users/jimmyhmiller/Documents/Code/open-source/lldb-sys.rs/src/liblldb_bindings.dylib")
@@ -15,21 +16,27 @@ let _symbol_context_list_get_size = ffi/get_function(_lldb, "SBSymbolContextList
 let _symbol_context_list_get_context_at_index = ffi/get_function(_lldb, "SBSymbolContextListGetContextAtIndex", [ffi/Type.Pointer, ffi/Type.U32], ffi/Type.Pointer)
 let _target_breakpoint_create_by_name = ffi/get_function(_lldb, "SBTargetBreakpointCreateByName", [ffi/Type.Pointer, ffi/Type.String, ffi/Type.String], ffi/Type.Pointer)
 let _breakpoint_set_enabled = ffi/get_function(_lldb, "SBBreakpointSetEnabled", [ffi/Type.Pointer, ffi/Type.U32], ffi/Type.Void)
+let _breakpoint_is_enabled = ffi/get_function(_lldb, "SBBreakpointIsEnabled", [ffi/Type.Pointer], ffi/Type.U32)
 let _target_enable_all_breakpoints = ffi/get_function(_lldb, "SBTargetEnableAllBreakpoints", [ffi/Type.Pointer], ffi/Type.U32)
 let _create_sb_launch_info = ffi/get_function(_lldb, "CreateSBLaunchInfo", [ffi/Type.Pointer], ffi/Type.Pointer)
 let _target_launch2 = ffi/get_function(_lldb, "SBTargetLaunch2", [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer], ffi/Type.Pointer)
+let _launch_info_set_arguments = ffi/get_function(_lldb, "SBLaunchInfoSetArguments", [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.U32], ffi/Type.Void)
 let _create_sb_error = ffi/get_function(_lldb, "CreateSBError", [], ffi/Type.Pointer)
 let _launch_info_set_launch_flags = ffi/get_function(_lldb, "SBLaunchInfoSetLaunchFlags", [ffi/Type.Pointer, ffi/Type.U32], ffi/Type.Void)
 let _process_get_state = ffi/get_function(_lldb, "SBProcessGetState", [ffi/Type.Pointer], ffi/Type.U32)
 let _process_get_thread_by_index_id = ffi/get_function(_lldb, "SBProcessGetThreadByIndexID", [ffi/Type.Pointer, ffi/Type.U32], ffi/Type.Pointer)
+let _process_continue = ffi/get_function(_lldb, "SBProcessContinue", [ffi/Type.Pointer], ffi/Type.Pointer)
 let _thread_get_selected_frame = ffi/get_function(_lldb, "SBThreadGetSelectedFrame", [ffi/Type.Pointer], ffi/Type.Pointer)
+let _frame_find_register = ffi/get_function(_lldb, "SBFrameFindRegister", [ffi/Type.Pointer, ffi/Type.String], ffi/Type.Pointer)
+let _frame_get_function_name = ffi/get_function(_lldb, "SBFrameGetFunctionName", [ffi/Type.Pointer], ffi/Type.String)
 let _frame_get_pc = ffi/get_function(_lldb, "SBFrameGetPC", [ffi/Type.Pointer], ffi/Type.U64)
-//pub fn SBFrameGetPCAddress(instance: SBFrameRef) -> SBAddressRef;
 let _frame_get_pc_address = ffi/get_function(_lldb, "SBFrameGetPCAddress", [ffi/Type.Pointer], ffi/Type.Pointer)
 let _thread_step_instruction = ffi/get_function(_lldb, "SBThreadStepInstruction", [ffi/Type.Pointer, ffi/Type.U32, ffi/Type.Pointer], ffi/Type.Void)
 let _error_get_c_string = ffi/get_function(_lldb, "SBErrorGetCString", [ffi/Type.Pointer], ffi/Type.String)
 let _error_success = ffi/get_function(_lldb, "SBErrorSuccess", [ffi/Type.Pointer], ffi/Type.U32)
 
+// pub fn SBValueGetValueAsUnsigned2(instance: SBValueRef, fail_value: u64) -> u64;
+let _value_get_value_as_unsigned2 = ffi/get_function(_lldb, "SBValueGetValueAsUnsigned2", [ffi/Type.Pointer, ffi/Type.U64], ffi/Type.U64)
 
 
 
@@ -144,6 +151,10 @@ fn set_breakpoint_enabled(breakpoint, enable?) {
     _breakpoint_set_enabled(breakpoint, if enable? { 1 } else { 0 })
 }
 
+fn breakpoint_enabled?(breakpoint) {
+    _breakpoint_is_enabled(breakpoint) == 1
+}
+
 fn enable_all_breakpoints(target) {
     _target_enable_all_breakpoints(target)
 }
@@ -176,12 +187,24 @@ fn get_selected_frame(thread) {
     _thread_get_selected_frame(thread)
 }
 
+fn find_register(frame, name) {
+    _frame_find_register(frame, name)
+}
+
+fn get_register_value(register) {
+    _value_get_value_as_unsigned2(register, 0)
+}
+
 fn get_pc(frame) {
     _frame_get_pc(frame)
 }
 
 fn get_pc_address(frame) {
     _frame_get_pc_address(frame)
+}
+
+fn get_function_name(frame) {
+    _frame_get_function_name(frame)
 }
 
 fn step_instruction(thread, step_over, error) {
@@ -198,6 +221,7 @@ fn get_error_message(error) {
 
 let process_stopped = 5;
 let stop_at_entry = 4
+let process_exited = 10
 
 fn get_instructions_raw(process, target, base_address) {
     let flavor = "intel"
@@ -211,12 +235,30 @@ fn get_instructions_raw(process, target, base_address) {
     _target_get_instructions_with_flavor(target, base_address, flavor, buffer, size)
 }
 
+fn get_memory(process, address, size) {
+    let buffer = ffi/allocate(size)
+    let error = create_error()
+    _process_read_memory(process, address, buffer, size, error)
+    ffi/get_string(buffer, 0, size)
+}
+
+
 fn get_instruction_list_size(list) {
     _instruction_list_get_size(list)
 }
 
 fn get_instruction_at_index(list, idx) {
     _instruction_list_get_instruction_at_index(list, idx)
+}
+
+fn continue(process) {
+    _process_continue(process)
+}
+
+fn add_args(target, args) {
+    let args = vector/to_array(args)
+    let buffer = ffi/create_array(ffi/Type.String, args)
+    _launch_info_set_arguments(target, buffer, 1)
 }
 
 struct Instruction {

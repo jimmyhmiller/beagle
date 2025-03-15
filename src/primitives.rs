@@ -118,7 +118,7 @@ impl AstCompiler<'_> {
             "beagle.primitive/panic" => {
                 let message = args[0];
                 // print the message then call throw_error
-                self.call_builtin("beagle.core/println", vec![message]);
+                self.call_builtin("beagle.core/_println", vec![message]);
                 self.call_builtin("beagle.builtin/throw_error", vec![]);
                 Value::Null
             }

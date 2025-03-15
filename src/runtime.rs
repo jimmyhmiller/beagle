@@ -147,6 +147,7 @@ pub enum FFIType {
     Void,
     U16,
     U64,
+    Structure(Vec<FFIType>),
 }
 
 #[derive(Debug, Clone)]
@@ -386,6 +387,18 @@ impl MMapMutWithOffset {
         unsafe { self.mmap.as_ptr().add(start) as *const *mut c_void }
     }
 
+    pub fn write_buffer(&mut self, ptr: usize, size: usize) -> *const u8 {
+        // we are going to get the buffer located at ptr with a size of size
+        // and copy it into our mmap
+        let start = self.offset;
+        let buffer = unsafe { std::slice::from_raw_parts(ptr as *const u8, size) };
+        for byte in buffer {
+            self.mmap[self.offset] = *byte;
+            self.offset += 1;
+        }
+        unsafe { self.mmap.as_ptr().add(start) }
+    }
+
     pub fn clear(&mut self) {
         self.offset = 0;
     }
@@ -493,6 +506,12 @@ impl Memory {
     pub fn write_u16(&mut self, value: u16) -> &u16 {
         let mut result: *const u16 = &0;
         NATIVE_ARGUMENTS.with(|memory| result = memory.borrow_mut().write_u16(value));
+        unsafe { &*result }
+    }
+
+    pub fn write_buffer(&mut self, ptr: usize, size: usize) -> &u8 {
+        let mut result: *const u8 = &0;
+        NATIVE_ARGUMENTS.with(|memory| result = memory.borrow_mut().write_buffer(ptr, size));
         unsafe { &*result }
     }
 
