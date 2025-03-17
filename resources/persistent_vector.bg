@@ -250,6 +250,21 @@ fn vec() {
     EMPTY
 }
 
+fn from_array(arr) {
+    from_array_helper(vec(), arr, 0, array/count(arr))
+}
+
+fn from_array_helper(v, arr, i, n) {
+    if i == n {
+        v
+    } else {
+        let new_vec = push(v, array/read_field(arr, i))
+        from_array_helper(new_vec, arr, i + 1, n)
+    }
+}
+
+
+
 extend PersistentVector with Indexed {
     fn get(vec, index) {
         get(vec, index)
@@ -295,6 +310,12 @@ extend PersistentVector with Length {
     }
 }
 
+
+extend PersistentVector with Associable {
+    fn assoc(vec, index, value) {
+        assoc(vec, index, value)
+    }
+}
 
 
 

@@ -2,6 +2,7 @@ namespace persistent_map
 import "beagle.builtin" as builtin
 import "beagle.primitive" as primitive
 import "raw_mutable_array" as array
+import "persistent_vector" as vec
 
 
 // TODO: ChatGPT wrote this
@@ -382,7 +383,7 @@ fn copy_collision_array_no_hdr(n, out, ccount, i) {
 }
 
 // lookup
-fn get(pm, k) {
+fn _get(pm, k) {
     if pm.root == null {
         null
     } else {
@@ -393,7 +394,7 @@ fn get(pm, k) {
 
 extend PersistentMap with Indexed {
     fn get(map, index) {
-        get(map, index)
+        _get(map, index)
     }
 }
 
@@ -464,47 +465,54 @@ fn insert_many(pm, i, max) {
     }
 }
 
-fn keys(pm) {
-    let keys_vec = array/new_array(pm.count)
+fn _keys(pm) {
+    // TODO: Make this a vec not an array
+    let keys_array = array/new_array(pm.count)
     if pm.root != null {
-        collect_keys(pm.root, keys_vec, 0)
+        collect_keys(pm.root, keys_array, 0)
     }
-    keys_vec
+    vec/from_array(keys_array)
 }
 
-fn collect_keys(n, keys_vec, idx) {
+fn collect_keys(n, keys_array, idx) {
     if is_bitmap_indexed_node(n) {
         let children = node_children_array(n)
         let len = array/count(children)
-        collect_keys_bitmap(children, keys_vec, idx, len, 0)
+        collect_keys_bitmap(children, keys_array, idx, len, 0)
     } else if is_collision_node(n) {
         let ccount = collision_count(n)
-        collect_keys_collision(n, keys_vec, idx, ccount)
+        collect_keys_collision(n, keys_array, idx, ccount)
     } else if is_pair_node(n) {
-        array/write_field(keys_vec, idx, n.key)
+        array/write_field(keys_array, idx, n.key)
         idx + 1
     } else {
         idx
     }
 }
 
-fn collect_keys_bitmap(children, keys_vec, idx, len, i) {
+fn collect_keys_bitmap(children, keys_array, idx, len, i) {
     if i == len {
         idx
     } else {
         let child = array/read_field(children, i)
-        let new_idx = collect_keys(child, keys_vec, idx)
-        collect_keys_bitmap(children, keys_vec, new_idx, len, i + 1)
+        let new_idx = collect_keys(child, keys_array, idx)
+        collect_keys_bitmap(children, keys_array, new_idx, len, i + 1)
     }
 }
 
-fn collect_keys_collision(n, keys_vec, idx, ccount) {
+fn collect_keys_collision(n, keys_array, idx, ccount) {
     if ccount == 0 {
         idx
     } else {
         let key = collision_key(n, 0)
-        array/write_field(keys_vec, idx, key)
-        collect_keys_collision(n, keys_vec, idx + 1, ccount - 1)
+        array/write_field(keys_array, idx, key)
+        collect_keys_collision(n, keys_array, idx + 1, ccount - 1)
+    }
+}
+
+extend PersistentMap with Keys {
+    fn keys(map) {
+        _keys(map)
     }
 }
 
@@ -520,11 +528,17 @@ extend PersistentMap with Format {
     }
 }
 
+extend PersistentMap with Associable {
+    fn assoc(map, key, value) {
+        assoc(map, key, value)
+    }
+}
+
 fn format_entries(map, keys_vec, idx, acc) {
-    if idx >= array/count(keys_vec) {
+    if idx >= count(keys_vec) {
         acc ++ "}"
     } else {
-        let key = array/read_field(keys_vec, idx)
+        let key = get(keys_vec, idx)
         let val = get(map, key)
         
         let key_str = format(key, 1)
@@ -602,7 +616,7 @@ fn main() {
 // 0
 // 9
 // null
-// [ "baz", "qux", "bar", "foo" ]
+// ["baz", "qux", "bar", "foo"]
 // {"baz": 999, "qux": 777, "bar": 101, "foo": 1}
 // done
 

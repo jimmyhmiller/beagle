@@ -4,7 +4,7 @@ import "beagle.builtin" as builtin
 import "lib_lldb" as lldb
 import "slow_json_parser" as json
 import "beagle.ffi" as ffi
-
+import "persistent_map" as map
 
 // TODO: Thist code fails in lib_lldb with an update binding
 // unsure of the cause right now
@@ -13,12 +13,16 @@ struct State {
     process
     target
     function_names
+    address_to_name
+    called_functions
 }
 
 let state = atom(State {
     process: 0,
     target: 0,
     function_names: [],
+    address_to_name: map/map()
+    called_functions: map/map()
 })
 
 fn loop_state() {
@@ -49,16 +53,46 @@ fn loop_state() {
             let data = lldb/get_memory(process, x1, x2)
             let data = json/parse(data)
             if data["kind"] == "user_function" {
-                let function_name = data["data"]["UserFunction"]["name"]
+                let function_data = data["data"]["UserFunction"]
+                let function_name = function_data["name"]
+                let function_address = function_data["pointer"];
                 swap!(state, fn(s) {
                     State {
                         process: s.process,
                         target: s.target,
                         function_names: push(s.function_names, function_name)
+                        address_to_name: assoc(s.address_to_name, function_address, function_name)
+                        called_functions: s.called_functions
                     }
                 })
+                if function_name == "beagle.core/swap!" {
+                    lldb/create_breakpoint_by_address(target, function_address)
+                }
+            }
+        } else {
+            let thread = lldb/get_thread_by_index(process, 1)
+            let stop_reason = lldb/get_stop_reason(thread)
+            if stop_reason != 0 {
+                let frame = lldb/get_selected_frame(thread)
+                let pc = lldb/get_pc(frame)
+                let result = get(deref(state).address_to_name, pc)
+                if result != null {
+                    swap!(state, fn(s) {
+                        let called_count = get(s.called_functions, result)
+                        let total = if called_count == null { 1 } else { called_count + 1 }
+                        State {
+                            process: s.process,
+                            target: s.target,
+                            function_names: s.function_names
+                            address_to_name: s.address_to_name
+                            called_functions: assoc(s.called_functions, result, total)
+                        }
+                    })
+                }
             }
         }
+
+
 
         lldb/continue(process)
         if process_state != lldb/process_exited {
@@ -190,7 +224,7 @@ fn start_debugger_thread() {
 
 
     let launch_info = lldb/create_launch_info(0)
-    lldb/add_args(launch_info, ["/Users/jimmyhmiller/Documents/Code/beagle/resources/if_test.bg"])
+    lldb/add_args(launch_info, ["/Users/jimmyhmiller/Documents/Code/beagle/resources/ffi_test.bg"])
 
     let error = lldb/create_error()
     let process = lldb/launch_target(target, launch_info, error)
@@ -201,6 +235,8 @@ fn start_debugger_thread() {
             process: process,
             target: target,
             function_names: s.function_names
+            address_to_name: s.address_to_name
+            called_functions: s.called_functions
         }
     })
     thread(loop_state)
@@ -240,9 +276,9 @@ fn gui_loop(window, buffer, renderer, font) {
     ffi/set_u8(white, 3, 0)   // a
 
     let state = deref(state)
-    let function_names = state.function_names
-    for_each(function_names, fn (name, i) {
-        let surface_message = ttf_render_text_blended(font, name, white)
+    let function_calls = state.called_functions
+    for_each(keys(function_calls), fn (name, i) {
+        let surface_message = ttf_render_text_blended(font, name ++ ": " ++ to_string(get(function_calls, name)), white)
         let message = sdl_create_texture_from_surface(renderer, surface_message)
         let text_width_ptr = ffi/allocate(4)
         let text_height_ptr = ffi/allocate(4)

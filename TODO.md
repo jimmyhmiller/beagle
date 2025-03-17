@@ -117,3 +117,4 @@ error: test failed, to rerun pass `--bin main`
 * Allow protocols to have a default function they call (eq is a good example)
 * Make it so that `==` compiles to a function call testing equality
 * Properly detect if variable is undefined
+* Make arrays participate in all the instance of stuff
