@@ -11,7 +11,7 @@
             "cargo": {
                 "args": [
                     "build",
-                    // "--release",
+                    "--release",
                     // "--profile=release-with-debug",
                     "--bin=main",
                     "--package=main",
@@ -22,7 +22,7 @@
                     "kind": "bin"
                 }
             },
-            "args": ["resources/enum_test.bg"],
+            "args": ["resources/persistent_map.bg"],
             "cwd": "${workspaceFolder}",
             "preRunCommands": [
                 "command script import .vscode/rust_prettifier_for_lldb.py"

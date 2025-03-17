@@ -55,6 +55,14 @@ protocol Format {
     }
 }
 
+protocol Associable {
+    fn assoc(coll, key, value)
+}
+
+protocol Keys {
+    fn keys(coll)
+}
+
 extend String with Format {
     fn format(self, depth) {
         if depth > 0 {
