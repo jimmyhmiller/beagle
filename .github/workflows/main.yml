@@ -16,11 +16,15 @@ jobs:
       matrix:
         feature-combination:
           - "--features compacting,thread-safe"
+          - "--features compacting-v2,thread-safe"
           - "--features simple-generation,thread-safe"
           - "--features simple-mark-and-sweep,thread-safe"
+          - "--features mark-and-sweep-v2,thread-safe"
           - "--features compacting"
+          - "--features compacting-v2"
           - "--features simple-generation"
           - "--features simple-mark-and-sweep"
+          - "--features mark-and-sweep-v2"
 
     steps:
       - name: Checkout repository

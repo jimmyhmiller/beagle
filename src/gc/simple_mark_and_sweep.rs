@@ -348,6 +348,13 @@ impl SimpleMarkSweepHeap {
             to_mark.push(HeapObject::from_tagged(*root));
         }
 
+        for root in self.temporary_roots.iter().flatten() {
+            if !BuiltInTypes::is_heap_pointer(*root) {
+                panic!("Temporary root is not a heap pointer");
+            }
+            to_mark.push(HeapObject::from_tagged(*root));
+        }
+
         let mut i = 0;
         while i < stack.len() {
             let value = stack[i];
@@ -505,7 +512,7 @@ impl SimpleMarkSweepHeap {
             panic!("Too deep");
         }
 
-        let size_bytes = size.to_bytes() + 8;
+        let size_bytes = size.to_bytes() + HeapObject::header_size();
 
         if self.current_offset() + size_bytes < self.current_segment_size() {
             let pointer =
