@@ -11,18 +11,18 @@
             "cargo": {
                 "args": [
                     "build",
-                    "--release",
+                    // "--release",
                     // "--profile=release-with-debug",
                     "--bin=main",
                     "--package=main",
-                    "--features=simple-generation,thread-safe,json"
+                    "--features=compacting-v2,thread-safe,json"
                 ],
                 "filter": {
                     "name": "main",
                     "kind": "bin"
                 }
             },
-            "args": ["resources/persistent_map.bg"],
+            "args": ["resources/binary_tree.bg"],
             "cwd": "${workspaceFolder}",
             "preRunCommands": [
                 "command script import .vscode/rust_prettifier_for_lldb.py"

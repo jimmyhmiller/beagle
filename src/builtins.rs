@@ -14,7 +14,7 @@ use libffi::{
 };
 
 use crate::{
-    Message, Serialize,
+    Message,
     gc::{Allocator, STACK_SIZE},
     get_runtime,
     runtime::{FFIInfo, FFIType, RawPtr, Runtime, SyncWrapper},
@@ -55,6 +55,7 @@ pub fn debugger(message: Message) {
             serialized_message = serialized.into_bytes();
         }
         #[cfg(not(feature="json"))] {
+            use crate::Serialize;
             serialized_message = message.to_binary();
         }
         let message = serialized_message;
@@ -276,6 +277,8 @@ extern "C" fn property_access(
         .property_access(struct_pointer, str_constant_ptr)
         .unwrap_or_else(|error| {
             let stack_pointer = get_current_stack_pointer();
+            let heap_object = HeapObject::from_tagged(struct_pointer);
+            println!("Heap object: {:?}", heap_object.get_header());
             println!("Error: {:?}", error);
             unsafe {
                 throw_error(stack_pointer);
