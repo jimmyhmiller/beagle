@@ -270,7 +270,8 @@ impl MarkAndSweepV2 {
         if let AllocateAction::Allocated(pointer) = pointer {
             pointer
         } else {
-            panic!("Failed to allocate");
+            self.grow();
+            self.copy_data_to_offset(data)
         }
     }
 
@@ -366,6 +367,7 @@ impl MarkAndSweepV2 {
                 continue;
             }
             let heap_object = HeapObject::from_untagged(unsafe { self.space.start.add(offset) });
+
             if heap_object.marked() {
                 heap_object.unmark();
                 offset += heap_object.full_size();
@@ -391,11 +393,9 @@ impl MarkAndSweepV2 {
     pub fn clear_namespace_roots(&mut self) {
         self.namespace_roots.clear();
     }
-}
 
-impl Allocator for MarkAndSweepV2 {
-    fn new(options: AllocatorOptions) -> Self {
-        let space = Space::new(DEFAULT_PAGE_COUNT);
+    pub fn new_with_page_count(page_count: usize, options: AllocatorOptions) -> Self {
+        let space = Space::new(page_count);
         let size = space.byte_count();
         Self {
             space,
@@ -404,6 +404,13 @@ impl Allocator for MarkAndSweepV2 {
             options,
             temporary_roots: vec![],
         }
+    }
+}
+
+impl Allocator for MarkAndSweepV2 {
+    fn new(options: AllocatorOptions) -> Self {
+        let page_count = DEFAULT_PAGE_COUNT;
+        Self::new_with_page_count(page_count, options)
     }
 
     fn try_allocate(

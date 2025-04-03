@@ -81,13 +81,13 @@ impl AstCompiler<'_> {
             "beagle.primitive/write_field" => {
                 // self.ir.breakpoint();
                 let pointer = args[0];
-                let pointer = self.ir.untag(pointer);
+                let untagged = self.ir.untag(pointer);
                 let field = args[1];
                 let field = self.ir.add_int(field, Value::TaggedConstant(1));
                 let field = self.ir.mul(field, Value::RawValue(8));
                 // let untagged_field = self.ir.untag(field);
                 let value = args[2];
-                self.ir.heap_store_with_reg_offset(pointer, value, field);
+                self.ir.heap_store_with_reg_offset(untagged, value, field);
                 self.call_builtin("beagle.builtin/gc_add_root", vec![pointer]);
                 Value::Null
             }
