@@ -15,14 +15,14 @@
                     // "--profile=release-with-debug",
                     "--bin=main",
                     "--package=main",
-                    "--features=compacting-v2,thread-safe,json"
+                    "--features=generation-v2,thread-safe,json"
                 ],
                 "filter": {
                     "name": "main",
                     "kind": "bin"
                 }
             },
-            "args": ["resources/binary_tree.bg"],
+            "args": ["--show-gc-times", "resources/binary_tree_benchmark.bg"],
             "cwd": "${workspaceFolder}",
             "preRunCommands": [
                 "command script import .vscode/rust_prettifier_for_lldb.py"

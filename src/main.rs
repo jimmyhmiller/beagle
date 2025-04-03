@@ -7,9 +7,9 @@ use clap::{Parser as ClapParser, command};
 use gc::{Allocator, StackMapDetails, get_allocate_options};
 #[allow(unused)]
 use gc::{
-    compacting::CompactingHeap, compacting_v2::CompactingHeapV2, mark_and_sweep_v2::MarkAndSweepV2,
-    mutex_allocator::MutexAllocator, simple_generation::SimpleGeneration,
-    simple_mark_and_sweep::SimpleMarkSweepHeap,
+    compacting::CompactingHeap, compacting_v2::CompactingHeapV2, generation_v2::GenerationV2,
+    mark_and_sweep_v2::MarkAndSweepV2, mutex_allocator::MutexAllocator,
+    simple_generation::SimpleGeneration, simple_mark_and_sweep::SimpleMarkSweepHeap,
 };
 use nanoserde::SerJson;
 use runtime::{DefaultPrinter, Printer, Runtime, TestPrinter};
@@ -352,9 +352,15 @@ cfg_if::cfg_if! {
                 pub type Alloc = SimpleMarkSweepHeap;
             }
         }
-
-    }
-    else if #[cfg(feature = "simple-generation")] {
+    } else if #[cfg(feature = "generation-v2")] {
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "thread-safe")] {
+                pub type Alloc = MutexAllocator<GenerationV2>;
+            } else {
+                pub type Alloc = GenerationV2;
+            }
+        }
+    } else if #[cfg(feature = "simple-generation")] {
         cfg_if::cfg_if! {
             if #[cfg(feature = "thread-safe")] {
                 pub type Alloc = MutexAllocator<SimpleGeneration>;

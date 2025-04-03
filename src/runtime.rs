@@ -1492,7 +1492,15 @@ impl Runtime {
                         }
                         Some(string.to_string())
                     }
-                    _ => Some("Unknown".to_string()),
+                    _ => {
+                        // This is an unknown object. Meaning it is invalid.
+                        // We are going to print everything we can to debug this
+
+                        println!("=====================");
+                        println!("{:?} {:?}", header, BuiltInTypes::untag(value));
+                        println!("=====================");
+                        Some("ErrorUnknown".to_string())
+                    }
                 }
             }
         }

@@ -7,6 +7,7 @@ use crate::{CommandLineArguments, types::BuiltInTypes};
 
 pub mod compacting;
 pub mod compacting_v2;
+pub mod generation_v2;
 pub mod mark_and_sweep_v2;
 pub mod mutex_allocator;
 pub mod simple_generation;

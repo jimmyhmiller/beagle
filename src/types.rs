@@ -249,6 +249,7 @@ pub struct HeapObject {
 impl HeapObject {
     pub fn from_tagged(pointer: usize) -> Self {
         assert!(BuiltInTypes::is_heap_pointer(pointer));
+        assert!(BuiltInTypes::untag(pointer) % 8 == 0);
         HeapObject {
             pointer,
             tagged: true,
