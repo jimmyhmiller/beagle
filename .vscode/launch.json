@@ -22,7 +22,7 @@
                     "kind": "bin"
                 }
             },
-            "args": ["--show-gc-times", "resources/binary_tree_benchmark.bg"],
+            "args": ["resources/mut_var.bg"],
             "cwd": "${workspaceFolder}",
             "preRunCommands": [
                 "command script import .vscode/rust_prettifier_for_lldb.py"
