@@ -124,6 +124,11 @@ pub enum Ast {
         value: Box<Ast>,
         token_range: TokenRange,
     },
+    MutLet {
+        name: Box<Ast>,
+        value: Box<Ast>,
+        token_range: TokenRange,
+    },
     IntegerLiteral(i64, TokenPosition),
     FloatLiteral(f64, TokenPosition),
     Identifier(String, TokenPosition),
@@ -209,6 +214,11 @@ pub enum Ast {
         body: Vec<Ast>,
         token_range: TokenRange,
     },
+    Assignment {
+        name: Box<Ast>,
+        value: Box<Ast>,
+        token_range: TokenRange,
+    },
 }
 
 impl Ast {
@@ -233,6 +243,8 @@ impl Ast {
             | Ast::TailRecurse { token_range, .. }
             | Ast::Call { token_range, .. }
             | Ast::Let { token_range, .. }
+            | Ast::MutLet { token_range, .. }
+            | Ast::Assignment { token_range, .. }
             | Ast::Namespace { token_range, .. }
             | Ast::Import { token_range, .. }
             | Ast::ShiftLeft { token_range, .. }
@@ -1325,7 +1337,7 @@ impl AstCompiler<'_> {
                 self.resolve_variable(reg)
                     .unwrap_or_else(|_| panic!("Could not resolve variable {}", name))
             }
-            Ast::Let { name, value, .. } => {
+            Ast::Let { name, value, .. } | Ast::MutLet { name, value, .. } => {
                 if let Ast::Identifier(name, _) = name.as_ref() {
                     if self.environment_stack.len() == 1 {
                         self.not_tail_position();
@@ -1363,6 +1375,42 @@ impl AstCompiler<'_> {
                 } else {
                     panic!("Expected variable")
                 }
+            }
+            Ast::Assignment {
+                name,
+                value,
+                ..
+            } => {
+                // TODO: if not marked as mut error
+                // I will need to make it so that this gets heap allocated
+                // if we access from a closure
+                let name = if let Ast::Identifier(name, _) = name.as_ref() {
+                    name
+                } else {
+                    panic!("Expected identifier")
+                };
+                let value = self.call_compile(&value);
+                let value = self.ir.assign_new(value);
+                let variable: Option<VariableLocation> = self.get_accessible_variable(name);
+                if variable.is_none() {
+                    panic!("Can't find variable {}", name);
+                }
+                let variable = variable.unwrap();
+                match variable {
+                    VariableLocation::NamespaceVariable(_namespace_id,_slott) => {
+                        panic!("Can't assign to a namespace variable {}", name);
+                    }
+                    VariableLocation::Local(local_index) => {
+                        self.ir.store_local(local_index, value.into());
+                    }
+                    VariableLocation::FreeVariable(_free_variable) => {
+                        panic!("When would this happen? assign free {}", name);
+                    }
+                    VariableLocation::Register(_virtual_register) => {
+                        panic!("Can't assign to a register {}", name);
+                    }
+                }
+                Value::Null
             }
             Ast::Condition {
                 operator,

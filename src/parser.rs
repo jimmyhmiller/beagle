@@ -66,6 +66,7 @@ pub enum Token {
     Protocol,
     Extend,
     With,
+    Mut,
 }
 impl Token {
     fn is_binary_operator(&self) -> bool {
@@ -88,7 +89,8 @@ impl Token {
             | Token::BitWiseOr
             | Token::BitWiseXor
             | Token::Or
-            | Token::And => true,
+            | Token::And
+            | Token::Equal => true,
             _ => false,
         }
     }
@@ -134,6 +136,7 @@ impl Token {
             Token::If => "if".to_string(),
             Token::Else => "else".to_string(),
             Token::Let => "let".to_string(),
+            Token::Mut => "mut".to_string(),
             Token::Struct => "struct".to_string(),
             Token::Enum => "enum".to_string(),
             Token::Namespace => "namespace".to_string(),
@@ -409,6 +412,7 @@ impl Tokenizer {
             b"false" => Token::False,
             b"null" => Token::Null,
             b"let" => Token::Let,
+            b"mut" => Token::Mut,
             b"struct" => Token::Struct,
             b"enum" => Token::Enum,
             b"." => Token::Dot,
@@ -765,6 +769,30 @@ impl Parser {
                 let start_position = self.position;
                 self.consume();
                 self.move_to_next_non_whitespace();
+
+                if self.peek_next_non_whitespace() == Token::Mut {
+                    self.consume();
+                    self.move_to_next_non_whitespace();
+                    let name_position = self.position;
+                    let name = match self.current_token() {
+                        Token::Atom((start, end)) => {
+                            // Gross
+                            String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap()
+                        }
+                        _ => panic!("Expected variable name got {}", self.get_token_repr()),
+                    };
+                    self.consume();
+                    self.move_to_next_non_whitespace();
+                    self.expect_equal();
+                    self.move_to_next_non_whitespace();
+                    let value = self.parse_expression(0, true, true).unwrap();
+                    let end_position = self.position;
+                    return Some(Ast::MutLet {
+                        name: Box::new(Ast::Identifier(name, name_position)),
+                        value: Box::new(value),
+                    token_range: TokenRange::new(start_position, end_position),
+                    })
+                }
                 let name_position = self.position;
                 let name = match self.current_token() {
                     Token::Atom((start, end)) => {
@@ -1694,6 +1722,11 @@ impl Parser {
             Token::Concat => Ast::Call {
                 name: "beagle.core/string_concat".to_string(),
                 args: vec![lhs, rhs],
+                token_range,
+            },
+            Token::Equal => Ast::Assignment {
+                name: Box::new(lhs),
+                value: Box::new(rhs),
                 token_range,
             },
             _ => panic!("Exepcted binary op got {:?}", current_token),
