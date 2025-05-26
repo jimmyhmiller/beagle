@@ -790,8 +790,8 @@ impl Parser {
                     return Some(Ast::LetMut {
                         name: Box::new(Ast::Identifier(name, name_position)),
                         value: Box::new(value),
-                    token_range: TokenRange::new(start_position, end_position),
-                    })
+                        token_range: TokenRange::new(start_position, end_position),
+                    });
                 }
                 let name_position = self.position;
                 let name = match self.current_token() {
