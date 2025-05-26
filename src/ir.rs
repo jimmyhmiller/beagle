@@ -1450,7 +1450,7 @@ impl Ir {
                     let temp = self.value_to_register(temp, lang);
                     // need to turn string to float precisely
                     let value: f64 = value.parse().unwrap();
-                    
+
                     lang.mov_64(temp, value.to_bits() as isize);
                     // The header is the first field, so offset is 1
                     lang.store_on_heap(dest, temp, 1);

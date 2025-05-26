@@ -1472,7 +1472,6 @@ impl AstCompiler<'_> {
                 }
                 let variable = variable.unwrap();
                 match variable {
-
                     // TODO: Do I have mutable namespace variables?
                     VariableLocation::NamespaceVariable(_namespace_id, _slott) => {
                         panic!("Can't assign to a namespace variable {}", name);
@@ -1487,7 +1486,7 @@ impl AstCompiler<'_> {
                         // TODO(mutable): I could just allocate have something special
                         // but I might just want to make a struct for this?
                         let local = self.ir.load_local(local_index);
-                        let local = self.ir.untag(local.into());
+                        let local = self.ir.untag(local);
                         self.ir.write_field(local, 0, value.into());
                     }
                     VariableLocation::FreeVariable(_free_variable) => {
@@ -1507,7 +1506,7 @@ impl AstCompiler<'_> {
                         // TODO: Fix
                         let slot = self.ir.read_field(arg0, index.into());
                         // TODO: Is it tagged constant or raw?
-                        let slot = self.ir.untag(slot.into());
+                        let slot = self.ir.untag(slot);
                         self.ir.write_field(slot, 0, value.into());
                     }
                     VariableLocation::MutableFreeVariable(index) => {
@@ -1724,7 +1723,7 @@ impl AstCompiler<'_> {
                 | VariableLocation::MutableLocal(index)
                 | VariableLocation::BoxedMutableLocal(index) => {
                     let reg = self.ir.load_local(index);
-                    self.ir.push_to_stack(reg.into());
+                    self.ir.push_to_stack(reg);
                 }
                 VariableLocation::NamespaceVariable(namespace, slot) => {
                     self.resolve_variable(&VariableLocation::NamespaceVariable(namespace, slot))
@@ -2071,7 +2070,7 @@ impl AstCompiler<'_> {
             VariableLocation::BoxedMutableLocal(index) => {
                 // TODO: I need to deref the box here I think
                 let reg = self.ir.load_local(*index);
-                let reg = self.ir.untag(reg.into());
+                let reg = self.ir.untag(reg);
                 let value = self.ir.read_field(reg, Value::TaggedConstant(0));
                 Ok(value)
             }
@@ -2097,7 +2096,7 @@ impl AstCompiler<'_> {
                 // TODO: Fix
                 let slot = self.ir.read_field(arg0, index.into());
                 // TODO: Is it tagged constant or raw?
-                let slot = self.ir.untag(slot.into());
+                let slot = self.ir.untag(slot);
                 let value = self.ir.read_field(slot, Value::TaggedConstant(0));
                 Ok(value)
             }
@@ -2421,11 +2420,11 @@ impl AstCompiler<'_> {
         }
     }
 
-    fn add_variable_for_mutable_pass(&mut self, name: &String) {
+    fn add_variable_for_mutable_pass(&mut self, name: &str) {
         self.mutable_pass_env_stack
             .last_mut()
             .unwrap()
-            .insert(name.clone(), MutablePassInfo::default());
+            .insert(name.to_string(), MutablePassInfo::default());
     }
 
     fn find_mutable_info(&self, name: &Ast) -> Option<(bool, MutablePassInfo)> {
