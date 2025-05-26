@@ -1,7 +1,6 @@
 namespace mut_var
 
 
-
 fn main() {
     let mut x = 0
     let mut y = 0
@@ -11,7 +10,32 @@ fn main() {
     y = 2
     z = 3
 
+    let mut counter = 0
+    let captured = fn() {
+        println("captured")
+        println(counter)
+        counter = counter + 1
+    }
+
     println(x)
     println(y)
     println(z)
+
+    println("counter")
+    println(counter)
+    counter = counter + 1
+    captured();
+    println(counter)
+    "done"
 }
+
+// Expect
+// 1
+// 2
+// 3
+// counter
+// 0
+// captured
+// 1
+// 2
+// done

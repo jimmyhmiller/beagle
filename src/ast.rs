@@ -1,5 +1,6 @@
+use core::panic;
 use ir::{Ir, Value, VirtualRegister};
-use std::collections::HashMap;
+use std::{collections::HashMap, hash::Hash};
 
 use crate::{
     Data, Message,
@@ -14,7 +15,7 @@ use crate::{
 
 type TokenPosition = usize;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TokenRange {
     pub start: usize,
     pub end: usize,
@@ -26,7 +27,7 @@ impl TokenRange {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ast {
     Program {
         elements: Vec<Ast>,
@@ -124,13 +125,13 @@ pub enum Ast {
         value: Box<Ast>,
         token_range: TokenRange,
     },
-    MutLet {
+    LetMut {
         name: Box<Ast>,
         value: Box<Ast>,
         token_range: TokenRange,
     },
     IntegerLiteral(i64, TokenPosition),
-    FloatLiteral(f64, TokenPosition),
+    FloatLiteral(String, TokenPosition),
     Identifier(String, TokenPosition),
     String(String, TokenPosition),
     True(TokenPosition),
@@ -243,7 +244,7 @@ impl Ast {
             | Ast::TailRecurse { token_range, .. }
             | Ast::Call { token_range, .. }
             | Ast::Let { token_range, .. }
-            | Ast::MutLet { token_range, .. }
+            | Ast::LetMut { token_range, .. }
             | Ast::Assignment { token_range, .. }
             | Ast::Namespace { token_range, .. }
             | Ast::Import { token_range, .. }
@@ -294,6 +295,8 @@ impl Ast {
             environment_stack: vec![Environment::new()],
             current_token_info: vec![],
             last_accounted_for_ir: 0,
+            metadata: HashMap::new(),
+            mutable_pass_env_stack: vec![HashMap::new()],
         };
 
         // println!("{:#?}", compiler);
@@ -350,8 +353,22 @@ impl Ast {
 pub enum VariableLocation {
     Register(VirtualRegister),
     Local(usize),
+    MutableLocal(usize),
     FreeVariable(usize),
     NamespaceVariable(usize, usize),
+    BoxedMutableLocal(usize),
+    BoxedFreeVariable(usize),
+    MutableFreeVariable(usize),
+}
+impl VariableLocation {
+    fn is_free(&self) -> bool {
+        match self {
+            VariableLocation::FreeVariable(_)
+            | VariableLocation::MutableFreeVariable(_)
+            | VariableLocation::BoxedFreeVariable(_) => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -361,10 +378,15 @@ pub struct Context {
 }
 
 #[derive(Debug, Clone)]
+pub struct FreeVariable {
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct Environment {
     pub local_variables: Vec<String>,
     pub variables: HashMap<String, VariableLocation>,
-    pub free_variables: Vec<String>,
+    pub free_variables: Vec<FreeVariable>,
     pub argument_locations: HashMap<usize, VariableLocation>,
 }
 
@@ -385,6 +407,24 @@ pub struct IRRange {
     pub end: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct Metadata {
+    needs_to_be_boxed: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct MutablePassInfo {
+    // If it is mutable, this is Some
+    mutable_definition: Option<Ast>,
+}
+impl MutablePassInfo {
+    fn default() -> MutablePassInfo {
+        MutablePassInfo {
+            mutable_definition: None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct AstCompiler<'a> {
     pub ast: Ast,
@@ -402,6 +442,8 @@ pub struct AstCompiler<'a> {
     pub current_token_info: Vec<(TokenRange, usize)>,
     pub ir_range_to_token_range: Vec<Vec<(TokenRange, IRRange)>>,
     pub last_accounted_for_ir: usize,
+    pub metadata: HashMap<Ast, Metadata>,
+    pub mutable_pass_env_stack: Vec<HashMap<String, MutablePassInfo>>,
 }
 
 impl AstCompiler<'_> {
@@ -435,6 +477,9 @@ impl AstCompiler<'_> {
 
     pub fn compile(&mut self) -> Ir {
         // TODO: Get rid of clone
+        self.find_mutable_vars_that_need_boxing(&self.ast.clone());
+
+        // TODO: Get rid of clone
         self.first_pass(&self.ast.clone());
 
         self.tail_position();
@@ -444,6 +489,7 @@ impl AstCompiler<'_> {
         std::mem::swap(&mut ir, &mut self.ir);
         ir
     }
+
     pub fn compile_to_ir(&mut self, ast: &Ast) -> Value {
         match ast.clone() {
             Ast::Program { elements, .. } => {
@@ -1337,9 +1383,18 @@ impl AstCompiler<'_> {
                 self.resolve_variable(reg)
                     .unwrap_or_else(|_| panic!("Could not resolve variable {}", name))
             }
-            Ast::Let { name, value, .. } | Ast::MutLet { name, value, .. } => {
+            Ast::Let { name, value, .. } | Ast::LetMut { name, value, .. } => {
+                let needs_boxing = self
+                    .metadata
+                    .get(ast)
+                    .map(|m| m.needs_to_be_boxed)
+                    .unwrap_or(false);
                 if let Ast::Identifier(name, _) = name.as_ref() {
                     if self.environment_stack.len() == 1 {
+                        if matches!(ast, Ast::LetMut { .. }) {
+                            panic!("Can't create mutable variable in global scope");
+                        }
+
                         self.not_tail_position();
                         let value = self.call_compile(&value);
                         self.not_tail_position();
@@ -1359,28 +1414,48 @@ impl AstCompiler<'_> {
                         );
                         reg.into()
                     } else {
-                        self.not_tail_position();
-                        let value = self.call_compile(&value);
-                        self.not_tail_position();
                         let reg = self.ir.volatile_register();
-                        self.ir.assign(reg, value);
+                        if needs_boxing {
+                            let boxed = self.call_compile(&Ast::StructCreation {
+                                name: "beagle.core/__Box__".to_string(),
+                                fields: vec![("value".to_string(), *value)],
+                                token_range: ast.token_range(),
+                            });
+                            self.ir.assign(reg, boxed);
+                        } else {
+                            self.not_tail_position();
+                            let value = self.call_compile(&value);
+                            self.not_tail_position();
+                            self.ir.assign(reg, value);
+                        }
                         let local_index = self.find_or_insert_local(name);
                         self.ir.store_local(local_index, reg.into());
-                        self.insert_variable(
-                            name.to_string(),
-                            VariableLocation::Local(local_index),
-                        );
+
+                        if matches!(ast, Ast::Let { .. }) {
+                            self.insert_variable(
+                                name.to_string(),
+                                VariableLocation::Local(local_index),
+                            );
+                        } else if matches!(ast, Ast::LetMut { .. }) && !needs_boxing {
+                            self.insert_variable(
+                                name.to_string(),
+                                VariableLocation::MutableLocal(local_index),
+                            );
+                        } else if matches!(ast, Ast::LetMut { .. }) && needs_boxing {
+                            self.insert_variable(
+                                name.to_string(),
+                                VariableLocation::BoxedMutableLocal(local_index),
+                            );
+                        } else {
+                            panic!("Expected let or mutlet")
+                        }
                         reg.into()
                     }
                 } else {
                     panic!("Expected variable")
                 }
             }
-            Ast::Assignment {
-                name,
-                value,
-                ..
-            } => {
+            Ast::Assignment { name, value, .. } => {
                 // TODO: if not marked as mut error
                 // I will need to make it so that this gets heap allocated
                 // if we access from a closure
@@ -1397,14 +1472,53 @@ impl AstCompiler<'_> {
                 }
                 let variable = variable.unwrap();
                 match variable {
-                    VariableLocation::NamespaceVariable(_namespace_id,_slott) => {
+
+                    // TODO: Do I have mutable namespace variables?
+                    VariableLocation::NamespaceVariable(_namespace_id, _slott) => {
                         panic!("Can't assign to a namespace variable {}", name);
                     }
-                    VariableLocation::Local(local_index) => {
+                    VariableLocation::Local(_local_index) => {
+                        panic!("You can only assign to mutable variables");
+                    }
+                    VariableLocation::MutableLocal(local_index) => {
                         self.ir.store_local(local_index, value.into());
                     }
+                    VariableLocation::BoxedMutableLocal(local_index) => {
+                        // TODO(mutable): I could just allocate have something special
+                        // but I might just want to make a struct for this?
+                        let local = self.ir.load_local(local_index);
+                        let local = self.ir.untag(local.into());
+                        self.ir.write_field(local, 0, value.into());
+                    }
                     VariableLocation::FreeVariable(_free_variable) => {
-                        panic!("When would this happen? assign free {}", name);
+                        panic!("Can't assign to a non-mutable free variable {}", name);
+                    }
+                    VariableLocation::BoxedFreeVariable(index) => {
+                        let arg0_location = self
+                            .get_argument_location(0)
+                            .ok_or("Variable not found")
+                            .unwrap();
+                        let arg0 = self.resolve_variable(&arg0_location).unwrap();
+                        let arg0: VirtualRegister = self.ir.assign_new(arg0);
+                        let arg0 = self.ir.untag(arg0.into());
+                        let index = self
+                            .ir
+                            .assign_new(Value::TaggedConstant((index + 3) as isize));
+                        // TODO: Fix
+                        let slot = self.ir.read_field(arg0, index.into());
+                        // TODO: Is it tagged constant or raw?
+                        let slot = self.ir.untag(slot.into());
+                        self.ir.write_field(slot, 0, value.into());
+                    }
+                    VariableLocation::MutableFreeVariable(index) => {
+                        let arg0_location = self
+                            .get_argument_location(0)
+                            .ok_or("Variable not found")
+                            .unwrap();
+                        let arg0 = self.resolve_variable(&arg0_location).unwrap();
+                        let arg0: VirtualRegister = self.ir.assign_new(arg0);
+                        let arg0 = self.ir.untag(arg0.into());
+                        self.ir.write_field(arg0, index + 3, value.into());
                     }
                     VariableLocation::Register(_virtual_register) => {
                         panic!("Can't assign to a register {}", name);
@@ -1477,19 +1591,28 @@ impl AstCompiler<'_> {
     }
 
     fn create_free_if_closable(&mut self, name: &String) -> Option<VariableLocation> {
-        let mut can_be_closed = false;
+        let mut location = None;
         for environment in self.environment_stack.iter_mut().rev().skip(1) {
-            if environment.variables.contains_key(name) {
-                can_be_closed = true;
+            if let Some(loc) = environment.variables.get(name) {
+                location = Some(loc.clone());
                 break;
             }
         }
-        if can_be_closed {
+        if let Some(location) = location {
             let free_variable = self.find_or_insert_free_variable(name);
-            Some(VariableLocation::FreeVariable(free_variable))
-        } else {
-            None
+            match location {
+                VariableLocation::BoxedMutableLocal(_) => {
+                    return Some(VariableLocation::BoxedFreeVariable(free_variable));
+                }
+                VariableLocation::MutableLocal(_) => {
+                    return Some(VariableLocation::MutableFreeVariable(free_variable));
+                }
+                _ => {
+                    return Some(VariableLocation::FreeVariable(free_variable));
+                }
+            }
         }
+        None
     }
 
     fn get_qualified_function_name(&mut self, name: &String) -> String {
@@ -1589,24 +1712,27 @@ impl AstCompiler<'_> {
         self.ir.write_label(label);
         for free_variable in self.get_current_env().free_variables.clone().iter().rev() {
             let variable = self
-                .get_variable(free_variable)
-                .unwrap_or_else(|| panic!("Can't find variable {}", free_variable));
+                .get_variable(&free_variable.name)
+                .unwrap_or_else(|| panic!("Can't find variable {:?}", free_variable));
             // we are now going to push these variables onto the stack
 
             match variable {
                 VariableLocation::Register(reg) => {
                     self.ir.push_to_stack(reg.into());
                 }
-                VariableLocation::Local(index) => {
-                    let reg = self.ir.volatile_register();
-                    self.ir.load_local(reg, index);
+                VariableLocation::Local(index)
+                | VariableLocation::MutableLocal(index)
+                | VariableLocation::BoxedMutableLocal(index) => {
+                    let reg = self.ir.load_local(index);
                     self.ir.push_to_stack(reg.into());
                 }
                 VariableLocation::NamespaceVariable(namespace, slot) => {
                     self.resolve_variable(&VariableLocation::NamespaceVariable(namespace, slot))
                         .unwrap();
                 }
-                VariableLocation::FreeVariable(_) => {
+                VariableLocation::FreeVariable(_)
+                | VariableLocation::BoxedFreeVariable(_)
+                | VariableLocation::MutableFreeVariable(_) => {
                     panic!(
                         "We are trying to find this variable concretely and found a free variable"
                     )
@@ -1690,15 +1816,22 @@ impl AstCompiler<'_> {
 
     fn find_or_insert_free_variable(&mut self, name: &str) -> usize {
         let current_env = self.environment_stack.last_mut().unwrap();
-        if let Some(index) = current_env.free_variables.iter().position(|n| n == name) {
+        if let Some(index) = current_env
+            .free_variables
+            .iter()
+            .position(|n| n.name == name)
+        {
             index
         } else {
-            current_env.free_variables.push(name.to_string());
+            current_env.free_variables.push(FreeVariable {
+                name: name.to_string(),
+            });
             current_env.free_variables.len() - 1
         }
     }
 
     fn get_variable_alloc_free_variable(&mut self, name: &str) -> VariableLocation {
+        let existing_location = self.get_variable(name);
         if let Some(variable) = self.get_accessible_variable(name) {
             variable.clone()
         } else if name.contains("/") {
@@ -1713,11 +1846,21 @@ impl AstCompiler<'_> {
             VariableLocation::NamespaceVariable(namespace_id, slot)
         } else {
             let current_env = self.environment_stack.last_mut().unwrap();
-            current_env.free_variables.push(name.to_string());
+            current_env.free_variables.push(FreeVariable {
+                name: name.to_string(),
+            });
             let index = current_env.free_variables.len() - 1;
-            current_env
-                .variables
-                .insert(name.to_string(), VariableLocation::FreeVariable(index));
+
+            let free = match existing_location {
+                Some(VariableLocation::BoxedMutableLocal(_)) => {
+                    VariableLocation::BoxedFreeVariable(index)
+                }
+                Some(VariableLocation::MutableLocal(_)) => {
+                    VariableLocation::MutableFreeVariable(index)
+                }
+                _ => VariableLocation::FreeVariable(index),
+            };
+            current_env.variables.insert(name.to_string(), free);
             let current_env = self.environment_stack.last().unwrap();
             current_env.variables.get(name).unwrap().clone()
         }
@@ -1726,7 +1869,7 @@ impl AstCompiler<'_> {
     fn get_variable(&self, name: &str) -> Option<VariableLocation> {
         for env in self.environment_stack.iter().rev() {
             if let Some(variable) = env.variables.get(name) {
-                if !matches!(&variable, VariableLocation::FreeVariable(_)) {
+                if !variable.is_free() {
                     return Some(variable.clone());
                 }
             }
@@ -1922,8 +2065,18 @@ impl AstCompiler<'_> {
     fn resolve_variable(&mut self, reg: &VariableLocation) -> Result<Value, String> {
         match reg {
             VariableLocation::Register(reg) => Ok(Value::Register(*reg)),
-            VariableLocation::Local(index) => Ok(Value::Local(*index)),
-            VariableLocation::FreeVariable(index) => {
+            VariableLocation::Local(index) | VariableLocation::MutableLocal(index) => {
+                Ok(Value::Local(*index))
+            }
+            VariableLocation::BoxedMutableLocal(index) => {
+                // TODO: I need to deref the box here I think
+                let reg = self.ir.load_local(*index);
+                let reg = self.ir.untag(reg.into());
+                let value = self.ir.read_field(reg, Value::TaggedConstant(0));
+                Ok(value)
+            }
+            VariableLocation::FreeVariable(index)
+            | VariableLocation::MutableFreeVariable(index) => {
                 let arg0_location = self.get_argument_location(0).ok_or("Variable not found")?;
                 let arg0 = self.resolve_variable(&arg0_location)?;
                 let arg0: VirtualRegister = self.ir.assign_new(arg0);
@@ -1932,6 +2085,21 @@ impl AstCompiler<'_> {
                     .ir
                     .assign_new(Value::TaggedConstant((*index + 3) as isize));
                 Ok(self.ir.read_field(arg0, index.into()))
+            }
+            VariableLocation::BoxedFreeVariable(index) => {
+                let arg0_location = self.get_argument_location(0).ok_or("Variable not found")?;
+                let arg0 = self.resolve_variable(&arg0_location)?;
+                let arg0: VirtualRegister = self.ir.assign_new(arg0);
+                let arg0 = self.ir.untag(arg0.into());
+                let index = self
+                    .ir
+                    .assign_new(Value::TaggedConstant((*index + 3) as isize));
+                // TODO: Fix
+                let slot = self.ir.read_field(arg0, index.into());
+                // TODO: Is it tagged constant or raw?
+                let slot = self.ir.untag(slot.into());
+                let value = self.ir.read_field(slot, Value::TaggedConstant(0));
+                Ok(value)
             }
             VariableLocation::NamespaceVariable(namespace, slot) => {
                 let slot = self.ir.assign_new(*slot);
@@ -2014,5 +2182,260 @@ impl AstCompiler<'_> {
                 end: ending_ir,
             },
         ));
+    }
+
+    // I'm going to make this an entirely separate pass for simplicities sake
+    // I could combine this and be more efficient, but I just want to make things work first
+    fn find_mutable_vars_that_need_boxing(&mut self, ast: &Ast) {
+        match ast {
+            Ast::LetMut {
+                name,
+                value,
+                token_range: _,
+            } => {
+                self.add_mutable_variable(name, ast);
+
+                self.find_mutable_vars_that_need_boxing(value);
+            }
+
+            Ast::Assignment {
+                name,
+                value,
+                token_range: _,
+            } => {
+                self.update_mutable_variable_meta(name);
+                self.find_mutable_vars_that_need_boxing(value);
+            }
+
+            Ast::Function {
+                name,
+                args: _,
+                body,
+                token_range: _,
+            } => {
+                if let Some(name) = name {
+                    self.add_variable_for_mutable_pass(name);
+                }
+                self.track_function_mutable_variable_pass();
+                for expression in body.iter() {
+                    self.find_mutable_vars_that_need_boxing(expression);
+                }
+                self.pop_function_mutable_variable_pass();
+            }
+
+            Ast::Let {
+                name,
+                value,
+                token_range: _,
+            } => {
+                self.add_variable_for_mutable_pass(&name.get_string());
+                self.find_mutable_vars_that_need_boxing(value);
+            }
+
+            Ast::Program {
+                elements,
+                token_range: _,
+            } => {
+                for ast in elements.iter() {
+                    self.find_mutable_vars_that_need_boxing(ast);
+                }
+            }
+
+            Ast::Struct { .. }
+            | Ast::Enum { .. }
+            | Ast::EnumVariant { .. }
+            | Ast::EnumStaticVariant { .. }
+            | Ast::Protocol { .. }
+            | Ast::FunctionStub { .. }
+            | Ast::IntegerLiteral(_, _)
+            | Ast::FloatLiteral(_, _)
+            | Ast::Identifier(_, _)
+            | Ast::String(_, _)
+            | Ast::True(_)
+            | Ast::False(_)
+            | Ast::Null(_)
+            | Ast::Namespace { .. }
+            | Ast::Import { .. } => {
+                // I shouldn't need to do anything here
+            }
+
+            // TODO: Should I allow these to be closures?
+            // Probably makes sense
+            Ast::Extend {
+                target_type: _,
+                protocol: _,
+                body,
+                token_range: _,
+            } => {
+                for ast in body.iter() {
+                    self.find_mutable_vars_that_need_boxing(ast);
+                }
+            }
+            Ast::If {
+                condition,
+                then,
+                else_,
+                token_range: _,
+            } => {
+                self.find_mutable_vars_that_need_boxing(condition);
+                for ast in then.iter() {
+                    self.find_mutable_vars_that_need_boxing(ast);
+                }
+                for ast in else_.iter() {
+                    self.find_mutable_vars_that_need_boxing(ast);
+                }
+            }
+            Ast::Condition { left, right, .. }
+            | Ast::Add { left, right, .. }
+            | Ast::Sub { left, right, .. }
+            | Ast::Mul { left, right, .. }
+            | Ast::Div { left, right, .. }
+            | Ast::ShiftLeft { left, right, .. }
+            | Ast::ShiftRight { left, right, .. }
+            | Ast::ShiftRightZero { left, right, .. }
+            | Ast::BitWiseAnd { left, right, .. }
+            | Ast::BitWiseOr { left, right, .. }
+            | Ast::BitWiseXor { left, right, .. }
+            | Ast::And { left, right, .. }
+            | Ast::Or { left, right, .. } => {
+                self.find_mutable_vars_that_need_boxing(left);
+                self.find_mutable_vars_that_need_boxing(right);
+            }
+
+            Ast::Recurse {
+                args,
+                token_range: _,
+            } => {
+                for arg in args.iter() {
+                    self.find_mutable_vars_that_need_boxing(arg);
+                }
+            }
+            Ast::TailRecurse {
+                args,
+                token_range: _,
+            } => {
+                for arg in args.iter() {
+                    self.find_mutable_vars_that_need_boxing(arg);
+                }
+            }
+            Ast::Call {
+                name: _,
+                args,
+                token_range: _,
+            } => {
+                for arg in args.iter() {
+                    self.find_mutable_vars_that_need_boxing(arg);
+                }
+            }
+
+            Ast::StructCreation {
+                name: _,
+                fields,
+                token_range: _,
+            } => {
+                for (_, field) in fields.iter() {
+                    self.find_mutable_vars_that_need_boxing(field);
+                }
+            }
+            Ast::PropertyAccess {
+                object,
+                property,
+                token_range: _,
+            } => {
+                self.find_mutable_vars_that_need_boxing(object);
+                self.find_mutable_vars_that_need_boxing(property);
+            }
+            Ast::EnumCreation {
+                name: _,
+                variant: _,
+                fields,
+                token_range: _,
+            } => {
+                for (_, field) in fields.iter() {
+                    self.find_mutable_vars_that_need_boxing(field);
+                }
+            }
+
+            Ast::Array {
+                array,
+                token_range: _,
+            } => {
+                for element in array.iter() {
+                    self.find_mutable_vars_that_need_boxing(element);
+                }
+            }
+            Ast::IndexOperator {
+                array,
+                index,
+                token_range: _,
+            } => {
+                self.find_mutable_vars_that_need_boxing(array);
+                self.find_mutable_vars_that_need_boxing(index);
+            }
+            Ast::Loop {
+                body,
+                token_range: _,
+            } => {
+                for ast in body.iter() {
+                    self.find_mutable_vars_that_need_boxing(ast);
+                }
+            }
+        }
+    }
+
+    fn add_mutable_variable(&mut self, name: &Ast, ast: &Ast) {
+        self.mutable_pass_env_stack.last_mut().unwrap().insert(
+            name.get_string(),
+            MutablePassInfo {
+                mutable_definition: Some(ast.clone()),
+            },
+        );
+    }
+
+    fn track_function_mutable_variable_pass(&mut self) {
+        self.mutable_pass_env_stack.push(HashMap::new());
+    }
+
+    fn pop_function_mutable_variable_pass(&mut self) {
+        self.mutable_pass_env_stack.pop();
+    }
+
+    fn update_mutable_variable_meta(&mut self, name: &Ast) {
+        let variable_info = self.find_mutable_info(name);
+        if let Some((in_current, variable_info)) = variable_info {
+            if in_current {
+                // It's in the current environment, we don't
+                // need to do anything
+                return;
+            }
+            if let Some(ast) = variable_info.mutable_definition {
+                self.metadata.insert(
+                    ast,
+                    Metadata {
+                        needs_to_be_boxed: true,
+                    },
+                );
+            }
+        } else {
+            panic!("Can't find variable {:?}", name);
+        }
+    }
+
+    fn add_variable_for_mutable_pass(&mut self, name: &String) {
+        self.mutable_pass_env_stack
+            .last_mut()
+            .unwrap()
+            .insert(name.clone(), MutablePassInfo::default());
+    }
+
+    fn find_mutable_info(&self, name: &Ast) -> Option<(bool, MutablePassInfo)> {
+        let mut in_current = true;
+        for env in self.mutable_pass_env_stack.iter().rev() {
+            if let Some(variable) = env.get(&name.get_string()) {
+                return Some((in_current, variable.clone()));
+            }
+            in_current = false;
+        }
+        None
     }
 }

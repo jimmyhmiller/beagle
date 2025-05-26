@@ -56,11 +56,11 @@ extend String with Format {
 
 
 fn main() {
-    println(vector/PersistentVector)
+    println(vector/PersistentVector.name)
     println(Indexed)
     let x = [2];
     println(x[0])
-    println(primitive/read_struct_id(x))
+    println(primitive/read_struct_id(x) == vector/PersistentVector.id)
     println(instance_of(x, vector/PersistentVector))
     println(instance_of(2, vector/PersistentVector))
 
@@ -85,10 +85,10 @@ fn main() {
 }
 
 // Expect
-// Struct { name: "persistent_vector/PersistentVector", id: 5 }
+// persistent_vector/PersistentVector
 // Protocol { name: "beagle.core/Indexed" }
 // 2
-// 5
+// true
 // true
 // false
 // 1

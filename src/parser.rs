@@ -751,7 +751,7 @@ impl Parser {
                 // Gross
                 let value = String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap();
                 let position = self.consume();
-                Some(Ast::FloatLiteral(value.parse::<f64>().unwrap(), position))
+                Some(Ast::FloatLiteral(value, position))
             }
             Token::True => {
                 let position = self.consume();
@@ -787,7 +787,7 @@ impl Parser {
                     self.move_to_next_non_whitespace();
                     let value = self.parse_expression(0, true, true).unwrap();
                     let end_position = self.position;
-                    return Some(Ast::MutLet {
+                    return Some(Ast::LetMut {
                         name: Box::new(Ast::Identifier(name, name_position)),
                         value: Box::new(value),
                     token_range: TokenRange::new(start_position, end_position),
