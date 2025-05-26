@@ -157,3 +157,8 @@ fn println(value) {
 fn print(value) {
     _print(format(value, 0))
 }
+
+
+struct __Box__ {
+    value
+}

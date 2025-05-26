@@ -142,7 +142,7 @@ pub enum Instruction {
     AtomicLoad(Value, Value),
     AtomicStore(Value, Value),
     CompareAndSwap(Value, Value, Value),
-    StoreFloat(Value, Value, f64),
+    StoreFloat(Value, Value, String),
     // TODO: Move destination register
     // to inside arm instead of here
     GuardInt(Value, Value, Label),
@@ -1448,6 +1448,9 @@ impl Ir {
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, lang);
                     let temp = self.value_to_register(temp, lang);
+                    // need to turn string to float precisely
+                    let value: f64 = value.parse().unwrap();
+                    
                     lang.mov_64(temp, value.to_bits() as isize);
                     // The header is the first field, so offset is 1
                     lang.store_on_heap(dest, temp, 1);
@@ -1919,7 +1922,8 @@ impl Ir {
             .push(Instruction::StoreLocal(Value::Local(local_index), reg));
     }
 
-    pub fn load_local(&mut self, reg: VirtualRegister, local_index: usize) -> Value {
+    pub fn load_local(&mut self, local_index: usize) -> Value {
+        let reg = self.volatile_register();
         self.increment_locals(local_index);
         self.instructions.push(Instruction::LoadLocal(
             reg.into(),
@@ -2011,7 +2015,7 @@ impl Ir {
             .push(Instruction::HeapStoreOffsetReg(pointer, value, offset));
     }
 
-    pub fn write_float_literal(&mut self, float_pointer: Value, n: f64) {
+    pub fn write_float_literal(&mut self, float_pointer: Value, n: String) {
         let temp_register = self.volatile_register();
         self.instructions.push(Instruction::StoreFloat(
             float_pointer,

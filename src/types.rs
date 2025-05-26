@@ -579,9 +579,9 @@ impl Ir {
         self.heap_store_offset(struct_pointer, field, offset + index);
     }
 
-    pub fn read_field(&mut self, struct_pointer: Value, index: Value) -> Value {
+    pub fn read_field(&mut self, untagged_struct_pointer: Value, index: Value) -> Value {
         let incremented = self.add_int(index, 1);
-        self.heap_load_with_reg_offset(struct_pointer, incremented)
+        self.heap_load_with_reg_offset(untagged_struct_pointer, incremented)
     }
 
     pub fn write_field_dynamic(&mut self, struct_pointer: Value, index: Value, field: Value) {
