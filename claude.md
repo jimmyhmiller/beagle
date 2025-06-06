@@ -39,6 +39,13 @@ cargo run --features generation-v2 -- resources/example.bg
 # Code formatting
 cargo fmt
 cargo clippy --fix --allow-dirty --allow-staged
+
+# Testing after changes
+# ALWAYS run cargo fmt and tests after making code changes
+cargo fmt
+cargo run -- --all-tests
+# For specific GC implementations, use the appropriate feature flag:
+cargo run --features generation-v2 -- --all-tests
 ```
 
 ## Project Structure

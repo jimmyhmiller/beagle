@@ -266,14 +266,34 @@ impl GenerationV2 {
     }
 
     fn minor_gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
+        let start = std::time::Instant::now();
+
+        self.process_temporary_roots();
+        self.process_additional_roots();
+        self.process_namespace_roots();
+        self.update_old_generation_namespace_roots();
+        self.process_stack_roots(stack_map, stack_pointers);
+
+        self.young.clear();
+
+        if self.options.print_stats {
+            println!("Minor GC took {:?}", start.elapsed());
+        }
+    }
+
+    fn process_temporary_roots(&mut self) {
         // TODO: I don't deal with temporary roots updating
         unsafe { self.copy_all(self.temporary_roots.iter().flatten().cloned().collect()) };
+    }
 
+    fn process_additional_roots(&mut self) {
         let additional_roots = std::mem::take(&mut self.additional_roots);
         for old in additional_roots.into_iter() {
             self.move_objects_referenced_from_old_to_old(&mut HeapObject::from_tagged(old));
         }
+    }
 
+    fn process_namespace_roots(&mut self) {
         let namespace_roots = std::mem::take(&mut self.namespace_roots);
         // There has to be a better answer than this. But it does seem to work.
         for (namespace_id, root) in namespace_roots.into_iter() {
@@ -300,13 +320,16 @@ impl GenerationV2 {
                 self.move_objects_referenced_from_old_to_old(&mut heap_object);
             }
         }
+    }
 
+    fn update_old_generation_namespace_roots(&mut self) {
         self.old.clear_namespace_roots();
         for (namespace_id, root) in self.namespace_roots.iter() {
             self.old.add_namespace_root(*namespace_id, *root);
         }
+    }
 
-        let start = std::time::Instant::now();
+    fn process_stack_roots(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
         for (stack_base, stack_pointer) in stack_pointers.iter() {
             let roots = self.gather_roots(*stack_base, stack_map, *stack_pointer);
             let new_roots: Vec<usize> = roots.iter().map(|x| x.1).collect();
@@ -322,10 +345,6 @@ impl GenerationV2 {
                 );
                 stack_buffer[*stack_offset] = new_roots[i];
             }
-        }
-        self.young.clear();
-        if self.options.print_stats {
-            println!("Minor GC took {:?}", start.elapsed());
         }
     }
 
