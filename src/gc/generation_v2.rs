@@ -282,8 +282,18 @@ impl GenerationV2 {
     }
 
     fn process_temporary_roots(&mut self) {
-        // TODO: I don't deal with temporary roots updating
-        unsafe { self.copy_all(self.temporary_roots.iter().flatten().cloned().collect()) };
+        let roots_to_copy: Vec<(usize, usize)> = self
+            .temporary_roots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, root)| root.map(|r| (i, r)))
+            .collect();
+
+        for (index, root) in roots_to_copy {
+            let new_root = unsafe { self.copy(root) };
+            self.temporary_roots[index] = Some(new_root);
+        }
+        self.copy_remaining();
     }
 
     fn process_additional_roots(&mut self) {
