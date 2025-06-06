@@ -163,16 +163,32 @@ impl Header {
     // |         | (4 bytes)     |        |         | Opaque object (bit 1) |
     // |         |               |        |         | Marked (bit 0)       |
 
+    /// Position of the marked bit in the header.
+    /// IMPORTANT: This MUST be in the 3 least significant bits (0, 1, or 2) for
+    /// GC forwarding to work with 8-byte aligned pointers.
+    const MARKED_BIT_POSITION: u32 = 0;
+
+    /// Position of the opaque bit in the header.
+    const OPAQUE_BIT_POSITION: u32 = 1;
+
+    // Compile-time check that marked bit is in the 3 least significant bits
+    const MARKED_BIT_POSITION_CHECK: () = {
+        assert!(
+            Self::MARKED_BIT_POSITION < 3,
+            "Marked bit must be in the 3 least significant bits for GC forwarding to work with 8-byte alignment"
+        );
+    };
+
     fn to_usize(self) -> usize {
         let mut data: usize = 0;
         data |= (self.type_id as usize) << 56;
         data |= (self.type_data as usize) << 24;
         data |= (self.size as usize) << 16;
         if self.opaque {
-            data |= 0b10;
+            data |= 1 << Self::OPAQUE_BIT_POSITION;
         }
         if self.marked {
-            data |= 0b1;
+            data |= 1 << Self::MARKED_BIT_POSITION;
         }
         data
     }
@@ -181,8 +197,8 @@ impl Header {
         let _type = (data >> 56) as u8;
         let type_data = (data >> 24) as u32;
         let size = (data >> 16) as u8;
-        let opaque = (data & 0b10) == 0b10;
-        let marked = (data & 0b1) == 0b1;
+        let opaque = (data & (1 << Self::OPAQUE_BIT_POSITION)) != 0;
+        let marked = (data & (1 << Self::MARKED_BIT_POSITION)) != 0;
         Header {
             type_id: _type,
             type_data,
@@ -202,6 +218,77 @@ impl Header {
 
     pub fn size_offset() -> usize {
         2
+    }
+
+    /// Get the bit mask for the marked bit
+    pub const fn marked_bit_mask() -> usize {
+        // Reference the compile-time check to ensure it's evaluated
+        let _ = Self::MARKED_BIT_POSITION_CHECK;
+        1 << Self::MARKED_BIT_POSITION
+    }
+
+    /// Set the marked bit in a raw header value, preserving other bits
+    pub const fn set_marked_bit(header_value: usize) -> usize {
+        header_value | Self::marked_bit_mask()
+    }
+
+    /// Clear the marked bit in a raw header value, preserving other bits
+    pub const fn clear_marked_bit(header_value: usize) -> usize {
+        header_value & !Self::marked_bit_mask()
+    }
+
+    /// Check if the marked bit is set in a raw header value
+    pub const fn is_marked_bit_set(header_value: usize) -> bool {
+        (header_value & Self::marked_bit_mask()) != 0
+    }
+}
+
+#[cfg(test)]
+mod header_layout_tests {
+    use super::*;
+
+    #[test]
+    fn test_marked_bit_position_compatibility() {
+        // This test verifies that our marked bit position is compatible with 8-byte alignment
+        assert!(
+            Header::MARKED_BIT_POSITION < 3,
+            "Marked bit must be in the 3 least significant bits for GC forwarding to work"
+        );
+
+        // Test that we can set and clear the marked bit correctly
+        let test_value = 0xDEADBEEF_CAFEBABE_usize;
+
+        let marked = Header::set_marked_bit(test_value);
+        assert!(Header::is_marked_bit_set(marked));
+
+        let unmarked = Header::clear_marked_bit(marked);
+        assert!(!Header::is_marked_bit_set(unmarked));
+
+        // Verify that setting/clearing doesn't affect other bits (except the marked bit)
+        let expected_unmarked = test_value & !Header::marked_bit_mask();
+        assert_eq!(unmarked, expected_unmarked);
+    }
+
+    #[test]
+    fn test_header_bit_manipulation() {
+        // Test that header conversion preserves bit manipulation
+        let header = Header {
+            type_id: 42,
+            type_data: 0x12345678,
+            size: 16,
+            opaque: true,
+            marked: false,
+        };
+
+        let header_value = header.to_usize();
+        let marked_value = Header::set_marked_bit(header_value);
+        let reconstructed = Header::from_usize(marked_value);
+
+        assert!(reconstructed.marked);
+        assert_eq!(reconstructed.type_id, header.type_id);
+        assert_eq!(reconstructed.type_data, header.type_data);
+        assert_eq!(reconstructed.size, header.size);
+        assert_eq!(reconstructed.opaque, header.opaque);
     }
 }
 
@@ -293,13 +380,9 @@ impl HeapObject {
     pub fn mark(&self) {
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
-        let mut data: usize = unsafe { *pointer.cast::<usize>() };
-
-        // check right most bit
-        if (data & 1) != 1 {
-            data |= 1;
-        }
-        unsafe { *pointer.cast::<usize>() = data };
+        let data: usize = unsafe { *pointer.cast::<usize>() };
+        let marked_data = Header::set_marked_bit(data);
+        unsafe { *pointer.cast::<usize>() = marked_data };
     }
 
     pub fn marked(&self) -> bool {
@@ -370,12 +453,9 @@ impl HeapObject {
     pub fn unmark(&self) {
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
-        let mut data: usize = unsafe { *pointer.cast::<usize>() };
-        // check right most bit
-        if (data & 1) == 1 {
-            data &= !1;
-        }
-        unsafe { *pointer.cast::<usize>() = data };
+        let data: usize = unsafe { *pointer.cast::<usize>() };
+        let unmarked_data = Header::clear_marked_bit(data);
+        unsafe { *pointer.cast::<usize>() = unmarked_data };
     }
 
     pub fn full_size(&self) -> usize {

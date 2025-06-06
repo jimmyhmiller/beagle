@@ -1,0 +1,79 @@
+# Beagle Language Project
+
+## Overview
+Beagle is a dynamically-typed, functional programming language that compiles directly to ARM64 machine code (macOS only). Inspired by Clojure, it aims to bring the best of dynamic languages to a modern, high-performance runtime without JVM overhead.
+
+## Key Architecture
+- **Compilation Pipeline**: AST → IR → ARM64 machine code (no VM)
+- **Runtime**: Rust-based with hand-written parser and ARM64 code generator
+- **Memory Management**: 6 different GC implementations (mark-sweep, compacting, generational)
+- **Performance**: Already outperforms Ruby 2x, runs 30% slower than Node.js
+
+## Language Features
+- Dynamic typing with structs, enums, closures, atoms, threads
+- Namespace system for code organization
+- Tail call optimization (currently only way to do loops)
+- Multi-threading with thread-safe GC options
+- FFI for C interop
+- Built-in debugger with runtime introspection
+
+## Development Commands
+```bash
+# Build and run
+cargo run -- resources/example.bg
+
+# Run tests
+cargo run -- --all-tests
+
+# Run with debugging
+cargo run -- --debug resources/example.bg
+
+# Show compilation times
+cargo run -- --show-times resources/example.bg
+
+# Different GC backends via features
+cargo run --features compacting-v2 -- resources/example.bg
+cargo run --features mark-and-sweep-v2 -- resources/example.bg
+cargo run --features generation-v2 -- resources/example.bg
+
+# Code formatting
+cargo fmt
+cargo clippy --fix --allow-dirty --allow-staged
+```
+
+## Project Structure
+- `src/main.rs` - Entry point and runtime initialization
+- `src/parser.rs` - Hand-written parser
+- `src/ast.rs` - AST definitions
+- `src/compiler.rs` - Compilation orchestration
+- `src/ir.rs` - Intermediate representation
+- `src/machine_code/` - ARM64 code generation
+- `src/gc/` - Multiple garbage collector implementations
+- `src/runtime.rs` - Runtime system and memory management
+- `resources/` - Example Beagle programs and tests
+
+## Example Beagle Code
+```beagle
+namespace example
+
+fn fib(n) {
+    if n <= 1 {
+        n
+    } else {
+        fib(n - 1) + fib(n - 2)
+    }
+}
+
+fn main() {
+    println(fib(30))
+}
+```
+
+## Current Status
+Early proof-of-concept with solid foundations. Missing many language features but demonstrates promising performance characteristics. Active development focuses on GC optimization and language feature completion.
+
+## Goals
+- Build production-ready dynamic language
+- GUI debugger frontend written in Beagle itself
+- Full standard library and better FFI
+- Make dynamic languages popular again with modern performance

@@ -3,7 +3,7 @@ use std::{ffi::c_void, io::Error, mem};
 
 use libc::{mprotect, vm_page_size};
 
-use crate::types::{BuiltInTypes, HeapObject, Word};
+use crate::types::{BuiltInTypes, Header, HeapObject, Word};
 
 use super::{AllocateAction, Allocator, AllocatorOptions, StackMap};
 
@@ -201,48 +201,34 @@ impl CompactingHeapV2 {
             "Pointer is not in to space"
         );
 
+        // If already in to_space, it's been copied
         if self.to_space.contains(untagged as *const u8) {
             debug_assert!(untagged % 8 == 0, "Pointer is not aligned");
             return heap_object.tagged_pointer();
         }
 
-        if !heap_object.is_zero_size() && !heap_object.is_opaque_object() {
-            // TODO(DuplicatingOpaque)
-            let first_field = heap_object.get_field(0);
-            if BuiltInTypes::is_heap_pointer(heap_object.get_field(0)) {
-                let untagged_data = BuiltInTypes::untag(first_field);
-                if self.to_space.contains(untagged_data as *const u8) {
-                    debug_assert!(untagged_data % 8 == 0, "Pointer is not aligned");
-                    return first_field;
-                }
-            }
+        // If marked, object has been forwarded - get forwarding pointer from header
+        if heap_object.marked() {
+            // The header contains the forwarding pointer with marked bit preserved
+            let untagged = heap_object.untagged();
+            let pointer = untagged as *mut usize;
+            let header_data = unsafe { *pointer };
+            // Clear the marked bit to get the clean forwarding pointer
+            return Header::clear_marked_bit(header_data);
         }
 
-        // TODO: I want to change up this setup to use my mark bit to know
-        // if objects have already been forwarded rather than trying to parse
-        // their first field
-        if heap_object.is_zero_size() || heap_object.is_opaque_object() {
-            // TODO(DuplicatingOpaque)
-            let data = heap_object.get_full_object_data();
-            let new_pointer = self.to_space.copy_data_to_offset(data);
-            let tagged_new = heap_object.get_object_type().unwrap().tag(new_pointer) as usize;
-            return tagged_new;
-        }
-        let first_field = heap_object.get_field(0);
-        if BuiltInTypes::is_heap_pointer(first_field) {
-            let untagged = BuiltInTypes::untag(first_field);
-            if !self.from_space.contains(untagged as *const u8) {
-                let first_field = HeapObject::from_tagged(first_field);
-                heap_object.write_field(0, self.copy_using_cheneys_algorithm(first_field));
-            }
-        }
+        // Copy the object to to_space
         let data = heap_object.get_full_object_data();
         let new_pointer = self.to_space.copy_data_to_offset(data);
         debug_assert!(new_pointer % 8 == 0, "Pointer is not aligned");
-        // update header of original object to now be the forwarding pointer
+
+        // Store forwarding pointer in header for all objects
         let tagged_new = heap_object.get_object_type().unwrap().tag(new_pointer) as usize;
-        heap_object.write_field(0, tagged_new);
-        // heap_object.mark();
+        let untagged = heap_object.untagged();
+        let pointer = untagged as *mut usize;
+        // Set the forwarding pointer with marked bit preserved
+        unsafe { *pointer = Header::set_marked_bit(tagged_new) };
+
         tagged_new
     }
 
@@ -270,9 +256,7 @@ impl CompactingHeapV2 {
             if object.marked() {
                 panic!("We are copying to this space, nothing should be marked");
             }
-            if object.is_opaque_object() || object.is_zero_size() {
-                // TODO(DuplicatingOpaque): I think right now I'm duplicating opaque objects
-                // Once I have a good means of visualizing that, it would be obvious
+            if object.is_zero_size() {
                 continue;
             }
             for datum in object.get_fields_mut() {
@@ -371,6 +355,7 @@ impl Allocator for CompactingHeapV2 {
         if !self.options.gc {
             return;
         }
+
         #[cfg(debug_assertions)]
         {
             self.to_space.unprotect();
