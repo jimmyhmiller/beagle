@@ -1466,11 +1466,7 @@ impl AstCompiler<'_> {
                 };
                 let value = self.call_compile(&value);
                 let value = self.ir.assign_new(value);
-                let variable: Option<VariableLocation> = self.get_accessible_variable(name);
-                if variable.is_none() {
-                    panic!("Can't find variable {}", name);
-                }
-                let variable = variable.unwrap();
+                let variable = self.get_variable_alloc_free_variable(name);
                 match variable {
                     // TODO: Do I have mutable namespace variables?
                     VariableLocation::NamespaceVariable(_namespace_id, _slott) => {
@@ -1483,9 +1479,10 @@ impl AstCompiler<'_> {
                         self.ir.store_local(local_index, value.into());
                     }
                     VariableLocation::BoxedMutableLocal(local_index) => {
-                        // TODO(mutable): I could just allocate have something special
-                        // but I might just want to make a struct for this?
                         let local = self.ir.load_local(local_index);
+                        // I thought I needed a write barrier, but I believe that isn't the case
+                        // because these are only heap allocated if captured.
+                        // self.call_builtin("beagle.builtin/gc_add_root", vec![local]);
                         let local = self.ir.untag(local);
                         self.ir.write_field(local, 0, value.into());
                     }
@@ -1503,9 +1500,10 @@ impl AstCompiler<'_> {
                         let index = self
                             .ir
                             .assign_new(Value::TaggedConstant((index + 3) as isize));
-                        // TODO: Fix
                         let slot = self.ir.read_field(arg0, index.into());
-                        // TODO: Is it tagged constant or raw?
+                        // I thought I needed a write barrier, but I believe that isn't the case
+                        // because these are only heap allocated if captured.
+                        // self.call_builtin("beagle.builtin/gc_add_root", vec![slot]);
                         let slot = self.ir.untag(slot);
                         self.ir.write_field(slot, 0, value.into());
                     }
@@ -1516,6 +1514,9 @@ impl AstCompiler<'_> {
                             .unwrap();
                         let arg0 = self.resolve_variable(&arg0_location).unwrap();
                         let arg0: VirtualRegister = self.ir.assign_new(arg0);
+                        // I thought I needed a write barrier, but I believe that isn't the case
+                        // because these are only heap allocated if captured.
+                        // self.call_builtin("beagle.builtin/gc_add_root", vec![arg0.into()]);
                         let arg0 = self.ir.untag(arg0.into());
                         self.ir.write_field(arg0, index + 3, value.into());
                     }

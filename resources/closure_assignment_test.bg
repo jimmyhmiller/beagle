@@ -1,0 +1,36 @@
+namespace closure_assignment_test
+
+// Test for closure variable capture bug:
+// Assignment to captured variables should work even without
+// reading the variable first (to trigger capture)
+
+fn main() {
+    // Test 1: Assignment after read (worked before fix)
+    let mut counter = 0
+    let read_then_assign = fn() {
+        println(counter)  // Read triggers capture
+        counter = 42      // Assignment works because already captured
+        counter
+    }
+
+    // Test 2: Direct assignment without read (broken before fix)
+    let mut value = 100
+    let direct_assign = fn() {
+        value = 200       // Assignment should trigger capture
+        value
+    }
+
+    let result1 = read_then_assign()
+    let result2 = direct_assign()
+
+    println(result1)  // Should be 42
+    println(result2)  // Should be 200
+
+    "closure assignment test passed"
+}
+
+// Expect
+// 0
+// 42
+// 200
+// closure assignment test passed
