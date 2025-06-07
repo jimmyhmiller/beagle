@@ -20,11 +20,13 @@ jobs:
           - "--features simple-generation,thread-safe"
           - "--features simple-mark-and-sweep,thread-safe"
           - "--features mark-and-sweep-v2,thread-safe"
+          - "--features generation-v2,thread-safe"
           - "--features compacting"
           - "--features compacting-v2"
           - "--features simple-generation"
           - "--features simple-mark-and-sweep"
           - "--features mark-and-sweep-v2"
+          - "--features generation-v2"
 
     steps:
       - name: Checkout repository
