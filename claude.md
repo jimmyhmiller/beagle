@@ -46,6 +46,11 @@ cargo fmt
 cargo run -- --all-tests
 # For specific GC implementations, use the appropriate feature flag:
 cargo run --features generation-v2 -- --all-tests
+
+# Trailing whitespace cleanup
+# For non-Rust files (*.bg, *.md, *.toml, etc.), remove trailing whitespace:
+sed -i '' 's/[[:space:]]*$//' path/to/file
+# Note: cargo fmt handles this automatically for Rust files
 ```
 
 ## Project Structure
@@ -75,6 +80,40 @@ fn main() {
     println(fib(30))
 }
 ```
+
+## Testing System
+Beagle uses a simple but effective testing system:
+
+**Test Requirements:**
+- Tests must be `.bg` files in the `resources/` directory
+- **Must contain the exact string `"// Expect"`** to be included in `--all-tests`
+- Expected output follows immediately after `// Expect` on lines starting with `//`
+
+**Test Format:**
+```beagle
+namespace example_test
+
+fn main() {
+    println("Hello")
+    println(42)
+    "done"  // Return value also appears in output
+}
+
+// Expect
+// Hello
+// 42
+// done
+```
+
+**Special Annotations:**
+- `// thread-safe` - Only runs with thread-safe GC features enabled
+- `// no-std` - Sets no_std flag automatically
+
+**Test Execution:**
+- `cargo run -- --all-tests` runs all tests with `// Expect`
+- Output comparison is exact - whitespace and formatting must match
+- Tests use `TestPrinter` to capture all `println()` and `print()` calls
+- Each test runs in a fresh runtime environment
 
 ## Current Status
 Early proof-of-concept with solid foundations. Missing many language features but demonstrates promising performance characteristics. Active development focuses on GC optimization and language feature completion.
