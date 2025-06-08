@@ -11,6 +11,12 @@ use crate::register_allocation::linear_scan::LinearScan;
 use crate::types::BuiltInTypes;
 use crate::{arm::LowLevelArm, common::Label};
 
+/// Size of the stack frame prelude in 64-bit words  
+/// X29 points to [prev_X29][X30], and below that are [zero][zero] for delimit markers
+/// For stack arguments, we need to account for the distance from X29 to the previous frame
+/// TODO: When we re-enable zero padding, this should be 4 to account for the extra zeros
+const PRELUDE_SIZE_WORDS: isize = 2;
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Encode, Decode)]
 pub enum Condition {
     LessThanOrEqual,
@@ -668,7 +674,7 @@ impl Ir {
 
     pub fn arg(&mut self, n: usize) -> Value {
         if n >= 8 {
-            return Value::Stack((n as isize) - 8 + 2);
+            return Value::Stack((n as isize) - 8 + PRELUDE_SIZE_WORDS);
         }
         let register = self.next_register(Some(n), true);
         Value::Register(register)
@@ -1036,8 +1042,7 @@ impl Ir {
         let before_prelude = lang.new_label("before_prelude");
         lang.write_label(before_prelude);
 
-        // zero is a placeholder because this will be patched
-        lang.prelude(0);
+        lang.prelude();
 
         // I believe this is fine because it is volatile and we
         // are at the beginning of the function
@@ -1066,8 +1071,8 @@ impl Ir {
         self.compile_instructions(&mut lang, exit, before_prelude, after_prelude);
 
         lang.write_label(exit);
-        // Zero is a placeholder because this will be patched
-        lang.epilogue(0);
+
+        lang.epilogue();
         lang.ret();
         // TODO: ugly
         let lang_after_return = lang.get_label_by_name("after_return");

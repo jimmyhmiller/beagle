@@ -1,0 +1,67 @@
+namespace test_stack_walk
+
+import "beagle.builtin" as builtin
+
+fn level10() {
+    println("About to throw error")
+    // This should trigger an error and show our stack trace
+    builtin/throw_error()
+}
+
+fn level9() {
+    let result = level10()
+    println("in level9")
+    result
+}
+
+fn level8() {
+    let result = level9()
+    println("in level8")
+    result
+}
+
+fn level7() {
+    let result = level8()
+    println("in level7")
+    result
+}
+
+fn level6() {
+    let result = level7()
+    println("in level6")
+    result
+}
+
+fn level5() {
+    let result = level6()
+    println("in level5")
+    result
+}
+
+fn level4() {
+    let result = level5()
+    println("in level4")
+    result
+}
+
+fn level3() {
+    let result = level4()
+    println("in level3")
+    result
+}
+
+fn level2() {
+    let result = level3()
+    println("in level2")
+    result
+}
+
+fn level1() {
+    let result = level2()
+    println("in level1")
+    result
+}
+
+fn main() {
+    level1()
+}

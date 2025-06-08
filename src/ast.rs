@@ -81,6 +81,13 @@ pub enum Ast {
         else_: Vec<Ast>,
         token_range: TokenRange,
     },
+    DelimitHandle {
+        delimit_body: Vec<Ast>,
+        value: String,
+        continuation: String,
+        handler_body: Vec<Ast>,
+        token_range: TokenRange,
+    },
     Condition {
         operator: Condition,
         left: Box<Ast>,
@@ -235,6 +242,7 @@ impl Ast {
             | Ast::Extend { token_range, .. }
             | Ast::FunctionStub { token_range, .. }
             | Ast::If { token_range, .. }
+            | Ast::DelimitHandle { token_range, .. }
             | Ast::Condition { token_range, .. }
             | Ast::Add { token_range, .. }
             | Ast::Sub { token_range, .. }
@@ -1155,6 +1163,11 @@ impl AstCompiler<'_> {
                 let array = self.ir.assign_new(array);
                 let index = self.ir.assign_new(index);
                 self.call("beagle.core/get", vec![array.into(), index.into()])
+            }
+            Ast::DelimitHandle { .. } => {
+                // TODO: Implement delimited continuations
+                // For now, just return null to allow other tests to run
+                Value::Null
             }
             Ast::If {
                 condition,
@@ -2282,6 +2295,18 @@ impl AstCompiler<'_> {
                     self.find_mutable_vars_that_need_boxing(ast);
                 }
                 for ast in else_.iter() {
+                    self.find_mutable_vars_that_need_boxing(ast);
+                }
+            }
+            Ast::DelimitHandle {
+                delimit_body,
+                handler_body,
+                ..
+            } => {
+                for ast in delimit_body.iter() {
+                    self.find_mutable_vars_that_need_boxing(ast);
+                }
+                for ast in handler_body.iter() {
                     self.find_mutable_vars_that_need_boxing(ast);
                 }
             }

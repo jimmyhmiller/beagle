@@ -1,6 +1,6 @@
 #![allow(clippy::match_like_matches_macro)]
 #![allow(clippy::missing_safety_doc)]
-use crate::machine_code::arm_codegen::{SP, X0, X1, X2, X3, X4, X10};
+use crate::machine_code::arm_codegen::{SP, X0, X1, X2, X3, X4, X10, ZERO_REGISTER};
 use arm::LowLevelArm;
 use bincode::{Decode, Encode, config::standard};
 use clap::{Parser as ClapParser, command};
@@ -109,14 +109,21 @@ impl<T: Encode + Decode<()>> Serialize for T {
     }
 }
 
+const PADDING_FOR_ALIGNMENT: i64 = 2;
+
 fn compile_trampoline(runtime: &mut Runtime) {
     let mut lang = LowLevelArm::new();
+
     // lang.breakpoint();
-    lang.prelude(-2);
+    lang.prelude();
+
+    // We have one extra word based on our padding
+    // we are going to zero it out
+    lang.store_on_stack(ZERO_REGISTER, -1);
 
     // Should I store or push?
     for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
-        lang.store_on_stack(*reg, -((i + 2) as i32));
+        lang.store_on_stack(*reg, -((i + PADDING_FOR_ALIGNMENT as usize) as i32));
     }
 
     lang.mov_reg(X10, SP);
@@ -139,9 +146,9 @@ fn compile_trampoline(runtime: &mut Runtime) {
         .enumerate()
         .rev()
     {
-        lang.load_from_stack(*reg, -((i + 2) as i32));
+        lang.load_from_stack(*reg, -((i + PADDING_FOR_ALIGNMENT as usize) as i32));
     }
-    lang.epilogue(2);
+    lang.epilogue();
     lang.ret();
 
     runtime
@@ -155,23 +162,27 @@ fn compile_trampoline(runtime: &mut Runtime) {
 fn compile_save_volatile_registers(runtime: &mut Runtime) {
     let mut lang = LowLevelArm::new();
     // lang.breakpoint();
-    lang.prelude(-2);
+    lang.prelude();
 
-    lang.sub_stack_pointer((lang.canonical_volatile_registers.len() + 2) as i32);
+    lang.sub_stack_pointer(
+        (lang.canonical_volatile_registers.len() + PADDING_FOR_ALIGNMENT as usize) as i32,
+    );
 
     for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
-        lang.store_on_stack(*reg, -((i + 3) as i32));
+        lang.store_on_stack(*reg, -((i + PADDING_FOR_ALIGNMENT as usize + 1) as i32));
     }
 
     lang.call(X1);
 
     for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
-        lang.load_from_stack(*reg, -((i + 3) as i32));
+        lang.load_from_stack(*reg, -((i + PADDING_FOR_ALIGNMENT as usize + 1) as i32));
     }
 
-    lang.add_stack_pointer((lang.canonical_volatile_registers.len() + 2) as i32);
+    lang.add_stack_pointer(
+        (lang.canonical_volatile_registers.len() + PADDING_FOR_ALIGNMENT as usize) as i32,
+    );
 
-    lang.epilogue(2);
+    lang.epilogue();
     lang.ret();
 
     runtime
@@ -191,23 +202,27 @@ fn compile_save_volatile_registers(runtime: &mut Runtime) {
 fn compile_save_volatile_registers2(runtime: &mut Runtime) {
     let mut lang = LowLevelArm::new();
     // lang.breakpoint();
-    lang.prelude(-2);
+    lang.prelude();
 
-    lang.sub_stack_pointer((lang.canonical_volatile_registers.len() + 2) as i32);
+    lang.sub_stack_pointer(
+        (lang.canonical_volatile_registers.len() + PADDING_FOR_ALIGNMENT as usize) as i32,
+    );
 
     for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
-        lang.store_on_stack(*reg, -((i + 3) as i32));
+        lang.store_on_stack(*reg, -((i + PADDING_FOR_ALIGNMENT as usize + 1) as i32));
     }
 
     lang.call(X2);
 
     for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
-        lang.load_from_stack(*reg, -((i + 3) as i32));
+        lang.load_from_stack(*reg, -((i + PADDING_FOR_ALIGNMENT as usize + 1) as i32));
     }
 
-    lang.add_stack_pointer((lang.canonical_volatile_registers.len() + 2) as i32);
+    lang.add_stack_pointer(
+        (lang.canonical_volatile_registers.len() + PADDING_FOR_ALIGNMENT as usize) as i32,
+    );
 
-    lang.epilogue(2);
+    lang.epilogue();
     lang.ret();
 
     runtime

@@ -1,0 +1,26 @@
+namespace test_stack_no_tco
+
+import "beagle.builtin" as builtin
+
+fn bottom() {
+    println("About to throw error")
+    builtin/throw_error()
+}
+
+fn middle() {
+    println("In middle before call")
+    bottom()
+    println("In middle after call - this won't execute")
+}
+
+fn top() {
+    println("In top before call")
+    middle()
+    println("In top after call - this won't execute")
+}
+
+fn main() {
+    println("In main before call")
+    top()
+    println("In main after call - this won't execute")
+}

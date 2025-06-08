@@ -518,18 +518,24 @@ impl LowLevelArm {
         }
     }
 
-    pub fn prelude(&mut self, offset: i32) {
+    pub fn prelude(&mut self) {
         // self.breakpoint();
-        // 0 is a placeholder we will patch later
         // TODO: make better/faster/fewer instructions
-        self.store_pair(X29, X30, SP, offset);
+        self.store_pair(X29, X30, SP, -2);
+        // we are doing this so we have a place to put metadata on our frame
+        // most notably here we are going to use it to make a frame as a delimit boundary
+        // for our continuations
+        // TODO: Commented out until we fix GC stack scanning to handle the zeros
+        // self.store_pair(ZERO_REGISTER, ZERO_REGISTER, SP, -2);
         self.mov_reg(X29, SP);
         self.sub_stack_pointer(-self.max_locals);
     }
 
-    pub fn epilogue(&mut self, offset: i32) {
+    pub fn epilogue(&mut self) {
+        // TODO: Commented out until we fix GC stack scanning to handle the zeros
+        // self.add_stack_pointer(2);
         self.add_stack_pointer(self.max_locals);
-        self.load_pair(X29, X30, SP, offset);
+        self.load_pair(X29, X30, SP, 2);
     }
 
     pub fn get_label_index(&mut self) -> usize {
@@ -998,23 +1004,9 @@ impl LowLevelArm {
             max += 1;
         }
 
-        // Does this need to be aligned somehow? Next power of two was causing issues
-        // where I was having values on the stack from native code.
-        // I don't think getting rid of it was the right answer.
         let max = max as i32;
 
-        // TODO: I don't need to patch because it is no longer based on max
-        if let Some(ArmAsm::StpGen { imm7, .. }) = self
-            .instructions
-            .iter_mut()
-            .position(|instruction| matches!(instruction, ArmAsm::StpGen { .. }))
-            .map(|i| &mut self.instructions[i])
-        {
-            *imm7 = -2
-        } else {
-            unreachable!();
-        }
-
+        // TODO: It is probably the case that I can get rid of this patching all together
         if let Some(ArmAsm::SubAddsubImm { imm12, .. }) = self
             .instructions
             .iter_mut()
@@ -1033,19 +1025,6 @@ impl LowLevelArm {
             .map(|i| &mut self.instructions[i])
         {
             *imm12 = max * 8;
-        } else {
-            unreachable!();
-        }
-
-        // Same but last load pair
-        // note the rposition
-        if let Some(ArmAsm::LdpGen { imm7, .. }) = self
-            .instructions
-            .iter_mut()
-            .rposition(|instruction| matches!(instruction, ArmAsm::LdpGen { .. }))
-            .map(|i| &mut self.instructions[i])
-        {
-            *imm7 = 2;
         } else {
             unreachable!();
         }

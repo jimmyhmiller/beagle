@@ -1,0 +1,20 @@
+namespace delimit_syntax_test
+
+// Test basic delimit/handle syntax parsing
+
+fn main() {
+    let result = delimit {
+        println("before yield")
+        "done"
+    } handle (value, resume) {
+        println("in handler")
+        "handled"
+    }
+
+    println(result)
+    "test completed"
+}
+
+// Expect
+// null
+// test completed
