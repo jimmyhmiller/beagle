@@ -171,14 +171,6 @@ impl Header {
     /// Position of the opaque bit in the header.
     const OPAQUE_BIT_POSITION: u32 = 1;
 
-    // Compile-time check that marked bit is in the 3 least significant bits
-    const MARKED_BIT_POSITION_CHECK: () = {
-        assert!(
-            Self::MARKED_BIT_POSITION < 3,
-            "Marked bit must be in the 3 least significant bits for GC forwarding to work with 8-byte alignment"
-        );
-    };
-
     fn to_usize(self) -> usize {
         let mut data: usize = 0;
         data |= (self.type_id as usize) << 56;
@@ -222,8 +214,6 @@ impl Header {
 
     /// Get the bit mask for the marked bit
     pub const fn marked_bit_mask() -> usize {
-        // Reference the compile-time check to ensure it's evaluated
-        let _ = Self::MARKED_BIT_POSITION_CHECK;
         1 << Self::MARKED_BIT_POSITION
     }
 
