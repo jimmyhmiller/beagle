@@ -1,7 +1,5 @@
 namespace ffi_test
 
-// TODO: I need to fix my std library dependence on persistent_vector
-import "persistent_vector" as vec
 import "beagle.ffi" as ffi
 import "beagle.primitive" as primitive
 import "repl_test" as repl
