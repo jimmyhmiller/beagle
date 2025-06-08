@@ -1,5 +1,4 @@
 namespace array_literals
-import "persistent_vector" as vector
 
 struct ExampleStruct {
     value

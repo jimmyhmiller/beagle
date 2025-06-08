@@ -256,6 +256,31 @@ pub struct CommandLineArguments {
     print_builtin_calls: bool,
 }
 
+fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Error>> {
+    let default_files = ["std.bg", "persistent_vector.bg"];
+    let mut all_top_levels = vec![];
+
+    for file_name in default_files {
+        let file_path = find_resource_file(file_name)?;
+        let top_levels = runtime.compile(&file_path)?;
+        all_top_levels.extend(top_levels);
+    }
+
+    Ok(all_top_levels)
+}
+
+fn find_resource_file(file_name: &str) -> Result<String, Box<dyn Error>> {
+    let mut exe_path = env::current_exe()?;
+    exe_path = exe_path.parent().unwrap().to_path_buf();
+    let resource_path = exe_path.join(format!("resources/{}", file_name));
+
+    if resource_path.exists() {
+        Ok(resource_path.to_str().unwrap().to_string())
+    } else {
+        Err(format!("Could not find resource file: {}", file_name).into())
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args = CommandLineArguments::parse();
     if args.all_tests {
@@ -428,12 +453,7 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     let mut top_levels = vec![];
     if !args.no_std {
-        let mut exe_path = env::current_exe()?;
-        exe_path = exe_path.parent().unwrap().to_path_buf();
-        if !exe_path.join("resources/std.bg").exists() {
-            exe_path = exe_path.parent().unwrap().to_path_buf();
-        }
-        top_levels = runtime.compile(exe_path.join("resources/std.bg").to_str().unwrap())?;
+        top_levels = load_default_files(runtime)?;
     }
 
     // TODO: Need better name for top_level
