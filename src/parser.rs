@@ -67,6 +67,8 @@ pub enum Token {
     Extend,
     With,
     Mut,
+    Delimit,
+    Handle,
 }
 impl Token {
     fn is_binary_operator(&self) -> bool {
@@ -145,6 +147,8 @@ impl Token {
             Token::Extend => "extend".to_string(),
             Token::As => "as".to_string(),
             Token::With => "with".to_string(),
+            Token::Delimit => "delimit".to_string(),
+            Token::Handle => "handle".to_string(),
             Token::Comment((start, end))
             | Token::Atom((start, end))
             | Token::Spaces((start, end))
@@ -422,6 +426,8 @@ impl Tokenizer {
             b"extend" => Token::Extend,
             b"with" => Token::With,
             b"as" => Token::As,
+            b"delimit" => Token::Delimit,
+            b"handle" => Token::Handle,
             _ => Token::Atom((start, self.position)),
         }
     }
@@ -702,6 +708,7 @@ impl Parser {
             Token::Struct => Some(self.parse_struct()),
             Token::Enum => Some(self.parse_enum()),
             Token::If => Some(self.parse_if()),
+            Token::Delimit => Some(self.parse_delimit()),
             Token::Namespace => Some(self.parse_namespace()),
             Token::Import => Some(self.parse_import()),
             Token::Protocol => Some(self.parse_protocol()),
@@ -1592,6 +1599,88 @@ impl Parser {
                 else_: Vec::new(),
                 token_range: TokenRange::new(start_position, end_position),
             }
+        }
+    }
+
+    fn parse_delimit(&mut self) -> Ast {
+        let start_position = self.position;
+        self.move_to_next_non_whitespace();
+
+        // Parse delimit block
+        let delimit_body = self.parse_block();
+
+        // Expect handle keyword
+        self.move_to_next_non_whitespace();
+        if !self.is_handle() {
+            panic!("Expected 'handle' after delimit block");
+        }
+        self.consume(); // consume 'handle'
+
+        // Expect opening parenthesis
+        self.move_to_next_non_whitespace();
+        if !self.is_open_paren() {
+            panic!("Expected '(' after handle");
+        }
+        self.consume(); // consume '('
+
+        // Parse first argument (value)
+        self.skip_whitespace();
+        let value = match self.current_token() {
+            Token::Atom((start, end)) => {
+                let name = String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap();
+                self.consume(); // consume the identifier token
+                name
+            }
+            _ => panic!(
+                "Expected identifier for value argument, got: {:?}",
+                self.current_token()
+            ),
+        };
+        self.skip_whitespace();
+
+        // Expect comma
+        if !self.is_comma() {
+            panic!("Expected ',' between handler arguments");
+        }
+        self.consume(); // consume ','
+
+        // Parse second argument (continuation)
+        self.skip_whitespace();
+        let continuation = match self.current_token() {
+            Token::Atom((start, end)) => {
+                let name = String::from_utf8(self.source[start..end].as_bytes().to_vec()).unwrap();
+                self.consume(); // consume the identifier token
+                name
+            }
+            _ => panic!("Expected identifier for continuation argument"),
+        };
+        self.skip_whitespace();
+
+        // Expect closing parenthesis
+        self.skip_whitespace();
+        if !self.is_close_paren() {
+            panic!("Expected ')' after handler arguments");
+        }
+        self.consume(); // consume ')'
+
+        // Parse handler block
+        self.move_to_next_non_whitespace();
+        let handler_body = self.parse_block();
+
+        let end_position = self.position;
+        Ast::DelimitHandle {
+            delimit_body,
+            value,
+            continuation,
+            handler_body,
+            token_range: TokenRange::new(start_position, end_position),
+        }
+    }
+
+    fn is_handle(&self) -> bool {
+        match self.current_token() {
+            Token::Handle => true,
+            _ => false,
         }
     }
 

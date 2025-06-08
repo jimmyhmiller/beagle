@@ -267,6 +267,18 @@ pub fn get_current_stack_pointer() -> usize {
     }
     sp
 }
+
+pub fn get_current_frame_pointer() -> usize {
+    use core::arch::asm;
+    let fp: usize;
+    unsafe {
+        asm!(
+            "mov {0}, x29",
+            out(reg) fp
+        );
+    }
+    fp
+}
 extern "C" fn property_access(
     struct_pointer: usize,
     str_constant_ptr: usize,
@@ -327,28 +339,46 @@ pub unsafe extern "C" fn throw_error(stack_pointer: usize) -> ! {
     panic!("Error!");
 }
 
-fn print_stack(stack_pointer: usize) {
+fn print_stack(_stack_pointer: usize) {
     let runtime = get_runtime().get_mut();
     let stack_base = runtime.get_stack_base();
-    let stack_end = stack_base;
-    // let current_stack_pointer = current_stack_pointer & !0b111;
-    let distance_till_end = stack_end - stack_pointer;
-    let num_64_till_end = (distance_till_end / 8) + 1;
-    let stack_begin = stack_end - STACK_SIZE;
-    let stack = unsafe { std::slice::from_raw_parts(stack_begin as *const usize, STACK_SIZE / 8) };
-    // saturating so if we are outside the stack, we just see the whole stack.
-    let start = stack.len().saturating_sub(num_64_till_end);
-    let stack = &stack[start..];
+    let stack_begin = stack_base - STACK_SIZE;
 
-    for value in stack.iter() {
+    // Get the current frame pointer (X29) directly from the register
+    let mut current_frame_ptr = get_current_frame_pointer();
+
+    println!("Walking stack frames:");
+
+    let mut frame_count = 0;
+    const MAX_FRAMES: usize = 100; // Prevent infinite loops
+
+    while frame_count < MAX_FRAMES && current_frame_ptr != 0 {
+        // Validate frame pointer is within stack bounds
+        if current_frame_ptr < stack_begin || current_frame_ptr >= stack_base {
+            break;
+        }
+
+        // Frame layout in our calling convention:
+        // [previous_X29] [X30/return_addr] <- X29 points here
+        // [zero] [zero] [locals...]
+        let frame = current_frame_ptr as *const usize;
+        let previous_frame_ptr = unsafe { *frame.offset(0) }; // Previous X29
+        let return_address = unsafe { *frame.offset(1) }; // X30 (return address)
+
+        // Look up the function containing this return address
         for function in runtime.functions.iter() {
             let function_size = function.size;
             let function_start = usize::from(function.pointer);
             let range = function_start..function_start + function_size;
-            if range.contains(value) {
+            if range.contains(&return_address) {
                 println!("Function: {:?}", function.name);
+                break;
             }
         }
+
+        // Move to the previous frame
+        current_frame_ptr = previous_frame_ptr;
+        frame_count += 1;
     }
 }
 
