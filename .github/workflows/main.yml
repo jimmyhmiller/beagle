@@ -16,10 +16,7 @@ jobs:
       matrix:
         feature-combination:
           - "--features compacting,thread-safe"
-          - "--features compacting-v2,thread-safe"
-          - "--features simple-generation,thread-safe"
           - "--features generational,thread-safe"
-          - "--features compacting,thread-safe"
           - "--features mark-and-sweep,thread-safe"
           - "--features generational"
           - "--features compacting"
