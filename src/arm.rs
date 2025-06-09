@@ -525,15 +525,13 @@ impl LowLevelArm {
         // we are doing this so we have a place to put metadata on our frame
         // most notably here we are going to use it to make a frame as a delimit boundary
         // for our continuations
-        // TODO: Commented out until we fix GC stack scanning to handle the zeros
-        // self.store_pair(ZERO_REGISTER, ZERO_REGISTER, SP, -2);
         self.mov_reg(X29, SP);
+        self.store_pair(ZERO_REGISTER, ZERO_REGISTER, SP, -2);
         self.sub_stack_pointer(-self.max_locals);
     }
 
     pub fn epilogue(&mut self) {
-        // TODO: Commented out until we fix GC stack scanning to handle the zeros
-        // self.add_stack_pointer(2);
+        self.add_stack_pointer(2);
         self.add_stack_pointer(self.max_locals);
         self.load_pair(X29, X30, SP, 2);
     }

@@ -84,6 +84,12 @@ fn main() {
 ## Testing System
 Beagle uses a simple but effective testing system:
 
+**CRITICAL: ALL TESTS MUST PASS**
+- **100% test pass rate is required** - partial success is not acceptable
+- Any change that breaks existing tests must be fixed or reverted
+- "Most tests passing" is considered a failure state
+- New features should not break existing functionality
+
 **Test Requirements:**
 - Tests must be `.bg` files in the `resources/` directory
 - **Must contain the exact string `"// Expect"`** to be included in `--all-tests`
