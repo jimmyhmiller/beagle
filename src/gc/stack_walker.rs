@@ -41,7 +41,8 @@ impl StackWalker {
                     frame_size += 1;
                 }
 
-                let bottom_of_frame = i + frame_size + 1;
+                // Account for the 2 words of zero padding for delimited continuations
+                let bottom_of_frame = i + frame_size + 1 + 2;
                 let active_frame = details.current_stack_size + details.number_of_locals;
 
                 i = bottom_of_frame;
