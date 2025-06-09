@@ -5,7 +5,8 @@ use libc::{mprotect, vm_page_size};
 use crate::types::{BuiltInTypes, HeapObject, Word};
 
 use super::{
-    AllocateAction, Allocator, AllocatorOptions, STACK_SIZE, StackMap, mark_and_sweep::MarkAndSweep,
+    AllocateAction, Allocator, AllocatorOptions, StackMap, mark_and_sweep::MarkAndSweep,
+    stack_walker::StackWalker,
 };
 
 const DEFAULT_PAGE_COUNT: usize = 1024;
@@ -251,19 +252,6 @@ impl GenerationalGC {
         }
     }
 
-    fn get_live_stack<'a>(stack_base: usize, stack_pointer: usize) -> &'a mut [usize] {
-        let stack_end = stack_base;
-        // let current_stack_pointer = current_stack_pointer & !0b111;
-        let distance_till_end = stack_end - stack_pointer;
-        let num_64_till_end = (distance_till_end / 8) + 1;
-        let len = STACK_SIZE / 8;
-        let stack_begin = stack_end - STACK_SIZE;
-        let stack =
-            unsafe { std::slice::from_raw_parts_mut(stack_begin as *mut usize, STACK_SIZE / 8) };
-
-        (&mut stack[len - num_64_till_end..]) as _
-    }
-
     fn minor_gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
         let start = std::time::Instant::now();
 
@@ -346,7 +334,7 @@ impl GenerationalGC {
 
             self.copy_remaining();
 
-            let stack_buffer = Self::get_live_stack(*stack_base, *stack_pointer);
+            let stack_buffer = StackWalker::get_live_stack_mut(*stack_base, *stack_pointer);
             for (i, (stack_offset, _)) in roots.iter().enumerate() {
                 debug_assert!(
                     BuiltInTypes::untag(new_roots[i]) % 8 == 0,
@@ -457,48 +445,14 @@ impl GenerationalGC {
         stack_map: &StackMap,
         stack_pointer: usize,
     ) -> Vec<(usize, usize)> {
-        // I'm adding to the end of the stack I've allocated so I only need to go from the end
-        // til the current stack
-        let stack = Self::get_live_stack(stack_base, stack_pointer);
-
         let mut roots: Vec<(usize, usize)> = Vec::with_capacity(36);
 
-        let mut i = 0;
-        while i < stack.len() {
-            let value = stack[i];
-
-            if let Some(details) = stack_map.find_stack_data(value) {
-                let mut frame_size = details.max_stack_size + details.number_of_locals;
-                if frame_size % 2 != 0 {
-                    frame_size += 1;
-                }
-
-                let bottom_of_frame = i + frame_size + 1;
-                let _top_of_frame = i + 1;
-
-                let active_frame = details.current_stack_size + details.number_of_locals;
-
-                i = bottom_of_frame;
-
-                for (j, slot) in stack
-                    .iter()
-                    .enumerate()
-                    .take(bottom_of_frame)
-                    .skip(bottom_of_frame - active_frame)
-                {
-                    if BuiltInTypes::is_heap_pointer(*slot) {
-                        let untagged = BuiltInTypes::untag(*slot);
-                        debug_assert!(untagged % 8 == 0, "Pointer is not aligned");
-                        if !self.young.contains(untagged as *const u8) {
-                            continue;
-                        }
-                        roots.push((j, *slot));
-                    }
-                }
-                continue;
+        StackWalker::walk_stack_roots(stack_base, stack_pointer, stack_map, |offset, pointer| {
+            let untagged = BuiltInTypes::untag(pointer);
+            if self.young.contains(untagged as *const u8) {
+                roots.push((offset, pointer));
             }
-            i += 1;
-        }
+        });
 
         roots
     }

@@ -9,6 +9,7 @@ pub mod compacting;
 pub mod generational;
 pub mod mark_and_sweep;
 pub mod mutex_allocator;
+pub mod stack_walker;
 
 #[derive(Debug, Encode, Decode, SerJson, Clone)]
 pub struct StackMapDetails {
