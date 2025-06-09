@@ -28,11 +28,8 @@ nanoserde = { version = "0.2.0-beta.0", features = ["json", "binary"] }
 
 [features]
 default = []
-simple-mark-and-sweep = []
 compacting = []
-compacting-v2 = []
-mark-and-sweep-v2 = []
-simple-generation = []
-generation-v2 = []
+mark-and-sweep = []
+generational = []
 thread-safe = []
 json = []

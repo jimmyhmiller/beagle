@@ -7,9 +7,8 @@ use clap::{Parser as ClapParser, command};
 use gc::{Allocator, StackMapDetails, get_allocate_options};
 #[allow(unused)]
 use gc::{
-    compacting::CompactingHeap, compacting_v2::CompactingHeapV2, generation_v2::GenerationV2,
-    mark_and_sweep_v2::MarkAndSweepV2, mutex_allocator::MutexAllocator,
-    simple_generation::SimpleGeneration, simple_mark_and_sweep::SimpleMarkSweepHeap,
+    compacting::CompactingHeap, generational::GenerationalGC, mark_and_sweep::MarkAndSweep,
+    mutex_allocator::MutexAllocator,
 };
 use nanoserde::SerJson;
 use runtime::{DefaultPrinter, Printer, Runtime, TestPrinter};
@@ -351,16 +350,7 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 }
 
 cfg_if::cfg_if! {
-
-    if #[cfg(feature = "compacting-v2")] {
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "thread-safe")] {
-                pub type Alloc = MutexAllocator<CompactingHeapV2>;
-            } else {
-                pub type Alloc = CompactingHeapV2;
-            }
-        }
-    } else if #[cfg(feature = "compacting")] {
+    if #[cfg(feature = "compacting")] {
         cfg_if::cfg_if! {
             if #[cfg(feature = "thread-safe")] {
                 pub type Alloc = MutexAllocator<CompactingHeap>;
@@ -368,50 +358,31 @@ cfg_if::cfg_if! {
                 pub type Alloc = CompactingHeap;
             }
         }
-    } else if #[cfg(feature = "simple-mark-and-sweep")] {
+    } else if #[cfg(feature = "mark-and-sweep")] {
         cfg_if::cfg_if! {
             if #[cfg(feature = "thread-safe")] {
-                pub type Alloc = MutexAllocator<SimpleMarkSweepHeap>;
+                pub type Alloc = MutexAllocator<MarkAndSweep>;
             } else {
-                pub type Alloc = SimpleMarkSweepHeap;
+                pub type Alloc = MarkAndSweep;
             }
         }
-    } else if #[cfg(feature = "mark-and-sweep-v2")] {
+    } else if #[cfg(feature = "generational")] {
         cfg_if::cfg_if! {
             if #[cfg(feature = "thread-safe")] {
-                pub type Alloc = MutexAllocator<MarkAndSweepV2>;
+                pub type Alloc = MutexAllocator<GenerationalGC>;
             } else {
-                pub type Alloc = MarkAndSweepV2;
+                pub type Alloc = GenerationalGC;
             }
         }
-    } else if #[cfg(feature = "simple-mark-and-sweep")] {
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "thread-safe")] {
-                pub type Alloc = MutexAllocator<SimpleMarkSweepHeap>;
-            } else {
-                pub type Alloc = SimpleMarkSweepHeap;
-            }
-        }
-    } else if #[cfg(feature = "generation-v2")] {
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "thread-safe")] {
-                pub type Alloc = MutexAllocator<GenerationV2>;
-            } else {
-                pub type Alloc = GenerationV2;
-            }
-        }
-    } else if #[cfg(feature = "simple-generation")] {
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "thread-safe")] {
-                pub type Alloc = MutexAllocator<SimpleGeneration>;
-            } else {
-                pub type Alloc = SimpleGeneration;
-            }
-        }
-    } else if #[cfg(feature = "thread-safe")] {
-        pub type Alloc = MutexAllocator<SimpleGeneration>;
     } else {
-        pub type Alloc = SimpleGeneration;
+        // Default to generational GC
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "thread-safe")] {
+                pub type Alloc = MutexAllocator<GenerationalGC>;
+            } else {
+                pub type Alloc = GenerationalGC;
+            }
+        }
     }
 }
 

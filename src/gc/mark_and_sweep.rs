@@ -218,7 +218,7 @@ impl FreeList {
     }
 }
 
-pub struct MarkAndSweepV2 {
+pub struct MarkAndSweep {
     space: Space,
     free_list: FreeList,
     namespace_roots: Vec<(usize, usize)>,
@@ -227,7 +227,7 @@ pub struct MarkAndSweepV2 {
 }
 
 // TODO: I got an issue with my freelist
-impl MarkAndSweepV2 {
+impl MarkAndSweep {
     fn can_allocate(&self, words: usize) -> bool {
         let words = Word::from_word(words);
         let size = words.to_bytes() + HeapObject::header_size();
@@ -407,7 +407,7 @@ impl MarkAndSweepV2 {
     }
 }
 
-impl Allocator for MarkAndSweepV2 {
+impl Allocator for MarkAndSweep {
     fn new(options: AllocatorOptions) -> Self {
         let page_count = DEFAULT_PAGE_COUNT;
         Self::new_with_page_count(page_count, options)
