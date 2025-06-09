@@ -6,7 +6,7 @@ Beagle is a dynamically-typed, functional programming language that compiles dir
 ## Key Architecture
 - **Compilation Pipeline**: AST → IR → ARM64 machine code (no VM)
 - **Runtime**: Rust-based with hand-written parser and ARM64 code generator
-- **Memory Management**: 6 different GC implementations (mark-sweep, compacting, generational)
+- **Memory Management**: 3 modern GC implementations (mark-sweep, compacting, generational)
 - **Performance**: Already outperforms Ruby 2x, runs 30% slower than Node.js
 
 ## Language Features
@@ -32,9 +32,9 @@ cargo run -- --debug resources/example.bg
 cargo run -- --show-times resources/example.bg
 
 # Different GC backends via features
-cargo run --features compacting-v2 -- resources/example.bg
-cargo run --features mark-and-sweep-v2 -- resources/example.bg
-cargo run --features generation-v2 -- resources/example.bg
+cargo run --features compacting -- resources/example.bg
+cargo run --features mark-and-sweep -- resources/example.bg
+cargo run --features generational -- resources/example.bg
 
 # Code formatting
 cargo fmt

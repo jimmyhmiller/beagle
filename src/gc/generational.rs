@@ -1,140 +1,140 @@
-use std::{error::Error, sync::Once};
+use std::{error::Error, ffi::c_void, io};
 
-use mmap_rs::{MmapMut, MmapOptions};
+use libc::{mprotect, vm_page_size};
 
 use crate::types::{BuiltInTypes, HeapObject, Word};
 
 use super::{
-    AllocateAction, Allocator, AllocatorOptions, STACK_SIZE, StackMap,
-    simple_mark_and_sweep::SimpleMarkSweepHeap,
+    AllocateAction, Allocator, AllocatorOptions, STACK_SIZE, StackMap, mark_and_sweep::MarkAndSweep,
 };
 
-struct Segment {
-    memory: MmapMut,
-    offset: usize,
-    size: usize,
-    memory_range: std::ops::Range<*const u8>,
-}
-
-unsafe impl Send for Segment {}
-unsafe impl Sync for Segment {}
-
-impl Segment {
-    fn new(size: usize) -> Self {
-        let memory = MmapOptions::new(size)
-            .unwrap()
-            .map_mut()
-            .unwrap()
-            .make_mut()
-            .unwrap_or_else(|(_map, e)| {
-                panic!("Failed to make mmap executable: {}", e);
-            });
-        let memory_range = memory.as_ptr_range();
-        Self {
-            memory,
-            offset: 0,
-            size,
-            memory_range,
-        }
-    }
-}
+const DEFAULT_PAGE_COUNT: usize = 1024;
+// Aribtary number that should be changed when I have
+// better options for gc
+const MAX_PAGE_COUNT: usize = 1000000;
 
 struct Space {
-    segments: Vec<Segment>,
-    segment_offset: usize,
-    #[allow(unused)]
-    segment_size: usize,
+    start: *const u8,
+    page_count: usize,
+    allocation_offset: usize,
 }
 
+unsafe impl Send for Space {}
+unsafe impl Sync for Space {}
+
 impl Space {
-    fn new(segment_size: usize) -> Self {
-        let space = vec![Segment::new(segment_size)];
-        Self {
-            segments: space,
-            segment_offset: 0,
-            segment_size,
-        }
+    #[allow(unused)]
+    fn word_count(&self) -> usize {
+        (self.page_count * unsafe { vm_page_size }) / 8
+    }
+
+    fn byte_count(&self) -> usize {
+        self.page_count * unsafe { vm_page_size }
     }
 
     fn contains(&self, pointer: *const u8) -> bool {
-        for segment in self.segments.iter() {
-            if segment.memory_range.contains(&pointer) {
-                return true;
-            }
-        }
-        false
+        let start = self.start as usize;
+        let end = start + self.byte_count();
+        let pointer = pointer as usize;
+        pointer >= start && pointer < end
     }
 
-    fn write_object(&mut self, segment_offset: usize, offset: usize, size: Word) -> *const u8 {
-        let memory = &mut self.segments[segment_offset].memory;
-        let mut heap_object = HeapObject::from_untagged(unsafe { memory.as_ptr().add(offset) });
+    #[allow(unused)]
+    fn copy_data_to_offset(&mut self, data: &[u8]) -> isize {
+        unsafe {
+            let start = self.start.add(self.allocation_offset);
+            let new_pointer = start as isize;
+            self.allocation_offset += data.len();
+            if self.allocation_offset % 8 != 0 {
+                panic!("Heap offset is not aligned");
+            }
+            std::ptr::copy_nonoverlapping(data.as_ptr(), start as *mut u8, data.len());
+            new_pointer
+        }
+    }
+
+    fn write_object(&mut self, offset: usize, size: Word) -> *const u8 {
+        let mut heap_object = HeapObject::from_untagged(unsafe { self.start.add(offset) });
+
+        assert!(self.contains(heap_object.get_pointer()));
         heap_object.write_header(size);
+
         heap_object.get_pointer()
     }
 
-    fn increment_current_offset(&mut self, size: usize) {
-        self.segments[self.segment_offset].offset += size;
-        // align to 8 bytes
-        self.segments[self.segment_offset].offset =
-            (self.segments[self.segment_offset].offset + 7) & !7;
-        debug_assert!(
-            self.segments[self.segment_offset].offset % 8 == 0,
-            "Heap offset is not aligned"
-        );
-    }
-
-    fn can_allocate(&mut self, size: Word) -> bool {
-        let segment = self.segments.get(self.segment_offset).unwrap();
-        let current_segment =
-            segment.offset + size.to_bytes() + HeapObject::header_size() < segment.size;
-        if current_segment {
-            return true;
-        }
-        while self.segment_offset < self.segments.len() {
-            let segment = self.segments.get(self.segment_offset).unwrap();
-            if segment.offset + size.to_bytes() + HeapObject::header_size() < segment.size {
-                return true;
-            }
-            self.segment_offset += 1;
-        }
-        if self.segment_offset == self.segments.len() {
-            self.segment_offset = self.segments.len() - 1;
-        }
-        false
-    }
-
-    fn allocate(&mut self, size: Word) -> Result<*const u8, Box<dyn Error>> {
-        let segment = self.segments.get_mut(self.segment_offset).unwrap();
-        let offset = segment.offset;
+    fn allocate(&mut self, size: Word) -> *const u8 {
+        let offset = self.allocation_offset;
         let full_size = size.to_bytes() + HeapObject::header_size();
-        if offset + full_size > segment.size {
-            panic!(
-                "We should only be here if we think we can allocate: full_size: {}, offset: {}, segment.size: {}, diff {}",
-                full_size,
-                offset,
-                segment.size,
-                segment.size - offset
-            );
-        }
-        let pointer = self.write_object(self.segment_offset, offset, size);
+        let pointer = self.write_object(offset, size);
         self.increment_current_offset(full_size);
-        assert!(pointer as usize % 8 == 0, "Pointer is not aligned");
-        Ok(pointer)
+        pointer
+    }
+
+    fn increment_current_offset(&mut self, size: usize) {
+        self.allocation_offset += size;
     }
 
     fn clear(&mut self) {
-        for segment in self.segments.iter_mut() {
-            segment.offset = 0;
+        self.allocation_offset = 0;
+    }
+
+    fn new(default_page_count: usize) -> Self {
+        let pre_allocated_space = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                vm_page_size * MAX_PAGE_COUNT,
+                libc::PROT_NONE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        Self::commit_memory(
+            pre_allocated_space,
+            default_page_count * unsafe { vm_page_size },
+        )
+        .unwrap();
+        Self {
+            start: pre_allocated_space as *const u8,
+            page_count: default_page_count,
+            allocation_offset: 0,
         }
-        self.segment_offset = 0;
+    }
+
+    fn commit_memory(addr: *mut c_void, size: usize) -> Result<(), io::Error> {
+        unsafe {
+            if mprotect(addr, size, libc::PROT_READ | libc::PROT_WRITE) != 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[allow(unused)]
+    fn double_committed_memory(&mut self) {
+        let new_page_count = self.page_count * 2;
+        Self::commit_memory(
+            self.start as *mut c_void,
+            new_page_count * unsafe { vm_page_size },
+        )
+        .unwrap();
+        self.page_count = new_page_count;
+    }
+
+    fn can_allocate(&self, size: Word) -> bool {
+        let size = size.to_bytes() + HeapObject::header_size();
+        let new_offset = self.allocation_offset + size;
+        if new_offset > self.byte_count() {
+            return false;
+        }
+        true
     }
 }
 
-static WARN_MEMORY: Once = Once::new();
-
-pub struct SimpleGeneration {
+pub struct GenerationalGC {
     young: Space,
-    old: SimpleMarkSweepHeap,
+    old: MarkAndSweep,
     copied: Vec<HeapObject>,
     gc_count: usize,
     full_gc_frequency: usize,
@@ -151,21 +151,16 @@ pub struct SimpleGeneration {
     options: AllocatorOptions,
 }
 
-impl Allocator for SimpleGeneration {
+impl Allocator for GenerationalGC {
     fn new(options: AllocatorOptions) -> Self {
-        // TODO: Make these configurable and play with configurations
-        let young_size = MmapOptions::page_size() * 10000;
-        let young = Space::new(young_size);
-        let old = SimpleMarkSweepHeap::new_with_count(options, 10);
-        let copied = vec![];
-        let gc_count = 0;
-        let full_gc_frequency = 10;
+        let young = Space::new(DEFAULT_PAGE_COUNT * 10);
+        let old = MarkAndSweep::new_with_page_count(DEFAULT_PAGE_COUNT * 100, options);
         Self {
             young,
             old,
-            copied,
-            gc_count,
-            full_gc_frequency,
+            copied: vec![],
+            gc_count: 0,
+            full_gc_frequency: 100,
             additional_roots: vec![],
             namespace_roots: vec![],
             relocated_namespace_roots: vec![],
@@ -184,7 +179,7 @@ impl Allocator for SimpleGeneration {
         Ok(pointer)
     }
 
-    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
+    fn gc(&mut self, stack_map: &super::StackMap, stack_pointers: &[(usize, usize)]) {
         // TODO: Need to figure out when to do a Major GC
         if !self.options.gc {
             return;
@@ -199,9 +194,6 @@ impl Allocator for SimpleGeneration {
     }
 
     fn grow(&mut self) {
-        if cfg!(debug_assertions) && self.old.segment_count() > 1000 {
-            WARN_MEMORY.call_once(|| println!("Warning, memory growing dramatically"));
-        }
         self.old.grow();
     }
 
@@ -245,7 +237,7 @@ impl Allocator for SimpleGeneration {
     }
 }
 
-impl SimpleGeneration {
+impl GenerationalGC {
     fn allocate_inner(
         &mut self,
         words: usize,
@@ -253,61 +245,108 @@ impl SimpleGeneration {
     ) -> Result<AllocateAction, Box<dyn Error>> {
         let size = Word::from_word(words);
         if self.young.can_allocate(size) {
-            Ok(AllocateAction::Allocated(self.young.allocate(size)?))
+            Ok(AllocateAction::Allocated(self.young.allocate(size)))
         } else {
             Ok(AllocateAction::Gc)
         }
     }
 
-    fn minor_gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
-        unsafe { self.copy_all(self.temporary_roots.iter().flatten().cloned().collect()) };
+    fn get_live_stack<'a>(stack_base: usize, stack_pointer: usize) -> &'a mut [usize] {
+        let stack_end = stack_base;
+        // let current_stack_pointer = current_stack_pointer & !0b111;
+        let distance_till_end = stack_end - stack_pointer;
+        let num_64_till_end = (distance_till_end / 8) + 1;
+        let len = STACK_SIZE / 8;
+        let stack_begin = stack_end - STACK_SIZE;
+        let stack =
+            unsafe { std::slice::from_raw_parts_mut(stack_begin as *mut usize, STACK_SIZE / 8) };
 
+        (&mut stack[len - num_64_till_end..]) as _
+    }
+
+    fn minor_gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
         let start = std::time::Instant::now();
+
+        self.process_temporary_roots();
+        self.process_additional_roots();
+        self.process_namespace_roots();
+        self.update_old_generation_namespace_roots();
+        self.process_stack_roots(stack_map, stack_pointers);
+
+        self.young.clear();
+
+        if self.options.print_stats {
+            println!("Minor GC took {:?}", start.elapsed());
+        }
+    }
+
+    fn process_temporary_roots(&mut self) {
+        let roots_to_copy: Vec<(usize, usize)> = self
+            .temporary_roots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, root)| root.map(|r| (i, r)))
+            .collect();
+
+        for (index, root) in roots_to_copy {
+            let new_root = unsafe { self.copy(root) };
+            self.temporary_roots[index] = Some(new_root);
+        }
+        self.copy_remaining();
+    }
+
+    fn process_additional_roots(&mut self) {
+        let additional_roots = std::mem::take(&mut self.additional_roots);
+        for old in additional_roots.into_iter() {
+            self.move_objects_referenced_from_old_to_old(&mut HeapObject::from_tagged(old));
+        }
+    }
+
+    fn process_namespace_roots(&mut self) {
+        let namespace_roots = std::mem::take(&mut self.namespace_roots);
+        // There has to be a better answer than this. But it does seem to work.
+        for (namespace_id, root) in namespace_roots.into_iter() {
+            if !BuiltInTypes::is_heap_pointer(root) {
+                continue;
+            }
+            let mut heap_object = HeapObject::from_tagged(root);
+            if self.young.contains(heap_object.get_pointer()) && heap_object.marked() {
+                // We have already copied this object, so the first field points to the new location
+                let new_pointer = heap_object.get_field(0);
+                self.namespace_roots.push((namespace_id, new_pointer));
+                self.relocated_namespace_roots
+                    .push((namespace_id, vec![(root, new_pointer)]));
+            } else if self.young.contains(heap_object.get_pointer()) {
+                let new_pointer = unsafe { self.copy(root) };
+                self.relocated_namespace_roots
+                    .push((namespace_id, vec![(root, new_pointer)]));
+                self.namespace_roots.push((namespace_id, new_pointer));
+                self.move_objects_referenced_from_old_to_old(&mut HeapObject::from_tagged(
+                    new_pointer,
+                ));
+            } else {
+                self.namespace_roots.push((namespace_id, root));
+                self.move_objects_referenced_from_old_to_old(&mut heap_object);
+            }
+        }
+    }
+
+    fn update_old_generation_namespace_roots(&mut self) {
+        self.old.clear_namespace_roots();
+        for (namespace_id, root) in self.namespace_roots.iter() {
+            self.old.add_namespace_root(*namespace_id, *root);
+        }
+    }
+
+    fn process_stack_roots(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
         for (stack_base, stack_pointer) in stack_pointers.iter() {
             let roots = self.gather_roots(*stack_base, stack_map, *stack_pointer);
             let new_roots: Vec<usize> = roots.iter().map(|x| x.1).collect();
             let new_roots = unsafe { self.copy_all(new_roots) };
 
-            let additional_roots = std::mem::take(&mut self.additional_roots);
-            for old in additional_roots.into_iter() {
-                self.move_objects_referenced_from_old_to_old(&mut HeapObject::from_tagged(old));
-            }
-
-            let namespace_roots = std::mem::take(&mut self.namespace_roots);
-            // There has to be a better answer than this. But it does seem to work.
-            for (namespace_id, root) in namespace_roots.into_iter() {
-                if !BuiltInTypes::is_heap_pointer(root) {
-                    continue;
-                }
-                let mut heap_object = HeapObject::from_tagged(root);
-                if self.young.contains(heap_object.get_pointer()) && heap_object.marked() {
-                    // We have already copied this object, so the first field points to the new location
-                    let new_pointer = heap_object.get_field(0);
-                    self.namespace_roots.push((namespace_id, new_pointer));
-                    self.relocated_namespace_roots
-                        .push((namespace_id, vec![(root, new_pointer)]));
-                } else if self.young.contains(heap_object.get_pointer()) {
-                    let new_pointer = unsafe { self.copy(root) };
-                    self.relocated_namespace_roots
-                        .push((namespace_id, vec![(root, new_pointer)]));
-                    self.namespace_roots.push((namespace_id, new_pointer));
-                    self.move_objects_referenced_from_old_to_old(&mut HeapObject::from_tagged(
-                        new_pointer,
-                    ));
-                } else {
-                    self.namespace_roots.push((namespace_id, root));
-                    self.move_objects_referenced_from_old_to_old(&mut heap_object);
-                }
-            }
             self.copy_remaining();
 
-            // TODO: Do better
-            self.old.clear_namespace_roots();
-            for (namespace_id, root) in self.namespace_roots.iter() {
-                self.old.add_namespace_root(*namespace_id, *root);
-            }
-
-            let stack_buffer = get_live_stack(*stack_base, *stack_pointer);
+            let stack_buffer = Self::get_live_stack(*stack_base, *stack_pointer);
             for (i, (stack_offset, _)) in roots.iter().enumerate() {
                 debug_assert!(
                     BuiltInTypes::untag(new_roots[i]) % 8 == 0,
@@ -316,13 +355,9 @@ impl SimpleGeneration {
                 stack_buffer[*stack_offset] = new_roots[i];
             }
         }
-        self.young.clear();
-        if self.options.print_stats {
-            println!("Minor GC took {:?}", start.elapsed());
-        }
     }
 
-    fn full_gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
+    fn full_gc(&mut self, stack_map: &super::StackMap, stack_pointers: &[(usize, usize)]) {
         self.minor_gc(stack_map, stack_pointers);
         self.old.gc(stack_map, stack_pointers);
     }
@@ -381,15 +416,14 @@ impl SimpleGeneration {
             // update header of original object to now be the forwarding pointer
             let tagged_new = BuiltInTypes::get_kind(root).tag(new_pointer as isize) as usize;
 
-            if heap_object.is_zero_size() {
+            if heap_object.is_zero_size() || heap_object.is_opaque_object() {
                 return tagged_new;
             }
             let first_field = heap_object.get_field(0);
             if let Some(heap_object) = HeapObject::try_from_tagged(first_field) {
-                if !self.young.contains(heap_object.get_pointer()) {
-                    return tagged_new;
+                if self.young.contains(heap_object.get_pointer()) {
+                    self.copy(first_field);
                 }
-                self.copy(first_field);
             }
 
             heap_object.write_field(0, tagged_new);
@@ -425,7 +459,7 @@ impl SimpleGeneration {
     ) -> Vec<(usize, usize)> {
         // I'm adding to the end of the stack I've allocated so I only need to go from the end
         // til the current stack
-        let stack = get_live_stack(stack_base, stack_pointer);
+        let stack = Self::get_live_stack(stack_base, stack_pointer);
 
         let mut roots: Vec<(usize, usize)> = Vec::with_capacity(36);
 
@@ -468,17 +502,4 @@ impl SimpleGeneration {
 
         roots
     }
-}
-
-fn get_live_stack<'a>(stack_base: usize, stack_pointer: usize) -> &'a mut [usize] {
-    let stack_end = stack_base;
-    // let current_stack_pointer = current_stack_pointer & !0b111;
-    let distance_till_end = stack_end - stack_pointer;
-    let num_64_till_end = (distance_till_end / 8) + 1;
-    let len = STACK_SIZE / 8;
-    let stack_begin = stack_end - STACK_SIZE;
-    let stack =
-        unsafe { std::slice::from_raw_parts_mut(stack_begin as *mut usize, STACK_SIZE / 8) };
-
-    (&mut stack[len - num_64_till_end..]) as _
 }
