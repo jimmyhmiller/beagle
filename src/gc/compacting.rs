@@ -1,11 +1,10 @@
-use core::slice;
 use std::{ffi::c_void, io::Error, mem};
 
 use libc::{mprotect, vm_page_size};
 
 use crate::types::{BuiltInTypes, Header, HeapObject, Word};
 
-use super::{AllocateAction, Allocator, AllocatorOptions, StackMap};
+use super::{AllocateAction, Allocator, AllocatorOptions, StackMap, stack_walker::StackWalker};
 
 const DEFAULT_PAGE_COUNT: usize = 1024;
 // Aribtary number that should be changed when I have
@@ -268,51 +267,13 @@ impl CompactingHeap {
         }
     }
 
-    // Stolen from original compacting
     pub fn gather_roots(
         &mut self,
         stack_base: usize,
         stack_map: &StackMap,
         stack_pointer: usize,
     ) -> Vec<(usize, usize)> {
-        // I'm adding to the end of the stack I've allocated so I only need to go from the end
-        // til the current stack
-        let stack = get_live_stack(stack_base, stack_pointer);
-
-        let mut to_mark: Vec<usize> = Vec::with_capacity(128);
-        let mut roots: Vec<(usize, usize)> = Vec::with_capacity(36);
-
-        let mut i = 0;
-        while i < stack.len() {
-            let value = stack[i];
-
-            if let Some(details) = stack_map.find_stack_data(value) {
-                let frame_size = details.max_stack_size + details.number_of_locals;
-                let padding = frame_size % 2;
-                let active_frame_size = details.current_stack_size + details.number_of_locals;
-
-                let diff = frame_size - active_frame_size;
-
-                for (j, slot) in stack
-                    .iter()
-                    .enumerate()
-                    .skip(i + padding + 1)
-                    .skip(diff)
-                    .take(active_frame_size)
-                {
-                    if BuiltInTypes::is_heap_pointer(*slot) {
-                        roots.push((j, *slot));
-                        let untagged = BuiltInTypes::untag(*slot);
-                        debug_assert!(untagged % 8 == 0, "Pointer is not aligned");
-                        to_mark.push(*slot);
-                    }
-                }
-                i = i + padding + 1 + frame_size;
-                continue;
-            }
-            i += 1;
-        }
-        roots
+        StackWalker::collect_stack_roots(stack_base, stack_pointer, stack_map)
     }
 }
 
@@ -384,7 +345,7 @@ impl Allocator for CompactingHeap {
             let roots = self.gather_roots(*stack_base, stack_map, *stack_pointer);
             let new_roots = unsafe { self.copy_all(roots.iter().map(|x| x.1).collect()) };
 
-            let stack_buffer = get_live_stack(*stack_base, *stack_pointer);
+            let stack_buffer = StackWalker::get_live_stack_mut(*stack_base, *stack_pointer);
             for (i, (stack_offset, _)) in roots.iter().enumerate() {
                 debug_assert!(
                     BuiltInTypes::untag(new_roots[i]) % 8 == 0,
@@ -472,21 +433,5 @@ impl Allocator for CompactingHeap {
 
     fn get_allocation_options(&self) -> AllocatorOptions {
         self.options
-    }
-}
-
-unsafe fn buffer_between<'a, T>(start: *mut T, end: *mut T) -> &'a mut [T] {
-    unsafe {
-        let len = end.offset_from(start);
-        slice::from_raw_parts_mut(start, len as usize)
-    }
-}
-
-fn get_live_stack<'a>(stack_base: usize, stack_pointer: usize) -> &'a mut [usize] {
-    unsafe {
-        buffer_between(
-            (stack_pointer as *mut usize).sub(1),
-            stack_base as *mut usize,
-        )
     }
 }

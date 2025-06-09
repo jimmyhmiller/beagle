@@ -4,7 +4,7 @@ use libc::{mprotect, vm_page_size};
 
 use crate::types::{BuiltInTypes, HeapObject, Word};
 
-use super::{AllocateAction, Allocator, AllocatorOptions, STACK_SIZE, StackMap};
+use super::{AllocateAction, Allocator, AllocatorOptions, StackMap, stack_walker::StackWalker};
 
 const DEFAULT_PAGE_COUNT: usize = 1024;
 // Aribtary number that should be changed when I have
@@ -287,17 +287,6 @@ impl MarkAndSweep {
     }
 
     fn mark(&self, stack_base: usize, stack_map: &super::StackMap, stack_pointer: usize) {
-        // I'm adding to the end of the stack I've allocated so I only need to go from the end
-        // til the current stack
-        let stack_end = stack_base;
-        // let current_stack_pointer = current_stack_pointer & !0b111;
-        let distance_till_end = stack_end - stack_pointer;
-        let num_64_till_end = (distance_till_end / 8) + 1;
-        let stack_begin = stack_end - STACK_SIZE;
-        let stack =
-            unsafe { std::slice::from_raw_parts(stack_begin as *const usize, STACK_SIZE / 8) };
-        let stack = &stack[stack.len() - num_64_till_end..];
-
         let mut to_mark: Vec<HeapObject> = Vec::with_capacity(128);
 
         for (_, root) in self.namespace_roots.iter() {
@@ -307,41 +296,10 @@ impl MarkAndSweep {
             to_mark.push(HeapObject::from_tagged(*root));
         }
 
-        let mut i = 0;
-        while i < stack.len() {
-            let value = stack[i];
-
-            if let Some(details) = stack_map.find_stack_data(value) {
-                let mut frame_size = details.max_stack_size + details.number_of_locals;
-                if frame_size % 2 != 0 {
-                    frame_size += 1;
-                }
-
-                let bottom_of_frame = i + frame_size + 1;
-                let _top_of_frame = i + 1;
-
-                let active_frame = details.current_stack_size + details.number_of_locals;
-
-                i = bottom_of_frame;
-
-                for slot in stack
-                    .iter()
-                    .take(bottom_of_frame)
-                    .skip(bottom_of_frame - active_frame)
-                {
-                    if BuiltInTypes::is_heap_pointer(*slot) {
-                        // println!("{} {}", slot, BuiltInTypes::untag(*slot));
-                        let untagged = BuiltInTypes::untag(*slot);
-                        if untagged % 8 != 0 {
-                            panic!("Not aligned");
-                        }
-                        to_mark.push(HeapObject::from_tagged(*slot));
-                    }
-                }
-                continue;
-            }
-            i += 1;
-        }
+        // Use the new stack walker to find heap pointers
+        StackWalker::walk_stack_roots(stack_base, stack_pointer, stack_map, |_, pointer| {
+            to_mark.push(HeapObject::from_tagged(pointer));
+        });
 
         while let Some(object) = to_mark.pop() {
             if object.marked() {
