@@ -16,5 +16,6 @@ fn main() {
 }
 
 // Expect
-// null
+// before yield
+// done
 // test completed

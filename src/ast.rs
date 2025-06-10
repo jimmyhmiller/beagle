@@ -1164,10 +1164,17 @@ impl AstCompiler<'_> {
                 let index = self.ir.assign_new(index);
                 self.call("beagle.core/get", vec![array.into(), index.into()])
             }
-            Ast::DelimitHandle { .. } => {
-                // TODO: Implement delimited continuations
-                // For now, just return null to allow other tests to run
-                Value::Null
+            Ast::DelimitHandle { delimit_body, .. } => {
+                // Set continuation marker in current frame's first zero word
+                self.ir.set_continuation_marker();
+
+                // Compile the delimited body normally
+                let mut result = Value::Null;
+                for expr in delimit_body {
+                    result = self.call_compile(&expr);
+                }
+
+                result
             }
             Ast::If {
                 condition,

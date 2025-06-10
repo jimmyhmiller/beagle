@@ -238,6 +238,7 @@ mod header_layout_tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_marked_bit_position_compatibility() {
         // This test verifies that our marked bit position is compatible with 8-byte alignment
         assert!(
