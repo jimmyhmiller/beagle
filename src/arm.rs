@@ -6,6 +6,7 @@ use crate::{
         X30, ZERO_REGISTER,
     },
     types::BuiltInTypes,
+    ir::CONTINUATION_MARKER_PADDING_SIZE,
 };
 
 use std::collections::HashMap;
@@ -670,10 +671,12 @@ impl LowLevelArm {
 
     pub fn push_to_stack(&mut self, reg: Register) {
         self.increment_stack_size(1);
-        self.store_on_stack(reg, -(self.max_locals + self.stack_size))
+        // Account for continuation padding added in prelude
+        self.store_on_stack(reg, -(self.max_locals + self.stack_size + CONTINUATION_MARKER_PADDING_SIZE as i32))
     }
     pub fn store_local(&mut self, value: Register, offset: i32) {
-        self.store_on_stack(value, -(offset + 1));
+        // Account for continuation padding added in prelude
+        self.store_on_stack(value, -(offset + 1 + CONTINUATION_MARKER_PADDING_SIZE as i32));
     }
 
     pub fn load_from_stack(&mut self, destination: Register, offset: i32) {
@@ -706,7 +709,8 @@ impl LowLevelArm {
 
     pub fn pop_from_stack_indexed(&mut self, reg: Register, offset: i32) {
         self.increment_stack_size(-1);
-        self.load_from_stack(reg, -(offset + self.max_locals + 1))
+        // Account for continuation padding added in prelude
+        self.load_from_stack(reg, -(offset + self.max_locals + 1 + CONTINUATION_MARKER_PADDING_SIZE as i32))
     }
 
     pub fn pop_from_stack_indexed_raw(&mut self, reg: Register, offset: i32) {
@@ -715,11 +719,13 @@ impl LowLevelArm {
 
     pub fn pop_from_stack(&mut self, reg: Register) {
         self.increment_stack_size(-1);
-        self.load_from_stack(reg, -(self.max_locals + self.stack_size + 1))
+        // Account for continuation padding added in prelude
+        self.load_from_stack(reg, -(self.max_locals + self.stack_size + 1 + CONTINUATION_MARKER_PADDING_SIZE as i32))
     }
 
     pub fn load_local(&mut self, destination: Register, offset: i32) {
-        self.load_from_stack(destination, -(offset + 1));
+        // Account for continuation padding added in prelude
+        self.load_from_stack(destination, -(offset + 1 + CONTINUATION_MARKER_PADDING_SIZE as i32));
     }
 
     pub fn load_from_heap(&mut self, destination: Register, source: Register, offset: i32) {
@@ -1136,7 +1142,8 @@ impl LowLevelArm {
             sf: dest.sf(),
             rn: X29,
             rd: dest,
-            imm12: (self.max_locals + self.stack_size + 1) * 8,
+            // Account for continuation padding added in prelude
+            imm12: (self.max_locals + self.stack_size + 1 + CONTINUATION_MARKER_PADDING_SIZE as i32) * 8,
             sh: 0,
         });
         // TODO: This seems
@@ -1211,5 +1218,26 @@ impl LowLevelArm {
 
     pub fn current_position(&self) -> usize {
         self.instructions.len()
+    }
+
+    pub fn set_continuation_marker(&mut self) {
+        // Set bit 0 of the first zero word in current stack frame
+        // The first zero word is at X29 - 16 (X29 points to saved frame pointer, zeros are 2 words below)
+
+        // Load the address of the first zero word (X29 - 8)
+        let temp_reg = self.temporary_register();
+        self.sub_imm(temp_reg, X29, 8); // X29 - 8 bytes (first zero word)
+
+        // Load the current value at that location
+        let current_value_reg = self.temporary_register();
+        self.load_from_heap(current_value_reg, temp_reg, 0);
+
+        // Set bit 0 by ORing with 1
+        let one_reg = self.temporary_register();
+        self.mov(one_reg, 1);
+        self.or(current_value_reg, current_value_reg, one_reg);
+
+        // Store the modified value back
+        self.store_on_heap(temp_reg, current_value_reg, 0);
     }
 }

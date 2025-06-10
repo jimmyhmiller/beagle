@@ -11,11 +11,7 @@ use crate::register_allocation::linear_scan::LinearScan;
 use crate::types::BuiltInTypes;
 use crate::{arm::LowLevelArm, common::Label};
 
-/// Size of the stack frame prelude in 64-bit words  
-/// X29 points to [prev_X29][X30], and below that are [zero][zero] for delimit markers
-/// For stack arguments, we need to account for the distance from X29 to the previous frame
-/// TODO: When we re-enable zero padding, this should be 4 to account for the extra zeros
-const PRELUDE_SIZE_WORDS: isize = 2;
+pub const CONTINUATION_MARKER_PADDING_SIZE: isize = 2;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Encode, Decode)]
 pub enum Condition {
@@ -169,6 +165,7 @@ pub enum Instruction {
     Or(Value, Value, Value),
     Xor(Value, Value, Value),
     Label(Label),
+    SetContinuationMarker,
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -486,6 +483,9 @@ impl Instruction {
             Instruction::ExtendLifeTime(a) => {
                 get_register!(a)
             }
+            Instruction::SetContinuationMarker => {
+                vec![]
+            }
         }
     }
 
@@ -604,7 +604,8 @@ impl Instruction {
                 }
             }
 
-            Instruction::Jump(_) | Instruction::Breakpoint => {}
+            Instruction::Jump(_) | Instruction::Breakpoint | Instruction::SetContinuationMarker => {
+            }
         }
     }
 }
@@ -674,7 +675,7 @@ impl Ir {
 
     pub fn arg(&mut self, n: usize) -> Value {
         if n >= 8 {
-            return Value::Stack((n as isize) - 8 + PRELUDE_SIZE_WORDS);
+            return Value::Stack((n as isize) - 8 + CONTINUATION_MARKER_PADDING_SIZE);
         }
         let register = self.next_register(Some(n), true);
         Value::Register(register)
@@ -1777,6 +1778,9 @@ impl Ir {
                     lang.shift_right_imm(dest, value, BuiltInTypes::tag_size());
                     self.store_spill(dest, dest_spill, lang);
                 }
+                Instruction::SetContinuationMarker => {
+                    lang.set_continuation_marker();
+                }
             }
             let end_machine_code = lang.current_position();
             self.ir_to_machine_code_range.push((
@@ -2098,5 +2102,11 @@ impl Ir {
         self.labels.push(label);
         self.label_names.push(name.to_string());
         self.label_names.len() - 1
+    }
+
+    pub fn set_continuation_marker(&mut self) {
+        // Set bit 0 of the first zero word in current stack frame
+        // The first zero word is at X29 - 16 (X29 points to saved frame pointer, zeros are 2 words below)
+        self.instructions.push(Instruction::SetContinuationMarker);
     }
 }

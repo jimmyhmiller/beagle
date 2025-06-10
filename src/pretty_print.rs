@@ -452,6 +452,7 @@ impl PrettyPrint for Instruction {
                     value2.pretty_print()
                 )
             }
+            Instruction::SetContinuationMarker => "set_continuation_marker".to_string(),
         }
     }
 }
