@@ -1164,7 +1164,7 @@ impl AstCompiler<'_> {
                 let index = self.ir.assign_new(index);
                 self.call("beagle.core/get", vec![array.into(), index.into()])
             }
-            Ast::DelimitHandle { delimit_body, .. } => {
+            Ast::DelimitHandle { delimit_body, value, continuation, handler_body, .. } => {
                 // Set continuation marker in current frame's first zero word
                 self.ir.set_continuation_marker();
 
@@ -1173,6 +1173,37 @@ impl AstCompiler<'_> {
                 for expr in delimit_body {
                     result = self.call_compile(&expr);
                 }
+
+                // Jump around handler body
+                let skip_handler = self.ir.label("skip_handler");
+                self.ir.jump(skip_handler);
+
+                // Handler body starts here
+                let handler_start = self.ir.label("handler_start");
+                self.ir.write_label(handler_start);
+
+                // Set up handler parameter locals from X0 and X1
+                let value_reg = self.ir.arg(0); // X0
+                let value_local = self.find_or_insert_local(&value);
+                let value_reg = self.ir.assign_new(value_reg);
+                self.ir.store_local(value_local, value_reg.into());
+                self.insert_variable(value.clone(), VariableLocation::Local(value_local));
+
+                let continuation_reg = self.ir.arg(1); // X1
+                let continuation_local = self.find_or_insert_local(&continuation);
+                let continuation_reg = self.ir.assign_new(continuation_reg);
+                self.ir.store_local(continuation_local, continuation_reg.into());
+                self.insert_variable(continuation.clone(), VariableLocation::Local(continuation_local));
+
+                // Compile handler body
+                let mut handler_result = Value::Null;
+                for expr in handler_body {
+                    handler_result = self.call_compile(&expr);
+                }
+                self.ir.ret(handler_result);
+
+                // Continue here after skipping handler
+                self.ir.write_label(skip_handler);
 
                 result
             }
