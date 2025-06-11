@@ -382,6 +382,69 @@ fn print_stack(_stack_pointer: usize) {
     }
 }
 
+pub unsafe extern "C" fn yield_continuation(_stack_pointer: usize, value: usize) -> usize {
+    let runtime = get_runtime().get();
+    let stack_base = runtime.get_stack_base();
+    let stack_begin = stack_base - STACK_SIZE;
+
+    // Get the current frame pointer (X29) directly from the register
+    let mut current_frame_ptr = get_current_frame_pointer();
+    let mut frames_before_delimited = vec![];
+
+    let mut frame_count = 0;
+    const MAX_FRAMES: usize = 100; // Prevent infinite loops
+
+    while frame_count < MAX_FRAMES && current_frame_ptr != 0 {
+        // Validate frame pointer is within stack bounds
+        if current_frame_ptr < stack_begin || current_frame_ptr >= stack_base {
+            break;
+        }
+
+        // Frame layout in our calling convention:
+        // [previous_X29] [X30/return_addr] <- X29 points here
+        // [zero/marker] [zero] [locals...]
+        let frame = current_frame_ptr as *const usize;
+        let previous_frame_ptr = unsafe { *frame.offset(0) }; // Previous X29
+        let return_addr = unsafe { *frame.offset(1) };
+        
+        // Store this frame info before checking for delimited marker
+        frames_before_delimited.push((current_frame_ptr, previous_frame_ptr, return_addr));
+        
+        // Check the first continuation marker at X29 - 16 (first zero word)
+        let first_marker_ptr = (current_frame_ptr as isize - 16) as *const usize;
+        let first_marker = unsafe { *first_marker_ptr };
+        
+        // Check if the least significant bit is set (continuation marker)
+        if (first_marker & 1) == 1 {
+            // Found delimited continuation frame
+            // Return from the test_yield frame (second frame back) to continue in delimit block
+            if frames_before_delimited.len() >= 2 {
+                let (target_frame, _prev, _ret_addr) = frames_before_delimited[frames_before_delimited.len() - 2];
+                unsafe {
+                    std::arch::asm!(
+                        "mov x0, {return_value}",
+                        "mov sp, {target_frame}",
+                        "ldp x29, x30, [sp], #16",
+                        "ret",
+                        return_value = in(reg) value,
+                        target_frame = in(reg) target_frame,
+                        options(noreturn)
+                    );
+                }
+            }
+            
+            // Fallback if not enough frames
+            return value;
+        }
+
+        // Move to the previous frame
+        current_frame_ptr = previous_frame_ptr;
+        frame_count += 1;
+    }
+    // If no delimited frame found, just return the value
+    value
+}
+
 pub unsafe extern "C" fn gc(stack_pointer: usize) -> usize {
     let runtime = get_runtime().get_mut();
     runtime.gc(stack_pointer);
@@ -1335,6 +1398,8 @@ impl Runtime {
         self.add_builtin_function("beagle.builtin/assert!", placeholder as *const u8, false, 0)?;
 
         self.add_builtin_function("beagle.core/gc", gc as *const u8, true, 1)?;
+
+        self.add_builtin_function("beagle.core/yield", yield_continuation as *const u8, true, 2)?;
 
         self.add_builtin_function(
             "beagle.builtin/gc_add_root",

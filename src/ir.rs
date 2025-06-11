@@ -959,6 +959,7 @@ impl Ir {
         destination.into()
     }
 
+
     pub fn bitwise_xor(&mut self, a: Value, b: Value) -> Value {
         let a = self.assign_new(a);
         let b = self.assign_new(b);
@@ -1809,6 +1810,7 @@ impl Ir {
         register.into()
     }
 
+
     pub fn heap_store<A, B>(&mut self, dest: A, source: B)
     where
         A: Into<Value>,
@@ -2109,4 +2111,5 @@ impl Ir {
         // The first zero word is at X29 - 16 (X29 points to saved frame pointer, zeros are 2 words below)
         self.instructions.push(Instruction::SetContinuationMarker);
     }
+
 }

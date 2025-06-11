@@ -660,6 +660,7 @@ impl LowLevelArm {
         self.instructions.push(jump(destination.index as u32));
     }
 
+
     pub fn store_on_stack(&mut self, reg: Register, offset: i32) {
         self.instructions.push(ArmAsm::SturGen {
             size: 0b11,
@@ -1224,9 +1225,9 @@ impl LowLevelArm {
         // Set bit 0 of the first zero word in current stack frame
         // The first zero word is at X29 - 16 (X29 points to saved frame pointer, zeros are 2 words below)
 
-        // Load the address of the first zero word (X29 - 8)
+        // Load the address of the first zero word (X29 - 16)
         let temp_reg = self.temporary_register();
-        self.sub_imm(temp_reg, X29, 8); // X29 - 8 bytes (first zero word)
+        self.sub_imm(temp_reg, X29, 16); // X29 - 16 bytes (first zero word)
 
         // Load the current value at that location
         let current_value_reg = self.temporary_register();
@@ -1240,4 +1241,5 @@ impl LowLevelArm {
         // Store the modified value back
         self.store_on_heap(temp_reg, current_value_reg, 0);
     }
+
 }
