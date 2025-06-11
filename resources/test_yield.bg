@@ -1,0 +1,21 @@
+namespace test_yield
+
+
+fn test_yield() {
+    let result = yield("yielded value")
+    "after yield: "
+}
+
+
+fn main() {
+    delimit {
+        let result = test_yield()
+        println("After yield")
+        println(result)
+    } handle (value, resume) {
+        println("Handler caught:")
+        println(value)
+        "handled"
+    }
+    "done"
+}

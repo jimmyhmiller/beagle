@@ -1,0 +1,14 @@
+namespace test_adr
+
+fn test_adr() {
+    println("Testing ADR instruction")
+    "test complete"
+}
+
+fn main() {
+    test_adr()
+}
+
+// Expect
+// Testing ADR instruction
+// test complete

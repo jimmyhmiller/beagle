@@ -1,0 +1,21 @@
+namespace test_simple_yield
+
+fn test_yield() {
+    println("Before yield")
+    yield("test_value")
+    println("After yield - should not see this")
+}
+
+fn main() {
+    delimit {
+        test_yield()
+    } handle (value, resume) {
+        println("HANDLER EXECUTED")
+        value
+    }
+}
+
+// Expect
+// Before yield
+// HANDLER EXECUTED
+// test_value
