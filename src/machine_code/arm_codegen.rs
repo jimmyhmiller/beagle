@@ -202,6 +202,14 @@ pub const ZERO_REGISTER: Register = Register {
 };
 #[derive(Debug)]
 pub enum ArmAsm {
+    /// ADR -- A64
+    /// Form PC-relative address
+    /// ADR  <Xd>, <label>
+    Adr {
+        immlo: i32,
+        immhi: i32,
+        rd: Register,
+    },
     /// ADD (immediate) -- A64
     /// Add (immediate)
     /// ADD  <Wd|WSP>, <Wn|WSP>, #<imm>{, <shift>}
@@ -729,6 +737,12 @@ pub enum StrImmGenSelector {
 impl ArmAsm {
     pub fn encode(&self) -> u32 {
         match self {
+            ArmAsm::Adr { immlo, immhi, rd } => {
+                0b0_00_10000_0000000000000000000_00000
+                    | ((*immlo as u32) << 29)
+                    | ((*immhi as u32) << 5)
+                    | (rd << 0)
+            }
             ArmAsm::AddAddsubImm {
                 sf,
                 sh,

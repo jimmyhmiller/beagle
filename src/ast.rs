@@ -1164,9 +1164,19 @@ impl AstCompiler<'_> {
                 let index = self.ir.assign_new(index);
                 self.call("beagle.core/get", vec![array.into(), index.into()])
             }
-            Ast::DelimitHandle { delimit_body, value, continuation, handler_body, .. } => {
-                // Set continuation marker in current frame's first zero word
-                self.ir.set_continuation_marker();
+            Ast::DelimitHandle {
+                delimit_body,
+                value,
+                continuation,
+                handler_body,
+                ..
+            } => {
+                // Store a simple marker for now, we'll enhance this step by step
+
+                // Handler body starts here - we need the label first to get its address
+                let handler_start = self.ir.label("handler_start");
+
+                self.ir.set_continuation_handler_address(handler_start);
 
                 // Compile the delimited body normally
                 let mut result = Value::Null;
@@ -1178,8 +1188,7 @@ impl AstCompiler<'_> {
                 let skip_handler = self.ir.label("skip_handler");
                 self.ir.jump(skip_handler);
 
-                // Handler body starts here
-                let handler_start = self.ir.label("handler_start");
+                // Write the handler label here
                 self.ir.write_label(handler_start);
 
                 // Set up handler parameter locals from X0 and X1
@@ -1192,8 +1201,12 @@ impl AstCompiler<'_> {
                 let continuation_reg = self.ir.arg(1); // X1
                 let continuation_local = self.find_or_insert_local(&continuation);
                 let continuation_reg = self.ir.assign_new(continuation_reg);
-                self.ir.store_local(continuation_local, continuation_reg.into());
-                self.insert_variable(continuation.clone(), VariableLocation::Local(continuation_local));
+                self.ir
+                    .store_local(continuation_local, continuation_reg.into());
+                self.insert_variable(
+                    continuation.clone(),
+                    VariableLocation::Local(continuation_local),
+                );
 
                 // Compile handler body
                 let mut handler_result = Value::Null;

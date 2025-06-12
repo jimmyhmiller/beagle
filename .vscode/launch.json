@@ -15,14 +15,14 @@
                     // "--profile=release-with-debug",
                     "--bin=main",
                     "--package=main",
-                    "--features=generational,thread-safe,json"
+                    "--features=generational,thread-safe"
                 ],
                 "filter": {
                     "name": "main",
                     "kind": "bin"
                 }
             },
-            "args": ["resources/delimit_syntax_test.bg"],
+            "args": ["resources/test_yield.bg"],
             "cwd": "${workspaceFolder}",
             "preRunCommands": [
                 "command script import .vscode/rust_prettifier_for_lldb.py"
