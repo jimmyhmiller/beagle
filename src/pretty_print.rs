@@ -453,6 +453,9 @@ impl PrettyPrint for Instruction {
                 )
             }
             Instruction::SetContinuationMarker => "set_continuation_marker".to_string(),
+            Instruction::SetContinuationHandlerAddress(label) => {
+                format!("set_continuation_handler_address {}", label.index)
+            }
         }
     }
 }
@@ -538,6 +541,9 @@ impl PrettyPrint for Condition {
 impl PrettyPrint for ArmAsm {
     fn pretty_print(&self) -> String {
         match self {
+            ArmAsm::Adr { immlo, immhi, rd } => {
+                format!("adr {}, #{}", rd.pretty_print(), (*immhi << 2) | *immlo)
+            }
             ArmAsm::AddAddsubImm {
                 sf: _,
                 sh,

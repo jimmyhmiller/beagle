@@ -166,6 +166,7 @@ pub enum Instruction {
     Xor(Value, Value, Value),
     Label(Label),
     SetContinuationMarker,
+    SetContinuationHandlerAddress(Label),
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -486,6 +487,9 @@ impl Instruction {
             Instruction::SetContinuationMarker => {
                 vec![]
             }
+            Instruction::SetContinuationHandlerAddress(_) => {
+                vec![]
+            }
         }
     }
 
@@ -604,8 +608,10 @@ impl Instruction {
                 }
             }
 
-            Instruction::Jump(_) | Instruction::Breakpoint | Instruction::SetContinuationMarker => {
-            }
+            Instruction::Jump(_)
+            | Instruction::Breakpoint
+            | Instruction::SetContinuationMarker
+            | Instruction::SetContinuationHandlerAddress(_) => {}
         }
     }
 }
@@ -958,7 +964,6 @@ impl Ir {
             .push(Instruction::Or(destination.into(), a.into(), b.into()));
         destination.into()
     }
-
 
     pub fn bitwise_xor(&mut self, a: Value, b: Value) -> Value {
         let a = self.assign_new(a);
@@ -1782,6 +1787,9 @@ impl Ir {
                 Instruction::SetContinuationMarker => {
                     lang.set_continuation_marker();
                 }
+                Instruction::SetContinuationHandlerAddress(handler_label) => {
+                    lang.set_continuation_handler_address(ir_label_to_lang_label[handler_label]);
+                }
             }
             let end_machine_code = lang.current_position();
             self.ir_to_machine_code_range.push((
@@ -1809,7 +1817,6 @@ impl Ir {
         ));
         register.into()
     }
-
 
     pub fn heap_store<A, B>(&mut self, dest: A, source: B)
     where
@@ -2112,4 +2119,12 @@ impl Ir {
         self.instructions.push(Instruction::SetContinuationMarker);
     }
 
+    pub fn set_continuation_handler_address(&mut self, handler_label: Label) {
+        // Store handler address in continuation marker slot
+        // This will be compiled to ARM instructions that:
+        // 1. Use ADR to get handler address relative to PC
+        // 2. Store that raw address in the continuation marker slot
+        self.instructions
+            .push(Instruction::SetContinuationHandlerAddress(handler_label));
+    }
 }
