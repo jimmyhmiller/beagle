@@ -1,12 +1,12 @@
 use crate::{
     builtins::debugger,
+    ir::CONTINUATION_MARKER_PADDING_SIZE,
     machine_code::arm_codegen::{
         ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, SP, Size, StpGenSelector,
         StrImmGenSelector, X0, X9, X10, X11, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29,
         X30, ZERO_REGISTER,
     },
     types::BuiltInTypes,
-    ir::CONTINUATION_MARKER_PADDING_SIZE,
 };
 
 use std::collections::HashMap;
@@ -16,6 +16,16 @@ use crate::{Data, Message, common::Label, ir::Condition};
 pub enum FmovDirection {
     FromGeneralToFloat,
     FromFloatToGeneral,
+}
+
+pub fn adr(destination: Register, label_index: usize) -> ArmAsm {
+    // For now, store the label index in immhi, we'll patch this later
+    // immlo will be set to 0 for now
+    ArmAsm::Adr {
+        immlo: 0,
+        immhi: label_index as i32,
+        rd: destination,
+    }
 }
 
 pub fn mov_imm(destination: Register, input: u16) -> ArmAsm {
@@ -565,15 +575,9 @@ impl LowLevelArm {
         self.instructions
             .push(store_pair(reg1, reg2, destination, offset));
     }
-    pub fn load_pair(
-        &mut self,
-        reg1: Register,
-        reg2: Register,
-        destination: Register,
-        offset: i32,
-    ) {
+    pub fn load_pair(&mut self, reg1: Register, reg2: Register, location: Register, offset: i32) {
         self.instructions
-            .push(load_pair(reg1, reg2, destination, offset));
+            .push(load_pair(reg1, reg2, location, offset));
     }
     pub fn add(&mut self, destination: Register, a: Register, b: Register) {
         self.instructions.push(add(destination, a, b));
@@ -660,7 +664,6 @@ impl LowLevelArm {
         self.instructions.push(jump(destination.index as u32));
     }
 
-
     pub fn store_on_stack(&mut self, reg: Register, offset: i32) {
         self.instructions.push(ArmAsm::SturGen {
             size: 0b11,
@@ -673,11 +676,17 @@ impl LowLevelArm {
     pub fn push_to_stack(&mut self, reg: Register) {
         self.increment_stack_size(1);
         // Account for continuation padding added in prelude
-        self.store_on_stack(reg, -(self.max_locals + self.stack_size + CONTINUATION_MARKER_PADDING_SIZE as i32))
+        self.store_on_stack(
+            reg,
+            -(self.max_locals + self.stack_size + CONTINUATION_MARKER_PADDING_SIZE as i32),
+        )
     }
     pub fn store_local(&mut self, value: Register, offset: i32) {
         // Account for continuation padding added in prelude
-        self.store_on_stack(value, -(offset + 1 + CONTINUATION_MARKER_PADDING_SIZE as i32));
+        self.store_on_stack(
+            value,
+            -(offset + 1 + CONTINUATION_MARKER_PADDING_SIZE as i32),
+        );
     }
 
     pub fn load_from_stack(&mut self, destination: Register, offset: i32) {
@@ -711,7 +720,10 @@ impl LowLevelArm {
     pub fn pop_from_stack_indexed(&mut self, reg: Register, offset: i32) {
         self.increment_stack_size(-1);
         // Account for continuation padding added in prelude
-        self.load_from_stack(reg, -(offset + self.max_locals + 1 + CONTINUATION_MARKER_PADDING_SIZE as i32))
+        self.load_from_stack(
+            reg,
+            -(offset + self.max_locals + 1 + CONTINUATION_MARKER_PADDING_SIZE as i32),
+        )
     }
 
     pub fn pop_from_stack_indexed_raw(&mut self, reg: Register, offset: i32) {
@@ -721,12 +733,18 @@ impl LowLevelArm {
     pub fn pop_from_stack(&mut self, reg: Register) {
         self.increment_stack_size(-1);
         // Account for continuation padding added in prelude
-        self.load_from_stack(reg, -(self.max_locals + self.stack_size + 1 + CONTINUATION_MARKER_PADDING_SIZE as i32))
+        self.load_from_stack(
+            reg,
+            -(self.max_locals + self.stack_size + 1 + CONTINUATION_MARKER_PADDING_SIZE as i32),
+        )
     }
 
     pub fn load_local(&mut self, destination: Register, offset: i32) {
         // Account for continuation padding added in prelude
-        self.load_from_stack(destination, -(offset + 1 + CONTINUATION_MARKER_PADDING_SIZE as i32));
+        self.load_from_stack(
+            destination,
+            -(offset + 1 + CONTINUATION_MARKER_PADDING_SIZE as i32),
+        );
     }
 
     pub fn load_from_heap(&mut self, destination: Register, source: Register, offset: i32) {
@@ -925,6 +943,36 @@ impl LowLevelArm {
                             let relative_position =
                                 *label_location as isize - instruction_index as isize;
                             *imm26 = relative_position as i32;
+                        }
+                        None => {
+                            println!("Couldn't find label {:?}", self.labels.get(label_index));
+                        }
+                    }
+                }
+                ArmAsm::Adr {
+                    immlo,
+                    immhi,
+                    rd: _,
+                } => {
+                    let label_index = *immhi as usize;
+                    let label_location = self.label_locations.get(&label_index);
+                    match label_location {
+                        Some(label_location) => {
+                            let relative_position =
+                                *label_location as isize - instruction_index as isize;
+                            // ADR uses byte offsets, so multiply by 4 (instruction size)
+                            let byte_offset = (relative_position * 4) as i32;
+                            println!(
+                                "ADR patching: label_index={}, instruction_index={}, label_location={}, relative_position={}, byte_offset={}",
+                                label_index,
+                                instruction_index,
+                                label_location,
+                                relative_position,
+                                byte_offset
+                            );
+                            // ADR uses a 21-bit signed immediate split across immlo (2 bits) and immhi (19 bits)
+                            *immlo = byte_offset & 0x3; // Lower 2 bits
+                            *immhi = (byte_offset >> 2) & 0x7FFFF; // Upper 19 bits
                         }
                         None => {
                             println!("Couldn't find label {:?}", self.labels.get(label_index));
@@ -1144,7 +1192,11 @@ impl LowLevelArm {
             rn: X29,
             rd: dest,
             // Account for continuation padding added in prelude
-            imm12: (self.max_locals + self.stack_size + 1 + CONTINUATION_MARKER_PADDING_SIZE as i32) * 8,
+            imm12: (self.max_locals
+                + self.stack_size
+                + 1
+                + CONTINUATION_MARKER_PADDING_SIZE as i32)
+                * 8,
             sh: 0,
         });
         // TODO: This seems
@@ -1221,6 +1273,26 @@ impl LowLevelArm {
         self.instructions.len()
     }
 
+    pub fn load_label_address(&mut self, destination: Register, label: Label) {
+        self.instructions.push(adr(destination, label.index));
+    }
+
+    pub fn set_continuation_handler_address(&mut self, handler_label: Label) {
+        // Store handler address in continuation marker slot
+        // Steps 1-3: Get relative offset, add to PC, store raw address
+
+        // Get handler address using ADR instruction
+        let handler_addr_reg = self.temporary_register();
+        self.load_label_address(handler_addr_reg, handler_label);
+
+        // Load the address of the first zero word (X29 - 16)
+        let marker_slot_reg = self.temporary_register();
+        self.sub_imm(marker_slot_reg, X29, 16); // X29 - 16 bytes (first zero word)
+
+        // Store the raw handler address (untagged) in the marker slot
+        self.store_on_heap(marker_slot_reg, handler_addr_reg, 0);
+    }
+
     pub fn set_continuation_marker(&mut self) {
         // Set bit 0 of the first zero word in current stack frame
         // The first zero word is at X29 - 16 (X29 points to saved frame pointer, zeros are 2 words below)
@@ -1241,5 +1313,4 @@ impl LowLevelArm {
         // Store the modified value back
         self.store_on_heap(temp_reg, current_value_reg, 0);
     }
-
 }
