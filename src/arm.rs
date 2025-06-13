@@ -1,6 +1,5 @@
 use crate::{
     builtins::debugger,
-    ir::CONTINUATION_MARKER_PADDING_SIZE,
     machine_code::arm_codegen::{
         ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, SP, Size, StpGenSelector,
         StrImmGenSelector, X0, X9, X10, X11, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29,
@@ -675,17 +674,17 @@ impl LowLevelArm {
 
     pub fn push_to_stack(&mut self, reg: Register) {
         self.increment_stack_size(1);
-        // Account for continuation padding added in prelude
+        // Continuation padding is already allocated in prelude, no need to add it here
         self.store_on_stack(
             reg,
-            -(self.max_locals + self.stack_size + CONTINUATION_MARKER_PADDING_SIZE as i32),
+            -(self.max_locals + self.stack_size),
         )
     }
     pub fn store_local(&mut self, value: Register, offset: i32) {
-        // Account for continuation padding added in prelude
+        // Continuation padding is already allocated in prelude, no need to add it here
         self.store_on_stack(
             value,
-            -(offset + 1 + CONTINUATION_MARKER_PADDING_SIZE as i32),
+            -(offset + 1),
         );
     }
 
@@ -719,10 +718,10 @@ impl LowLevelArm {
 
     pub fn pop_from_stack_indexed(&mut self, reg: Register, offset: i32) {
         self.increment_stack_size(-1);
-        // Account for continuation padding added in prelude
+        // Continuation padding is already allocated in prelude, no need to add it here
         self.load_from_stack(
             reg,
-            -(offset + self.max_locals + 1 + CONTINUATION_MARKER_PADDING_SIZE as i32),
+            -(offset + self.max_locals + 1),
         )
     }
 
@@ -732,18 +731,18 @@ impl LowLevelArm {
 
     pub fn pop_from_stack(&mut self, reg: Register) {
         self.increment_stack_size(-1);
-        // Account for continuation padding added in prelude
+        // Continuation padding is already allocated in prelude, no need to add it here
         self.load_from_stack(
             reg,
-            -(self.max_locals + self.stack_size + 1 + CONTINUATION_MARKER_PADDING_SIZE as i32),
+            -(self.max_locals + self.stack_size + 1),
         )
     }
 
     pub fn load_local(&mut self, destination: Register, offset: i32) {
-        // Account for continuation padding added in prelude
+        // Continuation padding is already allocated in prelude, no need to add it here
         self.load_from_stack(
             destination,
-            -(offset + 1 + CONTINUATION_MARKER_PADDING_SIZE as i32),
+            -(offset + 1),
         );
     }
 
@@ -1184,11 +1183,10 @@ impl LowLevelArm {
             sf: dest.sf(),
             rn: X29,
             rd: dest,
-            // Account for continuation padding added in prelude
+            // Continuation padding is already allocated in prelude, no need to add it here
             imm12: (self.max_locals
                 + self.stack_size
-                + 1
-                + CONTINUATION_MARKER_PADDING_SIZE as i32)
+                + 1)
                 * 8,
             sh: 0,
         });

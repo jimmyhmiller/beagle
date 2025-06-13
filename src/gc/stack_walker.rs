@@ -42,14 +42,14 @@ impl StackWalker {
                     frame_size += 1;
                 }
 
-                // Account for continuation padding for delimited continuations
+                // Account for continuation padding that's physically allocated in prelude
+                // The padding is allocated but not added to local calculations anymore
                 let bottom_of_frame =
                     i + frame_size + 1 + CONTINUATION_MARKER_PADDING_SIZE as usize;
-                // Since locals are now stored lower due to continuation padding,
-                // we need to scan more words to find them
+                // Active frame size includes locals and current stack, but padding is already
+                // accounted for in the bottom_of_frame calculation
                 let active_frame = details.current_stack_size
-                    + details.number_of_locals
-                    + CONTINUATION_MARKER_PADDING_SIZE as usize;
+                    + details.number_of_locals;
 
                 i = bottom_of_frame;
 
