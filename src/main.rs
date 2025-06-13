@@ -1,6 +1,6 @@
 #![allow(clippy::match_like_matches_macro)]
 #![allow(clippy::missing_safety_doc)]
-use crate::machine_code::arm_codegen::{SP, X0, X1, X2, X3, X4, X10, ZERO_REGISTER};
+use crate::machine_code::arm_codegen::{SP, X0, X1, X2, X3, X4, X5, X6, X7, X8, X10, X29, X30, ZERO_REGISTER};
 use arm::LowLevelArm;
 use bincode::{Decode, Encode, config::standard};
 use clap::{Parser as ClapParser, command};
@@ -155,6 +155,79 @@ fn compile_trampoline(runtime: &mut Runtime) {
         .unwrap();
 
     let function = runtime.get_function_by_name_mut("trampoline").unwrap();
+    function.is_builtin = true;
+}
+
+fn compile_yield_continuation(runtime: &mut Runtime) {
+    let mut lang = LowLevelArm::new();
+
+    lang.prelude();
+
+    // Parameters: x0 = _stack_pointer (unused), x1 = value
+    // We need to preserve the value in x1 for later use
+    lang.mov_reg(X2, X1); // Save value in x2
+
+    // Get current frame pointer (x29) into x3
+    lang.mov_reg(X3, X29);
+
+    // Load first_beagle_frame = *(x29) into x4
+    lang.load_from_heap(X4, X3, 0);
+
+    // current_frame = first_beagle_frame
+    lang.mov_reg(X5, X4); // x5 = current_frame
+    lang.mov_reg(X8, X5); // x8 = previous_frame (start with same as current)
+    
+    // Create loop label
+    let loop_start = lang.new_label("loop_start");
+    lang.write_label(loop_start);
+
+    // Check if marker: load value from [current_frame - 16] into x6
+    // Calculate current_frame - 16 first, then load from that address
+    lang.mov(X7, 16);
+    lang.sub(X7, X5, X7); // X7 = current_frame - 16
+    lang.load_from_heap(X6, X7, 0); // Load from (current_frame - 16)
+    
+    // Compare with 0
+    lang.compare(X6, ZERO_REGISTER);
+    
+    // If zero, continue loop
+    let continue_loop = lang.new_label("continue_loop");
+    lang.jump_equal(continue_loop);
+    
+    // Found marker! x6 contains the return address
+    // Set up for continuation jump:
+    // x0 = value (from x2)
+    // x30 = ret_address (from x6) 
+    // x29 = current_frame (from x5)
+    // sp = frame_top = previous_frame + 16
+    
+    lang.mov_reg(X0, X2);           // x0 = value
+    lang.mov_reg(X30, X6);          // x30 = ret_address  
+    lang.mov_reg(X29, X5);          // x29 = current_frame
+    lang.mov(X3, 16);               // load 16 into X3  
+    lang.add(X3, X8, X3);           // x3 = previous_frame + 16
+    lang.mov_reg(SP, X3);           // sp = previous_frame + 16
+    
+    // Jump to continuation
+    lang.ret();
+    
+    // Continue loop: update frame pointers
+    lang.write_label(continue_loop);
+    
+    // previous_frame = current_frame
+    lang.mov_reg(X8, X5);
+    
+    // current_frame = *(current_frame) - load next frame
+    lang.load_from_heap(X5, X5, 0);
+    
+    // Jump back to loop start  
+    lang.jump(loop_start);
+
+    runtime
+        .add_function_mark_executable("yield_continuation_v2".to_string(), &lang.compile_directly(), 0, 2)
+        .unwrap();
+
+    let function = runtime.get_function_by_name_mut("yield_continuation_v2").unwrap();
     function.is_builtin = true;
 }
 
@@ -428,6 +501,7 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     runtime.start_compiler_thread();
 
     compile_trampoline(runtime);
+    compile_yield_continuation(runtime);
     compile_save_volatile_registers(runtime);
     compile_save_volatile_registers2(runtime);
 

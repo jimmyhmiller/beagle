@@ -167,6 +167,8 @@ pub enum Instruction {
     Label(Label),
     SetContinuationMarker,
     SetContinuationHandlerAddress(Label),
+    DelimitHandlerValue(Value),
+    DelimitHandlerContinuation(Value),
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -490,6 +492,12 @@ impl Instruction {
             Instruction::SetContinuationHandlerAddress(_) => {
                 vec![]
             }
+            Instruction::DelimitHandlerValue(dest) => {
+                get_register!(dest)
+            }
+            Instruction::DelimitHandlerContinuation(dest) => {
+                get_register!(dest)
+            }
         }
     }
 
@@ -612,6 +620,10 @@ impl Instruction {
             | Instruction::Breakpoint
             | Instruction::SetContinuationMarker
             | Instruction::SetContinuationHandlerAddress(_) => {}
+            Instruction::DelimitHandlerValue(dest) 
+            | Instruction::DelimitHandlerContinuation(dest) => {
+                replace_register!(dest, old_register, new_register);
+            }
         }
     }
 }
@@ -1790,6 +1802,20 @@ impl Ir {
                 Instruction::SetContinuationHandlerAddress(handler_label) => {
                     lang.set_continuation_handler_address(ir_label_to_lang_label[handler_label]);
                 }
+                Instruction::DelimitHandlerValue(dest) => {
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
+                    // Move the handler value from x0 to destination register
+                    lang.mov_reg(dest, lang.arg(0));
+                    self.store_spill(dest, dest_spill, lang);
+                }
+                Instruction::DelimitHandlerContinuation(dest) => {
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, lang);
+                    // Move the continuation from x1 to destination register
+                    lang.mov_reg(dest, lang.arg(1));
+                    self.store_spill(dest, dest_spill, lang);
+                }
             }
             let end_machine_code = lang.current_position();
             self.ir_to_machine_code_range.push((
@@ -2126,5 +2152,21 @@ impl Ir {
         // 2. Store that raw address in the continuation marker slot
         self.instructions
             .push(Instruction::SetContinuationHandlerAddress(handler_label));
+    }
+
+    pub fn delimit_handler_value(&mut self) -> Value {
+        // Get the handler value from x0
+        let dest = self.volatile_register().into();
+        self.instructions
+            .push(Instruction::DelimitHandlerValue(dest));
+        dest
+    }
+
+    pub fn delimit_handler_continuation(&mut self) -> Value {
+        // Get the continuation from x1
+        let dest = self.volatile_register().into();
+        self.instructions
+            .push(Instruction::DelimitHandlerContinuation(dest));
+        dest
     }
 }
