@@ -1192,13 +1192,13 @@ impl AstCompiler<'_> {
                 self.ir.write_label(handler_start);
 
                 // Set up handler parameter locals from X0 and X1
-                let value_reg = self.ir.arg(0); // X0
+                let value_reg = self.ir.delimit_handler_value(); // X0
                 let value_local = self.find_or_insert_local(&value);
                 let value_reg = self.ir.assign_new(value_reg);
                 self.ir.store_local(value_local, value_reg.into());
                 self.insert_variable(value.clone(), VariableLocation::Local(value_local));
 
-                let continuation_reg = self.ir.arg(1); // X1
+                let continuation_reg = self.ir.delimit_handler_continuation(); // X1
                 let continuation_local = self.find_or_insert_local(&continuation);
                 let continuation_reg = self.ir.assign_new(continuation_reg);
                 self.ir
