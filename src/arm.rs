@@ -866,6 +866,7 @@ impl LowLevelArm {
     }
 
     pub fn compile_directly(&mut self) -> Vec<u8> {
+        self.patch_labels();
         let bytes = self
             .instructions
             .iter()
@@ -962,14 +963,6 @@ impl LowLevelArm {
                                 *label_location as isize - instruction_index as isize;
                             // ADR uses byte offsets, so multiply by 4 (instruction size)
                             let byte_offset = (relative_position * 4) as i32;
-                            println!(
-                                "ADR patching: label_index={}, instruction_index={}, label_location={}, relative_position={}, byte_offset={}",
-                                label_index,
-                                instruction_index,
-                                label_location,
-                                relative_position,
-                                byte_offset
-                            );
                             // ADR uses a 21-bit signed immediate split across immlo (2 bits) and immhi (19 bits)
                             *immlo = byte_offset & 0x3; // Lower 2 bits
                             *immhi = (byte_offset >> 2) & 0x7FFFF; // Upper 19 bits

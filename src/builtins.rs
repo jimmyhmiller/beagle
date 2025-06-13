@@ -379,64 +379,6 @@ fn print_stack(_stack_pointer: usize) {
     }
 }
 
-fn check_if_marker(address: usize) -> Option<usize> {
-    let value = unsafe { *((address - 16) as *const usize) };
-    if value != 0 {
-        return Some(value);
-    }
-    None
-}
-
-pub unsafe extern "C" fn yield_continuation(_stack_pointer: usize, value: usize) -> usize {
-    // Get the current frame pointer (X29) directly from the register
-    let fp: usize;
-    let current_x29 = unsafe {
-        asm!(
-            "mov {0}, x29",
-            out(reg) fp
-        );
-        fp
-    };
-
-    let first_beagle_frame = unsafe { *(current_x29 as *const usize) };
-
-    let mut current_frame = first_beagle_frame;
-    let mut frame_top = current_frame + 16;
-    // Not 100% sure this is right but righter than it has been
-    loop {
-        if let Some(ret_address) = check_if_marker(current_frame) {
-            // We are now going to set x30 to ret_address
-            // set sp to frame_top
-            // set x29 to current_frame
-            // Then return
-            unsafe {
-                // TODO: I need my IR to actually grab things from x0
-                asm!(
-                    "mov x0, {3}",
-                    "mov x30, {0}",
-                    "mov sp, {1}",
-                    "mov x29, {2}",
-                    "ret",
-                    in(reg) ret_address,
-                    in(reg) frame_top,
-                    in(reg) current_frame,
-                    in(reg) value,
-                );
-            }
-        }
-        frame_top = current_frame + 16;
-        current_frame = unsafe { *(current_frame as *const usize) };
-    }
-
-    // We are going to walk the stack.
-    // We find the delimited frame by looking for
-    // a non-zero value -2 offset from the frame
-    // Then we need to set our X29 to the value of prior frame
-    // we need to set our SP to the top of the frame so just below the location
-    // of the previous x29 (not the value it points to)
-    // We need to set our x30 (return address) to the value we find -2 from the frame
-    // Then we return
-}
 
 pub unsafe extern "C" fn gc(stack_pointer: usize) -> usize {
     let runtime = get_runtime().get_mut();
@@ -1392,12 +1334,17 @@ impl Runtime {
 
         self.add_builtin_function("beagle.core/gc", gc as *const u8, true, 1)?;
 
-        self.add_builtin_function(
-            "beagle.core/yield",
-            yield_continuation as *const u8,
-            true,
-            2,
-        )?;
+        // Use machine code implementation to debug
+        if let Some(yield_v2_fn) = self.get_function_by_name("yield_continuation_v2") {
+            let yield_v2_ptr = self.get_pointer(yield_v2_fn).unwrap();
+            
+            self.add_builtin_function(
+                "beagle.core/yield",
+                yield_v2_ptr,
+                true,
+                2,
+            )?;
+        }
 
         self.add_builtin_function(
             "beagle.builtin/gc_add_root",
