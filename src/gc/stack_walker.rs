@@ -48,8 +48,7 @@ impl StackWalker {
                     i + frame_size + 1 + CONTINUATION_MARKER_PADDING_SIZE as usize;
                 // Active frame size includes locals and current stack, but padding is already
                 // accounted for in the bottom_of_frame calculation
-                let active_frame = details.current_stack_size
-                    + details.number_of_locals;
+                let active_frame = details.current_stack_size + details.number_of_locals;
 
                 i = bottom_of_frame;
 

@@ -379,7 +379,6 @@ fn print_stack(_stack_pointer: usize) {
     }
 }
 
-
 pub unsafe extern "C" fn gc(stack_pointer: usize) -> usize {
     let runtime = get_runtime().get_mut();
     runtime.gc(stack_pointer);
@@ -1252,8 +1251,69 @@ extern "C" fn pop_count(value: usize) -> usize {
     }
 }
 
+fn compile_yield_continuation(runtime: &mut Runtime) {
+    use crate::arm::LowLevelArm;
+    use crate::machine_code::arm_codegen::{
+        SP, X0, X1, X2, X3, X4, X5, X6, X7, X8, X29, X30, ZERO_REGISTER,
+    };
+
+    let mut lang = LowLevelArm::new();
+
+    lang.prelude();
+
+    // Save yield value and initialize frame pointers
+    lang.mov_reg(X2, X1); // Save value
+    lang.mov_reg(X3, X29); // Get current frame pointer
+    lang.load_from_heap(X4, X3, 0); // Load first_beagle_frame
+    lang.mov_reg(X5, X4); // current_frame
+    lang.mov_reg(X8, X5); // previous_frame
+
+    // Walk stack frames looking for yield marker
+    let loop_start = lang.new_label("loop_start");
+    lang.write_label(loop_start);
+
+    // Check for yield marker at [current_frame - 16]
+    lang.mov(X7, 16);
+    lang.sub(X7, X5, X7);
+    lang.load_from_heap(X6, X7, 0);
+    lang.compare(X6, ZERO_REGISTER);
+
+    let continue_loop = lang.new_label("continue_loop");
+    lang.jump_equal(continue_loop);
+
+    // Found yield marker - restore registers and jump to continuation
+    lang.mov_reg(X0, X2); // Return value
+    lang.mov_reg(X30, X6); // Return address
+    lang.mov_reg(X29, X5); // Frame pointer
+    lang.mov(X3, 16);
+    lang.add(X3, X8, X3);
+    lang.mov_reg(SP, X3); // Stack pointer
+    lang.ret();
+
+    // No marker found - move to next frame
+    lang.write_label(continue_loop);
+    lang.mov_reg(X8, X5); // previous_frame = current_frame
+    lang.load_from_heap(X5, X5, 0); // current_frame = next frame
+    lang.jump(loop_start);
+
+    runtime
+        .add_function_mark_executable(
+            "yield_continuation".to_string(),
+            &lang.compile_directly(),
+            0,
+            2,
+        )
+        .unwrap();
+
+    let function = runtime
+        .get_function_by_name_mut("yield_continuation")
+        .unwrap();
+    function.is_builtin = true;
+}
+
 impl Runtime {
     pub fn install_builtins(&mut self) -> Result<(), Box<dyn Error>> {
+        compile_yield_continuation(self);
         self.add_builtin_function(
             "beagle.__internal_test__/many_args",
             many_args as *const u8,
@@ -1334,16 +1394,10 @@ impl Runtime {
 
         self.add_builtin_function("beagle.core/gc", gc as *const u8, true, 1)?;
 
-        // Use machine code implementation to debug
-        if let Some(yield_v2_fn) = self.get_function_by_name("yield_continuation_v2") {
-            let yield_v2_ptr = self.get_pointer(yield_v2_fn).unwrap();
-            
-            self.add_builtin_function(
-                "beagle.core/yield",
-                yield_v2_ptr,
-                true,
-                2,
-            )?;
+        if let Some(yield_fn) = self.get_function_by_name("yield_continuation") {
+            let yield_ptr = self.get_pointer(yield_fn).unwrap();
+
+            self.add_builtin_function("beagle.core/yield", yield_ptr, true, 2)?;
         }
 
         self.add_builtin_function(
