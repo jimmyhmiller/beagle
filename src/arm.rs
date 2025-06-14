@@ -675,17 +675,11 @@ impl LowLevelArm {
     pub fn push_to_stack(&mut self, reg: Register) {
         self.increment_stack_size(1);
         // Continuation padding is already allocated in prelude, no need to add it here
-        self.store_on_stack(
-            reg,
-            -(self.max_locals + self.stack_size),
-        )
+        self.store_on_stack(reg, -(self.max_locals + self.stack_size))
     }
     pub fn store_local(&mut self, value: Register, offset: i32) {
         // Continuation padding is already allocated in prelude, no need to add it here
-        self.store_on_stack(
-            value,
-            -(offset + 1),
-        );
+        self.store_on_stack(value, -(offset + 1));
     }
 
     pub fn load_from_stack(&mut self, destination: Register, offset: i32) {
@@ -719,10 +713,7 @@ impl LowLevelArm {
     pub fn pop_from_stack_indexed(&mut self, reg: Register, offset: i32) {
         self.increment_stack_size(-1);
         // Continuation padding is already allocated in prelude, no need to add it here
-        self.load_from_stack(
-            reg,
-            -(offset + self.max_locals + 1),
-        )
+        self.load_from_stack(reg, -(offset + self.max_locals + 1))
     }
 
     pub fn pop_from_stack_indexed_raw(&mut self, reg: Register, offset: i32) {
@@ -732,18 +723,12 @@ impl LowLevelArm {
     pub fn pop_from_stack(&mut self, reg: Register) {
         self.increment_stack_size(-1);
         // Continuation padding is already allocated in prelude, no need to add it here
-        self.load_from_stack(
-            reg,
-            -(self.max_locals + self.stack_size + 1),
-        )
+        self.load_from_stack(reg, -(self.max_locals + self.stack_size + 1))
     }
 
     pub fn load_local(&mut self, destination: Register, offset: i32) {
         // Continuation padding is already allocated in prelude, no need to add it here
-        self.load_from_stack(
-            destination,
-            -(offset + 1),
-        );
+        self.load_from_stack(destination, -(offset + 1));
     }
 
     pub fn load_from_heap(&mut self, destination: Register, source: Register, offset: i32) {
@@ -1184,10 +1169,7 @@ impl LowLevelArm {
             rn: X29,
             rd: dest,
             // Continuation padding is already allocated in prelude, no need to add it here
-            imm12: (self.max_locals
-                + self.stack_size
-                + 1)
-                * 8,
+            imm12: (self.max_locals + self.stack_size + 1) * 8,
             sh: 0,
         });
         // TODO: This seems
