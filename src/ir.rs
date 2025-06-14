@@ -620,7 +620,7 @@ impl Instruction {
             | Instruction::Breakpoint
             | Instruction::SetContinuationMarker
             | Instruction::SetContinuationHandlerAddress(_) => {}
-            Instruction::DelimitHandlerValue(dest) 
+            Instruction::DelimitHandlerValue(dest)
             | Instruction::DelimitHandlerContinuation(dest) => {
                 replace_register!(dest, old_register, new_register);
             }
