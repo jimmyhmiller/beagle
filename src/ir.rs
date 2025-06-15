@@ -693,7 +693,6 @@ impl Ir {
 
     pub fn arg(&mut self, n: usize) -> Value {
         if n >= 8 {
-            // Stack arguments come from caller's frame, need to account for our continuation padding
             return Value::Stack((n as isize) - 8 + CONTINUATION_MARKER_PADDING_SIZE);
         }
         let register = self.next_register(Some(n), true);
