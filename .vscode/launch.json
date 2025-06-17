@@ -12,7 +12,7 @@
                 "args": [
                     "build",
                     // "--release",
-                    // "--profile=release-with-debug",
+                    "--profile=release-with-debug",
                     "--bin=main",
                     "--package=main",
                     "--features=generational,thread-safe"
@@ -22,7 +22,7 @@
                     "kind": "bin"
                 }
             },
-            "args": ["resources/test_yield.bg"],
+            "args": ["resources/thread.bg"],
             "cwd": "${workspaceFolder}",
             "preRunCommands": [
                 "command script import .vscode/rust_prettifier_for_lldb.py"

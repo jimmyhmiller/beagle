@@ -1332,6 +1332,7 @@ impl Runtime {
         self.namespaces.current_namespace
     }
 
+    #[inline(never)]
     pub fn update_binding(&mut self, namespace_id: usize, namespace_slot: usize, value: usize) {
         let mut namespace = self
             .namespaces

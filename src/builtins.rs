@@ -1150,7 +1150,7 @@ extern "C" fn sleep(time: usize) -> usize {
     BuiltInTypes::null_value() as usize
 }
 
-extern "C" fn register_extension(
+pub extern "C" fn register_extension(
     struct_name: usize,
     protocol_name: usize,
     method_name: usize,
