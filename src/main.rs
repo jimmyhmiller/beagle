@@ -1,6 +1,6 @@
 #![allow(clippy::match_like_matches_macro)]
 #![allow(clippy::missing_safety_doc)]
-use crate::machine_code::arm_codegen::{SP, X0, X1, X2, X3, X4, X10, ZERO_REGISTER};
+use crate::machine_code::arm_codegen::{SP, X0, X1, X2, X3, X4, X10};
 use arm::LowLevelArm;
 use bincode::{Decode, Encode, config::standard};
 use clap::{Parser as ClapParser, command};
@@ -118,7 +118,7 @@ fn compile_trampoline(runtime: &mut Runtime) {
 
     // Should I store or push?
     for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
-        lang.store_on_stack(*reg, -((i + 4 as usize) as i32));
+        lang.store_on_stack(*reg, -((i + 4_usize) as i32));
     }
 
     lang.mov_reg(X10, SP);
@@ -141,7 +141,7 @@ fn compile_trampoline(runtime: &mut Runtime) {
         .enumerate()
         .rev()
     {
-        lang.load_from_stack(*reg, -((i + 4 as usize) as i32));
+        lang.load_from_stack(*reg, -((i + 4_usize) as i32));
     }
     lang.epilogue();
     lang.ret();
