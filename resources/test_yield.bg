@@ -1,4 +1,5 @@
 namespace test_yield
+import "beagle.primitive" as primitive
 
 
 fn test_yield() {
@@ -8,6 +9,7 @@ fn test_yield() {
 
 
 fn main() {
+    primitive/breakpoint()
     delimit {
         let result = test_yield()
         println("After yield")

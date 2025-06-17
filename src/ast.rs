@@ -934,6 +934,7 @@ impl AstCompiler<'_> {
                         let name = self.string_constant(name.clone());
                         let name = self.ir.assign_new(name);
                         let function_pointer = self.ir.assign_new(function_pointer);
+                        // self.ir.breakpoint();
                         self.call_builtin(
                             "beagle.builtin/register_extension",
                             vec![

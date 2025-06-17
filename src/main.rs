@@ -116,13 +116,9 @@ fn compile_trampoline(runtime: &mut Runtime) {
     // lang.breakpoint();
     lang.prelude();
 
-    // We have one extra word based on our padding
-    // we are going to zero it out
-    lang.store_on_stack(ZERO_REGISTER, -1);
-
     // Should I store or push?
     for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
-        lang.store_on_stack(*reg, -((i + PADDING_FOR_ALIGNMENT as usize) as i32));
+        lang.store_on_stack(*reg, -((i + 4 as usize) as i32));
     }
 
     lang.mov_reg(X10, SP);
@@ -145,7 +141,7 @@ fn compile_trampoline(runtime: &mut Runtime) {
         .enumerate()
         .rev()
     {
-        lang.load_from_stack(*reg, -((i + PADDING_FOR_ALIGNMENT as usize) as i32));
+        lang.load_from_stack(*reg, -((i + 4 as usize) as i32));
     }
     lang.epilogue();
     lang.ret();
