@@ -1,3 +1,6 @@
+I didn't go with this plan. It is overly structured and fairly complicated. Instead, I reused the way in which we scan multiple stacks for multiple threads. AI produces documents like this that would convince someone so much better than I would of the implementation.
+
+
 # Detailed Plan for Continuation Capture Implementation
 
 ## 1. Continuation Object Design

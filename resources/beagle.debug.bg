@@ -1,0 +1,6 @@
+namespace beagle.debug
+
+// Debug utilities for runtime introspection
+
+// External function to analyze saved stack segments
+// This is implemented as a builtin in Rust

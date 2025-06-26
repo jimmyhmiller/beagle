@@ -8,7 +8,10 @@ use std::{
     ffi::{CString, c_void},
     io::Write,
     slice::{self},
-    sync::{Arc, Condvar, Mutex, TryLockError, atomic::AtomicUsize},
+    sync::{
+        Arc, Condvar, Mutex, TryLockError,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     thread::{self, JoinHandle, Thread, ThreadId},
     time::Duration,
     vec,
@@ -20,7 +23,10 @@ use crate::{
     compiler::{
         BlockingSender, CompilerMessage, CompilerResponse, CompilerThread, blocking_channel,
     },
-    gc::{AllocateAction, Allocator, AllocatorOptions, STACK_SIZE, StackMap, StackMapDetails},
+    gc::{
+        AllocateAction, Allocator, AllocatorOptions, STACK_SIZE, StackMap, StackMapDetails,
+        stack_segments::StackSegmentAllocator,
+    },
     ir::StringValue,
     types::{BuiltInTypes, Header, HeapObject, Tagged},
 };
@@ -630,6 +636,7 @@ impl NamespaceManager {
         s.add_namespace("beagle.primitive");
         s.add_namespace("beagle.builtin");
         s.add_namespace("beagle.__internal_test__");
+        s.add_namespace("beagle.debug");
         s
     }
 
@@ -740,6 +747,8 @@ pub struct Runtime {
     compiler_channel: Option<BlockingSender<CompilerMessage, CompilerResponse>>,
     compiler_thread: Option<JoinHandle<()>>,
     protocol_info: HashMap<String, Vec<ProtocolMethodInfo>>,
+    stack_segments: StackSegmentAllocator,
+    stacks_for_continuation_swapping: Vec<ContinuationStack>,
 }
 
 pub fn create_stack_with_protected_page_after(stack_size: usize) -> MmapMut {
@@ -757,6 +766,17 @@ pub fn create_stack_with_protected_page_after(stack_size: usize) -> MmapMut {
         );
     }
     stack
+}
+
+type ContinuationStackBuffer = [usize; 512];
+
+fn new_continuation_stack_buffer() -> ContinuationStackBuffer {
+    [0; 512]
+}
+
+struct ContinuationStack {
+    is_used: AtomicBool,
+    stack: ContinuationStackBuffer,
 }
 
 impl Runtime {
@@ -807,6 +827,11 @@ impl Runtime {
             compiler_channel: None,
             compiler_thread: None,
             protocol_info: HashMap::new(),
+            stack_segments: StackSegmentAllocator::new(),
+            stacks_for_continuation_swapping: vec![ContinuationStack {
+                is_used: AtomicBool::new(false),
+                stack: [0; 512],
+            }],
         }
     }
 
@@ -827,6 +852,7 @@ impl Runtime {
         self.printer.reset();
         self.ffi_function_info.clear();
         self.ffi_info_by_name.clear();
+        self.stack_segments.clear_all_segments();
         self.compiler_channel
             .as_mut()
             .unwrap()
@@ -996,15 +1022,45 @@ impl Runtime {
         stack_frames
     }
 
+    /// Save a stack segment for later restoration (for yield functionality)
+    pub fn save_stack_segment(&mut self, stack_data: &[u8]) -> Result<usize, Box<dyn Error>> {
+        self.stack_segments.add_segment(stack_data)
+    }
+
+    /// Restore a stack segment to the given pointer location
+    pub fn restore_stack_segment(
+        &self,
+        id: usize,
+        target_ptr: *mut u8,
+    ) -> Result<usize, Box<dyn Error>> {
+        self.stack_segments.restore_segment(id, target_ptr)
+    }
+
+    /// Remove a stack segment when it's no longer needed
+    pub fn remove_stack_segment(&mut self, id: usize) -> Result<(), Box<dyn Error>> {
+        self.stack_segments.remove_segment(id)
+    }
+
+    pub fn get_stack_segment_count(&self) -> usize {
+        self.stack_segments.segment_count()
+    }
+
+    pub fn get_stack_segment(&self, id: usize) -> Option<&crate::gc::stack_segments::StackSegment> {
+        self.stack_segments.get_segment(id)
+    }
+
     pub fn gc(&mut self, stack_pointer: usize) {
         if self.memory.threads.len() == 1 {
             // If there is only one thread, that is us
             // that means nothing else could spin up a thread in the mean time
             // so there is no need to lock anything
-            self.memory.heap.gc(
-                &self.memory.stack_map,
-                &[(self.get_stack_base(), stack_pointer)],
-            );
+            // Collect all stack pointers: regular stacks + saved stack segments
+            let mut all_stack_pointers = vec![(self.get_stack_base(), stack_pointer)];
+            all_stack_pointers.extend(self.stack_segments.get_all_stack_pointers());
+
+            self.memory
+                .heap
+                .gc(&self.memory.stack_map, &all_stack_pointers);
 
             // duplicated below
             // TODO: This whole thing is awful.
@@ -1070,6 +1126,8 @@ impl Runtime {
 
         let mut stack_pointers = thread_state.stack_pointers.clone();
         stack_pointers.push((self.get_stack_base(), stack_pointer));
+        // Add saved stack segments to the GC scan
+        stack_pointers.extend(self.stack_segments.get_all_stack_pointers());
 
         drop(thread_state);
 
@@ -1332,7 +1390,6 @@ impl Runtime {
         self.namespaces.current_namespace
     }
 
-    #[inline(never)]
     pub fn update_binding(&mut self, namespace_id: usize, namespace_slot: usize, value: usize) {
         let mut namespace = self
             .namespaces
@@ -2224,5 +2281,83 @@ impl Runtime {
 
     pub fn get_command_line_args(&self) -> &CommandLineArguments {
         &self.command_line_arguments
+    }
+
+    pub fn get_stack_for_continuiation_swapping(&mut self) -> (*const u8, usize) {
+        for (i, stack) in self.stacks_for_continuation_swapping.iter().enumerate() {
+            if stack
+                .is_used
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return (
+                    unsafe {
+                        stack.stack.as_ptr().offset(stack.stack.len() as isize - 64) as *const u8
+                    },
+                    i,
+                );
+            }
+        }
+        self.stacks_for_continuation_swapping
+            .push(ContinuationStack {
+                is_used: AtomicBool::new(true),
+                stack: new_continuation_stack_buffer(),
+            });
+        self.get_stack_for_continuiation_swapping()
+    }
+
+    pub fn release_stack_for_continuation_swapping(&mut self, index: usize) {
+        if let Some(stack) = self.stacks_for_continuation_swapping.get(index) {
+            stack.is_used.store(false, Ordering::SeqCst);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gc::get_allocate_options;
+
+    #[test]
+    fn test_stack_segment_integration() {
+        let args = CommandLineArguments {
+            program: None,
+            show_times: false,
+            show_gc_times: false,
+            print_ast: false,
+            no_gc: false,
+            gc_always: false,
+            all_tests: false,
+            test: false,
+            debug: false,
+            verbose: false,
+            no_std: false,
+            print_parse: false,
+            print_builtin_calls: false,
+        };
+        let allocator_options = get_allocate_options(&args);
+        let allocator = crate::Alloc::new(allocator_options);
+        let printer = Box::new(crate::runtime::DefaultPrinter);
+        let mut runtime = Runtime::new(args, allocator, printer);
+
+        // Test saving a stack segment
+        let test_data = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
+        let segment_id = runtime.save_stack_segment(&test_data).unwrap();
+
+        // Test restoring the segment
+        let mut restore_buffer = vec![0u8; 10];
+        let bytes_copied = runtime
+            .restore_stack_segment(segment_id, restore_buffer.as_mut_ptr())
+            .unwrap();
+
+        assert_eq!(bytes_copied, 8);
+        assert_eq!(&restore_buffer[0..8], &test_data[..]);
+
+        // Test removing the segment
+        runtime.remove_stack_segment(segment_id).unwrap();
+
+        // Verify it's removed by trying to restore again (should fail)
+        let result = runtime.restore_stack_segment(segment_id, restore_buffer.as_mut_ptr());
+        assert!(result.is_err());
     }
 }

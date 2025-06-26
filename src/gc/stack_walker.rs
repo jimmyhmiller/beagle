@@ -1,7 +1,7 @@
 use crate::ir::CONTINUATION_MARKER_PADDING_SIZE;
 use crate::types::BuiltInTypes;
 
-use super::{STACK_SIZE, StackMap};
+use super::StackMap;
 
 /// A simple abstraction for walking the stack and finding heap pointers
 pub struct StackWalker;
@@ -9,15 +9,13 @@ pub struct StackWalker;
 impl StackWalker {
     /// Get the live portion of the stack as a slice
     pub fn get_live_stack(stack_base: usize, stack_pointer: usize) -> &'static [usize] {
-        let stack_end = stack_base;
-        let distance_till_end = stack_end - stack_pointer;
-        let num_64_till_end = (distance_till_end / 8) + 1;
-        let stack_begin = stack_end - STACK_SIZE;
+        let distance_till_end = stack_base - stack_pointer;
+        let num_words = (distance_till_end / 8) + 1;
 
-        unsafe {
-            let stack = std::slice::from_raw_parts(stack_begin as *const usize, STACK_SIZE / 8);
-            &stack[stack.len() - num_64_till_end..]
-        }
+        // Start one word before the stack pointer to match original behavior
+        let start_ptr = stack_pointer - 8;
+
+        unsafe { std::slice::from_raw_parts(start_ptr as *const usize, num_words) }
     }
 
     /// Walk the stack and call a callback for each heap pointer found
@@ -87,15 +85,31 @@ impl StackWalker {
 
     /// Get a mutable slice of the live stack for updating pointers after GC
     pub fn get_live_stack_mut(stack_base: usize, stack_pointer: usize) -> &'static mut [usize] {
-        let stack_end = stack_base;
-        let distance_till_end = stack_end - stack_pointer;
-        let num_64_till_end = (distance_till_end / 8) + 1;
-        let stack_begin = stack_end - STACK_SIZE;
-        let len = STACK_SIZE / 8;
+        let distance_till_end = stack_base - stack_pointer;
+        let num_words = (distance_till_end / 8) + 1;
 
-        unsafe {
-            let start_ptr = (stack_begin as *mut usize).add(len - num_64_till_end);
-            std::slice::from_raw_parts_mut(start_ptr, num_64_till_end)
-        }
+        // Start one word before the stack pointer to match original behavior
+        let start_ptr = stack_pointer - 8;
+
+        unsafe { std::slice::from_raw_parts_mut(start_ptr as *mut usize, num_words) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stack_slice_calculation() {
+        // Test the calculation logic with known values
+        let stack_base = 0x1000;
+        let stack_pointer = 0x0F00; // 256 bytes down from base
+
+        let slice = StackWalker::get_live_stack(stack_base, stack_pointer);
+
+        // Distance is 256 bytes = 32 words, +1 = 33 words
+        assert_eq!(slice.len(), 33);
+        // Should start 8 bytes before stack_pointer
+        assert_eq!(slice.as_ptr() as usize, stack_pointer - 8);
     }
 }
