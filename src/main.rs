@@ -1,6 +1,6 @@
 #![allow(clippy::match_like_matches_macro)]
 #![allow(clippy::missing_safety_doc)]
-use crate::machine_code::arm_codegen::{SP, X0, X1, X2, X3, X4, X10};
+use crate::machine_code::arm_codegen::{Register, SP, Size, X0, X1, X2, X3, X4, X10};
 use arm::LowLevelArm;
 use bincode::{Decode, Encode, config::standard};
 use clap::{Parser as ClapParser, command};
@@ -154,9 +154,16 @@ fn compile_trampoline(runtime: &mut Runtime) {
     function.is_builtin = true;
 }
 
-fn compile_save_volatile_registers(runtime: &mut Runtime) {
+fn compile_save_volatile_registers_for(runtime: &mut Runtime, register_num: usize) {
+    let call_register = Register {
+        index: (register_num) as u8,
+        size: Size::S64,
+    };
+    let function_name =
+        "beagle.builtin/save_volatile_registers".to_owned() + &register_num.to_string();
+    let arity = register_num + 1;
+
     let mut lang = LowLevelArm::new();
-    // lang.breakpoint();
     lang.prelude();
 
     lang.sub_stack_pointer(
@@ -167,7 +174,7 @@ fn compile_save_volatile_registers(runtime: &mut Runtime) {
         lang.store_on_stack(*reg, -((i + PADDING_FOR_ALIGNMENT as usize + 1) as i32));
     }
 
-    lang.call(X1);
+    lang.call(call_register);
 
     for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
         lang.load_from_stack(*reg, -((i + PADDING_FOR_ALIGNMENT as usize + 1) as i32));
@@ -182,55 +189,13 @@ fn compile_save_volatile_registers(runtime: &mut Runtime) {
 
     runtime
         .add_function_mark_executable(
-            "beagle.builtin/save_volatile_registers".to_string(),
+            function_name.to_string(),
             &lang.compile_directly(),
             0,
-            2,
+            arity,
         )
         .unwrap();
-    let function = runtime
-        .get_function_by_name_mut("beagle.builtin/save_volatile_registers")
-        .unwrap();
-    function.is_builtin = true;
-}
-
-fn compile_save_volatile_registers2(runtime: &mut Runtime) {
-    let mut lang = LowLevelArm::new();
-    // lang.breakpoint();
-    lang.prelude();
-
-    lang.sub_stack_pointer(
-        (lang.canonical_volatile_registers.len() + PADDING_FOR_ALIGNMENT as usize) as i32,
-    );
-
-    for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
-        lang.store_on_stack(*reg, -((i + PADDING_FOR_ALIGNMENT as usize + 1) as i32));
-    }
-
-    lang.call(X2);
-
-    for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
-        lang.load_from_stack(*reg, -((i + PADDING_FOR_ALIGNMENT as usize + 1) as i32));
-    }
-
-    lang.add_stack_pointer(
-        (lang.canonical_volatile_registers.len() + PADDING_FOR_ALIGNMENT as usize) as i32,
-    );
-
-    lang.epilogue();
-    lang.ret();
-
-    runtime
-        .add_function_mark_executable(
-            "beagle.builtin/save_volatile_registers2".to_string(),
-            &lang.compile_directly(),
-            0,
-            3,
-        )
-        .unwrap();
-    let function = runtime
-        .get_function_by_name_mut("beagle.builtin/save_volatile_registers2")
-        .unwrap();
+    let function = runtime.get_function_by_name_mut(&function_name).unwrap();
     function.is_builtin = true;
 }
 
@@ -424,8 +389,9 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     runtime.start_compiler_thread();
 
     compile_trampoline(runtime);
-    compile_save_volatile_registers(runtime);
-    compile_save_volatile_registers2(runtime);
+    for i in 1..=6 {
+        compile_save_volatile_registers_for(runtime, i);
+    }
 
     let pause_atom_ptr = runtime.pause_atom_ptr();
     runtime.set_pause_atom_ptr(pause_atom_ptr);

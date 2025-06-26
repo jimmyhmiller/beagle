@@ -2,9 +2,8 @@ use crate::{
     builtins::debugger,
     ir::CONTINUATION_MARKER_PADDING_SIZE,
     machine_code::arm_codegen::{
-        ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, SP, Size, StpGenSelector,
-        StrImmGenSelector, X0, X9, X10, X11, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29,
-        X30, ZERO_REGISTER,
+        ArmAsm, LdpGenSelector, Register, SP, Size, StpGenSelector, StrImmGenSelector, X0, X9, X10,
+        X11, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29, X30, ZERO_REGISTER,
     },
     types::BuiltInTypes,
 };
@@ -748,13 +747,11 @@ impl LowLevelArm {
     }
 
     pub fn load_from_heap(&mut self, destination: Register, source: Register, offset: i32) {
-        self.instructions.push(ArmAsm::LdrImmGen {
+        self.instructions.push(ArmAsm::LdurGen {
             size: 0b11,
-            imm9: 0, // not used
+            imm9: offset * 8,
             rn: source,
             rt: destination,
-            imm12: offset,
-            class_selector: LdrImmGenSelector::UnsignedOffset,
         });
     }
 
