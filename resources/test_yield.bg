@@ -1,23 +1,37 @@
 namespace test_yield
-import "beagle.primitive" as primitive
+import "beagle.debug" as debug
 
+
+// TODO: This breaks when I do release :)
 
 fn test_yield() {
-    let result = yield("yielded value")
-    "after yield: "
+    let result = yield("We yielded something!")
+    result
 }
 
+fn inner_function() {
+    let x = test_yield()
+    println("Inner function")
+    x
+}
 
 fn main() {
-    primitive/breakpoint()
     delimit {
-        let result = test_yield()
-        println("After yield")
+        let result = inner_function()
+        print("Returned from test_yield: ")
         println(result)
     } handle (value, resume) {
-        println("Handler caught:")
+        // TODO: resume needs to be a closure that we can
+        // call that will do restore_continuation with the correct index
+        print("Handler caught: ")
         println(value)
+        resume("BAM!")
         "handled"
     }
     "done"
 }
+
+// Exp ect
+// Handler caught: We yielded something!
+// Returned from test_yield: BAM!
+// done

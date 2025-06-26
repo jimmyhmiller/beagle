@@ -16,7 +16,7 @@ import "beagle.builtin" as builtin
 
 // TODO: This is hack because 0 is making the fast path cache activate
 // fix by changing id or filling the cache
-struct NEVER{}
+struct NEVER {}
 
 struct Struct {
     name
@@ -161,4 +161,10 @@ fn print(value) {
 
 struct __Box__ {
     value
+}
+
+fn __create_continuation_closure(index) {
+    fn(value) {
+        restore_continuation(index, value, true)
+    }
 }

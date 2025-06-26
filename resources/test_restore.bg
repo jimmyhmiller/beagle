@@ -1,0 +1,33 @@
+namespace test_restore
+
+import "beagle.debug" as debug
+
+fn test_basic_restore() {
+    // First yield to create a stack segment
+    let result = yield("test value")
+    "after restore"
+}
+
+fn main() {
+    gc()
+    let result = delimit {
+        let result = test_basic_restore()
+        println("After yield")
+        println(result)
+    } handle (value, resume) {
+        println("Handler caught:")
+        println(value)
+        
+        // Try to call restore_continuation (basic test - just see if function exists)
+        // For now, just call it with dummy values to test accessibility
+        // restore_continuation(0, 1000000)  // This will fail but shows function exists
+        
+        "handled without restore"
+    }
+    println("done")
+}
+
+// Expect
+// Handler caught:
+// test value
+// handled without restore
