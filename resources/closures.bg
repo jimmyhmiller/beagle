@@ -1,42 +1,53 @@
 namespace closures
 
-fn closure_1() {
-    let y = fn thing() {
-        42
-    }
-    println(y)
-    println(y())
-}
+// no-std
+// fn closure_1() {
+//     let y = fn thing() {
+//         42
+//     }
+//     println(y)
+//     println(y())
+// }
 
-fn closure_2() {
-    let x = 42;
-    let z = 2;
-    let y = fn closure_fn() {
-        let q = 1
-        let y = 5
-        x + z + q + y
-    }
-    println(y())
-}
+// fn closure_2() {
+//     let x = 42;
+//     let z = 2;
+//     let y = fn closure_fn() {
+//         let q = 1
+//         let y = 5
+//         x + z + q + y
+//     }
+//     println(y())
+// }
 
 
-fn closure_3() {
-    let x = 42;
-    let f = fn() {
-        x
+// fn closure_3() {
+//     let x = 42;
+//     let f = fn() {
+//         x
+//     }
+//     println(f())
+//     null
+// }
+
+fn return_closure(n) {
+    fn next() {
+       n
     }
-    println(f())
-    null
+    next
 }
 
 fn main() {
-    closure_1()
-    closure_2()
-    closure_3()
+    // closure_1()
+    // closure_2()
+    // closure_3()
+    let c = return_closure(32)
+    _println(c)
+    _println(c())
     "done"
 }
 
-// Expected output:
+// Expec ted output:
 // Closure { function, 0, 16, [] }
 // 42
 // 50

@@ -2,7 +2,7 @@ namespace test_yield
 import "beagle.debug" as debug
 
 
-// TODO: This breaks when I do release :)
+// TODO: I'm betting this isn't general yet
 
 fn test_yield() {
     let result = yield("We yielded something!")
@@ -15,23 +15,74 @@ fn inner_function() {
     x
 }
 
-fn main() {
-    delimit {
-        let result = inner_function()
-        print("Returned from test_yield: ")
-        println(result)
-    } handle (value, resume) {
-        // TODO: resume needs to be a closure that we can
-        // call that will do restore_continuation with the correct index
-        print("Handler caught: ")
-        println(value)
-        resume("BAM!")
-        "handled"
-    }
-    "done"
-}
+// fn main() {
+//     delimit {
+//         let result = inner_function()
+//         print("Returned from test_yield: ")
+//         println(result)
+//     } handle (value, resume) {
+//         // TODO: resume needs to be a closure that we can
+//         // call that will do restore_continuation with the correct index
+//         print("Handler caught: ")
+//         println(value)
+//         resume("BAM!")
+//         "handled"
+//     }
+//     "done"
+// }
 
-// Exp ect
+// Expect
 // Handler caught: We yielded something!
+// Inner function
 // Returned from test_yield: BAM!
 // done
+
+
+fn make_generator(n) {
+    let mut i = 0
+    fn next() {
+        if i < n {
+            i = i + 1
+            yield(i)
+        } else {
+            null
+        }
+    }
+    next
+}
+
+// fn main() {
+//     delimit {
+//         let gen = make_generator(3)
+//         println(gen()) // 1
+//         println(gen()) // 2
+//         println(gen()) // 3
+//         println(gen()) // null
+//     } handle (v, resume) {
+//         resume(v)
+//     }
+// }
+
+
+// TODO:
+// I want to make multishot work
+// The key is I need to restore the continuation
+// while leaving the handler code in place
+// So resume will come back to the handler
+// and we can call it again
+
+fn choose(a, b) {
+    yield([a, fn() { b }])
+}
+
+fn main() {
+    delimit {
+        let x = choose("left", "right")
+        println("Chose: ")
+        println(x)
+    } handle (value, resume) {
+        debug/stack_segments()
+        resume(2)
+        resume(3)
+    }
+}

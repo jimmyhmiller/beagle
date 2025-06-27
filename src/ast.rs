@@ -536,14 +536,14 @@ impl AstCompiler<'_> {
 
                 self.name = name.clone();
                 if is_not_top_level {
-                    let name = "<closure_context>";
+                    let context_name = "<closure_context>";
                     let reg = self.ir.arg(0);
-                    let local = self.find_or_insert_local(name);
+                    let local = self.find_or_insert_local(context_name);
                     let reg = self.ir.assign_new(reg);
                     self.ir.store_local(local, reg.into());
                     let local = VariableLocation::Local(local);
                     self.register_arg_location(0, local.clone());
-                    self.insert_variable(name.to_string(), local);
+                    self.insert_variable(context_name.to_string(), local);
                 }
                 for (index, arg) in args.iter().enumerate() {
                     let mut index = index;
@@ -685,12 +685,14 @@ impl AstCompiler<'_> {
                         self.ir.store_local(index, reg.into());
                     }
                     self.pop_environment();
-                    if variable_locaton.is_some() && name.is_some() {
-                        let local = self.find_or_insert_local(name.as_ref().unwrap());
-                        self.insert_variable(
-                            name.as_ref().unwrap().to_string(),
-                            VariableLocation::Local(local),
-                        );
+                    // Re-insert the variable in the parent environment after popping
+                    if let Some(VariableLocation::Local(index)) = variable_locaton {
+                        if let Some(name) = &name {
+                            self.insert_variable(
+                                name.to_string(),
+                                VariableLocation::Local(index),
+                            );
+                        }
                     }
                     return function;
                 }
@@ -1909,6 +1911,8 @@ impl AstCompiler<'_> {
                 .unwrap_or_else(|| panic!("Can't find variable {}", name));
 
             VariableLocation::NamespaceVariable(namespace_id, slot)
+        } else if let Some(free_var) = self.create_free_if_closable(&name.to_string()) {
+            free_var
         } else {
             let current_env = self.environment_stack.last_mut().unwrap();
             current_env.free_variables.push(FreeVariable {
