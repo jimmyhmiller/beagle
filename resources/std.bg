@@ -165,6 +165,7 @@ struct __Box__ {
 
 fn __create_continuation_closure(index) {
     fn(value) {
+        primitive/breakpoint!()
         restore_continuation(index, value, true)
     }
 }
