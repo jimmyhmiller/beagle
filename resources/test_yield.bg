@@ -31,7 +31,7 @@ fn inner_function() {
 //     "done"
 // }
 
-// Expect
+// Exp ect
 // Handler caught: We yielded something!
 // Inner function
 // Returned from test_yield: BAM!
