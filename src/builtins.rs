@@ -66,11 +66,22 @@ pub unsafe extern "C" fn debug_stack_segments() -> usize {
     0b111 // Return success
 }
 
+
+// TODO:
+// Okay, now I understand the multishot semantics better
+// I need to do the following
+// 1. patch the frame pointers
+// 2. Don't capture the return and last frame pointer on the stack
+// 3. If I do that I can just push my own based on the current setup
+// and replace the stack just above that.
+
+
 fn compile_continuation_trampoline() {
     use crate::arm::LowLevelArm;
     use crate::machine_code::arm_codegen::{SP, X3, X4, X5, X19, X20, X21, X29};
 
     let mut lang = LowLevelArm::new();
+    // lang.breakpoint();
     lang.prelude();
 
     lang.mov_reg(X21, X0);
@@ -142,11 +153,11 @@ pub unsafe extern "C" fn restore_continuation(
     called_from_continuation: usize,
 ) -> usize {
     let mut stack_pointer = stack_pointer;
-    if BuiltInTypes::is_true(called_from_continuation) {
-        let frame_pointer = skip_frame(get_current_frame_pointer());
-        // Why 16? Trial and error
-        stack_pointer = unsafe { *(frame_pointer as *const usize) } + 16;
-    }
+    // if BuiltInTypes::is_true(called_from_continuation) {
+    //     let frame_pointer = skip_frame(get_current_frame_pointer());
+    //     // Why 16? Trial and error
+    //     stack_pointer = unsafe { *(frame_pointer as *const usize) } + 16;
+    // }
     // I actually need to get the previous frames stack_pointer
 
     let runtime = get_runtime().get_mut();
@@ -1459,6 +1470,12 @@ extern "C" fn pop_count(value: usize) -> usize {
     }
 }
 
+// It is very important that this isn't inlined
+// because other code is expecting that
+// If we inline, we need to remove a skip frame
+// maybe I should just always inline it
+// but I didn't.
+#[inline(never)]
 fn get_current_frame_pointer() -> *const u8 {
     // This is a hacky way to get the current stack pointer
     // It relies on the fact that the stack pointer is stored in X29
@@ -1477,7 +1494,7 @@ fn skip_frame(frame: *const u8) -> *const u8 {
     unsafe { *(frame as *const *const u8) }
 }
 
-fn yield_continuation(value: usize) -> Result<(), Box<dyn std::error::Error>> {
+pub unsafe extern "C" fn yield_continuation(value: usize) -> usize {
     let current_frame = get_current_frame_pointer();
     let beagle_frame = skip_frame(current_frame);
     let mut current_frame = skip_frame(current_frame);
@@ -1500,7 +1517,7 @@ fn yield_continuation(value: usize) -> Result<(), Box<dyn std::error::Error>> {
         let stack_end = beagle_frame as usize - 8;
         std::slice::from_raw_parts(stack_end as *const u8, stack_base - stack_end)
     };
-    let segment_id = runtime.save_stack_segment(stack_data)?;
+    let segment_id = runtime.save_stack_segment(stack_data).unwrap();
 
     let return_address = unsafe { *continuation_marker };
     let frame_bottom = current_frame as usize;
@@ -1527,7 +1544,7 @@ fn yield_continuation(value: usize) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    Ok(())
+    0
 }
 
 // Second function: Takes buffer and yielded value, performs register restoration + jump
