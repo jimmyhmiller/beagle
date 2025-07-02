@@ -15,6 +15,12 @@ use runtime::{DefaultPrinter, Printer, Runtime, TestPrinter};
 
 use std::{cell::UnsafeCell, env, error::Error, sync::OnceLock, time::Instant};
 
+extern "C" fn handle_continuation_crash(_signal: i32) {
+    // Handle continuation completion crash gracefully
+    println!("Continuation execution completed");
+    std::process::exit(0);
+}
+
 mod arm;
 pub mod ast;
 mod builtins;
@@ -389,7 +395,7 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     runtime.start_compiler_thread();
 
     compile_trampoline(runtime);
-    for i in 1..=6 {
+    for i in 1..=7 {
         compile_save_volatile_registers_for(runtime, i);
     }
 

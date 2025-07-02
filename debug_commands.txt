@@ -1,0 +1,14 @@
+b inner_restore_continuation
+run resources/test_yield.bg
+frame variable
+register read
+disassemble -f
+stepi
+stepi
+stepi
+stepi
+stepi
+register read
+x/10xg $sp
+continue
+bt

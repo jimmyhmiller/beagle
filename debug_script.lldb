@@ -1,0 +1,2 @@
+b src/builtins.rs:151
+run resources/test_yield.bg

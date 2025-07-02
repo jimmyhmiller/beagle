@@ -688,10 +688,7 @@ impl AstCompiler<'_> {
                     // Re-insert the variable in the parent environment after popping
                     if let Some(VariableLocation::Local(index)) = variable_locaton {
                         if let Some(name) = &name {
-                            self.insert_variable(
-                                name.to_string(),
-                                VariableLocation::Local(index),
-                            );
+                            self.insert_variable(name.to_string(), VariableLocation::Local(index));
                         }
                     }
                     return function;

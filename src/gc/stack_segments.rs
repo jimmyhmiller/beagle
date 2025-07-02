@@ -6,10 +6,11 @@ pub struct StackSegment {
     pub data: Vec<u8>,
     pub base: usize,
     pub size: usize,
+    pub original_stack_top: usize,
 }
 
 impl StackSegment {
-    pub fn new(id: usize, data: Vec<u8>) -> Self {
+    pub fn new(id: usize, data: Vec<u8>, original_stack_top: usize) -> Self {
         let base = data.as_ptr() as usize;
         let size = data.len();
         Self {
@@ -17,6 +18,7 @@ impl StackSegment {
             data,
             base,
             size,
+            original_stack_top,
         }
     }
 
@@ -38,12 +40,16 @@ impl StackSegmentAllocator {
         }
     }
 
-    pub fn add_segment(&mut self, stack_data: &[u8]) -> Result<usize, Box<dyn Error>> {
+    pub fn add_segment(
+        &mut self,
+        stack_data: &[u8],
+        original_stack_top: usize,
+    ) -> Result<usize, Box<dyn Error>> {
         let id = self.next_id;
         self.next_id += 1;
 
         let data = stack_data.to_vec();
-        let segment = StackSegment::new(id, data);
+        let segment = StackSegment::new(id, data, original_stack_top);
 
         self.segments.push(segment);
         Ok(id)
@@ -114,7 +120,7 @@ mod tests {
         let mut allocator = StackSegmentAllocator::new();
         let stack_data = vec![1, 2, 3, 4, 5];
 
-        let id = allocator.add_segment(&stack_data).unwrap();
+        let id = allocator.add_segment(&stack_data, 0x1000).unwrap();
         assert_eq!(id, 0);
         assert_eq!(allocator.segment_count(), 1);
         assert_eq!(allocator.next_id, 1);
@@ -129,8 +135,8 @@ mod tests {
     fn test_add_multiple_segments() {
         let mut allocator = StackSegmentAllocator::new();
 
-        let id1 = allocator.add_segment(&[1, 2, 3]).unwrap();
-        let id2 = allocator.add_segment(&[4, 5, 6, 7]).unwrap();
+        let id1 = allocator.add_segment(&[1, 2, 3], 0x1000).unwrap();
+        let id2 = allocator.add_segment(&[4, 5, 6, 7], 0x2000).unwrap();
 
         assert_eq!(id1, 0);
         assert_eq!(id2, 1);
@@ -147,8 +153,8 @@ mod tests {
     fn test_remove_segment() {
         let mut allocator = StackSegmentAllocator::new();
 
-        let id1 = allocator.add_segment(&[1, 2, 3]).unwrap();
-        let id2 = allocator.add_segment(&[4, 5, 6]).unwrap();
+        let id1 = allocator.add_segment(&[1, 2, 3], 0x1000).unwrap();
+        let id2 = allocator.add_segment(&[4, 5, 6], 0x2000).unwrap();
 
         assert_eq!(allocator.segment_count(), 2);
 
@@ -171,8 +177,8 @@ mod tests {
     fn test_get_all_stack_pointers() {
         let mut allocator = StackSegmentAllocator::new();
 
-        allocator.add_segment(&[1, 2, 3]).unwrap();
-        allocator.add_segment(&[4, 5]).unwrap();
+        allocator.add_segment(&[1, 2, 3], 0x1000).unwrap();
+        allocator.add_segment(&[4, 5], 0x2000).unwrap();
 
         let stack_pointers = allocator.get_all_stack_pointers();
         assert_eq!(stack_pointers.len(), 2);
@@ -187,8 +193,8 @@ mod tests {
     fn test_clear_all_segments() {
         let mut allocator = StackSegmentAllocator::new();
 
-        allocator.add_segment(&[1, 2, 3]).unwrap();
-        allocator.add_segment(&[4, 5, 6]).unwrap();
+        allocator.add_segment(&[1, 2, 3], 0x1000).unwrap();
+        allocator.add_segment(&[4, 5, 6], 0x2000).unwrap();
         assert_eq!(allocator.segment_count(), 2);
 
         allocator.clear_all_segments();
@@ -201,7 +207,7 @@ mod tests {
         let mut allocator = StackSegmentAllocator::new();
         let stack_data = vec![0; 100]; // 100 bytes
 
-        let id = allocator.add_segment(&stack_data).unwrap();
+        let id = allocator.add_segment(&stack_data, 0x1000).unwrap();
         let segment = allocator.get_segment(id).unwrap();
         let (stack_top, stack_bottom) = segment.as_stack_pointer_pair();
 
@@ -215,7 +221,7 @@ mod tests {
         let mut allocator = StackSegmentAllocator::new();
         let original_data = vec![1, 2, 3, 4, 5, 6, 7, 8];
 
-        let id = allocator.add_segment(&original_data).unwrap();
+        let id = allocator.add_segment(&original_data, 0x1000).unwrap();
 
         // Create a target buffer to restore into
         let mut target_buffer = vec![0u8; 10]; // Larger buffer
@@ -247,8 +253,8 @@ mod tests {
         let data1 = vec![10, 20, 30];
         let data2 = vec![40, 50, 60, 70];
 
-        let id1 = allocator.add_segment(&data1).unwrap();
-        let id2 = allocator.add_segment(&data2).unwrap();
+        let id1 = allocator.add_segment(&data1, 0x1000).unwrap();
+        let id2 = allocator.add_segment(&data2, 0x2000).unwrap();
 
         // Restore first segment
         let mut buffer1 = vec![0u8; 5];
@@ -272,7 +278,7 @@ mod tests {
         let mut allocator = StackSegmentAllocator::new();
         let data = vec![100, 101, 102, 103];
 
-        let id = allocator.add_segment(&data).unwrap();
+        let id = allocator.add_segment(&data, 0x1000).unwrap();
 
         // Target buffer is exactly the same size
         let mut target_buffer = vec![0u8; 4];
@@ -289,7 +295,7 @@ mod tests {
         let mut allocator = StackSegmentAllocator::new();
         let original_data = vec![1, 2, 3, 4];
 
-        let id = allocator.add_segment(&original_data).unwrap();
+        let id = allocator.add_segment(&original_data, 0x1000).unwrap();
 
         // Restore multiple times to different buffers
         let mut buffer1 = vec![0u8; 4];

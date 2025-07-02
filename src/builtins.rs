@@ -66,6 +66,11 @@ pub unsafe extern "C" fn debug_stack_segments() -> usize {
     0b111 // Return success
 }
 
+pub unsafe extern "C" fn exit_continuation_safe() -> usize {
+    // Safe exit point for continuations that complete
+    // This should return properly to the caller
+    BuiltInTypes::null_value() as usize
+}
 
 // TODO:
 // Okay, now I understand the multishot semantics better
@@ -75,10 +80,9 @@ pub unsafe extern "C" fn debug_stack_segments() -> usize {
 // 3. If I do that I can just push my own based on the current setup
 // and replace the stack just above that.
 
-
 fn compile_continuation_trampoline() {
     use crate::arm::LowLevelArm;
-    use crate::machine_code::arm_codegen::{SP, X3, X4, X5, X19, X20, X21, X29};
+    use crate::machine_code::arm_codegen::{SP, X3, X4, X6, X19, X20, X21, X29};
 
     let mut lang = LowLevelArm::new();
     // lang.breakpoint();
@@ -89,7 +93,7 @@ fn compile_continuation_trampoline() {
     lang.mov_reg(X20, X29);
     lang.mov_reg(SP, X4);
     lang.mov_reg(X29, SP);
-    lang.call(X5);
+    lang.call(X6);
 
     lang.mov_reg(X29, X19);
     lang.mov_reg(SP, X19);
@@ -121,6 +125,8 @@ pub unsafe extern "C" fn inner_restore_continuation(
     segment_id: usize,
     index: usize,
     stack_pointer: usize,
+    _new_stack_pointer: usize,
+    caller_return_address: usize,
 ) -> usize {
     // Now I am on a clean stack.
     // I need to be sure to restore my index
@@ -129,11 +135,58 @@ pub unsafe extern "C" fn inner_restore_continuation(
     let runtime = get_runtime().get_mut();
     let segment = runtime.get_stack_segment(segment_id).unwrap();
     let segment_length = segment.data.len();
-    // TODO: I need to patch the stack
+
+    // Calculate where we'll place the segment data
+    let dest = stack_pointer - segment.data.len();
+
+    // Copy the segment data to the new location
     unsafe {
-        let dest = stack_pointer - segment.data.len();
         ptr::copy_nonoverlapping(segment.data.as_ptr(), dest as *mut u8, segment.data.len());
     }
+
+    // Now we need to patch the frame pointers in the copied segment
+    // The offset is the difference between the original stack location and the new location
+    let offset = dest as isize - segment.original_stack_top as isize;
+    
+    // Walk the frame pointer chain and patch each frame pointer
+    unsafe {
+        // Start with the first frame pointer at the beginning of the segment
+        let mut current_fp_ptr = dest as *mut usize;
+        
+        loop {
+            // Read the frame pointer value at this location
+            let old_fp = *current_fp_ptr;
+            
+            // If the frame pointer is 0 or points outside our original segment, we're done
+            if old_fp == 0 || old_fp < segment.original_stack_top || old_fp >= segment.original_stack_top + segment_length {
+                // This is the last frame pointer in our segment
+                // It should point to the caller's frame, not the intermediate frame we had
+                // We need to get the frame pointer from when restore_continuation was called
+                let caller_frame = get_current_frame_pointer();
+                let caller_caller_frame = skip_frame(caller_frame);
+                *current_fp_ptr = caller_caller_frame as usize;
+                break;
+            }
+            
+            // Apply the offset to get the new frame pointer location
+            let new_fp = (old_fp as isize + offset) as usize;
+            *current_fp_ptr = new_fp;
+            
+            // Move to the next frame pointer in the chain
+            // The frame pointer points to the location of the previous frame pointer
+            current_fp_ptr = new_fp as *mut usize;
+        }
+        
+        // Patch the very last return address in the captured segment
+        // This should be the return address of our original caller (the handler)
+        let last_return_addr_ptr = (dest + segment_length - 8) as *mut usize;
+        let original_return_addr = *last_return_addr_ptr;
+        
+
+        println!("Patching last return address: 0x{:x} -> 0x{:x}", original_return_addr, caller_return_address);
+        *last_return_addr_ptr = caller_return_address;
+    }
+
     // TODO: I need to sooner rather than later fix this index system
     // I think instead of allocating a new stack area
     // I am just going to reserve space on the stack for this
@@ -150,9 +203,9 @@ pub unsafe extern "C" fn restore_continuation(
     stack_pointer: usize,
     segment_id: usize,
     value: usize,
-    called_from_continuation: usize,
+    _called_from_continuation: usize,
 ) -> usize {
-    let mut stack_pointer = stack_pointer;
+    let stack_pointer = stack_pointer;
     // if BuiltInTypes::is_true(called_from_continuation) {
     //     let frame_pointer = skip_frame(get_current_frame_pointer());
     //     // Why 16? Trial and error
@@ -160,10 +213,17 @@ pub unsafe extern "C" fn restore_continuation(
     // }
     // I actually need to get the previous frames stack_pointer
 
+    // Get the return address from our caller - this is where we want the restored continuation to return to
+    let mut caller_frame: *const u8;
+    unsafe {
+        asm!("mov {}, x29", out(reg) caller_frame);
+    }
+    let caller_return_address = unsafe { *((caller_frame).add(8) as *const usize) };
+
     let runtime = get_runtime().get_mut();
     let (new_stack_pointer, index) = runtime.get_stack_for_continuiation_swapping();
     unsafe {
-        call_fn_6(
+        call_fn_7(
             runtime,
             "continuation_trampoline",
             value,
@@ -171,6 +231,7 @@ pub unsafe extern "C" fn restore_continuation(
             index,
             stack_pointer,
             new_stack_pointer as usize,
+            caller_return_address,
             inner_restore_continuation as *const u8 as usize,
         );
     };
@@ -718,6 +779,41 @@ pub unsafe fn call_fn_6(
     let function = runtime.get_function_by_name(function_name).unwrap();
     let function = runtime.get_pointer(function).unwrap();
     save_volatile_registers(arg1, arg2, arg3, arg4, arg5, arg6, function as usize)
+}
+
+pub unsafe fn call_fn_7(
+    runtime: &Runtime,
+    function_name: &str,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+    arg5: usize,
+    arg6: usize,
+    arg7: usize,
+) -> usize {
+    print_call_builtin(
+        runtime,
+        format!("{} {}", "call_fn_7", function_name).as_str(),
+    );
+    let save_volatile_registers = runtime
+        .get_function_by_name("beagle.builtin/save_volatile_registers7")
+        .unwrap();
+    let save_volatile_registers = runtime.get_pointer(save_volatile_registers).unwrap();
+    let save_volatile_registers: fn(
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+    ) -> usize = unsafe { std::mem::transmute(save_volatile_registers) };
+
+    let function = runtime.get_function_by_name(function_name).unwrap();
+    let function = runtime.get_pointer(function).unwrap();
+    save_volatile_registers(arg1, arg2, arg3, arg4, arg5, arg6, arg7, function as usize)
 }
 
 pub unsafe fn call_fn_5(
@@ -1509,15 +1605,19 @@ pub unsafe extern "C" fn yield_continuation(value: usize) -> usize {
         current_frame = skip_frame(current_frame);
         continuation_marker = unsafe { current_frame.sub(16) } as *const usize;
     }
+    
+    // Continue one more frame to include the delimit frame for proper return path
+    previous_frame = current_frame;
+    current_frame = skip_frame(current_frame);
 
     let runtime = get_runtime().get_mut();
     // we want stack data to be from previous_frame to _beagle_frame
-    let stack_data = unsafe {
-        let stack_base = previous_frame as usize + 16;
-        let stack_end = beagle_frame as usize - 8;
-        std::slice::from_raw_parts(stack_end as *const u8, stack_base - stack_end)
-    };
-    let segment_id = runtime.save_stack_segment(stack_data).unwrap();
+    let stack_base = previous_frame as usize + 16;
+    let stack_end = beagle_frame as usize - 8;
+    let stack_data =
+        unsafe { std::slice::from_raw_parts(stack_end as *const u8, stack_base - stack_end) };
+    // stack_end is the top of the stack (most negative address)
+    let segment_id = runtime.save_stack_segment(stack_data, stack_end).unwrap();
 
     let return_address = unsafe { *continuation_marker };
     let frame_bottom = current_frame as usize;

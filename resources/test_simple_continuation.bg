@@ -1,0 +1,29 @@
+namespace test_simple_continuation
+
+import "beagle.debug" as debug
+
+fn choose(a, b) {
+    yield([a, fn() { b }])
+}
+
+fn main() {
+    delimit {
+        let x = choose("left", "right")
+        println("Chose: ")
+        println(x)
+    } handle (value, resume) {
+        debug/stack_segments()
+        resume(2)
+        // Only call resume once to test if that works
+        "handler completed"
+    }
+}
+
+// Expect
+// === Stack Segments Debug ===
+// Segment count: 1
+// Segment 0: 208 bytes
+// Raw bytes: [raw bytes will vary]
+// Chose: 
+// 2
+// handler completed

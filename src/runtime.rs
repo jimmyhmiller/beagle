@@ -1023,8 +1023,13 @@ impl Runtime {
     }
 
     /// Save a stack segment for later restoration (for yield functionality)
-    pub fn save_stack_segment(&mut self, stack_data: &[u8]) -> Result<usize, Box<dyn Error>> {
-        self.stack_segments.add_segment(stack_data)
+    pub fn save_stack_segment(
+        &mut self,
+        stack_data: &[u8],
+        original_stack_top: usize,
+    ) -> Result<usize, Box<dyn Error>> {
+        self.stack_segments
+            .add_segment(stack_data, original_stack_top)
     }
 
     /// Restore a stack segment to the given pointer location
@@ -2342,7 +2347,7 @@ mod tests {
 
         // Test saving a stack segment
         let test_data = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
-        let segment_id = runtime.save_stack_segment(&test_data).unwrap();
+        let segment_id = runtime.save_stack_segment(&test_data, 0x1000).unwrap();
 
         // Test restoring the segment
         let mut restore_buffer = vec![0u8; 10];

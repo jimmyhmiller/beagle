@@ -1,0 +1,30 @@
+namespace test_multishot_simple
+
+fn main() {
+    let result = delimit {
+        yield("first")
+        "delimit done"
+    } handle (value, resume) {
+        println("Handler got:")
+        println(value)
+        let r1 = resume("resumed1")
+        println("First resume returned:")
+        println(r1)
+        let r2 = resume("resumed2") 
+        println("Second resume returned:")
+        println(r2)
+        "handler done"
+    }
+    println("Final result:")
+    println(result)
+}
+
+// Expect
+// Handler got:
+// first
+// First resume returned:
+// delimit done
+// Second resume returned:
+// delimit done
+// Final result:
+// handler done

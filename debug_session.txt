@@ -1,0 +1,30 @@
+b inner_restore_continuation
+run resources/test_yield.bg
+frame variable
+p segment_length
+p dest
+p segment.original_stack_top
+p offset
+x/14xg dest
+n
+n
+n
+n
+n
+n
+n
+n
+n
+n
+n
+n
+n
+n
+finish
+register read sp x29 lr
+x/10xg $sp-80
+x/10xg $x29-80
+continue
+bt
+register read
+quit
