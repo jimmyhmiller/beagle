@@ -45,6 +45,14 @@ protocol Push {
     fn push(coll, value)
 }
 
+protocol Rest {
+    fn rest(coll)
+}
+
+protocol First {
+    fn first(coll)
+}
+
 protocol Length {
     fn length(coll)
 }
@@ -168,4 +176,8 @@ fn __create_continuation_closure(index) {
         // primitive/breakpoint!()
         restore_continuation(index, value, true)
     }
+}
+
+fn yield(value, in_handler) {
+    _yield(value, in_handler)
 }

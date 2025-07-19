@@ -10,6 +10,8 @@ use std::{
     thread,
 };
 
+use rand::Rng;
+
 use libffi::{
     low::CodePtr,
     middle::{Cif, Type, arg},
@@ -65,13 +67,6 @@ pub unsafe extern "C" fn debug_stack_segments() -> usize {
 
     0b111 // Return success
 }
-
-pub unsafe extern "C" fn exit_continuation_safe() -> usize {
-    // Safe exit point for continuations that complete
-    // This should return properly to the caller
-    BuiltInTypes::null_value() as usize
-}
-
 // TODO:
 // Okay, now I understand the multishot semantics better
 // I need to do the following
@@ -147,18 +142,21 @@ pub unsafe extern "C" fn inner_restore_continuation(
     // Now we need to patch the frame pointers in the copied segment
     // The offset is the difference between the original stack location and the new location
     let offset = dest as isize - segment.original_stack_top as isize;
-    
+
     // Walk the frame pointer chain and patch each frame pointer
     unsafe {
         // Start with the first frame pointer at the beginning of the segment
         let mut current_fp_ptr = dest as *mut usize;
-        
+
         loop {
             // Read the frame pointer value at this location
             let old_fp = *current_fp_ptr;
-            
+
             // If the frame pointer is 0 or points outside our original segment, we're done
-            if old_fp == 0 || old_fp < segment.original_stack_top || old_fp >= segment.original_stack_top + segment_length {
+            if old_fp == 0
+                || old_fp < segment.original_stack_top
+                || old_fp >= segment.original_stack_top + segment_length
+            {
                 // This is the last frame pointer in our segment
                 // It should point to the caller's frame, not the intermediate frame we had
                 // We need to get the frame pointer from when restore_continuation was called
@@ -167,23 +165,21 @@ pub unsafe extern "C" fn inner_restore_continuation(
                 *current_fp_ptr = caller_caller_frame as usize;
                 break;
             }
-            
+
             // Apply the offset to get the new frame pointer location
             let new_fp = (old_fp as isize + offset) as usize;
             *current_fp_ptr = new_fp;
-            
+
             // Move to the next frame pointer in the chain
             // The frame pointer points to the location of the previous frame pointer
             current_fp_ptr = new_fp as *mut usize;
         }
-        
+
         // Patch the very last return address in the captured segment
         // This should be the return address of our original caller (the handler)
         let last_return_addr_ptr = (dest + segment_length - 8) as *mut usize;
-        let original_return_addr = *last_return_addr_ptr;
-        
 
-        println!("Patching last return address: 0x{:x} -> 0x{:x}", original_return_addr, caller_return_address);
+        // println!("Patching last return address: 0x{:x} -> 0x{:x}", original_return_addr, caller_return_address);
         *last_return_addr_ptr = caller_return_address;
     }
 
@@ -205,14 +201,6 @@ pub unsafe extern "C" fn restore_continuation(
     value: usize,
     _called_from_continuation: usize,
 ) -> usize {
-    let stack_pointer = stack_pointer;
-    // if BuiltInTypes::is_true(called_from_continuation) {
-    //     let frame_pointer = skip_frame(get_current_frame_pointer());
-    //     // Why 16? Trial and error
-    //     stack_pointer = unsafe { *(frame_pointer as *const usize) } + 16;
-    // }
-    // I actually need to get the previous frames stack_pointer
-
     // Get the return address from our caller - this is where we want the restored continuation to return to
     let mut caller_frame: *const u8;
     unsafe {
@@ -754,7 +742,7 @@ pub unsafe fn call_fn_2(runtime: &Runtime, function_name: &str, arg1: usize, arg
     save_volatile_registers(arg1, arg2, function as usize)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, unused)]
 pub unsafe fn call_fn_6(
     runtime: &Runtime,
     function_name: &str,
@@ -781,6 +769,7 @@ pub unsafe fn call_fn_6(
     save_volatile_registers(arg1, arg2, arg3, arg4, arg5, arg6, function as usize)
 }
 
+#[allow(clippy::too_many_arguments, unused)]
 pub unsafe fn call_fn_7(
     runtime: &Runtime,
     function_name: &str,
@@ -1566,6 +1555,31 @@ extern "C" fn pop_count(value: usize) -> usize {
     }
 }
 
+extern "C" fn random_int(lower: isize, upper: isize) -> usize {
+    print_call_builtin(get_runtime().get(), "random_int");
+    let lower_tag = BuiltInTypes::get_kind(lower as usize);
+    let upper_tag = BuiltInTypes::get_kind(upper as usize);
+
+    match (lower_tag, upper_tag) {
+        (BuiltInTypes::Int, BuiltInTypes::Int) => {
+            let lower = BuiltInTypes::untag_isize(lower) as i64;
+            let upper = BuiltInTypes::untag_isize(upper) as i64;
+
+            if lower >= upper {
+                panic!("Lower bound must be less than upper bound");
+            }
+
+            let mut rng = rand::thread_rng();
+            let result = rng.gen_range(lower..upper);
+            BuiltInTypes::Int.tag(result as isize) as usize
+        }
+        _ => panic!(
+            "Expected int arguments, got {:?} and {:?}",
+            lower_tag, upper_tag
+        ),
+    }
+}
+
 // It is very important that this isn't inlined
 // because other code is expecting that
 // If we inline, we need to remove a skip frame
@@ -1590,38 +1604,67 @@ fn skip_frame(frame: *const u8) -> *const u8 {
     unsafe { *(frame as *const *const u8) }
 }
 
-pub unsafe extern "C" fn yield_continuation(value: usize) -> usize {
+pub unsafe extern "C" fn yield_continuation(value: usize, in_handler: usize) -> usize {
+    let runtime = get_runtime().get();
+    let stack_base = runtime.get_stack_base();
+    let stack_begin = stack_base - STACK_SIZE;
+
     let current_frame = get_current_frame_pointer();
-    let beagle_frame = skip_frame(current_frame);
-    let mut current_frame = skip_frame(current_frame);
+    // When in_handler is true, we need to skip additional frames to escape the handler context
+    let beagle_frame = if BuiltInTypes::is_true(in_handler) {
+        skip_frame(skip_frame(skip_frame(current_frame))) // Handler case: skip current frame + handler frame + one extra
+    } else {
+        skip_frame(skip_frame(current_frame)) // Normal case: skip current frame + one extra
+    };
+    let mut current_frame = if BuiltInTypes::is_true(in_handler) {
+        skip_frame(skip_frame(skip_frame(current_frame))) // Handler case: skip current frame + handler frame + one extra
+    } else {
+        skip_frame(skip_frame(current_frame)) // Normal case: skip current frame + one extra  
+    };
     let beagle_frame = unsafe { beagle_frame.add(8) };
     let mut previous_frame = current_frame;
     current_frame = skip_frame(current_frame);
     let mut continuation_marker = unsafe { current_frame.sub(16) } as *const usize;
 
-    while unsafe { *continuation_marker == 0 } {
-        // Otherwise, we skip to the next frame
+    while unsafe { *continuation_marker == 0 || (*continuation_marker & 0b11) == 0b11 } {
+        // Check if we've gone beyond stack bounds
+        if current_frame as usize >= stack_base || (current_frame as usize) < stack_begin {
+            println!("Error: yield called outside of a delimited continuation");
+            unsafe {
+                throw_error(get_current_stack_pointer());
+            }
+        }
+
+        // Skip if no marker (0) or if we're inside a handler (bits 0 and 1 both set)
         previous_frame = current_frame;
         current_frame = skip_frame(current_frame);
         continuation_marker = unsafe { current_frame.sub(16) } as *const usize;
     }
-    
+
+    let top = previous_frame as usize;
     // Continue one more frame to include the delimit frame for proper return path
     previous_frame = current_frame;
-    current_frame = skip_frame(current_frame);
 
     let runtime = get_runtime().get_mut();
     // we want stack data to be from previous_frame to _beagle_frame
     let stack_base = previous_frame as usize + 16;
     let stack_end = beagle_frame as usize - 8;
+    let stack_data = unsafe {
+        std::slice::from_raw_parts_mut(stack_end as *mut usize, (stack_base - stack_end) / 8)
+    };
+
+    stack_data[stack_data.len() - 5] = BuiltInTypes::Int.tag(42 as isize) as usize;
+
+    // Turn stackdata back into u8 slice
     let stack_data =
-        unsafe { std::slice::from_raw_parts(stack_end as *const u8, stack_base - stack_end) };
+        unsafe { std::slice::from_raw_parts(stack_data.as_ptr() as *mut u8, stack_data.len() * 8) };
+
     // stack_end is the top of the stack (most negative address)
     let segment_id = runtime.save_stack_segment(stack_data, stack_end).unwrap();
 
     let return_address = unsafe { *continuation_marker };
-    let frame_bottom = current_frame as usize;
-    let frame_top = unsafe { previous_frame.add(16) } as usize;
+    let frame_bottom = previous_frame as usize;
+    let frame_top = top + 16;
     let root = runtime.register_temporary_root(value);
     let continuation_closure = unsafe {
         call_fn_1(
@@ -1771,10 +1814,10 @@ impl Runtime {
         self.add_builtin_function("beagle.core/gc", gc as *const u8, true, 1)?;
 
         self.add_builtin_function(
-            "beagle.core/yield",
+            "beagle.core/_yield",
             yield_continuation as *const u8,
             false,
-            1,
+            2,
         )?;
 
         self.add_builtin_function(
@@ -1941,6 +1984,8 @@ impl Runtime {
             true,
             2,
         )?;
+
+        self.add_builtin_function("beagle.core/random_int", random_int as *const u8, false, 2)?;
 
         Ok(())
     }

@@ -1,88 +1,614 @@
 namespace test_yield
 import "beagle.debug" as debug
+import "beagle.builtin" as builtin
+import "beagle.primitive" as primitive
 
-
-// TODO: I'm betting this isn't general yet
-
-fn test_yield() {
-    let result = yield("We yielded something!")
-    result
+// Test 1: Basic multishot - calling the same continuation multiple times
+fn multishot_basic() {
+    println("=== Basic Multishot ===")
+    delimit {
+        let x = yield("ping")
+        println("Resumed with:")
+        println(x)
+        x + 10
+    } handle (value, resume) {
+        println("Handler caught:")
+        println(value)
+        let first = resume(1)
+        println("First result:")
+        println(first)
+        let second = resume(2)
+        println("Second result:")
+        println(second)
+        "multishot done"
+    }
 }
 
-fn inner_function() {
-    let x = test_yield()
-    println("Inner function")
-    x
+// Test 2: Non-deterministic choice - exploring multiple paths
+fn choose(a, b) {
+    yield([a, b])
 }
 
-// fn main() {
-//     delimit {
-//         let result = inner_function()
-//         print("Returned from test_yield: ")
-//         println(result)
-//     } handle (value, resume) {
-//         // TODO: resume needs to be a closure that we can
-//         // call that will do restore_continuation with the correct index
-//         print("Handler caught: ")
-//         println(value)
-//         resume("BAM!")
-//         "handled"
-//     }
-//     "done"
-// }
+fn nondeterministic_search() {
+    println("=== Non-deterministic Search ===")
+    delimit {
+        let x = choose(10, 20)
+        let y = choose(1, 2)
+        let result = x + y
+        println("Path result:")
+        println(result)
+        result
+    } handle (value, resume) {
+        let options = value
+        println("Exploring path:")
+        println(options[0])
+        let result1 = resume(options[0])
+        println("Exploring path:")
+        println(options[1])
+        let result2 = resume(options[1])
+        [result1, result2]
+    }
+}
 
-// Exp ect
-// Handler caught: We yielded something!
-// Inner function
-// Returned from test_yield: BAM!
-// done
+// Test 3: Backtracking search
+fn solve_puzzle() {
+    let a = choose(1, 2)
+    let b = choose(3, 4)
+    if a + b == 5 {
+        [a, b]
+    } else {
+        yield("no solution on this path")
+    }
+}
 
+fn backtracking_search() {
+    println("=== Backtracking Search ===")
+    delimit {
+        let solution = solve_puzzle()
+        println("Found solution:")
+        println(solution)
+        solution
+    } handle (value, resume) {
+        if value == "no solution on this path" {
+            println("Dead end, backtracking...")
+            null // Don't resume, just backtrack
+        } else {
+            // This is a choice point
+            let options = value
+            // Try first option
+            let result1 = resume(options[0])
+            if result1 != null {
+                result1
+            } else {
+                // Try second option
+                resume(options[1])
+            }
+        }
+    }
+}
 
-fn make_generator(n) {
+// Test 4: Generator with multishot capability
+fn make_multishot_generator(items) {
     let mut i = 0
     fn next() {
-        if i < n {
+        if i < length(items) {
+            let current = items[i]
             i = i + 1
-            yield(i)
+            yield(current)
         } else {
-            null
+            "done"
         }
     }
     next
 }
 
-// fn main() {
-//     delimit {
-//         let gen = make_generator(3)
-//         println(gen()) // 1
-//         println(gen()) // 2
-//         println(gen()) // 3
-//         println(gen()) // null
-//     } handle (v, resume) {
-//         resume(v)
-//     }
-// }
-
-
-// TODO:
-// I want to make multishot work
-// The key is I need to restore the continuation
-// while leaving the handler code in place
-// So resume will come back to the handler
-// and we can call it again
-
-fn choose(a, b) {
-    yield([a, fn() { b }])
-}
-
-fn main() {
+fn multishot_generator_test() {
+    println("=== Multishot Generator ===")
     delimit {
-        let x = choose("left", "right")
-        println("Chose: ")
-        println(x)
+        let gen = make_multishot_generator([10, 20, 30])
+        println("First call:")
+        println(gen())
+        println("Second call:")
+        println(gen())
+        gen
     } handle (value, resume) {
-        debug/stack_segments()
-        resume(2)
-        resume(3)
+        if value == "done" {
+            resume(value)
+        } else {
+            println("Handler intercepted:")
+            println(value)
+            // Resume multiple times to see different states
+            let result1 = resume(value)
+            println("After first resume, generator returned:")
+            println(result1)
+            resume(value) // Resume again from same point
+        }
     }
 }
+
+// Test 5: Exception handling with multiple recovery strategies
+fn risky_operation(strategy) {
+    if strategy == "fail" {
+        yield("error: operation failed")
+    } else if strategy == "slow" {
+        yield("warning: operation slow")
+    } else {
+        "success"
+    }
+}
+
+fn exception_handling_test() {
+    println("=== Exception Handling ===")
+    delimit {
+        let result1 = risky_operation("fail")
+        println("First operation:")
+        println(result1)
+        let result2 = risky_operation("slow")
+        println("Second operation:")
+        println(result2)
+        [result1, result2]
+    } handle (value, resume) {
+        println("Exception handler caught:")
+        println(value)
+        if value == "error: operation failed" {
+            // Try multiple recovery strategies
+            println("Trying retry strategy...")
+            let retry = resume("retry")
+            println("Trying fallback strategy...")
+            resume("fallback")
+        } else if value == "warning: operation slow" {
+            println("Handling warning...")
+            resume("optimized")
+        } else {
+            resume(value)
+        }
+    }
+}
+
+// Test 6: State machine with backtracking
+fn state_machine(state) {
+    if state == "end" {
+        "state machine complete"
+    } else if state == "start" {
+        let new_state = yield("choose: A or B?")
+        state_machine(new_state)
+    } else if state == "A" {
+        let new_state = yield("A chosen, next: C or D?")
+        state_machine(new_state)
+    } else if state == "B" {
+        let new_state = yield("B chosen, next: E or F?")
+        state_machine(new_state)
+    } else if state == "C" {
+        println("Reached C - success!")
+        state_machine("end")
+    } else {
+        let new_state = yield("dead end, backtrack")
+        state_machine(new_state)
+    }
+}
+
+fn state_machine_test() {
+    println("=== State Machine ===")
+    delimit {
+        state_machine("start")
+    } handle (value, resume) {
+        println("State machine asks:")
+        println(value)
+        if value == "choose: A or B?" {
+            // Try A first
+            let result_a = resume("A")
+            if result_a != null {
+                result_a
+            } else {
+                // A failed, try B
+                resume("B")
+            }
+        } else if value == "A chosen, next: C or D?" {
+            // Try C (which succeeds)
+            resume("C")
+        } else if value == "B chosen, next: E or F?" {
+            // Both E and F are dead ends in this example
+            resume("E")
+        } else if value == "dead end, backtrack" {
+            println("Hit dead end, need to backtrack")
+            null // Signal failure
+        } else {
+            resume(value)
+        }
+    }
+}
+
+// Test 7: Cooperative multitasking simulation  
+fn task_loop(name, steps, i) {
+    if i < steps {
+        yield("task " ++ name ++ " step " ++ to_string(i))
+        task_loop(name, steps, i + 1)
+    } else {
+        "task " ++ name ++ " complete"
+    }
+}
+
+fn task(name, steps) {
+    task_loop(name, steps, 0)
+}
+
+fn scheduler_test() {
+    println("=== Cooperative Scheduler ===")
+    delimit {
+        let task_a = task("A", 3)
+        let task_b = task("B", 2)
+        [task_a, task_b]
+    } handle (value, resume) {
+        println("Scheduler handling:")
+        println(value)
+        // Simulate time slice - resume briefly then yield control
+        resume("continue")
+    }
+}
+
+// Test 8: Tree traversal with multiple strategies
+fn tree_node(value, left, right) {
+    [value, left, right]
+}
+
+fn traverse_tree(node, strategy) {
+    if node == null {
+        null
+    } else {
+        let value = node[0]
+        let left = node[1]
+        let right = node[2]
+        
+        if strategy == "preorder" {
+            yield(value)
+            traverse_tree(left, strategy)
+            traverse_tree(right, strategy)
+        } else if strategy == "inorder" {
+            traverse_tree(left, strategy)
+            yield(value)
+            traverse_tree(right, strategy)
+        } else {
+            traverse_tree(left, strategy)
+            traverse_tree(right, strategy)
+            yield(value)
+        }
+    }
+}
+
+fn tree_traversal_test() {
+    println("=== Tree Traversal ===")
+    let tree = tree_node(1, 
+                tree_node(2, tree_node(4, null, null), tree_node(5, null, null)),
+                tree_node(3, tree_node(6, null, null), tree_node(7, null, null)))
+    
+    delimit {
+        traverse_tree(tree, "preorder")
+        "traversal complete"
+    } handle (value, resume) {
+        if value == "traversal complete" {
+            resume(value)
+        } else {
+            println("Visited node:")
+            println(value)
+            // Continue traversal
+            resume(null)
+        }
+    }
+}
+
+// Test 9: Parallel execution simulation
+fn parallel_task_loop(id, duration, time) {
+    if time < duration {
+        yield("task " ++ id ++ " at time " ++ to_string(time))
+        parallel_task_loop(id, duration, time + 1)
+    } else {
+        "task " ++ id ++ " finished"
+    }
+}
+
+fn parallel_task(id, duration) {
+    parallel_task_loop(id, duration, 0)
+}
+
+fn parallel_execution_test() {
+    println("=== Parallel Execution Simulation ===")
+    delimit {
+        // Start multiple "parallel" tasks
+        parallel_task("X", 3)
+        parallel_task("Y", 2)
+        "all tasks complete"
+    } handle (value, resume) {
+        println("Scheduler tick:")
+        println(value)
+        if value == "all tasks complete" {
+            resume(value)
+        } else {
+            // Simulate round-robin scheduling
+            resume("tick")
+        }
+    }
+}
+
+// Test 10: Round Robin Scheduler with Time Slices
+fn task_worker(id, work_units, current_unit) {
+    println("running task " ++ id ++ " unit " ++ to_string(current_unit))
+    if current_unit < work_units {
+        yield("task_" ++ id ++ "_unit_" ++ to_string(current_unit))
+        task_worker(id, work_units, current_unit + 1)
+    } else {
+        yield("task_" ++ id ++ "_complete")
+    }
+}
+
+fn make_task(id, work_units) {
+    fn () {
+        task_worker(id, work_units, 0)
+    }
+}
+
+fn enqueue!(q, task) {
+    // TODO: task isn't being captured here
+    swap!(q, fn (v) {
+        [v[0], push(v[1], task)]
+    })
+}
+
+fn dequeue!(q) {
+    let result = swap!(q, fn (v) {
+        if v == [] {
+            [null, v]
+        } else {
+            [first(v[1]), rest(v[1])]
+        }
+    })
+    result[0]
+}
+
+fn round_robin_scheduler_test() {
+    let task_a = make_task("A", 4)
+    let task_b = make_task("B", 3)
+    let task_c = make_task("C", 2)
+    let tasks = atom([null, []])
+    println("Enqueueing all tasks...")
+    enqueue!(tasks, task_a)
+    enqueue!(tasks, task_b)
+    enqueue!(tasks, task_c)
+    delimit {
+        println("=== Round Robin Scheduler ===")
+        let thing = dequeue!(tasks)
+        thing()
+    } handle (value, resume) {
+        enqueue!(tasks, resume)
+        let new_task = dequeue!(tasks)
+        new_task()
+    }
+}
+
+// Test 11: Complex nested multishot with cross-cutting concerns
+fn logging_wrapper(operation) {
+    println("Starting operation")
+    let result = operation()
+    println("Operation completed with:")
+    println(result)
+    result
+}
+
+fn monitored_operation() {
+    let step1 = yield("step1")
+    let step2 = yield("step2")
+    step1 + step2
+}
+
+fn complex_multishot_test() {
+    println("=== Complex Multishot ===")
+    delimit {
+        logging_wrapper(fn() {
+            monitored_operation()
+        })
+    } handle (value, resume) {
+        println("Monitor caught:")
+        println(value)
+        if value == "step1" {
+            // Try multiple values for step1
+            println("Trying step1 = 10")
+            let result1 = resume(10)
+            println("Result with 10:")
+            println(result1)
+            println("Trying step1 = 20")
+            resume(20)
+        } else if value == "step2" {
+            resume(5)
+        } else {
+            resume(value)
+        }
+    }
+}
+
+// TODO: Make this work correctly
+fn simple_with_stuff_after() {
+    delimit {
+        yield("test")
+        yield("test2")
+        println("2")
+    } handle (value, resume) {
+        println("1")
+        resume(1)
+        println("3")
+    }
+    println("4")
+}
+
+
+
+fn main() {
+    let result = simple_with_stuff_after()
+    println(result)
+    // multishot_basic()
+    // nondeterministic_search()
+    // backtracking_search()
+    // multishot_generator_test()
+    // exception_handling_test()
+    // state_machine_test()
+    // scheduler_test()
+    // tree_traversal_test()
+    // parallel_execution_test()
+    // complex_multishot_test()
+    // round_robin_scheduler_test()
+    // println("=== All Multishot Tests Complete ===")
+}
+
+// Expe ct
+// === Basic Multishot ===
+// Handler caught:
+// ping
+// Resumed with:
+// 1
+// First result:
+// 11
+// Resumed with:
+// 2
+// Second result:
+// 12
+// === Non-deterministic Search ===
+// Exploring path:
+// 10
+// Exploring path:
+// 1
+// Path result:
+// 11
+// Exploring path:
+// 2
+// Path result:
+// 12
+// Exploring path:
+// 20
+// Exploring path:
+// 1
+// Path result:
+// 21
+// Exploring path:
+// 2
+// Path result:
+// 22
+// === Backtracking Search ===
+// Dead end, backtracking...
+// Dead end, backtracking...
+// Found solution:
+// [2, 3]
+// === Multishot Generator ===
+// Handler intercepted:
+// 10
+// First call:
+// 10
+// Handler intercepted:
+// 20
+// After first resume, generator returned:
+// 20
+// === Exception Handling ===
+// Exception handler caught:
+// error: operation failed
+// Trying retry strategy...
+// First operation:
+// retry
+// Exception handler caught:
+// warning: operation slow
+// Handling warning...
+// Second operation:
+// optimized
+// Trying fallback strategy...
+// === State Machine ===
+// State machine asks:
+// choose: A or B?
+// State machine asks:
+// A chosen, next: C or D?
+// Reached C - success!
+// === Cooperative Scheduler ===
+// Scheduler handling:
+// task A step 0
+// Scheduler handling:
+// task A step 1
+// Scheduler handling:
+// task A step 2
+// Scheduler handling:
+// task B step 0
+// Scheduler handling:
+// task B step 1
+// === Tree Traversal ===
+// Visited node:
+// 1
+// Visited node:
+// 2
+// Visited node:
+// 4
+// Visited node:
+// 5
+// Visited node:
+// 3
+// Visited node:
+// 6
+// Visited node:
+// 7
+// === Parallel Execution Simulation ===
+// Scheduler tick:
+// task X at time 0
+// Scheduler tick:
+// task X at time 1
+// Scheduler tick:
+// task X at time 2
+// Scheduler tick:
+// task Y at time 0
+// Scheduler tick:
+// task Y at time 1
+// === Round Robin Scheduler ===
+// Starting all tasks...
+// Scheduler: Processing task_A_unit_0
+// Giving time slice to: task_A_unit_0
+// Time slice expired, preempting task
+// Scheduler: Processing task_A_unit_1
+// Giving time slice to: task_A_unit_1
+// Work unit completed
+// Scheduler: Processing task_A_unit_2
+// Giving time slice to: task_A_unit_2
+// Work unit completed
+// Scheduler: Processing task_A_unit_3
+// Giving time slice to: task_A_unit_3
+// Work unit completed
+// Scheduler: Processing task_A_complete
+// Task completed: task_A_complete
+// Scheduler: Processing task_B_unit_0
+// Giving time slice to: task_B_unit_0
+// Work unit completed
+// Scheduler: Processing task_B_unit_1
+// Giving time slice to: task_B_unit_1
+// Time slice expired, preempting task
+// Scheduler: Processing task_B_unit_2
+// Giving time slice to: task_B_unit_2
+// Work unit completed
+// Scheduler: Processing task_B_complete
+// Task completed: task_B_complete
+// Scheduler: Processing task_C_unit_0
+// Giving time slice to: task_C_unit_0
+// Time slice expired, preempting task
+// Scheduler: Processing task_C_unit_1
+// Giving time slice to: task_C_unit_1
+// Work unit completed
+// Scheduler: Processing task_C_complete
+// Task completed: task_C_complete
+// === Complex Multishot ===
+// Starting operation
+// Monitor caught:
+// step1
+// Trying step1 = 10
+// Monitor caught:
+// step2
+// Operation completed with:
+// 15
+// Result with 10:
+// 15
+// Trying step1 = 20
+// Starting operation
+// Monitor caught:
+// step2
+// Operation completed with:
+// 25
+// === All Multishot Tests Complete ===

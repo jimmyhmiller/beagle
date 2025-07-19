@@ -39,6 +39,7 @@ fn get_node_for_level(node, level, index) {
 
 fn get(vec, index) {
     if index < 0 || index >= vec.count {
+        println(vec)
         primitive/panic("Index out of bounds")
     }
 
@@ -263,6 +264,32 @@ fn from_array_helper(v, arr, i, n) {
     }
 }
 
+fn rest(vec) {
+    if vec.count <= 1 {
+        EMPTY
+    } else {
+        rest_helper(EMPTY, vec, 1, vec.count)
+    }
+}
+
+fn rest_helper(new_vec, orig_vec, i, n) {
+    if i == n {
+        new_vec
+    } else {
+        let value = get(orig_vec, i)
+        let updated_vec = push(new_vec, value)
+        rest_helper(updated_vec, orig_vec, i + 1, n)
+    }
+}
+
+fn first(vec) {
+    if vec.count == 0 {
+        null
+    } else {
+        get(vec, 0)
+    }
+}
+
 
 
 extend PersistentVector with Indexed {
@@ -317,6 +344,18 @@ extend PersistentVector with Associable {
     }
 }
 
+extend PersistentVector with Rest {
+    fn rest(vec) {
+        rest(vec)
+    }
+}
+
+extend PersistentVector with First {
+    fn first(vec) {
+        first(vec)
+    }
+}
+
 
 
 fn main() {
@@ -331,6 +370,28 @@ fn main() {
     let vec2 = fill_vec_n(10);
     let array2 = to_array(vec2)
     println(array2)
+    
+    // Test rest function
+    let empty_vec = vec()
+    println(rest(empty_vec))
+    
+    let single_vec = push(vec(), 42)
+    println(rest(single_vec))
+    
+    let vec3 = fill_vec_n(5)
+    println(vec3)
+    let rest_vec = rest(vec3)
+    println(rest_vec)
+    
+    // Test first function
+    let empty_vec = vec()
+    println(first(empty_vec))
+    
+    let single_vec = push(vec(), 42)
+    println(first(single_vec))
+    
+    println(first(vec3))
+    
     "done"
 }
 
@@ -341,4 +402,11 @@ fn main() {
 // worked!
 // worked!
 // [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 ]
+// []
+// []
+// [0, 1, 2, 3, 4]
+// [1, 2, 3, 4]
+// null
+// 42
+// 0
 // done

@@ -456,12 +456,17 @@ impl PrettyPrint for Instruction {
             Instruction::SetContinuationHandlerAddress(label) => {
                 format!("set_continuation_handler_address {}", label.index)
             }
+            Instruction::ClearContinuationHandlerAddress => {
+                "clear_continuation_handler_address".to_string()
+            }
             Instruction::DelimitHandlerValue(dest) => {
                 format!("delimit_handler_value {}", dest.pretty_print())
             }
             Instruction::DelimitHandlerContinuation(dest) => {
                 format!("delimit_handler_continuation {}", dest.pretty_print())
             }
+            Instruction::DelimitPrelude => "delimit_prelude".to_string(),
+            Instruction::DelimitEpilogue => "delimit_epilogue".to_string(),
         }
     }
 }

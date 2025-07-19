@@ -540,6 +540,23 @@ impl LowLevelArm {
         self.sub_stack_pointer(-self.max_locals);
     }
 
+    pub fn delimit_prelude(&mut self) {
+        // Create a dummy frame that both handler and yield can return to
+        // Similar to prelude but without adjusting for locals (0 locals)
+        self.store_pair(X29, X30, SP, -2);
+        self.mov_reg(X29, SP);
+        self.store_pair(ZERO_REGISTER, ZERO_REGISTER, SP, -2);
+        // No local adjustment needed - treating as 0 locals
+    }
+
+    pub fn delimit_epilogue(&mut self) {
+        // Clean up the dummy frame created by delimit_prelude
+        // Similar to epilogue but without adjusting for locals (0 locals)
+        self.add_stack_pointer(2);
+        // No local adjustment needed - we treated as 0 locals
+        self.load_pair(X29, X30, SP, 2);
+    }
+
     pub fn epilogue(&mut self) {
         self.add_stack_pointer(2);
         self.add_stack_pointer(self.max_locals);
@@ -1281,6 +1298,20 @@ impl LowLevelArm {
 
         // Store the raw handler address (untagged) in the marker slot
         self.store_on_heap(marker_slot_reg, handler_addr_reg, 0);
+    }
+
+    pub fn clear_continuation_handler_address(&mut self) {
+        // Clear handler address by storing 0 in continuation marker slot
+        // The marker slot is at X29 - 16
+
+        // Load the address of the first zero word (X29 - 16)
+        let marker_slot_reg = self.temporary_register();
+        self.sub_imm(marker_slot_reg, X29, 16);
+
+        // Store 0 in the marker slot
+        let zero_reg = self.temporary_register();
+        self.mov(zero_reg, 0);
+        self.store_on_heap(marker_slot_reg, zero_reg, 0);
     }
 
     pub fn set_continuation_marker(&mut self) {

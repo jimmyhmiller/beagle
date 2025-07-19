@@ -1,0 +1,31 @@
+namespace incorrect_capture_test
+
+
+fn task() {
+    _println("Top level task")
+}
+
+
+fn closure_capture(task) {
+    _println("In closure_capture, task is:")
+    _println(task)
+    fn () {
+        _println("In closure, task is:")
+        _println(task)
+    }
+}
+
+
+fn main() {
+    let closure = closure_capture(42)
+
+    closure()
+    "done"
+}
+
+// Expect
+// In closure_capture, task is:
+// 42
+// In closure, task is:
+// 42
+// done

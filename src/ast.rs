@@ -295,16 +295,19 @@ impl Ast {
             current_context: Context {
                 tail_position: true,
                 in_function: false,
+                in_handler: false,
             },
             next_context: Context {
                 tail_position: true,
                 in_function: false,
+                in_handler: false,
             },
             environment_stack: vec![Environment::new()],
             current_token_info: vec![],
             last_accounted_for_ir: 0,
             metadata: HashMap::new(),
             mutable_pass_env_stack: vec![HashMap::new()],
+            current_function: None,
         };
 
         // println!("{:#?}", compiler);
@@ -357,7 +360,7 @@ impl Ast {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum VariableLocation {
     Register(VirtualRegister),
     Local(usize),
@@ -383,6 +386,7 @@ impl VariableLocation {
 pub struct Context {
     pub tail_position: bool,
     pub in_function: bool,
+    pub in_handler: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -407,6 +411,18 @@ impl Environment {
             argument_locations: HashMap::new(),
         }
     }
+
+    fn get_variable(&self, name: &str) -> Option<VariableLocation> {
+        // Search in reverse order so that the most recent variable is found first
+        // for variable in self.local_variables.iter().rev() {
+        //     if variable == name {
+        //         return Some(VariableLocation::Local(
+        //             self.local_variables.len() - 1,
+        //         ));
+        //     }
+        // }
+        self.variables.get(name).cloned()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -418,6 +434,7 @@ pub struct IRRange {
 #[derive(Debug, Clone)]
 pub struct Metadata {
     needs_to_be_boxed: bool,
+    needs_handler_local: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -452,6 +469,7 @@ pub struct AstCompiler<'a> {
     pub last_accounted_for_ir: usize,
     pub metadata: HashMap<Ast, Metadata>,
     pub mutable_pass_env_stack: Vec<HashMap<String, MutablePassInfo>>,
+    pub current_function: Option<Ast>,
 }
 
 impl AstCompiler<'_> {
@@ -465,6 +483,18 @@ impl AstCompiler<'_> {
 
     pub fn in_function(&mut self) {
         self.next_context.in_function = true;
+    }
+
+    pub fn in_handler(&mut self) {
+        self.next_context.in_handler = true;
+    }
+
+    pub fn not_in_handler(&mut self) {
+        self.next_context.in_handler = false;
+    }
+
+    pub fn is_in_handler(&self) -> bool {
+        self.current_context.in_handler
     }
 
     pub fn is_tail_position(&self) -> bool {
@@ -485,7 +515,7 @@ impl AstCompiler<'_> {
 
     pub fn compile(&mut self) -> Ir {
         // TODO: Get rid of clone
-        self.find_mutable_vars_that_need_boxing(&self.ast.clone());
+        self.full_pass_for_metadata(&self.ast.clone());
 
         // TODO: Get rid of clone
         self.first_pass(&self.ast.clone());
@@ -514,6 +544,26 @@ impl AstCompiler<'_> {
                 self.create_new_environment();
 
                 let is_not_top_level = self.environment_stack.len() > 2;
+
+                if self
+                    .metadata
+                    .get(&ast)
+                    .map(|x| x.needs_handler_local)
+                    .unwrap_or(false)
+                {
+                    // Intentionally empty string so you can't reference it in code.
+                    let local_index = self.find_or_insert_local("handler");
+                    self.insert_variable(
+                        "handler".to_string(),
+                        VariableLocation::Local(local_index),
+                    );
+                    assert!(
+                        local_index == 0,
+                        "Handler local should always be at index 0"
+                    );
+                    let reg = self.ir.assign_new(Value::Null);
+                    self.ir.store_local(local_index, reg.into());
+                }
 
                 let variable_locaton = if is_not_top_level {
                     // We are inside a function already, so this isn't a top level function
@@ -1171,27 +1221,42 @@ impl AstCompiler<'_> {
                 handler_body,
                 ..
             } => {
-                // Store a simple marker for now, we'll enhance this step by step
 
-                // Handler body starts here - we need the label first to get its address
+                // TODO: My thought is that if I set my x30 here to be skip_handler
+                // I can have delimit and handler return, which will just us to 
+                // skip_handler if no calls are on the stack. If we are in yield
+                // situation, that will do the right thing I think.
+
+
                 let handler_start = self.ir.label("handler_start");
+
+                let return_value = self.ir.volatile_register();
 
                 self.ir.set_continuation_handler_address(handler_start);
 
-                // Compile the delimited body normally
+                let skip_handler = self.ir.label("skip_handler");
+
                 let mut result = Value::Null;
                 for expr in delimit_body {
                     result = self.call_compile(&expr);
                 }
+                // let handler_local = self.find_local("handler");
+                // let handler_local = self.ir.load_local(handler_local);
+                // if the handler local is null, we didn't yield and should skip handler
+                // self.ir
+                    // .jump_if(skip_handler, Condition::Equal, handler_local, Value::Null);
 
-                // Jump around handler body
-                let skip_handler = self.ir.label("skip_handler");
+                // else we should return right here
+
+                self.ir.assign(return_value, result);
+                self.ir.ret(return_value);
+
+                self.ir.clear_continuation_handler_address();
+
                 self.ir.jump(skip_handler);
 
-                // Write the handler label here
                 self.ir.write_label(handler_start);
 
-                // Set up handler parameter locals from X0 and X1
                 let value_reg = self.ir.delimit_handler_value(); // X0
                 let value_local = self.find_or_insert_local(&value);
                 let value_reg = self.ir.assign_new(value_reg);
@@ -1208,17 +1273,20 @@ impl AstCompiler<'_> {
                     VariableLocation::Local(continuation_local),
                 );
 
-                // Compile handler body
+                self.in_handler();
                 let mut handler_result = Value::Null;
                 for expr in handler_body {
                     handler_result = self.call_compile(&expr);
                 }
-                self.ir.ret(handler_result);
+                self.not_in_handler();
+                self.ir.assign(return_value, handler_result);
 
-                // Continue here after skipping handler
+                self.ir.ret(return_value);
+
                 self.ir.write_label(skip_handler);
 
-                result
+
+                return_value.into()
             }
             Ast::If {
                 condition,
@@ -1368,9 +1436,9 @@ impl AstCompiler<'_> {
                 args,
                 token_range,
             } => {
-                let name = self.get_qualified_function_name(&name);
+                let qualified_name = self.get_qualified_function_name(&name);
 
-                if self.name_matches(&name) {
+                if self.name_matches(&qualified_name) {
                     if self.is_tail_position() {
                         return self.call_compile(&Ast::TailRecurse { args, token_range });
                     } else {
@@ -1378,8 +1446,8 @@ impl AstCompiler<'_> {
                     }
                 }
 
-                if self.should_not_evaluate_arguments(&name) {
-                    return self.compile_macro_like_primitive(name, args);
+                if self.should_not_evaluate_arguments(&qualified_name) {
+                    return self.compile_macro_like_primitive(qualified_name, args);
                 }
 
                 let args: Vec<Value> = args
@@ -1397,25 +1465,28 @@ impl AstCompiler<'_> {
                         }
                     })
                     .collect();
+                if let Some(function) = self.get_variable(&name) {
+                    return self.compile_closure_call(function, args);
+                }
 
                 // TODO: Should the arguments be evaluated first?
                 // I think so, this will matter once I think about macros
                 // though
-                if self.compiler.is_inline_primitive_function(&name) {
-                    return self.compile_inline_primitive_function(&name, args);
+                if self.compiler.is_inline_primitive_function(&qualified_name) {
+                    return self.compile_inline_primitive_function(&qualified_name, args);
                 }
 
                 // TODO: This isn't they way to handle this
                 // I am acting as if all closures are assign to a variable when they aren't.
                 // Need to have negative test cases for this
-                if !self.is_qualifed_function_name(&name) {
-                    if let Some(function) = self.get_variable(&name) {
+                if !self.is_qualifed_function_name(&qualified_name) {
+                    if let Some(function) = self.get_variable(&qualified_name) {
                         self.compile_closure_call(function, args)
                     } else {
-                        panic!("Not qualified and didn't find it {}", name);
+                        panic!("Not qualified and didn't find it {}", qualified_name);
                     }
                 } else {
-                    self.call(&name, args)
+                    self.call(&qualified_name, args)
                 }
             }
             Ast::IntegerLiteral(n, _) => Value::TaggedConstant(n as isize),
@@ -1448,6 +1519,7 @@ impl AstCompiler<'_> {
                     .unwrap_or_else(|_| panic!("Could not resolve variable {}", name))
             }
             Ast::Let { name, value, .. } | Ast::LetMut { name, value, .. } => {
+
                 let needs_boxing = self
                     .metadata
                     .get(ast)
@@ -1640,6 +1712,16 @@ impl AstCompiler<'_> {
             self.ir.assign(stack_pointer_reg, stack_pointer);
             args.insert(0, stack_pointer);
         }
+        if name == "beagle.core/yield" {
+            let in_handler_value = if self.is_in_handler() {
+                Value::True
+            } else {
+                Value::False
+            };
+            let in_handler_reg = self.ir.volatile_register();
+            self.ir.assign(in_handler_reg, in_handler_value);
+            args.push(in_handler_reg.into());
+        }
 
         let jump_table_pointer = self.compiler.get_jump_table_pointer(function).unwrap();
         let jump_table_point_reg = self.ir.assign_new(Value::Pointer(jump_table_pointer));
@@ -1679,6 +1761,24 @@ impl AstCompiler<'_> {
         None
     }
 
+    fn create_free_if_closable_location(
+        &mut self,
+        name: &str,
+        location: VariableLocation,
+    ) -> Option<VariableLocation> {
+        let free_variable = self.find_or_insert_free_variable(name);
+        match location {
+            VariableLocation::BoxedMutableLocal(_) => {
+                return Some(VariableLocation::BoxedFreeVariable(free_variable));
+            }
+            VariableLocation::MutableLocal(_) => {
+                return Some(VariableLocation::MutableFreeVariable(free_variable));
+            }
+            _ => {
+                return Some(VariableLocation::FreeVariable(free_variable));
+            }
+        }
+    }
     fn get_qualified_function_name(&mut self, name: &String) -> String {
         let full_function_name = if name.contains("/") {
             let parts: Vec<&str> = name.split("/").collect();
@@ -1823,7 +1923,7 @@ impl AstCompiler<'_> {
 
         let stack_pointer = self.ir.get_stack_pointer_imm(0);
 
-        self.ir.call(
+        let result = self.ir.call(
             make_closure_reg.into(),
             vec![
                 stack_pointer,
@@ -1831,7 +1931,15 @@ impl AstCompiler<'_> {
                 num_free_reg.into(),
                 free_variable_pointer,
             ],
-        )
+        );
+
+        // Pop the free variables from the stack that we pushed
+        let num_free_vars = self.get_current_env().free_variables.len();
+        for _ in 0..num_free_vars {
+            self.ir.pop_from_stack();
+        }
+
+        result
     }
 
     fn find_or_insert_local(&mut self, name: &str) -> usize {
@@ -1841,6 +1949,15 @@ impl AstCompiler<'_> {
         } else {
             current_env.local_variables.push(name.to_string());
             current_env.local_variables.len() - 1
+        }
+    }
+
+    fn find_local(&self, name: &str) -> usize {
+        let current_env = self.environment_stack.last().unwrap();
+        if let Some(index) = current_env.local_variables.iter().position(|n| n == name) {
+            index
+        } else {
+            panic!("Local variable {} not found", name);
         }
     }
 
@@ -1895,7 +2012,25 @@ impl AstCompiler<'_> {
     }
 
     fn get_variable_alloc_free_variable(&mut self, name: &str) -> VariableLocation {
+        if let Some(location) = self.get_current_env().get_variable(name) {
+            return location.clone();
+        }
+
         let existing_location = self.get_variable(name);
+        if let Some(location) = existing_location {
+            match location {
+                VariableLocation::NamespaceVariable(_, _) => {
+                    return location;
+                }
+                _ => {
+                    let free = self.create_free_if_closable_location(&name.to_string(), location);
+                    if let Some(free_var) = free {
+                        return free_var;
+                    }
+                }
+            }
+        }
+
         if let Some(variable) = self.get_accessible_variable(name) {
             variable.clone()
         } else if name.contains("/") {
@@ -1934,7 +2069,7 @@ impl AstCompiler<'_> {
 
     fn get_variable(&self, name: &str) -> Option<VariableLocation> {
         for env in self.environment_stack.iter().rev() {
-            if let Some(variable) = env.variables.get(name) {
+            if let Some(variable) = env.get_variable(name) {
                 if !variable.is_free() {
                     return Some(variable.clone());
                 }
@@ -1980,6 +2115,7 @@ impl AstCompiler<'_> {
                 body: _,
                 ..
             } => {
+                // TODO: Get rid of this clone
                 if let Some(name) = name {
                     let full_function_name = self.compiler.current_namespace_name() + "/" + name;
                     self.compiler
@@ -2252,7 +2388,7 @@ impl AstCompiler<'_> {
 
     // I'm going to make this an entirely separate pass for simplicities sake
     // I could combine this and be more efficient, but I just want to make things work first
-    fn find_mutable_vars_that_need_boxing(&mut self, ast: &Ast) {
+    fn full_pass_for_metadata(&mut self, ast: &Ast) {
         match ast {
             Ast::LetMut {
                 name,
@@ -2261,7 +2397,7 @@ impl AstCompiler<'_> {
             } => {
                 self.add_mutable_variable(name, ast);
 
-                self.find_mutable_vars_that_need_boxing(value);
+                self.full_pass_for_metadata(value);
             }
 
             Ast::Assignment {
@@ -2270,7 +2406,7 @@ impl AstCompiler<'_> {
                 token_range: _,
             } => {
                 self.update_mutable_variable_meta(name);
-                self.find_mutable_vars_that_need_boxing(value);
+                self.full_pass_for_metadata(value);
             }
 
             Ast::Function {
@@ -2279,12 +2415,13 @@ impl AstCompiler<'_> {
                 body,
                 token_range: _,
             } => {
+                self.current_function = Some(ast.clone());
                 if let Some(name) = name {
                     self.add_variable_for_mutable_pass(name);
                 }
                 self.track_function_mutable_variable_pass();
                 for expression in body.iter() {
-                    self.find_mutable_vars_that_need_boxing(expression);
+                    self.full_pass_for_metadata(expression);
                 }
                 self.pop_function_mutable_variable_pass();
             }
@@ -2295,7 +2432,7 @@ impl AstCompiler<'_> {
                 token_range: _,
             } => {
                 self.add_variable_for_mutable_pass(&name.get_string());
-                self.find_mutable_vars_that_need_boxing(value);
+                self.full_pass_for_metadata(value);
             }
 
             Ast::Program {
@@ -2303,7 +2440,7 @@ impl AstCompiler<'_> {
                 token_range: _,
             } => {
                 for ast in elements.iter() {
-                    self.find_mutable_vars_that_need_boxing(ast);
+                    self.full_pass_for_metadata(ast);
                 }
             }
 
@@ -2334,7 +2471,7 @@ impl AstCompiler<'_> {
                 token_range: _,
             } => {
                 for ast in body.iter() {
-                    self.find_mutable_vars_that_need_boxing(ast);
+                    self.full_pass_for_metadata(ast);
                 }
             }
             Ast::If {
@@ -2343,12 +2480,12 @@ impl AstCompiler<'_> {
                 else_,
                 token_range: _,
             } => {
-                self.find_mutable_vars_that_need_boxing(condition);
+                self.full_pass_for_metadata(condition);
                 for ast in then.iter() {
-                    self.find_mutable_vars_that_need_boxing(ast);
+                    self.full_pass_for_metadata(ast);
                 }
                 for ast in else_.iter() {
-                    self.find_mutable_vars_that_need_boxing(ast);
+                    self.full_pass_for_metadata(ast);
                 }
             }
             Ast::DelimitHandle {
@@ -2356,11 +2493,23 @@ impl AstCompiler<'_> {
                 handler_body,
                 ..
             } => {
+                if let Some(current_function) = &self.current_function {
+                    let metadata =
+                        self.metadata
+                            .entry(current_function.clone())
+                            .or_insert(Metadata {
+                                needs_to_be_boxed: false,
+                                needs_handler_local: true,
+                            });
+                    metadata.needs_handler_local = true;
+                } else {
+                    panic!("Delimit handle outside of function");
+                }
                 for ast in delimit_body.iter() {
-                    self.find_mutable_vars_that_need_boxing(ast);
+                    self.full_pass_for_metadata(ast);
                 }
                 for ast in handler_body.iter() {
-                    self.find_mutable_vars_that_need_boxing(ast);
+                    self.full_pass_for_metadata(ast);
                 }
             }
             Ast::Condition { left, right, .. }
@@ -2376,8 +2525,8 @@ impl AstCompiler<'_> {
             | Ast::BitWiseXor { left, right, .. }
             | Ast::And { left, right, .. }
             | Ast::Or { left, right, .. } => {
-                self.find_mutable_vars_that_need_boxing(left);
-                self.find_mutable_vars_that_need_boxing(right);
+                self.full_pass_for_metadata(left);
+                self.full_pass_for_metadata(right);
             }
 
             Ast::Recurse {
@@ -2385,7 +2534,7 @@ impl AstCompiler<'_> {
                 token_range: _,
             } => {
                 for arg in args.iter() {
-                    self.find_mutable_vars_that_need_boxing(arg);
+                    self.full_pass_for_metadata(arg);
                 }
             }
             Ast::TailRecurse {
@@ -2393,7 +2542,7 @@ impl AstCompiler<'_> {
                 token_range: _,
             } => {
                 for arg in args.iter() {
-                    self.find_mutable_vars_that_need_boxing(arg);
+                    self.full_pass_for_metadata(arg);
                 }
             }
             Ast::Call {
@@ -2402,7 +2551,7 @@ impl AstCompiler<'_> {
                 token_range: _,
             } => {
                 for arg in args.iter() {
-                    self.find_mutable_vars_that_need_boxing(arg);
+                    self.full_pass_for_metadata(arg);
                 }
             }
 
@@ -2412,7 +2561,7 @@ impl AstCompiler<'_> {
                 token_range: _,
             } => {
                 for (_, field) in fields.iter() {
-                    self.find_mutable_vars_that_need_boxing(field);
+                    self.full_pass_for_metadata(field);
                 }
             }
             Ast::PropertyAccess {
@@ -2420,8 +2569,8 @@ impl AstCompiler<'_> {
                 property,
                 token_range: _,
             } => {
-                self.find_mutable_vars_that_need_boxing(object);
-                self.find_mutable_vars_that_need_boxing(property);
+                self.full_pass_for_metadata(object);
+                self.full_pass_for_metadata(property);
             }
             Ast::EnumCreation {
                 name: _,
@@ -2430,7 +2579,7 @@ impl AstCompiler<'_> {
                 token_range: _,
             } => {
                 for (_, field) in fields.iter() {
-                    self.find_mutable_vars_that_need_boxing(field);
+                    self.full_pass_for_metadata(field);
                 }
             }
 
@@ -2439,7 +2588,7 @@ impl AstCompiler<'_> {
                 token_range: _,
             } => {
                 for element in array.iter() {
-                    self.find_mutable_vars_that_need_boxing(element);
+                    self.full_pass_for_metadata(element);
                 }
             }
             Ast::IndexOperator {
@@ -2447,15 +2596,15 @@ impl AstCompiler<'_> {
                 index,
                 token_range: _,
             } => {
-                self.find_mutable_vars_that_need_boxing(array);
-                self.find_mutable_vars_that_need_boxing(index);
+                self.full_pass_for_metadata(array);
+                self.full_pass_for_metadata(index);
             }
             Ast::Loop {
                 body,
                 token_range: _,
             } => {
                 for ast in body.iter() {
-                    self.find_mutable_vars_that_need_boxing(ast);
+                    self.full_pass_for_metadata(ast);
                 }
             }
         }
@@ -2487,12 +2636,12 @@ impl AstCompiler<'_> {
                 return;
             }
             if let Some(ast) = variable_info.mutable_definition {
-                self.metadata.insert(
-                    ast,
-                    Metadata {
-                        needs_to_be_boxed: true,
-                    },
-                );
+                // update or insert metatdata
+                let metadata = self.metadata.entry(ast).or_insert(Metadata {
+                    needs_to_be_boxed: true,
+                    needs_handler_local: false,
+                });
+                metadata.needs_to_be_boxed = true;
             }
         } else {
             panic!("Can't find variable {:?}", name);

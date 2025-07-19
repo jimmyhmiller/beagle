@@ -167,8 +167,11 @@ pub enum Instruction {
     Label(Label),
     SetContinuationMarker,
     SetContinuationHandlerAddress(Label),
+    ClearContinuationHandlerAddress,
     DelimitHandlerValue(Value),
     DelimitHandlerContinuation(Value),
+    DelimitPrelude,
+    DelimitEpilogue,
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -492,11 +495,20 @@ impl Instruction {
             Instruction::SetContinuationHandlerAddress(_) => {
                 vec![]
             }
+            Instruction::ClearContinuationHandlerAddress => {
+                vec![]
+            }
             Instruction::DelimitHandlerValue(dest) => {
                 get_register!(dest)
             }
             Instruction::DelimitHandlerContinuation(dest) => {
                 get_register!(dest)
+            }
+            Instruction::DelimitPrelude => {
+                vec![]
+            }
+            Instruction::DelimitEpilogue => {
+                vec![]
             }
         }
     }
@@ -619,7 +631,10 @@ impl Instruction {
             Instruction::Jump(_)
             | Instruction::Breakpoint
             | Instruction::SetContinuationMarker
-            | Instruction::SetContinuationHandlerAddress(_) => {}
+            | Instruction::SetContinuationHandlerAddress(_)
+            | Instruction::ClearContinuationHandlerAddress
+            | Instruction::DelimitPrelude
+            | Instruction::DelimitEpilogue => {}
             Instruction::DelimitHandlerValue(dest)
             | Instruction::DelimitHandlerContinuation(dest) => {
                 replace_register!(dest, old_register, new_register);
@@ -1803,6 +1818,9 @@ impl Ir {
                 Instruction::SetContinuationHandlerAddress(handler_label) => {
                     lang.set_continuation_handler_address(ir_label_to_lang_label[handler_label]);
                 }
+                Instruction::ClearContinuationHandlerAddress => {
+                    lang.clear_continuation_handler_address();
+                }
                 Instruction::DelimitHandlerValue(dest) => {
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, lang);
@@ -1816,6 +1834,14 @@ impl Ir {
                     // Move the continuation from x1 to destination register
                     lang.mov_reg(dest, lang.arg(1));
                     self.store_spill(dest, dest_spill, lang);
+                }
+                Instruction::DelimitPrelude => {
+                    // Call the delimit_prelude method in ARM to create a dummy frame
+                    lang.delimit_prelude();
+                }
+                Instruction::DelimitEpilogue => {
+                    // Call the delimit_epilogue method in ARM to clean up the dummy frame
+                    lang.delimit_epilogue();
                 }
             }
             let end_machine_code = lang.current_position();
@@ -2155,6 +2181,12 @@ impl Ir {
             .push(Instruction::SetContinuationHandlerAddress(handler_label));
     }
 
+    pub fn clear_continuation_handler_address(&mut self) {
+        // Clear the handler address by storing 0 in the continuation marker slot
+        self.instructions
+            .push(Instruction::ClearContinuationHandlerAddress);
+    }
+
     pub fn delimit_handler_value(&mut self) -> Value {
         // Get the handler value from x0
         let dest = self.volatile_register().into();
@@ -2169,5 +2201,14 @@ impl Ir {
         self.instructions
             .push(Instruction::DelimitHandlerContinuation(dest));
         dest
+    }
+    pub fn delimit_prelude(&mut self) {
+        // Create a dummy frame that both handler and yield can return to
+        // Similar to arm_prelude but without adjusting for locals (0 locals)
+        self.instructions.push(Instruction::DelimitPrelude);
+    }
+    pub fn delimit_epilogue(&mut self) {
+        // Clean up the dummy frame created by delimit_prelude
+        self.instructions.push(Instruction::DelimitEpilogue);
     }
 }

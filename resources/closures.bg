@@ -1,34 +1,33 @@
 namespace closures
 
-// no-std
-// fn closure_1() {
-//     let y = fn thing() {
-//         42
-//     }
-//     println(y)
-//     println(y())
-// }
+fn closure_1() {
+    let y = fn thing() {
+        42
+    }
+    _println(y)
+    _println(y())
+}
 
-// fn closure_2() {
-//     let x = 42;
-//     let z = 2;
-//     let y = fn closure_fn() {
-//         let q = 1
-//         let y = 5
-//         x + z + q + y
-//     }
-//     println(y())
-// }
+fn closure_2() {
+    let x = 42;
+    let z = 2;
+    let y = fn closure_fn() {
+        let q = 1
+        let y = 5
+        x + z + q + y
+    }
+    _println(y())
+}
 
 
-// fn closure_3() {
-//     let x = 42;
-//     let f = fn() {
-//         x
-//     }
-//     println(f())
-//     null
-// }
+fn closure_3() {
+    let x = 42;
+    let f = fn() {
+        x
+    }
+    _println(f())
+    null
+}
 
 fn return_closure(n) {
     fn next() {
@@ -37,19 +36,43 @@ fn return_closure(n) {
     next
 }
 
+fn weird_closure_issue(a, b) {
+    let x = [a, fn() { b }];
+    x
+}
+
+// Does not work
+fn task(name, steps) {
+    fn loop_(i) {
+        if i < steps {
+            _println(name)
+            loop_(i + 1)
+        } else {
+            _println("done")
+        }
+    }
+    loop_(0)
+}
+
+
 fn main() {
-    // closure_1()
-    // closure_2()
-    // closure_3()
+    closure_1()
+    closure_2()
+    closure_3()
     let c = return_closure(32)
     _println(c)
     _println(c())
+    println(weird_closure_issue(2, "captured overrides local"))
+    // task("example", 3)
     "done"
 }
 
-// Expec ted output:
+// Expect
 // Closure { function, 0, 16, [] }
 // 42
 // 50
 // 42
+// Closure { function, 8, 16, [32, ] }
+// 32
+// [2, Closure { function, 8, 8, ["captured overrides local", ] }]
 // done

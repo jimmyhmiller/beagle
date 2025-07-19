@@ -15,12 +15,6 @@ use runtime::{DefaultPrinter, Printer, Runtime, TestPrinter};
 
 use std::{cell::UnsafeCell, env, error::Error, sync::OnceLock, time::Instant};
 
-extern "C" fn handle_continuation_crash(_signal: i32) {
-    // Handle continuation completion crash gracefully
-    println!("Continuation execution completed");
-    std::process::exit(0);
-}
-
 mod arm;
 pub mod ast;
 mod builtins;
