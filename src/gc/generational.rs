@@ -408,10 +408,10 @@ impl GenerationalGC {
                 return tagged_new;
             }
             let first_field = heap_object.get_field(0);
-            if let Some(heap_object) = HeapObject::try_from_tagged(first_field) {
-                if self.young.contains(heap_object.get_pointer()) {
-                    self.copy(first_field);
-                }
+            if let Some(heap_object) = HeapObject::try_from_tagged(first_field)
+                && self.young.contains(heap_object.get_pointer())
+            {
+                self.copy(first_field);
             }
 
             heap_object.write_field(0, tagged_new);

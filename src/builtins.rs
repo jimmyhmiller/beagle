@@ -5,7 +5,6 @@ use std::{
     ffi::{CStr, c_void},
     hash::{DefaultHasher, Hasher},
     mem::{self, transmute},
-    ptr,
     slice::{from_raw_parts, from_raw_parts_mut},
     thread,
 };
@@ -19,7 +18,6 @@ use crate::{
     Message, debug_only,
     gc::{Allocator, STACK_SIZE},
     get_runtime,
-    machine_code::arm_codegen::X0,
     runtime::{FFIInfo, FFIType, RawPtr, Runtime, SyncWrapper},
     types::{BuiltInTypes, HeapObject},
 };
@@ -64,120 +62,6 @@ pub unsafe extern "C" fn debug_stack_segments() -> usize {
     }
 
     0b111 // Return success
-}
-
-
-// TODO:
-// Okay, now I understand the multishot semantics better
-// I need to do the following
-// 1. patch the frame pointers
-// 2. Don't capture the return and last frame pointer on the stack
-// 3. If I do that I can just push my own based on the current setup
-// and replace the stack just above that.
-
-
-fn compile_continuation_trampoline() {
-    use crate::arm::LowLevelArm;
-    use crate::machine_code::arm_codegen::{SP, X3, X4, X5, X19, X20, X21, X29};
-
-    let mut lang = LowLevelArm::new();
-    // lang.breakpoint();
-    lang.prelude();
-
-    lang.mov_reg(X21, X0);
-    lang.mov_reg(X19, X3);
-    lang.mov_reg(X20, X29);
-    lang.mov_reg(SP, X4);
-    lang.mov_reg(X29, SP);
-    lang.call(X5);
-
-    lang.mov_reg(X29, X19);
-    lang.mov_reg(SP, X19);
-    lang.sub(X19, X19, X0);
-    lang.mov_reg(SP, X19);
-    lang.mov_reg(X0, X21);
-    lang.epilogue();
-    lang.ret();
-
-    let runtime = get_runtime().get_mut();
-
-    runtime
-        .add_function_mark_executable(
-            "continuation_trampoline".to_string(),
-            &lang.compile_directly(),
-            0,
-            2,
-        )
-        .unwrap();
-
-    let function = runtime
-        .get_function_by_name_mut("continuation_trampoline")
-        .unwrap();
-    function.is_builtin = true;
-}
-
-pub unsafe extern "C" fn inner_restore_continuation(
-    _value: usize,
-    segment_id: usize,
-    index: usize,
-    stack_pointer: usize,
-) -> usize {
-    // Now I am on a clean stack.
-    // I need to be sure to restore my index
-    // I need to modify frame pointers of the segment when I copy
-    // then I need something that will make me do the jump
-    let runtime = get_runtime().get_mut();
-    let segment = runtime.get_stack_segment(segment_id).unwrap();
-    let segment_length = segment.data.len();
-    // TODO: I need to patch the stack
-    unsafe {
-        let dest = stack_pointer - segment.data.len();
-        ptr::copy_nonoverlapping(segment.data.as_ptr(), dest as *mut u8, segment.data.len());
-    }
-    // TODO: I need to sooner rather than later fix this index system
-    // I think instead of allocating a new stack area
-    // I am just going to reserve space on the stack for this
-    // This currently has a race condition. Unlikely one
-    // but techincally possible
-    runtime.release_stack_for_continuation_swapping(index);
-    segment_length + 16
-}
-
-// TODO: Am I copying the wrong part of the stack? Or moving them upside down?
-// it should be stack then return but it is return then stack
-
-pub unsafe extern "C" fn restore_continuation(
-    stack_pointer: usize,
-    segment_id: usize,
-    value: usize,
-    called_from_continuation: usize,
-) -> usize {
-    let mut stack_pointer = stack_pointer;
-    // if BuiltInTypes::is_true(called_from_continuation) {
-    //     let frame_pointer = skip_frame(get_current_frame_pointer());
-    //     // Why 16? Trial and error
-    //     stack_pointer = unsafe { *(frame_pointer as *const usize) } + 16;
-    // }
-    // I actually need to get the previous frames stack_pointer
-
-    let runtime = get_runtime().get_mut();
-    let (new_stack_pointer, index) = runtime.get_stack_for_continuiation_swapping();
-    unsafe {
-        call_fn_6(
-            runtime,
-            "continuation_trampoline",
-            value,
-            segment_id,
-            index,
-            stack_pointer,
-            new_stack_pointer as usize,
-            inner_restore_continuation as *const u8 as usize,
-        );
-    };
-    // I need to move to some other stack so I can jack with this one
-    // Then I need to copy the frames.
-    // I can adjust
-    BuiltInTypes::null_value() as usize
 }
 
 #[allow(unused)]
@@ -691,58 +575,6 @@ pub unsafe fn call_fn_2(runtime: &Runtime, function_name: &str, arg1: usize, arg
     let function = runtime.get_function_by_name(function_name).unwrap();
     let function = runtime.get_pointer(function).unwrap();
     save_volatile_registers(arg1, arg2, function as usize)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub unsafe fn call_fn_6(
-    runtime: &Runtime,
-    function_name: &str,
-    arg1: usize,
-    arg2: usize,
-    arg3: usize,
-    arg4: usize,
-    arg5: usize,
-    arg6: usize,
-) -> usize {
-    print_call_builtin(
-        runtime,
-        format!("{} {}", "call_fn_6", function_name).as_str(),
-    );
-    let save_volatile_registers = runtime
-        .get_function_by_name("beagle.builtin/save_volatile_registers6")
-        .unwrap();
-    let save_volatile_registers = runtime.get_pointer(save_volatile_registers).unwrap();
-    let save_volatile_registers: fn(usize, usize, usize, usize, usize, usize, usize) -> usize =
-        unsafe { std::mem::transmute(save_volatile_registers) };
-
-    let function = runtime.get_function_by_name(function_name).unwrap();
-    let function = runtime.get_pointer(function).unwrap();
-    save_volatile_registers(arg1, arg2, arg3, arg4, arg5, arg6, function as usize)
-}
-
-pub unsafe fn call_fn_5(
-    runtime: &Runtime,
-    function_name: &str,
-    arg1: usize,
-    arg2: usize,
-    arg3: usize,
-    arg4: usize,
-    arg5: usize,
-) -> usize {
-    print_call_builtin(
-        runtime,
-        format!("{} {}", "call_fn_5", function_name).as_str(),
-    );
-    let save_volatile_registers = runtime
-        .get_function_by_name("beagle.builtin/save_volatile_registers5")
-        .unwrap();
-    let save_volatile_registers = runtime.get_pointer(save_volatile_registers).unwrap();
-    let save_volatile_registers: fn(usize, usize, usize, usize, usize, usize) -> usize =
-        unsafe { std::mem::transmute(save_volatile_registers) };
-
-    let function = runtime.get_function_by_name(function_name).unwrap();
-    let function = runtime.get_pointer(function).unwrap();
-    save_volatile_registers(arg1, arg2, arg3, arg4, arg5, function as usize)
 }
 
 pub unsafe extern "C" fn load_library(name: usize) -> usize {
@@ -1473,123 +1305,8 @@ extern "C" fn pop_count(value: usize) -> usize {
 // It is very important that this isn't inlined
 // because other code is expecting that
 // If we inline, we need to remove a skip frame
-// maybe I should just always inline it
-// but I didn't.
-#[inline(never)]
-fn get_current_frame_pointer() -> *const u8 {
-    // This is a hacky way to get the current stack pointer
-    // It relies on the fact that the stack pointer is stored in X29
-    // which is the frame pointer in ARM64
-    let mut stack_pointer: usize;
-    unsafe {
-        asm!("mov {}, x29", out(reg) stack_pointer);
-    }
-    stack_pointer as *const u8
-}
-
-fn skip_frame(frame: *const u8) -> *const u8 {
-    // This is a hacky way to skip a frame
-    // It relies on the fact that the frame pointer is stored in X29
-    // which is the frame pointer in ARM64
-    unsafe { *(frame as *const *const u8) }
-}
-
-pub unsafe extern "C" fn yield_continuation(value: usize) -> usize {
-    let current_frame = get_current_frame_pointer();
-    let beagle_frame = skip_frame(current_frame);
-    let mut current_frame = skip_frame(current_frame);
-    let beagle_frame = unsafe { beagle_frame.add(8) };
-    let mut previous_frame = current_frame;
-    current_frame = skip_frame(current_frame);
-    let mut continuation_marker = unsafe { current_frame.sub(16) } as *const usize;
-
-    while unsafe { *continuation_marker == 0 } {
-        // Otherwise, we skip to the next frame
-        previous_frame = current_frame;
-        current_frame = skip_frame(current_frame);
-        continuation_marker = unsafe { current_frame.sub(16) } as *const usize;
-    }
-
-    let runtime = get_runtime().get_mut();
-    // we want stack data to be from previous_frame to _beagle_frame
-    let stack_data = unsafe {
-        let stack_base = previous_frame as usize + 16;
-        let stack_end = beagle_frame as usize - 8;
-        std::slice::from_raw_parts(stack_end as *const u8, stack_base - stack_end)
-    };
-    let segment_id = runtime.save_stack_segment(stack_data).unwrap();
-
-    let return_address = unsafe { *continuation_marker };
-    let frame_bottom = current_frame as usize;
-    let frame_top = unsafe { previous_frame.add(16) } as usize;
-    let root = runtime.register_temporary_root(value);
-    let continuation_closure = unsafe {
-        call_fn_1(
-            runtime,
-            "beagle.core/__create_continuation_closure",
-            segment_id,
-        )
-    };
-    runtime.unregister_temporary_root(root);
-
-    unsafe {
-        call_fn_5(
-            runtime,
-            "yield_register_restorer",
-            return_address,
-            frame_bottom,
-            frame_top,
-            value,
-            continuation_closure,
-        );
-    }
-
-    0
-}
-
-// Second function: Takes buffer and yielded value, performs register restoration + jump
-fn compile_yield_register_restorer(runtime: &mut Runtime) {
-    use crate::arm::LowLevelArm;
-    use crate::machine_code::arm_codegen::{SP, X0, X1, X2, X3, X4, X29, X30};
-
-    let mut lang = LowLevelArm::new();
-    // lang.breakpoint();
-    lang.prelude();
-
-    // Arguments: X0 = buffer with yield data, X1 = yielded value
-    // Buffer layout: [return_address, frame_pointer_offset, stack_pointer, start_addr, end_addr]
-    lang.mov_reg(X30, X0); // Return Address
-    lang.mov_reg(X29, X1); // Frame pointer
-    lang.mov_reg(SP, X2); // Stack pointer
-    lang.mov_reg(X0, X3); // Save yielded value
-    lang.mov_reg(X1, X4);
-
-    // Jump to continuation - no epilogue needed since we're jumping
-    lang.ret();
-
-    runtime
-        .add_function_mark_executable(
-            "yield_register_restorer".to_string(),
-            &lang.compile_directly(),
-            0,
-            4,
-        )
-        .unwrap();
-
-    let function = runtime
-        .get_function_by_name_mut("yield_register_restorer")
-        .unwrap();
-    function.is_builtin = true;
-}
-
-fn compile_yield_functions(runtime: &mut Runtime) {
-    compile_yield_register_restorer(runtime);
-    compile_continuation_trampoline();
-}
-
 impl Runtime {
     pub fn install_builtins(&mut self) -> Result<(), Box<dyn Error>> {
-        compile_yield_functions(self);
         self.add_builtin_function(
             "beagle.__internal_test__/many_args",
             many_args as *const u8,
@@ -1671,24 +1388,10 @@ impl Runtime {
         self.add_builtin_function("beagle.core/gc", gc as *const u8, true, 1)?;
 
         self.add_builtin_function(
-            "beagle.core/yield",
-            yield_continuation as *const u8,
-            false,
-            1,
-        )?;
-
-        self.add_builtin_function(
             "beagle.debug/stack_segments",
             debug_stack_segments as *const u8,
             false,
             0,
-        )?;
-
-        self.add_builtin_function(
-            "beagle.core/restore_continuation",
-            restore_continuation as *const u8,
-            true,
-            3,
         )?;
 
         self.add_builtin_function(

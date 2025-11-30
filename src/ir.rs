@@ -11,8 +11,6 @@ use crate::register_allocation::linear_scan::LinearScan;
 use crate::types::BuiltInTypes;
 use crate::{arm::LowLevelArm, common::Label};
 
-pub const CONTINUATION_MARKER_PADDING_SIZE: isize = 2;
-
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Encode, Decode)]
 pub enum Condition {
     LessThanOrEqual,
@@ -165,10 +163,6 @@ pub enum Instruction {
     Or(Value, Value, Value),
     Xor(Value, Value, Value),
     Label(Label),
-    SetContinuationMarker,
-    SetContinuationHandlerAddress(Label),
-    DelimitHandlerValue(Value),
-    DelimitHandlerContinuation(Value),
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -486,18 +480,6 @@ impl Instruction {
             Instruction::ExtendLifeTime(a) => {
                 get_register!(a)
             }
-            Instruction::SetContinuationMarker => {
-                vec![]
-            }
-            Instruction::SetContinuationHandlerAddress(_) => {
-                vec![]
-            }
-            Instruction::DelimitHandlerValue(dest) => {
-                get_register!(dest)
-            }
-            Instruction::DelimitHandlerContinuation(dest) => {
-                get_register!(dest)
-            }
         }
     }
 
@@ -616,14 +598,7 @@ impl Instruction {
                 }
             }
 
-            Instruction::Jump(_)
-            | Instruction::Breakpoint
-            | Instruction::SetContinuationMarker
-            | Instruction::SetContinuationHandlerAddress(_) => {}
-            Instruction::DelimitHandlerValue(dest)
-            | Instruction::DelimitHandlerContinuation(dest) => {
-                replace_register!(dest, old_register, new_register);
-            }
+            Instruction::Jump(_) | Instruction::Breakpoint => {}
         }
     }
 }
@@ -693,8 +668,9 @@ impl Ir {
 
     pub fn arg(&mut self, n: usize) -> Value {
         if n >= 8 {
-            // Stack arguments come from caller's frame, need to account for our continuation padding
-            return Value::Stack((n as isize) - 8 + CONTINUATION_MARKER_PADDING_SIZE);
+            // Stack arguments are passed above the frame header (saved FP and LR)
+            // which is 2 words, so we add 2 to the offset
+            return Value::Stack((n as isize) - 8 + 2);
         }
         let register = self.next_register(Some(n), true);
         Value::Register(register)
@@ -1797,26 +1773,6 @@ impl Ir {
                     lang.shift_right_imm(dest, value, BuiltInTypes::tag_size());
                     self.store_spill(dest, dest_spill, lang);
                 }
-                Instruction::SetContinuationMarker => {
-                    lang.set_continuation_marker();
-                }
-                Instruction::SetContinuationHandlerAddress(handler_label) => {
-                    lang.set_continuation_handler_address(ir_label_to_lang_label[handler_label]);
-                }
-                Instruction::DelimitHandlerValue(dest) => {
-                    let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    // Move the handler value from x0 to destination register
-                    lang.mov_reg(dest, lang.arg(0));
-                    self.store_spill(dest, dest_spill, lang);
-                }
-                Instruction::DelimitHandlerContinuation(dest) => {
-                    let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    // Move the continuation from x1 to destination register
-                    lang.mov_reg(dest, lang.arg(1));
-                    self.store_spill(dest, dest_spill, lang);
-                }
             }
             let end_machine_code = lang.current_position();
             self.ir_to_machine_code_range.push((
@@ -2138,36 +2094,5 @@ impl Ir {
         self.labels.push(label);
         self.label_names.push(name.to_string());
         self.label_names.len() - 1
-    }
-
-    pub fn set_continuation_marker(&mut self) {
-        // Set bit 0 of the first zero word in current stack frame
-        // The first zero word is at X29 - 16 (X29 points to saved frame pointer, zeros are 2 words below)
-        self.instructions.push(Instruction::SetContinuationMarker);
-    }
-
-    pub fn set_continuation_handler_address(&mut self, handler_label: Label) {
-        // Store handler address in continuation marker slot
-        // This will be compiled to ARM instructions that:
-        // 1. Use ADR to get handler address relative to PC
-        // 2. Store that raw address in the continuation marker slot
-        self.instructions
-            .push(Instruction::SetContinuationHandlerAddress(handler_label));
-    }
-
-    pub fn delimit_handler_value(&mut self) -> Value {
-        // Get the handler value from x0
-        let dest = self.volatile_register().into();
-        self.instructions
-            .push(Instruction::DelimitHandlerValue(dest));
-        dest
-    }
-
-    pub fn delimit_handler_continuation(&mut self) -> Value {
-        // Get the continuation from x1
-        let dest = self.volatile_register().into();
-        self.instructions
-            .push(Instruction::DelimitHandlerContinuation(dest));
-        dest
     }
 }

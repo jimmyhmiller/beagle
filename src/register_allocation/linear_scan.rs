@@ -212,10 +212,10 @@ impl LinearScan {
                         // if register.index == 20 {
                         //     println!("20");
                         // }
-                        if let Value::Register(dest) = dest {
-                            if dest == register {
-                                continue;
-                            }
+                        if let Value::Register(dest) = dest
+                            && dest == register
+                        {
+                            continue;
                         }
                         saves.push(Value::Register(*register));
                     }
@@ -227,10 +227,10 @@ impl LinearScan {
                     if *start < i && *end > i + 1 && !self.location.contains_key(original_register)
                     {
                         let register = self.allocated_registers.get(original_register).unwrap();
-                        if let Value::Register(dest) = dest {
-                            if dest == register {
-                                continue;
-                            }
+                        if let Value::Register(dest) = dest
+                            && dest == register
+                        {
+                            continue;
                         }
                         saves.push(Value::Register(*register));
                     }

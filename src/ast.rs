@@ -81,13 +81,6 @@ pub enum Ast {
         else_: Vec<Ast>,
         token_range: TokenRange,
     },
-    DelimitHandle {
-        delimit_body: Vec<Ast>,
-        value: String,
-        continuation: String,
-        handler_body: Vec<Ast>,
-        token_range: TokenRange,
-    },
     Condition {
         operator: Condition,
         left: Box<Ast>,
@@ -242,7 +235,6 @@ impl Ast {
             | Ast::Extend { token_range, .. }
             | Ast::FunctionStub { token_range, .. }
             | Ast::If { token_range, .. }
-            | Ast::DelimitHandle { token_range, .. }
             | Ast::Condition { token_range, .. }
             | Ast::Add { token_range, .. }
             | Ast::Sub { token_range, .. }
@@ -686,13 +678,10 @@ impl AstCompiler<'_> {
                     }
                     self.pop_environment();
                     // Re-insert the variable in the parent environment after popping
-                    if let Some(VariableLocation::Local(index)) = variable_locaton {
-                        if let Some(name) = &name {
-                            self.insert_variable(
-                                name.to_string(),
-                                VariableLocation::Local(index),
-                            );
-                        }
+                    if let Some(VariableLocation::Local(index)) = variable_locaton
+                        && let Some(name) = &name
+                    {
+                        self.insert_variable(name.to_string(), VariableLocation::Local(index));
                     }
                     return function;
                 }
@@ -1167,62 +1156,6 @@ impl AstCompiler<'_> {
                 let index = self.ir.assign_new(index);
                 self.call("beagle.core/get", vec![array.into(), index.into()])
             }
-            Ast::DelimitHandle {
-                delimit_body,
-                value,
-                continuation,
-                handler_body,
-                ..
-            } => {
-                // Store a simple marker for now, we'll enhance this step by step
-
-                // Handler body starts here - we need the label first to get its address
-                let handler_start = self.ir.label("handler_start");
-
-                self.ir.set_continuation_handler_address(handler_start);
-
-                // Compile the delimited body normally
-                let mut result = Value::Null;
-                for expr in delimit_body {
-                    result = self.call_compile(&expr);
-                }
-
-                // Jump around handler body
-                let skip_handler = self.ir.label("skip_handler");
-                self.ir.jump(skip_handler);
-
-                // Write the handler label here
-                self.ir.write_label(handler_start);
-
-                // Set up handler parameter locals from X0 and X1
-                let value_reg = self.ir.delimit_handler_value(); // X0
-                let value_local = self.find_or_insert_local(&value);
-                let value_reg = self.ir.assign_new(value_reg);
-                self.ir.store_local(value_local, value_reg.into());
-                self.insert_variable(value.clone(), VariableLocation::Local(value_local));
-
-                let continuation_reg = self.ir.delimit_handler_continuation(); // X1
-                let continuation_local = self.find_or_insert_local(&continuation);
-                let continuation_reg = self.ir.assign_new(continuation_reg);
-                self.ir
-                    .store_local(continuation_local, continuation_reg.into());
-                self.insert_variable(
-                    continuation.clone(),
-                    VariableLocation::Local(continuation_local),
-                );
-
-                // Compile handler body
-                let mut handler_result = Value::Null;
-                for expr in handler_body {
-                    handler_result = self.call_compile(&expr);
-                }
-                self.ir.ret(handler_result);
-
-                // Continue here after skipping handler
-                self.ir.write_label(skip_handler);
-
-                result
-            }
             Ast::If {
                 condition,
                 then,
@@ -1683,7 +1616,7 @@ impl AstCompiler<'_> {
     }
 
     fn get_qualified_function_name(&mut self, name: &String) -> String {
-        let full_function_name = if name.contains("/") {
+        if name.contains("/") {
             let parts: Vec<&str> = name.split("/").collect();
             let alias = parts[0];
             let name = parts[1];
@@ -1710,8 +1643,7 @@ impl AstCompiler<'_> {
             name.clone()
         } else {
             panic!("Can't find function {}", name);
-        };
-        full_function_name
+        }
     }
 
     fn compile_closure_call(&mut self, function: VariableLocation, args: Vec<Value>) -> Value {
@@ -1937,10 +1869,10 @@ impl AstCompiler<'_> {
 
     fn get_variable(&self, name: &str) -> Option<VariableLocation> {
         for env in self.environment_stack.iter().rev() {
-            if let Some(variable) = env.variables.get(name) {
-                if !variable.is_free() {
-                    return Some(variable.clone());
-                }
+            if let Some(variable) = env.variables.get(name)
+                && !variable.is_free()
+            {
+                return Some(variable.clone());
             }
         }
         None
@@ -2351,18 +2283,6 @@ impl AstCompiler<'_> {
                     self.find_mutable_vars_that_need_boxing(ast);
                 }
                 for ast in else_.iter() {
-                    self.find_mutable_vars_that_need_boxing(ast);
-                }
-            }
-            Ast::DelimitHandle {
-                delimit_body,
-                handler_body,
-                ..
-            } => {
-                for ast in delimit_body.iter() {
-                    self.find_mutable_vars_that_need_boxing(ast);
-                }
-                for ast in handler_body.iter() {
                     self.find_mutable_vars_that_need_boxing(ast);
                 }
             }

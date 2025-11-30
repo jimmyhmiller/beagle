@@ -1,6 +1,5 @@
 use crate::{
     builtins::debugger,
-    ir::CONTINUATION_MARKER_PADDING_SIZE,
     machine_code::arm_codegen::{
         ArmAsm, LdpGenSelector, Register, SP, Size, StpGenSelector, StrImmGenSelector, X0, X9, X10,
         X11, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29, X30, ZERO_REGISTER,
@@ -532,16 +531,11 @@ impl LowLevelArm {
         // self.breakpoint();
         // TODO: make better/faster/fewer instructions
         self.store_pair(X29, X30, SP, -2);
-        // we are doing this so we have a place to put metadata on our frame
-        // most notably here we are going to use it to make a frame as a delimit boundary
-        // for our continuations
         self.mov_reg(X29, SP);
-        self.store_pair(ZERO_REGISTER, ZERO_REGISTER, SP, -2);
         self.sub_stack_pointer(-self.max_locals);
     }
 
     pub fn epilogue(&mut self) {
-        self.add_stack_pointer(2);
         self.add_stack_pointer(self.max_locals);
         self.load_pair(X29, X30, SP, 2);
     }
@@ -674,18 +668,10 @@ impl LowLevelArm {
 
     pub fn push_to_stack(&mut self, reg: Register) {
         self.increment_stack_size(1);
-        // Account for continuation padding added in prelude
-        self.store_on_stack(
-            reg,
-            -(self.max_locals + self.stack_size + CONTINUATION_MARKER_PADDING_SIZE as i32),
-        )
+        self.store_on_stack(reg, -(self.max_locals + self.stack_size))
     }
     pub fn store_local(&mut self, value: Register, offset: i32) {
-        // Account for continuation padding added in prelude
-        self.store_on_stack(
-            value,
-            -(offset + 1 + CONTINUATION_MARKER_PADDING_SIZE as i32),
-        );
+        self.store_on_stack(value, -(offset + 1));
     }
 
     pub fn load_from_stack(&mut self, destination: Register, offset: i32) {
@@ -718,11 +704,7 @@ impl LowLevelArm {
 
     pub fn pop_from_stack_indexed(&mut self, reg: Register, offset: i32) {
         self.increment_stack_size(-1);
-        // Account for continuation padding added in prelude
-        self.load_from_stack(
-            reg,
-            -(offset + self.max_locals + 1 + CONTINUATION_MARKER_PADDING_SIZE as i32),
-        )
+        self.load_from_stack(reg, -(offset + self.max_locals + 1))
     }
 
     pub fn pop_from_stack_indexed_raw(&mut self, reg: Register, offset: i32) {
@@ -731,19 +713,11 @@ impl LowLevelArm {
 
     pub fn pop_from_stack(&mut self, reg: Register) {
         self.increment_stack_size(-1);
-        // Account for continuation padding added in prelude
-        self.load_from_stack(
-            reg,
-            -(self.max_locals + self.stack_size + 1 + CONTINUATION_MARKER_PADDING_SIZE as i32),
-        )
+        self.load_from_stack(reg, -(self.max_locals + self.stack_size + 1))
     }
 
     pub fn load_local(&mut self, destination: Register, offset: i32) {
-        // Account for continuation padding added in prelude
-        self.load_from_stack(
-            destination,
-            -(offset + 1 + CONTINUATION_MARKER_PADDING_SIZE as i32),
-        );
+        self.load_from_stack(destination, -(offset + 1));
     }
 
     pub fn load_from_heap(&mut self, destination: Register, source: Register, offset: i32) {
@@ -864,21 +838,20 @@ impl LowLevelArm {
 
     pub fn compile_directly(&mut self) -> Vec<u8> {
         self.patch_labels();
-        let bytes = self
-            .instructions
+
+        self.instructions
             .iter()
             .flat_map(|x| x.encode().to_le_bytes())
-            .collect();
-        bytes
+            .collect()
     }
 
     pub fn compile_to_bytes(&mut self) -> Vec<u8> {
         let instructions = self.compile();
-        let bytes = instructions
+
+        instructions
             .iter()
             .flat_map(|x| x.encode().to_le_bytes())
-            .collect();
-        bytes
+            .collect()
     }
 
     // TODO: I should pass this information to my debugger
@@ -1181,12 +1154,7 @@ impl LowLevelArm {
             sf: dest.sf(),
             rn: X29,
             rd: dest,
-            // Account for continuation padding added in prelude
-            imm12: (self.max_locals
-                + self.stack_size
-                + 1
-                + CONTINUATION_MARKER_PADDING_SIZE as i32)
-                * 8,
+            imm12: (self.max_locals + self.stack_size + 1) * 8,
             sh: 0,
         });
         // TODO: This seems
@@ -1265,42 +1233,5 @@ impl LowLevelArm {
 
     pub fn load_label_address(&mut self, destination: Register, label: Label) {
         self.instructions.push(adr(destination, label.index));
-    }
-
-    pub fn set_continuation_handler_address(&mut self, handler_label: Label) {
-        // Store handler address in continuation marker slot
-        // Steps 1-3: Get relative offset, add to PC, store raw address
-
-        // Get handler address using ADR instruction
-        let handler_addr_reg = self.temporary_register();
-        self.load_label_address(handler_addr_reg, handler_label);
-
-        // Load the address of the first zero word (X29 - 16)
-        let marker_slot_reg = self.temporary_register();
-        self.sub_imm(marker_slot_reg, X29, 16); // X29 - 16 bytes (first zero word)
-
-        // Store the raw handler address (untagged) in the marker slot
-        self.store_on_heap(marker_slot_reg, handler_addr_reg, 0);
-    }
-
-    pub fn set_continuation_marker(&mut self) {
-        // Set bit 0 of the first zero word in current stack frame
-        // The first zero word is at X29 - 16 (X29 points to saved frame pointer, zeros are 2 words below)
-
-        // Load the address of the first zero word (X29 - 16)
-        let temp_reg = self.temporary_register();
-        self.sub_imm(temp_reg, X29, 16); // X29 - 16 bytes (first zero word)
-
-        // Load the current value at that location
-        let current_value_reg = self.temporary_register();
-        self.load_from_heap(current_value_reg, temp_reg, 0);
-
-        // Set bit 0 by ORing with 1
-        let one_reg = self.temporary_register();
-        self.mov(one_reg, 1);
-        self.or(current_value_reg, current_value_reg, one_reg);
-
-        // Store the modified value back
-        self.store_on_heap(temp_reg, current_value_reg, 0);
     }
 }

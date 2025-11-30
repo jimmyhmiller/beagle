@@ -1,4 +1,3 @@
-use crate::ir::CONTINUATION_MARKER_PADDING_SIZE;
 use crate::types::BuiltInTypes;
 
 use super::StackMap;
@@ -40,14 +39,8 @@ impl StackWalker {
                     frame_size += 1;
                 }
 
-                // Account for continuation padding for delimited continuations
-                let bottom_of_frame =
-                    i + frame_size + 1 + CONTINUATION_MARKER_PADDING_SIZE as usize;
-                // Since locals are now stored lower due to continuation padding,
-                // we need to scan more words to find them
-                let active_frame = details.current_stack_size
-                    + details.number_of_locals
-                    + CONTINUATION_MARKER_PADDING_SIZE as usize;
+                let bottom_of_frame = i + frame_size + 1;
+                let active_frame = details.current_stack_size + details.number_of_locals;
 
                 i = bottom_of_frame;
 

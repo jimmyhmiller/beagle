@@ -1089,8 +1089,8 @@ impl Runtime {
 
         let locked = self.gc_lock.try_lock();
 
-        if locked.is_err() {
-            match locked.as_ref().unwrap_err() {
+        if let Err(e) = &locked {
+            match e {
                 TryLockError::WouldBlock => {
                     drop(locked);
                     unsafe { __pause(stack_pointer) };
@@ -1901,9 +1901,9 @@ impl Runtime {
     ) -> Result<usize, Box<dyn Error>> {
         let mut already_defined = false;
         let mut function_pointer = 0;
-        if name.is_some() {
+        if let Some(n) = name {
             for (index, function) in self.functions.iter_mut().enumerate() {
-                if function.name == name.unwrap() {
+                if function.name == n {
                     function_pointer = self.overwrite_function(index, pointer, size)?;
                     // self.namespaces.add_binding(name.unwrap(), function_pointer);
                     already_defined = true;
