@@ -477,14 +477,14 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 fn get_expect(source: &str) -> String {
     let start = source.find("// Expect").unwrap();
     // get each line as long as they start with //
-    let lines = source[start..]
+
+    source[start..]
         .lines()
         .skip(1)
         .take_while(|line| line.starts_with("//"))
         .map(|line| line.trim_start_matches("//").trim())
         .collect::<Vec<_>>()
-        .join("\n");
-    lines
+        .join("\n")
 }
 
 #[test]

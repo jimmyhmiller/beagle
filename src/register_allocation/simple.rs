@@ -234,10 +234,10 @@ impl SimpleRegisterAllocator {
                     let dest_clone = *dest;
                     if !self.allocated_registers.is_empty() {
                         for register in self.allocated_registers.clone().values() {
-                            if let Value::Register(dest) = dest_clone {
-                                if dest == *register {
-                                    continue;
-                                }
+                            if let Value::Register(dest) = dest_clone
+                                && dest == *register
+                            {
+                                continue;
                             }
                             self.extend_token_range(self.resulting_instructions.len());
                             self.resulting_instructions
@@ -245,10 +245,10 @@ impl SimpleRegisterAllocator {
                         }
                         self.resulting_instructions.push(instruction.clone());
                         for register in self.allocated_registers.clone().values().rev() {
-                            if let Value::Register(dest) = dest_clone {
-                                if dest == *register {
-                                    continue;
-                                }
+                            if let Value::Register(dest) = dest_clone
+                                && dest == *register
+                            {
+                                continue;
                             }
                             self.extend_token_range(self.resulting_instructions.len());
                             self.resulting_instructions
@@ -263,20 +263,19 @@ impl SimpleRegisterAllocator {
                 }
             }
 
-            if let Instruction::Assign(register, _) = self.instructions[instruction_index] {
-                if let Instruction::Assign(new_register, _) =
+            if let Instruction::Assign(register, _) = self.instructions[instruction_index]
+                && let Instruction::Assign(new_register, _) =
                     self.resulting_instructions.last().unwrap().clone()
-                {
-                    let Value::Register(register) = register else {
-                        panic!("Not a register");
-                    };
-                    if let Some(local_offset) = spilled_registers.get(&register) {
-                        self.extend_token_range(self.resulting_instructions.len());
-                        self.resulting_instructions.push(Instruction::StoreLocal(
-                            Value::Local(*local_offset),
-                            new_register,
-                        ));
-                    }
+            {
+                let Value::Register(register) = register else {
+                    panic!("Not a register");
+                };
+                if let Some(local_offset) = spilled_registers.get(&register) {
+                    self.extend_token_range(self.resulting_instructions.len());
+                    self.resulting_instructions.push(Instruction::StoreLocal(
+                        Value::Local(*local_offset),
+                        new_register,
+                    ));
                 }
             }
         }
@@ -354,10 +353,10 @@ impl SimpleRegisterAllocator {
 
         let mut max_register_index = 0;
         for lifetime in self.multiplex_lifetime.values() {
-            if let Some(last_instruction) = lifetime.last() {
-                if *last_instruction > max_register_index {
-                    max_register_index = *last_instruction;
-                }
+            if let Some(last_instruction) = lifetime.last()
+                && *last_instruction > max_register_index
+            {
+                max_register_index = *last_instruction;
             }
         }
 
