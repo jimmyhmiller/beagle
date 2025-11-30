@@ -35,3 +35,10 @@ fn main() {
     gc();
     println("Garbage collected")
 }
+
+// Expect
+// After first allocate
+// Garbage created
+// Garbage created
+// Garbage collected
+// null

@@ -16,3 +16,7 @@ fn main() {
     // arguments being live
     println(swap_argments(1, 2, 3, 4, 5, 6))
 }
+
+// Expect
+// -9
+// null

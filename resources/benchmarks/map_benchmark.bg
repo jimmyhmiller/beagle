@@ -16,7 +16,7 @@ fn do_gets(m, i, limit) {
     if i == limit {
         0
     } else {
-        let result = pm/get(m, i)
+        let result = pm/_get(m, i)
         do_gets(m, i + 1, limit)
     }
 }

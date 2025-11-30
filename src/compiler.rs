@@ -20,6 +20,7 @@ use std::{
     env,
     error::Error,
     fmt,
+    path::Path,
     sync::mpsc::{self, Receiver, SyncSender},
 };
 
@@ -86,7 +87,12 @@ impl Compiler {
     // I want to be able to dynamically run these namespaces
     // not have this awkward compile returns top level names thing
     pub fn compile(&mut self, file_name: &str) -> Result<Vec<String>, Box<dyn Error>> {
-        if self.compiled_file_cache.contains(file_name) {
+        // Canonicalize path for cache consistency
+        let canonical_path = std::fs::canonicalize(file_name)
+            .unwrap_or_else(|_| std::path::PathBuf::from(file_name));
+        let canonical_str = canonical_path.to_str().unwrap().to_string();
+
+        if self.compiled_file_cache.contains(&canonical_str) {
             if self.command_line_arguments.verbose {
                 println!("Already compiled {:?}", file_name);
             }
@@ -114,7 +120,7 @@ impl Compiler {
             println!("Parse time: {:?}", parse_time.elapsed());
         }
 
-        let mut top_levels_to_run = self.compile_dependencies(&ast)?;
+        let mut top_levels_to_run = self.compile_dependencies(&ast, file_name)?;
 
         let top_level = self.compile_ast(ast, None, file_name)?;
         if let Some(top_level) = top_level {
@@ -125,13 +131,14 @@ impl Compiler {
             println!("Done compiling {:?}", file_name);
         }
         self.code_allocator.make_executable();
-        self.compiled_file_cache.insert(file_name.to_string());
+        self.compiled_file_cache.insert(canonical_str);
         Ok(top_levels_to_run)
     }
 
     pub fn compile_dependencies(
         &mut self,
         ast: &crate::ast::Ast,
+        source_file: &str,
     ) -> Result<Vec<String>, Box<dyn Error>> {
         let mut top_levels_to_run = vec![];
         for import in ast.imports() {
@@ -139,7 +146,7 @@ impl Compiler {
             if name.starts_with("beagle.") {
                 continue;
             }
-            let file_name = self.get_file_name_from_import(name);
+            let file_name = self.get_file_name_from_import(name, source_file)?;
             let top_level = self.compile(&file_name)?;
             top_levels_to_run.extend(top_level);
         }
@@ -248,21 +255,55 @@ impl Compiler {
         name.starts_with("beagle.primitive/")
     }
 
-    /// TODO: Temporary please fix
-    pub fn get_file_name_from_import(&self, import_name: String) -> String {
-        let mut exe_path = env::current_exe().unwrap();
-        exe_path = exe_path.parent().unwrap().to_path_buf();
-        if !exe_path
-            .join(format!("resources/{}.bg", import_name))
-            .exists()
-        {
-            exe_path = exe_path.parent().unwrap().to_path_buf();
+    pub fn get_file_name_from_import(
+        &self,
+        import_name: String,
+        source_file: &str,
+    ) -> Result<String, Box<dyn Error>> {
+        // 1. Try relative to source file (PRIORITY 1)
+        let source_dir = Path::new(source_file)
+            .parent()
+            .ok_or("Invalid source file path")?;
+
+        let relative_path = source_dir.join(format!("{}.bg", import_name));
+        if relative_path.exists() {
+            return Ok(relative_path.to_str().unwrap().to_string());
         }
-        exe_path
-            .join(format!("resources/{}.bg", import_name))
-            .to_str()
+
+        // 2. Try standard library (PRIORITY 2)
+        let mut exe_path = env::current_exe()?;
+        exe_path = exe_path.parent().unwrap().to_path_buf();
+
+        let stdlib_path = exe_path.join(format!("standard-library/{}.bg", import_name));
+        if stdlib_path.exists() {
+            return Ok(stdlib_path.to_str().unwrap().to_string());
+        }
+
+        // Try one level up (for development - cargo run from project root)
+        let parent_stdlib_path = exe_path
+            .parent()
             .unwrap()
-            .to_string()
+            .join(format!("standard-library/{}.bg", import_name));
+        if parent_stdlib_path.exists() {
+            return Ok(parent_stdlib_path.to_str().unwrap().to_string());
+        }
+
+        // Try two levels up (for cargo run - target/debug -> target -> root)
+        let grandparent_stdlib_path = exe_path
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(format!("standard-library/{}.bg", import_name));
+        if grandparent_stdlib_path.exists() {
+            return Ok(grandparent_stdlib_path.to_str().unwrap().to_string());
+        }
+
+        Err(format!(
+            "Could not find module '{}' (searched: relative to {}, standard-library/)",
+            import_name, source_file
+        )
+        .into())
     }
 
     pub fn extract_import(&self, import: &crate::ast::Ast) -> (String, String) {
