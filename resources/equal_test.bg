@@ -21,3 +21,9 @@ fn main() {
     println(equal(x, 1))
     "done"
 }
+
+// Expect
+// true
+// true
+// false
+// done

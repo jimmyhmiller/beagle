@@ -47,9 +47,7 @@ fn main() {
     "done"
 }
 
-// Expec ted output:
-// Closure { function, 0, 16, [] }
-// 42
-// 50
-// 42
+// Expect
+// Closure { function, 8, 16, [32, ] }
+// 32
 // done

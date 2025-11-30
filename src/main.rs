@@ -232,11 +232,18 @@ pub struct CommandLineArguments {
 }
 
 fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Error>> {
-    let default_files = ["std.bg", "persistent_vector.bg"];
+    let resource_files = ["std.bg"];
+    let stdlib_files = ["persistent_vector.bg", "beagle.ffi.bg"];
     let mut all_top_levels = vec![];
 
-    for file_name in default_files {
+    for file_name in resource_files {
         let file_path = find_resource_file(file_name)?;
+        let top_levels = runtime.compile(&file_path)?;
+        all_top_levels.extend(top_levels);
+    }
+
+    for file_name in stdlib_files {
+        let file_path = find_stdlib_file(file_name)?;
         let top_levels = runtime.compile(&file_path)?;
         all_top_levels.extend(top_levels);
     }
@@ -256,6 +263,39 @@ fn find_resource_file(file_name: &str) -> Result<String, Box<dyn Error>> {
     }
 }
 
+fn find_stdlib_file(file_name: &str) -> Result<String, Box<dyn Error>> {
+    let mut exe_path = env::current_exe()?;
+    exe_path = exe_path.parent().unwrap().to_path_buf();
+
+    // Try exe_dir/standard-library/
+    let stdlib_path = exe_path.join(format!("standard-library/{}", file_name));
+    if stdlib_path.exists() {
+        return Ok(stdlib_path.to_str().unwrap().to_string());
+    }
+
+    // Try exe_dir/../standard-library/ (development - one level up)
+    let parent_stdlib_path = exe_path
+        .parent()
+        .unwrap()
+        .join(format!("standard-library/{}", file_name));
+    if parent_stdlib_path.exists() {
+        return Ok(parent_stdlib_path.to_str().unwrap().to_string());
+    }
+
+    // Try exe_dir/../../standard-library/ (development - two levels up, for cargo run)
+    let grandparent_stdlib_path = exe_path
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(format!("standard-library/{}", file_name));
+    if grandparent_stdlib_path.exists() {
+        return Ok(grandparent_stdlib_path.to_str().unwrap().to_string());
+    }
+
+    Err(format!("Could not find standard library file: {}", file_name).into())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args = CommandLineArguments::parse();
     if args.all_tests {
@@ -269,6 +309,12 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     for entry in std::fs::read_dir("resources")? {
         let entry = entry?;
         let mut path = entry.path();
+
+        // Skip directories
+        if path.is_dir() {
+            continue;
+        }
+
         if !path.exists() {
             path = path
                 .parent()
