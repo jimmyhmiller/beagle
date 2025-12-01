@@ -1,0 +1,27 @@
+namespace try_shadowing
+
+fn main() {
+    let e = "outer value"
+    let result = try {
+        let e = "inner value"
+        throw(e)
+    } catch (e) {
+        println("caught in catch")
+        println(e)
+        "handler result"
+    }
+    println("outer e after try:")
+    println(e)
+    println("result from try:")
+    println(result)
+    "done"
+}
+
+// Expect
+// caught in catch
+// inner value
+// outer e after try:
+// inner value
+// result from try:
+// handler result
+// done

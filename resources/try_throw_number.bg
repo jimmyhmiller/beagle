@@ -1,0 +1,20 @@
+namespace try_throw_number
+
+fn main() {
+    let value = try {
+        throw(5)
+        0
+    } catch (e) {
+        println("caught int")
+        println(e)
+        e + 10
+    }
+    println(value)
+    "done"
+}
+
+// Expect
+// caught int
+// 5
+// 15
+// done

@@ -721,6 +721,16 @@ pub struct ProtocolMethodInfo {
     pub fn_pointer: usize,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct ExceptionHandler {
+    pub handler_address: usize,
+    pub stack_pointer: usize,
+    pub frame_pointer: usize,
+    pub link_register: usize,
+    pub result_local: usize,
+}
+
 pub struct Runtime {
     pub memory: Memory,
     pub libraries: Vec<Library>,
@@ -749,6 +759,8 @@ pub struct Runtime {
     protocol_info: HashMap<String, Vec<ProtocolMethodInfo>>,
     stack_segments: StackSegmentAllocator,
     stacks_for_continuation_swapping: Vec<ContinuationStack>,
+    pub exception_handlers: Vec<ExceptionHandler>,
+    pub global_exception_handler: Option<fn(usize)>,
 }
 
 pub fn create_stack_with_protected_page_after(stack_size: usize) -> MmapMut {
@@ -832,6 +844,8 @@ impl Runtime {
                 is_used: AtomicBool::new(false),
                 stack: [0; 512],
             }],
+            exception_handlers: Vec::new(),
+            global_exception_handler: None,
         }
     }
 
@@ -1047,6 +1061,29 @@ impl Runtime {
 
     pub fn get_stack_segment(&self, id: usize) -> Option<&crate::gc::stack_segments::StackSegment> {
         self.stack_segments.get_segment(id)
+    }
+
+    // Exception handling methods
+    pub fn push_exception_handler(&mut self, handler: ExceptionHandler) {
+        self.exception_handlers.push(handler);
+    }
+
+    pub fn pop_exception_handler(&mut self) -> Option<ExceptionHandler> {
+        self.exception_handlers.pop()
+    }
+
+    pub fn set_global_exception_handler(&mut self, handler: fn(usize)) {
+        self.global_exception_handler = Some(handler);
+    }
+
+    pub fn create_exception(
+        &mut self,
+        _stack_pointer: usize,
+        value: usize,
+    ) -> Result<usize, Box<dyn Error>> {
+        // Create a simple exception object - for now just return the value
+        // In the future, this could be a struct with stack trace information
+        Ok(value)
     }
 
     pub fn gc(&mut self, stack_pointer: usize) {

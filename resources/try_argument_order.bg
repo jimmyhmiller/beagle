@@ -1,0 +1,27 @@
+namespace try_argument_order
+
+fn log(x) {
+    println(x)
+    x
+}
+
+fn main() {
+    let result = log(try {
+        throw("arg error")
+    } catch (e) {
+        println("caught arg")
+        println(e)
+        e
+    })
+    println("after call")
+    println(result)
+    "done"
+}
+
+// Expect
+// caught arg
+// arg error
+// arg error
+// after call
+// arg error
+// done

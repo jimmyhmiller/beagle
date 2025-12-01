@@ -1,0 +1,32 @@
+namespace try_expression_values
+
+fn value_from_try_expression() {
+    let combined = (try {
+        throw("fail")
+        1
+    } catch (e) {
+        println("caught in expression")
+        println(e)
+        2
+    }) + (try {
+        10
+    } catch (e) {
+        println("should not run")
+        e
+    })
+    println(combined)
+    combined
+}
+
+fn main() {
+    let result = value_from_try_expression()
+    println(result)
+    "done"
+}
+
+// Expect
+// caught in expression
+// fail
+// 12
+// 12
+// done

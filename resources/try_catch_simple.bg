@@ -1,0 +1,26 @@
+namespace try_catch_simple
+
+fn main() {
+    println("Before try")
+    try {
+        println("In try block")
+        throw("my error")
+        println("After throw - should not print")
+    } catch (e) {
+        println("In catch block")
+        println(e)
+    }
+    println("After try-catch")
+    let x = "done"
+    println(x)
+    x
+}
+
+// Expect
+// Before try
+// In try block
+// In catch block
+// my error
+// After try-catch
+// done
+// done

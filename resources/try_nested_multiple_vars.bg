@@ -1,0 +1,46 @@
+namespace try_nested_multiple_vars
+
+fn main() {
+    try {
+        let x = "outer value"
+        println(x)
+        throw("outer error")
+    } catch (outer_e) {
+        println("Outer catch:")
+        println(outer_e)
+        try {
+            let y = "inner value"
+            println(y)
+            println("Accessing outer_e from inner try:")
+            println(outer_e)
+            throw("inner error")
+        } catch (inner_e) {
+            println("Inner catch:")
+            println(inner_e)
+            println("Accessing outer_e from inner catch:")
+            println(outer_e)
+            println("Accessing inner_e again:")
+            println(inner_e)
+        }
+        println("Back in outer catch, accessing outer_e:")
+        println(outer_e)
+    }
+    "done"
+}
+
+// Expect
+// outer value
+// Outer catch:
+// outer error
+// inner value
+// Accessing outer_e from inner try:
+// outer error
+// Inner catch:
+// inner error
+// Accessing outer_e from inner catch:
+// outer error
+// Accessing inner_e again:
+// inner error
+// Back in outer catch, accessing outer_e:
+// outer error
+// done

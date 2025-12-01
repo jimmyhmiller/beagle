@@ -1,0 +1,31 @@
+namespace try_nested_no_rethrow
+
+fn main() {
+    try {
+        println("Outer try")
+        try {
+            println("Inner try")
+            throw("inner error")
+        } catch (e) {
+            println("Inner catch:")
+            println(e)
+            println("Handled, not rethrowing")
+        }
+        println("After inner try-catch")
+    } catch (e) {
+        println("Outer catch (should not reach):")
+        println(e)
+    }
+    println("All done")
+    "done"
+}
+
+// Expect
+// Outer try
+// Inner try
+// Inner catch:
+// inner error
+// Handled, not rethrowing
+// After inner try-catch
+// All done
+// done

@@ -1,0 +1,31 @@
+namespace try_handler_cleanup
+
+fn no_throw(label) {
+    try {
+        println(label)
+        "ok"
+    } catch (e) {
+        println("unexpected catch")
+        println(e)
+    }
+}
+
+fn main() {
+    no_throw("first run")
+    no_throw("second run")
+
+    try {
+        throw("final error")
+    } catch (e) {
+        println("expected catch")
+        println(e)
+    }
+    "done"
+}
+
+// Expect
+// first run
+// second run
+// expected catch
+// final error
+// done

@@ -5,7 +5,7 @@ use bincode::{Decode, Encode};
 
 use crate::arm::FmovDirection;
 use crate::ast::IRRange;
-use crate::machine_code::arm_codegen::{Register, X0};
+use crate::machine_code::arm_codegen::{Register, X0, X29, X30};
 
 use crate::register_allocation::linear_scan::LinearScan;
 use crate::types::BuiltInTypes;
@@ -162,6 +162,9 @@ pub enum Instruction {
     And(Value, Value, Value),
     Or(Value, Value, Value),
     Xor(Value, Value, Value),
+    PushExceptionHandler(Label, Value, usize), // label, result_local, builtin_fn_ptr
+    PopExceptionHandler(usize),                // builtin_fn_ptr
+    Throw(Value, usize),                       // value, builtin_fn_ptr
     Label(Label),
 }
 
@@ -480,6 +483,15 @@ impl Instruction {
             Instruction::ExtendLifeTime(a) => {
                 get_register!(a)
             }
+            Instruction::PushExceptionHandler(_, local, _) => {
+                get_register!(local)
+            }
+            Instruction::PopExceptionHandler(_) => {
+                vec![]
+            }
+            Instruction::Throw(value, _) => {
+                get_register!(value)
+            }
         }
     }
 
@@ -599,6 +611,13 @@ impl Instruction {
             }
 
             Instruction::Jump(_) | Instruction::Breakpoint => {}
+            Instruction::PushExceptionHandler(_, value, _) => {
+                replace_register!(value, old_register, new_register);
+            }
+            Instruction::PopExceptionHandler(_) => {}
+            Instruction::Throw(value, _) => {
+                replace_register!(value, old_register, new_register);
+            }
         }
     }
 }
@@ -1083,9 +1102,19 @@ impl Ir {
     pub fn value_to_register(&self, value: &Value, lang: &mut LowLevelArm) -> Register {
         match value {
             Value::Register(register) => Register::from_index(register.index),
+            Value::Local(index) => {
+                let temp_reg = lang.temporary_register();
+                lang.load_local(temp_reg, *index as i32);
+                temp_reg
+            }
             Value::Spill(_register, index) => {
                 let temp_reg = lang.temporary_register();
                 lang.load_local(temp_reg, *index as i32);
+                temp_reg
+            }
+            Value::RawValue(val) => {
+                let temp_reg = lang.temporary_register();
+                lang.mov_64(temp_reg, *val as isize);
                 temp_reg
             }
             _ => panic!("Expected register got {:?}", value),
@@ -1773,6 +1802,57 @@ impl Ir {
                     lang.shift_right_imm(dest, value, BuiltInTypes::tag_size());
                     self.store_spill(dest, dest_spill, lang);
                 }
+                Instruction::PushExceptionHandler(label, result_local, builtin_fn) => {
+                    // Call push_exception_handler builtin
+                    // Arguments: (handler_address, result_local_offset, link_register, stack_pointer, frame_pointer)
+
+                    // Get the ARM64 label for the catch block
+                    let catch_label = ir_label_to_lang_label.get(label).unwrap();
+
+                    // Load the address of the catch label into arg 0
+                    lang.load_label_address(lang.arg(0), *catch_label);
+
+                    // Load result_local offset into arg 1
+                    // result_local is a Value::Local(index)
+                    // Locals are stored at FP - ((index + 1) * 8), so we need to pass the negative offset
+                    let local_index = result_local.as_local();
+                    let local_offset = -(((local_index + 1) * 8) as isize); // Negative offset from FP
+                    lang.mov_64(lang.arg(1), local_offset);
+
+                    // Copy link register (x30) to arg 2 BEFORE calling the builtin
+                    lang.mov_reg(lang.arg(2), X30);
+
+                    // Get stack pointer into arg 3
+                    lang.get_stack_pointer_imm(lang.arg(3), 0);
+
+                    // Copy frame pointer (x29) to arg 4
+                    lang.mov_reg(lang.arg(4), X29);
+
+                    // Call the push_exception_handler builtin
+                    let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), lang);
+                    lang.call_builtin(fn_ptr);
+                }
+                Instruction::PopExceptionHandler(builtin_fn) => {
+                    // Call pop_exception_handler builtin - no arguments
+                    let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), lang);
+                    lang.call_builtin(fn_ptr);
+                }
+                Instruction::Throw(value, builtin_fn) => {
+                    // Call throw_exception builtin with stack pointer and value
+                    // Arguments: (stack_pointer, exception_value)
+
+                    // Load stack pointer into arg 0
+                    lang.get_stack_pointer_imm(lang.arg(0), 0);
+
+                    // Load exception value into arg 1
+                    let value_reg = self.value_to_register(value, lang);
+                    lang.mov_reg(lang.arg(1), value_reg);
+
+                    // Call the throw_exception builtin (does not return)
+                    let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), lang);
+                    lang.call_builtin(fn_ptr);
+                    // Note: execution never continues past this point
+                }
             }
             let end_machine_code = lang.current_position();
             self.ir_to_machine_code_range.push((
@@ -1789,6 +1869,29 @@ impl Ir {
 
     pub fn jump(&mut self, label: Label) {
         self.instructions.push(Instruction::Jump(label));
+    }
+
+    pub fn push_exception_handler(
+        &mut self,
+        handler: Label,
+        result_local: Value,
+        builtin_fn: usize,
+    ) {
+        self.instructions.push(Instruction::PushExceptionHandler(
+            handler,
+            result_local,
+            builtin_fn,
+        ));
+    }
+
+    pub fn pop_exception_handler(&mut self, builtin_fn: usize) {
+        self.instructions
+            .push(Instruction::PopExceptionHandler(builtin_fn));
+    }
+
+    pub fn throw_value(&mut self, value: Value, builtin_fn: usize) {
+        self.instructions
+            .push(Instruction::Throw(value, builtin_fn));
     }
 
     pub fn load_string_constant(&mut self, string_constant: Value) -> Value {

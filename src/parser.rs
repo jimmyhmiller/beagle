@@ -67,6 +67,9 @@ pub enum Token {
     Extend,
     With,
     Mut,
+    Try,
+    Catch,
+    Throw,
 }
 impl Token {
     fn is_binary_operator(&self) -> bool {
@@ -145,6 +148,9 @@ impl Token {
             Token::Extend => "extend".to_string(),
             Token::As => "as".to_string(),
             Token::With => "with".to_string(),
+            Token::Try => "try".to_string(),
+            Token::Catch => "catch".to_string(),
+            Token::Throw => "throw".to_string(),
             Token::Comment((start, end))
             | Token::Atom((start, end))
             | Token::Spaces((start, end))
@@ -422,6 +428,9 @@ impl Tokenizer {
             b"extend" => Token::Extend,
             b"with" => Token::With,
             b"as" => Token::As,
+            b"try" => Token::Try,
+            b"catch" => Token::Catch,
+            b"throw" => Token::Throw,
             _ => Token::Atom((start, self.position)),
         }
     }
@@ -702,6 +711,8 @@ impl Parser {
             Token::Struct => Some(self.parse_struct()),
             Token::Enum => Some(self.parse_enum()),
             Token::If => Some(self.parse_if()),
+            Token::Try => Some(self.parse_try()),
+            Token::Throw => Some(self.parse_throw()),
             Token::Namespace => Some(self.parse_namespace()),
             Token::Import => Some(self.parse_import()),
             Token::Protocol => Some(self.parse_protocol()),
@@ -1604,6 +1615,81 @@ impl Parser {
         match self.current_token() {
             Token::If => true,
             _ => false,
+        }
+    }
+
+    fn parse_try(&mut self) -> Ast {
+        let start_position = self.position;
+        self.move_to_next_non_whitespace();
+
+        // Parse try block
+        let body = self.parse_block();
+
+        // Expect 'catch'
+        self.move_to_next_non_whitespace();
+        if !matches!(self.current_token(), Token::Catch) {
+            panic!("Expected 'catch' after try block");
+        }
+        self.consume();
+        self.move_to_next_non_whitespace();
+
+        // Parse catch parameter: catch(e)
+        if !matches!(self.current_token(), Token::OpenParen) {
+            panic!("Expected '(' after 'catch'");
+        }
+        self.consume();
+        self.skip_whitespace();
+
+        // Get the exception binding identifier
+        let exception_binding = if let Token::Atom((start, end)) = self.current_token() {
+            let binding = String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap();
+            self.consume();
+            binding
+        } else {
+            panic!("Expected identifier for exception binding");
+        };
+
+        self.skip_whitespace();
+        if !matches!(self.current_token(), Token::CloseParen) {
+            panic!("Expected ')' after exception binding");
+        }
+        self.consume();
+
+        // Parse catch block
+        let catch_body = self.parse_block();
+
+        let end_position = self.position;
+        Ast::Try {
+            body,
+            exception_binding,
+            catch_body,
+            token_range: TokenRange::new(start_position, end_position),
+        }
+    }
+
+    fn parse_throw(&mut self) -> Ast {
+        let start_position = self.position;
+        self.move_to_next_non_whitespace();
+
+        // throw is a function call: throw(value)
+        if !matches!(self.current_token(), Token::OpenParen) {
+            panic!("Expected '(' after 'throw'");
+        }
+        self.consume();
+        self.skip_whitespace();
+
+        let value = Box::new(self.parse_expression(1, true, false).unwrap());
+
+        self.skip_whitespace();
+        if !matches!(self.current_token(), Token::CloseParen) {
+            panic!("Expected ')' after throw value");
+        }
+        self.consume();
+
+        let end_position = self.position;
+        Ast::Throw {
+            value,
+            token_range: TokenRange::new(start_position, end_position),
         }
     }
 

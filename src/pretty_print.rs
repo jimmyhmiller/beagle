@@ -452,6 +452,17 @@ impl PrettyPrint for Instruction {
                     value2.pretty_print()
                 )
             }
+            Instruction::PushExceptionHandler(label, result_local, _) => {
+                format!(
+                    "push_exception_handler {}, {}",
+                    label.index,
+                    result_local.pretty_print()
+                )
+            }
+            Instruction::PopExceptionHandler(_) => "pop_exception_handler".to_string(),
+            Instruction::Throw(value, _) => {
+                format!("throw {}", value.pretty_print())
+            }
         }
     }
 }

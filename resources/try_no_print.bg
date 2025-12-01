@@ -1,0 +1,14 @@
+namespace try_no_print
+
+fn main() {
+    let result = try {
+        throw("error")
+        "try"
+    } catch (e) {
+        "caught"
+    }
+    result
+}
+
+// Expect
+// caught

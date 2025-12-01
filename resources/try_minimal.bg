@@ -1,0 +1,14 @@
+namespace try_minimal
+
+fn main() {
+    try {
+        throw("error")
+    } catch (e) {
+        println(e)
+    }
+    "done"
+}
+
+// Expect
+// error
+// done

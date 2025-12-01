@@ -1,0 +1,18 @@
+namespace try_function_call
+
+fn throws_error() {
+    throw("my error message")
+}
+
+fn main() {
+    try {
+        throws_error()
+    } catch (e) {
+        println(e)
+    }
+    "done"
+}
+
+// Expect
+// my error message
+// done

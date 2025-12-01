@@ -1,0 +1,18 @@
+namespace try_no_exception
+
+fn main() {
+    println("Before try")
+    try {
+        println("In try - no exception")
+    } catch (e) {
+        println("Should not catch")
+    }
+    println("After try-catch")
+    "done"
+}
+
+// Expect
+// Before try
+// In try - no exception
+// After try-catch
+// done

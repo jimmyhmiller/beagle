@@ -1,0 +1,46 @@
+namespace try_catch_test
+
+fn test_basic_try_catch() {
+    try {
+        println("In try block")
+        throw("error!")
+        println("This should not print")
+    } catch (e) {
+        println("Caught exception:")
+        println(e)
+    }
+    println("After try-catch")
+    "test done"
+}
+
+fn test_no_exception() {
+    try {
+        println("No exception thrown")
+    } catch (e) {
+        println("Should not catch")
+        println(e)
+    }
+    println("Finished without exception")
+}
+
+fn main() {
+    println("Test 1: Basic try-catch")
+    test_basic_try_catch()
+
+    println("\nTest 2: No exception")
+    test_no_exception()
+
+    "done"
+}
+
+// Expect
+// Test 1: Basic try-catch
+// In try block
+// Caught exception:
+// error!
+// After try-catch
+//
+// Test 2: No exception
+// No exception thrown
+// Finished without exception
+// done

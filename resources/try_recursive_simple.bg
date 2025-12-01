@@ -1,0 +1,51 @@
+namespace try_recursive_simple
+
+fn recursive_try(depth) {
+    println("Entering with depth:")
+    println(depth)
+    if depth == 0 {
+        throw("depth 0")
+    } else {
+        try {
+            recursive_try(depth - 1)
+        } catch (e) {
+            println("Caught, depth is:")
+            println(depth)
+            println("Exception:")
+            println(e)
+            if depth < 2 {
+                throw(e)
+            }
+        }
+    }
+    println("Exiting with depth:")
+    println(depth)
+}
+
+fn main() {
+    recursive_try(3)
+    "done"
+}
+
+// Expect
+// Entering with depth:
+// 3
+// Entering with depth:
+// 2
+// Entering with depth:
+// 1
+// Entering with depth:
+// 0
+// Caught, depth is:
+// 1
+// Exception:
+// depth 0
+// Caught, depth is:
+// 2
+// Exception:
+// depth 0
+// Exiting with depth:
+// 2
+// Exiting with depth:
+// 3
+// done

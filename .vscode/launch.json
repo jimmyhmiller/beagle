@@ -22,7 +22,7 @@
                     "kind": "bin"
                 }
             },
-            "args": ["resources/test_yield.bg"],
+            "args": ["resources/try_return_test.bg"],
             "cwd": "${workspaceFolder}",
             "preRunCommands": [
                 "command script import .vscode/rust_prettifier_for_lldb.py"

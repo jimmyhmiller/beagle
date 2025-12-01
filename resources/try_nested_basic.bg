@@ -1,0 +1,28 @@
+namespace try_nested_basic
+
+fn main() {
+    try {
+        println("Outer try")
+        try {
+            println("Inner try")
+            throw("inner error")
+        } catch (e) {
+            println("Inner catch:")
+            println(e)
+            throw("outer error")
+        }
+    } catch (e) {
+        println("Outer catch:")
+        println(e)
+    }
+    "done"
+}
+
+// Expect
+// Outer try
+// Inner try
+// Inner catch:
+// inner error
+// Outer catch:
+// outer error
+// done
