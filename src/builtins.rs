@@ -1302,6 +1302,90 @@ extern "C" fn pop_count(value: usize) -> usize {
     }
 }
 
+// Exception handling builtins
+pub unsafe extern "C" fn push_exception_handler_runtime(
+    handler_address: usize,
+    result_local: usize,
+    link_register: usize,
+    stack_pointer: usize,
+    frame_pointer: usize,
+) -> usize {
+    print_call_builtin(get_runtime().get(), "push_exception_handler");
+    let runtime = get_runtime().get_mut();
+
+    // All values are passed as parameters since we can't reliably read them
+    // inside this function (x30 gets clobbered by the call, SP/FP might be modified)
+    let handler = crate::runtime::ExceptionHandler {
+        handler_address,
+        stack_pointer,
+        frame_pointer,
+        link_register,
+        result_local,
+    };
+
+    runtime.push_exception_handler(handler);
+    BuiltInTypes::null_value() as usize
+}
+
+pub unsafe extern "C" fn pop_exception_handler_runtime() -> usize {
+    print_call_builtin(get_runtime().get(), "pop_exception_handler");
+    let runtime = get_runtime().get_mut();
+    runtime.pop_exception_handler();
+    BuiltInTypes::null_value() as usize
+}
+
+pub unsafe extern "C" fn throw_exception(stack_pointer: usize, value: usize) -> ! {
+    print_call_builtin(get_runtime().get(), "throw_exception");
+    let runtime = get_runtime().get_mut();
+
+    // Create exception object
+    let exception = runtime.create_exception(stack_pointer, value).unwrap();
+
+    // Pop handlers until we find one
+    if let Some(handler) = runtime.pop_exception_handler() {
+        // Restore stack, frame, and link register pointers
+        let handler_address = handler.handler_address;
+        let new_sp = handler.stack_pointer;
+        let new_fp = handler.frame_pointer;
+        let new_lr = handler.link_register;
+        let result_local_offset = handler.result_local;
+
+        // Store exception value in the result local
+        // The result local is at FP - offset (locals are below FP)
+        // result_local_offset is already the byte offset (negative from FP)
+        let result_ptr = (new_fp.wrapping_add(result_local_offset)) as *mut usize;
+        unsafe {
+            *result_ptr = exception;
+        }
+
+        // Jump to handler with restored SP, FP, and LR
+        unsafe {
+            asm!(
+                "mov sp, {0}",
+                "mov x29, {1}",
+                "mov x30, {2}",
+                "br {3}",
+                in(reg) new_sp,
+                in(reg) new_fp,
+                in(reg) new_lr,
+                in(reg) handler_address,
+                options(noreturn)
+            );
+        }
+    } else {
+        // No handler found, check global handler
+        if let Some(global_handler) = runtime.global_exception_handler {
+            global_handler(exception);
+            panic!("Global exception handler returned!");
+        } else {
+            // No global handler, panic
+            println!("Uncaught exception:");
+            runtime.println(exception).ok();
+            unsafe { throw_error(stack_pointer) };
+        }
+    }
+}
+
 // It is very important that this isn't inlined
 // because other code is expecting that
 // If we inline, we need to remove a skip frame
@@ -1381,6 +1465,27 @@ impl Runtime {
             throw_error as *const u8,
             true,
             1,
+        )?;
+
+        self.add_builtin_function(
+            "beagle.builtin/push_exception_handler",
+            push_exception_handler_runtime as *const u8,
+            false,
+            5, // handler_address, result_local, link_register, stack_pointer, frame_pointer
+        )?;
+
+        self.add_builtin_function(
+            "beagle.builtin/pop_exception_handler",
+            pop_exception_handler_runtime as *const u8,
+            false,
+            0,
+        )?;
+
+        self.add_builtin_function(
+            "beagle.builtin/throw_exception",
+            throw_exception as *const u8,
+            true,
+            2,
         )?;
 
         self.add_builtin_function("beagle.builtin/assert!", placeholder as *const u8, false, 0)?;

@@ -1,0 +1,38 @@
+namespace try_triple_nested
+
+fn main() {
+    try {
+        println("Level 1 try")
+        try {
+            println("Level 2 try")
+            try {
+                println("Level 3 try")
+                throw("level 3 error")
+            } catch (e) {
+                println("Level 3 catch:")
+                println(e)
+                throw("level 2 error")
+            }
+        } catch (e) {
+            println("Level 2 catch:")
+            println(e)
+            throw("level 1 error")
+        }
+    } catch (e) {
+        println("Level 1 catch:")
+        println(e)
+    }
+    "done"
+}
+
+// Expect
+// Level 1 try
+// Level 2 try
+// Level 3 try
+// Level 3 catch:
+// level 3 error
+// Level 2 catch:
+// level 2 error
+// Level 1 catch:
+// level 1 error
+// done

@@ -1,0 +1,20 @@
+namespace try_with_print
+
+fn test_fn() {
+    try {
+        println("before throw")
+        throw("error!")
+    } catch (e) {
+        println(e)
+    }
+}
+
+fn main() {
+    test_fn()
+    "done"
+}
+
+// Expect
+// before throw
+// error!
+// done

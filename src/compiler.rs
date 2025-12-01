@@ -299,6 +299,19 @@ impl Compiler {
             return Ok(grandparent_stdlib_path.to_str().unwrap().to_string());
         }
 
+        // Try three levels up (for cargo test - target/debug/deps -> target/debug -> target -> root)
+        let great_grandparent_stdlib_path = exe_path
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(format!("standard-library/{}.bg", import_name));
+        if great_grandparent_stdlib_path.exists() {
+            return Ok(great_grandparent_stdlib_path.to_str().unwrap().to_string());
+        }
+
         Err(format!(
             "Could not find module '{}' (searched: relative to {}, standard-library/)",
             import_name, source_file

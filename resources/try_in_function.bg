@@ -1,0 +1,18 @@
+namespace try_in_function
+
+fn test_fn() {
+    try {
+        throw("error!")
+    } catch (e) {
+        println(e)
+    }
+}
+
+fn main() {
+    test_fn()
+    "done"
+}
+
+// Expect
+// error!
+// done

@@ -1,0 +1,90 @@
+namespace try_stress_test
+
+fn throw_if_zero(n) {
+    if n == 0 {
+        throw("zero detected")
+    } else {
+        n
+    }
+}
+
+fn recursive_try(depth) {
+    if depth == 0 {
+        throw("reached depth 0")
+    } else {
+        try {
+            println("Depth:")
+            println(depth)
+            recursive_try(depth - 1)
+        } catch (e) {
+            println("Caught at depth:")
+            println(depth)
+            println("Exception:")
+            println(e)
+            if depth < 3 {
+                throw(e)
+            } else {
+                println("Handling at depth 3")
+            }
+        }
+    }
+}
+
+fn main() {
+    try {
+        let result = throw_if_zero(5)
+        println("Result 1:")
+        println(result)
+
+        try {
+            let result2 = throw_if_zero(0)
+            println("Should not print")
+        } catch (e1) {
+            println("Caught e1:")
+            println(e1)
+
+            try {
+                recursive_try(5)
+            } catch (e2) {
+                println("Caught e2:")
+                println(e2)
+                println("Accessing e1 again:")
+                println(e1)
+            }
+        }
+    } catch (outer) {
+        println("Outer catch (should not reach):")
+        println(outer)
+    }
+    "done"
+}
+
+// Expect
+// Result 1:
+// 5
+// Caught e1:
+// zero detected
+// Depth:
+// 5
+// Depth:
+// 4
+// Depth:
+// 3
+// Depth:
+// 2
+// Depth:
+// 1
+// Caught at depth:
+// 1
+// Exception:
+// reached depth 0
+// Caught at depth:
+// 2
+// Exception:
+// reached depth 0
+// Caught at depth:
+// 3
+// Exception:
+// reached depth 0
+// Handling at depth 3
+// done

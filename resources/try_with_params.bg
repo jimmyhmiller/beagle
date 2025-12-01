@@ -1,0 +1,32 @@
+namespace try_with_params
+
+fn test_with_param(x) {
+    println("Param before try:")
+    println(x)
+    try {
+        throw("error")
+    } catch (e) {
+        println("In catch, param:")
+        println(x)
+        println("Exception:")
+        println(e)
+    }
+    println("After try, param:")
+    println(x)
+}
+
+fn main() {
+    test_with_param(42)
+    "done"
+}
+
+// Expect
+// Param before try:
+// 42
+// In catch, param:
+// 42
+// Exception:
+// error
+// After try, param:
+// 42
+// done

@@ -1,0 +1,50 @@
+namespace overflow_test
+
+fn main() {
+    // Test with the maximum allowed value (accounting for tag bits)
+    // isize::MAX >> 3 = 1152921504606846975 on 64-bit systems
+    let large = 1152921504606846975
+    println("Large value:")
+    println(large)
+    println("Large + 1:")
+    println(large + 1)
+    println("Large + 100:")
+    println(large + 100)
+
+    // Test negative
+    let neg_large = -1152921504606846975
+    println("Negative large:")
+    println(neg_large)
+    println("Negative large - 1:")
+    println(neg_large - 1)
+
+    // Test multiplication that might overflow
+    let big = 100000000000
+    println("Big value:")
+    println(big)
+    println("Big * 2:")
+    println(big * 2)
+    println("Big * 20:")
+    println(big * 20)
+
+    "done"
+}
+
+// Expect
+// Large value:
+// 1152921504606846975
+// Large + 1:
+// -1152921504606846976
+// Large + 100:
+// -1152921504606846877
+// Negative large:
+// -1152921504606846975
+// Negative large - 1:
+// -1152921504606846976
+// Big value:
+// 100000000000
+// Big * 2:
+// 200000000000
+// Big * 20:
+// 2000000000000
+// done

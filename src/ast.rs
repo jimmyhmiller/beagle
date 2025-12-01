@@ -220,6 +220,16 @@ pub enum Ast {
         value: Box<Ast>,
         token_range: TokenRange,
     },
+    Try {
+        body: Vec<Ast>,
+        exception_binding: String,
+        catch_body: Vec<Ast>,
+        token_range: TokenRange,
+    },
+    Throw {
+        value: Box<Ast>,
+        token_range: TokenRange,
+    },
 }
 
 impl Ast {
@@ -261,7 +271,9 @@ impl Ast {
             | Ast::Loop { token_range, .. }
             | Ast::StructCreation { token_range, .. }
             | Ast::PropertyAccess { token_range, .. }
-            | Ast::EnumCreation { token_range, .. } => *token_range,
+            | Ast::EnumCreation { token_range, .. }
+            | Ast::Try { token_range, .. }
+            | Ast::Throw { token_range, .. } => *token_range,
             Ast::IntegerLiteral(_, position)
             | Ast::FloatLiteral(_, position)
             | Ast::Identifier(_, position)
@@ -717,6 +729,117 @@ impl AstCompiler<'_> {
                     self.call_compile(ast);
                 }
                 self.ir.jump(loop_start);
+                Value::Null
+            }
+            Ast::Try {
+                body,
+                exception_binding,
+                catch_body,
+                ..
+            } => {
+                // Create labels for catch block and continuation
+                let catch_label = self.ir.label("catch_block");
+                let after_catch = self.ir.label("after_catch");
+
+                // Create a result register that both try and catch will write to
+                let result_reg = self.ir.assign_new(Value::Null);
+
+                // Save any existing binding with this name to restore later
+                let saved_binding = self.get_variable(&exception_binding).clone();
+
+                // Allocate local for exception object with a unique internal name
+                // Use the label index to ensure uniqueness across multiple try-catch blocks
+                let unique_exception_name =
+                    format!("__exception_{}_{}__", exception_binding, catch_label.index);
+                let exception_local = self.find_or_insert_local(&unique_exception_name);
+                // Initialize it to null and register it with IR so num_locals includes it
+                let null_reg = self.ir.assign_new(Value::Null);
+                self.ir.store_local(exception_local, null_reg.into());
+
+                // Get builtin function pointers
+                let push_handler_fn = self
+                    .compiler
+                    .find_function("beagle.builtin/push_exception_handler")
+                    .expect("push_exception_handler builtin not found");
+                let push_handler_fn_ptr = usize::from(push_handler_fn.pointer);
+
+                let pop_handler_fn = self
+                    .compiler
+                    .find_function("beagle.builtin/pop_exception_handler")
+                    .expect("pop_exception_handler builtin not found");
+                let pop_handler_fn_ptr = usize::from(pop_handler_fn.pointer);
+
+                // Push exception handler
+                self.ir.push_exception_handler(
+                    catch_label,
+                    Value::Local(exception_local),
+                    push_handler_fn_ptr,
+                );
+
+                // Compile try body - disable tail call optimization
+                // TCO would prevent proper stack frame setup, breaking exception handling
+                self.not_tail_position();
+                let mut try_result = Value::Null;
+                for ast in body.iter() {
+                    self.not_tail_position();
+                    try_result = self.call_compile(ast);
+                }
+
+                // Normal path: store result, pop handler and skip catch
+                self.ir.assign(result_reg, try_result);
+                self.ir.pop_exception_handler(pop_handler_fn_ptr);
+                self.ir.jump(after_catch);
+
+                // Catch block (target of throw)
+                self.ir.write_label(catch_label);
+
+                // Exception already stored in exception_local by throw
+                self.insert_variable(
+                    exception_binding.clone(),
+                    VariableLocation::Local(exception_local),
+                );
+
+                // Compile catch body - also disable tail call optimization
+                let mut catch_result = Value::Null;
+                for ast in catch_body.iter() {
+                    self.not_tail_position();
+                    catch_result = self.call_compile(ast);
+                }
+
+                // Store catch result in the same result register
+                self.ir.assign(result_reg, catch_result);
+
+                self.ir.write_label(after_catch);
+
+                // Restore the saved binding so subsequent code sees the original variable
+                if let Some(saved) = saved_binding.clone() {
+                    self.insert_variable(exception_binding.clone(), saved);
+                } else {
+                    // Remove the exception binding if it didn't exist before
+                    let current_env = self.environment_stack.last_mut().unwrap();
+                    current_env.variables.remove(&exception_binding);
+                }
+
+                result_reg.into()
+            }
+            Ast::Throw { value, .. } => {
+                let exception_value = self.call_compile(&value);
+                // Ensure the exception value is in a register
+                let exception_value = match exception_value {
+                    Value::Register(_) => exception_value,
+                    _ => {
+                        let reg = self.ir.volatile_register();
+                        self.ir.assign(reg, exception_value);
+                        reg.into()
+                    }
+                };
+                let throw_fn = self
+                    .compiler
+                    .find_function("beagle.builtin/throw_exception")
+                    .expect("throw_exception builtin not found");
+                let throw_fn_ptr = usize::from(throw_fn.pointer);
+                self.ir.throw_value(exception_value, throw_fn_ptr);
+                // Throw never returns, but we need to return something for type checking
                 Value::Null
             }
             Ast::Struct {
@@ -2380,6 +2503,25 @@ impl AstCompiler<'_> {
                 for ast in body.iter() {
                     self.find_mutable_vars_that_need_boxing(ast);
                 }
+            }
+            Ast::Try {
+                body,
+                exception_binding: _,
+                catch_body,
+                token_range: _,
+            } => {
+                for ast in body.iter() {
+                    self.find_mutable_vars_that_need_boxing(ast);
+                }
+                for ast in catch_body.iter() {
+                    self.find_mutable_vars_that_need_boxing(ast);
+                }
+            }
+            Ast::Throw {
+                value,
+                token_range: _,
+            } => {
+                self.find_mutable_vars_that_need_boxing(value);
             }
         }
     }

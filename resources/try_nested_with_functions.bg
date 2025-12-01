@@ -1,0 +1,50 @@
+namespace try_nested_with_functions
+
+fn inner_function() {
+    println("In inner_function")
+    throw("error from inner_function")
+}
+
+fn middle_function() {
+    println("In middle_function")
+    try {
+        inner_function()
+    } catch (e) {
+        println("Caught in middle_function:")
+        println(e)
+        throw("re-thrown from middle_function")
+    }
+}
+
+fn main() {
+    try {
+        println("In main try")
+        try {
+            middle_function()
+        } catch (e) {
+            println("Caught in main inner catch:")
+            println(e)
+            println("Accessing e again:")
+            println(e)
+            throw("final error from main")
+        }
+    } catch (e) {
+        println("Caught in main outer catch:")
+        println(e)
+    }
+    "done"
+}
+
+// Expect
+// In main try
+// In middle_function
+// In inner_function
+// Caught in middle_function:
+// error from inner_function
+// Caught in main inner catch:
+// re-thrown from middle_function
+// Accessing e again:
+// re-thrown from middle_function
+// Caught in main outer catch:
+// final error from main
+// done

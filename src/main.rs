@@ -254,43 +254,48 @@ fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Erro
 fn find_resource_file(file_name: &str) -> Result<String, Box<dyn Error>> {
     let mut exe_path = env::current_exe()?;
     exe_path = exe_path.parent().unwrap().to_path_buf();
-    let resource_path = exe_path.join(format!("resources/{}", file_name));
+    let mut candidates = Vec::new();
+    candidates.push(exe_path.join(format!("resources/{}", file_name)));
 
-    if resource_path.exists() {
-        Ok(resource_path.to_str().unwrap().to_string())
-    } else {
-        Err(format!("Could not find resource file: {}", file_name).into())
+    if let Some(parent) = exe_path.parent() {
+        candidates.push(parent.join(format!("resources/{}", file_name)));
+        if let Some(grandparent) = parent.parent() {
+            candidates.push(grandparent.join(format!("resources/{}", file_name)));
+            if let Some(great_grandparent) = grandparent.parent() {
+                candidates.push(great_grandparent.join(format!("resources/{}", file_name)));
+            }
+        }
     }
+
+    for candidate in candidates.into_iter() {
+        if candidate.exists() {
+            return Ok(candidate.to_str().unwrap().to_string());
+        }
+    }
+
+    Err(format!("Could not find resource file: {}", file_name).into())
 }
 
 fn find_stdlib_file(file_name: &str) -> Result<String, Box<dyn Error>> {
     let mut exe_path = env::current_exe()?;
     exe_path = exe_path.parent().unwrap().to_path_buf();
+    let mut candidates = Vec::new();
+    candidates.push(exe_path.join(format!("standard-library/{}", file_name)));
 
-    // Try exe_dir/standard-library/
-    let stdlib_path = exe_path.join(format!("standard-library/{}", file_name));
-    if stdlib_path.exists() {
-        return Ok(stdlib_path.to_str().unwrap().to_string());
+    if let Some(parent) = exe_path.parent() {
+        candidates.push(parent.join(format!("standard-library/{}", file_name)));
+        if let Some(grandparent) = parent.parent() {
+            candidates.push(grandparent.join(format!("standard-library/{}", file_name)));
+            if let Some(great_grandparent) = grandparent.parent() {
+                candidates.push(great_grandparent.join(format!("standard-library/{}", file_name)));
+            }
+        }
     }
 
-    // Try exe_dir/../standard-library/ (development - one level up)
-    let parent_stdlib_path = exe_path
-        .parent()
-        .unwrap()
-        .join(format!("standard-library/{}", file_name));
-    if parent_stdlib_path.exists() {
-        return Ok(parent_stdlib_path.to_str().unwrap().to_string());
-    }
-
-    // Try exe_dir/../../standard-library/ (development - two levels up, for cargo run)
-    let grandparent_stdlib_path = exe_path
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join(format!("standard-library/{}", file_name));
-    if grandparent_stdlib_path.exists() {
-        return Ok(grandparent_stdlib_path.to_str().unwrap().to_string());
+    for path in candidates.into_iter() {
+        if path.exists() {
+            return Ok(path.to_str().unwrap().to_string());
+        }
     }
 
     Err(format!("Could not find standard library file: {}", file_name).into())
@@ -350,7 +355,7 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             print_parse: args.print_parse,
             print_builtin_calls: args.print_builtin_calls,
         };
-        main_inner(args).ok();
+        main_inner(args)?;
         RUNTIME.get().unwrap().get_mut().reset();
     }
     Ok(())
@@ -464,10 +469,6 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     }
 
     let time = Instant::now();
-
-    if args.program.unwrap() == "resources/array_literal.bg" {
-        println!("Running {:?}", top_levels);
-    }
 
     for top_level in top_levels {
         if let Some(f) = runtime.get_function0(&top_level) {
