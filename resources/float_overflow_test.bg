@@ -1,0 +1,60 @@
+namespace float_overflow_test
+
+fn main() {
+    // Test infinity constant
+    println("Infinity constant:")
+    println(infinity)
+
+    println("Negative infinity constant:")
+    println(-infinity)
+
+    // Build up a very large float by repeated multiplication
+    let large = 1000000000000000.0  // 10^15
+    let very_large = large * large  // 10^30
+    let huge = very_large * very_large  // 10^60
+    let gigantic = huge * huge  // 10^120
+
+    println("Gigantic value:")
+    println(gigantic)
+
+    // Try to overflow by multiplication
+    println("Gigantic * Gigantic:")
+    let overflow = gigantic * gigantic  // 10^240
+    println(overflow)
+
+    // Keep going to definitely overflow
+    println("Overflow * Overflow:")
+    println(overflow * overflow)
+
+    // Test division by zero (definitely produces infinity)
+    println("Division by zero:")
+    println(1.0 / 0.0)
+
+    println("Negative division by zero:")
+    println(-1.0 / 0.0)
+
+    // Test NaN
+    println("NaN (0/0):")
+    println(0.0 / 0.0)
+
+    "done"
+}
+
+// Expect
+// Infinity constant:
+// infinity
+// Negative infinity constant:
+// -infinity
+// Gigantic value:
+// 1000000000000000300000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+// Gigantic * Gigantic:
+// 1000000000000000600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+// Overflow * Overflow:
+// infinity
+// Division by zero:
+// infinity
+// Negative division by zero:
+// -infinity
+// NaN (0/0):
+// NaN
+// done

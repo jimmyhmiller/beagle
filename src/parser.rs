@@ -40,6 +40,8 @@ pub enum Token {
     True,
     False,
     Null,
+    Infinity,
+    NegativeInfinity,
     ShiftRight,
     ShiftRightZero,
     ShiftLeft,
@@ -129,6 +131,8 @@ impl Token {
             Token::True => "true".to_string(),
             Token::False => "false".to_string(),
             Token::Null => "null".to_string(),
+            Token::Infinity => "infinity".to_string(),
+            Token::NegativeInfinity => "-infinity".to_string(),
             Token::ShiftRight => ">>".to_string(),
             Token::ShiftRightZero => ">>>".to_string(),
             Token::ShiftLeft => "<<".to_string(),
@@ -417,6 +421,8 @@ impl Tokenizer {
             b"true" => Token::True,
             b"false" => Token::False,
             b"null" => Token::Null,
+            b"infinity" => Token::Infinity,
+            b"-infinity" => Token::NegativeInfinity,
             b"let" => Token::Let,
             b"mut" => Token::Mut,
             b"struct" => Token::Struct,
@@ -775,6 +781,14 @@ impl Parser {
             Token::Null => {
                 let position = self.consume();
                 Some(Ast::Null(position))
+            }
+            Token::Infinity => {
+                let position = self.consume();
+                Some(Ast::FloatLiteral("infinity".to_string(), position))
+            }
+            Token::NegativeInfinity => {
+                let position = self.consume();
+                Some(Ast::FloatLiteral("-infinity".to_string(), position))
             }
             Token::Let => {
                 let start_position = self.position;
