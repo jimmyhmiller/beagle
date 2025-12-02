@@ -1,0 +1,17 @@
+namespace loop_conditional_break_test
+
+fn main() {
+    let mut i = 0
+    let result = loop {
+        if i == 5 {
+            break(i * 10)
+        }
+        i = i + 1
+    }
+    println(result)
+    "done"
+}
+
+// Expect
+// 50
+// done

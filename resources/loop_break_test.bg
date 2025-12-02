@@ -1,0 +1,13 @@
+namespace loop_break_test
+
+fn main() {
+    let x = loop {
+        break(42)
+    }
+    println(x)
+    "done"
+}
+
+// Expect
+// 42
+// done

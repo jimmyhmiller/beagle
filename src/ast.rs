@@ -6,6 +6,7 @@ use crate::{
     Data, Message,
     arm::LowLevelArm,
     builtins::debugger,
+    common::Label,
     compiler::Compiler,
     ir::{self, Condition},
     pretty_print::PrettyPrint,
@@ -215,6 +216,18 @@ pub enum Ast {
         body: Vec<Ast>,
         token_range: TokenRange,
     },
+    While {
+        condition: Box<Ast>,
+        body: Vec<Ast>,
+        token_range: TokenRange,
+    },
+    Break {
+        value: Box<Ast>,
+        token_range: TokenRange,
+    },
+    Continue {
+        token_range: TokenRange,
+    },
     Assignment {
         name: Box<Ast>,
         value: Box<Ast>,
@@ -269,6 +282,9 @@ impl Ast {
             | Ast::Array { token_range, .. }
             | Ast::IndexOperator { token_range, .. }
             | Ast::Loop { token_range, .. }
+            | Ast::While { token_range, .. }
+            | Ast::Break { token_range, .. }
+            | Ast::Continue { token_range, .. }
             | Ast::StructCreation { token_range, .. }
             | Ast::PropertyAccess { token_range, .. }
             | Ast::EnumCreation { token_range, .. }
@@ -309,6 +325,7 @@ impl Ast {
             last_accounted_for_ir: 0,
             metadata: HashMap::new(),
             mutable_pass_env_stack: vec![HashMap::new()],
+            loop_exit_stack: vec![],
         };
 
         // println!("{:#?}", compiler);
@@ -456,6 +473,7 @@ pub struct AstCompiler<'a> {
     pub last_accounted_for_ir: usize,
     pub metadata: HashMap<Ast, Metadata>,
     pub mutable_pass_env_stack: Vec<HashMap<String, MutablePassInfo>>,
+    pub loop_exit_stack: Vec<(Label, VirtualRegister, Label)>,
 }
 
 impl AstCompiler<'_> {
@@ -724,12 +742,86 @@ impl AstCompiler<'_> {
 
             Ast::Loop { body, .. } => {
                 let loop_start = self.ir.label("loop_start");
+                let loop_exit = self.ir.label("loop_exit");
+                let result_reg = self.ir.assign_new(Value::Null);
+
+                // Push loop context for break/continue statements
+                self.loop_exit_stack
+                    .push((loop_exit, result_reg, loop_start));
+
                 self.ir.write_label(loop_start);
                 for ast in body.iter() {
                     self.call_compile(ast);
                 }
                 self.ir.jump(loop_start);
-                Value::Null
+
+                // Pop loop context
+                self.loop_exit_stack.pop();
+
+                // Exit label (only reached via break)
+                self.ir.write_label(loop_exit);
+
+                result_reg.into() // Return the break value
+            }
+            Ast::While {
+                condition, body, ..
+            } => {
+                let loop_start = self.ir.label("while_start");
+                let loop_exit = self.ir.label("while_exit");
+                let result_reg = self.ir.assign_new(Value::Null);
+
+                // Push loop context for break/continue statements
+                self.loop_exit_stack
+                    .push((loop_exit, result_reg, loop_start));
+
+                self.ir.write_label(loop_start);
+
+                // Check condition
+                let cond_value = self.call_compile(&condition);
+                self.ir
+                    .jump_if(loop_exit, Condition::NotEqual, cond_value, Value::True);
+
+                // Execute body and track last expression value
+                let mut last_value = Value::Null;
+                for ast in body.iter() {
+                    last_value = self.call_compile(ast);
+                }
+
+                // Store last expression value in result_reg
+                self.ir.assign(result_reg, last_value);
+
+                // Jump back to check condition
+                self.ir.jump(loop_start);
+
+                // Pop loop context
+                self.loop_exit_stack.pop();
+
+                // Exit label
+                self.ir.write_label(loop_exit);
+
+                result_reg.into() // Return last expression or break value
+            }
+            Ast::Break { value, .. } => {
+                if self.loop_exit_stack.is_empty() {
+                    panic!("break statement outside of loop");
+                }
+
+                let (exit_label, result_reg, _) = *self.loop_exit_stack.last().unwrap();
+                let break_value = self.call_compile(&value);
+                self.ir.assign(result_reg, break_value);
+                self.ir.jump(exit_label);
+
+                Value::Null // Unreachable after jump
+            }
+            Ast::Continue { .. } => {
+                if self.loop_exit_stack.is_empty() {
+                    panic!("continue statement outside of loop");
+                }
+
+                let (_, _, loop_start) = *self.loop_exit_stack.last().unwrap();
+                self.ir.jump(loop_start);
+
+                Value::Null // Unreachable after jump
             }
             Ast::Try {
                 body,
@@ -2503,6 +2595,25 @@ impl AstCompiler<'_> {
                 for ast in body.iter() {
                     self.find_mutable_vars_that_need_boxing(ast);
                 }
+            }
+            Ast::While {
+                condition,
+                body,
+                token_range: _,
+            } => {
+                self.find_mutable_vars_that_need_boxing(condition);
+                for ast in body.iter() {
+                    self.find_mutable_vars_that_need_boxing(ast);
+                }
+            }
+            Ast::Break {
+                value,
+                token_range: _,
+            } => {
+                self.find_mutable_vars_that_need_boxing(value);
+            }
+            Ast::Continue { token_range: _ } => {
+                // No sub-expressions to check
             }
             Ast::Try {
                 body,
