@@ -6,6 +6,27 @@ use crate::{
     types::{BuiltInTypes, Header},
 };
 
+pub fn get_inline_primitive_arity(name: &str) -> usize {
+    match name {
+        "beagle.primitive/deref" => 1,
+        "beagle.primitive/reset!" => 2,
+        "beagle.primitive/compare_and_swap!" => 3,
+        "beagle.primitive/breakpoint!" => 0,
+        "beagle.primitive/write_type_id" => 2,
+        "beagle.primitive/read_type_id" => 1,
+        "beagle.primitive/read_struct_id" => 1,
+        "beagle.primitive/write_field" => 3,
+        "beagle.primitive/read_field" => 2,
+        "beagle.primitive/breakpoint" => 0,
+        "beagle.primitive/size" => 1,
+        "beagle.primitive/panic" => 1,
+        "beagle.primitive/is_object" => 1,
+        "beagle.primitive/is_string_constant" => 1,
+        "beagle.primitive/set!" => 2,
+        _ => panic!("Unknown inline primitive: {}", name),
+    }
+}
+
 // TODO: I'd rather this be on Ir I think?
 impl AstCompiler<'_> {
     pub fn compile_inline_primitive_function(&mut self, name: &str, args: Vec<Value>) -> Value {

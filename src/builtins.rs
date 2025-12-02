@@ -380,6 +380,33 @@ pub unsafe extern "C" fn throw_error(stack_pointer: usize) -> ! {
     panic!("Error!");
 }
 
+pub unsafe extern "C" fn check_arity(
+    stack_pointer: usize,
+    function_pointer: usize,
+    expected_args: isize,
+) -> isize {
+    let runtime = get_runtime().get();
+
+    // Function pointer is tagged, need to untag
+    let untagged_ptr = (function_pointer >> BuiltInTypes::tag_size()) as *const u8;
+
+    if let Some(function) = runtime.get_function_by_pointer(untagged_ptr) {
+        // expected_args is a tagged integer, need to untag it
+        let expected_args_untagged = BuiltInTypes::untag(expected_args as usize);
+        if function.number_of_args != expected_args_untagged {
+            println!(
+                "Arity mismatch for '{}': expected {} args, got {}",
+                function.name, function.number_of_args, expected_args_untagged
+            );
+            unsafe {
+                throw_error(stack_pointer);
+            }
+        }
+    }
+
+    0 // Return value unused
+}
+
 fn print_stack(_stack_pointer: usize) {
     let runtime = get_runtime().get_mut();
     let stack_base = runtime.get_stack_base();
@@ -1395,7 +1422,7 @@ impl Runtime {
             "beagle.__internal_test__/many_args",
             many_args as *const u8,
             false,
-            9,
+            11,
         )?;
 
         self.add_builtin_function("beagle.core/_println", println_value as *const u8, false, 1)?;
@@ -1465,6 +1492,13 @@ impl Runtime {
             throw_error as *const u8,
             true,
             1,
+        )?;
+
+        self.add_builtin_function(
+            "beagle.builtin/check_arity",
+            check_arity as *const u8,
+            true, // needs_stack_pointer
+            3,    // stack_pointer, function_pointer, expected_args
         )?;
 
         self.add_builtin_function(

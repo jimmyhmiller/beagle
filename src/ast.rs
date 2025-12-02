@@ -326,6 +326,7 @@ impl Ast {
             metadata: HashMap::new(),
             mutable_pass_env_stack: vec![HashMap::new()],
             loop_exit_stack: vec![],
+            current_function_arity: 0,
         };
 
         // println!("{:#?}", compiler);
@@ -474,6 +475,7 @@ pub struct AstCompiler<'a> {
     pub metadata: HashMap<Ast, Metadata>,
     pub mutable_pass_env_stack: Vec<HashMap<String, MutablePassInfo>>,
     pub loop_exit_stack: Vec<(Label, VirtualRegister, Label)>,
+    pub current_function_arity: usize,
 }
 
 impl AstCompiler<'_> {
@@ -554,9 +556,11 @@ impl AstCompiler<'_> {
                 let old_ir =
                     std::mem::replace(&mut self.ir, Ir::new(self.compiler.allocate_fn_pointer()));
                 let old_name = self.name.clone();
+                let old_arity = self.current_function_arity;
                 self.ir_range_to_token_range.push(Vec::new());
 
                 self.name = name.clone();
+                self.current_function_arity = args.len();
                 if is_not_top_level {
                     let context_name = "<closure_context>";
                     let reg = self.ir.arg(0);
@@ -620,6 +624,7 @@ impl AstCompiler<'_> {
                 self.ir.ret(return_value);
 
                 self.name = old_name;
+                self.current_function_arity = old_arity;
 
                 let lang = LowLevelArm::new();
 
@@ -1522,6 +1527,14 @@ impl AstCompiler<'_> {
                 let name = self.get_qualified_function_name(&name);
 
                 if self.name_matches(&name) {
+                    if args.len() != self.current_function_arity {
+                        panic!(
+                            "Recursive call to '{}' expects {} argument(s), but {} were provided",
+                            self.name.as_ref().unwrap_or(&"<unknown>".to_string()),
+                            self.current_function_arity,
+                            args.len()
+                        );
+                    }
                     if self.is_tail_position() {
                         return self.call_compile(&Ast::TailRecurse { args, token_range });
                     } else {
@@ -1553,6 +1566,15 @@ impl AstCompiler<'_> {
                 // I think so, this will matter once I think about macros
                 // though
                 if self.compiler.is_inline_primitive_function(&name) {
+                    let expected = crate::primitives::get_inline_primitive_arity(&name);
+                    if args.len() != expected {
+                        panic!(
+                            "Function '{}' expects {} argument(s), but {} were provided",
+                            name,
+                            expected,
+                            args.len()
+                        );
+                    }
                     return self.compile_inline_primitive_function(&name, args);
                 }
 
@@ -1785,6 +1807,26 @@ impl AstCompiler<'_> {
 
         let builtin = function.is_builtin;
         let needs_stack_pointer = function.needs_stack_pointer;
+
+        // Arity check - for functions that need stack pointer, number_of_args includes it
+        let expected_user_args = if needs_stack_pointer {
+            function.number_of_args.saturating_sub(1)
+        } else {
+            function.number_of_args
+        };
+
+        if args.len() != expected_user_args {
+            panic!(
+                "Function '{}' expects {} argument(s), but {} were provided\n\
+                 (function.number_of_args={}, needs_stack_pointer={}, is_builtin={})",
+                name,
+                expected_user_args,
+                args.len(),
+                function.number_of_args,
+                needs_stack_pointer,
+                builtin
+            );
+        }
         if needs_stack_pointer {
             let stack_pointer_reg = self.ir.volatile_register();
             let stack_pointer = self.ir.get_stack_pointer_imm(0);
@@ -1878,6 +1920,16 @@ impl AstCompiler<'_> {
         // I just have to think about the correct way to do that
         self.ir
             .jump_if(call_closure, Condition::Equal, tag, closure_tag);
+
+        // Runtime arity check for non-closure function call
+        let expected_count = self
+            .ir
+            .assign_new(Value::TaggedConstant(args.len() as isize));
+        self.call(
+            "beagle.builtin/check_arity",
+            vec![function_register.into(), expected_count.into()],
+        );
+
         let result = self.ir.call(function_register.into(), args.clone());
         self.ir.assign(ret_register, result);
         self.ir.jump(exit_closure_call);
@@ -1892,7 +1944,18 @@ impl AstCompiler<'_> {
         // }
         let untagged_closure_register = self.ir.untag(closure_register.into());
         // self.ir.breakpoint();
+        // Load function pointer from closure structure (field 0 = offset 1, after 8-byte header)
         let function_pointer = self.ir.load_from_memory(untagged_closure_register, 1);
+
+        // Runtime arity check for closure call
+        let expected_count = self
+            .ir
+            .assign_new(Value::TaggedConstant(args.len() as isize));
+        self.call(
+            "beagle.builtin/check_arity",
+            vec![function_pointer, expected_count.into()],
+        );
+
         // make the first argument to the closure be the values pointer
         // the rest of the arguments are the arguments passed to the closure
         let mut args = args;

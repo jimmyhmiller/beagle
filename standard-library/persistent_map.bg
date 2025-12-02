@@ -593,7 +593,7 @@ fn main() {
     println(get(pm7, 999)) 
     let keys_vec = keys(pm6)
     println(keys_vec) // Print all keys
-    println(format(pm6)) // Print all entries
+    println(format(pm6, 0)) // Print all entries
     "done"
 }
  
