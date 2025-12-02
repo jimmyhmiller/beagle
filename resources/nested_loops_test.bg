@@ -1,0 +1,18 @@
+namespace nested_loops_test
+
+fn main() {
+    let outer = loop {
+        let inner = loop {
+            break("inner")
+        }
+        println(inner)
+        break("outer")
+    }
+    println(outer)
+    "done"
+}
+
+// Expect
+// inner
+// outer
+// done

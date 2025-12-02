@@ -1,0 +1,25 @@
+namespace loop_expression_usage_test
+
+fn main() {
+    let loop_value = loop {
+        break(7)
+    }
+
+    let mut n = 0
+    let while_value = while n < 3 {
+        n = n + 1
+        n * 2
+    }
+
+    let total = loop_value + while_value
+    println(loop_value)
+    println(while_value)
+    println(total)
+    "done"
+}
+
+// Expect
+// 7
+// 6
+// 13
+// done

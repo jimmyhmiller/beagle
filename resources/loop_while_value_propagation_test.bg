@@ -1,0 +1,21 @@
+namespace loop_while_value_propagation_test
+
+fn main() {
+    let result = loop {
+        let mut x = 0
+        let inner = while x < 3 {
+            x = x + 1
+            if x == 2 {
+                break(x * 5)
+            }
+            x
+        }
+        break(inner + 1)
+    }
+    println(result)
+    "done"
+}
+
+// Expect
+// 11
+// done

@@ -23,6 +23,9 @@ pub enum Token {
     NewLine,
     Fn,
     Loop,
+    While,
+    Break,
+    Continue,
     If,
     Else,
     LessThanOrEqual,
@@ -140,6 +143,9 @@ impl Token {
             Token::BitWiseOr => "|".to_string(),
             Token::BitWiseXor => "^".to_string(),
             Token::Loop => "loop".to_string(),
+            Token::While => "while".to_string(),
+            Token::Break => "break".to_string(),
+            Token::Continue => "continue".to_string(),
             Token::If => "if".to_string(),
             Token::Else => "else".to_string(),
             Token::Let => "let".to_string(),
@@ -396,6 +402,9 @@ impl Tokenizer {
         match &input_bytes[start..self.position] {
             b"fn" => Token::Fn,
             b"loop" => Token::Loop,
+            b"while" => Token::While,
+            b"break" => Token::Break,
+            b"continue" => Token::Continue,
             b"if" => Token::If,
             b"else" => Token::Else,
             b"<=" => Token::LessThanOrEqual,
@@ -714,6 +723,9 @@ impl Parser {
         match self.current_token() {
             Token::Fn => Some(self.parse_function()),
             Token::Loop => Some(self.parse_loop()),
+            Token::While => Some(self.parse_while()),
+            Token::Break => Some(self.parse_break()),
+            Token::Continue => Some(self.parse_continue()),
             Token::Struct => Some(self.parse_struct()),
             Token::Enum => Some(self.parse_enum()),
             Token::If => Some(self.parse_if()),
@@ -890,6 +902,65 @@ impl Parser {
         let end_position = self.position;
         Ast::Loop {
             body,
+            token_range: TokenRange::new(start_position, end_position),
+        }
+    }
+
+    fn parse_while(&mut self) -> Ast {
+        let start_position = self.position;
+        self.move_to_next_non_whitespace();
+        // Parse condition (no parens required)
+        let condition = Box::new(
+            self.parse_expression(1, true, false)
+                .expect("Expected condition after while"),
+        );
+        let body = self.parse_block();
+        let end_position = self.position;
+        Ast::While {
+            condition,
+            body,
+            token_range: TokenRange::new(start_position, end_position),
+        }
+    }
+
+    fn parse_break(&mut self) -> Ast {
+        let start_position = self.position;
+        self.move_to_next_non_whitespace();
+        // Expect function call syntax: break(value)
+        if self.current_token() != Token::OpenParen {
+            panic!("Expected '(' after break");
+        }
+        self.move_to_next_non_whitespace();
+        let value = self
+            .parse_expression(0, true, true)
+            .expect("Expected value in break()");
+        // parse_expression should leave us at the closing paren
+        if self.current_token() != Token::CloseParen {
+            panic!("Expected ')' after break value");
+        }
+        self.move_to_next_non_whitespace();
+        let end_position = self.position;
+        Ast::Break {
+            value: Box::new(value),
+            token_range: TokenRange::new(start_position, end_position),
+        }
+    }
+
+    fn parse_continue(&mut self) -> Ast {
+        let start_position = self.position;
+        self.move_to_next_non_whitespace();
+        // Expect function call syntax: continue()
+        if self.current_token() != Token::OpenParen {
+            panic!("Expected '(' after continue");
+        }
+        self.move_to_next_non_whitespace();
+        // Should be at closing paren immediately
+        if self.current_token() != Token::CloseParen {
+            panic!("Expected ')' - continue takes no arguments");
+        }
+        self.move_to_next_non_whitespace();
+        let end_position = self.position;
+        Ast::Continue {
             token_range: TokenRange::new(start_position, end_position),
         }
     }

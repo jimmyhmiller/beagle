@@ -1,0 +1,14 @@
+namespace while_false_test
+
+fn main() {
+    let result = while false {
+        println("never runs")
+        42
+    }
+    println(result)
+    "done"
+}
+
+// Expect
+// null
+// done

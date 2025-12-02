@@ -1,0 +1,25 @@
+namespace while_continue_test
+
+fn main() {
+    let mut i = 0
+    let mut hits = 0
+    let result = while i < 5 {
+        i = i + 1
+        if i == 2 {
+            continue()
+        }
+        if i == 4 {
+            continue()
+        }
+        hits = hits + 1
+        hits * 100
+    }
+    println(hits)
+    println(result)
+    "done"
+}
+
+// Expect
+// 3
+// 300
+// done
