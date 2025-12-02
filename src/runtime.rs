@@ -563,6 +563,10 @@ impl Allocator for Memory {
         self.heap.add_namespace_root(namespace_id, root)
     }
 
+    fn remove_namespace_root(&mut self, namespace_id: usize, root: usize) -> bool {
+        self.heap.remove_namespace_root(namespace_id, root)
+    }
+
     fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)> {
         self.heap.get_namespace_relocations()
     }
@@ -759,8 +763,14 @@ pub struct Runtime {
     protocol_info: HashMap<String, Vec<ProtocolMethodInfo>>,
     stack_segments: StackSegmentAllocator,
     stacks_for_continuation_swapping: Vec<ContinuationStack>,
-    pub exception_handlers: Vec<ExceptionHandler>,
-    pub global_exception_handler: Option<fn(usize)>,
+    // Per-thread try-catch handler stacks
+    pub exception_handlers: HashMap<ThreadId, Vec<ExceptionHandler>>,
+    // Per-thread uncaught exception handlers (Beagle function pointers)
+    pub thread_exception_handler_fns: HashMap<ThreadId, usize>,
+    // Global default uncaught exception handler (Beagle function pointer)
+    pub default_exception_handler_fn: Option<usize>,
+    // Namespace ID for exception handler GC roots
+    exception_handler_namespace: usize,
 }
 
 pub fn create_stack_with_protected_page_after(stack_size: usize) -> MmapMut {
@@ -844,8 +854,14 @@ impl Runtime {
                 is_used: AtomicBool::new(false),
                 stack: [0; 512],
             }],
-            exception_handlers: Vec::new(),
-            global_exception_handler: None,
+            exception_handlers: {
+                let mut map = HashMap::new();
+                map.insert(std::thread::current().id(), Vec::new());
+                map
+            },
+            thread_exception_handler_fns: HashMap::new(),
+            default_exception_handler_fn: None,
+            exception_handler_namespace: 0, // Will be set in bootstrap
         }
     }
 
@@ -1065,15 +1081,131 @@ impl Runtime {
 
     // Exception handling methods
     pub fn push_exception_handler(&mut self, handler: ExceptionHandler) {
-        self.exception_handlers.push(handler);
+        let thread_id = std::thread::current().id();
+        self.exception_handlers
+            .entry(thread_id)
+            .or_insert_with(Vec::new)
+            .push(handler);
     }
 
     pub fn pop_exception_handler(&mut self) -> Option<ExceptionHandler> {
-        self.exception_handlers.pop()
+        let thread_id = std::thread::current().id();
+        self.exception_handlers.get_mut(&thread_id)?.pop()
     }
 
-    pub fn set_global_exception_handler(&mut self, handler: fn(usize)) {
-        self.global_exception_handler = Some(handler);
+    pub fn set_thread_exception_handler(&mut self, handler_fn: usize) {
+        // Ensure exception handler namespace exists
+        if self.exception_handler_namespace == 0 {
+            self.exception_handler_namespace = self
+                .namespaces
+                .add_namespace("beagle.internal.exception-handlers");
+        }
+
+        let thread_id = std::thread::current().id();
+
+        // Remove old handler from GC roots if it exists
+        if let Some(&old_handler) = self.thread_exception_handler_fns.get(&thread_id) {
+            if BuiltInTypes::is_heap_pointer(old_handler) {
+                self.memory
+                    .remove_namespace_root(self.exception_handler_namespace, old_handler);
+            }
+        }
+
+        self.thread_exception_handler_fns
+            .insert(thread_id, handler_fn);
+
+        // Register new handler as GC root if it's a heap object
+        if BuiltInTypes::is_heap_pointer(handler_fn) {
+            self.memory
+                .add_namespace_root(self.exception_handler_namespace, handler_fn);
+        }
+    }
+
+    pub fn set_default_exception_handler(&mut self, handler_fn: usize) {
+        // Ensure exception handler namespace exists
+        if self.exception_handler_namespace == 0 {
+            self.exception_handler_namespace = self
+                .namespaces
+                .add_namespace("beagle.internal.exception-handlers");
+        }
+
+        // Remove old handler from GC roots if it exists
+        if let Some(old_handler) = self.default_exception_handler_fn {
+            if BuiltInTypes::is_heap_pointer(old_handler) {
+                self.memory
+                    .remove_namespace_root(self.exception_handler_namespace, old_handler);
+            }
+        }
+
+        self.default_exception_handler_fn = Some(handler_fn);
+
+        // Register new handler as GC root if it's a heap object
+        if BuiltInTypes::is_heap_pointer(handler_fn) {
+            self.memory
+                .add_namespace_root(self.exception_handler_namespace, handler_fn);
+        }
+    }
+
+    pub fn get_thread_exception_handler(&self) -> Option<usize> {
+        let thread_id = std::thread::current().id();
+        self.thread_exception_handler_fns.get(&thread_id).copied()
+    }
+
+    pub fn update_exception_handlers_after_gc(&mut self) {
+        // Get GC relocations for the exception handler namespace
+        let relocations = self.memory.get_namespace_relocations();
+
+        for (namespace_id, relocs) in relocations {
+            if namespace_id == self.exception_handler_namespace {
+                for (old_ptr, new_ptr) in relocs {
+                    // Update thread-specific handlers
+                    for handler_fn in self.thread_exception_handler_fns.values_mut() {
+                        if *handler_fn == old_ptr {
+                            *handler_fn = new_ptr;
+                        }
+                    }
+
+                    // Update default handler
+                    if let Some(ref mut default) = self.default_exception_handler_fn {
+                        if *default == old_ptr {
+                            *default = new_ptr;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn cleanup_finished_thread_handlers(&mut self) {
+        // Get list of active thread IDs
+        let active_thread_ids: std::collections::HashSet<ThreadId> = self
+            .memory
+            .threads
+            .iter()
+            .map(|t| t.id())
+            .chain(std::iter::once(std::thread::current().id()))
+            .collect();
+
+        // Remove exception handlers for threads that are no longer active
+        let dead_threads: Vec<ThreadId> = self
+            .exception_handlers
+            .keys()
+            .filter(|id| !active_thread_ids.contains(id))
+            .copied()
+            .collect();
+
+        for thread_id in dead_threads {
+            // Remove handler from GC roots before removing from map
+            if let Some(&handler_fn) = self.thread_exception_handler_fns.get(&thread_id) {
+                if BuiltInTypes::is_heap_pointer(handler_fn) {
+                    self.memory
+                        .remove_namespace_root(self.exception_handler_namespace, handler_fn);
+                }
+            }
+
+            self.exception_handlers.remove(&thread_id);
+            self.thread_exception_handler_fns.remove(&thread_id);
+        }
     }
 
     pub fn create_exception(
@@ -1117,6 +1249,21 @@ impl Runtime {
                     {
                         if *value == old {
                             *value = new;
+                        }
+                    }
+
+                    // Update exception handler pointers after GC
+                    if namespace == self.exception_handler_namespace {
+                        for handler_fn in self.thread_exception_handler_fns.values_mut() {
+                            if *handler_fn == old {
+                                *handler_fn = new;
+                            }
+                        }
+
+                        if let Some(ref mut default) = self.default_exception_handler_fn {
+                            if *default == old {
+                                *default = new;
+                            }
                         }
                     }
                 }
@@ -1188,6 +1335,21 @@ impl Runtime {
                 {
                     if *value == old {
                         *value = new;
+                    }
+                }
+
+                // Update exception handler pointers after GC
+                if namespace == self.exception_handler_namespace {
+                    for handler_fn in self.thread_exception_handler_fns.values_mut() {
+                        if *handler_fn == old {
+                            *handler_fn = new;
+                        }
+                    }
+
+                    if let Some(ref mut default) = self.default_exception_handler_fn {
+                        if *default == old {
+                            *default = new;
+                        }
                     }
                 }
             }
@@ -1329,6 +1491,11 @@ impl Runtime {
 
         self.memory.stacks.push((thread.thread().id(), new_stack));
         self.memory.heap.register_thread(thread.thread().id());
+
+        // Initialize exception handler stack for new thread
+        let thread_id = thread.thread().id();
+        self.exception_handlers.insert(thread_id, Vec::new());
+
         self.memory.threads.push(thread.thread().clone());
         self.memory.join_handles.push(thread);
     }
@@ -1340,6 +1507,8 @@ impl Runtime {
         for thread in self.memory.join_handles.drain(..) {
             thread.join().unwrap();
         }
+        // Clean up exception handlers for finished threads
+        self.cleanup_finished_thread_handlers();
         self.wait_for_other_threads();
     }
 

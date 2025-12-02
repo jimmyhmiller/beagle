@@ -91,6 +91,16 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         drop(lock)
     }
 
+    fn remove_namespace_root(&mut self, namespace_id: usize, root: usize) -> bool {
+        if self.registered_threads == 0 {
+            return self.alloc.remove_namespace_root(namespace_id, root);
+        }
+        let lock = self.mutex.lock().unwrap();
+        let result = self.alloc.remove_namespace_root(namespace_id, root);
+        drop(lock);
+        result
+    }
+
     fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)> {
         if self.registered_threads == 0 {
             return self.alloc.get_namespace_relocations();

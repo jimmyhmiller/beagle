@@ -90,6 +90,7 @@ pub trait Allocator {
     fn register_temporary_root(&mut self, root: usize) -> usize;
     fn unregister_temporary_root(&mut self, id: usize) -> usize;
     fn add_namespace_root(&mut self, namespace_id: usize, root: usize);
+    fn remove_namespace_root(&mut self, namespace_id: usize, root: usize) -> bool;
     // TODO: Get rid of allocation
     fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)>;
 

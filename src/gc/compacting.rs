@@ -427,6 +427,19 @@ impl Allocator for CompactingHeap {
         self.namespace_roots.push((namespace_id, root));
     }
 
+    fn remove_namespace_root(&mut self, namespace_id: usize, root: usize) -> bool {
+        if let Some(pos) = self
+            .namespace_roots
+            .iter()
+            .position(|(ns, r)| *ns == namespace_id && *r == root)
+        {
+            self.namespace_roots.swap_remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
     fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)> {
         self.namespace_relocations.drain(0..).collect()
     }

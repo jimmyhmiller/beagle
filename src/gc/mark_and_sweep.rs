@@ -403,6 +403,19 @@ impl Allocator for MarkAndSweep {
         self.namespace_roots.push((namespace_id, root));
     }
 
+    fn remove_namespace_root(&mut self, namespace_id: usize, root: usize) -> bool {
+        if let Some(pos) = self
+            .namespace_roots
+            .iter()
+            .position(|(ns, r)| *ns == namespace_id && *r == root)
+        {
+            self.namespace_roots.swap_remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
     fn register_temporary_root(&mut self, root: usize) -> usize {
         debug_assert!(self.temporary_roots.len() < 10, "Too many temporary roots");
         for (i, temp_root) in self.temporary_roots.iter_mut().enumerate() {
