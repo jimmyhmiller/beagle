@@ -104,7 +104,7 @@ fn testGcSimple(n) {
 }
 
 fn testGcNested(n) {
-    let y = testGcSimple()
+    let y = testGcSimple(n)
 
     println("done with call")
 
