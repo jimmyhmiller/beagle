@@ -1509,7 +1509,15 @@ impl Runtime {
                 let value = BuiltInTypes::untag(value);
                 let value = value as *const f64;
                 let value = unsafe { *value.add(1) };
-                Some(value.to_string())
+                if value.is_infinite() {
+                    if value.is_sign_positive() {
+                        Some("infinity".to_string())
+                    } else {
+                        Some("-infinity".to_string())
+                    }
+                } else {
+                    Some(value.to_string())
+                }
             }
             BuiltInTypes::String => {
                 let value = BuiltInTypes::untag(value);
