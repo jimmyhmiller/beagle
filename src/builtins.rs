@@ -604,6 +604,45 @@ pub unsafe fn call_fn_2(runtime: &Runtime, function_name: &str, arg1: usize, arg
     save_volatile_registers(arg1, arg2, function as usize)
 }
 
+// Helper to call a Beagle function or closure with one argument
+pub unsafe fn call_beagle_fn_ptr(runtime: &Runtime, fn_or_closure: usize, arg1: usize) {
+    // Check if this is a closure (has closure tag)
+    let kind = BuiltInTypes::get_kind(fn_or_closure);
+
+    if matches!(kind, BuiltInTypes::Closure) {
+        // It's a closure - extract function pointer
+        // Closure structure: [header][function_ptr][num_free_vars][free_vars...]
+        let untagged = BuiltInTypes::untag(fn_or_closure);
+        let closure = HeapObject::from_untagged(untagged as *const u8);
+        // Function pointer is at field 0, but it's tagged so need to untag it
+        let fp_tagged = closure.get_field(0);
+        let function_pointer = BuiltInTypes::untag(fp_tagged);
+
+        // Call with closure as first arg, exception as second
+        // Closures MUST receive the closure object itself as the first argument
+        let save_volatile_registers = runtime
+            .get_function_by_name("beagle.builtin/save_volatile_registers2")
+            .unwrap();
+        let save_volatile_registers = runtime.get_pointer(save_volatile_registers).unwrap();
+        let save_volatile_registers: fn(usize, usize, usize) -> usize =
+            unsafe { std::mem::transmute(save_volatile_registers) };
+
+        save_volatile_registers(fn_or_closure, arg1, function_pointer);
+    } else {
+        // It's a regular function pointer - just pass exception
+        let function_pointer = BuiltInTypes::untag(fn_or_closure);
+
+        let save_volatile_registers = runtime
+            .get_function_by_name("beagle.builtin/save_volatile_registers1")
+            .unwrap();
+        let save_volatile_registers = runtime.get_pointer(save_volatile_registers).unwrap();
+        let save_volatile_registers: fn(usize, usize) -> usize =
+            unsafe { std::mem::transmute(save_volatile_registers) };
+
+        save_volatile_registers(arg1, function_pointer);
+    }
+}
+
 pub unsafe extern "C" fn load_library(name: usize) -> usize {
     let runtime = get_runtime().get_mut();
     let string = &runtime.get_string_literal(name);
@@ -1363,13 +1402,18 @@ pub unsafe extern "C" fn pop_exception_handler_runtime() -> usize {
 
 pub unsafe extern "C" fn throw_exception(stack_pointer: usize, value: usize) -> ! {
     print_call_builtin(get_runtime().get(), "throw_exception");
-    let runtime = get_runtime().get_mut();
 
     // Create exception object
-    let exception = runtime.create_exception(stack_pointer, value).unwrap();
+    let exception = {
+        let runtime = get_runtime().get_mut();
+        runtime.create_exception(stack_pointer, value).unwrap()
+    };
 
     // Pop handlers until we find one
-    if let Some(handler) = runtime.pop_exception_handler() {
+    if let Some(handler) = {
+        let runtime = get_runtime().get_mut();
+        runtime.pop_exception_handler()
+    } {
         // Restore stack, frame, and link register pointers
         let handler_address = handler.handler_address;
         let new_sp = handler.stack_pointer;
@@ -1400,17 +1444,54 @@ pub unsafe extern "C" fn throw_exception(stack_pointer: usize, value: usize) -> 
             );
         }
     } else {
-        // No handler found, check global handler
-        if let Some(global_handler) = runtime.global_exception_handler {
-            global_handler(exception);
-            panic!("Global exception handler returned!");
-        } else {
-            // No global handler, panic
-            println!("Uncaught exception:");
-            runtime.println(exception).ok();
+        // No try-catch handler found
+        // Check per-thread uncaught exception handler (JVM-style)
+        let thread_handler_fn = {
+            let runtime = get_runtime().get();
+            runtime.get_thread_exception_handler()
+        };
+
+        if let Some(handler_fn) = thread_handler_fn {
+            // Call the per-thread uncaught exception handler
+            let runtime = get_runtime().get();
+            unsafe { call_beagle_fn_ptr(runtime, handler_fn, exception) };
+            // Handler ran, now terminate since exception was uncaught
+            println!("Uncaught exception after thread handler:");
+            get_runtime().get_mut().println(exception).ok();
             unsafe { throw_error(stack_pointer) };
         }
+
+        // Check default (global) uncaught exception handler
+        let default_handler_fn = {
+            let runtime = get_runtime().get();
+            runtime.default_exception_handler_fn
+        };
+
+        if let Some(handler_fn) = default_handler_fn {
+            // Call the Beagle handler function
+            let runtime = get_runtime().get();
+            unsafe { call_beagle_fn_ptr(runtime, handler_fn, exception) };
+            // Handler ran, now panic since exception was uncaught
+            println!("Uncaught exception after default handler:");
+            get_runtime().get_mut().println(exception).ok();
+            unsafe { throw_error(stack_pointer) };
+        }
+
+        // No handler at all - panic with stack trace
+        println!("Uncaught exception:");
+        get_runtime().get_mut().println(exception).ok();
+        unsafe { throw_error(stack_pointer) };
     }
+}
+
+pub unsafe extern "C" fn set_thread_exception_handler(handler_fn: usize) {
+    let runtime = get_runtime().get_mut();
+    runtime.set_thread_exception_handler(handler_fn);
+}
+
+pub unsafe extern "C" fn set_default_exception_handler(handler_fn: usize) {
+    let runtime = get_runtime().get_mut();
+    runtime.set_default_exception_handler(handler_fn);
 }
 
 // It is very important that this isn't inlined
@@ -1520,6 +1601,20 @@ impl Runtime {
             throw_exception as *const u8,
             true,
             2,
+        )?;
+
+        self.add_builtin_function(
+            "beagle.core/set-thread-exception-handler!",
+            set_thread_exception_handler as *const u8,
+            false,
+            1, // handler_fn
+        )?;
+
+        self.add_builtin_function(
+            "beagle.core/set-default-exception-handler!",
+            set_default_exception_handler as *const u8,
+            false,
+            1, // handler_fn
         )?;
 
         self.add_builtin_function("beagle.builtin/assert!", placeholder as *const u8, false, 0)?;
