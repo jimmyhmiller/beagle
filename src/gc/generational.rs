@@ -417,16 +417,24 @@ impl GenerationalGC {
             // update header of original object to now be the forwarding pointer
             let tagged_new = BuiltInTypes::get_kind(root).tag(new_pointer as isize) as usize;
 
-            if heap_object.is_zero_size() || heap_object.is_opaque_object() {
+            if heap_object.is_zero_size() {
+                // Zero-size objects don't have space for forwarding pointer
                 return tagged_new;
             }
-            let first_field = heap_object.get_field(0);
-            if let Some(heap_object) = HeapObject::try_from_tagged(first_field)
-                && self.young.contains(heap_object.get_pointer())
-            {
-                self.copy(first_field);
+
+            // For opaque objects (strings, keywords), we still need to mark them
+            // and write the forwarding pointer to prevent duplicate copies
+            if !heap_object.is_opaque_object() {
+                let first_field = heap_object.get_field(0);
+                if let Some(heap_object) = HeapObject::try_from_tagged(first_field)
+                    && self.young.contains(heap_object.get_pointer())
+                {
+                    self.copy(first_field);
+                }
             }
 
+            // Write forwarding pointer to first word (safe even for opaque objects
+            // since we've already copied the data to the new location)
             heap_object.write_field(0, tagged_new);
             heap_object.mark();
             self.copied.push(HeapObject::from_untagged(new_pointer));

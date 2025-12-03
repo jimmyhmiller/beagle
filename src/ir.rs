@@ -30,6 +30,7 @@ pub enum Value {
     RawValue(usize),
     // TODO: Think of a better representation
     StringConstantPtr(usize),
+    KeywordConstantPtr(usize),
     Function(usize),
     Pointer(usize),
     Local(usize),
@@ -1403,6 +1404,11 @@ impl Ir {
                             lang.mov_64(dest, tagged);
                             self.store_spill(dest, dest_spill, lang);
                         }
+                        Value::KeywordConstantPtr(ptr) => {
+                            // Just pass the raw index, not tagged
+                            lang.mov_64(dest, *ptr as isize);
+                            self.store_spill(dest, dest_spill, lang);
+                        }
                         Value::Function(id) => {
                             let function = BuiltInTypes::Function.tag(*id as isize);
                             lang.mov_64(dest, function);
@@ -1639,6 +1645,11 @@ impl Ir {
                         lang.jump(exit);
                     }
                     Value::StringConstantPtr(ptr) => {
+                        lang.mov_64(lang.ret_reg(), *ptr as isize);
+                        lang.jump(exit);
+                    }
+                    Value::KeywordConstantPtr(ptr) => {
+                        // Just pass the raw index
                         lang.mov_64(lang.ret_reg(), *ptr as isize);
                         lang.jump(exit);
                     }

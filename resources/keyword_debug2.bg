@@ -1,0 +1,14 @@
+namespace keyword_debug2
+
+fn main() {
+    println(:foo)
+    println(:bar)
+    println(:foo == :bar)
+    "done"
+}
+
+// Expect
+// :foo
+// :bar
+// false
+// done

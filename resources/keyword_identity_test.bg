@@ -1,0 +1,18 @@
+namespace keyword_identity_test
+
+fn main() {
+    let kw1 = :foo
+    let kw2 = :foo
+    let kw3 = :bar
+
+    println(kw1 == kw2)
+    println(kw1 == kw3)
+    println(:test == :test)
+    "done"
+}
+
+// Expect
+// true
+// false
+// true
+// done

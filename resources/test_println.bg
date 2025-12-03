@@ -1,0 +1,5 @@
+namespace test_println
+
+fn main() {
+    println(42)
+}

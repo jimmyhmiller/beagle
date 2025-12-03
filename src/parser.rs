@@ -63,6 +63,7 @@ pub enum Token {
     // I should replace this with builtins
     // like fn and stuff
     Atom((usize, usize)),
+    Keyword((usize, usize)),
     Never,
     Namespace,
     Import,
@@ -173,6 +174,7 @@ impl Token {
             Token::In => "in".to_string(),
             Token::Comment((start, end))
             | Token::Atom((start, end))
+            | Token::Keyword((start, end))
             | Token::Spaces((start, end))
             | Token::String((start, end))
             | Token::Integer((start, end))
@@ -464,6 +466,25 @@ impl Tokenizer {
         }
     }
 
+    pub fn parse_keyword(&mut self, input_bytes: &[u8]) -> Token {
+        let start = self.position;
+        while !self.at_end(input_bytes)
+            && !self.is_space(input_bytes)
+            && !self.is_open_paren(input_bytes)
+            && !self.is_close_paren(input_bytes)
+            && !self.is_open_curly(input_bytes)
+            && !self.is_close_curly(input_bytes)
+            && !self.is_open_bracket(input_bytes)
+            && !self.is_close_bracket(input_bytes)
+            && !self.is_semi_colon(input_bytes)
+            && !self.is_comma(input_bytes)
+            && !self.is_newline(input_bytes)
+        {
+            self.consume(input_bytes);
+        }
+        Token::Keyword((start, self.position))
+    }
+
     pub fn parse_single(&mut self, input_bytes: &[u8]) -> Option<Token> {
         if self.at_end(input_bytes) {
             return None;
@@ -493,7 +514,22 @@ impl Tokenizer {
             Token::Comma
         } else if self.is_colon(input_bytes) {
             self.consume(input_bytes);
-            Token::Colon
+            // Look ahead to see if this is a keyword (:identifier)
+            if !self.at_end(input_bytes)
+                && !self.is_space(input_bytes)
+                && !self.is_open_paren(input_bytes)
+                && !self.is_close_paren(input_bytes)
+                && !self.is_open_curly(input_bytes)
+                && !self.is_close_curly(input_bytes)
+                && !self.is_colon(input_bytes)
+                && !self.is_newline(input_bytes)
+            {
+                // This is a keyword like :foo
+                self.parse_keyword(input_bytes)
+            } else {
+                // This is a standalone colon (struct field separator)
+                Token::Colon
+            }
         } else if self.is_open_curly(input_bytes) {
             self.consume(input_bytes);
             Token::OpenCurly
@@ -789,6 +825,12 @@ impl Parser {
                 value = stripslashes(&value);
                 let position = self.consume();
                 Some(Ast::String(value, position))
+            }
+            Token::Keyword((start, end)) => {
+                let keyword_text =
+                    String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap();
+                let position = self.consume();
+                Some(Ast::Keyword(keyword_text, position))
             }
             Token::Integer((start, end)) => {
                 // Gross

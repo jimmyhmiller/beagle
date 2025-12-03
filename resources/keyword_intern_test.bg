@@ -1,0 +1,18 @@
+namespace keyword_intern_test
+
+fn main() {
+    let kw1 = string->keyword("test")
+    let kw2 = string->keyword("test")
+    let kw3 = :test
+
+    println(kw1 == kw2)
+    println(kw1 == kw3)
+    println(kw2 == kw3)
+    "done"
+}
+
+// Expect
+// true
+// true
+// true
+// done

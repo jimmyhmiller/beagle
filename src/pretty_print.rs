@@ -20,6 +20,7 @@ impl PrettyPrint for Value {
             Value::Pointer(value) => format!("ptr{}", value),
             Value::TaggedConstant(value) => format!("tagged_constant{}", value),
             Value::StringConstantPtr(value) => format!("string_constant_ptr{}", value),
+            Value::KeywordConstantPtr(value) => format!("keyword_constant_ptr{}", value),
             Value::Local(value) => format!("local{}", value),
             Value::Function(f) => format!("function{}", f),
             Value::True => "true".to_string(),

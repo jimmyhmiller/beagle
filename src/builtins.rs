@@ -1411,6 +1411,10 @@ extern "C" fn hash(stack_pointer: usize, value: usize) -> usize {
                 let mut s = DefaultHasher::new();
                 string.hash(&mut s);
                 return BuiltInTypes::Int.tag(s.finish() as isize) as usize;
+            } else if heap_object.get_header().type_id == 3 {
+                // Keywords: return cached hash (stable across GC)
+                let hash = heap_object.get_keyword_hash();
+                return BuiltInTypes::Int.tag(hash as isize) as usize;
             }
             let fields = heap_object.get_fields();
             let mut s = DefaultHasher::new();
@@ -1434,6 +1438,73 @@ extern "C" fn hash(stack_pointer: usize, value: usize) -> usize {
             );
         },
     }
+}
+
+pub extern "C" fn is_keyword(value: usize) -> usize {
+    let tag = BuiltInTypes::get_kind(value);
+    if tag != BuiltInTypes::HeapObject {
+        return BuiltInTypes::construct_boolean(false) as usize;
+    }
+    let heap_object = HeapObject::from_tagged(value);
+    let is_kw = heap_object.get_header().type_id == 3;
+    BuiltInTypes::construct_boolean(is_kw) as usize
+}
+
+pub extern "C" fn keyword_to_string(stack_pointer: usize, keyword: usize) -> usize {
+    let runtime = get_runtime().get_mut();
+
+    // Check if it's a HeapObject before calling from_tagged
+    let tag = BuiltInTypes::get_kind(keyword);
+    if tag != BuiltInTypes::HeapObject {
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "TypeError",
+                "keyword->string expects a keyword".to_string(),
+            );
+        }
+    }
+
+    let heap_object = HeapObject::from_tagged(keyword);
+
+    if heap_object.get_header().type_id != 3 {
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "TypeError",
+                "keyword->string expects a keyword".to_string(),
+            );
+        }
+    }
+
+    let bytes = heap_object.get_keyword_bytes();
+    let keyword_text = unsafe { std::str::from_utf8_unchecked(bytes) };
+
+    runtime
+        .allocate_string(stack_pointer, keyword_text.to_string())
+        .unwrap()
+        .into()
+}
+
+pub extern "C" fn string_to_keyword(stack_pointer: usize, string_value: usize) -> usize {
+    let runtime = get_runtime().get_mut();
+    let keyword_text = runtime.get_string(stack_pointer, string_value);
+
+    // Use intern_keyword to ensure same text = same pointer
+    runtime.intern_keyword(stack_pointer, keyword_text).unwrap()
+}
+
+pub extern "C" fn load_keyword_constant_runtime(stack_pointer: usize, index: usize) -> usize {
+    let runtime = get_runtime().get_mut();
+
+    // Check if we already allocated this keyword
+    if let Some(ptr) = runtime.keyword_heap_ptrs[index] {
+        return ptr;
+    }
+
+    // Allocate and register as GC root
+    let keyword_text = runtime.keyword_constants[index].str.clone();
+    runtime.intern_keyword(stack_pointer, keyword_text).unwrap()
 }
 
 extern "C" fn many_args(
@@ -1969,6 +2040,34 @@ impl Runtime {
         self.add_builtin_function("beagle.core/substring", substring as *const u8, true, 4)?;
 
         self.add_builtin_function("beagle.builtin/hash", hash as *const u8, true, 2)?;
+
+        self.add_builtin_function(
+            "beagle.builtin/is_keyword",
+            is_keyword as *const u8,
+            false,
+            1,
+        )?;
+
+        self.add_builtin_function(
+            "beagle.builtin/keyword_to_string",
+            keyword_to_string as *const u8,
+            true,
+            2,
+        )?;
+
+        self.add_builtin_function(
+            "beagle.builtin/string_to_keyword",
+            string_to_keyword as *const u8,
+            true,
+            2,
+        )?;
+
+        self.add_builtin_function(
+            "beagle.builtin/load_keyword_constant_runtime",
+            load_keyword_constant_runtime as *const u8,
+            true,
+            2,
+        )?;
 
         self.add_builtin_function("beagle.builtin/pop_count", pop_count as *const u8, true, 2)?;
 
