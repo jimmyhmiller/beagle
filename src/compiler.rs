@@ -122,6 +122,10 @@ impl Compiler {
     }
 
     pub fn compile_string(&mut self, string: &str) -> Result<usize, Box<dyn Error>> {
+        // Clear warnings at the start of each eval/REPL compilation
+        // This ensures each eval() shows only its own warnings
+        self.warnings.lock().unwrap().clear();
+
         let mut parser = Parser::new("".to_string(), string.to_string());
         let ast = parser.parse();
         let token_line_column_map = parser.get_token_line_column_map();
@@ -155,6 +159,14 @@ impl Compiler {
                 println!("Already compiled {:?}", file_name);
             }
             return Ok(vec![]);
+        }
+
+        // Clear warnings only at the start of a new compilation session
+        // (when no files have been compiled yet). This ensures:
+        // 1. Sequential compilations (e.g., multiple eval() calls) start fresh
+        // 2. Warnings from dependencies within a single compilation accumulate
+        if self.compiled_file_cache.is_empty() {
+            self.warnings.lock().unwrap().clear();
         }
         if self.command_line_arguments.verbose {
             println!("Compiling {:?}", file_name);

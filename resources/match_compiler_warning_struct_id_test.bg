@@ -11,7 +11,23 @@ fn main() {
     let normal = TestStruct { count: 5, data: "test" }
 
     // Trigger generation of a compiler warning by compiling code with non-exhaustive match
-    eval("generate_warning_for_test/main()")
+    // We need to eval actual code that generates warnings, not just call an existing function
+    eval("
+        enum MyEnum {
+            Variant1,
+            Variant2,
+            Variant3
+        }
+
+        fn test_match(val) {
+            match val {
+                MyEnum.Variant1 => \"one\",
+                MyEnum.Variant2 => \"two\"
+            }
+        }
+
+        test_match(MyEnum.Variant1)
+    ")
 
     // Get warnings vector (should have at least one warning now)
     let warnings_vec = core/compiler-warnings()
@@ -52,5 +68,5 @@ fn main() {
 // Normal struct ID matches:
 // true
 // About to get first warning...
-// [CompilerWarning { kind: "NonExhaustiveMatch", file_name: "resources/generate_warning_for_test.bg", line: 12, column: 10, message: "Non-exhaustive match on enum 'MyEnum'. Missing variants: Variant3", enum_name: "MyEnum", missing_variants: PersistentVector { count: 1, shift: 5, root: [  ], tail: [ "Variant3" ] } }]
+// [CompilerWarning { kind: "NonExhaustiveMatch", file_name: "repl", line: 9, column: 18, message: "Non-exhaustive match on enum 'MyEnum'. Missing variants: Variant3", enum_name: "MyEnum", missing_variants: PersistentVector { count: 1, shift: 5, root: [  ], tail: [ "Variant3" ] } }]
 // done

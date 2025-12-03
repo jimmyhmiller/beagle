@@ -1,0 +1,60 @@
+namespace test_warnings_eval_accumulate
+
+import "persistent_vector" as vec
+
+enum Color {
+    Red,
+    Green,
+}
+
+fn main() {
+    let c = Color.Red
+    match c {
+        Color.Red => "red",
+        // Missing Green - generates 1 warning
+    }
+
+    println("Warnings after initial compilation:")
+    let warnings1 = compiler-warnings()
+    println(vec/count(warnings1))
+
+    // Now eval some code that also has a warning
+    eval("
+        enum Shape {
+            Circle,
+            Square,
+        }
+
+        fn test() {
+            let s = Shape.Circle
+            match s {
+                Shape.Circle => \"circle\",
+            }
+        }
+        test()
+    ")
+
+    // eval() clears previous warnings, so we should only see the eval warning
+    println("Warnings after eval:")
+    let warnings2 = compiler-warnings()
+    println(vec/count(warnings2))
+
+    // Verify we only have 1 warning (from eval - the initial warning was cleared)
+    let count = vec/count(warnings2)
+    if count == 1 {
+        println("PASS: Got 1 warning as expected (eval cleared previous warnings)")
+    } else {
+        println("FAIL: Expected 1 warning, got:")
+        println(count)
+    }
+
+    "done"
+}
+
+// Expect
+// Warnings after initial compilation:
+// 1
+// Warnings after eval:
+// 1
+// PASS: Got 1 warning as expected (eval cleared previous warnings)
+// done
