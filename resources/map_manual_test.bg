@@ -1,0 +1,20 @@
+namespace map_manual_test
+
+import "persistent_map" as pm
+
+fn main() {
+    // Simulate what the map literal {42 100} should compile to
+    let key = 42
+    let val = 100
+    let m = pm/map()
+    let m2 = pm/assoc(m, key, val)
+    println(length(m2))
+    println(get(m2, 42))
+
+    "done"
+}
+
+// Expect
+// 1
+// 100
+// done

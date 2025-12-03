@@ -1,0 +1,35 @@
+namespace map_no_duplicate_test
+
+fn main() {
+    // These should all work fine
+    let m1 = {:a 1 :b 2}
+    println(length(m1))
+    println(get(m1, :a))
+
+    let m2 = {"a" 1 "b" 2}
+    println(length(m2))
+    println(get(m2, "b"))
+
+    let m3 = {1 "one" 2 "two" 3 "three"}
+    println(length(m3))
+    println(get(m3, 2))
+
+    // Computed keys - we can't check these at compile time
+    // But they should still compile
+    let m4 = {(1 + 1) "two" (2 + 1) "three"}
+    println(length(m4))
+    println(get(m4, 2))
+
+    "done"
+}
+
+// Expect
+// 2
+// 1
+// 2
+// 2
+// 3
+// two
+// 2
+// two
+// done

@@ -1,0 +1,43 @@
+namespace map_literals_test
+
+fn main() {
+    // Empty map
+    let empty = {}
+    println(length(empty))
+
+    // Simple keyword map
+    let simple = {:name "Alice" :age 30}
+    println(get(simple, :name))
+    println(get(simple, :age))
+
+    // Non-keyword keys
+    let mixed = {"string-key" 1 123 "numeric-key"}
+    println(get(mixed, "string-key"))
+    println(get(mixed, 123))
+
+    // Nested maps
+    let nested = {:outer {:inner 42}}
+    let outer_map = get(nested, :outer)
+    println(get(outer_map, :inner))
+
+    // Computed keys/values
+    let computed = {(1 + 2) (10 * 10)}
+    println(get(computed, 3))
+
+    // Single pair
+    let single = {:only "value"}
+    println(get(single, :only))
+
+    "done"
+}
+
+// Expect
+// 0
+// Alice
+// 30
+// 1
+// numeric-key
+// 42
+// 100
+// value
+// done

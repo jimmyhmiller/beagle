@@ -1,0 +1,20 @@
+namespace map_mixed_keys_test
+
+fn main() {
+    // Test that different types of keys can coexist
+    // without being considered duplicates
+    let m = {:a 1 "a" 2 1 "one"}
+    println(length(m))
+    println(get(m, :a))
+    println(get(m, "a"))
+    println(get(m, 1))
+
+    "done"
+}
+
+// Expect
+// 3
+// 1
+// 2
+// one
+// done

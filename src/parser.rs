@@ -925,6 +925,10 @@ impl Parser {
                 let result = self.parse_array();
                 Some(result)
             }
+            Token::OpenCurly => {
+                let result = self.parse_map_literal();
+                Some(result)
+            }
             _ => panic!(
                 "Expected atom, got {} at line {}",
                 self.get_token_repr(),
@@ -2302,6 +2306,59 @@ impl Parser {
         Ast::Array {
             array: elements,
             token_range: TokenRange::new(start_position, end_position),
+        }
+    }
+
+    fn parse_map_literal(&mut self) -> Ast {
+        let start_position = self.position;
+        self.consume(); // consume '{'
+        self.skip_whitespace();
+
+        // Empty map case
+        if self.is_close_curly() {
+            self.consume();
+            return Ast::MapLiteral {
+                pairs: vec![],
+                token_range: TokenRange::new(start_position, self.position),
+            };
+        }
+
+        // Parse key-value pairs
+        let mut pairs = Vec::new();
+        loop {
+            // Parse key (any expression)
+            let key = self
+                .parse_expression(0, true, true)
+                .expect("Expected key expression in map literal");
+
+            self.skip_whitespace();
+
+            // Parse value (any expression)
+            let value = self
+                .parse_expression(0, true, true)
+                .expect("Expected value expression in map literal");
+
+            pairs.push((key, value));
+
+            self.skip_whitespace();
+
+            // Check if done
+            if self.is_close_curly() {
+                break;
+            }
+
+            // Optional comma between pairs
+            if self.is_comma() {
+                self.consume();
+                self.skip_whitespace();
+            }
+        }
+
+        self.expect_close_curly();
+
+        Ast::MapLiteral {
+            pairs,
+            token_range: TokenRange::new(start_position, self.position),
         }
     }
 
