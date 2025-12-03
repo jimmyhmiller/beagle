@@ -332,7 +332,7 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             continue;
         }
         let source: String = std::fs::read_to_string(path)?;
-       
+
         if !source.contains("// Expect") {
             continue;
         }

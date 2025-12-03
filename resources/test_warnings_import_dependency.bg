@@ -1,0 +1,14 @@
+namespace test_warnings_import_dependency
+
+enum Color {
+    Red,
+    Green,
+}
+
+fn test-color() {
+    let c = Color.Red
+    match c {
+        Color.Red => "red",
+        // Missing Green - should generate 1 warning
+    }
+}

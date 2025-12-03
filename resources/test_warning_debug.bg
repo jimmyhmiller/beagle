@@ -4,8 +4,23 @@ import "beagle.primitive" as primitive
 import "beagle.core" as core
 
 fn main() {
-    // Trigger a warning
-    eval("generate_warning_for_test/main()")
+    // Trigger a warning by evaling code with non-exhaustive match
+    eval("
+        enum MyEnum {
+            Variant1,
+            Variant2,
+            Variant3
+        }
+
+        fn test_match(val) {
+            match val {
+                MyEnum.Variant1 => \"one\",
+                MyEnum.Variant2 => \"two\"
+            }
+        }
+
+        test_match(MyEnum.Variant1)
+    ")
 
     let warnings = core/compiler-warnings()
     println("Number of warnings:")
