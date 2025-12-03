@@ -228,6 +228,12 @@ pub enum Ast {
     Continue {
         token_range: TokenRange,
     },
+    For {
+        binding: String,
+        collection: Box<Ast>,
+        body: Vec<Ast>,
+        token_range: TokenRange,
+    },
     Assignment {
         name: Box<Ast>,
         value: Box<Ast>,
@@ -322,6 +328,7 @@ impl Ast {
             | Ast::While { token_range, .. }
             | Ast::Break { token_range, .. }
             | Ast::Continue { token_range, .. }
+            | Ast::For { token_range, .. }
             | Ast::StructCreation { token_range, .. }
             | Ast::PropertyAccess { token_range, .. }
             | Ast::EnumCreation { token_range, .. }
@@ -868,6 +875,133 @@ impl AstCompiler<'_> {
                 self.ir.jump(loop_start);
 
                 Value::Null // Unreachable after jump
+            }
+            Ast::For {
+                binding,
+                collection,
+                body,
+                token_range,
+            } => {
+                // Generate unique variable names to avoid shadowing
+                let seq_var = format!("__for_seq_{}", token_range.start);
+                let first_var = format!("__for_first_{}", token_range.start);
+                let result_var = format!("__for_result_{}", token_range.start);
+
+                // Use loop instead of while to handle continue correctly
+                // Equivalent to:
+                //     let mut __seq = seq(coll)
+                //     let mut __first = true
+                //     let mut __result = null
+                //     loop {
+                //         if !__first {
+                //             __seq = next(__seq)
+                //         }
+                //         __first = false
+                //         if __seq == null { break(__result) }
+                //         let binding = first(__seq)
+                //         __result = { ...body... }
+                //     }
+
+                // First: let mut __seq = seq(coll)
+                self.call_compile(&Ast::LetMut {
+                    name: Box::new(Ast::Identifier(seq_var.clone(), token_range.start)),
+                    value: Box::new(Ast::Call {
+                        name: "beagle.core/seq".to_string(),
+                        args: vec![*collection.clone()],
+                        token_range: token_range.clone(),
+                    }),
+                    token_range: token_range.clone(),
+                });
+
+                // Second: let mut __first = true
+                self.call_compile(&Ast::LetMut {
+                    name: Box::new(Ast::Identifier(first_var.clone(), token_range.start)),
+                    value: Box::new(Ast::True(token_range.start)),
+                    token_range: token_range.clone(),
+                });
+
+                // Third: let mut __result = null
+                self.call_compile(&Ast::LetMut {
+                    name: Box::new(Ast::Identifier(result_var.clone(), token_range.start)),
+                    value: Box::new(Ast::Null(token_range.start)),
+                    token_range: token_range.clone(),
+                });
+
+                // Third: loop { ... }
+                let mut loop_body = vec![
+                    // if __first == false { __seq = next(__seq) }
+                    Ast::If {
+                        condition: Box::new(Ast::Condition {
+                            operator: Condition::Equal,
+                            left: Box::new(Ast::Identifier(first_var.clone(), token_range.start)),
+                            right: Box::new(Ast::False(token_range.start)),
+                            token_range: token_range.clone(),
+                        }),
+                        then: vec![Ast::Assignment {
+                            name: Box::new(Ast::Identifier(seq_var.clone(), token_range.start)),
+                            value: Box::new(Ast::Call {
+                                name: "beagle.core/next".to_string(),
+                                args: vec![Ast::Identifier(seq_var.clone(), token_range.start)],
+                                token_range: token_range.clone(),
+                            }),
+                            token_range: token_range.clone(),
+                        }],
+                        else_: vec![],
+                        token_range: token_range.clone(),
+                    },
+                    // __first = false
+                    Ast::Assignment {
+                        name: Box::new(Ast::Identifier(first_var.clone(), token_range.start)),
+                        value: Box::new(Ast::False(token_range.start)),
+                        token_range: token_range.clone(),
+                    },
+                    // if __seq == null { break(__result) }
+                    Ast::If {
+                        condition: Box::new(Ast::Condition {
+                            operator: Condition::Equal,
+                            left: Box::new(Ast::Identifier(seq_var.clone(), token_range.start)),
+                            right: Box::new(Ast::Null(token_range.start)),
+                            token_range: token_range.clone(),
+                        }),
+                        then: vec![Ast::Break {
+                            value: Box::new(Ast::Identifier(result_var.clone(), token_range.start)),
+                            token_range: token_range.clone(),
+                        }],
+                        else_: vec![],
+                        token_range: token_range.clone(),
+                    },
+                    // let binding = first(__seq)
+                    Ast::Let {
+                        name: Box::new(Ast::Identifier(binding.clone(), token_range.start)),
+                        value: Box::new(Ast::Call {
+                            name: "beagle.core/first".to_string(),
+                            args: vec![Ast::Identifier(seq_var.clone(), token_range.start)],
+                            token_range: token_range.clone(),
+                        }),
+                        token_range: token_range.clone(),
+                    },
+                ];
+
+                // Add body statements  - we need to inline them, not wrap in Program
+                // We'll compile each body statement, and assign the last one to __result
+                for (i, stmt) in body.iter().enumerate() {
+                    if i == body.len() - 1 {
+                        // Last statement: assign its value to __result
+                        loop_body.push(Ast::Assignment {
+                            name: Box::new(Ast::Identifier(result_var.clone(), token_range.start)),
+                            value: Box::new(stmt.clone()),
+                            token_range: token_range.clone(),
+                        });
+                    } else {
+                        // Not last: just execute it
+                        loop_body.push(stmt.clone());
+                    }
+                }
+
+                self.call_compile(&Ast::Loop {
+                    body: loop_body,
+                    token_range: token_range.clone(),
+                })
             }
             Ast::Try {
                 body,
@@ -2843,6 +2977,17 @@ impl AstCompiler<'_> {
                     for ast in arm.body.iter() {
                         self.find_mutable_vars_that_need_boxing(ast);
                     }
+                }
+            }
+            Ast::For {
+                collection,
+                body,
+                binding: _,
+                token_range: _,
+            } => {
+                self.find_mutable_vars_that_need_boxing(collection);
+                for ast in body.iter() {
+                    self.find_mutable_vars_that_need_boxing(ast);
                 }
             }
         }

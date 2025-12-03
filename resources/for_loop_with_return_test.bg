@@ -1,0 +1,15 @@
+namespace for_loop_with_return_test
+
+fn main() {
+    for x in [1, 2, 3] {
+        println(x)
+    }
+    println("done")
+}
+
+// Expect
+// 1
+// 2
+// 3
+// done
+// null

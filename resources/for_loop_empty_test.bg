@@ -1,0 +1,14 @@
+namespace for_loop_empty_test
+
+fn main() {
+    let result = for x in [] {
+        println("should not print")
+        x
+    }
+    println(result)
+    "done"
+}
+
+// Expect
+// null
+// done

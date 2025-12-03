@@ -1,0 +1,14 @@
+namespace for_loop_string_test
+
+fn main() {
+    for c in "abc" {
+        println(c)
+    }
+    "done"
+}
+
+// Expect
+// a
+// b
+// c
+// done

@@ -1,0 +1,5 @@
+namespace test.in.name
+
+fn main() {
+    println("Hello")
+}
