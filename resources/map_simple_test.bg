@@ -1,0 +1,23 @@
+namespace map_simple_test
+
+import "persistent_map" as pm
+
+fn main() {
+    // Test manual map creation
+    let m1 = pm/map()
+    let m2 = pm/assoc(m1, :a, 1)
+    println(get(m2, :a))
+
+    // Test map literal
+    let m3 = {:a 1}
+    println(length(m3))
+    println(get(m3, :a))
+
+    "done"
+}
+
+// Expect
+// 1
+// 1
+// 1
+// done

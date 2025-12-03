@@ -398,6 +398,12 @@ extend PersistentMap with Indexed {
     }
 }
 
+extend PersistentMap with Length {
+    fn length(map) {
+        count(map)
+    }
+}
+
 
 fn find_node(n, k, h, shift) {
     if n == null {
@@ -540,63 +546,63 @@ fn format_entries(map, keys_vec, idx, acc) {
     } else {
         let key = get(keys_vec, idx)
         let val = get(map, key)
-        
+
         let key_str = format(key, 1)
         let val_str = format(val, 1)
-        
+
         let entry = key_str ++ ": " ++ val_str
-        
+
         // Add comma if not the last entry
         let new_acc = if idx == 0 {
             acc ++ entry
         } else {
             acc ++ ", " ++ entry
         }
-        
+
         format_entries(map, keys_vec, idx + 1, new_acc)
     }
 }
 
 fn main() {
-    
+
     let pm = map()
-    println(pm) 
+    println(pm)
 
     let pm2 = assoc(pm, "foo", 1)
-    println(get(pm2, "foo")) 
-    println(count(pm2))      
-    
+    println(get(pm2, "foo"))
+    println(count(pm2))
+
     let pm3 = assoc(pm2, "bar", 100)
-    println(get(pm3, "foo")) 
-    println(get(pm3, "bar")) 
-    println(count(pm3))      
+    println(get(pm3, "foo"))
+    println(get(pm3, "bar"))
+    println(count(pm3))
 
     let pm4 = assoc(pm3, "bar", 101)
-    println(get(pm4, "bar")) 
-    println(count(pm4))      
+    println(get(pm4, "bar"))
+    println(count(pm4))
 
     let pm5 = assoc(pm4, "baz", 999)
     let pm6 = assoc(pm5, "qux", 777)
-    println(get(pm6, "baz")) 
-    println(get(pm6, "qux")) 
-    println(count(pm6))      
-    
+    println(get(pm6, "baz"))
+    println(get(pm6, "qux"))
+    println(count(pm6))
+
     let val_missing = get(pm6, "no-such-key")
-    println(val_missing) 
+    println(val_missing)
 
     let times = 10
     let pm7 = insert_many(pm6, 0, times)
-    println(count(pm7)) 
+    println(count(pm7))
 
-    println(get(pm7, 0))  
-    println(get(pm7, 9))  
-    println(get(pm7, 999)) 
+    println(get(pm7, 0))
+    println(get(pm7, 9))
+    println(get(pm7, 999))
     let keys_vec = keys(pm6)
     println(keys_vec) // Print all keys
     println(format(pm6, 0)) // Print all entries
     "done"
 }
- 
+
 
 
 // Expect

@@ -1,0 +1,49 @@
+namespace map_idiomatic_test
+
+fn main() {
+    // Idiomatic map literal usage with protocols
+    let person = {:name "Alice" :age 30 :city "NYC"}
+
+    // Using Length protocol
+    println("Map has entries:")
+    println(length(person))
+
+    // Using Indexed protocol
+    println("Name:")
+    println(get(person, :name))
+    println("Age:")
+    println(get(person, :age))
+    println("City:")
+    println(get(person, :city))
+
+    // Nested maps
+    let data = {
+        :user {:name "Bob" :role "admin"}
+        :settings {:theme "dark" :notifications true}
+    }
+
+    let user = get(data, :user)
+    let settings = get(data, :settings)
+
+    println("User name:")
+    println(get(user, :name))
+    println("Theme:")
+    println(get(settings, :theme))
+
+    "done"
+}
+
+// Expect
+// Map has entries:
+// 3
+// Name:
+// Alice
+// Age:
+// 30
+// City:
+// NYC
+// User name:
+// Bob
+// Theme:
+// dark
+// done

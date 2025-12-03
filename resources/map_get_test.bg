@@ -1,0 +1,33 @@
+namespace map_get_test
+
+import "persistent_map" as pm
+
+fn main() {
+    // Manual creation
+    let m1 = pm/map()
+    let m1 = pm/assoc(m1, "key1", 100)
+    println("Manual map count:")
+    println(length(m1))
+    println("Manual map get:")
+    println(get(m1, "key1"))
+
+    // Literal creation
+    let m2 = {"key1" 100}
+    println("Literal map count:")
+    println(length(m2))
+    println("Literal map get:")
+    println(get(m2, "key1"))
+
+    "done"
+}
+
+// Expect
+// Manual map count:
+// 1
+// Manual map get:
+// 100
+// Literal map count:
+// 1
+// Literal map get:
+// 100
+// done

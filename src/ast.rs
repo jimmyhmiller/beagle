@@ -208,6 +208,10 @@ pub enum Ast {
         array: Vec<Ast>,
         token_range: TokenRange,
     },
+    MapLiteral {
+        pairs: Vec<(Ast, Ast)>,
+        token_range: TokenRange,
+    },
     IndexOperator {
         array: Box<Ast>,
         index: Box<Ast>,
@@ -324,6 +328,7 @@ impl Ast {
             | Ast::And { token_range, .. }
             | Ast::Or { token_range, .. }
             | Ast::Array { token_range, .. }
+            | Ast::MapLiteral { token_range, .. }
             | Ast::IndexOperator { token_range, .. }
             | Ast::Loop { token_range, .. }
             | Ast::While { token_range, .. }
@@ -1573,6 +1578,85 @@ impl AstCompiler<'_> {
                 }
 
                 vector_register.into()
+            }
+            Ast::MapLiteral { pairs, .. } => {
+                // Special case: empty map
+                if pairs.is_empty() {
+                    return self.call("persistent_map/map", vec![]);
+                }
+
+                // Check for duplicate literal keys at compile time
+                let mut seen_keys: HashMap<String, &Ast> = HashMap::new();
+                for (key, _value) in pairs.iter() {
+                    // Extract a string representation for literal keys
+                    let key_str = match key {
+                        Ast::String(s, _) => Some(format!("string:{}", s)),
+                        Ast::IntegerLiteral(n, _) => Some(format!("int:{}", n)),
+                        Ast::FloatLiteral(f, _) => Some(format!("float:{}", f)),
+                        Ast::Keyword(k, _) => Some(format!("keyword:{}", k)),
+                        Ast::True(_) => Some("bool:true".to_string()),
+                        Ast::False(_) => Some("bool:false".to_string()),
+                        Ast::Null(_) => Some("null".to_string()),
+                        // For non-literal keys, we can't check at compile time
+                        _ => None,
+                    };
+
+                    if let Some(key_repr) = key_str {
+                        if let Some(first_key) = seen_keys.get(&key_repr) {
+                            panic!(
+                                "Duplicate key in map literal: {:?}. First occurrence: {:?}, Second occurrence: {:?}",
+                                key_repr, first_key, key
+                            );
+                        }
+                        seen_keys.insert(key_repr, key);
+                    }
+                }
+
+                // Push all keys and values to stack
+                for (key, value) in pairs.iter() {
+                    self.not_tail_position();
+                    let key_val = self.call_compile(key);
+                    let key_reg = self.ir.assign_new(key_val);
+                    self.ir.push_to_stack(key_reg.into());
+
+                    self.not_tail_position();
+                    let val_val = self.call_compile(value);
+                    let val_reg = self.ir.assign_new(val_val);
+                    self.ir.push_to_stack(val_reg.into());
+                }
+
+                // Create empty map
+                let map_pointer = self.call("persistent_map/map", vec![]);
+                let map_register = self.ir.assign_new(map_pointer);
+
+                // Get assoc function
+                let assoc = self.get_function("persistent_map/assoc");
+
+                // Load pairs from stack and assoc them
+                let stack_pointer = self.ir.get_current_stack_position();
+                for i in 0..pairs.len() {
+                    // Stack layout: [key0, val0, key1, val1, key2, val2, ...]
+                    // Pair i (0-indexed):
+                    // - key is at stack offset (2*i + 1)
+                    // - value is at stack offset (2*i + 2)
+                    let key_offset = (2 * i + 1) as i32;
+                    let val_offset = (2 * i + 2) as i32;
+
+                    // Note: val_offset is actually where the key is stored, key_offset has the value
+                    // This is because of how the stack grows
+                    let key = self.ir.load_from_memory(stack_pointer, val_offset);
+                    let value = self.ir.load_from_memory(stack_pointer, key_offset);
+
+                    let assoc_result = self.ir.call(assoc, vec![map_register.into(), key, value]);
+                    self.ir.assign(map_register, assoc_result);
+                }
+
+                // Clean up stack
+                for _ in 0..(pairs.len() * 2) {
+                    self.ir.pop_from_stack();
+                }
+
+                map_register.into()
             }
             Ast::Namespace { name, .. } => {
                 let namespace_id = self.compiler.reserve_namespace(name);
@@ -2927,6 +3011,15 @@ impl AstCompiler<'_> {
             } => {
                 for element in array.iter() {
                     self.find_mutable_vars_that_need_boxing(element);
+                }
+            }
+            Ast::MapLiteral {
+                pairs,
+                token_range: _,
+            } => {
+                for (key, value) in pairs.iter() {
+                    self.find_mutable_vars_that_need_boxing(key);
+                    self.find_mutable_vars_that_need_boxing(value);
                 }
             }
             Ast::IndexOperator {

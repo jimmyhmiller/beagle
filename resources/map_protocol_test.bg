@@ -1,0 +1,15 @@
+namespace map_protocol_test
+
+fn main() {
+    // Test if protocol-based get works with map literals
+    let m = {:a 1 :b 2}
+    println(get(m, :a))
+    println(get(m, :b))
+
+    "done"
+}
+
+// Expect
+// 1
+// 2
+// done
