@@ -1,0 +1,30 @@
+namespace match_enum_test
+
+enum Action {
+    run { speed },
+    walk,
+    stop,
+}
+
+fn main() {
+    let action = Action.run { speed: 5 }
+
+    let result = match action {
+        Action.run { speed } => {
+            if speed > 3 {
+                "fast"
+            } else {
+                "slow"
+            }
+        },
+        Action.walk => "walking",
+        Action.stop => "stopped",
+    }
+
+    println(result)
+    "done"
+}
+
+// Expect
+// fast
+// done

@@ -1,0 +1,28 @@
+namespace test_multi_main
+
+import "test_multi_a" as a
+
+enum ColorB {
+    RedB,
+    GreenB,
+}
+
+fn test_b(c) {
+    match c {
+        ColorB.RedB => "red",
+        // Missing GreenB
+    }
+}
+
+fn main() {
+    let warnings = compiler-warnings()
+    println("Total warnings from both files:")
+    // println(warnings)
+    // TODO: Fix when structs format nested fields properly
+    // otherwise I was getting inconsistent order on a persistent vector
+    // It might actually be from the backed, wasn't clear
+}
+
+// Expect
+// Total warnings from both files:
+// null

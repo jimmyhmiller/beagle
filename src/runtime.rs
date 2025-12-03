@@ -752,6 +752,7 @@ pub struct Runtime {
     pub structs: StructManager,
     pub enums: EnumManager,
     pub string_constants: Vec<StringValue>,
+    pub compiler_warnings: Arc<Mutex<Vec<crate::compiler::CompilerWarning>>>,
     // TODO: Do I need anything more than
     // namespace manager? Shouldn't these functions
     // and things be under that?
@@ -850,6 +851,7 @@ impl Runtime {
             compiler_thread: None,
             protocol_info: HashMap::new(),
             stack_segments: StackSegmentAllocator::new(),
+            compiler_warnings: Arc::new(Mutex::new(Vec::new())),
             stacks_for_continuation_swapping: vec![ContinuationStack {
                 is_used: AtomicBool::new(false),
                 stack: [0; 512],
@@ -894,10 +896,13 @@ impl Runtime {
         if self.compiler_channel.is_none() {
             let (sender, receiver) = blocking_channel();
             let args_clone = self.command_line_arguments.clone();
+            let warnings_clone = Arc::clone(&self.compiler_warnings);
             let compiler_thread = thread::Builder::new()
                 .name("Beagle Compiler".to_string())
                 .spawn(move || {
-                    CompilerThread::new(receiver, args_clone).unwrap().run();
+                    CompilerThread::new(receiver, args_clone, warnings_clone)
+                        .unwrap()
+                        .run();
                 })
                 .unwrap();
             self.compiler_channel = Some(sender);

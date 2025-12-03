@@ -1,0 +1,37 @@
+namespace test_match_cross_ns
+
+import "other_types" as colors
+
+fn test-imported-enum() {
+    let red = colors/Color.Red
+    let blue = colors/Color.Blue { value: 128 }
+
+    match red {
+        colors/Color.Red => println("Matched Red from imported namespace")
+        colors/Color.Green => println("Matched Green")
+        colors/Color.Blue { value: v } => {
+            println("Matched Blue:")
+            println(v)
+        }
+    }
+
+    match blue {
+        colors/Color.Red => println("Matched Red")
+        colors/Color.Green => println("Matched Green")
+        colors/Color.Blue { value: v } => {
+            println("Matched Blue with value:")
+            println(v)
+        }
+    }
+}
+
+fn main() {
+    test-imported-enum()
+    "done"
+}
+
+// Expect
+// Matched Red from imported namespace
+// Matched Blue with value:
+// 128
+// done

@@ -1,0 +1,70 @@
+namespace test
+
+import "beagle.core" as core
+import "persistent_vector" as pv
+
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+fn test_match(c) {
+    match c {
+        Color.Red => "red",
+        Color.Green => "green",
+        // Missing Blue - triggers NonExhaustiveMatch warning
+    }
+}
+
+fn main() {
+    let warnings = compiler-warnings()
+    let count = pv/count(warnings)
+
+    println("Warning count:")
+    println(count)
+
+    if count > 0 {
+        let w = pv/get(warnings, 0)
+        println("Kind:")
+        println(w.kind)
+        println("File:")
+        println(w.file_name)
+        println("Line:")
+        println(w.line)
+        println("Column:")
+        println(w.column)
+        println("Message:")
+        println(w.message)
+
+        if w.enum_name != null {
+            println("Enum:")
+            println(w.enum_name)
+            println("Missing variants count:")
+            println(pv/count(w.missing_variants))
+            println("First missing variant:")
+            println(pv/get(w.missing_variants, 0))
+        }
+    }
+}
+
+// Expect
+// Warning count:
+// 1
+// Kind:
+// NonExhaustiveMatch
+// File:
+// resources/test_compiler_warnings_struct.bg
+// Line:
+// 13
+// Column:
+// 10
+// Message:
+// Non-exhaustive match on enum 'Color'. Missing variants: Blue
+// Enum:
+// Color
+// Missing variants count:
+// 1
+// First missing variant:
+// Blue
+// null

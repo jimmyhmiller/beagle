@@ -1,0 +1,20 @@
+namespace test_error_id
+
+import "beagle.primitive" as primitive
+import "beagle.core" as core
+
+fn main() {
+    let err = core/Error { kind: "TestError", message: "test", location: null }
+
+    println("Error struct_id:")
+    let err_id = primitive/read_struct_id(err)
+    println(err_id)
+
+    println("Expected Error.id:")
+    println(core/Error.id)
+
+    println("Match?:")
+    println(err_id == core/Error.id)
+
+    "done"
+}

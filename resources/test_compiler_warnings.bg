@@ -1,0 +1,31 @@
+namespace test_compiler_warnings
+
+enum Color {
+    red,
+    green,
+    blue,
+}
+
+fn main() {
+    let color = Color.red
+
+    // This match is non-exhaustive - missing blue
+    let result = match color {
+        Color.red => "RED",
+        Color.green => "GREEN",
+    }
+
+    // Call compiler-warnings to get the warnings as a persistent vector
+    let warnings = compiler-warnings()
+    println("Warning count:")
+    println(warnings)
+
+    println(result)
+    "done"
+}
+
+// Expect
+// Warning count:
+// [CompilerWarning { kind: "NonExhaustiveMatch", file_name: "resources/test_compiler_warnings.bg", line: 13, column: 23, message: "Non-exhaustive match on enum 'Color'. Missing variants: blue", enum_name: "Color", missing_variants: PersistentVector { count: 1, shift: 5, root: [  ], tail: [ "blue" ] } }]
+// RED
+// done

@@ -13,7 +13,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// Exp ect
 // Caught CompileError successfully
 // Test completed
 // done

@@ -1,0 +1,22 @@
+namespace match_destructure_test
+
+enum Result {
+    ok { value },
+    error { message },
+}
+
+fn main() {
+    let r = Result.ok { value: 42 }
+
+    let result = match r {
+        Result.ok { value: v } => v,
+        Result.error { message: m } => 0,
+    }
+
+    println(result)
+    "done"
+}
+
+// Expect
+// 42
+// done

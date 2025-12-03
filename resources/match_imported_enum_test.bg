@@ -1,0 +1,22 @@
+namespace test_match_import
+
+import "other_types" as other
+
+fn main() {
+    let color = other/Color.Red
+
+    match color {
+        other/Color.Red => println("It's red!")
+        other/Color.Green => println("It's green!")
+        other/Color.Blue { value: v } => {
+            println("It's blue with value:")
+            println(v)
+        }
+    }
+
+    "done"
+}
+
+// Expect
+// It's red!
+// done

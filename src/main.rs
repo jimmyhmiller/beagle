@@ -328,7 +328,11 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
                 .join(path.file_name().unwrap());
         }
         let path = path.to_str().unwrap();
+        if !path.ends_with(".bg") {
+            continue;
+        }
         let source: String = std::fs::read_to_string(path)?;
+       
         if !source.contains("// Expect") {
             continue;
         }

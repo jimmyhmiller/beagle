@@ -1,0 +1,9 @@
+namespace test
+
+import "beagle.core" as core
+
+fn main() {
+    println("CompilerWarning.id:")
+    println(core/CompilerWarning.id)
+    "done"
+}

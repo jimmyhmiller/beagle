@@ -1,0 +1,15 @@
+namespace other_types
+
+enum Color {
+    Red,
+    Green,
+    Blue { value }
+}
+
+fn make-red() {
+    Color.Red
+}
+
+fn make-blue(v) {
+    Color.Blue { value: v }
+}
