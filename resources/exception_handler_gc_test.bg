@@ -1,0 +1,28 @@
+namespace exception_handler_gc_test
+
+import "beagle.core" as core
+
+fn main() {
+    let captured = "captured value"
+
+    // Set handler that captures a variable
+    core/set-default-exception-handler!(fn(e) {
+        println("Handler called:")
+        println(e)
+        println("Captured:")
+        println(captured)
+    })
+
+    // Trigger GC multiple times to ensure handler survives collection
+    core/gc()
+    core/gc()
+    core/gc()
+
+    println("GC complete, about to throw")
+    throw("test error")
+}
+
+// NOTE: This test demonstrates exception handlers survive GC
+// Output: "GC complete, about to throw" then handler output with captured value
+// followed by panic message
+// Not suitable for automated testing due to panic

@@ -1,0 +1,15 @@
+namespace eval_valid_code_test
+
+fn main() {
+    // Test: eval valid code successfully
+    let result = eval("1 + 1")
+    println(result)
+
+    println("Test completed")
+    "done"
+}
+
+// Expect
+// 2
+// Test completed
+// done

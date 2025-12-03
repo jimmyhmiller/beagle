@@ -1130,13 +1130,16 @@ impl LowLevelArm {
             .push(add(destination, destination, offset));
     }
 
-    pub fn share_label_info_debug(&self, function_pointer: usize) {
+    pub fn share_label_info_debug(
+        &self,
+        function_pointer: usize,
+    ) -> Result<(), crate::compiler::CompileError> {
         for (label_index, label) in self.labels.iter().enumerate() {
-            let label_location = *self
-                .label_locations
-                .get(&label_index)
-                .unwrap_or_else(|| panic!("Could not find label {}", label))
-                * 4;
+            let label_location = *self.label_locations.get(&label_index).ok_or_else(|| {
+                crate::compiler::CompileError::LabelLookup {
+                    label: label.to_string(),
+                }
+            })? * 4;
             debugger(Message {
                 kind: "label".to_string(),
                 data: Data::Label {
@@ -1147,6 +1150,7 @@ impl LowLevelArm {
                 },
             });
         }
+        Ok(())
     }
 
     pub fn get_current_stack_position(&mut self, dest: Register) {

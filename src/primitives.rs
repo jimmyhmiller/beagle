@@ -222,7 +222,7 @@ impl AstCompiler<'_> {
         let untagged_object = self.ir.untag(object.into());
         // self.ir.breakpoint();
         let struct_id = self.ir.read_struct_id(untagged_object);
-        let property_location = Value::RawValue(self.compiler.add_property_lookup());
+        let property_location = Value::RawValue(self.compiler.add_property_lookup().unwrap());
         let property_location = self.ir.assign_new(property_location);
         let property_value = self.ir.load_from_heap(property_location.into(), 0);
         let result = self.ir.assign_new(0);

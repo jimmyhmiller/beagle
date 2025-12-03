@@ -1,0 +1,19 @@
+namespace exception_default_handler_test
+
+import "beagle.core" as core
+
+fn main() {
+    // Set a default uncaught exception handler
+    core/set-default-exception-handler!(fn(e) {
+        println("Default handler called:")
+        println(e)
+    })
+
+    // Throw an uncaught exception - handler will be called, then panic
+    throw("uncaught default error")
+}
+
+// NOTE: This test demonstrates the default handler is called
+// Output: "Default handler called:" and "uncaught default error"
+// followed by panic message
+// Not suitable for automated testing due to panic

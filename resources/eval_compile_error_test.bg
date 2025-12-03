@@ -1,0 +1,19 @@
+namespace eval_compile_error_test
+
+fn main() {
+    // Test: Try to eval code that will cause a compilation error
+    try {
+        eval("this is invalid beagle syntax !!!")
+        println("Should not reach here")
+    } catch (e) {
+        println("Caught CompileError successfully")
+    }
+
+    println("Test completed")
+    "done"
+}
+
+// Expect
+// Caught CompileError successfully
+// Test completed
+// done

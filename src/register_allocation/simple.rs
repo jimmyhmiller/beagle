@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-use core::panic;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::{
@@ -91,7 +90,7 @@ impl SimpleRegisterAllocator {
 
     // TODO: I'm not super happy with this module
     // But things are working which is honestly, a bit suprising
-    pub fn simplify_registers(&mut self) {
+    pub fn simplify_registers(&mut self) -> Result<(), crate::compiler::CompileError> {
         let mut cloned_instructions = self.instructions.clone();
         let mut spilled_registers: HashMap<VirtualRegister, usize> = HashMap::new();
         let mut to_free = vec![];
@@ -120,7 +119,9 @@ impl SimpleRegisterAllocator {
                         // TODO: I think I should actually spill here
                         // But I'm actually going to intentionally leave this here so that
                         // I can know when this happens
-                        panic!("Ran out of registers!");
+                        return Err(crate::compiler::CompileError::RegisterAllocation(
+                            "Ran out of registers while reloading spilled register".to_string(),
+                        ));
                     }
                 }
 
@@ -268,7 +269,9 @@ impl SimpleRegisterAllocator {
                     self.resulting_instructions.last().unwrap().clone()
             {
                 let Value::Register(register) = register else {
-                    panic!("Not a register");
+                    return Err(crate::compiler::CompileError::RegisterAllocation(
+                        "Expected register in Assign instruction".to_string(),
+                    ));
                 };
                 if let Some(local_offset) = spilled_registers.get(&register) {
                     self.extend_token_range(self.resulting_instructions.len());
@@ -289,6 +292,7 @@ impl SimpleRegisterAllocator {
 
         self.lifetimes = Self::get_register_lifetime(&self.instructions);
         self.label_locations = new_labels;
+        Ok(())
     }
 
     fn spill(

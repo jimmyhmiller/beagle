@@ -1,0 +1,21 @@
+namespace exception_handler_set_test
+
+import "beagle.core" as core
+
+fn main() {
+    // Test that we can set handlers without crashing
+    core/set-thread-exception-handler!(fn(e) {
+        println("thread handler")
+    })
+
+    core/set-default-exception-handler!(fn(e) {
+        println("default handler")
+    })
+
+    println("handlers set successfully")
+    "done"
+}
+
+// Expect
+// handlers set successfully
+// done

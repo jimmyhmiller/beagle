@@ -1,0 +1,19 @@
+namespace exception_thread_handler_test
+
+import "beagle.core" as core
+
+fn main() {
+    // Set a per-thread uncaught exception handler
+    core/set-thread-exception-handler!(fn(e) {
+        println("Thread handler called:")
+        println(e)
+    })
+
+    // Throw an uncaught exception - handler will be called, then panic
+    throw("uncaught thread error")
+}
+
+// NOTE: This test demonstrates the per-thread handler is called
+// Output: "Thread handler called:" and "uncaught thread error"
+// followed by panic message
+// Not suitable for automated testing due to panic
