@@ -1,0 +1,16 @@
+namespace for_loop_break_test
+
+fn main() {
+    let result = for i in range(0, 10) {
+        if i == 5 {
+            break(i * 100)
+        }
+        i
+    }
+    println(result)
+    "done"
+}
+
+// Expect
+// 500
+// done

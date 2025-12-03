@@ -1,0 +1,14 @@
+namespace for_loop_vector_test
+
+fn main() {
+    for x in [1, 2, 3] {
+        println(x)
+    }
+    "done"
+}
+
+// Expect
+// 1
+// 2
+// 3
+// done

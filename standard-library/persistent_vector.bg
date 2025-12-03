@@ -93,7 +93,7 @@ fn push(vec, value) {
             }
         } else {
             // Insert into existing tree
-            
+
             let new_root = push_tail(vec, vec.shift, vec.root, tail_node)
             // Return a new PersistentVector with the same shift and the new root
             PersistentVector {
@@ -293,13 +293,13 @@ fn format_vector(vec, idx, acc) {
     } else {
         let val = get(vec, idx)
         let val_str = format(val, 1)
-        
+
         let new_acc = if idx == 0 {
             acc ++ val_str
         } else {
             acc ++ ", " ++ val_str
         }
-        
+
         format_vector(vec, idx + 1, new_acc)
     }
 }
@@ -317,6 +317,36 @@ extend PersistentVector with Associable {
     }
 }
 
+// Vector sequence for iteration
+struct VectorSeq {
+    vec
+    index
+}
+
+extend PersistentVector with Seqable {
+    fn seq(vec) {
+        if vec.count == 0 {
+            null
+        } else {
+            VectorSeq { vec: vec, index: 0 }
+        }
+    }
+}
+
+extend VectorSeq with Seq {
+    fn first(seq) {
+        get(seq.vec, seq.index)
+    }
+
+    fn next(seq) {
+        let next_index = seq.index + 1
+        if next_index >= seq.vec.count {
+            null
+        } else {
+            VectorSeq { vec: seq.vec, index: next_index }
+        }
+    }
+}
 
 
 fn main() {

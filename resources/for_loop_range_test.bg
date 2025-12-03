@@ -1,0 +1,14 @@
+namespace for_loop_range_test
+
+fn main() {
+    let mut sum = 0
+    for i in range(0, 5) {
+        sum = sum + i
+    }
+    println(sum)
+    "done"
+}
+
+// Expect
+// 10
+// done

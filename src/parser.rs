@@ -78,6 +78,8 @@ pub enum Token {
     Match,
     Arrow,
     Underscore,
+    For,
+    In,
 }
 impl Token {
     fn is_binary_operator(&self) -> bool {
@@ -167,6 +169,8 @@ impl Token {
             Token::Match => "match".to_string(),
             Token::Arrow => "=>".to_string(),
             Token::Underscore => "_".to_string(),
+            Token::For => "for".to_string(),
+            Token::In => "in".to_string(),
             Token::Comment((start, end))
             | Token::Atom((start, end))
             | Token::Spaces((start, end))
@@ -455,6 +459,7 @@ impl Tokenizer {
             b"throw" => Token::Throw,
             b"match" => Token::Match,
             b"_" => Token::Underscore,
+            b"for" => Token::For,
             _ => Token::Atom((start, self.position)),
         }
     }
@@ -739,6 +744,7 @@ impl Parser {
             Token::While => Some(self.parse_while()),
             Token::Break => Some(self.parse_break()),
             Token::Continue => Some(self.parse_continue()),
+            Token::For => Some(self.parse_for()),
             Token::Struct => Some(self.parse_struct()),
             Token::Enum => Some(self.parse_enum()),
             Token::If => Some(self.parse_if()),
@@ -975,6 +981,49 @@ impl Parser {
         self.move_to_next_non_whitespace();
         let end_position = self.position;
         Ast::Continue {
+            token_range: TokenRange::new(start_position, end_position),
+        }
+    }
+
+    fn parse_for(&mut self) -> Ast {
+        let start_position = self.position;
+        self.move_to_next_non_whitespace();
+
+        // Parse binding name
+        let binding = match self.current_token() {
+            Token::Atom((start, end)) => {
+                String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap()
+            }
+            _ => panic!("Expected identifier after 'for'"),
+        };
+        self.move_to_next_non_whitespace();
+
+        // Expect 'in' keyword (context-sensitive - only in for-loops)
+        match self.current_token() {
+            Token::Atom((start, end)) => {
+                let atom = String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap();
+                if atom != "in" {
+                    panic!("Expected 'in' after for binding, got '{}'", atom);
+                }
+            }
+            _ => panic!("Expected 'in' after for binding"),
+        }
+        self.move_to_next_non_whitespace();
+
+        // Parse collection expression
+        let collection = Box::new(
+            self.parse_expression(1, true, false)
+                .expect("Expected collection expression after 'in'"),
+        );
+
+        // Parse body block
+        let body = self.parse_block();
+        let end_position = self.position;
+
+        Ast::For {
+            binding,
+            collection,
+            body,
             token_range: TokenRange::new(start_position, end_position),
         }
     }

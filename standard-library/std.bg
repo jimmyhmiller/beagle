@@ -63,6 +63,15 @@ protocol Keys {
     fn keys(coll)
 }
 
+protocol Seqable {
+    fn seq(coll)
+}
+
+protocol Seq {
+    fn first(seq)
+    fn next(seq)
+}
+
 extend String with Format {
     fn format(self, depth) {
         if depth > 0 {
@@ -180,5 +189,76 @@ struct CompilerWarning {
     message          // String: human-readable description
     enum_name        // String or null: for NonExhaustiveMatch warnings
     missing_variants // PersistentVector or null: for NonExhaustiveMatch warnings
+}
+
+// Range type for iteration
+struct Range {
+    current
+    end
+    step
+}
+
+fn range(start, end) {
+    Range { current: start, end: end, step: 1 }
+}
+
+fn range_step(start, end, step) {
+    Range { current: start, end: end, step: step }
+}
+
+extend Range with Seqable {
+    fn seq(r) {
+        if r.current >= r.end {
+            null
+        } else {
+            r
+        }
+    }
+}
+
+extend Range with Seq {
+    fn first(r) {
+        r.current
+    }
+
+    fn next(r) {
+        let next_val = r.current + r.step
+        if next_val >= r.end {
+            null
+        } else {
+            Range { current: next_val, end: r.end, step: r.step }
+        }
+    }
+}
+
+// String sequence for iteration
+struct StringSeq {
+    str
+    index
+}
+
+extend String with Seqable {
+    fn seq(str) {
+        if length(str) == 0 {
+            null
+        } else {
+            StringSeq { str: str, index: 0 }
+        }
+    }
+}
+
+extend StringSeq with Seq {
+    fn first(seq) {
+        get(seq.str, seq.index)
+    }
+
+    fn next(seq) {
+        let next_index = seq.index + 1
+        if next_index >= length(seq.str) {
+            null
+        } else {
+            StringSeq { str: seq.str, index: next_index }
+        }
+    }
 }
 

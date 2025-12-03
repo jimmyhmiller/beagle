@@ -1,0 +1,13 @@
+namespace for_loop_return_value_test
+
+fn main() {
+    let last = for x in [10, 20, 30] {
+        x * 2
+    }
+    println(last)
+    "done"
+}
+
+// Expect
+// 60
+// done
