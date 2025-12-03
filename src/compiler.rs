@@ -21,7 +21,10 @@ use std::{
     error::Error,
     fmt,
     path::Path,
-    sync::mpsc::{self, Receiver, SyncSender},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver, SyncSender},
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -51,6 +54,25 @@ impl fmt::Display for CompileError {
 
 impl Error for CompileError {}
 
+#[derive(Debug, Clone)]
+pub struct CompilerWarning {
+    pub kind: WarningKind,
+    pub file_name: String,
+    pub token_range: TokenRange,
+    pub line: usize,   // 1-based line number
+    pub column: usize, // 1-based column number
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum WarningKind {
+    NonExhaustiveMatch {
+        enum_name: String,
+        missing_variants: Vec<String>,
+    },
+    UnreachablePattern,
+}
+
 pub struct Compiler {
     pub code_allocator: CodeAllocator,
     pub property_look_up_cache: MmapMut,
@@ -59,6 +81,7 @@ pub struct Compiler {
     pub pause_atom_ptr: Option<usize>,
     pub property_look_up_cache_offset: usize,
     pub compiled_file_cache: HashSet<String>,
+    pub warnings: Arc<Mutex<Vec<CompilerWarning>>>,
 }
 
 impl Compiler {
@@ -76,6 +99,7 @@ impl Compiler {
         self.stack_map = StackMap::new();
         self.pause_atom_ptr = None;
         self.compiled_file_cache.clear();
+        self.warnings.lock().unwrap().clear();
         Ok(())
     }
 
@@ -100,7 +124,13 @@ impl Compiler {
     pub fn compile_string(&mut self, string: &str) -> Result<usize, Box<dyn Error>> {
         let mut parser = Parser::new("".to_string(), string.to_string());
         let ast = parser.parse();
-        let top_level = self.compile_ast(ast, Some("REPL_FUNCTION".to_string()), "repl")?;
+        let token_line_column_map = parser.get_token_line_column_map();
+        let top_level = self.compile_ast(
+            ast,
+            Some("REPL_FUNCTION".to_string()),
+            "repl",
+            token_line_column_map,
+        )?;
         self.code_allocator.make_executable();
         if let Some(top_level) = top_level {
             let function = self.get_function_by_name(&top_level).unwrap();
@@ -135,6 +165,7 @@ impl Compiler {
             .unwrap_or_else(|_| panic!("Could not find file {:?}", file_name));
         let mut parser = Parser::new(file_name.to_string(), code.to_string());
         let ast = parser.parse();
+        let token_line_column_map = parser.get_token_line_column_map();
 
         if self.command_line_arguments.print_parse {
             println!("{:#?}", ast);
@@ -150,7 +181,7 @@ impl Compiler {
 
         let mut top_levels_to_run = self.compile_dependencies(&ast, file_name)?;
 
-        let top_level = self.compile_ast(ast, None, file_name)?;
+        let top_level = self.compile_ast(ast, None, file_name, token_line_column_map)?;
         if let Some(top_level) = top_level {
             top_levels_to_run.push(top_level);
         }
@@ -186,8 +217,9 @@ impl Compiler {
         ast: crate::ast::Ast,
         fn_name: Option<String>,
         file_name: &str,
+        token_line_column_map: Vec<(usize, usize)>,
     ) -> Result<Option<String>, Box<dyn Error>> {
-        let (mut ir, token_map) = ast.compile(self, file_name);
+        let (mut ir, token_map) = ast.compile(self, file_name, token_line_column_map);
         let top_level_name =
             fn_name.unwrap_or_else(|| format!("{}/__top_level", self.current_namespace_name()));
         if ast.has_top_level() {
@@ -623,7 +655,7 @@ impl Compiler {
             }],
             token_range: TokenRange::new(0, 0),
         };
-        self.compile_ast(ast, None, "test").unwrap();
+        self.compile_ast(ast, None, "test", vec![]).unwrap();
         self.code_allocator.make_executable();
         self.set_current_namespace(current_namespace_id);
     }
@@ -661,6 +693,7 @@ impl CompilerThread {
     pub fn new(
         channel: BlockingReceiver<CompilerMessage, CompilerResponse>,
         command_line_arguments: CommandLineArguments,
+        warnings: Arc<Mutex<Vec<CompilerWarning>>>,
     ) -> Result<Self, CompileError> {
         Ok(CompilerThread {
             compiler: Compiler {
@@ -680,6 +713,7 @@ impl CompilerThread {
                 stack_map: StackMap::new(),
                 pause_atom_ptr: None,
                 compiled_file_cache: HashSet::new(),
+                warnings,
             },
             channel,
         })
@@ -691,27 +725,13 @@ impl CompilerThread {
             match result {
                 Ok((message, work_done)) => match message {
                     CompilerMessage::CompileString(string) => {
-                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            self.compiler.compile_string(&string)
-                        }));
-
-                        match result {
-                            Ok(Ok(pointer)) => {
+                        match self.compiler.compile_string(&string) {
+                            Ok(pointer) => {
                                 work_done.mark_done(CompilerResponse::FunctionPointer(pointer));
                             }
-                            Ok(Err(e)) => {
+                            Err(e) => {
                                 work_done
                                     .mark_done(CompilerResponse::CompileError(format!("{}", e)));
-                            }
-                            Err(panic_err) => {
-                                let error_msg = if let Some(s) = panic_err.downcast_ref::<&str>() {
-                                    s.to_string()
-                                } else if let Some(s) = panic_err.downcast_ref::<String>() {
-                                    s.clone()
-                                } else {
-                                    "Unknown compilation error".to_string()
-                                };
-                                work_done.mark_done(CompilerResponse::CompileError(error_msg));
                             }
                         }
                     }

@@ -243,6 +243,43 @@ pub enum Ast {
         value: Box<Ast>,
         token_range: TokenRange,
     },
+    Match {
+        value: Box<Ast>,
+        arms: Vec<MatchArm>,
+        token_range: TokenRange,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MatchArm {
+    pub pattern: Pattern,
+    pub guard: Option<Box<Ast>>,
+    pub body: Vec<Ast>,
+    pub token_range: TokenRange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Pattern {
+    EnumVariant {
+        enum_name: String,
+        variant_name: String,
+        fields: Vec<FieldPattern>,
+        token_range: TokenRange,
+    },
+    Literal {
+        value: Box<Ast>,
+        token_range: TokenRange,
+    },
+    Wildcard {
+        token_range: TokenRange,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FieldPattern {
+    pub field_name: String,
+    pub binding_name: Option<String>,
+    pub token_range: TokenRange,
 }
 
 impl Ast {
@@ -289,7 +326,8 @@ impl Ast {
             | Ast::PropertyAccess { token_range, .. }
             | Ast::EnumCreation { token_range, .. }
             | Ast::Try { token_range, .. }
-            | Ast::Throw { token_range, .. } => *token_range,
+            | Ast::Throw { token_range, .. }
+            | Ast::Match { token_range, .. } => *token_range,
             Ast::IntegerLiteral(_, position)
             | Ast::FloatLiteral(_, position)
             | Ast::Identifier(_, position)
@@ -303,6 +341,7 @@ impl Ast {
         &self,
         compiler: &mut Compiler,
         file_name: &str,
+        token_line_column_map: Vec<(usize, usize)>,
     ) -> (Ir, Vec<(TokenRange, IRRange)>) {
         let mut ast_compiler = AstCompiler {
             ast: self.clone(),
@@ -327,6 +366,7 @@ impl Ast {
             mutable_pass_env_stack: vec![HashMap::new()],
             loop_exit_stack: vec![],
             current_function_arity: 0,
+            token_line_column_map,
         };
 
         // println!("{:#?}", compiler);
@@ -476,6 +516,7 @@ pub struct AstCompiler<'a> {
     pub mutable_pass_env_stack: Vec<HashMap<String, MutablePassInfo>>,
     pub loop_exit_stack: Vec<(Label, VirtualRegister, Label)>,
     pub current_function_arity: usize,
+    pub token_line_column_map: Vec<(usize, usize)>,
 }
 
 impl AstCompiler<'_> {
@@ -939,6 +980,77 @@ impl AstCompiler<'_> {
                 // Throw never returns, but we need to return something for type checking
                 Value::Null
             }
+            Ast::Match {
+                value,
+                arms,
+                token_range,
+            } => {
+                // Compile the value to match on
+                let value_reg = self.call_compile(&value);
+
+                // Ensure value is in a register
+                let value_reg = match value_reg {
+                    Value::Register(_) => value_reg,
+                    _ => {
+                        let reg = self.ir.volatile_register();
+                        self.ir.assign(reg, value_reg);
+                        reg.into()
+                    }
+                };
+
+                // Create labels
+                let end_label = self.ir.label("match_end");
+                let no_match_label = self.ir.label("match_no_match");
+                let result_reg = self.ir.assign_new(Value::Null);
+
+                // Compile each arm
+                for (i, arm) in arms.iter().enumerate() {
+                    let next_arm_label = if i < arms.len() - 1 {
+                        self.ir.label(&format!("match_arm_{}", i + 1))
+                    } else {
+                        no_match_label
+                    };
+
+                    // Test pattern
+                    self.compile_pattern_test(&arm.pattern, value_reg, next_arm_label);
+
+                    // Pattern matched - save current environment before binding pattern variables
+                    // We need to save the actual VariableLocation values, not just keys,
+                    // to properly restore shadowed variables
+                    let saved_env: HashMap<String, VariableLocation> =
+                        self.environment_stack.last().unwrap().variables.clone();
+
+                    self.bind_pattern_variables(&arm.pattern, value_reg);
+
+                    // Compile arm body
+                    let mut arm_result = Value::Null;
+                    for ast in arm.body.iter() {
+                        arm_result = self.call_compile(ast);
+                    }
+                    self.ir.assign(result_reg, arm_result);
+
+                    // Restore environment - put back the exact state from before the match arm
+                    let current_env = self.environment_stack.last_mut().unwrap();
+                    current_env.variables = saved_env;
+
+                    self.ir.jump(end_label);
+
+                    // Write next arm label
+                    if i < arms.len() - 1 {
+                        self.ir.write_label(next_arm_label);
+                    }
+                }
+
+                // Check exhaustiveness and generate warnings
+                self.check_match_exhaustiveness(&arms, token_range);
+
+                // No pattern matched - throw error
+                self.ir.write_label(no_match_label);
+                self.call_builtin("beagle.builtin/throw_error", vec![]);
+
+                self.ir.write_label(end_label);
+                result_reg.into()
+            }
             Ast::Struct {
                 name, fields: _, ..
             } => {
@@ -1169,29 +1281,52 @@ impl AstCompiler<'_> {
                 ..
             } => {
                 let (namespace, name) = self.get_namespace_name_and_name(&name);
-                let field_results = fields
+
+                let full_struct_name = format!("{}/{}.{}", namespace, name, variant);
+                let (struct_id, struct_type) = self
+                    .compiler
+                    .get_struct(&full_struct_name)
+                    .unwrap_or_else(|| panic!("Struct not found {}", name));
+
+                // Clone the field names to avoid borrow checker issues
+                let defined_fields = struct_type.fields.clone();
+                let size = struct_type.size();
+
+                // Compile field values
+                let field_results: Vec<_> = fields
                     .iter()
                     .map(|field| {
                         self.not_tail_position();
                         self.call_compile(&field.1)
                     })
-                    .collect::<Vec<_>>();
+                    .collect();
 
-                let (struct_id, struct_type) = self
-                    .compiler
-                    .get_struct(&format!("{}/{}.{}", namespace, name, variant))
-                    .unwrap_or_else(|| panic!("Struct not found {}", name));
+                // Build a mapping from field name to its compiled value
+                let field_map: std::collections::HashMap<String, Value> = fields
+                    .iter()
+                    .zip(field_results.iter())
+                    .map(|(field, result)| (field.0.clone(), *result))
+                    .collect();
 
-                for field in fields.iter() {
-                    let mut found = false;
-                    for defined_field in struct_type.fields.iter() {
-                        if &field.0 == defined_field {
-                            found = true;
-                            break;
-                        }
+                // Validate that all user-provided fields exist in the struct definition
+                for (field_name, _) in fields.iter() {
+                    if !defined_fields.contains(field_name) {
+                        panic!(
+                            "Struct field not defined: '{}' in {}.{}",
+                            field_name, name, variant
+                        );
                     }
-                    if !found {
-                        panic!("Struct field not defined {}", field.0);
+                }
+
+                // Reorder fields to match the struct definition
+                let mut ordered_field_results = Vec::new();
+                for defined_field in defined_fields.iter() {
+                    match field_map.get(defined_field) {
+                        Some(&result) => ordered_field_results.push(result),
+                        None => panic!(
+                            "Field '{}' not provided in enum variant creation",
+                            defined_field
+                        ),
                     }
                 }
 
@@ -1202,7 +1337,7 @@ impl AstCompiler<'_> {
                 let allocate = self.compiler.get_function_pointer(allocate).unwrap();
                 let allocate = self.ir.assign_new(allocate);
 
-                let size_reg = self.ir.assign_new(struct_type.size());
+                let size_reg = self.ir.assign_new(size);
                 let stack_pointer = self.ir.get_stack_pointer_imm(0);
 
                 let struct_ptr = self
@@ -1211,7 +1346,7 @@ impl AstCompiler<'_> {
 
                 let struct_pointer = self.ir.untag(struct_ptr);
                 self.ir.write_struct_id(struct_pointer, struct_id);
-                self.ir.write_fields(struct_pointer, &field_results);
+                self.ir.write_fields(struct_pointer, &ordered_field_results);
 
                 self.ir
                     .tag(struct_pointer, BuiltInTypes::HeapObject.get_tag())
@@ -2698,6 +2833,18 @@ impl AstCompiler<'_> {
             } => {
                 self.find_mutable_vars_that_need_boxing(value);
             }
+            Ast::Match {
+                value,
+                arms,
+                token_range: _,
+            } => {
+                self.find_mutable_vars_that_need_boxing(value);
+                for arm in arms.iter() {
+                    for ast in arm.body.iter() {
+                        self.find_mutable_vars_that_need_boxing(ast);
+                    }
+                }
+            }
         }
     }
 
@@ -2755,5 +2902,241 @@ impl AstCompiler<'_> {
             in_current = false;
         }
         None
+    }
+
+    /// Build the full enum name with namespace.
+    /// If enum_name already contains a '/', resolve the alias to get the actual namespace.
+    /// Otherwise, prepend the current namespace.
+    fn get_full_enum_name(&self, enum_name: &str) -> String {
+        if enum_name.contains('/') {
+            // Namespace-qualified with alias (e.g., "other/Color")
+            // Need to resolve the alias to the actual namespace
+            let parts: Vec<&str> = enum_name.split("/").collect();
+            let alias = parts[0];
+            let name = parts[1];
+            // Try to resolve alias, but if it fails, assume alias is already a namespace
+            let namespace = self
+                .compiler
+                .get_namespace_from_alias(alias)
+                .unwrap_or_else(|| alias.to_string());
+            format!("{}/{}", namespace, name)
+        } else {
+            // Add current namespace (e.g., "Color" -> "current_namespace/Color")
+            format!("{}/{}", self.compiler.current_namespace_name(), enum_name)
+        }
+    }
+
+    fn compile_pattern_test(&mut self, pattern: &Pattern, value_reg: Value, no_match_label: Label) {
+        match pattern {
+            Pattern::EnumVariant {
+                enum_name,
+                variant_name,
+                ..
+            } => {
+                // Get the struct ID for this enum variant
+                let full_enum_name = self.get_full_enum_name(enum_name);
+                let full_name = format!("{}.{}", full_enum_name, variant_name);
+                let (expected_struct_id, _) = self
+                    .compiler
+                    .get_struct(&full_name)
+                    .unwrap_or_else(|| panic!("Enum variant not found: {}", full_name));
+
+                // Untag the value before reading struct ID
+                let untagged_value = self.ir.untag(value_reg);
+
+                // Read the struct ID from the value
+                let struct_id_reg = self.ir.read_struct_id(untagged_value);
+
+                // Tag the struct ID before comparison (as Int)
+                let tagged_struct_id = self.ir.tag(struct_id_reg, BuiltInTypes::Int.get_tag());
+
+                // Create expected value as tagged int
+                let expected_value = BuiltInTypes::Int.tag(expected_struct_id as isize);
+                let expected_reg = self.ir.assign_new(Value::TaggedConstant(expected_value));
+
+                // Compare and jump if not equal (both values are tagged ints)
+                self.ir.jump_if(
+                    no_match_label,
+                    Condition::NotEqual,
+                    tagged_struct_id,
+                    expected_reg,
+                );
+            }
+            Pattern::Literal { value, .. } => {
+                // Compile the literal value
+                let literal_value = self.call_compile(&value);
+
+                // Ensure literal is in a register
+                let literal_reg = match literal_value {
+                    Value::Register(_) => literal_value,
+                    _ => {
+                        let reg = self.ir.assign_new(literal_value);
+                        reg.into()
+                    }
+                };
+
+                // Use the equal builtin to compare
+                let result_value =
+                    self.call_builtin("beagle.core/equal", vec![value_reg, literal_reg]);
+
+                // Jump if not equal (false)
+                self.ir.jump_if(
+                    no_match_label,
+                    Condition::NotEqual,
+                    result_value,
+                    Value::True,
+                );
+            }
+            Pattern::Wildcard { .. } => {
+                // Wildcard always matches - no test needed
+            }
+        }
+    }
+
+    fn bind_pattern_variables(&mut self, pattern: &Pattern, value_reg: Value) {
+        match pattern {
+            Pattern::EnumVariant {
+                enum_name,
+                variant_name,
+                fields,
+                ..
+            } => {
+                // Get the variant's struct definition to look up field indices by name
+                let full_enum_name = self.get_full_enum_name(enum_name);
+                let full_name = format!("{}.{}", full_enum_name, variant_name);
+                let (_, variant_struct) = self
+                    .compiler
+                    .get_struct(&full_name)
+                    .unwrap_or_else(|| panic!("Enum variant not found: {}", full_name));
+
+                // Clone the field names to avoid borrow checker issues
+                let variant_field_names = variant_struct.fields.clone();
+
+                // Untag the value once before reading fields
+                let untagged_value = self.ir.untag(value_reg);
+
+                // Bind each field to a local variable
+                for field_pattern in fields.iter() {
+                    // Look up the actual field index in the variant definition
+                    let actual_field_idx = variant_field_names
+                        .iter()
+                        .position(|f| f == &field_pattern.field_name)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "Field '{}' not found in variant {}.{}",
+                                field_pattern.field_name, enum_name, variant_name
+                            )
+                        });
+
+                    // Read the field from the value using the ACTUAL index, not iteration order
+                    let field_value = self.ir.read_field(
+                        untagged_value,
+                        Value::TaggedConstant(actual_field_idx as isize),
+                    );
+
+                    // Determine the variable name to bind to
+                    let binding_name = field_pattern
+                        .binding_name
+                        .as_ref()
+                        .unwrap_or(&field_pattern.field_name);
+
+                    // Convert Value to VariableLocation
+                    let location = match field_value {
+                        Value::Register(reg) => VariableLocation::Register(reg),
+                        _ => {
+                            // Assign to a register if not already
+                            let reg = self.ir.assign_new(field_value);
+                            VariableLocation::Register(reg)
+                        }
+                    };
+
+                    // Add to environment
+                    self.insert_variable(binding_name.clone(), location);
+                }
+            }
+            Pattern::Literal { .. } | Pattern::Wildcard { .. } => {
+                // Literals and wildcards don't bind variables
+            }
+        }
+    }
+
+    fn check_match_exhaustiveness(&mut self, arms: &[MatchArm], token_range: TokenRange) {
+        use std::collections::{HashMap, HashSet};
+
+        // Group patterns by enum type
+        let mut enum_coverage: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut has_wildcard = false;
+
+        for arm in arms {
+            match &arm.pattern {
+                Pattern::EnumVariant {
+                    enum_name,
+                    variant_name,
+                    ..
+                } => {
+                    enum_coverage
+                        .entry(enum_name.clone())
+                        .or_insert_with(HashSet::new)
+                        .insert(variant_name.clone());
+                }
+                Pattern::Wildcard { .. } => {
+                    has_wildcard = true;
+                }
+                Pattern::Literal { .. } => {}
+            }
+        }
+
+        if has_wildcard {
+            return; // Wildcard suppresses all warnings
+        }
+
+        // Check each enum independently
+        for (enum_name, covered_variants) in enum_coverage {
+            // Get the full enum name with namespace
+            let full_enum_name = self.get_full_enum_name(&enum_name);
+
+            if let Some(enum_def) = self.compiler.get_enum(&full_enum_name) {
+                let all_variants: HashSet<_> = enum_def
+                    .variants
+                    .iter()
+                    .map(|v| match v {
+                        crate::runtime::EnumVariant::StructVariant { name, .. } => name,
+                        crate::runtime::EnumVariant::StaticVariant { name } => name,
+                    })
+                    .cloned()
+                    .collect();
+
+                let missing: Vec<_> = all_variants
+                    .difference(&covered_variants)
+                    .cloned()
+                    .collect();
+
+                if !missing.is_empty() {
+                    // Get line and column from token_line_column_map
+                    let (line, column) = if token_range.start < self.token_line_column_map.len() {
+                        self.token_line_column_map[token_range.start]
+                    } else {
+                        (1, 1) // Default if out of bounds
+                    };
+
+                    let warning = crate::compiler::CompilerWarning {
+                        kind: crate::compiler::WarningKind::NonExhaustiveMatch {
+                            enum_name: enum_name.clone(),
+                            missing_variants: missing.clone(),
+                        },
+                        file_name: self.file_name.clone(),
+                        token_range,
+                        line,
+                        column,
+                        message: format!(
+                            "Non-exhaustive match on enum '{}'. Missing variants: {}",
+                            enum_name,
+                            missing.join(", ")
+                        ),
+                    };
+                    self.compiler.warnings.lock().unwrap().push(warning);
+                }
+            }
+        }
     }
 }

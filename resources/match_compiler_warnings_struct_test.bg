@@ -1,0 +1,22 @@
+namespace match_compiler_warnings_struct_test
+
+fn main() {
+    // Get compiler warnings - tests if struct ID is properly written
+    let warnings = compiler-warnings()
+
+    println("Got warnings struct")
+
+    // Test 1: Can we access properties on the returned struct?
+    // If struct ID is corrupted, this will fail or panic
+    let count = warnings.count
+    println("Warning count:")
+    println(count)
+
+    "done"
+}
+
+// Expect
+// Got warnings struct
+// Warning count:
+// 0
+// done

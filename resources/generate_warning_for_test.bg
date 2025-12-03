@@ -1,0 +1,20 @@
+namespace generate_warning_for_test
+
+enum MyEnum {
+    Variant1,
+    Variant2,
+    Variant3
+}
+
+fn test_match(val) {
+    // This should generate a non-exhaustive match warning
+    // because we don't handle Variant3
+    match val {
+        MyEnum.Variant1 => "one",
+        MyEnum.Variant2 => "two"
+    }
+}
+
+fn main() {
+    test_match(MyEnum.Variant1)
+}

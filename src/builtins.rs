@@ -1979,6 +1979,198 @@ impl Runtime {
             2,
         )?;
 
+        self.add_builtin_function(
+            "beagle.core/compiler-warnings",
+            compiler_warnings as *const u8,
+            true,
+            1,
+        )?;
+
         Ok(())
     }
+}
+
+/// Allocates a Beagle struct from Rust using struct registry lookup.
+///
+/// # Arguments
+/// * `struct_name` - Fully qualified name like "beagle.core/CompilerWarning"
+/// * `fields` - Slice of pre-tagged Beagle values (must match struct field count)
+///
+/// # Returns
+/// Tagged pointer to the allocated struct
+unsafe fn allocate_struct(
+    runtime: &mut Runtime,
+    stack_pointer: usize,
+    struct_name: &str,
+    fields: &[usize],
+) -> Result<usize, String> {
+    // Look up struct definition from registry
+    let (struct_id, struct_def) = runtime
+        .get_struct(struct_name)
+        .ok_or_else(|| format!("Struct {} not found", struct_name))?;
+
+    let struct_id = BuiltInTypes::Int.tag(struct_id as isize) as usize;
+
+    // Validate field count matches struct definition
+    if fields.len() != struct_def.fields.len() {
+        return Err(format!(
+            "Expected {} fields for {}, got {}",
+            struct_def.fields.len(),
+            struct_name,
+            fields.len()
+        ));
+    }
+
+    // Allocate heap object (same as create_error line 1630-1632)
+    let obj_ptr = runtime
+        .allocate(fields.len(), stack_pointer, BuiltInTypes::HeapObject)
+        .map_err(|e| format!("Allocation failed: {}", e))?;
+
+    // Write struct_id to header's type_data field (same as create_error lines 1636-1653)
+    let heap_obj = HeapObject::from_tagged(obj_ptr);
+
+    let untagged = heap_obj.untagged();
+    let header_ptr = untagged as *mut usize;
+
+    // Write struct_id to type_data field (bytes 3-6) without changing other fields
+    // Header layout (little-endian):
+    //   Bits 0-7:   Byte 0 (flags)
+    //   Bits 8-15:  Byte 1 (padding)
+    //   Bits 16-23: Byte 2 (size) - MUST PRESERVE
+    //   Bits 24-55: Bytes 3-6 (type_data) - WRITE HERE
+    //   Bits 56-63: Byte 7 (type_id) - MUST PRESERVE
+    unsafe {
+        let current_header = *header_ptr;
+        let mask = 0x00FFFFFFFF000000; // Mask for bits 24-55 (bytes 3-6, the type_data field)
+        let shifted_type_id = (struct_id as usize) << 24; // Shift to bit 24
+        let new_header = (current_header & !mask) | shifted_type_id;
+        *header_ptr = new_header;
+    }
+    // Write all fields (same as create_error lines 1656-1658)
+    for (i, &field_value) in fields.iter().enumerate() {
+        heap_obj.write_field(i as i32, field_value);
+    }
+
+    Ok(obj_ptr)
+}
+
+/// Converts a CompilerWarning to a Beagle struct.
+unsafe fn warning_to_struct(
+    runtime: &mut Runtime,
+    stack_pointer: usize,
+    warning: &crate::compiler::CompilerWarning,
+) -> Result<usize, String> {
+    // Use line and column directly from the warning struct
+    let line = warning.line;
+    let column = warning.column;
+
+    // Create kind string based on warning type
+    let kind_str = match &warning.kind {
+        crate::compiler::WarningKind::NonExhaustiveMatch { .. } => "NonExhaustiveMatch",
+        crate::compiler::WarningKind::UnreachablePattern => "UnreachablePattern",
+    };
+    let kind_tagged = runtime
+        .allocate_string(stack_pointer, kind_str.to_string())
+        .map_err(|e| format!("Failed to create kind string: {}", e))?
+        .into();
+
+    // Create file_name string
+    let file_name_tagged = runtime
+        .allocate_string(stack_pointer, warning.file_name.clone())
+        .map_err(|e| format!("Failed to create file_name string: {}", e))?
+        .into();
+
+    // Create message string
+    let message_tagged = runtime
+        .allocate_string(stack_pointer, warning.message.clone())
+        .map_err(|e| format!("Failed to create message string: {}", e))?
+        .into();
+
+    // Create line and column as tagged ints
+    let line_tagged = BuiltInTypes::Int.tag(line as isize) as usize;
+    let column_tagged = BuiltInTypes::Int.tag(column as isize) as usize;
+
+    // Handle optional fields based on warning kind
+    let (enum_name_tagged, missing_variants_tagged) = match &warning.kind {
+        crate::compiler::WarningKind::NonExhaustiveMatch {
+            enum_name,
+            missing_variants,
+        } => {
+            // Create enum_name string
+            let enum_name_str = runtime
+                .allocate_string(stack_pointer, enum_name.clone())
+                .map_err(|e| format!("Failed to create enum_name string: {}", e))?
+                .into();
+
+            // Build persistent vector of variant strings
+            let empty_vec = unsafe { call_fn_1(runtime, "persistent_vector/vec", 0) };
+            let mut vec = empty_vec;
+            for variant in missing_variants {
+                let variant_str: usize = runtime
+                    .allocate_string(stack_pointer, variant.clone())
+                    .map_err(|e| format!("Failed to create variant string: {}", e))?
+                    .into();
+                vec = unsafe { call_fn_2(runtime, "persistent_vector/push", vec, variant_str) };
+            }
+
+            (enum_name_str, vec)
+        }
+        crate::compiler::WarningKind::UnreachablePattern => {
+            // Use null for both optional fields
+            (
+                BuiltInTypes::null_value() as usize,
+                BuiltInTypes::null_value() as usize,
+            )
+        }
+    };
+
+    // Allocate struct with all 7 fields in order
+    let fields = [
+        kind_tagged,
+        file_name_tagged,
+        line_tagged,
+        column_tagged,
+        message_tagged,
+        enum_name_tagged,
+        missing_variants_tagged,
+    ];
+
+    unsafe {
+        allocate_struct(
+            runtime,
+            stack_pointer,
+            "beagle.core/CompilerWarning",
+            &fields,
+        )
+    }
+}
+
+pub unsafe extern "C" fn compiler_warnings(stack_pointer: usize) -> usize {
+    let runtime = get_runtime().get_mut();
+
+    // Clone warnings to avoid holding the lock while processing
+    let warnings = {
+        let warnings_guard = runtime.compiler_warnings.lock().unwrap();
+        warnings_guard.clone()
+    };
+
+    // Start with empty persistent vector
+    let mut vec = unsafe { call_fn_1(runtime, "persistent_vector/vec", 0) };
+
+    // Convert each warning to struct and add to persistent vector
+    for (_, warning) in warnings.iter().enumerate() {
+        match unsafe { warning_to_struct(runtime, stack_pointer, warning) } {
+            Ok(warning_struct) => {
+                let root_id = runtime.register_temporary_root(warning_struct);
+                vec = unsafe { call_fn_2(runtime, "persistent_vector/push", vec, warning_struct) };
+                runtime.unregister_temporary_root(root_id);
+            }
+            Err(e) => {
+                // Log error but continue processing other warnings
+                eprintln!("Warning: Failed to convert compiler warning: {}", e);
+            }
+        }
+    }
+
+    vec
 }

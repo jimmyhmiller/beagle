@@ -1,0 +1,23 @@
+namespace match_wildcard_test
+
+enum Color {
+    red,
+    green,
+    blue,
+}
+
+fn main() {
+    let color = Color.red
+
+    let result = match color {
+        Color.red => "RED",
+        _ => "other",
+    }
+
+    println(result)
+    "done"
+}
+
+// Expect
+// RED
+// done

@@ -1,0 +1,28 @@
+namespace test_warning_vector
+
+import "beagle.primitive" as primitive
+import "beagle.core" as core
+
+fn main() {
+    // Trigger a warning
+    eval("generate_warning_for_test/main()")
+
+    let warnings = core/compiler-warnings()
+    println("Got warnings vector")
+    println("Length:")
+    println(core/length(warnings))
+
+    if core/length(warnings) > 0 {
+        println("Getting first warning...")
+        let first = core/get(warnings, 0)
+        println("Got first warning, pointer value:")
+        primitive/_println_raw(first)
+
+        println("Is object?:")
+        println(primitive/is_object(first))
+
+        println("Done")
+    }
+
+    "done"
+}

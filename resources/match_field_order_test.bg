@@ -1,0 +1,72 @@
+namespace match_field_order_test
+
+enum Result {
+    Success { value, message, code }
+}
+
+fn main() {
+    let result = Result.Success {
+        value: "data",
+        message: "ok",
+        code: 200
+    }
+
+    // Test 1: Pattern fields in SAME order as definition
+    match result {
+        Result.Success { value, message, code } => {
+            println("Test 1 - Same order:")
+            println(value)
+            println(message)
+            println(code)
+        }
+    }
+
+    // Test 2: Pattern fields in DIFFERENT order than definition
+    // If binding by NAME (correct): code=200, value="data", message="ok"
+    // If binding by POSITION (wrong): code="data", value="ok", message=200
+    match result {
+        Result.Success { code, value, message } => {
+            println("Test 2 - Different order (code, value, message):")
+            println(code)
+            println(value)
+            println(message)
+        }
+    }
+
+    // Test 3: Pattern with only MIDDLE field
+    // If binding by NAME (correct): message="ok"
+    // If binding by POSITION (wrong): message="data" (first field)
+    match result {
+        Result.Success { message } => {
+            println("Test 3 - Only middle field:")
+            println(message)
+        }
+    }
+
+    // Test 4: Pattern with only LAST field
+    // If binding by NAME (correct): code=200
+    // If binding by POSITION (wrong): code="data" (first field)
+    match result {
+        Result.Success { code } => {
+            println("Test 4 - Only last field:")
+            println(code)
+        }
+    }
+
+    "done"
+}
+
+// Expect
+// Test 1 - Same order:
+// data
+// ok
+// 200
+// Test 2 - Different order (code, value, message):
+// 200
+// data
+// ok
+// Test 3 - Only middle field:
+// ok
+// Test 4 - Only last field:
+// 200
+// done

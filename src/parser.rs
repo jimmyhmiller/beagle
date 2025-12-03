@@ -4,7 +4,7 @@
 
 use crate::{
     Data,
-    ast::{Ast, TokenRange},
+    ast::{Ast, FieldPattern, MatchArm, Pattern, TokenRange},
     builtins::debugger,
 };
 
@@ -75,6 +75,9 @@ pub enum Token {
     Try,
     Catch,
     Throw,
+    Match,
+    Arrow,
+    Underscore,
 }
 impl Token {
     fn is_binary_operator(&self) -> bool {
@@ -161,6 +164,9 @@ impl Token {
             Token::Try => "try".to_string(),
             Token::Catch => "catch".to_string(),
             Token::Throw => "throw".to_string(),
+            Token::Match => "match".to_string(),
+            Token::Arrow => "=>".to_string(),
+            Token::Underscore => "_".to_string(),
             Token::Comment((start, end))
             | Token::Atom((start, end))
             | Token::Spaces((start, end))
@@ -411,6 +417,7 @@ impl Tokenizer {
             b"<" => Token::LessThan,
             b"=" => Token::Equal,
             b"==" => Token::EqualEqual,
+            b"=>" => Token::Arrow,
             b"!=" => Token::NotEqual,
             b">" => Token::GreaterThan,
             b">=" => Token::GreaterThanOrEqual,
@@ -446,6 +453,8 @@ impl Tokenizer {
             b"try" => Token::Try,
             b"catch" => Token::Catch,
             b"throw" => Token::Throw,
+            b"match" => Token::Match,
+            b"_" => Token::Underscore,
             _ => Token::Atom((start, self.position)),
         }
     }
@@ -594,6 +603,10 @@ impl Parser {
         format!("{}:{}:{}", self.file_name, line, column)
     }
 
+    pub fn get_token_line_column_map(&self) -> Vec<(usize, usize)> {
+        self.token_line_column_map.clone()
+    }
+
     pub fn print_tokens(&self) {
         for token in &self.tokens {
             println!("{:?}", token);
@@ -731,6 +744,7 @@ impl Parser {
             Token::If => Some(self.parse_if()),
             Token::Try => Some(self.parse_try()),
             Token::Throw => Some(self.parse_throw()),
+            Token::Match => Some(self.parse_match()),
             Token::Namespace => Some(self.parse_namespace()),
             Token::Import => Some(self.parse_import()),
             Token::Protocol => Some(self.parse_protocol()),
@@ -1776,6 +1790,237 @@ impl Parser {
             value,
             token_range: TokenRange::new(start_position, end_position),
         }
+    }
+
+    fn parse_match(&mut self) -> Ast {
+        let start_position = self.position;
+        self.move_to_next_non_whitespace();
+
+        // Parse value to match on - same as if condition
+        let value = Box::new(self.parse_expression(1, true, false).unwrap());
+
+        // Expect '{'
+        self.skip_whitespace();
+        if !matches!(self.current_token(), Token::OpenCurly) {
+            panic!("Expected '{{' after match value");
+        }
+        self.consume();
+        self.move_to_next_non_whitespace();
+
+        // Parse match arms
+        let mut arms = vec![];
+        while !matches!(self.current_token(), Token::CloseCurly) {
+            let arm = self.parse_match_arm();
+            arms.push(arm);
+            self.skip_whitespace();
+
+            // Allow optional comma after each arm
+            if matches!(self.current_token(), Token::Comma) {
+                self.consume();
+                self.skip_whitespace();
+            }
+        }
+
+        // Consume '}'
+        self.consume();
+        let end_position = self.position;
+
+        Ast::Match {
+            value,
+            arms,
+            token_range: TokenRange::new(start_position, end_position),
+        }
+    }
+
+    fn parse_match_arm(&mut self) -> MatchArm {
+        let arm_start = self.position;
+
+        // Parse pattern
+        let pattern = self.parse_pattern();
+
+        // Expect '=>'
+        self.skip_whitespace();
+        if !matches!(self.current_token(), Token::Arrow) {
+            panic!("Expected '=>' after match pattern");
+        }
+        self.consume();
+        self.skip_whitespace();
+
+        // Parse body - either a block or single expression
+        let body = if matches!(self.current_token(), Token::OpenCurly) {
+            self.parse_block()
+        } else {
+            // Single expression
+            vec![self.parse_expression(1, true, false).unwrap()]
+        };
+
+        let arm_end = self.position;
+        MatchArm {
+            pattern,
+            guard: None, // TODO: implement guards later
+            body,
+            token_range: TokenRange::new(arm_start, arm_end),
+        }
+    }
+
+    fn parse_pattern(&mut self) -> Pattern {
+        self.skip_whitespace();
+        let start = self.position;
+
+        match self.current_token() {
+            Token::Underscore => {
+                self.consume();
+                Pattern::Wildcard {
+                    token_range: TokenRange::new(start, self.position),
+                }
+            }
+            Token::Atom((atom_start, atom_end)) => {
+                let first_name =
+                    String::from_utf8(self.source.as_bytes()[atom_start..atom_end].to_vec())
+                        .unwrap();
+                self.consume();
+                self.skip_whitespace();
+
+                // Check if it's an enum variant pattern (Enum.Variant)
+                if matches!(self.current_token(), Token::Dot) {
+                    self.consume();
+                    self.skip_whitespace();
+
+                    // Get variant name
+                    if let Token::Atom((var_start, var_end)) = self.current_token() {
+                        let variant_name =
+                            String::from_utf8(self.source.as_bytes()[var_start..var_end].to_vec())
+                                .unwrap();
+                        self.consume();
+                        self.skip_whitespace();
+
+                        // Check for field patterns { }
+                        let fields = if matches!(self.current_token(), Token::OpenCurly) {
+                            self.parse_field_patterns()
+                        } else {
+                            vec![]
+                        };
+
+                        Pattern::EnumVariant {
+                            enum_name: first_name,
+                            variant_name,
+                            fields,
+                            token_range: TokenRange::new(start, self.position),
+                        }
+                    } else {
+                        panic!("Expected variant name after '.'");
+                    }
+                } else {
+                    // It's just an identifier - treat as literal variable reference
+                    // For now, we can't distinguish between a variable and an enum
+                    // variant without the dot, so we'll panic
+                    panic!(
+                        "Patterns must be enum variants (Enum.Variant), literals, or wildcards (_)"
+                    );
+                }
+            }
+            // Literal patterns
+            Token::Integer((int_start, int_end)) => {
+                let int_str =
+                    String::from_utf8(self.source.as_bytes()[int_start..int_end].to_vec()).unwrap();
+                let value = int_str.parse::<i64>().unwrap();
+                self.consume();
+                Pattern::Literal {
+                    value: Box::new(Ast::IntegerLiteral(value, start)),
+                    token_range: TokenRange::new(start, self.position),
+                }
+            }
+            Token::String((str_start, str_end)) => {
+                let string_value =
+                    String::from_utf8(self.source.as_bytes()[str_start..str_end].to_vec()).unwrap();
+                self.consume();
+                Pattern::Literal {
+                    value: Box::new(Ast::String(string_value, start)),
+                    token_range: TokenRange::new(start, self.position),
+                }
+            }
+            Token::True => {
+                self.consume();
+                Pattern::Literal {
+                    value: Box::new(Ast::True(start)),
+                    token_range: TokenRange::new(start, self.position),
+                }
+            }
+            Token::False => {
+                self.consume();
+                Pattern::Literal {
+                    value: Box::new(Ast::False(start)),
+                    token_range: TokenRange::new(start, self.position),
+                }
+            }
+            Token::Null => {
+                self.consume();
+                Pattern::Literal {
+                    value: Box::new(Ast::Null(start)),
+                    token_range: TokenRange::new(start, self.position),
+                }
+            }
+            _ => panic!("Unexpected token in pattern: {:?}", self.current_token()),
+        }
+    }
+
+    fn parse_field_patterns(&mut self) -> Vec<FieldPattern> {
+        // Consume '{'
+        self.consume();
+        self.skip_whitespace();
+
+        let mut fields = vec![];
+        while !matches!(self.current_token(), Token::CloseCurly) {
+            let field_start = self.position;
+
+            // Get field name
+            if let Token::Atom((start, end)) = self.current_token() {
+                let field_name =
+                    String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap();
+                self.consume();
+                self.skip_whitespace();
+
+                // Check for rename syntax: field: binding
+                let binding_name = if matches!(self.current_token(), Token::Colon) {
+                    self.consume();
+                    self.skip_whitespace();
+
+                    if let Token::Atom((bind_start, bind_end)) = self.current_token() {
+                        let binding = String::from_utf8(
+                            self.source.as_bytes()[bind_start..bind_end].to_vec(),
+                        )
+                        .unwrap();
+                        self.consume();
+                        self.skip_whitespace();
+                        Some(binding)
+                    } else {
+                        panic!("Expected binding name after ':'");
+                    }
+                } else {
+                    None
+                };
+
+                fields.push(FieldPattern {
+                    field_name,
+                    binding_name,
+                    token_range: TokenRange::new(field_start, self.position),
+                });
+
+                // Allow comma or newline between fields
+                if matches!(self.current_token(), Token::Comma) {
+                    self.consume();
+                    self.skip_whitespace();
+                } else {
+                    self.skip_whitespace();
+                }
+            } else {
+                panic!("Expected field name in pattern");
+            }
+        }
+
+        // Consume '}'
+        self.consume();
+        fields
     }
 
     fn compose_binary_op(&mut self, lhs: Ast, current_token: Token, rhs: Ast) -> Ast {

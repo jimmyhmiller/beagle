@@ -24,7 +24,7 @@ struct Struct {
 }
 
 // TODO: This is a bit gross
-// I definitely need something like 
+// I definitely need something like
 // javascript Symbol
 // or some way to really uniquely
 // identify a type
@@ -120,10 +120,10 @@ fn atom(value) {
 // TODO: Need to make sure type is instance_of Struct
 // but how do I do that in a reasonable way?
 fn instance_of(value, type) {
-    (primitive/is_object(value) && 
+    (primitive/is_object(value) &&
         (
-            primitive/read_struct_id(value) == type.id || 
-            (type.id == -1 && primitive/read_type_id(value) == 2) 
+            primitive/read_struct_id(value) == type.id ||
+            (type.id == -1 && primitive/read_type_id(value) == 2)
         )) || (type.id == -1 && primitive/is_string_constant(value))
 }
 
@@ -169,5 +169,16 @@ struct Error {
     kind       // String: "ParseError", "TypeError", "ArityError", etc.
     message    // String: Human-readable description
     location   // String or null: Optional file:line:column
+}
+
+// Compiler warning information for programmatic inspection
+struct CompilerWarning {
+    kind             // String: warning type identifier
+    file_name        // String: source file path
+    line             // Int: 1-based line number
+    column           // Int: 1-based column number
+    message          // String: human-readable description
+    enum_name        // String or null: for NonExhaustiveMatch warnings
+    missing_variants // PersistentVector or null: for NonExhaustiveMatch warnings
 }
 

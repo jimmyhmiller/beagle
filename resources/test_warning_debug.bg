@@ -1,0 +1,28 @@
+namespace test_warning_debug
+
+import "beagle.primitive" as primitive
+import "beagle.core" as core
+
+fn main() {
+    // Trigger a warning
+    eval("generate_warning_for_test/main()")
+
+    let warnings = core/compiler-warnings()
+    println("Number of warnings:")
+    println(core/length(warnings))
+
+    if core/length(warnings) > 0 {
+        let first = core/get(warnings, 0)
+        println("Got first warning object")
+        println("Type check - is heap object?:")
+        println(primitive/is_object(first))
+
+        // Try to read the struct_id carefully
+        println("About to read struct_id...")
+        let id = primitive/read_struct_id(first)
+        println("struct_id:")
+        println(id)
+    }
+
+    "done"
+}

@@ -1,0 +1,17 @@
+namespace match_debug_test
+
+enum Color {
+    red,
+    green,
+    blue,
+}
+
+fn main() {
+    let color = Color.red
+    println(color)
+    "done"
+}
+
+// Expect
+// Color.red
+// done

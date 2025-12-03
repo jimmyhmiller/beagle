@@ -1,0 +1,24 @@
+namespace match_static_enum_test
+
+enum Color {
+    red,
+    green,
+    blue,
+}
+
+fn main() {
+    let color = Color.red
+
+    let result = match color {
+        Color.red => "RED",
+        Color.green => "GREEN",
+        Color.blue => "BLUE",
+    }
+
+    println(result)
+    "done"
+}
+
+// Expect
+// RED
+// done

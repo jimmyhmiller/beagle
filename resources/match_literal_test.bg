@@ -1,0 +1,18 @@
+namespace match_literal_test
+
+fn main() {
+    let x = 42
+
+    let result = match (x) {
+        0 => "zero",
+        42 => "answer",
+        _ => "other",
+    }
+
+    println(result)
+    "done"
+}
+
+// Expect
+// answer
+// done

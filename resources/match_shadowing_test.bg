@@ -1,0 +1,31 @@
+namespace match_shadowing_test
+
+enum Result {
+    Success { value }
+}
+
+fn main() {
+    // Test that match pattern bindings don't leak out
+    let value = "outer"
+
+    let result = Result.Success { value: "inner" }
+
+    match result {
+        Result.Success { value } => {
+            println("Inside match, value is:")
+            println(value)
+        }
+    }
+
+    println("Outside match, value is:")
+    println(value)
+
+    "done"
+}
+
+// Expect
+// Inside match, value is:
+// inner
+// Outside match, value is:
+// outer
+// done
