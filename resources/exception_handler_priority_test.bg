@@ -1,0 +1,26 @@
+namespace exception_handler_priority_test
+
+import "beagle.core" as core
+
+fn main() {
+    // Set both default and per-thread handlers
+    core/set-default-exception-handler!(fn(e) {
+        println("DEFAULT handler called:")
+        println(e)
+    })
+
+    core/set-thread-exception-handler!(fn(e) {
+        println("THREAD handler called:")
+        println(e)
+    })
+
+    // Throw an uncaught exception
+    // Should call THREAD handler (not default), then panic
+    throw("priority test error")
+}
+
+// NOTE: This test demonstrates that thread handlers take priority over default handlers
+// Output: "THREAD handler called:" and "priority test error"
+// (NOT "DEFAULT handler called")
+// followed by panic message
+// Not suitable for automated testing due to panic

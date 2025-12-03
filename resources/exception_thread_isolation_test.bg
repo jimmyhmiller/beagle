@@ -1,0 +1,41 @@
+namespace exception_thread_isolation_test
+// thread-safe
+
+fn main() {
+    let result1 = atom("unset")
+    let result2 = atom("unset")
+    let done1 = atom(false)
+    let done2 = atom(false)
+
+    thread(fn() {
+        try {
+            throw("thread1 error")
+        } catch (value) {
+            reset!(result1, value)
+            reset!(done1, true)
+        }
+    })
+
+    thread(fn() {
+        try {
+            throw("thread2 error")
+        } catch (value) {
+            reset!(result2, value)
+            reset!(done2, true)
+        }
+    })
+
+    // Wait for both threads to handle their own exceptions before printing
+    while deref(done1) == false || deref(done2) == false {
+        0
+    }
+
+    println(deref(result1))
+    println(deref(result2))
+    "done"
+}
+
+// Expect
+// thread1 error
+// thread2 error
+// done

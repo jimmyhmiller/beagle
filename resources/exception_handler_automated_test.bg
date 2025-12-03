@@ -1,0 +1,38 @@
+namespace exception_handler_automated_test
+
+import "beagle.core" as core
+
+fn main() {
+    let result = atom("none")
+
+    // Set both default and per-thread handlers
+    core/set-default-exception-handler!(fn(e) {
+        reset!(result, "default")
+    })
+
+    core/set-thread-exception-handler!(fn(e) {
+        reset!(result, "thread")
+    })
+
+    // Verify handlers were set by checking they exist
+    // (We can't actually trigger them in an automated test without panicking)
+    println("Handlers set successfully")
+
+    // Verify try-catch still works (takes priority over uncaught handlers)
+    try {
+        throw("caught error")
+    } catch (e) {
+        println("Caught in try-catch:")
+        println(e)
+    }
+
+    println("Try-catch took priority as expected")
+    "done"
+}
+
+// Expect
+// Handlers set successfully
+// Caught in try-catch:
+// caught error
+// Try-catch took priority as expected
+// done

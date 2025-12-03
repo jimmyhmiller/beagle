@@ -1,0 +1,33 @@
+namespace exception_nested_threads_test
+// thread-safe
+
+fn main() {
+    let result = atom("unset")
+    let done = atom(false)
+
+    thread(fn() {
+        try {
+            try {
+                throw("inner error")
+            } catch (value) {
+                let message = "outer: " ++ value
+                throw(message)
+            }
+        } catch (value) {
+            reset!(result, value)
+            reset!(done, true)
+        }
+    })
+
+    // Wait for the thread to propagate through nested try/catch
+    while deref(done) == false {
+        0
+    }
+
+    println(deref(result))
+    "done"
+}
+
+// Expect
+// outer: inner error
+// done

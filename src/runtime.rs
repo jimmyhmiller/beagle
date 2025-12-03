@@ -897,7 +897,7 @@ impl Runtime {
             let compiler_thread = thread::Builder::new()
                 .name("Beagle Compiler".to_string())
                 .spawn(move || {
-                    CompilerThread::new(receiver, args_clone).run();
+                    CompilerThread::new(receiver, args_clone).unwrap().run();
                 })
                 .unwrap();
             self.compiler_channel = Some(sender);
@@ -943,10 +943,10 @@ impl Runtime {
             .as_ref()
             .unwrap()
             .send(CompilerMessage::CompileString(_string.to_string()));
-        if let CompilerResponse::FunctionPointer(pointer) = response {
-            Ok(pointer)
-        } else {
-            Err("Error compiling".into())
+        match response {
+            CompilerResponse::FunctionPointer(pointer) => Ok(pointer),
+            CompilerResponse::CompileError(msg) => Err(msg.into()),
+            _ => Err("Unexpected compiler response".into()),
         }
     }
 
@@ -1426,7 +1426,13 @@ impl Runtime {
         let function_definition =
             self.get_function_by_pointer(BuiltInTypes::untag(function) as *const u8);
         if function_definition.is_none() {
-            panic!("Function not found");
+            unsafe {
+                crate::builtins::throw_runtime_error(
+                    stack_pointer,
+                    "FunctionError",
+                    "Function not found when creating closure".to_string(),
+                );
+            }
         }
         let function_definition = function_definition.unwrap();
         let num_locals = function_definition.number_of_locals;
@@ -1896,12 +1902,19 @@ impl Runtime {
 
     pub fn write_field(
         &self,
+        stack_pointer: usize,
         struct_pointer: usize,
         str_constant_ptr: usize,
         value: usize,
     ) -> usize {
         if BuiltInTypes::untag(struct_pointer) % 8 != 0 {
-            panic!("Not aligned");
+            unsafe {
+                crate::builtins::throw_runtime_error(
+                    stack_pointer,
+                    "TypeError",
+                    "Struct pointer not aligned".to_string(),
+                );
+            }
         }
         let heap_object = HeapObject::from_tagged(struct_pointer);
         let str_constant_ptr: usize = BuiltInTypes::untag(str_constant_ptr);
@@ -1910,11 +1923,19 @@ impl Runtime {
         let struct_type_id = heap_object.get_struct_id();
         let struct_type_id = BuiltInTypes::untag(struct_type_id);
         let struct_value = self.get_struct_by_id(struct_type_id).unwrap();
-        let field_index = struct_value
-            .fields
-            .iter()
-            .position(|f| f == string)
-            .unwrap_or_else(|| panic!("Field {} not found in struct", string));
+        let field_index = struct_value.fields.iter().position(|f| f == string);
+
+        if field_index.is_none() {
+            unsafe {
+                crate::builtins::throw_runtime_error(
+                    stack_pointer,
+                    "FieldError",
+                    format!("Field '{}' not found in struct", string),
+                );
+            }
+        }
+
+        let field_index = field_index.unwrap();
         // Temporary +1 because I was writing size as the first field
         // and I haven't changed that
 
@@ -1959,19 +1980,34 @@ impl Runtime {
         &self.string_constants[value].str
     }
 
-    pub fn get_string(&self, value: usize) -> String {
+    pub fn get_string(&self, stack_pointer: usize, value: usize) -> String {
         let tag = BuiltInTypes::get_kind(value);
         if tag == BuiltInTypes::String {
             self.get_string_literal(value)
         } else if tag == BuiltInTypes::HeapObject {
             let heap_object = HeapObject::from_tagged(value);
             if heap_object.get_type_id() != 2 {
-                panic!("Not a string");
+                unsafe {
+                    crate::builtins::throw_runtime_error(
+                        stack_pointer,
+                        "TypeError",
+                        format!(
+                            "Expected string, got heap object with type_id {}",
+                            heap_object.get_type_id()
+                        ),
+                    );
+                }
             }
             let bytes = heap_object.get_string_bytes();
             unsafe { std::str::from_utf8_unchecked(bytes).to_string() }
         } else {
-            panic!("Not a string");
+            unsafe {
+                crate::builtins::throw_runtime_error(
+                    stack_pointer,
+                    "TypeError",
+                    format!("Expected string, got {:?}", tag),
+                );
+            }
         }
     }
 
@@ -1990,14 +2026,29 @@ impl Runtime {
         } else if tag == BuiltInTypes::HeapObject {
             let heap_object = HeapObject::from_tagged(string);
             if heap_object.get_type_id() != 2 {
-                panic!("Not a string");
+                unsafe {
+                    crate::builtins::throw_runtime_error(
+                        stack_pointer,
+                        "TypeError",
+                        format!(
+                            "Expected string for substring, got heap object with type_id {}",
+                            heap_object.get_type_id()
+                        ),
+                    );
+                }
             }
             let bytes = heap_object.get_string_bytes();
             let string = unsafe { std::str::from_utf8_unchecked(bytes) };
             let string = string[start..start + length].to_string();
             self.allocate_string(stack_pointer, string)
         } else {
-            panic!("Not a string");
+            unsafe {
+                crate::builtins::throw_runtime_error(
+                    stack_pointer,
+                    "TypeError",
+                    format!("Expected string for substring, got {:?}", tag),
+                );
+            }
         }
     }
 

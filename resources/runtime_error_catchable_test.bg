@@ -1,0 +1,23 @@
+namespace runtime_error_catchable_test
+
+fn main() {
+    // Test: Try to concatenate a number as if it were a string
+    // This should throw a TypeError that we can catch
+    try {
+        let not_a_string = 42
+        let result = not_a_string ++ " world"
+        println("Should not reach here")
+    } catch (e) {
+        println("Caught TypeError successfully")
+        // Note: Can't access e.kind yet due to struct_id lookup issue
+        // That will be fixed when we address the Error struct implementation
+    }
+
+    println("Test completed")
+    "done"
+}
+
+// Expect
+// Caught TypeError successfully
+// Test completed
+// done

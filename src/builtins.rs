@@ -148,9 +148,9 @@ pub unsafe extern "C" fn to_string(stack_pointer: usize, value: usize) -> usize 
         .into()
 }
 
-pub unsafe extern "C" fn to_number(_stack_pointer: usize, value: usize) -> usize {
+pub unsafe extern "C" fn to_number(stack_pointer: usize, value: usize) -> usize {
     let runtime = get_runtime().get_mut();
-    let string = runtime.get_string(value);
+    let string = runtime.get_string(stack_pointer, value);
     if string.contains(".") {
         todo!()
     } else {
@@ -249,8 +249,8 @@ extern "C" fn get_string_length(string: usize) -> usize {
 extern "C" fn string_concat(stack_pointer: usize, a: usize, b: usize) -> usize {
     print_call_builtin(get_runtime().get(), "string_concat");
     let runtime = get_runtime().get_mut();
-    let a = runtime.get_string(a);
-    let b = runtime.get_string(b);
+    let a = runtime.get_string(stack_pointer, a);
+    let b = runtime.get_string(stack_pointer, b);
     let result = a + &b;
     runtime
         .allocate_string(stack_pointer, result)
@@ -288,10 +288,16 @@ extern "C" fn make_closure(
     print_call_builtin(get_runtime().get(), "make_closure");
     let runtime = get_runtime().get_mut();
     if BuiltInTypes::get_kind(function) != BuiltInTypes::Function {
-        panic!(
-            "Expected function, got {:?}",
-            BuiltInTypes::get_kind(function)
-        );
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "TypeError",
+                format!(
+                    "Expected function, got {:?}",
+                    BuiltInTypes::get_kind(function)
+                ),
+            );
+        }
     }
 
     assert!(matches!(
@@ -361,13 +367,14 @@ extern "C" fn equal(a: usize, b: usize) -> usize {
 }
 
 extern "C" fn write_field(
+    stack_pointer: usize,
     struct_pointer: usize,
     str_constant_ptr: usize,
     property_cache_location: usize,
     value: usize,
 ) -> usize {
     let runtime = get_runtime().get_mut();
-    let index = runtime.write_field(struct_pointer, str_constant_ptr, value);
+    let index = runtime.write_field(stack_pointer, struct_pointer, str_constant_ptr, value);
     let type_id = HeapObject::from_tagged(struct_pointer).get_struct_id();
     let buffer = unsafe { from_raw_parts_mut(property_cache_location as *mut usize, 2) };
     buffer[0] = type_id;
@@ -470,7 +477,7 @@ pub unsafe extern "C" fn gc_add_root(old: usize) -> usize {
 }
 
 #[allow(unused)]
-pub unsafe extern "C" fn new_thread(function: usize) -> usize {
+pub unsafe extern "C" fn new_thread(stack_pointer: usize, function: usize) -> usize {
     #[cfg(feature = "thread-safe")]
     {
         let runtime = get_runtime().get_mut();
@@ -479,7 +486,13 @@ pub unsafe extern "C" fn new_thread(function: usize) -> usize {
     }
     #[cfg(not(feature = "thread-safe"))]
     {
-        panic!("Threads are not supported in this build");
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "ThreadError",
+                "Threads are not supported in this build".to_string(),
+            );
+        }
     }
 }
 
@@ -658,60 +671,69 @@ pub unsafe extern "C" fn load_library(name: usize) -> usize {
     }
 }
 
-pub fn map_ffi_type(runtime: &Runtime, value: usize) -> Type {
+pub fn map_ffi_type(runtime: &Runtime, value: usize) -> Result<Type, String> {
     let heap_object = HeapObject::from_tagged(value);
     let struct_id = BuiltInTypes::untag(heap_object.get_struct_id());
-    let struct_info = runtime
-        .get_struct_by_id(struct_id)
-        .unwrap_or_else(|| panic!("Could not find struct with id {}", struct_id));
+    let struct_info = runtime.get_struct_by_id(struct_id);
+
+    if struct_info.is_none() {
+        return Err(format!("Could not find struct with id {}", struct_id));
+    }
+
+    let struct_info = struct_info.unwrap();
     let name = struct_info.name.as_str().split_once("/").unwrap().1;
     match name {
-        "Type.U8" => Type::u8(),
-        "Type.U16" => Type::u16(),
-        "Type.U32" => Type::u32(),
-        "Type.U64" => Type::u64(),
-        "Type.I32" => Type::i32(),
-        "Type.Pointer" => Type::pointer(),
-        "Type.MutablePointer" => Type::pointer(),
-        "Type.String" => Type::pointer(),
-        "Type.Void" => Type::void(),
+        "Type.U8" => Ok(Type::u8()),
+        "Type.U16" => Ok(Type::u16()),
+        "Type.U32" => Ok(Type::u32()),
+        "Type.U64" => Ok(Type::u64()),
+        "Type.I32" => Ok(Type::i32()),
+        "Type.Pointer" => Ok(Type::pointer()),
+        "Type.MutablePointer" => Ok(Type::pointer()),
+        "Type.String" => Ok(Type::pointer()),
+        "Type.Void" => Ok(Type::void()),
         "Type.Structure" => {
             let types = heap_object.get_field(0);
             let types = array_to_vec(persistent_vector_to_array(runtime, types));
-            let fields: Vec<Type> = types.iter().map(|t| map_ffi_type(runtime, *t)).collect();
-            Type::structure(fields)
+            let fields: Result<Vec<Type>, String> =
+                types.iter().map(|t| map_ffi_type(runtime, *t)).collect();
+            Ok(Type::structure(fields?))
         }
-        _ => panic!("Unknown type: {}", name),
+        _ => Err(format!("Unknown type: {}", name)),
     }
 }
 
-pub fn map_beagle_type_to_ffi_type(runtime: &Runtime, value: usize) -> FFIType {
+pub fn map_beagle_type_to_ffi_type(runtime: &Runtime, value: usize) -> Result<FFIType, String> {
     let heap_object = HeapObject::from_tagged(value);
     let struct_id = BuiltInTypes::untag(heap_object.get_struct_id());
-    let struct_info = runtime
-        .get_struct_by_id(struct_id)
-        .unwrap_or_else(|| panic!("Could not find struct with id {}", struct_id));
+    let struct_info = runtime.get_struct_by_id(struct_id);
+
+    if struct_info.is_none() {
+        return Err(format!("Could not find struct with id {}", struct_id));
+    }
+
+    let struct_info = struct_info.unwrap();
     let name = struct_info.name.as_str().split_once("/").unwrap().1;
     match name {
-        "Type.U8" => FFIType::U8,
-        "Type.U16" => FFIType::U16,
-        "Type.U32" => FFIType::U32,
-        "Type.U64" => FFIType::U64,
-        "Type.I32" => FFIType::I32,
-        "Type.Pointer" => FFIType::Pointer,
-        "Type.MutablePointer" => FFIType::MutablePointer,
-        "Type.String" => FFIType::String,
-        "Type.Void" => FFIType::Void,
+        "Type.U8" => Ok(FFIType::U8),
+        "Type.U16" => Ok(FFIType::U16),
+        "Type.U32" => Ok(FFIType::U32),
+        "Type.U64" => Ok(FFIType::U64),
+        "Type.I32" => Ok(FFIType::I32),
+        "Type.Pointer" => Ok(FFIType::Pointer),
+        "Type.MutablePointer" => Ok(FFIType::MutablePointer),
+        "Type.String" => Ok(FFIType::String),
+        "Type.Void" => Ok(FFIType::Void),
         "Type.Structure" => {
             let types = heap_object.get_field(0);
             let types = array_to_vec(persistent_vector_to_array(runtime, types));
-            let fields: Vec<FFIType> = types
+            let fields: Result<Vec<FFIType>, String> = types
                 .iter()
                 .map(|t| map_beagle_type_to_ffi_type(runtime, *t))
                 .collect();
-            FFIType::Structure(fields)
+            Ok(FFIType::Structure(fields?))
         }
-        _ => panic!("Unknown type: {}", name),
+        _ => Err(format!("Unknown type: {}", name)),
     }
 }
 
@@ -734,6 +756,7 @@ fn array_to_vec(object: HeapObject) -> Vec<usize> {
 // a rust vector and then map the types
 
 pub extern "C" fn get_function(
+    stack_pointer: usize,
     library_struct: usize,
     function_name: usize,
     types: usize,
@@ -762,16 +785,39 @@ pub extern "C" fn get_function(
 
     let types: Vec<usize> = array_to_vec(persistent_vector_to_array(runtime, types));
 
-    let lib_ffi_types: Vec<Type> = types.iter().map(|t| map_ffi_type(runtime, *t)).collect();
+    let lib_ffi_types: Result<Vec<Type>, String> =
+        types.iter().map(|t| map_ffi_type(runtime, *t)).collect();
+    let lib_ffi_types = match lib_ffi_types {
+        Ok(types) => types,
+        Err(e) => unsafe {
+            throw_runtime_error(stack_pointer, "FFIError", e);
+        },
+    };
     let number_of_arguments = lib_ffi_types.len();
 
-    let beagle_ffi_types = types
+    let beagle_ffi_types: Result<Vec<FFIType>, String> = types
         .iter()
         .map(|t| map_beagle_type_to_ffi_type(runtime, *t))
-        .collect::<Vec<_>>();
+        .collect();
+    let beagle_ffi_types = match beagle_ffi_types {
+        Ok(types) => types,
+        Err(e) => unsafe {
+            throw_runtime_error(stack_pointer, "FFIError", e);
+        },
+    };
 
-    let lib_ffi_return_type = map_ffi_type(runtime, return_type);
-    let ffi_return_type = map_beagle_type_to_ffi_type(runtime, return_type);
+    let lib_ffi_return_type = match map_ffi_type(runtime, return_type) {
+        Ok(t) => t,
+        Err(e) => unsafe {
+            throw_runtime_error(stack_pointer, "FFIError", e);
+        },
+    };
+    let ffi_return_type = match map_beagle_type_to_ffi_type(runtime, return_type) {
+        Ok(t) => t,
+        Err(e) => unsafe {
+            throw_runtime_error(stack_pointer, "FFIError", e);
+        },
+    };
 
     let cif = Cif::new(lib_ffi_types, lib_ffi_return_type.clone());
 
@@ -845,13 +891,21 @@ pub unsafe extern "C" fn call_ffi_info(
             match kind {
                 BuiltInTypes::Null => {
                     if ffi_type != &FFIType::Pointer {
-                        panic!("Expected pointer, got {:?}", ffi_type);
+                        throw_runtime_error(
+                            stack_pointer,
+                            "FFIError",
+                            format!("Expected pointer type, got {:?}", ffi_type),
+                        );
                     }
                     argument_pointers.push(arg(&std::ptr::null_mut::<c_void>()));
                 }
                 BuiltInTypes::String => {
                     if ffi_type != &FFIType::String {
-                        panic!("Expected string, got {:?}", ffi_type);
+                        throw_runtime_error(
+                            stack_pointer,
+                            "FFIError",
+                            format!("Expected string type, got {:?}", ffi_type),
+                        );
                     }
                     let string = runtime.get_string_literal(*argument);
                     let string = runtime.memory.write_c_string(string);
@@ -905,7 +959,11 @@ pub unsafe extern "C" fn call_ffi_info(
                     | FFIType::String
                     | FFIType::Void
                     | FFIType::Structure(_) => {
-                        panic!("Expected pointer, got {:?}", ffi_type);
+                        throw_runtime_error(
+                            stack_pointer,
+                            "FFIError",
+                            format!("Expected integer for FFI type {:?}", ffi_type),
+                        );
                     }
                 },
                 BuiltInTypes::HeapObject => {
@@ -927,22 +985,30 @@ pub unsafe extern "C" fn call_ffi_info(
                             argument_pointers.push(arg(pointer));
                         }
                         FFIType::String => {
-                            let string = runtime.get_string(*argument);
+                            let string = runtime.get_string(stack_pointer, *argument);
                             let string = runtime.memory.write_c_string(string);
                             let pointer = runtime.memory.write_pointer(string as usize);
                             argument_pointers.push(arg(pointer));
                         }
                         _ => {
-                            panic!(
-                                "Got HeapObject. Expected matching type of pointer or structure or string but got {:?}",
-                                ffi_type
+                            throw_runtime_error(
+                                stack_pointer,
+                                "FFIError",
+                                format!(
+                                    "Got HeapObject but expected matching FFI type, got {:?}",
+                                    ffi_type
+                                ),
                             );
                         }
                     }
                 }
                 _ => {
                     runtime.print(*argument);
-                    panic!("Unsupported type: {:?}", kind)
+                    throw_runtime_error(
+                        stack_pointer,
+                        "FFIError",
+                        format!("Unsupported FFI type: {:?}", kind),
+                    );
                 }
             }
         }
@@ -1172,13 +1238,18 @@ unsafe extern "C" fn ffi_get_string(
 }
 
 unsafe extern "C" fn ffi_create_array(
-    _stack_pointer: usize,
+    stack_pointer: usize,
     ffi_type: usize,
     array: usize,
 ) -> usize {
     unsafe {
         let runtime = get_runtime().get_mut();
-        let ffi_type = map_beagle_type_to_ffi_type(runtime, ffi_type);
+        let ffi_type = match map_beagle_type_to_ffi_type(runtime, ffi_type) {
+            Ok(t) => t,
+            Err(e) => {
+                throw_runtime_error(stack_pointer, "FFIError", e);
+            }
+        };
         let array = HeapObject::from_tagged(array);
         let fields = array.get_fields();
         let size = fields.len();
@@ -1200,11 +1271,17 @@ unsafe extern "C" fn ffi_create_array(
                     todo!()
                 }
                 FFIType::String => {
-                    let string = runtime.get_string(*field);
+                    let string = runtime.get_string(stack_pointer, *field);
                     let string_pointer = runtime.memory.write_c_string(string);
                     buffer.push(string_pointer);
                 }
-                FFIType::Void => panic!("Cannot create array of void"),
+                FFIType::Void => {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "FFIError",
+                        "Cannot create array of void type".to_string(),
+                    );
+                }
             }
         }
         // null terminate array
@@ -1233,26 +1310,52 @@ extern "C" fn wait_for_input(stack_pointer: usize) -> usize {
 
 extern "C" fn read_full_file(stack_pointer: usize, file_name: usize) -> usize {
     let runtime = get_runtime().get_mut();
-    let file_name = runtime.get_string(file_name);
+    let file_name = runtime.get_string(stack_pointer, file_name);
     let file = std::fs::read_to_string(file_name).unwrap();
     let string = runtime.allocate_string(stack_pointer, file);
     string.unwrap().into()
 }
 
-extern "C" fn eval(code: usize) -> usize {
+extern "C" fn eval(stack_pointer: usize, code: usize) -> usize {
     let runtime = get_runtime().get_mut();
     let code = match BuiltInTypes::get_kind(code) {
         BuiltInTypes::String => runtime.get_string_literal(code),
         BuiltInTypes::HeapObject => {
             let code = HeapObject::from_tagged(code);
-            assert!(code.get_header().type_id == 2);
+            if code.get_header().type_id != 2 {
+                unsafe {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "TypeError",
+                        format!(
+                            "Expected string, got heap object with type_id {}",
+                            code.get_header().type_id
+                        ),
+                    );
+                }
+            }
             let bytes = code.get_string_bytes();
             let code = std::str::from_utf8(bytes).unwrap();
             code.to_string()
         }
-        _ => panic!("Expected string, got {:?}", BuiltInTypes::get_kind(code)),
+        _ => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "TypeError",
+                format!("Expected string, got {:?}", BuiltInTypes::get_kind(code)),
+            );
+        },
     };
-    let result = runtime.compile_string(&code).unwrap();
+    let result = match runtime.compile_string(&code) {
+        Ok(result) => result,
+        Err(e) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "CompileError",
+                format!("Compilation failed: {}", e),
+            );
+        },
+    };
     mem::forget(code);
     if result == 0 {
         return BuiltInTypes::null_value() as usize;
@@ -1291,7 +1394,7 @@ pub extern "C" fn register_extension(
     BuiltInTypes::null_value() as usize
 }
 
-extern "C" fn hash(value: usize) -> usize {
+extern "C" fn hash(stack_pointer: usize, value: usize) -> usize {
     print_call_builtin(get_runtime().get(), "hash");
     let tag = BuiltInTypes::get_kind(value);
     match tag {
@@ -1323,7 +1426,13 @@ extern "C" fn hash(value: usize) -> usize {
             string.hash(&mut s);
             BuiltInTypes::Int.tag(s.finish() as isize) as usize
         }
-        _ => panic!("Expected int or heap object, got {:?}", tag),
+        _ => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "TypeError",
+                format!("Expected int or heap object for hash, got {:?}", tag),
+            );
+        },
     }
 }
 
@@ -1355,7 +1464,7 @@ extern "C" fn many_args(
     BuiltInTypes::Int.tag(result as isize) as usize
 }
 
-extern "C" fn pop_count(value: usize) -> usize {
+extern "C" fn pop_count(stack_pointer: usize, value: usize) -> usize {
     print_call_builtin(get_runtime().get(), "pop_count");
     let tag = BuiltInTypes::get_kind(value);
     match tag {
@@ -1364,7 +1473,13 @@ extern "C" fn pop_count(value: usize) -> usize {
             let count = value.count_ones();
             BuiltInTypes::Int.tag(count as isize) as usize
         }
-        _ => panic!("Expected int, got {:?}", tag),
+        _ => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "TypeError",
+                format!("Expected int, got {:?}", tag),
+            );
+        },
     }
 }
 
@@ -1494,6 +1609,84 @@ pub unsafe extern "C" fn set_default_exception_handler(handler_fn: usize) {
     runtime.set_default_exception_handler(handler_fn);
 }
 
+/// Creates an Error struct on the heap
+/// Returns tagged heap pointer to Error { kind, message, location }
+pub unsafe extern "C" fn create_error(
+    stack_pointer: usize,
+    kind_str: usize,     // Tagged string
+    message_str: usize,  // Tagged string
+    location_str: usize, // Tagged string or null
+) -> usize {
+    print_call_builtin(get_runtime().get(), "create_error");
+
+    let runtime = get_runtime().get_mut();
+
+    // Get the Error struct definition from beagle.core namespace
+    let (struct_id, _error_struct) = runtime
+        .get_struct("beagle.core/Error")
+        .expect("Error struct not found - make sure standard-library/std.bg is loaded");
+
+    // Allocate the Error struct on the heap (3 fields: kind, message, location)
+    let error_obj = runtime
+        .allocate(3, stack_pointer, BuiltInTypes::HeapObject)
+        .expect("Failed to allocate Error struct");
+
+    // Set the struct ID by writing to the header's type_data field
+    // We need to preserve the size field that was set during allocation
+    let heap_obj = HeapObject::from_tagged(error_obj);
+    let untagged = heap_obj.untagged();
+    let header_ptr = untagged as *mut usize;
+
+    // Write struct_id to type_data field (bytes 3-6) without changing other fields
+    // Header layout (little-endian):
+    //   Bits 0-7:   Byte 0 (flags)
+    //   Bits 8-15:  Byte 1 (padding)
+    //   Bits 16-23: Byte 2 (size) - MUST PRESERVE
+    //   Bits 24-55: Bytes 3-6 (type_data) - WRITE HERE
+    //   Bits 56-63: Byte 7 (type_id) - MUST PRESERVE
+    unsafe {
+        let current_header = *header_ptr;
+        let mask = 0x00FFFFFFFF000000; // Mask for bits 24-55 (bytes 3-6, the type_data field)
+        let shifted_type_id = (struct_id as usize) << 24; // Shift to bit 24
+        let new_header = (current_header & !mask) | shifted_type_id;
+        *header_ptr = new_header;
+    }
+
+    // Fill in the fields using write_field: kind, message, location (in order)
+    heap_obj.write_field(0, kind_str);
+    heap_obj.write_field(1, message_str);
+    heap_obj.write_field(2, location_str);
+
+    error_obj
+}
+
+/// Helper to throw a runtime error with kind and message strings
+/// This is a convenience function for Rust code to throw structured exceptions
+pub unsafe fn throw_runtime_error(stack_pointer: usize, kind: &str, message: String) -> ! {
+    // Allocate strings and create error in a scoped block to avoid aliasing
+    let (kind_str, message_str) = {
+        let runtime = get_runtime().get_mut();
+        let kind_str = runtime
+            .allocate_string(stack_pointer, kind.to_string())
+            .expect("Failed to allocate kind string")
+            .into();
+        let message_str = runtime
+            .allocate_string(stack_pointer, message)
+            .expect("Failed to allocate message string")
+            .into();
+        (kind_str, message_str)
+    };
+    // Runtime borrow is dropped here
+
+    let null_location = BuiltInTypes::Null.tag(0) as usize;
+
+    // Create the Error struct and throw it
+    unsafe {
+        let error = create_error(stack_pointer, kind_str, message_str, null_location);
+        throw_exception(stack_pointer, error);
+    }
+}
+
 // It is very important that this isn't inlined
 // because other code is expecting that
 // If we inline, we need to remove a skip frame
@@ -1564,8 +1757,8 @@ impl Runtime {
         self.add_builtin_function(
             "beagle.builtin/write_field",
             write_field as *const u8,
-            false,
-            3,
+            true, // Now takes stack_pointer
+            5,    // stack_pointer + 4 original args
         )?;
 
         self.add_builtin_function(
@@ -1617,6 +1810,13 @@ impl Runtime {
             1, // handler_fn
         )?;
 
+        self.add_builtin_function(
+            "beagle.builtin/create_error",
+            create_error as *const u8,
+            true,
+            4, // stack_pointer, kind_str, message_str, location_str
+        )?;
+
         self.add_builtin_function("beagle.builtin/assert!", placeholder as *const u8, false, 0)?;
 
         self.add_builtin_function("beagle.core/gc", gc as *const u8, true, 1)?;
@@ -1635,7 +1835,7 @@ impl Runtime {
             1,
         )?;
 
-        self.add_builtin_function("beagle.core/thread", new_thread as *const u8, false, 1)?;
+        self.add_builtin_function("beagle.core/thread", new_thread as *const u8, true, 2)?;
 
         self.add_builtin_function(
             "beagle.ffi/load_library",
@@ -1647,8 +1847,8 @@ impl Runtime {
         self.add_builtin_function(
             "beagle.ffi/get_function",
             get_function as *const u8,
-            false,
-            4,
+            true,
+            5,
         )?;
 
         self.add_builtin_function(
@@ -1734,7 +1934,7 @@ impl Runtime {
             1,
         )?;
 
-        self.add_builtin_function("beagle.core/eval", eval as *const u8, false, 1)?;
+        self.add_builtin_function("beagle.core/eval", eval as *const u8, true, 2)?;
 
         self.add_builtin_function("beagle.core/sleep", sleep as *const u8, false, 1)?;
 
@@ -1768,9 +1968,9 @@ impl Runtime {
 
         self.add_builtin_function("beagle.core/substring", substring as *const u8, true, 4)?;
 
-        self.add_builtin_function("beagle.builtin/hash", hash as *const u8, false, 1)?;
+        self.add_builtin_function("beagle.builtin/hash", hash as *const u8, true, 2)?;
 
-        self.add_builtin_function("beagle.builtin/pop_count", pop_count as *const u8, false, 1)?;
+        self.add_builtin_function("beagle.builtin/pop_count", pop_count as *const u8, true, 2)?;
 
         self.add_builtin_function(
             "beagle.core/read_full_file",

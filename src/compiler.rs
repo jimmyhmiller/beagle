@@ -24,6 +24,33 @@ use std::{
     sync::mpsc::{self, Receiver, SyncSender},
 };
 
+#[derive(Debug, Clone)]
+pub enum CompileError {
+    RegisterAllocation(String),
+    LabelLookup { label: String },
+    StructResolution { struct_name: String },
+    PropertyCacheFull,
+    MemoryMapping(String),
+}
+
+impl fmt::Display for CompileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CompileError::RegisterAllocation(msg) => {
+                write!(f, "Register allocation error: {}", msg)
+            }
+            CompileError::LabelLookup { label } => write!(f, "Could not find label: {}", label),
+            CompileError::StructResolution { struct_name } => {
+                write!(f, "Cannot resolve struct: {}", struct_name)
+            }
+            CompileError::PropertyCacheFull => write!(f, "Property look up cache is full"),
+            CompileError::MemoryMapping(msg) => write!(f, "Memory mapping error: {}", msg),
+        }
+    }
+}
+
+impl Error for CompileError {}
+
 pub struct Compiler {
     pub code_allocator: CodeAllocator,
     pub property_look_up_cache: MmapMut,
@@ -35,20 +62,21 @@ pub struct Compiler {
 }
 
 impl Compiler {
-    pub fn reset(&mut self) {
+    pub fn reset(&mut self) -> Result<(), CompileError> {
         self.code_allocator = CodeAllocator::new();
         self.property_look_up_cache = MmapOptions::new(MmapOptions::page_size())
-            .unwrap()
+            .map_err(|e| CompileError::MemoryMapping(format!("Failed to create mmap: {}", e)))?
             .map_mut()
-            .unwrap()
+            .map_err(|e| CompileError::MemoryMapping(format!("Failed to map mmap: {}", e)))?
             .make_mut()
-            .unwrap_or_else(|(_map, e)| {
-                panic!("Failed to make mmap mutable: {}", e);
-            });
+            .map_err(|(_map, e)| {
+                CompileError::MemoryMapping(format!("Failed to make mmap mutable: {}", e))
+            })?;
         self.property_look_up_cache_offset = 0;
         self.stack_map = StackMap::new();
         self.pause_atom_ptr = None;
         self.compiled_file_cache.clear();
+        Ok(())
     }
 
     pub fn get_pause_atom(&self) -> usize {
@@ -217,9 +245,9 @@ impl Compiler {
         Value::StringConstantPtr(offset)
     }
 
-    pub fn add_property_lookup(&mut self) -> usize {
+    pub fn add_property_lookup(&mut self) -> Result<usize, CompileError> {
         if self.property_look_up_cache_offset >= self.property_look_up_cache.len() {
-            panic!("Property look up cache is full");
+            return Err(CompileError::PropertyCacheFull);
         }
         let location = unsafe {
             self.property_look_up_cache
@@ -227,7 +255,7 @@ impl Compiler {
                 .add(self.property_look_up_cache_offset) as usize
         };
         self.property_look_up_cache_offset += 2 * 8;
-        location
+        Ok(location)
     }
 
     // TODO: All of this seems bad
@@ -621,6 +649,7 @@ pub enum CompilerResponse {
     Done,
     FunctionsToRun(Vec<String>),
     FunctionPointer(usize),
+    CompileError(String),
 }
 
 pub struct CompilerThread {
@@ -632,18 +661,20 @@ impl CompilerThread {
     pub fn new(
         channel: BlockingReceiver<CompilerMessage, CompilerResponse>,
         command_line_arguments: CommandLineArguments,
-    ) -> Self {
-        CompilerThread {
+    ) -> Result<Self, CompileError> {
+        Ok(CompilerThread {
             compiler: Compiler {
                 code_allocator: CodeAllocator::new(),
                 property_look_up_cache: MmapOptions::new(MmapOptions::page_size())
-                    .unwrap()
+                    .map_err(|e| {
+                        CompileError::MemoryMapping(format!("Failed to create mmap: {}", e))
+                    })?
                     .map_mut()
-                    .unwrap()
+                    .map_err(|e| CompileError::MemoryMapping(format!("Failed to map mmap: {}", e)))?
                     .make_mut()
-                    .unwrap_or_else(|(_map, e)| {
-                        panic!("Failed to make mmap mutable: {}", e);
-                    }),
+                    .map_err(|(_map, e)| {
+                        CompileError::MemoryMapping(format!("Failed to make mmap mutable: {}", e))
+                    })?,
                 property_look_up_cache_offset: 0,
                 command_line_arguments: command_line_arguments.clone(),
                 stack_map: StackMap::new(),
@@ -651,7 +682,7 @@ impl CompilerThread {
                 compiled_file_cache: HashSet::new(),
             },
             channel,
-        }
+        })
     }
 
     pub fn run(&mut self) {
@@ -660,8 +691,29 @@ impl CompilerThread {
             match result {
                 Ok((message, work_done)) => match message {
                     CompilerMessage::CompileString(string) => {
-                        let pointer = self.compiler.compile_string(&string).unwrap();
-                        work_done.mark_done(CompilerResponse::FunctionPointer(pointer));
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            self.compiler.compile_string(&string)
+                        }));
+
+                        match result {
+                            Ok(Ok(pointer)) => {
+                                work_done.mark_done(CompilerResponse::FunctionPointer(pointer));
+                            }
+                            Ok(Err(e)) => {
+                                work_done
+                                    .mark_done(CompilerResponse::CompileError(format!("{}", e)));
+                            }
+                            Err(panic_err) => {
+                                let error_msg = if let Some(s) = panic_err.downcast_ref::<&str>() {
+                                    s.to_string()
+                                } else if let Some(s) = panic_err.downcast_ref::<String>() {
+                                    s.clone()
+                                } else {
+                                    "Unknown compilation error".to_string()
+                                };
+                                work_done.mark_done(CompilerResponse::CompileError(error_msg));
+                            }
+                        }
                     }
                     CompilerMessage::CompileFile(file_name) => {
                         let top_levels = self.compiler.compile(&file_name).unwrap();
@@ -684,7 +736,7 @@ impl CompilerThread {
                         work_done.mark_done(CompilerResponse::Done);
                     }
                     CompilerMessage::Reset => {
-                        self.compiler.reset();
+                        self.compiler.reset().unwrap();
                         work_done.mark_done(CompilerResponse::Done);
                     }
                     CompilerMessage::CompileProtocolMethod(
