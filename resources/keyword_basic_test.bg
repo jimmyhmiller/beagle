@@ -1,0 +1,18 @@
+namespace keyword_basic_test
+
+fn main() {
+    let kw1 = :hello
+    let kw2 = :world
+    let kw3 = :hello
+
+    println(kw1)
+    println(kw2)
+    println(kw3)
+    "done"
+}
+
+// Expect
+// :hello
+// :world
+// :hello
+// done

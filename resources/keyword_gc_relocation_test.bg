@@ -1,0 +1,56 @@
+namespace keyword_gc_relocation_test
+
+struct TreeNode {
+    left
+    right
+}
+
+fn allocate_garbage() {
+    let t1 = TreeNode { left: 1, right: 2 }
+    let t2 = TreeNode { left: 3, right: 4 }
+    let t3 = TreeNode { left: 5, right: 6 }
+    t3
+}
+
+fn main() {
+    // Allocate keywords before GC
+    let kw1 = :before_gc
+    let kw2 = string->keyword("dynamic")
+
+    // Create and verify keyword equality before GC
+    println(kw1 == :before_gc)
+    println(kw2 == string->keyword("dynamic"))
+
+    // Allocate lots of garbage to potentially trigger relocation
+    allocate_garbage()
+    allocate_garbage()
+    allocate_garbage()
+
+    // Force a GC cycle
+    gc();
+
+    // Verify keywords still work after GC (cached pointers should be updated)
+    let kw3 = :before_gc
+    let kw4 = string->keyword("dynamic")
+
+    println(kw1 == kw3)
+    println(kw2 == kw4)
+    println(kw1 == :before_gc)
+    println(kw2 == string->keyword("dynamic"))
+
+    // Allocate new keyword after GC
+    let kw5 = :after_gc
+    println(kw5 == :after_gc)
+
+    "done"
+}
+
+// Expect
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// done

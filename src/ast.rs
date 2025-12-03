@@ -135,6 +135,7 @@ pub enum Ast {
     FloatLiteral(String, TokenPosition),
     Identifier(String, TokenPosition),
     String(String, TokenPosition),
+    Keyword(String, TokenPosition),
     True(TokenPosition),
     False(TokenPosition),
     StructCreation {
@@ -339,6 +340,7 @@ impl Ast {
             | Ast::FloatLiteral(_, position)
             | Ast::Identifier(_, position)
             | Ast::String(_, position)
+            | Ast::Keyword(_, position)
             | Ast::True(position)
             | Ast::False(position)
             | Ast::Null(position) => TokenRange::new(*position, *position),
@@ -412,6 +414,7 @@ impl Ast {
     pub fn get_string(&self) -> String {
         match self {
             Ast::String(str, _) => str.replace("\"", ""),
+            Ast::Keyword(str, _) => str.to_string(),
             Ast::Identifier(str, _) => str.to_string(),
             _ => panic!("Expected string"),
         }
@@ -2049,6 +2052,14 @@ impl AstCompiler<'_> {
                 let constant_ptr = self.string_constant(str);
                 self.ir.load_string_constant(constant_ptr)
             }
+            Ast::Keyword(keyword_text, _) => {
+                let constant_ptr = self.keyword_constant(keyword_text);
+                let constant_ptr = self.ir.assign_new(constant_ptr);
+                self.call_builtin(
+                    "beagle.builtin/load_keyword_constant_runtime",
+                    vec![constant_ptr.into()],
+                )
+            }
             Ast::True(_) => Value::True,
             Ast::False(_) => Value::False,
             Ast::Null(_) => Value::Null,
@@ -2430,6 +2441,10 @@ impl AstCompiler<'_> {
         self.compiler.add_string(ir::StringValue { str })
     }
 
+    pub fn keyword_constant(&mut self, keyword_text: String) -> Value {
+        self.compiler.add_keyword(keyword_text)
+    }
+
     fn create_new_environment(&mut self) {
         self.environment_stack.push(Environment::new());
     }
@@ -2800,6 +2815,7 @@ impl AstCompiler<'_> {
             | Ast::FloatLiteral(_, _)
             | Ast::Identifier(_, _)
             | Ast::String(_, _)
+            | Ast::Keyword(_, _)
             | Ast::True(_)
             | Ast::False(_)
             | Ast::Null(_)

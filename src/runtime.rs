@@ -473,6 +473,42 @@ impl Memory {
         Ok(BuiltInTypes::HeapObject.tagged(pointer))
     }
 
+    fn allocate_keyword(&mut self, bytes: &[u8], pointer: usize) -> Result<Tagged, Box<dyn Error>> {
+        let mut heap_object = HeapObject::from_tagged(pointer);
+
+        // Compute stable hash based on keyword text
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        let hash = hasher.finish();
+
+        // Layout: [hash (8 bytes)][keyword text bytes]
+        // Size includes hash word + text words
+        let text_words = (bytes.len() + 7) / 8; // Round up
+        let total_words = 1 + text_words; // 1 for hash + text
+
+        heap_object.writer_header_direct(Header {
+            type_id: 3,
+            type_data: bytes.len() as u32, // Store text length
+            size: total_words as u8,
+            opaque: true,
+            marked: false,
+        });
+
+        // Write hash as first 8 bytes, then the text
+        let mut data = Vec::with_capacity(total_words * 8);
+        data.extend_from_slice(&hash.to_le_bytes());
+        data.extend_from_slice(bytes);
+        // Pad to word boundary
+        while data.len() < total_words * 8 {
+            data.push(0);
+        }
+
+        heap_object.write_fields(&data);
+        Ok(BuiltInTypes::HeapObject.tagged(pointer))
+    }
+
     pub fn write_c_string(&mut self, string: String) -> *mut i8 {
         let mut result: *mut i8 = std::ptr::null_mut();
         NATIVE_ARGUMENTS.with(|memory| result = memory.borrow_mut().write_c_string(string));
@@ -752,6 +788,8 @@ pub struct Runtime {
     pub structs: StructManager,
     pub enums: EnumManager,
     pub string_constants: Vec<StringValue>,
+    pub keyword_constants: Vec<StringValue>,
+    pub keyword_heap_ptrs: Vec<Option<usize>>,
     pub compiler_warnings: Arc<Mutex<Vec<crate::compiler::CompilerWarning>>>,
     // TODO: Do I need anything more than
     // namespace manager? Shouldn't these functions
@@ -772,6 +810,8 @@ pub struct Runtime {
     pub default_exception_handler_fn: Option<usize>,
     // Namespace ID for exception handler GC roots
     exception_handler_namespace: usize,
+    // Namespace ID for keyword GC roots
+    keyword_namespace: usize,
 }
 
 pub fn create_stack_with_protected_page_after(stack_size: usize) -> MmapMut {
@@ -839,6 +879,8 @@ impl Runtime {
             structs: StructManager::new(),
             enums: EnumManager::new(),
             string_constants: vec![],
+            keyword_constants: vec![],
+            keyword_heap_ptrs: vec![],
             jump_table: Some(
                 MmapOptions::new(MmapOptions::page_size())
                     .unwrap()
@@ -864,6 +906,7 @@ impl Runtime {
             thread_exception_handler_fns: HashMap::new(),
             default_exception_handler_fn: None,
             exception_handler_namespace: 0, // Will be set in bootstrap
+            keyword_namespace: 0,           // Will be set when first keyword is allocated
         }
     }
 
@@ -873,6 +916,8 @@ impl Runtime {
         self.structs = StructManager::new();
         self.enums = EnumManager::new();
         self.string_constants.clear();
+        self.keyword_constants.clear();
+        self.keyword_heap_ptrs.clear();
         self.functions.clear();
         self.jump_table = Some(
             MmapOptions::new(MmapOptions::page_size())
@@ -965,6 +1010,62 @@ impl Runtime {
         let pointer = self.allocate(words, stack_pointer, BuiltInTypes::HeapObject)?;
         let pointer = self.memory.allocate_string(bytes, pointer)?;
         Ok(pointer)
+    }
+
+    pub fn allocate_keyword(
+        &mut self,
+        stack_pointer: usize,
+        keyword_text: String,
+    ) -> Result<Tagged, Box<dyn Error>> {
+        let bytes = keyword_text.as_bytes();
+        // Need space for: 1 word for hash + words for text
+        let text_words = (bytes.len() + 7) / 8; // Round up
+        let words = 1 + text_words;
+        let pointer = self.allocate(words, stack_pointer, BuiltInTypes::HeapObject)?;
+        let pointer = self.memory.allocate_keyword(bytes, pointer)?;
+        Ok(pointer)
+    }
+
+    /// Intern a keyword: check if it exists, otherwise allocate and register as GC root
+    pub fn intern_keyword(
+        &mut self,
+        stack_pointer: usize,
+        keyword_text: String,
+    ) -> Result<usize, Box<dyn Error>> {
+        // First check if this keyword text already has an index
+        let index = if let Some(idx) = self
+            .keyword_constants
+            .iter()
+            .position(|k| k.str == keyword_text)
+        {
+            idx
+        } else {
+            // Add new keyword to the constants table
+            self.keyword_constants.push(StringValue {
+                str: keyword_text.clone(),
+            });
+            self.keyword_heap_ptrs.push(None);
+            self.keyword_constants.len() - 1
+        };
+
+        // Check if we've already allocated a heap object for this keyword
+        if let Some(ptr) = self.keyword_heap_ptrs[index] {
+            return Ok(ptr);
+        }
+
+        // Ensure keyword namespace exists
+        if self.keyword_namespace == 0 {
+            self.keyword_namespace = self.namespaces.add_namespace("beagle.internal.keywords");
+        }
+
+        // Allocate the keyword
+        let ptr = self.allocate_keyword(stack_pointer, keyword_text)?.into();
+
+        // Register as GC root and cache the pointer
+        self.memory.add_namespace_root(self.keyword_namespace, ptr);
+        self.keyword_heap_ptrs[index] = Some(ptr);
+
+        Ok(ptr)
     }
 
     pub fn allocate(
@@ -1177,6 +1278,17 @@ impl Runtime {
                         }
                     }
                 }
+            } else if namespace_id == self.keyword_namespace {
+                // Update keyword cache after GC relocation
+                for (old_ptr, new_ptr) in relocs {
+                    for cached_ptr in self.keyword_heap_ptrs.iter_mut() {
+                        if let Some(ptr) = cached_ptr {
+                            if *ptr == old_ptr {
+                                *ptr = new_ptr;
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1242,18 +1354,12 @@ impl Runtime {
             let relocations = self.memory.get_namespace_relocations();
             for (namespace, values) in relocations {
                 for (old, new) in values {
-                    for (_, value) in self
-                        .namespaces
-                        .namespaces
-                        .get_mut(namespace)
-                        .unwrap()
-                        .get_mut()
-                        .unwrap()
-                        .bindings
-                        .iter_mut()
-                    {
-                        if *value == old {
-                            *value = new;
+                    // Skip if namespace doesn't exist (e.g., keyword namespace before any keywords created)
+                    if let Some(ns) = self.namespaces.namespaces.get_mut(namespace) {
+                        for (_, value) in ns.get_mut().unwrap().bindings.iter_mut() {
+                            if *value == old {
+                                *value = new;
+                            }
                         }
                     }
 
@@ -1268,6 +1374,17 @@ impl Runtime {
                         if let Some(ref mut default) = self.default_exception_handler_fn {
                             if *default == old {
                                 *default = new;
+                            }
+                        }
+                    }
+
+                    // Update keyword cache after GC relocation
+                    if namespace == self.keyword_namespace {
+                        for cached_ptr in self.keyword_heap_ptrs.iter_mut() {
+                            if let Some(ptr) = cached_ptr {
+                                if *ptr == old {
+                                    *ptr = new;
+                                }
                             }
                         }
                     }
@@ -1328,18 +1445,12 @@ impl Runtime {
         let relocations = self.memory.get_namespace_relocations();
         for (namespace, values) in relocations {
             for (old, new) in values {
-                for (_, value) in self
-                    .namespaces
-                    .namespaces
-                    .get_mut(namespace)
-                    .unwrap()
-                    .get_mut()
-                    .unwrap()
-                    .bindings
-                    .iter_mut()
-                {
-                    if *value == old {
-                        *value = new;
+                // Skip if namespace doesn't exist (e.g., keyword namespace before any keywords created)
+                if let Some(ns) = self.namespaces.namespaces.get_mut(namespace) {
+                    for (_, value) in ns.get_mut().unwrap().bindings.iter_mut() {
+                        if *value == old {
+                            *value = new;
+                        }
                     }
                 }
 
@@ -1354,6 +1465,17 @@ impl Runtime {
                     if let Some(ref mut default) = self.default_exception_handler_fn {
                         if *default == old {
                             *default = new;
+                        }
+                    }
+                }
+
+                // Update keyword cache after GC relocation
+                if namespace == self.keyword_namespace {
+                    for cached_ptr in self.keyword_heap_ptrs.iter_mut() {
+                        if let Some(ptr) = cached_ptr {
+                            if *ptr == old {
+                                *ptr = new;
+                            }
                         }
                     }
                 }
@@ -1775,6 +1897,11 @@ impl Runtime {
                         }
                         Some(string.to_string())
                     }
+                    3 => {
+                        let bytes = object.get_keyword_bytes();
+                        let keyword_text = unsafe { std::str::from_utf8_unchecked(bytes) };
+                        Some(format!(":{}", keyword_text))
+                    }
                     _ => {
                         // This is an unknown object. Meaning it is invalid.
                         // We are going to print everything we can to debug this
@@ -1887,6 +2014,25 @@ impl Runtime {
             BuiltInTypes::HeapObject => {
                 let a_object = HeapObject::from_tagged(a);
                 let b_object = HeapObject::from_tagged(b);
+
+                // Keywords (type_id=3) are interned, so compare by pointer identity
+                if a_object.get_type_id() == 3 && b_object.get_type_id() == 3 {
+                    return a == b;
+                }
+
+                // Strings (type_id=2) should also compare by byte content
+                if a_object.get_type_id() == 2 && b_object.get_type_id() == 2 {
+                    let a_bytes = a_object.get_string_bytes();
+                    let b_bytes = b_object.get_string_bytes();
+                    return a_bytes == b_bytes;
+                }
+
+                // Different types are not equal
+                if a_object.get_type_id() != b_object.get_type_id() {
+                    return false;
+                }
+
+                // For other HeapObjects (structs, arrays, etc.), compare struct_id and fields
                 if a_object.get_struct_id() != b_object.get_struct_id() {
                     return false;
                 }
@@ -2421,6 +2567,20 @@ impl Runtime {
         }
         self.string_constants.push(string_value);
         self.string_constants.len() - 1
+    }
+
+    pub fn add_keyword(&mut self, keyword_text: String) -> usize {
+        if let Some(index) = self
+            .keyword_constants
+            .iter()
+            .position(|k| k.str == keyword_text)
+        {
+            return index;
+        }
+        self.keyword_constants
+            .push(StringValue { str: keyword_text });
+        self.keyword_heap_ptrs.push(None);
+        self.keyword_constants.len() - 1
     }
 
     pub fn add_struct(&mut self, s: Struct) {

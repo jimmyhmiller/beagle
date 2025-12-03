@@ -289,6 +289,12 @@ impl Compiler {
         Value::StringConstantPtr(offset)
     }
 
+    pub fn add_keyword(&mut self, keyword_text: String) -> Value {
+        let runtime = get_runtime().get_mut();
+        let offset = runtime.add_keyword(keyword_text);
+        Value::KeywordConstantPtr(offset)
+    }
+
     pub fn add_property_lookup(&mut self) -> Result<usize, CompileError> {
         if self.property_look_up_cache_offset >= self.property_look_up_cache.len() {
             return Err(CompileError::PropertyCacheFull);

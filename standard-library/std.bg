@@ -167,6 +167,19 @@ fn print(value) {
     _print(format(value, 0))
 }
 
+// Keyword functions
+fn keyword?(value) {
+    builtin/is_keyword(value)
+}
+
+fn keyword->string(kw) {
+    builtin/keyword_to_string(kw)
+}
+
+fn string->keyword(str) {
+    builtin/string_to_keyword(str)
+}
+
 
 struct __Box__ {
     value

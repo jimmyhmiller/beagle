@@ -417,6 +417,25 @@ impl HeapObject {
         unsafe { std::str::from_utf8_unchecked(bytes) }
     }
 
+    /// Get the cached hash for a keyword (first 8 bytes of keyword data)
+    pub fn get_keyword_hash(&self) -> u64 {
+        let untagged = self.untagged();
+        let pointer = untagged as *mut u8;
+        let pointer = unsafe { pointer.add(Self::header_size()) };
+        unsafe { *(pointer as *const u64) }
+    }
+
+    /// Get keyword text bytes (skipping the 8-byte hash prefix)
+    pub fn get_keyword_bytes(&self) -> &[u8] {
+        let header = self.get_header();
+        let text_len = header.type_data as usize;
+        let untagged = self.untagged();
+        let pointer = untagged as *mut u8;
+        // Skip header (8 bytes) and hash (8 bytes)
+        let pointer = unsafe { pointer.add(Self::header_size() + 8) };
+        unsafe { std::slice::from_raw_parts(pointer, text_len) }
+    }
+
     pub fn get_full_object_data(&self) -> &[u8] {
         let size = self.full_size();
         let untagged = self.untagged();
