@@ -1,0 +1,55 @@
+namespace test
+
+// Test that primitive type descriptors work correctly
+// Type descriptors should be Struct instances with name and id fields
+// They should be consistent for the same types and different for different types
+
+fn main() {
+    let int_type = type-of(42)
+    let string_type = type-of("hello")
+    let float_type = type-of(3.14)
+    let bool_type = type-of(true)
+
+    // Should have name field
+    println(int_type.name)
+    println(string_type.name)
+    println(float_type.name)
+    println(bool_type.name)
+
+    // Should be consistent for same types
+    println(equal(type-of(1), type-of(999)))
+    println(equal(type-of("a"), type-of("test")))
+    println(equal(type-of(1.5), type-of(99.9)))
+    println(equal(type-of(true), type-of(false)))
+
+    // Should be different for different types
+    println(equal(int_type, string_type))
+    println(equal(int_type, float_type))
+    println(equal(string_type, bool_type))
+
+    // Should have negative IDs for primitives
+    println(int_type.id < 0)
+    println(string_type.id < 0)
+    println(float_type.id < 0)
+    println(bool_type.id < 0)
+
+    "done"
+}
+
+// Expect
+// Int
+// String
+// Float
+// Bool
+// true
+// true
+// true
+// true
+// false
+// false
+// false
+// true
+// true
+// true
+// true
+// done

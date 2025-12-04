@@ -350,10 +350,10 @@ extern "C" fn property_access(
     result
 }
 
-extern "C" fn type_of(struct_pointer: usize) -> usize {
+extern "C" fn type_of(stack_pointer: usize, value: usize) -> usize {
     print_call_builtin(get_runtime().get(), "type_of");
     let runtime = get_runtime().get_mut();
-    runtime.type_of(struct_pointer)
+    runtime.type_of(stack_pointer, value).unwrap()
 }
 
 extern "C" fn equal(a: usize, b: usize) -> usize {
@@ -1821,7 +1821,7 @@ impl Runtime {
             3,
         )?;
 
-        self.add_builtin_function("beagle.core/type_of", type_of as *const u8, false, 1)?;
+        self.add_builtin_function("beagle.core/type-of", type_of as *const u8, true, 2)?;
 
         self.add_builtin_function("beagle.core/equal", equal as *const u8, false, 2)?;
 
