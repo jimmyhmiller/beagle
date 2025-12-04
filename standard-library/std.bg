@@ -23,14 +23,58 @@ struct Struct {
     id
 }
 
-// TODO: This is a bit gross
-// I definitely need something like
-// javascript Symbol
-// or some way to really uniquely
-// identify a type
+extend Struct with Format {
+    fn format(self, depth) {
+        self.name
+    }
+}
+
+// Type descriptors for primitive types
+// These are Struct instances that describe each built-in type
+// Negative IDs distinguish primitives from custom structs (which have positive IDs)
+let Array = Struct {
+    name: "Array",
+    id: -1
+}
+
 let String = Struct {
     name: "String",
-    id: -1
+    id: -2
+}
+
+let Int = Struct {
+    name: "Int",
+    id: -3
+}
+
+let Float = Struct {
+    name: "Float",
+    id: -4
+}
+
+let Bool = Struct {
+    name: "Bool",
+    id: -5
+}
+
+let Null = Struct {
+    name: "Null",
+    id: -6
+}
+
+let Function = Struct {
+    name: "Function",
+    id: -7
+}
+
+let Closure = Struct {
+    name: "Closure",
+    id: -8
+}
+
+let Keyword = Struct {
+    name: "Keyword",
+    id: -9
 }
 
 struct Protocol {
@@ -129,11 +173,13 @@ fn atom(value) {
 // TODO: Need to make sure type is instance_of Struct
 // but how do I do that in a reasonable way?
 fn instance_of(value, type) {
-    (primitive/is_object(value) &&
-        (
-            primitive/read_struct_id(value) == type.id ||
-            (type.id == -1 && primitive/read_type_id(value) == 2)
-        )) || (type.id == -1 && primitive/is_string_constant(value))
+    if type.id < 0 {
+        // Primitive type - use type-of equality
+        equal(type-of(value), type)
+    } else {
+        // Custom struct - check struct_id
+        primitive/is_object(value) && primitive/read_struct_id(value) == type.id
+    }
 }
 
 

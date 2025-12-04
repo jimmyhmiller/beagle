@@ -379,8 +379,11 @@ impl Tokenizer {
         while !self.at_end(input_bytes)
             && (self.is_valid_number_char(input_bytes) || self.current_byte(input_bytes) == PERIOD)
         {
-            // Need to handle making sure there is only one "."
             if self.current_byte(input_bytes) == PERIOD {
+                if is_float {
+                    // Multiple dots in number literal
+                    panic!("Invalid number literal: multiple decimal points found");
+                }
                 is_float = true;
             }
             self.consume(input_bytes);
@@ -836,7 +839,24 @@ impl Parser {
                 // Gross
                 let value = String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap();
                 let position = self.consume();
-                Some(Ast::IntegerLiteral(value.parse::<i64>().unwrap(), position))
+                let parsed_value = value.parse::<i64>().unwrap_or_else(|_| {
+                    panic!(
+                        "Integer literal out of range: {} (must fit in i64: {} to {})",
+                        value,
+                        i64::MIN,
+                        i64::MAX
+                    )
+                });
+                // Values use 3-bit tagging (shifted left by 3), so only 61 bits available
+                const MAX_61_BIT: i64 = (1i64 << 60) - 1;
+                const MIN_61_BIT: i64 = -(1i64 << 60);
+                if parsed_value > MAX_61_BIT || parsed_value < MIN_61_BIT {
+                    panic!(
+                        "Integer literal out of range: {} (tagged integers use 61 bits: {} to {})",
+                        value, MIN_61_BIT, MAX_61_BIT
+                    );
+                }
+                Some(Ast::IntegerLiteral(parsed_value, position))
             }
             Token::Float((start, end)) => {
                 // Gross
@@ -2238,7 +2258,7 @@ impl Parser {
                 value: Box::new(rhs),
                 token_range,
             },
-            _ => panic!("Exepcted binary op got {:?}", current_token),
+            _ => panic!("Expected binary op got {:?}", current_token),
         }
     }
 

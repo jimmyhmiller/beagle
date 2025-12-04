@@ -1,0 +1,40 @@
+namespace test
+import "raw_mutable_array" as array
+
+// Test that type-of correctly identifies arrays
+// Arrays have type_id == 1 and should return the Array type descriptor
+
+fn main() {
+    let arr = array/new_array(5)
+    let arr_type = type-of(arr)
+
+    // Should have name "Array"
+    println(arr_type.name)
+
+    // Should be consistent for all arrays
+    let arr2 = array/new_array(10)
+    println(equal(type-of(arr), type-of(arr2)))
+
+    // Should be different from other types
+    println(equal(arr_type, type-of(42)))
+    println(equal(arr_type, type-of("hello")))
+
+    // Should have negative ID
+    println(arr_type.id < 0)
+
+    // instance_of should work correctly
+    println(instance_of(arr, arr_type))
+    println(instance_of(42, arr_type))
+
+    "done"
+}
+
+// Expect
+// Array
+// true
+// false
+// false
+// true
+// true
+// false
+// done

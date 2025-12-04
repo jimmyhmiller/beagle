@@ -1946,29 +1946,62 @@ impl Runtime {
         Ok((heap_object.get_field(field_index), field_index))
     }
 
-    pub fn type_of(&self, value: usize) -> usize {
+    pub fn type_of(
+        &mut self,
+        _stack_pointer: usize,
+        value: usize,
+    ) -> Result<usize, Box<dyn Error>> {
         let tag = BuiltInTypes::get_kind(value);
-        match tag {
-            BuiltInTypes::Null => todo!(),
-            BuiltInTypes::Int => todo!(),
-            BuiltInTypes::Float => todo!(),
-            BuiltInTypes::String => todo!(),
-            BuiltInTypes::Bool => todo!(),
-            BuiltInTypes::Function => todo!(),
-            BuiltInTypes::Closure => todo!(),
-            BuiltInTypes::HeapObject => {
-                let heap_object = HeapObject::from_tagged(value);
-                let struct_type_id = heap_object.get_struct_id();
-                let struct_type_id = BuiltInTypes::untag(struct_type_id);
-                let struct_value = self.get_struct_by_id(struct_type_id).unwrap();
-                let struct_name = struct_value.name.clone();
-                let (namespace_name, struct_name) = struct_name.split_once("/").unwrap();
-                let namespace_id = self.get_namespace_id(namespace_name).unwrap();
-                let slot = self.find_binding(namespace_id, struct_name).unwrap();
+        let beagle_core_id = self
+            .get_namespace_id("beagle.core")
+            .ok_or("beagle.core namespace must exist for type-of")?;
 
-                self.get_binding(namespace_id, slot)
+        // Map BuiltInTypes to type descriptor binding names
+        let type_name = match tag {
+            BuiltInTypes::Null => "Null",
+            BuiltInTypes::Int => "Int",
+            BuiltInTypes::Float => "Float",
+            BuiltInTypes::String => "String",
+            BuiltInTypes::Bool => "Bool",
+            BuiltInTypes::Function => "Function",
+            BuiltInTypes::Closure => "Closure",
+            BuiltInTypes::HeapObject => {
+                // Check HeapObject type_id to distinguish heap-based types
+                let heap_object = HeapObject::from_tagged(value);
+                let type_id = heap_object.get_type_id();
+                match type_id {
+                    1 => "Array",   // Raw mutable array (type_id == 1)
+                    2 => "String",  // HeapObject string (type_id == 2)
+                    3 => "Keyword", // Keyword type (type_id == 3)
+                    _ => {
+                        // Custom struct (type_id == 0 or other) - use struct_id
+                        let struct_type_id = heap_object.get_struct_id();
+                        let struct_type_id = BuiltInTypes::untag(struct_type_id);
+                        let struct_value = self
+                            .get_struct_by_id(struct_type_id)
+                            .ok_or("Struct type not found")?;
+                        let struct_name = struct_value.name.clone();
+                        let (namespace_name, struct_name) = struct_name
+                            .split_once("/")
+                            .ok_or("Struct name must be namespace-qualified")?;
+                        let namespace_id = self
+                            .get_namespace_id(namespace_name)
+                            .ok_or("Namespace for struct not found")?;
+                        let slot = self
+                            .find_binding(namespace_id, struct_name)
+                            .ok_or("Struct binding not found in namespace")?;
+                        return Ok(self.get_binding(namespace_id, slot));
+                    }
+                }
             }
-        }
+        };
+
+        // Look up the type descriptor binding from beagle.core
+        let slot = self.find_binding(beagle_core_id, type_name).ok_or(format!(
+            "Type descriptor '{}' not found in beagle.core",
+            type_name
+        ))?;
+        Ok(self.get_binding(beagle_core_id, slot))
     }
 
     pub fn equal(&self, a: usize, b: usize) -> bool {
