@@ -105,14 +105,15 @@ impl CodeAllocator {
     pub fn make_executable(&mut self) {
         self.mark_page_as_pending();
 
-        let pending = self.pending_pages.take().unwrap();
-        let pending = pending.make_exec().unwrap();
-        let pending: Mmap = pending.try_into().unwrap();
-        if let Some(mut used) = self.used_pages.take() {
-            used.merge(pending).unwrap();
-            self.used_pages = Some(used);
-        } else {
-            self.used_pages = Some(pending);
+        if let Some(pending) = self.pending_pages.take() {
+            let pending = pending.make_exec().unwrap();
+            let pending: Mmap = pending.try_into().unwrap();
+            if let Some(mut used) = self.used_pages.take() {
+                used.merge(pending).unwrap();
+                self.used_pages = Some(used);
+            } else {
+                self.used_pages = Some(pending);
+            }
         }
         // let used = self.used_pages.take();
         // let used = used.unwrap().make_exec().unwrap();

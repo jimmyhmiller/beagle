@@ -229,6 +229,8 @@ pub struct CommandLineArguments {
     print_parse: bool,
     #[clap(long, default_value = "false")]
     print_builtin_calls: bool,
+    #[clap(long, default_value = "false")]
+    repl: bool,
 }
 
 fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Error>> {
@@ -310,6 +312,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let args = CommandLineArguments::parse();
     if args.all_tests {
         run_all_tests(args)
+    } else if args.repl {
+        run_repl(args)
     } else {
         main_inner(args)
     }
@@ -363,10 +367,87 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             no_std: args.no_std,
             print_parse: args.print_parse,
             print_builtin_calls: args.print_builtin_calls,
+            repl: false,
         };
         main_inner(args)?;
         RUNTIME.get().unwrap().get_mut().reset();
     }
+    Ok(())
+}
+
+fn run_repl(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
+    use std::io::{self, Write};
+
+    let args_clone = args.clone();
+
+    RUNTIME.get_or_init(|| {
+        let allocator = Alloc::new(get_allocate_options(&args_clone));
+        let printer: Box<dyn Printer> = Box::new(DefaultPrinter);
+        let runtime = Runtime::new(args_clone, allocator, printer);
+        SyncUnsafeCell::new(runtime)
+    });
+
+    let runtime = RUNTIME.get().unwrap().get_mut();
+
+    runtime.start_compiler_thread();
+
+    compile_trampoline(runtime);
+    for i in 1..=6 {
+        compile_save_volatile_registers_for(runtime, i);
+    }
+
+    let pause_atom_ptr = runtime.pause_atom_ptr();
+    runtime.set_pause_atom_ptr(pause_atom_ptr);
+
+    runtime.install_builtins()?;
+
+    let mut top_levels = vec![];
+    if !args.no_std {
+        top_levels = load_default_files(runtime)?;
+    }
+
+    for top_level in top_levels {
+        if let Some(f) = runtime.get_function0(&top_level) {
+            f();
+        }
+    }
+
+    println!("Beagle REPL - Enter expressions to evaluate (Ctrl+C to exit)");
+
+    loop {
+        print!("beagle> ");
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        match io::stdin().read_line(&mut input) {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                let input = input.trim();
+                if input.is_empty() {
+                    continue;
+                }
+
+                match runtime.compile_string(input) {
+                    Ok(function_pointer) => {
+                        if function_pointer == 0 {
+                            continue;
+                        }
+                        let f: fn() -> usize = unsafe { std::mem::transmute(function_pointer) };
+                        let result = f();
+                        runtime.println(result).unwrap();
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Error reading input: {}", e);
+                break;
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -409,7 +490,7 @@ cfg_if::cfg_if! {
 
 fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     if args.program.is_none() {
-        println!("No program provided");
+        println!("No program provided. Use --repl for interactive mode.");
         return Ok(());
     }
     let program = args.program.clone().unwrap();
@@ -559,6 +640,7 @@ fn try_all_examples() -> Result<(), Box<dyn Error>> {
         no_std: false,
         print_parse: false,
         print_builtin_calls: false,
+        repl: false,
     };
     run_all_tests(args)?;
     Ok(())
