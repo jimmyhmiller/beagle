@@ -2797,6 +2797,7 @@ mod tests {
             no_std: false,
             print_parse: false,
             print_builtin_calls: false,
+            repl: false,
         };
         let allocator_options = get_allocate_options(&args);
         let allocator = crate::Alloc::new(allocator_options);
