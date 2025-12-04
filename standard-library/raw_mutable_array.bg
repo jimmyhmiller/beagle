@@ -31,20 +31,19 @@ fn panic_if_not_array(message, array) {
 fn write_field(array, index, value) {
     panic_if_not_array("write", array)
     if index < 0 || index >= primitive/size(array) {
-        println(array)
-        println(index)
-        println(primitive/size(array))
-        primitive/panic("Index out of bounds")
+        null
+    } else {
+        write_field_unsafe(array, index, value)
     }
-    write_field_unsafe(array, index, value)
 }
 
 fn read_field(array, index) {
     panic_if_not_array("read", array)
     if index < 0 || index >= primitive/size(array)  {
-        primitive/panic("Index out of bounds")
+        null
+    } else {
+        read_field_unsafe(array, index)
     }
-    read_field_unsafe(array, index)
 }
 
 fn new_array(size) {

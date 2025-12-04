@@ -39,10 +39,8 @@ fn get_node_for_level(node, level, index) {
 
 fn get(vec, index) {
     if index < 0 || index >= vec.count {
-        primitive/panic("Index out of bounds")
-    }
-
-    if index >= tailOffset(vec) {
+        null
+    } else if index >= tailOffset(vec) {
         array/read_field(vec.tail, index & 31)
     } else {
         let node = get_node_for_level(vec.root, vec.shift, index)

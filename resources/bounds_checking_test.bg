@@ -1,0 +1,267 @@
+namespace bounds_checking_test
+
+import "persistent_map" as pm
+import "raw_mutable_array" as raw
+
+struct Point {
+    x
+    y
+}
+
+fn test_array_get_valid() {
+    println("=== Testing valid array access ===")
+    let arr = [1, 2, 3]
+    println(get(arr, 0))
+    println(get(arr, 1))
+    println(get(arr, 2))
+    println("All valid accesses work")
+}
+
+fn test_array_bracket_valid() {
+    println("=== Testing valid bracket access ===")
+    let arr = [10, 20, 30]
+    println(arr[0])
+    println(arr[1])
+    println(arr[2])
+    println("All valid bracket accesses work")
+}
+
+fn test_map_get_valid() {
+    println("=== Testing valid map access ===")
+    let m = {"a" 1, "b" 2, "c" 3}
+    println(get(m, "a"))
+    println(get(m, "b"))
+    println(get(m, "c"))
+    println("All valid map accesses work")
+}
+
+fn test_map_get_missing_key() {
+    println("=== Testing map with missing key ===")
+    let m = {"a" 1, "b" 2}
+    println(get(m, "a"))
+    println("Trying to get missing key 'missing'...")
+    let result = get(m, "missing")
+    println(result)
+}
+
+fn test_array_out_of_bounds_should_return_null() {
+    println("=== Testing array out of bounds (should return null) ===")
+    let arr = [1, 2, 3]
+    println(get(arr, 0))
+    println(get(arr, 2))
+    println("Trying to get index 3...")
+    let result = get(arr, 3)
+    println(result)
+}
+
+fn test_array_negative_index_should_return_null() {
+    println("=== Testing negative index (should return null) ===")
+    let arr = [1, 2, 3]
+    println("Trying to get index -1...")
+    let result = get(arr, -1)
+    println(result)
+}
+
+fn test_empty_array_should_return_null() {
+    println("=== Testing empty array (should return null) ===")
+    let arr = []
+    println("Trying to get index 0 from empty array...")
+    let result = get(arr, 0)
+    println(result)
+}
+
+fn test_bracket_out_of_bounds_should_return_null() {
+    println("=== Testing bracket access out of bounds (should return null) ===")
+    let arr = [10, 20, 30]
+    println(arr[0])
+    println(arr[2])
+    println("Trying arr[3]...")
+    let result = arr[3]
+    println(result)
+}
+
+fn test_very_large_index_should_return_null() {
+    println("=== Testing very large index (should return null) ===")
+    let arr = [1, 2, 3]
+    println("Trying to get index 999999...")
+    let result = get(arr, 999999)
+    println(result)
+}
+
+fn test_empty_array() {
+    println("=== Testing empty array ===")
+    let arr = []
+    println(arr)
+    println(length(arr))
+}
+
+fn test_struct_fields() {
+    println("=== Testing struct field access ===")
+    let p = Point { x: 10, y: 20 }
+    println(p.x)
+    println(p.y)
+}
+
+fn test_array_length() {
+    println("=== Testing array length ===")
+    println(length([]))
+    println(length([1]))
+    println(length([1, 2, 3]))
+}
+
+fn test_map_length() {
+    println("=== Testing map length ===")
+    println(length({"a" 1}))
+    println(length({"a" 1, "b" 2}))
+}
+
+fn test_raw_array_bounds() {
+    println("=== Testing raw array bounds ===")
+    let arr = raw/new_array(3)
+    raw/write_field(arr, 0, 10)
+    raw/write_field(arr, 1, 20)
+    raw/write_field(arr, 2, 30)
+    println(raw/read_field(arr, 0))
+    println(raw/read_field(arr, 2))
+    println("Trying to read index 3...")
+    let result = raw/read_field(arr, 3)
+    println(result)
+}
+
+fn test_raw_array_negative_index() {
+    println("=== Testing raw array negative index ===")
+    let arr = raw/new_array(3)
+    raw/write_field(arr, 0, 100)
+    println("Trying to read index -1...")
+    let result = raw/read_field(arr, -1)
+    println(result)
+}
+
+fn test_raw_array_write_bounds() {
+    println("=== Testing raw array write bounds ===")
+    let arr = raw/new_array(2)
+    raw/write_field(arr, 0, 1)
+    raw/write_field(arr, 1, 2)
+    println("Trying to write to index 2...")
+    let result = raw/write_field(arr, 2, 999)
+    println(result)
+    println("Array unchanged:")
+    println(arr)
+}
+
+fn main() {
+    test_array_get_valid()
+    println("")
+    test_array_bracket_valid()
+    println("")
+    test_map_get_valid()
+    println("")
+    test_map_get_missing_key()
+    println("")
+    test_array_out_of_bounds_should_return_null()
+    println("")
+    test_array_negative_index_should_return_null()
+    println("")
+    test_empty_array_should_return_null()
+    println("")
+    test_bracket_out_of_bounds_should_return_null()
+    println("")
+    test_very_large_index_should_return_null()
+    println("")
+    test_empty_array()
+    println("")
+    test_struct_fields()
+    println("")
+    test_array_length()
+    println("")
+    test_map_length()
+    println("")
+    test_raw_array_bounds()
+    println("")
+    test_raw_array_negative_index()
+    println("")
+    test_raw_array_write_bounds()
+    "done"
+}
+
+// Expect
+// === Testing valid array access ===
+// 1
+// 2
+// 3
+// All valid accesses work
+//
+// === Testing valid bracket access ===
+// 10
+// 20
+// 30
+// All valid bracket accesses work
+//
+// === Testing valid map access ===
+// 1
+// 2
+// 3
+// All valid map accesses work
+//
+// === Testing map with missing key ===
+// 1
+// Trying to get missing key 'missing'...
+// null
+//
+// === Testing array out of bounds (should return null) ===
+// 1
+// 3
+// Trying to get index 3...
+// null
+//
+// === Testing negative index (should return null) ===
+// Trying to get index -1...
+// null
+//
+// === Testing empty array (should return null) ===
+// Trying to get index 0 from empty array...
+// null
+//
+// === Testing bracket access out of bounds (should return null) ===
+// 10
+// 30
+// Trying arr[3]...
+// null
+//
+// === Testing very large index (should return null) ===
+// Trying to get index 999999...
+// null
+//
+// === Testing empty array ===
+// []
+// 0
+//
+// === Testing struct field access ===
+// 10
+// 20
+//
+// === Testing array length ===
+// 0
+// 1
+// 3
+//
+// === Testing map length ===
+// 1
+// 2
+//
+// === Testing raw array bounds ===
+// 10
+// 30
+// Trying to read index 3...
+// null
+//
+// === Testing raw array negative index ===
+// Trying to read index -1...
+// null
+//
+// === Testing raw array write bounds ===
+// Trying to write to index 2...
+// null
+// Array unchanged:
+// [ 1, 2 ]
+// done
