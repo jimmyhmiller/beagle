@@ -315,9 +315,9 @@ impl MMapMutWithOffset {
     fn new() -> Self {
         Self {
             mmap: MmapOptions::new(MmapOptions::page_size() * 10)
-                .unwrap()
+                .expect("Failed to create mmap for CStringStorage - out of memory")
                 .map_mut()
-                .unwrap(),
+                .expect("Failed to map CStringStorage memory - this is a fatal error"),
             offset: 0,
         }
     }
@@ -325,7 +325,8 @@ impl MMapMutWithOffset {
     pub fn write_c_string(&mut self, string: String) -> *mut i8 {
         let string = string.clone();
         let start = self.offset;
-        let c_string = CString::new(string).unwrap();
+        let c_string =
+            CString::new(string).expect("Failed to create CString - string contains null byte");
         let bytes = c_string.as_bytes_with_nul();
         for byte in bytes {
             self.mmap[self.offset] = *byte;
@@ -681,10 +682,12 @@ impl NamespaceManager {
     }
 
     fn add_namespace(&mut self, name: &str) -> usize {
-        let position = self
-            .namespaces
-            .iter()
-            .position(|n| n.lock().unwrap().name == name);
+        let position = self.namespaces.iter().position(|n| {
+            n.lock()
+                .expect("Failed to lock namespace in add_namespace - this is a fatal error")
+                .name
+                == name
+        });
         if let Some(position) = position {
             return position;
         }
@@ -712,7 +715,9 @@ impl NamespaceManager {
     }
 
     fn get_current_namespace(&self) -> &Mutex<Namespace> {
-        self.namespaces.get(self.current_namespace).unwrap()
+        self.namespaces
+            .get(self.current_namespace)
+            .expect("Current namespace not found - this is a fatal error")
     }
 
     fn get_namespace_by_id(&self, id: usize) -> Option<&Mutex<Namespace>> {
@@ -724,10 +729,15 @@ impl NamespaceManager {
     }
 
     fn add_binding(&self, name: &str, pointer: usize) -> usize {
-        let mut namespace = self.get_current_namespace().lock().unwrap();
+        let mut namespace = self
+            .get_current_namespace()
+            .lock()
+            .expect("Failed to lock namespace in add_binding - this is a fatal error");
         if namespace.bindings.contains_key(name) {
             namespace.bindings.insert(name.to_string(), pointer);
-            return namespace.ids.iter().position(|n| n == name).unwrap();
+            return namespace.ids.iter().position(|n| n == name).expect(
+                "Binding exists in map but not in ids vec - this is a fatal internal error",
+            );
         }
         namespace.bindings.insert(name.to_string(), pointer);
         namespace.ids.push(name.to_string());
@@ -736,7 +746,10 @@ impl NamespaceManager {
 
     #[allow(unused)]
     fn find_binding_id(&self, name: &str) -> Option<usize> {
-        let namespace = self.get_current_namespace().lock().unwrap();
+        let namespace = self
+            .get_current_namespace()
+            .lock()
+            .expect("Failed to lock namespace in find_binding_id - this is a fatal error");
         namespace.ids.iter().position(|n| n == name)
     }
 
@@ -817,7 +830,10 @@ pub struct Runtime {
 pub fn create_stack_with_protected_page_after(stack_size: usize) -> MmapMut {
     let page_size = MmapOptions::page_size();
     let stack_size = stack_size + page_size;
-    let stack = MmapOptions::new(stack_size).unwrap().map_mut().unwrap();
+    let stack = MmapOptions::new(stack_size)
+        .expect("Failed to create mmap for stack - out of memory")
+        .map_mut()
+        .expect("Failed to map stack memory - this is a fatal error");
     // because the stack grows down we will protect the first page
     // so that if we go over the stack we will get a segfault
     let protected_area = &stack[0..page_size];
@@ -883,9 +899,9 @@ impl Runtime {
             keyword_heap_ptrs: vec![],
             jump_table: Some(
                 MmapOptions::new(MmapOptions::page_size())
-                    .unwrap()
+                    .expect("Failed to create mmap for jump table - out of memory")
                     .map()
-                    .unwrap(),
+                    .expect("Failed to map jump table memory - this is a fatal error"),
             ),
             jump_table_offset: 0,
             functions: vec![],
@@ -921,9 +937,9 @@ impl Runtime {
         self.functions.clear();
         self.jump_table = Some(
             MmapOptions::new(MmapOptions::page_size())
-                .unwrap()
+                .expect("Failed to create mmap for jump table - out of memory")
                 .map()
-                .unwrap(),
+                .expect("Failed to map jump table memory - this is a fatal error"),
         );
         self.jump_table_offset = 0;
         self.printer.reset();
@@ -932,7 +948,7 @@ impl Runtime {
         self.stack_segments.clear_all_segments();
         self.compiler_channel
             .as_mut()
-            .unwrap()
+            .expect("Compiler channel not initialized - this is a fatal error")
             .send(CompilerMessage::Reset);
         self.protocol_info.clear();
     }
@@ -946,17 +962,19 @@ impl Runtime {
                 .name("Beagle Compiler".to_string())
                 .spawn(move || {
                     CompilerThread::new(receiver, args_clone, warnings_clone)
-                        .unwrap()
+                        .expect("Failed to create compiler thread - this is a fatal error")
                         .run();
                 })
-                .unwrap();
+                .expect("Failed to spawn compiler thread - this is a fatal error");
             self.compiler_channel = Some(sender);
             self.compiler_thread = Some(compiler_thread);
         }
     }
 
     pub fn print(&mut self, result: usize) {
-        let result = self.get_repr(result, 0).unwrap();
+        let result = self
+            .get_repr(result, 0)
+            .expect("Failed to get representation for print - this is a fatal error");
         self.printer.print(result);
     }
 
@@ -978,7 +996,7 @@ impl Runtime {
         let response = self
             .compiler_channel
             .as_ref()
-            .unwrap()
+            .expect("Compiler channel not initialized - this is a fatal error")
             .send(CompilerMessage::CompileFile(file_name.to_string()));
         if let CompilerResponse::FunctionsToRun(functions) = response {
             Ok(functions)
@@ -991,7 +1009,7 @@ impl Runtime {
         let response = self
             .compiler_channel
             .as_ref()
-            .unwrap()
+            .expect("Compiler channel not initialized - this is a fatal error")
             .send(CompilerMessage::CompileString(_string.to_string()));
         match response {
             CompilerResponse::FunctionPointer(pointer) => Ok(pointer),
@@ -1106,6 +1124,72 @@ impl Runtime {
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// Create a Beagle struct or enum from Rust code
+    ///
+    /// # Arguments
+    /// * `struct_name` - Fully qualified struct name (e.g., "beagle.core/SystemError")
+    /// * `variant_name` - For enums, the variant name (e.g., "StructError"). None for regular structs
+    /// * `fields` - Field values in the order they appear in the struct/variant definition
+    /// * `stack_pointer` - Current stack pointer for GC
+    ///
+    /// # Example
+    /// ```rust
+    /// let fields = vec![message_str, location_str];
+    /// let error = runtime.create_struct(
+    ///     "beagle.core/SystemError",
+    ///     Some("StructError"),
+    ///     &fields,
+    ///     stack_pointer
+    /// )?;
+    /// ```
+    pub fn create_struct(
+        &mut self,
+        struct_name: &str,
+        variant_name: Option<&str>,
+        fields: &[usize],
+        stack_pointer: usize,
+    ) -> Result<usize, Box<dyn Error>> {
+        // Look up the struct definition
+        let actual_struct_id = if let Some(variant) = variant_name {
+            // For enum variants, look up the variant struct (e.g., "Enum.Variant")
+            let variant_struct_name = format!("{}.{}", struct_name, variant);
+            let (variant_id, _variant_def) = self
+                .get_struct(&variant_struct_name)
+                .ok_or_else(|| format!("Variant struct '{}' not found", variant_struct_name))?;
+
+            variant_id
+        } else {
+            // For regular structs, look up the struct directly
+            let (id, _struct_def) = self
+                .get_struct(struct_name)
+                .ok_or_else(|| format!("Struct '{}' not found", struct_name))?;
+            id
+        };
+
+        // Allocate heap object
+        let obj_ptr = self.allocate(fields.len(), stack_pointer, BuiltInTypes::HeapObject)?;
+        let heap_obj = HeapObject::from_tagged(obj_ptr);
+
+        // Write struct_id to header using Header API (no manual bit manipulation!)
+        let untagged = heap_obj.untagged();
+        let header_ptr = untagged as *mut usize;
+        unsafe {
+            let mut header = Header::from_usize(*header_ptr);
+            // struct_id must be tagged (shifted left by 3 bits) before storing in type_data
+            let tagged_struct_id = BuiltInTypes::Int.tag(actual_struct_id as isize) as usize;
+            header.type_data = tagged_struct_id as u32;
+            *header_ptr = header.to_usize();
+        }
+
+        // Write fields directly (both structs and enum variants)
+        // For enum variants, the variant is identified by the struct_id, not a separate field
+        for (i, &field_value) in fields.iter().enumerate() {
+            heap_obj.write_field(i as i32, field_value);
+        }
+
+        Ok(obj_ptr)
     }
 
     unsafe fn buffer_between<T>(start: *const T, end: *const T) -> &'static [T] {
@@ -1356,9 +1440,11 @@ impl Runtime {
                 for (old, new) in values {
                     // Skip if namespace doesn't exist (e.g., keyword namespace before any keywords created)
                     if let Some(ns) = self.namespaces.namespaces.get_mut(namespace) {
-                        for (_, value) in ns.get_mut().unwrap().bindings.iter_mut() {
-                            if *value == old {
-                                *value = new;
+                        if let Ok(namespace) = ns.get_mut() {
+                            for (_, value) in namespace.bindings.iter_mut() {
+                                if *value == old {
+                                    *value = new;
+                                }
                             }
                         }
                     }
@@ -1402,7 +1488,11 @@ impl Runtime {
                     unsafe { __pause(stack_pointer) };
                 }
                 TryLockError::Poisoned(e) => {
-                    panic!("Poisoned lock {:?}", e);
+                    eprintln!("Warning: Poisoned lock in GC: {:?}", e);
+                    // Try to recover by using the poisoned data anyway
+                    // The lock is poisoned but the data might still be usable
+                    drop(locked);
+                    unsafe { __pause(stack_pointer) };
                 }
             }
 
@@ -1420,14 +1510,18 @@ impl Runtime {
             return;
         }
 
-        let locked = locked.unwrap();
+        let locked = locked.expect("Failed to lock GC - this is a fatal error");
 
         let (lock, cvar) = &*self.thread_state;
-        let mut thread_state = lock.lock().unwrap();
+        let mut thread_state = lock
+            .lock()
+            .expect("Failed to lock thread state - this is a fatal error");
         while thread_state.paused_threads + thread_state.c_calling_stack_pointers.len()
             < self.memory.active_threads()
         {
-            thread_state = cvar.wait(thread_state).unwrap();
+            thread_state = cvar
+                .wait(thread_state)
+                .expect("Failed waiting on condition variable - this is a fatal error");
         }
 
         let mut stack_pointers = thread_state.stack_pointers.clone();
@@ -1447,9 +1541,11 @@ impl Runtime {
             for (old, new) in values {
                 // Skip if namespace doesn't exist (e.g., keyword namespace before any keywords created)
                 if let Some(ns) = self.namespaces.namespaces.get_mut(namespace) {
-                    for (_, value) in ns.get_mut().unwrap().bindings.iter_mut() {
-                        if *value == old {
-                            *value = new;
+                    if let Ok(namespace) = ns.get_mut() {
+                        for (_, value) in namespace.bindings.iter_mut() {
+                            if *value == old {
+                                *value = new;
+                            }
                         }
                     }
                 }
@@ -1490,11 +1586,15 @@ impl Runtime {
             thread.unpark();
         }
 
-        let mut thread_state = lock.lock().unwrap();
+        let mut thread_state = lock
+            .lock()
+            .expect("Failed to lock thread state after GC - this is a fatal error");
         while thread_state.paused_threads > 0 {
             let (state, timeout) = cvar
                 .wait_timeout(thread_state, Duration::from_millis(1))
-                .unwrap();
+                .expect(
+                    "Failed waiting on condition variable with timeout - this is a fatal error",
+                );
             thread_state = state;
 
             if timeout.timed_out() {
@@ -1537,7 +1637,7 @@ impl Runtime {
             .iter()
             .find(|(thread_id, _)| *thread_id == current_thread)
             .map(|(_, stack)| stack.as_ptr() as usize + STACK_SIZE)
-            .unwrap()
+            .expect("Current thread stack not found - this is a fatal error")
     }
 
     pub fn make_closure(
@@ -1552,16 +1652,13 @@ impl Runtime {
         let num_free = free_variables.len();
         let function_definition =
             self.get_function_by_pointer(BuiltInTypes::untag(function) as *const u8);
-        if function_definition.is_none() {
-            unsafe {
-                crate::builtins::throw_runtime_error(
-                    stack_pointer,
-                    "FunctionError",
-                    "Function not found when creating closure".to_string(),
-                );
-            }
-        }
-        let function_definition = function_definition.unwrap();
+        let function_definition = function_definition.unwrap_or_else(|| unsafe {
+            crate::builtins::throw_runtime_error(
+                stack_pointer,
+                "FunctionError",
+                "Function not found when creating closure".to_string(),
+            );
+        });
         let num_locals = function_definition.number_of_locals;
 
         heap_object.write_field(0, function);
@@ -1607,10 +1704,18 @@ impl Runtime {
     pub fn new_thread(&mut self, f: usize) {
         let trampoline = self.get_trampoline();
         let trampoline: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline) };
-        let call_fn = self.get_function_by_name("beagle.core/__call_fn").unwrap();
-        let function_pointer = self.get_pointer(call_fn).unwrap() as usize;
+        let call_fn = self
+            .get_function_by_name("beagle.core/__call_fn")
+            .expect("beagle.core/__call_fn not found - this is a fatal error");
+        let function_pointer = self
+            .get_pointer(call_fn)
+            .expect("Failed to get pointer for __call_fn - this is a fatal error")
+            as usize;
 
-        let new_stack = MmapOptions::new(STACK_SIZE).unwrap().map_mut().unwrap();
+        let new_stack = MmapOptions::new(STACK_SIZE)
+            .expect("Failed to create mmap for thread stack - out of memory")
+            .map_mut()
+            .expect("Failed to map thread stack memory - this is a fatal error");
         let stack_pointer = new_stack.as_ptr() as usize + STACK_SIZE;
         let thread_state = self.thread_state.clone();
         let thread = thread::spawn(move || {
@@ -1638,7 +1743,9 @@ impl Runtime {
             return;
         }
         for thread in self.memory.join_handles.drain(..) {
-            thread.join().unwrap();
+            thread
+                .join()
+                .expect("Thread panicked - this is a fatal error");
         }
         // Clean up exception handlers for finished threads
         self.cleanup_finished_thread_handlers();
@@ -1675,11 +1782,14 @@ impl Runtime {
     pub fn write_functions_to_pid_map(&self) {
         // https://github.com/torvalds/linux/blob/6485cf5ea253d40d507cd71253c9568c5470cd27/tools/perf/Documentation/jit-interface.txt
         let pid = std::process::id();
-        let mut file = std::fs::OpenOptions::new()
+        let mut file = match std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .open(format!("/tmp/perf-{}.map", pid))
-            .unwrap();
+        {
+            Ok(f) => f,
+            Err(_) => return, // Silently skip if we can't create the perf map
+        };
         // Each line has the following format, fields separated with spaces:
         // START SIZE symbolname
         // START and SIZE are hex numbers without 0x.
@@ -1693,7 +1803,8 @@ impl Runtime {
             let size = function.size;
             let name = function.name.clone();
             let line = format!("{:x} {:x} {}\n", start, size, name);
-            file.write_all(line.as_bytes()).unwrap();
+            file.write_all(line.as_bytes())
+                .expect("Failed to write to pid map file - this is a fatal error");
         }
     }
 
@@ -1709,7 +1820,9 @@ impl Runtime {
     }
 
     pub fn get_ffi_info(&self, ffi_info_id: usize) -> &FFIInfo {
-        self.ffi_function_info.get(ffi_info_id).unwrap()
+        self.ffi_function_info
+            .get(ffi_info_id)
+            .expect("FFI function info not found - this is a fatal error")
     }
 
     pub fn add_ffi_info_by_name(&mut self, function_name: String, ffi_info_id: usize) {
@@ -1733,18 +1846,34 @@ impl Runtime {
         let mut namespace = self
             .namespaces
             .get_namespace_by_id(namespace_id)
-            .unwrap()
+            .expect("Namespace not found in update_binding - this is a fatal error")
             .lock()
-            .unwrap();
-        let name = namespace.ids.get(namespace_slot).unwrap().clone();
+            .expect("Failed to lock namespace in update_binding - this is a fatal error");
+        let name = namespace
+            .ids
+            .get(namespace_slot)
+            .expect("Namespace slot not found in update_binding - this is a fatal error")
+            .clone();
         namespace.bindings.insert(name, value);
     }
 
     pub fn get_binding(&self, namespace: usize, slot: usize) -> usize {
-        let namespace = self.namespaces.namespaces.get(namespace).unwrap();
-        let namespace = namespace.lock().unwrap();
-        let name = namespace.ids.get(slot).unwrap();
-        *namespace.bindings.get(name).unwrap()
+        let namespace = self
+            .namespaces
+            .namespaces
+            .get(namespace)
+            .expect("Namespace not found in get_binding - this is a fatal error");
+        let namespace = namespace
+            .lock()
+            .expect("Failed to lock namespace in get_binding - this is a fatal error");
+        let name = namespace
+            .ids
+            .get(slot)
+            .expect("Namespace slot not found in get_binding - this is a fatal error");
+        *namespace
+            .bindings
+            .get(name)
+            .expect("Binding not found in namespace - this is a fatal error")
     }
 
     pub fn reserve_namespace(&mut self, name: String) -> usize {
@@ -1756,8 +1885,14 @@ impl Runtime {
     }
 
     pub fn find_binding(&self, namespace_id: usize, name: &str) -> Option<usize> {
-        let namespace = self.namespaces.namespaces.get(namespace_id).unwrap();
-        let namespace = namespace.lock().unwrap();
+        let namespace = self
+            .namespaces
+            .namespaces
+            .get(namespace_id)
+            .expect("Namespace not found in find_binding - this is a fatal error");
+        let namespace = namespace
+            .lock()
+            .expect("Failed to lock namespace in find_binding - this is a fatal error");
         namespace.ids.iter().position(|n| n == name)
     }
 
@@ -1769,9 +1904,9 @@ impl Runtime {
         self.namespaces
             .namespaces
             .get(self.namespaces.current_namespace)
-            .unwrap()
+            .expect("Current namespace not found - this is a fatal error")
             .lock()
-            .unwrap()
+            .expect("Failed to lock current namespace - this is a fatal error")
             .name
             .clone()
     }
@@ -1780,19 +1915,28 @@ impl Runtime {
         self.namespaces
             .namespaces
             .get(self.namespaces.current_namespace)
-            .unwrap()
+            .expect("Current namespace not found - this is a fatal error")
     }
 
     pub fn add_alias(&self, namespace_name: String, alias: String) {
         // TODO: I really need to get rid of this mutex business
-        let namespace_id = self
-            .namespaces
-            .get_namespace_id(namespace_name.as_str())
-            .unwrap_or_else(|| panic!("Could not find namespace {}", namespace_name));
+        let namespace_id = match self.namespaces.get_namespace_id(namespace_name.as_str()) {
+            Some(id) => id,
+            None => {
+                eprintln!(
+                    "Warning: Could not find namespace {} when adding alias {}",
+                    namespace_name, alias
+                );
+                return;
+            }
+        };
 
         let current_namespace = self.get_current_namespace();
-        let mut namespace = current_namespace.lock().unwrap();
-        namespace.aliases.insert(alias, namespace_id);
+        if let Ok(mut namespace) = current_namespace.lock() {
+            namespace.aliases.insert(alias, namespace_id);
+        } else {
+            eprintln!("Warning: Could not lock namespace to add alias");
+        }
     }
 
     pub fn get_namespace_id(&self, name: &str) -> Option<usize> {
@@ -1934,7 +2078,9 @@ impl Runtime {
         let string = &string_value.str;
         let struct_type_id = heap_object.get_struct_id();
         let struct_type_id = BuiltInTypes::untag(struct_type_id);
-        let struct_value = self.get_struct_by_id(struct_type_id).unwrap();
+        let struct_value = self
+            .get_struct_by_id(struct_type_id)
+            .expect("Struct not found by ID - this is a fatal error");
         let field_index = struct_value
             .fields
             .iter()
@@ -2106,20 +2252,18 @@ impl Runtime {
         let string = &string_value.str;
         let struct_type_id = heap_object.get_struct_id();
         let struct_type_id = BuiltInTypes::untag(struct_type_id);
-        let struct_value = self.get_struct_by_id(struct_type_id).unwrap();
+        let struct_value = self
+            .get_struct_by_id(struct_type_id)
+            .expect("Struct not found by ID - this is a fatal error");
         let field_index = struct_value.fields.iter().position(|f| f == string);
 
-        if field_index.is_none() {
-            unsafe {
-                crate::builtins::throw_runtime_error(
-                    stack_pointer,
-                    "FieldError",
-                    format!("Field '{}' not found in struct", string),
-                );
-            }
-        }
-
-        let field_index = field_index.unwrap();
+        let field_index = field_index.unwrap_or_else(|| unsafe {
+            crate::builtins::throw_runtime_error(
+                stack_pointer,
+                "FieldError",
+                format!("Field '{}' not found in struct", string),
+            );
+        });
         // Temporary +1 because I was writing size as the first field
         // and I haven't changed that
 
@@ -2135,7 +2279,11 @@ impl Runtime {
     ) -> Option<String> {
         // It should look like this
         // struct_name { field1: value1, field2: value2 }
-        let simple_name = struct_value.name.split_once("/").unwrap().1;
+        let simple_name = struct_value
+            .name
+            .split_once("/")
+            .map(|(_, name)| name)
+            .unwrap_or(&struct_value.name);
         let mut repr = simple_name.to_string();
         if struct_value.fields.is_empty() {
             return Some(repr);
@@ -2261,12 +2409,25 @@ impl Runtime {
             kind: "foreign_function".to_string(),
             data: Data::ForeignFunction {
                 name: name.unwrap_or("<Anonymous>").to_string(),
-                pointer: Self::get_function_pointer(self, self.functions.last().unwrap().clone())
-                    .unwrap() as usize,
+                pointer: Self::get_function_pointer(
+                    self,
+                    self.functions
+                        .last()
+                        .expect("No functions in function table - this is a fatal error")
+                        .clone(),
+                )
+                .expect("Failed to get function pointer - this is a fatal error")
+                    as usize,
             },
         });
-        let function_pointer =
-            Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
+        let function_pointer = Self::get_function_pointer(
+            self,
+            self.functions
+                .last()
+                .expect("No functions in function table - this is a fatal error")
+                .clone(),
+        )
+        .expect("Failed to get function pointer - this is a fatal error");
         Ok(function_pointer as usize)
     }
 
@@ -2293,8 +2454,14 @@ impl Runtime {
             size: 0,
             number_of_args,
         });
-        let pointer =
-            Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
+        let pointer = Self::get_function_pointer(
+            self,
+            self.functions
+                .last()
+                .expect("No functions in function table - this is a fatal error")
+                .clone(),
+        )
+        .expect("Failed to get function pointer - this is a fatal error");
         // self.namespaces.add_binding(name, pointer as usize);
         debugger(Message {
             kind: "builtin_function".to_string(),
@@ -2323,20 +2490,23 @@ impl Runtime {
         self.memory.stack_map.extend(stack_map);
     }
 
-    pub fn replace_function_binding(&mut self, name: String, pointer: usize) {
+    pub fn replace_function_binding(
+        &mut self,
+        name: String,
+        pointer: usize,
+    ) -> Result<(), Box<dyn Error>> {
         let untagged_pointer = BuiltInTypes::untag(pointer) as *const u8;
-        let existing_function = self.get_function_by_pointer(untagged_pointer);
-        if existing_function.is_none() {
-            panic!("Function not found");
-        }
-        let existing_function = existing_function.unwrap().clone();
+        let existing_function = self
+            .get_function_by_pointer(untagged_pointer)
+            .ok_or_else(|| format!("Function not found for pointer {:p}", untagged_pointer))?;
+        let existing_function = existing_function.clone();
         for (index, function) in self.functions.iter_mut().enumerate() {
             if function.name == name {
-                self.overwrite_function(index, untagged_pointer, existing_function.size)
-                    .unwrap();
-                break;
+                self.overwrite_function(index, untagged_pointer, existing_function.size)?;
+                return Ok(());
             }
         }
+        Err(format!("Function {} not found in function table", name).into())
     }
 
     pub fn upsert_function(
@@ -2429,8 +2599,14 @@ impl Runtime {
             size,
             number_of_args,
         });
-        let function_pointer =
-            Self::get_function_pointer(self, self.functions.last().unwrap().clone()).unwrap();
+        let function_pointer = Self::get_function_pointer(
+            self,
+            self.functions
+                .last()
+                .expect("No functions in function table - this is a fatal error")
+                .clone(),
+        )
+        .expect("Failed to get function pointer - this is a fatal error");
         let jump_table_offset = self.add_jump_table_entry(index, function_pointer)?;
 
         self.functions[index].jump_table_offset = jump_table_offset;
@@ -2450,7 +2626,9 @@ impl Runtime {
         function.pointer = pointer.into();
         let jump_table_offset = function.jump_table_offset;
         let function_clone = function.clone();
-        let function_pointer = self.get_function_pointer(function_clone).unwrap();
+        let function_pointer = self
+            .get_function_pointer(function_clone)
+            .expect("Failed to get function pointer - this is a fatal error");
         self.modify_jump_table_entry(jump_table_offset, function_pointer as usize)?;
         let function = &mut self.functions[index];
         function.size = size;
@@ -2470,7 +2648,11 @@ impl Runtime {
     }
 
     pub fn get_jump_table_pointer(&self, function: Function) -> Result<usize, Box<dyn Error>> {
-        Ok(function.jump_table_offset * 8 + self.jump_table.as_ref().unwrap().as_ptr() as usize)
+        let jump_table = self
+            .jump_table
+            .as_ref()
+            .ok_or("Jump table not initialized")?;
+        Ok(function.jump_table_offset * 8 + jump_table.as_ptr() as usize)
     }
 
     pub fn add_jump_table_entry(
@@ -2480,16 +2662,19 @@ impl Runtime {
     ) -> Result<usize, Box<dyn Error>> {
         let jump_table_offset = self.jump_table_offset;
         let memory = self.jump_table.take();
-        let mut memory = memory.unwrap().make_mut().map_err(|(_, e)| e)?;
+        let mut memory = memory
+            .ok_or("Jump table not initialized")?
+            .make_mut()
+            .map_err(|(_, e)| e)?;
         let buffer = &mut memory[jump_table_offset * 8..];
         let pointer = BuiltInTypes::Function.tag(pointer as isize) as usize;
         // Write full usize to buffer
         for (index, byte) in pointer.to_le_bytes().iter().enumerate() {
             buffer[index] = *byte;
         }
-        let mem = memory.make_read_only().unwrap_or_else(|(_map, e)| {
-            panic!("Failed to make mmap read_only: {}", e);
-        });
+        let mem = memory
+            .make_read_only()
+            .map_err(|(_map, e)| format!("Failed to make mmap read_only: {}", e))?;
         self.jump_table_offset += 1;
         self.jump_table = Some(mem);
         Ok(jump_table_offset)
@@ -2501,7 +2686,10 @@ impl Runtime {
         function_pointer: usize,
     ) -> Result<usize, Box<dyn Error>> {
         let memory = self.jump_table.take();
-        let mut memory = memory.unwrap().make_mut().map_err(|(_, e)| e)?;
+        let mut memory = memory
+            .ok_or("Jump table not initialized")?
+            .make_mut()
+            .map_err(|(_, e)| e)?;
         let buffer = &mut memory[jump_table_offset * 8..];
 
         let function_pointer = BuiltInTypes::Function.tag(function_pointer as isize) as usize;
@@ -2509,9 +2697,9 @@ impl Runtime {
         for (index, byte) in function_pointer.to_le_bytes().iter().enumerate() {
             buffer[index] = *byte;
         }
-        let mem = memory.make_read_only().unwrap_or_else(|(_map, e)| {
-            panic!("Failed to make mmap read_only: {}", e);
-        });
+        let mem = memory
+            .make_read_only()
+            .map_err(|(_map, e)| format!("Failed to make mmap read_only: {}", e))?;
         self.jump_table = Some(mem);
         Ok(jump_table_offset)
     }
@@ -2535,11 +2723,11 @@ impl Runtime {
             .find(|f| f.pointer == value.into())
     }
 
-    pub fn check_functions(&self) {
+    pub fn check_functions(&self) -> Result<(), Box<dyn Error>> {
         let undefined_functions: Vec<&Function> =
             self.functions.iter().filter(|f| !f.is_defined).collect();
         if !undefined_functions.is_empty() {
-            panic!(
+            return Err(format!(
                 "Undefined functions: {:?} only have functions {:#?}",
                 undefined_functions
                     .iter()
@@ -2549,8 +2737,10 @@ impl Runtime {
                     .iter()
                     .map(|f| f.name.clone())
                     .collect::<Vec<String>>()
-            );
+            )
+            .into());
         }
+        Ok(())
     }
 
     pub fn get_function_by_name(&self, name: &str) -> Option<&Function> {
@@ -2570,14 +2760,18 @@ impl Runtime {
     ) -> Result<usize, Box<dyn Error>> {
         self.compiler_channel
             .as_ref()
-            .unwrap()
+            .expect("Compiler channel not initialized - this is a fatal error")
             .send(CompilerMessage::AddFunctionMarkExecutable(
                 name.clone(),
                 code.to_vec(),
                 number_of_locals as usize,
                 number_of_args,
             ));
-        Ok(self.get_function_by_name(&name).unwrap().pointer.into())
+        Ok(self
+            .get_function_by_name(&name)
+            .expect("Function not found after compilation - this is a fatal error")
+            .pointer
+            .into())
     }
 
     fn add_binding(&mut self, name: &str, function_pointer: usize) -> usize {
@@ -2585,7 +2779,9 @@ impl Runtime {
     }
 
     pub fn get_trampoline(&self) -> fn(u64, u64) -> u64 {
-        let trampoline = self.get_function_by_name("trampoline").unwrap();
+        let trampoline = self
+            .get_function_by_name("trampoline")
+            .expect("Trampoline function not found - this is a fatal error");
 
         unsafe { std::mem::transmute(trampoline.pointer) }
     }
@@ -2627,7 +2823,9 @@ impl Runtime {
         // and then you say let x = Point
         // x is a struct object that describes the struct Point
         // grab the simple name for the binding
-        let (_, simple_name) = name.split_once("/").unwrap();
+        let (_, simple_name) = name
+            .split_once("/")
+            .expect("Struct name must contain / separator - this is a fatal error");
         self.add_binding(simple_name, 0);
     }
 
@@ -2648,12 +2846,26 @@ impl Runtime {
 
     pub fn get_namespace_from_alias(&self, alias: &str) -> Option<String> {
         let current_namespace = self.current_namespace_name();
-        let current_namespace = self.get_namespace_id(current_namespace.as_str()).unwrap();
-        let current_namespace = self.namespaces.namespaces.get(current_namespace).unwrap();
-        let current_namespace = current_namespace.lock().unwrap();
+        let current_namespace = self
+            .get_namespace_id(current_namespace.as_str())
+            .expect("Current namespace ID not found - this is a fatal error");
+        let current_namespace = self
+            .namespaces
+            .namespaces
+            .get(current_namespace)
+            .expect("Current namespace not found in namespaces - this is a fatal error");
+        let current_namespace = current_namespace
+            .lock()
+            .expect("Failed to lock current namespace - this is a fatal error");
         let namespace_id = current_namespace.aliases.get(alias)?;
-        let namespace = self.namespaces.namespaces.get(*namespace_id).unwrap();
-        let namespace = namespace.lock().unwrap();
+        let namespace = self
+            .namespaces
+            .namespaces
+            .get(*namespace_id)
+            .expect("Alias target namespace not found - this is a fatal error");
+        let namespace = namespace
+            .lock()
+            .expect("Failed to lock alias target namespace - this is a fatal error");
         Some(namespace.name.clone())
     }
 
@@ -2671,7 +2883,7 @@ impl Runtime {
     pub fn set_pause_atom_ptr(&self, pause_atom_ptr: usize) {
         self.compiler_channel
             .as_ref()
-            .unwrap()
+            .expect("Compiler channel not initialized - this is a fatal error")
             .send(CompilerMessage::SetPauseAtomPointer(pause_atom_ptr));
     }
 
@@ -2694,7 +2906,10 @@ impl Runtime {
     }
 
     pub fn compile_protocol_method(&self, protocol_name: &str, method_name: &str) -> usize {
-        let protocol_info = self.protocol_info.get(protocol_name).unwrap();
+        let protocol_info = self
+            .protocol_info
+            .get(protocol_name)
+            .expect("Protocol not found - this is a fatal error");
         let method_info: Vec<ProtocolMethodInfo> = protocol_info
             .iter()
             .filter(|m| m.method_name == method_name)
@@ -2702,7 +2917,7 @@ impl Runtime {
             .collect();
         self.compiler_channel
             .as_ref()
-            .unwrap()
+            .expect("Compiler channel not initialized - this is a fatal error")
             .send(CompilerMessage::CompileProtocolMethod(
                 protocol_name.to_string(),
                 method_name.to_string(),
@@ -2717,29 +2932,45 @@ impl Runtime {
             let current_namespace_name = self.current_namespace_name();
             let current_namespace_id = self
                 .get_namespace_id(current_namespace_name.as_str())
-                .unwrap();
+                .expect("Current namespace does not exist - this is a fatal error");
             let find_binding = self.find_binding(current_namespace_id, struct_name.as_str());
             if find_binding.is_some() {
                 return format!("{}/{}", current_namespace_name, struct_name);
             }
-            let beagle_core = self.get_namespace_id("beagle.core").unwrap();
-            let find_binding = self.find_binding(beagle_core, struct_name.as_str());
-            if find_binding.is_some() {
-                return format!("beagle.core/{}", struct_name);
+            if let Some(beagle_core) = self.get_namespace_id("beagle.core") {
+                let find_binding = self.find_binding(beagle_core, struct_name.as_str());
+                if find_binding.is_some() {
+                    return format!("beagle.core/{}", struct_name);
+                }
             }
-            panic!("Cannot resolve {}", struct_name);
+            eprintln!(
+                "Warning: Cannot resolve struct {}, using as-is",
+                struct_name
+            );
+            return struct_name.to_string();
         }
-        let (namespace_or_alias, struct_name) = struct_name.split_once("/").unwrap();
+
+        let (namespace_or_alias, struct_name) = match struct_name.split_once("/") {
+            Some(parts) => parts,
+            None => {
+                eprintln!("Warning: Invalid struct name format {}", struct_name);
+                return struct_name.to_string();
+            }
+        };
 
         let namespace_from_alias = self.get_namespace_from_alias(namespace_or_alias);
-        if namespace_from_alias.is_some() {
-            return format!("{}/{}", namespace_from_alias.unwrap(), struct_name);
+        if let Some(namespace) = namespace_from_alias {
+            return format!("{}/{}", namespace, struct_name);
         }
         let namespace_id = self.get_namespace_id(namespace_or_alias);
         if namespace_id.is_some() {
             return format!("{}/{}", namespace_or_alias, struct_name);
         }
-        panic!("Cannot resolve {}", struct_name);
+        eprintln!(
+            "Warning: Cannot resolve struct {}, using as-is",
+            struct_name
+        );
+        format!("{}/{}", namespace_or_alias, struct_name)
     }
 
     pub fn get_command_line_args(&self) -> &CommandLineArguments {
@@ -2806,19 +3037,23 @@ mod tests {
 
         // Test saving a stack segment
         let test_data = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
-        let segment_id = runtime.save_stack_segment(&test_data).unwrap();
+        let segment_id = runtime
+            .save_stack_segment(&test_data)
+            .expect("Test failed: could not save stack segment");
 
         // Test restoring the segment
         let mut restore_buffer = vec![0u8; 10];
         let bytes_copied = runtime
             .restore_stack_segment(segment_id, restore_buffer.as_mut_ptr())
-            .unwrap();
+            .expect("Test failed: could not restore stack segment");
 
         assert_eq!(bytes_copied, 8);
         assert_eq!(&restore_buffer[0..8], &test_data[..]);
 
         // Test removing the segment
-        runtime.remove_stack_segment(segment_id).unwrap();
+        runtime
+            .remove_stack_segment(segment_id)
+            .expect("Test failed: could not remove stack segment");
 
         // Verify it's removed by trying to restore again (should fail)
         let result = runtime.restore_stack_segment(segment_id, restore_buffer.as_mut_ptr());

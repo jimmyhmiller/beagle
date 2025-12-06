@@ -412,6 +412,12 @@ fn run_repl(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         }
     }
 
+    // Set REPL to use "user" namespace for user code
+    let user_namespace_id = runtime
+        .get_namespace_id("user")
+        .unwrap_or_else(|| runtime.reserve_namespace("user".to_string()));
+    runtime.set_current_namespace(user_namespace_id);
+
     println!("Beagle REPL - Enter expressions to evaluate (Ctrl+C to exit)");
 
     loop {
@@ -427,7 +433,17 @@ fn run_repl(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
                     continue;
                 }
 
-                match runtime.compile_string(input) {
+                // Escape the input string for eval()
+                let escaped_input = input.replace("\\", "\\\\").replace("\"", "\\\"");
+
+                // Wrap user input in eval() with try/catch to handle all exceptions consistently
+                // This ensures parse/compile errors throw SystemError.CompileError like explicit eval() calls
+                let wrapped_input = format!(
+                    "try {{ eval(\"{}\") }} catch (__repl_error__) {{ println(\"Uncaught exception:\"); println(__repl_error__); null }}",
+                    escaped_input
+                );
+
+                match runtime.compile_string(&wrapped_input) {
                     Ok(function_pointer) => {
                         if function_pointer == 0 {
                             continue;
@@ -437,7 +453,8 @@ fn run_repl(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
                         runtime.println(result).unwrap();
                     }
                     Err(e) => {
-                        eprintln!("Error: {}", e);
+                        // This should only happen if the wrapper code itself has syntax errors
+                        eprintln!("Internal REPL error: {}", e);
                     }
                 }
             }
@@ -553,7 +570,7 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     runtime.write_functions_to_pid_map();
 
-    runtime.check_functions();
+    runtime.check_functions()?;
     if args.show_times {
         println!("Compile time {:?}", compile_time.elapsed());
     }

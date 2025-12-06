@@ -175,7 +175,7 @@ impl Header {
     /// Position of the opaque bit in the header.
     const OPAQUE_BIT_POSITION: u32 = 1;
 
-    fn to_usize(self) -> usize {
+    pub fn to_usize(self) -> usize {
         let mut data: usize = 0;
         data |= (self.type_id as usize) << 56;
         data |= (self.type_data as usize) << 24;
@@ -189,7 +189,7 @@ impl Header {
         data
     }
 
-    fn from_usize(data: usize) -> Self {
+    pub fn from_usize(data: usize) -> Self {
         let _type = (data >> 56) as u8;
         let type_data = (data >> 24) as u32;
         let size = (data >> 16) as u8;

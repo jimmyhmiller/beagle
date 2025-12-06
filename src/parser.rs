@@ -7,6 +7,117 @@ use crate::{
     ast::{Ast, FieldPattern, MatchArm, Pattern, TokenRange},
     builtins::debugger,
 };
+use std::{error::Error, fmt};
+
+#[derive(Debug, Clone)]
+pub enum ParseError {
+    InvalidUtf8 {
+        position: usize,
+    },
+    UnexpectedToken {
+        expected: String,
+        found: String,
+        position: usize,
+    },
+    UnexpectedEof {
+        expected: String,
+    },
+    InvalidNumberLiteral {
+        literal: String,
+        position: usize,
+    },
+    InvalidStringEscape {
+        position: usize,
+    },
+    MissingToken {
+        expected: String,
+        position: usize,
+    },
+    InvalidPattern {
+        message: String,
+        position: usize,
+    },
+    InvalidExpression {
+        message: String,
+        position: usize,
+    },
+    InvalidDeclaration {
+        message: String,
+        position: usize,
+    },
+    IoError {
+        message: String,
+    },
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParseError::InvalidUtf8 { position } => {
+                write!(f, "Invalid UTF-8 at position {}", position)
+            }
+            ParseError::UnexpectedToken {
+                expected,
+                found,
+                position,
+            } => {
+                write!(
+                    f,
+                    "Expected {} but found {} at position {}",
+                    expected, found, position
+                )
+            }
+            ParseError::UnexpectedEof { expected } => {
+                write!(f, "Unexpected end of file, expected {}", expected)
+            }
+            ParseError::InvalidNumberLiteral { literal, position } => {
+                write!(
+                    f,
+                    "Invalid number literal '{}' at position {}",
+                    literal, position
+                )
+            }
+            ParseError::InvalidStringEscape { position } => {
+                write!(f, "Invalid string escape sequence at position {}", position)
+            }
+            ParseError::MissingToken { expected, position } => {
+                write!(f, "Missing {} at position {}", expected, position)
+            }
+            ParseError::InvalidPattern { message, position } => {
+                write!(f, "Invalid pattern: {} at position {}", message, position)
+            }
+            ParseError::InvalidExpression { message, position } => {
+                write!(
+                    f,
+                    "Invalid expression: {} at position {}",
+                    message, position
+                )
+            }
+            ParseError::InvalidDeclaration { message, position } => {
+                write!(
+                    f,
+                    "Invalid declaration: {} at position {}",
+                    message, position
+                )
+            }
+            ParseError::IoError { message } => {
+                write!(f, "IO error: {}", message)
+            }
+        }
+    }
+}
+
+impl Error for ParseError {}
+
+impl From<std::io::Error> for ParseError {
+    fn from(err: std::io::Error) -> Self {
+        ParseError::IoError {
+            message: err.to_string(),
+        }
+    }
+}
+
+pub type ParseResult<T> = Result<T, ParseError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Token {
@@ -109,79 +220,81 @@ impl Token {
         }
     }
 
-    fn literal(&self, input_bytes: &[u8]) -> String {
+    fn literal(&self, input_bytes: &[u8]) -> ParseResult<String> {
         match self {
-            Token::OpenParen => "(".to_string(),
-            Token::CloseParen => ")".to_string(),
-            Token::OpenCurly => "{".to_string(),
-            Token::CloseCurly => "}".to_string(),
-            Token::OpenBracket => "[".to_string(),
-            Token::CloseBracket => "]".to_string(),
-            Token::SemiColon => ";".to_string(),
-            Token::Colon => ":".to_string(),
-            Token::Comma => ",".to_string(),
-            Token::Dot => ".".to_string(),
-            Token::NewLine => "\n".to_string(),
-            Token::Fn => "fn".to_string(),
-            Token::And => "&&".to_string(),
-            Token::Or => "||".to_string(),
-            Token::LessThanOrEqual => "<=".to_string(),
-            Token::LessThan => "<".to_string(),
-            Token::Equal => "=".to_string(),
-            Token::EqualEqual => "==".to_string(),
-            Token::NotEqual => "!=".to_string(),
-            Token::GreaterThan => ">".to_string(),
-            Token::GreaterThanOrEqual => ">=".to_string(),
-            Token::Plus => "+".to_string(),
-            Token::Minus => "-".to_string(),
-            Token::Mul => "*".to_string(),
-            Token::Div => "/".to_string(),
-            Token::Concat => "++".to_string(),
-            Token::True => "true".to_string(),
-            Token::False => "false".to_string(),
-            Token::Null => "null".to_string(),
-            Token::Infinity => "infinity".to_string(),
-            Token::NegativeInfinity => "-infinity".to_string(),
-            Token::ShiftRight => ">>".to_string(),
-            Token::ShiftRightZero => ">>>".to_string(),
-            Token::ShiftLeft => "<<".to_string(),
-            Token::BitWiseAnd => "&".to_string(),
-            Token::BitWiseOr => "|".to_string(),
-            Token::BitWiseXor => "^".to_string(),
-            Token::Loop => "loop".to_string(),
-            Token::While => "while".to_string(),
-            Token::Break => "break".to_string(),
-            Token::Continue => "continue".to_string(),
-            Token::If => "if".to_string(),
-            Token::Else => "else".to_string(),
-            Token::Let => "let".to_string(),
-            Token::Mut => "mut".to_string(),
-            Token::Struct => "struct".to_string(),
-            Token::Enum => "enum".to_string(),
-            Token::Namespace => "namespace".to_string(),
-            Token::Import => "import".to_string(),
-            Token::Protocol => "protocol".to_string(),
-            Token::Extend => "extend".to_string(),
-            Token::As => "as".to_string(),
-            Token::With => "with".to_string(),
-            Token::Try => "try".to_string(),
-            Token::Catch => "catch".to_string(),
-            Token::Throw => "throw".to_string(),
-            Token::Match => "match".to_string(),
-            Token::Arrow => "=>".to_string(),
-            Token::Underscore => "_".to_string(),
-            Token::For => "for".to_string(),
-            Token::In => "in".to_string(),
+            Token::OpenParen => Ok("(".to_string()),
+            Token::CloseParen => Ok(")".to_string()),
+            Token::OpenCurly => Ok("{".to_string()),
+            Token::CloseCurly => Ok("}".to_string()),
+            Token::OpenBracket => Ok("[".to_string()),
+            Token::CloseBracket => Ok("]".to_string()),
+            Token::SemiColon => Ok(";".to_string()),
+            Token::Colon => Ok(":".to_string()),
+            Token::Comma => Ok(",".to_string()),
+            Token::Dot => Ok(".".to_string()),
+            Token::NewLine => Ok("\n".to_string()),
+            Token::Fn => Ok("fn".to_string()),
+            Token::And => Ok("&&".to_string()),
+            Token::Or => Ok("||".to_string()),
+            Token::LessThanOrEqual => Ok("<=".to_string()),
+            Token::LessThan => Ok("<".to_string()),
+            Token::Equal => Ok("=".to_string()),
+            Token::EqualEqual => Ok("==".to_string()),
+            Token::NotEqual => Ok("!=".to_string()),
+            Token::GreaterThan => Ok(">".to_string()),
+            Token::GreaterThanOrEqual => Ok(">=".to_string()),
+            Token::Plus => Ok("+".to_string()),
+            Token::Minus => Ok("-".to_string()),
+            Token::Mul => Ok("*".to_string()),
+            Token::Div => Ok("/".to_string()),
+            Token::Concat => Ok("++".to_string()),
+            Token::True => Ok("true".to_string()),
+            Token::False => Ok("false".to_string()),
+            Token::Null => Ok("null".to_string()),
+            Token::Infinity => Ok("infinity".to_string()),
+            Token::NegativeInfinity => Ok("-infinity".to_string()),
+            Token::ShiftRight => Ok(">>".to_string()),
+            Token::ShiftRightZero => Ok(">>>".to_string()),
+            Token::ShiftLeft => Ok("<<".to_string()),
+            Token::BitWiseAnd => Ok("&".to_string()),
+            Token::BitWiseOr => Ok("|".to_string()),
+            Token::BitWiseXor => Ok("^".to_string()),
+            Token::Loop => Ok("loop".to_string()),
+            Token::While => Ok("while".to_string()),
+            Token::Break => Ok("break".to_string()),
+            Token::Continue => Ok("continue".to_string()),
+            Token::If => Ok("if".to_string()),
+            Token::Else => Ok("else".to_string()),
+            Token::Let => Ok("let".to_string()),
+            Token::Mut => Ok("mut".to_string()),
+            Token::Struct => Ok("struct".to_string()),
+            Token::Enum => Ok("enum".to_string()),
+            Token::Namespace => Ok("namespace".to_string()),
+            Token::Import => Ok("import".to_string()),
+            Token::Protocol => Ok("protocol".to_string()),
+            Token::Extend => Ok("extend".to_string()),
+            Token::As => Ok("as".to_string()),
+            Token::With => Ok("with".to_string()),
+            Token::Try => Ok("try".to_string()),
+            Token::Catch => Ok("catch".to_string()),
+            Token::Throw => Ok("throw".to_string()),
+            Token::Match => Ok("match".to_string()),
+            Token::Arrow => Ok("=>".to_string()),
+            Token::Underscore => Ok("_".to_string()),
+            Token::For => Ok("for".to_string()),
+            Token::In => Ok("in".to_string()),
             Token::Comment((start, end))
             | Token::Atom((start, end))
             | Token::Keyword((start, end))
             | Token::Spaces((start, end))
             | Token::String((start, end))
             | Token::Integer((start, end))
-            | Token::Float((start, end)) => {
-                String::from_utf8(input_bytes[*start..*end].to_vec()).unwrap()
-            }
-            Token::Never => panic!("Should never be called"),
+            | Token::Float((start, end)) => String::from_utf8(input_bytes[*start..*end].to_vec())
+                .map_err(|_| ParseError::InvalidUtf8 { position: *start }),
+            Token::Never => Err(ParseError::InvalidExpression {
+                message: "Internal error: Token::Never should not be used".to_string(),
+                position: 0,
+            }),
         }
     }
 }
@@ -373,7 +486,7 @@ impl Tokenizer {
                 && self.peek(input_bytes).unwrap() <= NINE)
     }
 
-    pub fn parse_number(&mut self, input_bytes: &[u8]) -> Token {
+    pub fn parse_number(&mut self, input_bytes: &[u8]) -> Result<Token, ParseError> {
         let mut is_float = false;
         let start = self.position;
         while !self.at_end(input_bytes)
@@ -381,17 +494,22 @@ impl Tokenizer {
         {
             if self.current_byte(input_bytes) == PERIOD {
                 if is_float {
-                    // Multiple dots in number literal
-                    panic!("Invalid number literal: multiple decimal points found");
+                    // Multiple dots in number literal - this is an error
+                    let literal = String::from_utf8(input_bytes[start..self.position].to_vec())
+                        .unwrap_or_else(|_| "<invalid utf8>".to_string());
+                    return Err(ParseError::InvalidNumberLiteral {
+                        literal: format!("{}. (multiple decimal points)", literal),
+                        position: start,
+                    });
                 }
                 is_float = true;
             }
             self.consume(input_bytes);
         }
         if is_float {
-            Token::Float((start, self.position))
+            Ok(Token::Float((start, self.position)))
         } else {
-            Token::Integer((start, self.position))
+            Ok(Token::Integer((start, self.position)))
         }
     }
 
@@ -488,9 +606,9 @@ impl Tokenizer {
         Token::Keyword((start, self.position))
     }
 
-    pub fn parse_single(&mut self, input_bytes: &[u8]) -> Option<Token> {
+    pub fn parse_single(&mut self, input_bytes: &[u8]) -> Result<Option<Token>, ParseError> {
         if self.at_end(input_bytes) {
-            return None;
+            return Ok(None);
         }
         let result = if self.is_space(input_bytes) {
             self.parse_spaces(input_bytes)
@@ -506,7 +624,7 @@ impl Tokenizer {
             self.consume(input_bytes);
             Token::CloseParen
         } else if self.is_valid_number_char(input_bytes) {
-            self.parse_number(input_bytes)
+            self.parse_number(input_bytes)?
         } else if self.is_quote(input_bytes) {
             self.parse_string(input_bytes)
         } else if self.is_semi_colon(input_bytes) {
@@ -552,7 +670,7 @@ impl Tokenizer {
             // println!("identifier");
             self.parse_identifier(input_bytes)
         };
-        Some(result)
+        Ok(Some(result))
     }
 
     pub fn is_semi_colon(&self, input_bytes: &[u8]) -> bool {
@@ -576,17 +694,20 @@ impl Tokenizer {
     }
 
     // TODO: Make a lazy method of tokenizing
-    pub fn parse_all(&mut self, input_bytes: &[u8]) -> (Vec<Token>, Vec<(usize, usize)>) {
+    pub fn parse_all(
+        &mut self,
+        input_bytes: &[u8],
+    ) -> Result<(Vec<Token>, Vec<(usize, usize)>), ParseError> {
         let mut result = Vec::new();
         let mut token_line_column_map = Vec::new();
         while !self.at_end(input_bytes) {
-            if let Some(token) = self.parse_single(input_bytes) {
+            if let Some(token) = self.parse_single(input_bytes)? {
                 result.push(token);
                 token_line_column_map.push((self.line, self.column));
             }
         }
         self.position = 0;
-        (result, token_line_column_map)
+        Ok((result, token_line_column_map))
     }
 }
 
@@ -595,7 +716,7 @@ fn test_tokenizer1() {
     let mut tokenizer = Tokenizer::new();
     let input = "hello world";
     let input_bytes = input.as_bytes();
-    let result = tokenizer.parse_all(input_bytes);
+    let result = tokenizer.parse_all(input_bytes).unwrap();
     assert_eq!(result.0.len(), 3);
     assert_eq!(result.0[0], Token::Atom((0, 5)));
     assert_eq!(result.0[1], Token::Spaces((5, 6)));
@@ -613,11 +734,11 @@ pub struct Parser {
 }
 
 impl Parser {
-    pub fn new(file_name: String, source: String) -> Parser {
+    pub fn new(file_name: String, source: String) -> ParseResult<Parser> {
         let mut tokenizer = Tokenizer::new();
         let input_bytes = source.as_bytes();
         // TODO: It is probably better not to parse all at once
-        let (tokens, token_line_column_map) = tokenizer.parse_all(input_bytes);
+        let (tokens, token_line_column_map) = tokenizer.parse_all(input_bytes)?;
 
         debugger(crate::Message {
             kind: "tokens".to_string(),
@@ -626,20 +747,20 @@ impl Parser {
                 tokens: tokens
                     .clone()
                     .iter()
-                    .map(|x| x.literal(input_bytes))
+                    .filter_map(|x| x.literal(input_bytes).ok())
                     .collect(),
                 token_line_column_map: token_line_column_map.clone(),
             },
         });
 
-        Parser {
+        Ok(Parser {
             file_name,
             source,
             tokenizer,
             position: 0,
             tokens,
             token_line_column_map,
-        }
+        })
     }
 
     pub fn current_location(&self) -> String {
@@ -657,23 +778,52 @@ impl Parser {
         }
     }
 
-    pub fn parse(&mut self) -> Ast {
-        Ast::Program {
-            elements: self.parse_elements(),
-            token_range: TokenRange::new(0, self.tokens.len()),
+    // Helper methods for error handling
+    fn expect_atom(&self) -> ParseResult<String> {
+        match self.current_token() {
+            Token::Atom((start, end)) => {
+                String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                    .map_err(|_| ParseError::InvalidUtf8 { position: start })
+            }
+            _ => Err(ParseError::UnexpectedToken {
+                expected: "identifier".to_string(),
+                found: self.get_token_repr(),
+                position: self.position,
+            }),
         }
     }
 
-    fn parse_elements(&mut self) -> Vec<Ast> {
+    fn expect_string(&self) -> ParseResult<String> {
+        match self.current_token() {
+            Token::String((start, end)) => {
+                String::from_utf8(self.source.as_bytes()[start + 1..end - 1].to_vec())
+                    .map_err(|_| ParseError::InvalidUtf8 { position: start })
+            }
+            _ => Err(ParseError::UnexpectedToken {
+                expected: "string".to_string(),
+                found: self.get_token_repr(),
+                position: self.position,
+            }),
+        }
+    }
+
+    pub fn parse(&mut self) -> ParseResult<Ast> {
+        Ok(Ast::Program {
+            elements: self.parse_elements()?,
+            token_range: TokenRange::new(0, self.tokens.len()),
+        })
+    }
+
+    fn parse_elements(&mut self) -> ParseResult<Vec<Ast>> {
         let mut result = Vec::new();
         while !self.at_end() {
-            if let Some(elem) = self.parse_expression(0, true, true) {
-                result.push(elem);
-            } else {
-                break;
+            match self.parse_expression(0, true, true) {
+                Ok(Some(elem)) => result.push(elem),
+                Ok(None) => break,
+                Err(e) => return Err(e),
             }
         }
-        result
+        Ok(result)
     }
 
     fn at_end(&self) -> bool {
@@ -720,16 +870,19 @@ impl Parser {
         min_precedence: usize,
         should_skip: bool,
         struct_creation_allowed: bool,
-    ) -> Option<Ast> {
+    ) -> ParseResult<Option<Ast>> {
         let mut min_precedence = min_precedence;
         if should_skip {
             self.skip_whitespace();
         }
         if self.at_end() {
-            return None;
+            return Ok(None);
         }
 
-        let mut lhs = self.parse_atom(min_precedence)?;
+        let mut lhs = match self.parse_atom(min_precedence)? {
+            Some(ast) => ast,
+            None => return Ok(None),
+        };
         // TODO: this is ugly
         self.skip_spaces();
 
@@ -743,7 +896,10 @@ impl Parser {
             } else {
                 precedence
             };
-            lhs = self.parse_postfix(lhs, next_min_precedence, struct_creation_allowed)?;
+            lhs = match self.parse_postfix(lhs, next_min_precedence, struct_creation_allowed)? {
+                Some(ast) => ast,
+                None => return Ok(None),
+            };
             self.skip_spaces();
         }
         min_precedence = old_min_precedence;
@@ -768,36 +924,44 @@ impl Parser {
             };
 
             self.move_to_next_non_whitespace();
-            let rhs = self.parse_expression(next_min_precedence, true, struct_creation_allowed)?;
+            let rhs =
+                match self.parse_expression(next_min_precedence, true, struct_creation_allowed)? {
+                    Some(ast) => ast,
+                    None => {
+                        return Err(ParseError::UnexpectedEof {
+                            expected: "expression after binary operator".to_string(),
+                        });
+                    }
+                };
 
-            lhs = self.compose_binary_op(lhs.clone(), current_token, rhs);
+            lhs = self.compose_binary_op(lhs.clone(), current_token, rhs)?;
         }
 
-        Some(lhs)
+        Ok(Some(lhs))
     }
 
-    fn parse_atom(&mut self, min_precedence: usize) -> Option<Ast> {
+    fn parse_atom(&mut self, min_precedence: usize) -> ParseResult<Option<Ast>> {
         match self.current_token() {
-            Token::Fn => Some(self.parse_function()),
-            Token::Loop => Some(self.parse_loop()),
-            Token::While => Some(self.parse_while()),
-            Token::Break => Some(self.parse_break()),
-            Token::Continue => Some(self.parse_continue()),
-            Token::For => Some(self.parse_for()),
-            Token::Struct => Some(self.parse_struct()),
-            Token::Enum => Some(self.parse_enum()),
-            Token::If => Some(self.parse_if()),
-            Token::Try => Some(self.parse_try()),
-            Token::Throw => Some(self.parse_throw()),
-            Token::Match => Some(self.parse_match()),
-            Token::Namespace => Some(self.parse_namespace()),
-            Token::Import => Some(self.parse_import()),
-            Token::Protocol => Some(self.parse_protocol()),
-            Token::Extend => Some(self.parse_extend()),
+            Token::Fn => Ok(Some(self.parse_function()?)),
+            Token::Loop => Ok(Some(self.parse_loop()?)),
+            Token::While => Ok(Some(self.parse_while()?)),
+            Token::Break => Ok(Some(self.parse_break()?)),
+            Token::Continue => Ok(Some(self.parse_continue()?)),
+            Token::For => Ok(Some(self.parse_for()?)),
+            Token::Struct => Ok(Some(self.parse_struct()?)),
+            Token::Enum => Ok(Some(self.parse_enum()?)),
+            Token::If => Ok(Some(self.parse_if()?)),
+            Token::Try => Ok(Some(self.parse_try()?)),
+            Token::Throw => Ok(Some(self.parse_throw()?)),
+            Token::Match => Ok(Some(self.parse_match()?)),
+            Token::Namespace => Ok(Some(self.parse_namespace()?)),
+            Token::Import => Ok(Some(self.parse_import()?)),
+            Token::Protocol => Ok(Some(self.parse_protocol()?)),
+            Token::Extend => Ok(Some(self.parse_extend()?)),
             Token::Atom((start, end)) => {
                 let start_position = self.position;
-                // Gross
-                let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap();
+                let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
                 // TODO: Make better
                 self.consume();
                 self.skip_spaces();
@@ -808,81 +972,88 @@ impl Parser {
                 // I really need to start thinking about namespacing
                 // and if I want double colon for that.
                 if self.is_open_paren() {
-                    Some(self.parse_call(name, start_position))
+                    Ok(Some(self.parse_call(name, start_position)?))
                 }
                 // TODO: Hack to try and let struct creation work in ambiguous contexts
                 // like if. Need a better way.
                 else if self.is_open_curly() && min_precedence == 0 {
-                    Some(self.parse_struct_creation(name, start_position))
+                    Ok(Some(self.parse_struct_creation(name, start_position)?))
                 } else {
-                    Some(Ast::Identifier(name, self.position))
+                    Ok(Some(Ast::Identifier(name, self.position)))
                 }
             }
             Token::String((start, end)) => {
-                // Gross
                 let mut value =
-                    String::from_utf8(self.source.as_bytes()[start + 1..end - 1].to_vec()).unwrap();
+                    String::from_utf8(self.source.as_bytes()[start + 1..end - 1].to_vec())
+                        .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
                 // TODO: Test escapes properly
                 // Maybe token shouldn't have a range but an actual string value
                 // Or I do both
                 value = stripslashes(&value);
                 let position = self.consume();
-                Some(Ast::String(value, position))
+                Ok(Some(Ast::String(value, position)))
             }
             Token::Keyword((start, end)) => {
-                let keyword_text =
-                    String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap();
+                let keyword_text = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
                 let position = self.consume();
-                Some(Ast::Keyword(keyword_text, position))
+                Ok(Some(Ast::Keyword(keyword_text, position)))
             }
             Token::Integer((start, end)) => {
-                // Gross
-                let value = String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap();
+                let value = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
                 let position = self.consume();
-                let parsed_value = value.parse::<i64>().unwrap_or_else(|_| {
-                    panic!(
-                        "Integer literal out of range: {} (must fit in i64: {} to {})",
-                        value,
-                        i64::MIN,
-                        i64::MAX
-                    )
-                });
+                let parsed_value =
+                    value
+                        .parse::<i64>()
+                        .map_err(|_| ParseError::InvalidNumberLiteral {
+                            literal: format!(
+                                "{} (must fit in i64: {} to {})",
+                                value,
+                                i64::MIN,
+                                i64::MAX
+                            ),
+                            position: start,
+                        })?;
                 // Values use 3-bit tagging (shifted left by 3), so only 61 bits available
                 const MAX_61_BIT: i64 = (1i64 << 60) - 1;
                 const MIN_61_BIT: i64 = -(1i64 << 60);
                 if parsed_value > MAX_61_BIT || parsed_value < MIN_61_BIT {
-                    panic!(
-                        "Integer literal out of range: {} (tagged integers use 61 bits: {} to {})",
-                        value, MIN_61_BIT, MAX_61_BIT
-                    );
+                    return Err(ParseError::InvalidNumberLiteral {
+                        literal: format!(
+                            "{} (tagged integers use 61 bits: {} to {})",
+                            value, MIN_61_BIT, MAX_61_BIT
+                        ),
+                        position: start,
+                    });
                 }
-                Some(Ast::IntegerLiteral(parsed_value, position))
+                Ok(Some(Ast::IntegerLiteral(parsed_value, position)))
             }
             Token::Float((start, end)) => {
-                // Gross
-                let value = String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap();
+                let value = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
                 let position = self.consume();
-                Some(Ast::FloatLiteral(value, position))
+                Ok(Some(Ast::FloatLiteral(value, position)))
             }
             Token::True => {
                 let position = self.consume();
-                Some(Ast::True(position))
+                Ok(Some(Ast::True(position)))
             }
             Token::False => {
                 let position = self.consume();
-                Some(Ast::False(position))
+                Ok(Some(Ast::False(position)))
             }
             Token::Null => {
                 let position = self.consume();
-                Some(Ast::Null(position))
+                Ok(Some(Ast::Null(position)))
             }
             Token::Infinity => {
                 let position = self.consume();
-                Some(Ast::FloatLiteral("infinity".to_string(), position))
+                Ok(Some(Ast::FloatLiteral("infinity".to_string(), position)))
             }
             Token::NegativeInfinity => {
                 let position = self.consume();
-                Some(Ast::FloatLiteral("-infinity".to_string(), position))
+                Ok(Some(Ast::FloatLiteral("-infinity".to_string(), position)))
             }
             Token::Let => {
                 let start_position = self.position;
@@ -893,43 +1064,39 @@ impl Parser {
                     self.consume();
                     self.move_to_next_non_whitespace();
                     let name_position = self.position;
-                    let name = match self.current_token() {
-                        Token::Atom((start, end)) => {
-                            // Gross
-                            String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap()
-                        }
-                        _ => panic!("Expected variable name got {}", self.get_token_repr()),
-                    };
+                    let name = self.expect_atom()?;
                     self.consume();
                     self.move_to_next_non_whitespace();
-                    self.expect_equal();
+                    self.expect_equal()?;
                     self.move_to_next_non_whitespace();
-                    let value = self.parse_expression(0, true, true).unwrap();
+                    let value = self.parse_expression(0, true, true)?.ok_or_else(|| {
+                        ParseError::UnexpectedEof {
+                            expected: "value after '='".to_string(),
+                        }
+                    })?;
                     let end_position = self.position;
-                    return Some(Ast::LetMut {
+                    return Ok(Some(Ast::LetMut {
                         name: Box::new(Ast::Identifier(name, name_position)),
                         value: Box::new(value),
                         token_range: TokenRange::new(start_position, end_position),
-                    });
+                    }));
                 }
                 let name_position = self.position;
-                let name = match self.current_token() {
-                    Token::Atom((start, end)) => {
-                        // Gross
-                        String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap()
+                let name = self.expect_atom()?;
+                self.move_to_next_non_whitespace();
+                self.expect_equal()?;
+                self.move_to_next_non_whitespace();
+                let value = self.parse_expression(0, true, true)?.ok_or_else(|| {
+                    ParseError::UnexpectedEof {
+                        expected: "value after '='".to_string(),
                     }
-                    _ => panic!("Expected variable name"),
-                };
-                self.move_to_next_non_whitespace();
-                self.expect_equal();
-                self.move_to_next_non_whitespace();
-                let value = self.parse_expression(0, true, true).unwrap();
+                })?;
                 let end_position = self.position;
-                Some(Ast::Let {
+                Ok(Some(Ast::Let {
                     name: Box::new(Ast::Identifier(name, name_position)),
                     value: Box::new(value),
                     token_range: TokenRange::new(start_position, end_position),
-                })
+                }))
             }
             Token::NewLine | Token::Spaces(_) | Token::Comment(_) => {
                 self.consume();
@@ -937,334 +1104,411 @@ impl Parser {
             }
             Token::OpenParen => {
                 self.consume();
-                let result = self.parse_expression(0, true, true);
-                self.expect_close_paren();
-                result
+                let result = self.parse_expression(0, true, true)?;
+                self.expect_close_paren()?;
+                Ok(result)
             }
             Token::OpenBracket => {
-                let result = self.parse_array();
-                Some(result)
+                let result = self.parse_array()?;
+                Ok(Some(result))
             }
             Token::OpenCurly => {
-                let result = self.parse_map_literal();
-                Some(result)
+                let result = self.parse_map_literal()?;
+                Ok(Some(result))
             }
-            _ => panic!(
-                "Expected atom, got {} at line {}",
-                self.get_token_repr(),
-                self.current_location()
-            ),
+            _ => Err(ParseError::UnexpectedToken {
+                expected: "expression".to_string(),
+                found: self.get_token_repr(),
+                position: self.position,
+            }),
         }
     }
 
-    fn parse_function(&mut self) -> Ast {
+    fn parse_function(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
         self.move_to_next_non_whitespace();
         let name = match self.current_token() {
             Token::Atom((start, end)) => {
                 self.move_to_next_non_whitespace();
-                // Gross
-                Some(String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap())
+                Some(
+                    String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                        .map_err(|_| ParseError::InvalidUtf8 { position: start })?,
+                )
             }
             _ => None,
         };
-        self.expect_open_paren();
-        let args = self.parse_args();
-        self.expect_close_paren();
-        let body = self.parse_block();
+        self.expect_open_paren()?;
+        let args = self.parse_args()?;
+        self.expect_close_paren()?;
+        let body = self.parse_block()?;
         let end_position = self.position;
-        Ast::Function {
+        Ok(Ast::Function {
             name,
             args,
             body,
             token_range: TokenRange::new(start_position, end_position),
-        }
+        })
     }
 
-    fn parse_loop(&mut self) -> Ast {
+    fn parse_loop(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
         self.move_to_next_non_whitespace();
-        let body = self.parse_block();
+        let body = self.parse_block()?;
         let end_position = self.position;
-        Ast::Loop {
+        Ok(Ast::Loop {
             body,
             token_range: TokenRange::new(start_position, end_position),
-        }
+        })
     }
 
-    fn parse_while(&mut self) -> Ast {
+    fn parse_while(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
         self.move_to_next_non_whitespace();
         // Parse condition (no parens required)
-        let condition = Box::new(
-            self.parse_expression(1, true, false)
-                .expect("Expected condition after while"),
-        );
-        let body = self.parse_block();
+        let condition = Box::new(self.parse_expression(1, true, false)?.ok_or_else(|| {
+            ParseError::UnexpectedEof {
+                expected: "condition after while".to_string(),
+            }
+        })?);
+        let body = self.parse_block()?;
         let end_position = self.position;
-        Ast::While {
+        Ok(Ast::While {
             condition,
             body,
             token_range: TokenRange::new(start_position, end_position),
-        }
+        })
     }
 
-    fn parse_break(&mut self) -> Ast {
+    fn parse_break(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
         self.move_to_next_non_whitespace();
         // Expect function call syntax: break(value)
         if self.current_token() != Token::OpenParen {
-            panic!("Expected '(' after break");
+            return Err(ParseError::MissingToken {
+                expected: "'(' after break".to_string(),
+                position: self.position,
+            });
         }
         self.move_to_next_non_whitespace();
-        let value = self
-            .parse_expression(0, true, true)
-            .expect("Expected value in break()");
+        let value =
+            self.parse_expression(0, true, true)?
+                .ok_or_else(|| ParseError::UnexpectedEof {
+                    expected: "value in break()".to_string(),
+                })?;
         // parse_expression should leave us at the closing paren
         if self.current_token() != Token::CloseParen {
-            panic!("Expected ')' after break value");
+            return Err(ParseError::MissingToken {
+                expected: "')' after break value".to_string(),
+                position: self.position,
+            });
         }
         self.move_to_next_non_whitespace();
         let end_position = self.position;
-        Ast::Break {
+        Ok(Ast::Break {
             value: Box::new(value),
             token_range: TokenRange::new(start_position, end_position),
-        }
+        })
     }
 
-    fn parse_continue(&mut self) -> Ast {
+    fn parse_continue(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
         self.move_to_next_non_whitespace();
         // Expect function call syntax: continue()
         if self.current_token() != Token::OpenParen {
-            panic!("Expected '(' after continue");
+            return Err(ParseError::MissingToken {
+                expected: "'(' after continue".to_string(),
+                position: self.position,
+            });
         }
         self.move_to_next_non_whitespace();
         // Should be at closing paren immediately
         if self.current_token() != Token::CloseParen {
-            panic!("Expected ')' - continue takes no arguments");
+            return Err(ParseError::UnexpectedToken {
+                expected: "')' - continue takes no arguments".to_string(),
+                found: self.get_token_repr(),
+                position: self.position,
+            });
         }
         self.move_to_next_non_whitespace();
         let end_position = self.position;
-        Ast::Continue {
+        Ok(Ast::Continue {
             token_range: TokenRange::new(start_position, end_position),
-        }
+        })
     }
 
-    fn parse_for(&mut self) -> Ast {
+    fn parse_for(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
         self.move_to_next_non_whitespace();
 
         // Parse binding name
         let binding = match self.current_token() {
             Token::Atom((start, end)) => {
-                String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap()
+                String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?
             }
-            _ => panic!("Expected identifier after 'for'"),
+            _ => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "identifier after 'for'".to_string(),
+                    found: self.get_token_repr(),
+                    position: self.position,
+                });
+            }
         };
         self.move_to_next_non_whitespace();
 
         // Expect 'in' keyword (context-sensitive - only in for-loops)
         match self.current_token() {
             Token::Atom((start, end)) => {
-                let atom = String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap();
+                let atom = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
                 if atom != "in" {
-                    panic!("Expected 'in' after for binding, got '{}'", atom);
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "'in' after for binding".to_string(),
+                        found: atom,
+                        position: self.position,
+                    });
                 }
             }
-            _ => panic!("Expected 'in' after for binding"),
+            _ => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "'in' after for binding".to_string(),
+                    found: self.get_token_repr(),
+                    position: self.position,
+                });
+            }
         }
         self.move_to_next_non_whitespace();
 
         // Parse collection expression
-        let collection = Box::new(
-            self.parse_expression(1, true, false)
-                .expect("Expected collection expression after 'in'"),
-        );
+        let collection = Box::new(self.parse_expression(1, true, false)?.ok_or_else(|| {
+            ParseError::UnexpectedEof {
+                expected: "collection expression after 'in'".to_string(),
+            }
+        })?);
 
         // Parse body block
-        let body = self.parse_block();
+        let body = self.parse_block()?;
         let end_position = self.position;
 
-        Ast::For {
+        Ok(Ast::For {
             binding,
             collection,
             body,
             token_range: TokenRange::new(start_position, end_position),
-        }
+        })
     }
 
-    fn parse_struct(&mut self) -> Ast {
+    fn parse_struct(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
         self.move_to_next_atom();
         let name = match self.current_token() {
             Token::Atom((start, end)) => {
-                // Gross
-                String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap()
+                String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?
             }
-            _ => panic!("Expected struct name"),
+            _ => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "struct name".to_string(),
+                    found: self.get_token_repr(),
+                    position: self.position,
+                });
+            }
         };
         self.move_to_next_non_whitespace();
-        self.expect_open_curly();
-        let fields = self.parse_struct_fields();
-        self.expect_close_curly();
+        self.expect_open_curly()?;
+        let fields = self.parse_struct_fields()?;
+        self.expect_close_curly()?;
         let end_position = self.position;
-        Ast::Struct {
+        Ok(Ast::Struct {
             name,
             fields,
             token_range: TokenRange::new(start_position, end_position),
-        }
+        })
     }
 
-    fn parse_protocol(&mut self) -> Ast {
+    fn parse_protocol(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
         self.move_to_next_atom();
         let name = match self.current_token() {
             Token::Atom((start, end)) => {
-                // Gross
-                String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap()
+                String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?
             }
-            _ => panic!("Expected protocol name"),
+            _ => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "protocol name".to_string(),
+                    found: self.get_token_repr(),
+                    position: self.position,
+                });
+            }
         };
         self.move_to_next_non_whitespace();
-        self.expect_open_curly();
-        let body = self.parse_protocol_body();
-        self.expect_close_curly();
+        self.expect_open_curly()?;
+        let body = self.parse_protocol_body()?;
+        self.expect_close_curly()?;
         let end_position = self.position;
-        Ast::Protocol {
+        Ok(Ast::Protocol {
             name,
             body,
             token_range: TokenRange::new(start_position, end_position),
-        }
+        })
     }
 
-    fn parse_protocol_body(&mut self) -> Vec<Ast> {
+    fn parse_protocol_body(&mut self) -> ParseResult<Vec<Ast>> {
         let mut result = Vec::new();
         self.skip_whitespace();
         while !self.at_end() && !self.is_close_curly() {
             self.skip_spaces();
-            result.push(self.parse_protocol_member());
+            result.push(self.parse_protocol_member()?);
             self.skip_spaces();
             if !self.is_close_curly() && self.peek_next_non_whitespace() != Token::CloseCurly {
-                self.data_delimiter();
+                self.data_delimiter()?;
             }
             self.skip_spaces();
         }
-        result
+        Ok(result)
     }
 
-    fn parse_protocol_member(&mut self) -> Ast {
+    fn parse_protocol_member(&mut self) -> ParseResult<Ast> {
         match self.current_token() {
             Token::Fn => {
                 self.consume();
                 self.move_to_next_non_whitespace();
                 let name = match self.current_token() {
                     Token::Atom((start, end)) => {
-                        // Gross
-                        String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap()
+                        String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                            .map_err(|_| ParseError::InvalidUtf8 { position: start })?
                     }
-                    _ => panic!("Expected protocol member name"),
+                    _ => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "protocol member name".to_string(),
+                            found: self.get_token_repr(),
+                            position: self.position,
+                        });
+                    }
                 };
                 self.move_to_next_non_whitespace();
-                self.expect_open_paren();
-                let args = self.parse_args();
-                self.expect_close_paren();
+                self.expect_open_paren()?;
+                let args = self.parse_args()?;
+                self.expect_close_paren()?;
                 self.skip_spaces();
                 if self.is_open_curly() {
-                    let body = self.parse_block();
+                    let body = self.parse_block()?;
                     let end_position = self.position;
-                    Ast::Function {
+                    Ok(Ast::Function {
                         name: Some(name),
                         args,
                         body,
                         token_range: TokenRange::new(self.position, end_position),
-                    }
+                    })
                 } else {
                     let end_position = self.position;
-                    Ast::FunctionStub {
+                    Ok(Ast::FunctionStub {
                         name,
                         args,
                         token_range: TokenRange::new(self.position, end_position),
-                    }
+                    })
                 }
             }
-            _ => panic!("Expected protocol member"),
+            _ => Err(ParseError::UnexpectedToken {
+                expected: "protocol member".to_string(),
+                found: self.get_token_repr(),
+                position: self.position,
+            }),
         }
     }
 
-    fn parse_extend(&mut self) -> Ast {
+    fn parse_extend(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
         self.move_to_next_atom();
         let target_type = match self.current_token() {
             Token::Atom((start, end)) => {
-                // Gross
-                String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap()
+                String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?
             }
-            _ => panic!("Expected extend name"),
+            _ => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "type name after 'extend'".to_string(),
+                    found: self.get_token_repr(),
+                    position: self.position,
+                });
+            }
         };
         self.move_to_next_non_whitespace();
-        self.expect_with();
+        self.expect_with()?;
         self.move_to_next_non_whitespace();
         let protocol = match self.current_token() {
             Token::Atom((start, end)) => {
-                // Gross
-                String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap()
+                String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?
             }
-            _ => panic!("Expected extend name"),
+            _ => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "protocol name after 'with'".to_string(),
+                    found: self.get_token_repr(),
+                    position: self.position,
+                });
+            }
         };
         self.move_to_next_non_whitespace();
-        self.expect_open_curly();
-        let body = self.parse_extend_body();
-        self.expect_close_curly();
+        self.expect_open_curly()?;
+        let body = self.parse_extend_body()?;
+        self.expect_close_curly()?;
         let end_position = self.position;
-        Ast::Extend {
+        Ok(Ast::Extend {
             target_type,
             protocol,
             body,
             token_range: TokenRange::new(start_position, end_position),
-        }
+        })
     }
 
-    fn parse_extend_body(&mut self) -> Vec<Ast> {
+    fn parse_extend_body(&mut self) -> ParseResult<Vec<Ast>> {
         let mut result = Vec::new();
         self.skip_whitespace();
         while !self.at_end() && !self.is_close_curly() {
             self.skip_spaces();
-            result.push(self.parse_extend_member());
+            result.push(self.parse_extend_member()?);
             self.skip_spaces();
             if !self.is_close_curly() {
-                self.data_delimiter();
+                self.data_delimiter()?;
             }
             self.skip_spaces();
         }
-        result
+        Ok(result)
     }
 
-    fn parse_extend_member(&mut self) -> Ast {
+    fn parse_extend_member(&mut self) -> ParseResult<Ast> {
         self.skip_whitespace();
         self.parse_function()
     }
 
-    fn parse_enum(&mut self) -> Ast {
+    fn parse_enum(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
         self.move_to_next_atom();
         let name = match self.current_token() {
             Token::Atom((start, end)) => {
-                // Gross
-                String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap()
+                String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?
             }
-            _ => panic!("Expected enum name"),
+            _ => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "enum name".to_string(),
+                    found: self.get_token_repr(),
+                    position: self.position,
+                });
+            }
         };
         self.move_to_next_non_whitespace();
-        self.expect_open_curly();
-        let variants = self.parse_enum_variants();
-        self.expect_close_curly();
+        self.expect_open_curly()?;
+        let variants = self.parse_enum_variants()?;
+        self.expect_close_curly()?;
         let end_position = self.position;
-        Ast::Enum {
+        Ok(Ast::Enum {
             name,
             variants,
             token_range: TokenRange::new(start_position, end_position),
-        }
+        })
     }
 
     fn consume(&mut self) -> usize {
@@ -1305,90 +1549,73 @@ impl Parser {
         }
     }
 
-    fn expect_open_paren(&mut self) {
+    fn expect_open_paren(&mut self) -> ParseResult<()> {
         self.skip_whitespace();
         if self.is_open_paren() {
             self.consume();
+            Ok(())
         } else {
-            let (line, column) = self.token_line_column_map[self.position];
-            panic!(
-                "Expected open paren {:?} at {}:{}",
-                self.get_token_repr(),
-                line,
-                column
-            );
+            Err(ParseError::UnexpectedToken {
+                expected: "open paren '('".to_string(),
+                found: self.get_token_repr(),
+                position: self.position,
+            })
         }
     }
 
-    fn expect_with(&mut self) {
+    fn expect_with(&mut self) -> ParseResult<()> {
         self.skip_whitespace();
         if self.is_with() {
             self.consume();
+            Ok(())
         } else {
-            panic!(
-                "Expected with {:?} at {}",
-                self.get_token_repr(),
-                self.current_location()
-            );
+            Err(ParseError::UnexpectedToken {
+                expected: "'with' keyword".to_string(),
+                found: self.get_token_repr(),
+                position: self.position,
+            })
         }
     }
 
-    fn expect_close_bracket(&mut self) {
+    fn expect_close_bracket(&mut self) -> ParseResult<()> {
         self.skip_whitespace();
         if self.is_close_bracket() {
             self.consume();
+            Ok(())
         } else {
-            panic!(
-                "Expected close bracket {:?} at {}",
-                self.get_token_repr(),
-                self.current_location()
-            );
+            Err(ParseError::UnexpectedToken {
+                expected: "close bracket ']'".to_string(),
+                found: self.get_token_repr(),
+                position: self.position,
+            })
         }
     }
 
-    fn expect_comma(&mut self) {
+    fn expect_comma(&mut self) -> ParseResult<()> {
         self.skip_whitespace();
         if self.is_comma() {
             self.consume();
+            Ok(())
         } else {
-            panic!(
-                "Expected comma {:?} at {}",
-                self.get_token_repr(),
-                self.current_location()
-            );
+            Err(ParseError::UnexpectedToken {
+                expected: "comma ','".to_string(),
+                found: self.get_token_repr(),
+                position: self.position,
+            })
         }
     }
 
-    fn expect_string(&mut self) -> String {
-        self.skip_whitespace();
-        match self.current_token() {
-            Token::String((start, end)) => {
-                self.consume();
-                // Gross
-                String::from_utf8(self.source.as_bytes()[start + 1..end - 1].to_vec()).unwrap()
-            }
-            _ => panic!("Expected string got {:?}", self.get_token_repr()),
-        }
-    }
-
-    fn expect_atom(&mut self) -> String {
-        self.skip_whitespace();
-        match self.current_token() {
-            Token::Atom((start, end)) => {
-                self.consume();
-                // Gross
-                String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap()
-            }
-            _ => panic!("Expected atom got {:?}", self.get_token_repr()),
-        }
-    }
-
-    fn expect_as(&mut self) {
+    fn expect_as(&mut self) -> ParseResult<()> {
         self.skip_whitespace();
         if self.is_as() {
             self.consume();
+            Ok(())
         } else {
-            panic!("Expected as got {:?}", self.get_token_repr());
+            Err(ParseError::UnexpectedToken {
+                expected: "'as' keyword".to_string(),
+                found: self.get_token_repr(),
+                position: self.position,
+            })
         }
     }
 
@@ -1400,71 +1627,71 @@ impl Parser {
         self.current_token() == Token::Comma
     }
 
-    fn parse_args(&mut self) -> Vec<String> {
+    fn parse_args(&mut self) -> ParseResult<Vec<String>> {
         let mut result = Vec::new();
         self.skip_whitespace();
         while !self.at_end() && !self.is_close_paren() {
-            result.push(self.parse_arg());
+            result.push(self.parse_arg()?);
             self.skip_whitespace();
         }
-        result
+        Ok(result)
     }
 
-    fn parse_struct_fields(&mut self) -> Vec<Ast> {
+    fn parse_struct_fields(&mut self) -> ParseResult<Vec<Ast>> {
         let mut result = Vec::new();
         self.skip_whitespace();
         while !self.at_end() && !self.is_close_curly() {
             self.skip_spaces();
-            result.push(self.parse_struct_field());
+            result.push(self.parse_struct_field()?);
             self.skip_spaces();
             if !self.is_close_curly() {
-                self.data_delimiter();
+                self.data_delimiter()?;
             }
             self.skip_spaces();
         }
-        result
+        Ok(result)
     }
 
-    fn parse_struct_field(&mut self) -> Ast {
+    fn parse_struct_field(&mut self) -> ParseResult<Ast> {
         match self.current_token() {
             Token::Atom((start, end)) => {
-                // Gross
-                let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap();
+                let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
                 let position = self.consume();
-                Ast::Identifier(name, position)
+                Ok(Ast::Identifier(name, position))
             }
-            _ => panic!(
-                "Expected field name got {:?} at {}",
-                self.current_token(),
-                self.current_location()
-            ),
+            _ => Err(ParseError::UnexpectedToken {
+                expected: "field name".to_string(),
+                found: self.get_token_repr(),
+                position: self.position,
+            }),
         }
     }
 
-    fn parse_enum_variants(&mut self) -> Vec<Ast> {
+    fn parse_enum_variants(&mut self) -> ParseResult<Vec<Ast>> {
         let mut result = Vec::new();
         self.skip_whitespace();
         while !self.at_end() && !self.is_close_curly() {
-            result.push(self.parse_enum_variant());
+            result.push(self.parse_enum_variant()?);
             self.skip_whitespace();
         }
-        result
+        Ok(result)
     }
 
-    fn parse_enum_variant(&mut self) -> Ast {
+    fn parse_enum_variant(&mut self) -> ParseResult<Ast> {
         // We need to parse enum variants that are just a name
         // and enum variants that are struct like
 
         match self.current_token() {
             Token::Atom((start, end)) => {
-                // Gross
-                let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap();
+                let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
                 let position = self.consume();
                 self.skip_spaces();
                 let result = if self.is_open_curly() {
                     let start_position = self.consume();
-                    let fields = self.parse_struct_fields();
-                    self.expect_close_curly();
+                    let fields = self.parse_struct_fields()?;
+                    self.expect_close_curly()?;
                     let end_position = self.position;
                     Ast::EnumVariant {
                         name,
@@ -1477,14 +1704,14 @@ impl Parser {
                         token_range: TokenRange::new(position, position),
                     }
                 };
-                self.data_delimiter();
-                result
+                self.data_delimiter()?;
+                Ok(result)
             }
-            _ => panic!(
-                "Expected variant name got {:?} on line {}",
-                self.current_token(),
-                self.current_location()
-            ),
+            _ => Err(ParseError::UnexpectedToken {
+                expected: "variant name".to_string(),
+                found: self.get_token_repr(),
+                position: self.position,
+            }),
         }
     }
 
@@ -1509,49 +1736,51 @@ impl Parser {
         }
     }
 
-    fn data_delimiter(&mut self) {
+    fn data_delimiter(&mut self) -> ParseResult<()> {
         self.skip_spaces();
         if self.is_comma() || self.is_newline() {
             self.consume();
+            Ok(())
         } else {
-            panic!(
-                "Expected comma or new_line got {:?} at {}",
-                self.get_token_repr(),
-                self.current_location()
-            );
+            Err(ParseError::UnexpectedToken {
+                expected: "comma or newline".to_string(),
+                found: self.get_token_repr(),
+                position: self.position,
+            })
         }
     }
 
-    fn parse_arg(&mut self) -> String {
+    fn parse_arg(&mut self) -> ParseResult<String> {
         match self.current_token() {
             Token::Atom((start, end)) => {
-                // Gross
-                let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap();
+                let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
                 self.consume();
                 self.skip_whitespace();
                 if !self.is_close_paren() {
-                    self.expect_comma();
+                    self.expect_comma()?;
                 }
-                name
+                Ok(name)
             }
-            _ => panic!(
-                "Expected arg got {:?} on line {}",
-                self.current_token(),
-                self.current_location()
-            ),
+            _ => Err(ParseError::UnexpectedToken {
+                expected: "argument name".to_string(),
+                found: self.get_token_repr(),
+                position: self.position,
+            }),
         }
     }
 
-    fn expect_close_paren(&mut self) {
+    fn expect_close_paren(&mut self) -> ParseResult<()> {
         self.skip_whitespace();
         if self.is_close_paren() {
             self.consume();
+            Ok(())
         } else {
-            panic!(
-                "Expected close paren got {:?} on line {}",
-                self.current_token(),
-                self.current_location()
-            );
+            Err(ParseError::UnexpectedToken {
+                expected: "close paren ')'".to_string(),
+                found: self.get_token_repr(),
+                position: self.position,
+            })
         }
     }
 
@@ -1559,32 +1788,32 @@ impl Parser {
         self.current_token() == Token::CloseParen
     }
 
-    fn parse_block(&mut self) -> Vec<Ast> {
-        self.expect_open_curly();
+    fn parse_block(&mut self) -> ParseResult<Vec<Ast>> {
+        self.expect_open_curly()?;
         let mut result = Vec::new();
         self.skip_whitespace();
         while !self.at_end() && !self.is_close_curly() {
-            if let Some(elem) = self.parse_expression(0, true, true) {
-                result.push(elem);
-            } else {
-                break;
+            match self.parse_expression(0, true, true)? {
+                Some(elem) => result.push(elem),
+                None => break,
             }
             self.skip_whitespace();
         }
-        self.expect_close_curly();
-        result
+        self.expect_close_curly()?;
+        Ok(result)
     }
 
-    fn expect_open_curly(&mut self) {
+    fn expect_open_curly(&mut self) -> ParseResult<()> {
         self.skip_whitespace();
         if self.is_open_curly() {
             self.consume();
+            Ok(())
         } else {
-            panic!(
-                "Expected open curly {} at line {}",
-                self.get_token_repr(),
-                self.current_location()
-            );
+            Err(ParseError::UnexpectedToken {
+                expected: "open curly '{'".to_string(),
+                found: self.get_token_repr(),
+                position: self.position,
+            })
         }
     }
 
@@ -1596,16 +1825,17 @@ impl Parser {
         self.current_token() == Token::CloseCurly
     }
 
-    fn expect_close_curly(&mut self) {
+    fn expect_close_curly(&mut self) -> ParseResult<()> {
         self.skip_whitespace();
         if self.is_close_curly() {
             self.consume();
+            Ok(())
         } else {
-            panic!(
-                "Expected close curly got {:?} at line {}",
-                self.get_token_repr(),
-                self.current_location()
-            );
+            Err(ParseError::UnexpectedToken {
+                expected: "close curly '}'".to_string(),
+                found: self.get_token_repr(),
+                position: self.position,
+            })
         }
     }
 
@@ -1638,7 +1868,7 @@ impl Parser {
         }
     }
 
-    fn parse_namespace(&mut self) -> Ast {
+    fn parse_namespace(&mut self) -> ParseResult<Ast> {
         // TODO: Reconsider this design
         // namespaces can be names with dots
         // so beagle.core is a valid namespace
@@ -1654,105 +1884,120 @@ impl Parser {
                 Token::Atom((start, end)) => {
                     name.push_str(&self.source[start..end]);
                 }
-                _ => panic!("Expected atom"),
+                _ => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "namespace identifier".to_string(),
+                        found: self.get_token_repr(),
+                        position: self.position,
+                    });
+                }
             }
             self.consume();
         }
         if name.is_empty() {
-            panic!(
-                "Unexpected token {:?} at {}",
-                self.current_token(),
-                self.current_location()
-            );
+            return Err(ParseError::UnexpectedToken {
+                expected: "namespace name".to_string(),
+                found: self.get_token_repr(),
+                position: self.position,
+            });
         }
         self.consume();
         let end_position = self.position;
-        Ast::Namespace {
+        Ok(Ast::Namespace {
             name,
             token_range: TokenRange::new(start_position, end_position),
-        }
+        })
     }
 
-    fn parse_import(&mut self) -> Ast {
+    fn parse_import(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
         self.move_to_next_non_whitespace();
-        let library_name = self.expect_string();
-        self.expect_as();
+        let library_name = self.expect_string()?;
+        self.consume();
+        self.expect_as()?;
+        self.move_to_next_non_whitespace();
         let name_position = self.position;
-        let alias = Box::new(Ast::Identifier(self.expect_atom(), name_position));
+        let alias = Box::new(Ast::Identifier(self.expect_atom()?, name_position));
+        self.consume();
         let end_position = self.position;
-        Ast::Import {
+        Ok(Ast::Import {
             library_name,
             alias,
             token_range: TokenRange::new(start_position, end_position),
-        }
+        })
     }
 
-    fn parse_call(&mut self, name: String, start_position: usize) -> Ast {
-        self.expect_open_paren();
+    fn parse_call(&mut self, name: String, start_position: usize) -> ParseResult<Ast> {
+        self.expect_open_paren()?;
         let mut args = Vec::new();
         while !self.at_end() && !self.is_close_paren() {
-            if let Some(arg) = self.parse_expression(0, true, true) {
-                args.push(arg);
-                self.skip_whitespace();
-                if !self.is_close_paren() {
-                    self.expect_comma();
+            match self.parse_expression(0, true, true)? {
+                Some(arg) => {
+                    args.push(arg);
+                    self.skip_whitespace();
+                    if !self.is_close_paren() {
+                        self.expect_comma()?;
+                    }
                 }
-            } else {
-                break;
+                None => break,
             }
         }
-        self.expect_close_paren();
+        self.expect_close_paren()?;
         let end_position = self.position;
-        Ast::Call {
+        Ok(Ast::Call {
             name,
             args,
             token_range: TokenRange::new(start_position, end_position),
-        }
+        })
     }
 
-    fn parse_struct_creation(&mut self, name: String, start_position: usize) -> Ast {
-        self.expect_open_curly();
-        let fields = self.parse_struct_fields_creations();
+    fn parse_struct_creation(&mut self, name: String, start_position: usize) -> ParseResult<Ast> {
+        self.expect_open_curly()?;
+        let fields = self.parse_struct_fields_creations()?;
 
-        self.expect_close_curly();
+        self.expect_close_curly()?;
         let end_position = self.position;
-        Ast::StructCreation {
+        Ok(Ast::StructCreation {
             name,
             fields,
             token_range: TokenRange::new(start_position, end_position),
-        }
+        })
     }
 
-    fn parse_struct_fields_creations(&mut self) -> Vec<(String, Ast)> {
+    fn parse_struct_fields_creations(&mut self) -> ParseResult<Vec<(String, Ast)>> {
         let mut fields = Vec::new();
         while !self.at_end() && !self.is_close_curly() {
-            if let Some(field) = self.parse_struct_field_creation() {
+            if let Some(field) = self.parse_struct_field_creation()? {
                 fields.push(field);
             } else {
                 break;
             }
         }
-        fields
+        Ok(fields)
     }
 
-    fn parse_struct_field_creation(&mut self) -> Option<(String, Ast)> {
+    fn parse_struct_field_creation(&mut self) -> ParseResult<Option<(String, Ast)>> {
         self.skip_whitespace();
         match self.current_token() {
             Token::Atom((start, end)) => {
-                // Gross
-                let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap();
+                let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
                 self.consume();
                 self.skip_spaces();
-                self.expect_colon();
+                self.expect_colon()?;
                 self.skip_spaces();
-                let value = self.parse_expression(0, false, true).unwrap();
+                let value = self.parse_expression(0, false, true)?.ok_or_else(|| {
+                    ParseError::InvalidExpression {
+                        message: "Expected value for struct field".to_string(),
+                        position: self.position,
+                    }
+                })?;
                 if !self.is_close_curly() {
-                    self.data_delimiter();
+                    self.data_delimiter()?;
                 }
-                Some((name, value))
+                Ok(Some((name, value)))
             }
-            _ => None,
+            _ => Ok(None),
         }
     }
 
@@ -1778,43 +2023,47 @@ impl Parser {
         }
     }
 
-    fn parse_if(&mut self) -> Ast {
+    fn parse_if(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
         self.move_to_next_non_whitespace();
-        let condition = Box::new(self.parse_expression(1, true, false).unwrap());
-        let then = self.parse_block();
+        let condition = Box::new(self.parse_expression(1, true, false)?.ok_or_else(|| {
+            ParseError::UnexpectedEof {
+                expected: "condition after 'if'".to_string(),
+            }
+        })?);
+        let then = self.parse_block()?;
         self.move_to_next_non_whitespace();
         if self.is_else() {
             self.consume();
             self.skip_whitespace();
             if self.is_if() {
                 self.consume();
-                let else_ = vec![self.parse_if()];
+                let else_ = vec![self.parse_if()?];
                 let end_position = self.position;
-                return Ast::If {
+                return Ok(Ast::If {
                     condition,
                     then,
                     else_,
                     token_range: TokenRange::new(start_position, end_position),
-                };
+                });
             }
             self.skip_whitespace();
-            let else_ = self.parse_block();
+            let else_ = self.parse_block()?;
             let end_position = self.position;
-            Ast::If {
+            Ok(Ast::If {
                 condition,
                 then,
                 else_,
                 token_range: TokenRange::new(start_position, end_position),
-            }
+            })
         } else {
             let end_position = self.position;
-            Ast::If {
+            Ok(Ast::If {
                 condition,
                 then,
                 else_: Vec::new(),
                 token_range: TokenRange::new(start_position, end_position),
-            }
+            })
         }
     }
 
@@ -1832,92 +2081,123 @@ impl Parser {
         }
     }
 
-    fn parse_try(&mut self) -> Ast {
+    fn parse_try(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
         self.move_to_next_non_whitespace();
 
         // Parse try block
-        let body = self.parse_block();
+        let body = self.parse_block()?;
 
         // Expect 'catch'
         self.move_to_next_non_whitespace();
         if !matches!(self.current_token(), Token::Catch) {
-            panic!("Expected 'catch' after try block");
+            return Err(ParseError::MissingToken {
+                expected: "'catch' after try block".to_string(),
+                position: self.position,
+            });
         }
         self.consume();
         self.move_to_next_non_whitespace();
 
         // Parse catch parameter: catch(e)
         if !matches!(self.current_token(), Token::OpenParen) {
-            panic!("Expected '(' after 'catch'");
+            return Err(ParseError::MissingToken {
+                expected: "'(' after 'catch'".to_string(),
+                position: self.position,
+            });
         }
         self.consume();
         self.skip_whitespace();
 
         // Get the exception binding identifier
         let exception_binding = if let Token::Atom((start, end)) = self.current_token() {
-            let binding = String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap();
+            let binding = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
             self.consume();
             binding
         } else {
-            panic!("Expected identifier for exception binding");
+            return Err(ParseError::UnexpectedToken {
+                expected: "identifier for exception binding".to_string(),
+                found: self.get_token_repr(),
+                position: self.position,
+            });
         };
 
         self.skip_whitespace();
         if !matches!(self.current_token(), Token::CloseParen) {
-            panic!("Expected ')' after exception binding");
+            return Err(ParseError::MissingToken {
+                expected: "')' after exception binding".to_string(),
+                position: self.position,
+            });
         }
         self.consume();
 
         // Parse catch block
-        let catch_body = self.parse_block();
+        let catch_body = self.parse_block()?;
 
         let end_position = self.position;
-        Ast::Try {
+        Ok(Ast::Try {
             body,
             exception_binding,
             catch_body,
             token_range: TokenRange::new(start_position, end_position),
-        }
+        })
     }
 
-    fn parse_throw(&mut self) -> Ast {
+    fn parse_throw(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
         self.move_to_next_non_whitespace();
 
         // throw is a function call: throw(value)
         if !matches!(self.current_token(), Token::OpenParen) {
-            panic!("Expected '(' after 'throw'");
+            return Err(ParseError::MissingToken {
+                expected: "'(' after 'throw'".to_string(),
+                position: self.position,
+            });
         }
         self.consume();
         self.skip_whitespace();
 
-        let value = Box::new(self.parse_expression(1, true, false).unwrap());
+        let value = Box::new(self.parse_expression(1, true, false)?.ok_or_else(|| {
+            ParseError::UnexpectedEof {
+                expected: "value in throw()".to_string(),
+            }
+        })?);
 
         self.skip_whitespace();
         if !matches!(self.current_token(), Token::CloseParen) {
-            panic!("Expected ')' after throw value");
+            return Err(ParseError::MissingToken {
+                expected: "')' after throw value".to_string(),
+                position: self.position,
+            });
         }
         self.consume();
 
         let end_position = self.position;
-        Ast::Throw {
+        Ok(Ast::Throw {
             value,
             token_range: TokenRange::new(start_position, end_position),
-        }
+        })
     }
 
-    fn parse_match(&mut self) -> Ast {
+    fn parse_match(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
         self.move_to_next_non_whitespace();
 
         // Parse value to match on - same as if condition
-        let value = Box::new(self.parse_expression(1, true, false).unwrap());
+        let value = Box::new(self.parse_expression(1, true, false)?.ok_or_else(|| {
+            ParseError::UnexpectedEof {
+                expected: "value after 'match'".to_string(),
+            }
+        })?);
 
         // Expect '{'
         self.skip_whitespace();
         if !matches!(self.current_token(), Token::OpenCurly) {
-            panic!("Expected '{{' after match value");
+            return Err(ParseError::MissingToken {
+                expected: "'{{' after match value".to_string(),
+                position: self.position,
+            });
         }
         self.consume();
         self.move_to_next_non_whitespace();
@@ -1925,7 +2205,7 @@ impl Parser {
         // Parse match arms
         let mut arms = vec![];
         while !matches!(self.current_token(), Token::CloseCurly) {
-            let arm = self.parse_match_arm();
+            let arm = self.parse_match_arm()?;
             arms.push(arm);
             self.skip_whitespace();
 
@@ -1940,49 +2220,59 @@ impl Parser {
         self.consume();
         let end_position = self.position;
 
-        Ast::Match {
+        Ok(Ast::Match {
             value,
             arms,
             token_range: TokenRange::new(start_position, end_position),
-        }
+        })
     }
 
-    fn parse_match_arm(&mut self) -> MatchArm {
+    fn parse_match_arm(&mut self) -> ParseResult<MatchArm> {
         let arm_start = self.position;
 
         // Parse pattern
-        let pattern = self.parse_pattern();
+        let pattern = self.parse_pattern()?;
 
         // Expect '=>'
         self.skip_whitespace();
         if !matches!(self.current_token(), Token::Arrow) {
-            panic!("Expected '=>' after match pattern");
+            return Err(ParseError::UnexpectedToken {
+                expected: "'=>' after match pattern".to_string(),
+                found: self.get_token_repr(),
+                position: self.position,
+            });
         }
         self.consume();
         self.skip_whitespace();
 
         // Parse body - either a block or single expression
         let body = if matches!(self.current_token(), Token::OpenCurly) {
-            self.parse_block()
+            self.parse_block()?
         } else {
             // Single expression
-            vec![self.parse_expression(1, true, false).unwrap()]
+            let expr = self.parse_expression(1, true, false)?.ok_or_else(|| {
+                ParseError::InvalidExpression {
+                    message: "Expected expression in match arm body".to_string(),
+                    position: self.position,
+                }
+            })?;
+            vec![expr]
         };
 
         let arm_end = self.position;
-        MatchArm {
+        Ok(MatchArm {
             pattern,
             guard: None, // TODO: implement guards later
             body,
             token_range: TokenRange::new(arm_start, arm_end),
-        }
+        })
     }
 
-    fn parse_pattern(&mut self) -> Pattern {
+    fn parse_pattern(&mut self) -> ParseResult<Pattern> {
         self.skip_whitespace();
         let start = self.position;
 
-        match self.current_token() {
+        Ok(match self.current_token() {
             Token::Underscore => {
                 self.consume();
                 Pattern::Wildcard {
@@ -1992,7 +2282,9 @@ impl Parser {
             Token::Atom((atom_start, atom_end)) => {
                 let first_name =
                     String::from_utf8(self.source.as_bytes()[atom_start..atom_end].to_vec())
-                        .unwrap();
+                        .map_err(|_| ParseError::InvalidUtf8 {
+                            position: atom_start,
+                        })?;
                 self.consume();
                 self.skip_whitespace();
 
@@ -2005,13 +2297,15 @@ impl Parser {
                     if let Token::Atom((var_start, var_end)) = self.current_token() {
                         let variant_name =
                             String::from_utf8(self.source.as_bytes()[var_start..var_end].to_vec())
-                                .unwrap();
+                                .map_err(|_| ParseError::InvalidUtf8 {
+                                    position: var_start,
+                                })?;
                         self.consume();
                         self.skip_whitespace();
 
                         // Check for field patterns { }
                         let fields = if matches!(self.current_token(), Token::OpenCurly) {
-                            self.parse_field_patterns()
+                            self.parse_field_patterns()?
                         } else {
                             vec![]
                         };
@@ -2023,22 +2317,35 @@ impl Parser {
                             token_range: TokenRange::new(start, self.position),
                         }
                     } else {
-                        panic!("Expected variant name after '.'");
+                        return Err(ParseError::InvalidPattern {
+                            message: "Expected variant name after '.'".to_string(),
+                            position: self.position,
+                        });
                     }
                 } else {
                     // It's just an identifier - treat as literal variable reference
                     // For now, we can't distinguish between a variable and an enum
-                    // variant without the dot, so we'll panic
-                    panic!(
-                        "Patterns must be enum variants (Enum.Variant), literals, or wildcards (_)"
-                    );
+                    // variant without the dot, so we'll return an error
+                    return Err(ParseError::InvalidPattern {
+                        message: "Patterns must be enum variants (Enum.Variant), literals, or wildcards (_)".to_string(),
+                        position: start,
+                    });
                 }
             }
             // Literal patterns
             Token::Integer((int_start, int_end)) => {
                 let int_str =
-                    String::from_utf8(self.source.as_bytes()[int_start..int_end].to_vec()).unwrap();
-                let value = int_str.parse::<i64>().unwrap();
+                    String::from_utf8(self.source.as_bytes()[int_start..int_end].to_vec())
+                        .map_err(|_| ParseError::InvalidUtf8 {
+                            position: int_start,
+                        })?;
+                let value =
+                    int_str
+                        .parse::<i64>()
+                        .map_err(|_| ParseError::InvalidNumberLiteral {
+                            literal: int_str,
+                            position: int_start,
+                        })?;
                 self.consume();
                 Pattern::Literal {
                     value: Box::new(Ast::IntegerLiteral(value, start)),
@@ -2047,7 +2354,10 @@ impl Parser {
             }
             Token::String((str_start, str_end)) => {
                 let string_value =
-                    String::from_utf8(self.source.as_bytes()[str_start..str_end].to_vec()).unwrap();
+                    String::from_utf8(self.source.as_bytes()[str_start..str_end].to_vec())
+                        .map_err(|_| ParseError::InvalidUtf8 {
+                            position: str_start,
+                        })?;
                 self.consume();
                 Pattern::Literal {
                     value: Box::new(Ast::String(string_value, start)),
@@ -2075,11 +2385,16 @@ impl Parser {
                     token_range: TokenRange::new(start, self.position),
                 }
             }
-            _ => panic!("Unexpected token in pattern: {:?}", self.current_token()),
-        }
+            _ => {
+                return Err(ParseError::InvalidPattern {
+                    message: format!("Unexpected token in pattern: {:?}", self.current_token()),
+                    position: self.position,
+                });
+            }
+        })
     }
 
-    fn parse_field_patterns(&mut self) -> Vec<FieldPattern> {
+    fn parse_field_patterns(&mut self) -> ParseResult<Vec<FieldPattern>> {
         // Consume '{'
         self.consume();
         self.skip_whitespace();
@@ -2090,8 +2405,8 @@ impl Parser {
 
             // Get field name
             if let Token::Atom((start, end)) = self.current_token() {
-                let field_name =
-                    String::from_utf8(self.source.as_bytes()[start..end].to_vec()).unwrap();
+                let field_name = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
                 self.consume();
                 self.skip_whitespace();
 
@@ -2104,12 +2419,17 @@ impl Parser {
                         let binding = String::from_utf8(
                             self.source.as_bytes()[bind_start..bind_end].to_vec(),
                         )
-                        .unwrap();
+                        .map_err(|_| ParseError::InvalidUtf8 {
+                            position: bind_start,
+                        })?;
                         self.consume();
                         self.skip_whitespace();
                         Some(binding)
                     } else {
-                        panic!("Expected binding name after ':'");
+                        return Err(ParseError::InvalidPattern {
+                            message: "Expected binding name after ':'".to_string(),
+                            position: self.position,
+                        });
                     }
                 } else {
                     None
@@ -2129,20 +2449,23 @@ impl Parser {
                     self.skip_whitespace();
                 }
             } else {
-                panic!("Expected field name in pattern");
+                return Err(ParseError::InvalidPattern {
+                    message: "Expected field name in pattern".to_string(),
+                    position: self.position,
+                });
             }
         }
 
         // Consume '}'
         self.consume();
-        fields
+        Ok(fields)
     }
 
-    fn compose_binary_op(&mut self, lhs: Ast, current_token: Token, rhs: Ast) -> Ast {
+    fn compose_binary_op(&mut self, lhs: Ast, current_token: Token, rhs: Ast) -> ParseResult<Ast> {
         let start_position = lhs.token_range().start;
         let end_position = rhs.token_range().end + 1;
         let token_range = TokenRange::new(start_position, end_position);
-        match current_token {
+        Ok(match current_token {
             Token::LessThanOrEqual => Ast::Condition {
                 operator: crate::ir::Condition::LessThanOrEqual,
                 left: Box::new(lhs),
@@ -2241,7 +2564,7 @@ impl Parser {
 
             Token::OpenBracket => {
                 let index = Box::new(rhs);
-                self.expect_close_bracket();
+                self.expect_close_bracket()?;
                 Ast::IndexOperator {
                     array: Box::new(lhs),
                     index,
@@ -2258,20 +2581,26 @@ impl Parser {
                 value: Box::new(rhs),
                 token_range,
             },
-            _ => panic!("Expected binary op got {:?}", current_token),
-        }
+            _ => {
+                return Err(ParseError::InvalidExpression {
+                    message: format!("Unexpected binary operator: {:?}", current_token),
+                    position: start_position,
+                });
+            }
+        })
     }
 
-    fn expect_equal(&mut self) {
+    fn expect_equal(&mut self) -> ParseResult<()> {
         self.skip_whitespace();
         if self.is_equal() {
             self.consume();
+            Ok(())
         } else {
-            panic!(
-                "Expected equal got {:?} on line {}",
-                self.get_token_repr(),
-                self.current_location()
-            );
+            Err(ParseError::UnexpectedToken {
+                expected: "equal '='".to_string(),
+                found: self.get_token_repr(),
+                position: self.position,
+            })
         }
     }
 
@@ -2279,16 +2608,17 @@ impl Parser {
         self.current_token() == Token::Equal
     }
 
-    fn expect_colon(&mut self) {
+    fn expect_colon(&mut self) -> ParseResult<()> {
         self.skip_whitespace();
         if self.is_colon() {
             self.consume();
+            Ok(())
         } else {
-            panic!(
-                "Expected colon got {} at line {}",
-                self.get_token_repr(),
-                self.current_location()
-            );
+            Err(ParseError::UnexpectedToken {
+                expected: "colon ':'".to_string(),
+                found: self.get_token_repr(),
+                position: self.position,
+            })
         }
     }
 
@@ -2300,36 +2630,41 @@ impl Parser {
         self.current_token() == Token::NewLine
     }
 
-    pub fn from_file(arg: &str) -> Result<Ast, std::io::Error> {
+    pub fn from_file(arg: &str) -> ParseResult<Ast> {
         let source = std::fs::read_to_string(arg)?;
-        let mut parser = Parser::new(arg.to_string(), source);
-        Ok(parser.parse())
+        let mut parser = Parser::new(arg.to_string(), source)?;
+        parser.parse()
     }
 
     fn is_dot(&self) -> bool {
         self.current_token() == Token::Dot
     }
 
-    fn parse_array(&mut self) -> Ast {
+    fn parse_array(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
         self.consume();
         let mut elements = Vec::new();
         while !self.at_end() && !self.is_close_bracket() {
-            elements.push(self.parse_expression(0, true, true).unwrap());
+            let elem =
+                self.parse_expression(0, true, true)?
+                    .ok_or_else(|| ParseError::UnexpectedEof {
+                        expected: "array element".to_string(),
+                    })?;
+            elements.push(elem);
             self.skip_whitespace();
             if !self.is_close_bracket() {
-                self.expect_comma();
+                self.expect_comma()?;
             }
         }
-        self.expect_close_bracket();
+        self.expect_close_bracket()?;
         let end_position = self.position;
-        Ast::Array {
+        Ok(Ast::Array {
             array: elements,
             token_range: TokenRange::new(start_position, end_position),
-        }
+        })
     }
 
-    fn parse_map_literal(&mut self) -> Ast {
+    fn parse_map_literal(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
         self.consume(); // consume '{'
         self.skip_whitespace();
@@ -2337,26 +2672,30 @@ impl Parser {
         // Empty map case
         if self.is_close_curly() {
             self.consume();
-            return Ast::MapLiteral {
+            return Ok(Ast::MapLiteral {
                 pairs: vec![],
                 token_range: TokenRange::new(start_position, self.position),
-            };
+            });
         }
 
         // Parse key-value pairs
         let mut pairs = Vec::new();
         loop {
             // Parse key (any expression)
-            let key = self
-                .parse_expression(0, true, true)
-                .expect("Expected key expression in map literal");
+            let key =
+                self.parse_expression(0, true, true)?
+                    .ok_or_else(|| ParseError::UnexpectedEof {
+                        expected: "key expression in map literal".to_string(),
+                    })?;
 
             self.skip_whitespace();
 
             // Parse value (any expression)
-            let value = self
-                .parse_expression(0, true, true)
-                .expect("Expected value expression in map literal");
+            let value =
+                self.parse_expression(0, true, true)?
+                    .ok_or_else(|| ParseError::UnexpectedEof {
+                        expected: "value expression in map literal".to_string(),
+                    })?;
 
             pairs.push((key, value));
 
@@ -2374,12 +2713,12 @@ impl Parser {
             }
         }
 
-        self.expect_close_curly();
+        self.expect_close_curly()?;
 
-        Ast::MapLiteral {
+        Ok(Ast::MapLiteral {
             pairs,
             token_range: TokenRange::new(start_position, self.position),
-        }
+        })
     }
 
     fn is_close_bracket(&self) -> bool {
@@ -2409,11 +2748,15 @@ impl Parser {
         lhs: Ast,
         min_precedence: usize,
         struct_creation_allowed: bool,
-    ) -> Option<Ast> {
+    ) -> ParseResult<Option<Ast>> {
         match self.current_token() {
             Token::Dot => {
                 self.consume();
-                let rhs = self.parse_expression(min_precedence, true, struct_creation_allowed)?;
+                let rhs = self
+                    .parse_expression(min_precedence, true, struct_creation_allowed)?
+                    .ok_or_else(|| ParseError::UnexpectedEof {
+                        expected: "expression after '.'".to_string(),
+                    })?;
                 let start_position = lhs.token_range().start;
                 let end_position = rhs.token_range().end + 1;
                 let token_range = TokenRange::new(start_position, end_position);
@@ -2424,66 +2767,86 @@ impl Parser {
                             name,
                             fields,
                             token_range,
-                        } => Some(Ast::EnumCreation {
+                        } => Ok(Some(Ast::EnumCreation {
                             name: if let Ast::Identifier(name, _) = lhs {
                                 name
                             } else {
-                                panic!("Expected identifier")
+                                return Err(ParseError::InvalidExpression {
+                                    message: "Expected identifier before '.'".to_string(),
+                                    position: start_position,
+                                });
                             },
                             variant: name,
                             fields,
                             token_range,
+                        })),
+                        _ => Err(ParseError::InvalidExpression {
+                            message: "Expected struct creation".to_string(),
+                            position: start_position,
                         }),
-                        _ => panic!("Expected struct creation"),
                     }
                 } else {
-                    Some(Ast::PropertyAccess {
+                    Ok(Some(Ast::PropertyAccess {
                         object: Box::new(lhs),
                         property: Box::new(rhs),
                         token_range,
-                    })
+                    }))
                 }
             }
             Token::OpenParen => {
                 let position = self.consume();
                 let mut args = Vec::new();
                 while !self.at_end() && !self.is_close_paren() {
-                    args.push(self.parse_expression(0, true, true).unwrap());
+                    let arg = self.parse_expression(0, true, true)?.ok_or_else(|| {
+                        ParseError::UnexpectedEof {
+                            expected: "argument in function call".to_string(),
+                        }
+                    })?;
+                    args.push(arg);
                     self.skip_whitespace();
                     if !self.is_close_paren() {
-                        self.expect_comma();
+                        self.expect_comma()?;
                     }
                 }
-                self.expect_close_paren();
-                Some(Ast::Call {
+                self.expect_close_paren()?;
+                Ok(Some(Ast::Call {
                     name: match lhs {
                         Ast::Identifier(name, _) => name,
-                        _ => panic!("Expected identifier"),
+                        _ => {
+                            return Err(ParseError::InvalidExpression {
+                                message: "Expected identifier before '('".to_string(),
+                                position,
+                            });
+                        }
                     },
                     args,
                     token_range: TokenRange::new(position, self.position),
-                })
+                }))
             }
             Token::OpenBracket => {
                 let position = self.consume();
-                let index = self.parse_expression(0, true, true).unwrap();
-                self.expect_close_bracket();
-                Some(Ast::IndexOperator {
+                let index = self.parse_expression(0, true, true)?.ok_or_else(|| {
+                    ParseError::UnexpectedEof {
+                        expected: "index expression".to_string(),
+                    }
+                })?;
+                self.expect_close_bracket()?;
+                Ok(Some(Ast::IndexOperator {
                     array: Box::new(lhs),
                     index: Box::new(index),
                     token_range: TokenRange::new(position, self.position),
-                })
+                }))
             }
             Token::OpenCurly => {
                 let position = self.consume();
-                let fields = self.parse_struct_fields_creations();
-                self.expect_close_curly();
+                let fields = self.parse_struct_fields_creations()?;
+                self.expect_close_curly()?;
                 match lhs {
-                    Ast::Identifier(name, _) => Some(Ast::StructCreation {
+                    Ast::Identifier(name, _) => Ok(Some(Ast::StructCreation {
                         name,
                         fields,
                         token_range: TokenRange::new(position, self.position),
-                    }),
+                    })),
                     Ast::PropertyAccess {
                         object,
                         property,
@@ -2492,23 +2855,36 @@ impl Parser {
                         // TODO: Ugly
                         let enum_name = match *property {
                             Ast::Identifier(name, _) => name,
-                            _ => panic!("Expected identifier"),
+                            _ => {
+                                return Err(ParseError::InvalidExpression {
+                                    message: "Expected identifier for enum variant".to_string(),
+                                    position,
+                                });
+                            }
                         };
                         let parent_name = match *object {
                             Ast::Identifier(name, _) => name,
-                            _ => panic!("Expected identifier"),
+                            _ => {
+                                return Err(ParseError::InvalidExpression {
+                                    message: "Expected identifier for enum name".to_string(),
+                                    position,
+                                });
+                            }
                         };
-                        Some(Ast::EnumCreation {
+                        Ok(Some(Ast::EnumCreation {
                             name: parent_name,
                             variant: enum_name,
                             fields,
                             token_range,
-                        })
+                        }))
                     }
-                    _ => panic!("Expected identifier"),
+                    _ => Err(ParseError::InvalidExpression {
+                        message: "Expected identifier or property access before '{'".to_string(),
+                        position,
+                    }),
                 }
             }
-            _ => None,
+            _ => Ok(None),
         }
     }
 }
@@ -2522,10 +2898,10 @@ fn test_tokenizer2() {
         }
     ";
     let input_bytes = input.as_bytes();
-    let (tokens, _mappings) = tokenizer.parse_all(input_bytes);
+    let (tokens, _mappings) = tokenizer.parse_all(input_bytes).unwrap();
     let literals = tokens
         .iter()
-        .map(|x| x.literal(input_bytes))
+        .map(|x| x.literal(input_bytes).unwrap())
         .collect::<Vec<String>>()
         .join("");
     assert_eq!(literals, input);
@@ -2541,9 +2917,10 @@ fn test_parse() {
         print(\"Hello World!\")
     }",
         ),
-    );
+    )
+    .unwrap();
 
-    let ast = parser.parse();
+    let ast = parser.parse().unwrap();
     println!("{:#?}", ast);
 }
 #[test]
@@ -2555,9 +2932,10 @@ fn parse_array() {
     let x = [1, 2, 3, 4]
     ",
         ),
-    );
+    )
+    .unwrap();
 
-    let ast = parser.parse();
+    let ast = parser.parse().unwrap();
     println!("{:#?}", ast);
 }
 
@@ -2575,17 +2953,19 @@ fn test_parse2() {
         }
     }",
         ),
-    );
+    )
+    .unwrap();
 
-    let ast = parser.parse();
+    let ast = parser.parse().unwrap();
     println!("{:#?}", ast);
 }
 
 #[test]
 fn test_parens() {
-    let mut parser = Parser::new("test".to_string(), String::from("(2 + 2) * 3 - (2 * 4)"));
+    let mut parser =
+        Parser::new("test".to_string(), String::from("(2 + 2) * 3 - (2 * 4)")).unwrap();
 
-    let ast = parser.parse();
+    let ast = parser.parse().unwrap();
     println!("{:#?}", ast);
 }
 
@@ -2596,12 +2976,13 @@ fn test_empty_function() {
         String::from(
             "
     fn empty(n) {
-       
+
     }",
         ),
-    );
+    )
+    .unwrap();
 
-    let ast = parser.parse();
+    let ast = parser.parse().unwrap();
     println!("{:#?}", ast);
 }
 
@@ -2613,9 +2994,9 @@ fn test_empty_function() {
 #[macro_export]
 macro_rules! parse {
     ($input:expr) => {{
-        let mut parser = Parser::new("test".to_string(), $input.to_string());
+        let mut parser = Parser::new("test".to_string(), $input.to_string()).unwrap();
         parser.print_tokens();
-        parser.parse()
+        parser.parse().unwrap()
     }};
 }
 #[test]

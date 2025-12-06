@@ -1684,51 +1684,28 @@ pub unsafe extern "C" fn set_default_exception_handler(handler_fn: usize) {
 /// Returns tagged heap pointer to Error { kind, message, location }
 pub unsafe extern "C" fn create_error(
     stack_pointer: usize,
-    kind_str: usize,     // Tagged string
-    message_str: usize,  // Tagged string
+    kind_str: usize, // Tagged string specifying the error variant (e.g., "StructError", "TypeError")
+    message_str: usize, // Tagged string
     location_str: usize, // Tagged string or null
 ) -> usize {
     print_call_builtin(get_runtime().get(), "create_error");
 
     let runtime = get_runtime().get_mut();
 
-    // Get the Error struct definition from beagle.core namespace
-    let (struct_id, _error_struct) = runtime
-        .get_struct("beagle.core/Error")
-        .expect("Error struct not found - make sure standard-library/std.bg is loaded");
+    // Extract the error kind string to determine which variant to create
+    // Use get_string which handles both string constants and heap-allocated strings
+    let kind = runtime.get_string(stack_pointer, kind_str);
 
-    // Allocate the Error struct on the heap (3 fields: kind, message, location)
-    let error_obj = runtime
-        .allocate(3, stack_pointer, BuiltInTypes::HeapObject)
-        .expect("Failed to allocate Error struct");
-
-    // Set the struct ID by writing to the header's type_data field
-    // We need to preserve the size field that was set during allocation
-    let heap_obj = HeapObject::from_tagged(error_obj);
-    let untagged = heap_obj.untagged();
-    let header_ptr = untagged as *mut usize;
-
-    // Write struct_id to type_data field (bytes 3-6) without changing other fields
-    // Header layout (little-endian):
-    //   Bits 0-7:   Byte 0 (flags)
-    //   Bits 8-15:  Byte 1 (padding)
-    //   Bits 16-23: Byte 2 (size) - MUST PRESERVE
-    //   Bits 24-55: Bytes 3-6 (type_data) - WRITE HERE
-    //   Bits 56-63: Byte 7 (type_id) - MUST PRESERVE
-    unsafe {
-        let current_header = *header_ptr;
-        let mask = 0x00FFFFFFFF000000; // Mask for bits 24-55 (bytes 3-6, the type_data field)
-        let shifted_type_id = (struct_id as usize) << 24; // Shift to bit 24
-        let new_header = (current_header & !mask) | shifted_type_id;
-        *header_ptr = new_header;
-    }
-
-    // Fill in the fields using write_field: kind, message, location (in order)
-    heap_obj.write_field(0, kind_str);
-    heap_obj.write_field(1, message_str);
-    heap_obj.write_field(2, location_str);
-
-    error_obj
+    // Use the general struct creation helper
+    let fields = vec![message_str, location_str];
+    runtime
+        .create_struct(
+            "beagle.core/SystemError",
+            Some(&kind),
+            &fields,
+            stack_pointer,
+        )
+        .expect("Failed to create SystemError")
 }
 
 /// Helper to throw a runtime error with kind and message strings

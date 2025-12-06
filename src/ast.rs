@@ -357,10 +357,13 @@ impl Ast {
         file_name: &str,
         token_line_column_map: Vec<(usize, usize)>,
     ) -> (Ir, Vec<(TokenRange, IRRange)>) {
+        let allocate_fn_pointer = compiler
+            .allocate_fn_pointer()
+            .expect("Failed to get allocate function pointer - this is a fatal compiler error");
         let mut ast_compiler = AstCompiler {
             ast: self.clone(),
             file_name: file_name.to_string(),
-            ir: Ir::new(compiler.allocate_fn_pointer()),
+            ir: Ir::new(allocate_fn_pointer),
             ir_range_to_token_range: vec![Vec::new()],
             name: None,
             compiler,
@@ -573,7 +576,11 @@ impl AstCompiler<'_> {
         self.tail_position();
         self.call_compile(&Box::new(self.ast.clone()));
 
-        let mut ir = Ir::new(self.compiler.allocate_fn_pointer());
+        let allocate_fn_pointer = self
+            .compiler
+            .allocate_fn_pointer()
+            .expect("Failed to get allocate function pointer - this is a fatal compiler error");
+        let mut ir = Ir::new(allocate_fn_pointer);
         std::mem::swap(&mut ir, &mut self.ir);
         ir
     }
@@ -609,8 +616,10 @@ impl AstCompiler<'_> {
                 } else {
                     None
                 };
-                let old_ir =
-                    std::mem::replace(&mut self.ir, Ir::new(self.compiler.allocate_fn_pointer()));
+                let allocate_fn_pointer = self.compiler.allocate_fn_pointer().expect(
+                    "Failed to get allocate function pointer - this is a fatal compiler error",
+                );
+                let old_ir = std::mem::replace(&mut self.ir, Ir::new(allocate_fn_pointer));
                 let old_name = self.name.clone();
                 let old_arity = self.current_function_arity;
                 self.ir_range_to_token_range.push(Vec::new());
@@ -1315,7 +1324,9 @@ impl AstCompiler<'_> {
                             function_name.clone().unwrap()
                         );
 
-                        self.compiler
+                        // Ignore error - if alias can't be added, the protocol method won't work but won't crash
+                        let _ = self
+                            .compiler
                             .add_function_alias(&fully_qualified_name, function);
                     } else {
                         self.call_compile(ast);
@@ -1502,11 +1513,41 @@ impl AstCompiler<'_> {
                     self.ir.push_to_stack(reg.into());
                 }
 
-                let (struct_id, struct_type) = self
+                let (struct_id, struct_type) = match self
                     .compiler
                     .get_struct(&format!("{}/{}", namespace, name))
                     .or_else(|| self.compiler.get_struct(&format!("beagle.core/{}", name)))
-                    .unwrap_or_else(|| panic!("Struct not found {}/{}", namespace, name));
+                {
+                    Some(s) => s,
+                    None => {
+                        // Generate code to throw a runtime error that can be caught with try/catch
+
+                        // Create error kind string
+                        let kind_constant = self.string_constant("StructError".to_string());
+                        let kind_str = self.ir.load_string_constant(kind_constant);
+
+                        // Create error message string
+                        let message =
+                            format!("Struct '{}' not found in namespace '{}'", name, namespace);
+                        let message_constant = self.string_constant(message);
+                        let message_str = self.ir.load_string_constant(message_constant);
+
+                        // Create null for location and assign to register
+                        let null_reg = self.ir.assign_new(Value::Null);
+
+                        // Call create_error builtin (stack_pointer is added automatically by call_builtin)
+                        let error = self.call_builtin(
+                            "beagle.builtin/create_error",
+                            vec![kind_str, message_str, null_reg.into()],
+                        );
+
+                        // Throw the exception (this doesn't return)
+                        self.call_builtin("beagle.builtin/throw_exception", vec![error]);
+
+                        // Return null (unreachable but needed for type checking)
+                        return Value::Null;
+                    }
+                };
 
                 let mut field_order: Vec<usize> = vec![];
                 for field in fields.iter() {
@@ -2784,7 +2825,10 @@ impl AstCompiler<'_> {
             let namespace = self
                 .compiler
                 .get_namespace_from_alias(alias)
-                .unwrap_or_else(|| panic!("Can't find alias {}", alias));
+                .expect(&format!(
+                    "Namespace alias '{}' not found - did you forget to import it?",
+                    alias
+                ));
             (namespace, name.to_string())
         } else {
             (self.compiler.current_namespace_name(), name.to_string())
