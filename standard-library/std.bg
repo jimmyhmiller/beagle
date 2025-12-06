@@ -231,12 +231,18 @@ struct __Box__ {
     value
 }
 
-// Error type for exception handling
-// Future: Convert to enum when match is implemented
-struct Error {
-    kind       // String: "ParseError", "TypeError", "ArityError", etc.
-    message    // String: Human-readable description
-    location   // String or null: Optional file:line:column
+// System error enum for exception handling
+enum SystemError {
+    StructError { message, location }
+    ParseError { message, location }
+    CompileError { message, location }
+    TypeError { message, location }
+    ArityError { message, location }
+    RuntimeError { message, location }
+    ThreadError { message, location }
+    FFIError { message, location }
+    FunctionError { message, location }
+    FieldError { message, location }
 }
 
 // Compiler warning information for programmatic inspection

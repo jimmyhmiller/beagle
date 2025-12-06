@@ -34,6 +34,10 @@ pub enum CompileError {
     StructResolution { struct_name: String },
     PropertyCacheFull,
     MemoryMapping(String),
+    ParseError(crate::parser::ParseError),
+    FunctionNotFound { function_name: String },
+    InvalidFunctionPointer { function_name: String },
+    PathConversion { path: String },
 }
 
 impl fmt::Display for CompileError {
@@ -48,11 +52,27 @@ impl fmt::Display for CompileError {
             }
             CompileError::PropertyCacheFull => write!(f, "Property look up cache is full"),
             CompileError::MemoryMapping(msg) => write!(f, "Memory mapping error: {}", msg),
+            CompileError::ParseError(e) => write!(f, "Parse error: {}", e),
+            CompileError::FunctionNotFound { function_name } => {
+                write!(f, "Function not found: {}", function_name)
+            }
+            CompileError::InvalidFunctionPointer { function_name } => {
+                write!(f, "Invalid function pointer for: {}", function_name)
+            }
+            CompileError::PathConversion { path } => {
+                write!(f, "Failed to convert path to string: {}", path)
+            }
         }
     }
 }
 
 impl Error for CompileError {}
+
+impl From<crate::parser::ParseError> for CompileError {
+    fn from(err: crate::parser::ParseError) -> Self {
+        CompileError::ParseError(err)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct CompilerWarning {
@@ -99,7 +119,10 @@ impl Compiler {
         self.stack_map = StackMap::new();
         self.pause_atom_ptr = None;
         self.compiled_file_cache.clear();
-        self.warnings.lock().unwrap().clear();
+        // If lock is poisoned, we can still clear by ignoring the error
+        if let Ok(mut warnings) = self.warnings.lock() {
+            warnings.clear();
+        }
         Ok(())
     }
 
@@ -111,9 +134,16 @@ impl Compiler {
         self.pause_atom_ptr = Some(pointer);
     }
 
-    pub fn allocate_fn_pointer(&mut self) -> usize {
-        let allocate_fn_pointer = self.find_function("beagle.builtin/allocate").unwrap();
-        self.get_function_pointer(allocate_fn_pointer).unwrap()
+    pub fn allocate_fn_pointer(&mut self) -> Result<usize, CompileError> {
+        let allocate_fn = self
+            .find_function("beagle.builtin/allocate")
+            .ok_or_else(|| CompileError::FunctionNotFound {
+                function_name: "beagle.builtin/allocate".to_string(),
+            })?;
+        self.get_function_pointer(allocate_fn)
+            .ok_or_else(|| CompileError::InvalidFunctionPointer {
+                function_name: "beagle.builtin/allocate".to_string(),
+            })
     }
 
     pub fn add_code(&mut self, code: &[u8]) -> Result<*const u8, Box<dyn Error>> {
@@ -124,10 +154,12 @@ impl Compiler {
     pub fn compile_string(&mut self, string: &str) -> Result<usize, Box<dyn Error>> {
         // Clear warnings at the start of each eval/REPL compilation
         // This ensures each eval() shows only its own warnings
-        self.warnings.lock().unwrap().clear();
+        if let Ok(mut warnings) = self.warnings.lock() {
+            warnings.clear();
+        }
 
-        let mut parser = Parser::new("".to_string(), string.to_string());
-        let ast = parser.parse();
+        let mut parser = Parser::new("".to_string(), string.to_string())?;
+        let ast = parser.parse()?;
         let token_line_column_map = parser.get_token_line_column_map();
         let top_level = self.compile_ast(
             ast,
@@ -137,8 +169,16 @@ impl Compiler {
         )?;
         self.code_allocator.make_executable();
         if let Some(top_level) = top_level {
-            let function = self.get_function_by_name(&top_level).unwrap();
-            let function_pointer = self.get_pointer_for_function(function).unwrap();
+            let function = self.get_function_by_name(&top_level).ok_or_else(|| {
+                CompileError::FunctionNotFound {
+                    function_name: top_level.clone(),
+                }
+            })?;
+            let function_pointer = self.get_pointer_for_function(function).ok_or_else(|| {
+                CompileError::InvalidFunctionPointer {
+                    function_name: top_level,
+                }
+            })?;
             Ok(function_pointer)
         } else {
             Ok(0)
@@ -152,7 +192,12 @@ impl Compiler {
         // Canonicalize path for cache consistency
         let canonical_path = std::fs::canonicalize(file_name)
             .unwrap_or_else(|_| std::path::PathBuf::from(file_name));
-        let canonical_str = canonical_path.to_str().unwrap().to_string();
+        let canonical_str = canonical_path
+            .to_str()
+            .ok_or_else(|| CompileError::PathConversion {
+                path: format!("{:?}", canonical_path),
+            })?
+            .to_string();
 
         if self.compiled_file_cache.contains(&canonical_str) {
             if self.command_line_arguments.verbose {
@@ -166,17 +211,18 @@ impl Compiler {
         // 1. Sequential compilations (e.g., multiple eval() calls) start fresh
         // 2. Warnings from dependencies within a single compilation accumulate
         if self.compiled_file_cache.is_empty() {
-            self.warnings.lock().unwrap().clear();
+            if let Ok(mut warnings) = self.warnings.lock() {
+                warnings.clear();
+            }
         }
         if self.command_line_arguments.verbose {
             println!("Compiling {:?}", file_name);
         }
 
         let parse_time = std::time::Instant::now();
-        let code = std::fs::read_to_string(file_name)
-            .unwrap_or_else(|_| panic!("Could not find file {:?}", file_name));
-        let mut parser = Parser::new(file_name.to_string(), code.to_string());
-        let ast = parser.parse();
+        let code = std::fs::read_to_string(file_name)?;
+        let mut parser = Parser::new(file_name.to_string(), code.to_string())?;
+        let ast = parser.parse()?;
         let token_line_column_map = parser.get_token_line_column_map();
 
         if self.command_line_arguments.print_parse {
@@ -213,7 +259,7 @@ impl Compiler {
     ) -> Result<Vec<String>, Box<dyn Error>> {
         let mut top_levels_to_run = vec![];
         for import in ast.imports() {
-            let (name, _alias) = self.extract_import(&import);
+            let (name, _alias) = self.extract_import(&import)?;
             if name.starts_with("beagle.") {
                 continue;
             }
@@ -236,8 +282,16 @@ impl Compiler {
             fn_name.unwrap_or_else(|| format!("{}/__top_level", self.current_namespace_name()));
         if ast.has_top_level() {
             let arm = LowLevelArm::new();
-            let error_fn_pointer = self.find_function("beagle.builtin/throw_error").unwrap();
-            let error_fn_pointer = self.get_function_pointer(error_fn_pointer).unwrap();
+            let error_fn = self
+                .find_function("beagle.builtin/throw_error")
+                .ok_or_else(|| CompileError::FunctionNotFound {
+                    function_name: "beagle.builtin/throw_error".to_string(),
+                })?;
+            let error_fn_pointer = self.get_function_pointer(error_fn).ok_or_else(|| {
+                CompileError::InvalidFunctionPointer {
+                    function_name: "beagle.builtin/throw_error".to_string(),
+                }
+            })?;
 
             ir.ir_range_to_token_range = token_map.clone();
             let mut arm = ir.compile(arm, error_fn_pointer);
@@ -345,49 +399,81 @@ impl Compiler {
 
         let relative_path = source_dir.join(format!("{}.bg", import_name));
         if relative_path.exists() {
-            return Ok(relative_path.to_str().unwrap().to_string());
+            return relative_path
+                .to_str()
+                .ok_or_else(|| CompileError::PathConversion {
+                    path: format!("{:?}", relative_path),
+                })
+                .map(|s| s.to_string())
+                .map_err(|e| e.into());
         }
 
         // 2. Try standard library (PRIORITY 2)
         let mut exe_path = env::current_exe()?;
-        exe_path = exe_path.parent().unwrap().to_path_buf();
+        exe_path = exe_path
+            .parent()
+            .ok_or("Cannot get parent of executable path")?
+            .to_path_buf();
 
         let stdlib_path = exe_path.join(format!("standard-library/{}.bg", import_name));
         if stdlib_path.exists() {
-            return Ok(stdlib_path.to_str().unwrap().to_string());
+            return stdlib_path
+                .to_str()
+                .ok_or_else(|| CompileError::PathConversion {
+                    path: format!("{:?}", stdlib_path),
+                })
+                .map(|s| s.to_string())
+                .map_err(|e| e.into());
         }
 
         // Try one level up (for development - cargo run from project root)
-        let parent_stdlib_path = exe_path
-            .parent()
-            .unwrap()
-            .join(format!("standard-library/{}.bg", import_name));
-        if parent_stdlib_path.exists() {
-            return Ok(parent_stdlib_path.to_str().unwrap().to_string());
+        if let Some(parent) = exe_path.parent() {
+            let parent_stdlib_path = parent.join(format!("standard-library/{}.bg", import_name));
+            if parent_stdlib_path.exists() {
+                return parent_stdlib_path
+                    .to_str()
+                    .ok_or_else(|| CompileError::PathConversion {
+                        path: format!("{:?}", parent_stdlib_path),
+                    })
+                    .map(|s| s.to_string())
+                    .map_err(|e| e.into());
+            }
         }
 
         // Try two levels up (for cargo run - target/debug -> target -> root)
-        let grandparent_stdlib_path = exe_path
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join(format!("standard-library/{}.bg", import_name));
-        if grandparent_stdlib_path.exists() {
-            return Ok(grandparent_stdlib_path.to_str().unwrap().to_string());
+        if let Some(parent) = exe_path.parent() {
+            if let Some(grandparent) = parent.parent() {
+                let grandparent_stdlib_path =
+                    grandparent.join(format!("standard-library/{}.bg", import_name));
+                if grandparent_stdlib_path.exists() {
+                    return grandparent_stdlib_path
+                        .to_str()
+                        .ok_or_else(|| CompileError::PathConversion {
+                            path: format!("{:?}", grandparent_stdlib_path),
+                        })
+                        .map(|s| s.to_string())
+                        .map_err(|e| e.into());
+                }
+            }
         }
 
         // Try three levels up (for cargo test - target/debug/deps -> target/debug -> target -> root)
-        let great_grandparent_stdlib_path = exe_path
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join(format!("standard-library/{}.bg", import_name));
-        if great_grandparent_stdlib_path.exists() {
-            return Ok(great_grandparent_stdlib_path.to_str().unwrap().to_string());
+        if let Some(parent) = exe_path.parent() {
+            if let Some(grandparent) = parent.parent() {
+                if let Some(great_grandparent) = grandparent.parent() {
+                    let great_grandparent_stdlib_path =
+                        great_grandparent.join(format!("standard-library/{}.bg", import_name));
+                    if great_grandparent_stdlib_path.exists() {
+                        return great_grandparent_stdlib_path
+                            .to_str()
+                            .ok_or_else(|| CompileError::PathConversion {
+                                path: format!("{:?}", great_grandparent_stdlib_path),
+                            })
+                            .map(|s| s.to_string())
+                            .map_err(|e| e.into());
+                    }
+                }
+            }
         }
 
         Err(format!(
@@ -397,7 +483,10 @@ impl Compiler {
         .into())
     }
 
-    pub fn extract_import(&self, import: &crate::ast::Ast) -> (String, String) {
+    pub fn extract_import(
+        &self,
+        import: &crate::ast::Ast,
+    ) -> Result<(String, String), CompileError> {
         match import {
             crate::ast::Ast::Import {
                 library_name,
@@ -406,9 +495,14 @@ impl Compiler {
             } => {
                 let library_name = library_name.to_string().replace("\"", "");
                 let alias = alias.as_ref().get_string();
-                (library_name, alias)
+                Ok((library_name, alias))
             }
-            _ => panic!("Not an import"),
+            _ => Err(CompileError::ParseError(
+                crate::parser::ParseError::InvalidDeclaration {
+                    message: "Expected import AST node".to_string(),
+                    position: 0,
+                },
+            )),
         }
     }
 
@@ -535,17 +629,20 @@ impl Compiler {
         )
     }
 
-    pub fn add_function_alias(&self, alias: &str, function: &Function) {
+    pub fn add_function_alias(
+        &self,
+        alias: &str,
+        function: &Function,
+    ) -> Result<(), Box<dyn Error>> {
         let runtime = get_runtime().get_mut();
-        runtime
-            .add_function(
-                Some(alias),
-                usize::from(function.pointer) as *const u8,
-                function.size,
-                function.number_of_locals,
-                function.number_of_args,
-            )
-            .unwrap();
+        runtime.add_function(
+            Some(alias),
+            usize::from(function.pointer) as *const u8,
+            function.size,
+            function.number_of_locals,
+            function.number_of_args,
+        )?;
+        Ok(())
     }
 
     pub fn get_pointer_for_function(&self, function: &Function) -> Option<usize> {
@@ -609,13 +706,16 @@ impl Compiler {
             };
         }
 
-        let first_method = protocol_methods.first().unwrap();
+        // Use .first() which can't fail for non-empty vec (already checked above)
+        let first_method = &protocol_methods[0];
         let untagged_pointer = BuiltInTypes::untag(first_method.fn_pointer);
         let function_name = self
             .get_function_by_pointer(untagged_pointer)
-            .unwrap()
-            .name
-            .clone();
+            .map(|f| f.name.clone())
+            .unwrap_or_else(|| {
+                // Fall back to error function if we can't find the method
+                "beagle.builtin/throw_error".to_string()
+            });
 
         Ast::If {
             condition: Box::new(Ast::Call {
@@ -648,20 +748,28 @@ impl Compiler {
         protocol_name: String,
         method_name: String,
         protocol_methods: Vec<ProtocolMethodInfo>,
-    ) {
+    ) -> Result<(), Box<dyn Error>> {
         let runtime = get_runtime().get_mut();
-        let (protocol_namespace, protocol_name) = protocol_name.split_once("/").unwrap();
+        let (protocol_namespace, protocol_name) = protocol_name
+            .split_once("/")
+            .ok_or_else(|| format!("Invalid protocol name format: {}", protocol_name))?;
         let full_method_name = format!("{}/{}", protocol_namespace, method_name);
         let fully_qualified_name =
             format!("{}/{}_{}", protocol_namespace, protocol_name, method_name);
         let default_method = runtime.get_function_by_name(&fully_qualified_name);
-        let function = self.find_function(&full_method_name).unwrap();
+        let function = self.find_function(&full_method_name).ok_or_else(|| {
+            CompileError::FunctionNotFound {
+                function_name: full_method_name.clone(),
+            }
+        })?;
         let args: Vec<String> = (0..function.number_of_args)
             .map(|x| format!("arg{}", x))
             .collect();
 
         let current_namespace_id = self.current_namespace_id();
-        let protocol_namespace_id = runtime.get_namespace_id(protocol_namespace).unwrap();
+        let protocol_namespace_id = runtime
+            .get_namespace_id(protocol_namespace)
+            .ok_or_else(|| format!("Protocol namespace not found: {}", protocol_namespace))?;
         self.set_current_namespace(protocol_namespace_id);
 
         let ast = Ast::Program {
@@ -673,9 +781,10 @@ impl Compiler {
             }],
             token_range: TokenRange::new(0, 0),
         };
-        self.compile_ast(ast, None, "test", vec![]).unwrap();
+        self.compile_ast(ast, None, "test", vec![])?;
         self.code_allocator.make_executable();
         self.set_current_namespace(current_namespace_id);
+        Ok(())
     }
 }
 
@@ -754,8 +863,15 @@ impl CompilerThread {
                         }
                     }
                     CompilerMessage::CompileFile(file_name) => {
-                        let top_levels = self.compiler.compile(&file_name).unwrap();
-                        work_done.mark_done(CompilerResponse::FunctionsToRun(top_levels));
+                        match self.compiler.compile(&file_name) {
+                            Ok(top_levels) => {
+                                work_done.mark_done(CompilerResponse::FunctionsToRun(top_levels));
+                            }
+                            Err(e) => {
+                                work_done
+                                    .mark_done(CompilerResponse::CompileError(format!("{}", e)));
+                            }
+                        }
                     }
                     CompilerMessage::SetPauseAtomPointer(pointer) => {
                         self.compiler.set_pause_atom_ptr(pointer);
@@ -767,27 +883,48 @@ impl CompilerThread {
                         max_locals,
                         number_of_args,
                     ) => {
-                        self.compiler
-                            .upsert_function_bytes(Some(&name), code, max_locals, number_of_args)
-                            .unwrap();
-                        self.compiler.code_allocator.make_executable();
-                        work_done.mark_done(CompilerResponse::Done);
+                        match self.compiler.upsert_function_bytes(
+                            Some(&name),
+                            code,
+                            max_locals,
+                            number_of_args,
+                        ) {
+                            Ok(_) => {
+                                self.compiler.code_allocator.make_executable();
+                                work_done.mark_done(CompilerResponse::Done);
+                            }
+                            Err(e) => {
+                                work_done
+                                    .mark_done(CompilerResponse::CompileError(format!("{}", e)));
+                            }
+                        }
                     }
-                    CompilerMessage::Reset => {
-                        self.compiler.reset().unwrap();
-                        work_done.mark_done(CompilerResponse::Done);
-                    }
+                    CompilerMessage::Reset => match self.compiler.reset() {
+                        Ok(_) => {
+                            work_done.mark_done(CompilerResponse::Done);
+                        }
+                        Err(e) => {
+                            work_done.mark_done(CompilerResponse::CompileError(format!("{}", e)));
+                        }
+                    },
                     CompilerMessage::CompileProtocolMethod(
                         protocol_name,
                         method_name,
                         protocol_methods,
                     ) => {
-                        self.compiler.compile_protocol_method(
+                        match self.compiler.compile_protocol_method(
                             protocol_name,
                             method_name,
                             protocol_methods,
-                        );
-                        work_done.mark_done(CompilerResponse::Done);
+                        ) {
+                            Ok(_) => {
+                                work_done.mark_done(CompilerResponse::Done);
+                            }
+                            Err(e) => {
+                                work_done
+                                    .mark_done(CompilerResponse::CompileError(format!("{}", e)));
+                            }
+                        }
                     }
                 },
                 Err(_) => {
@@ -805,8 +942,12 @@ pub struct BlockingSender<T, R> {
 impl<T, R> BlockingSender<T, R> {
     pub fn send(&self, message: T) -> R {
         let (done_tx, done_rx) = mpsc::sync_channel(0);
-        self.inner.send((message, done_tx)).unwrap();
-        done_rx.recv().unwrap()
+        self.inner
+            .send((message, done_tx))
+            .expect("Compiler thread has disconnected - this is a fatal error");
+        done_rx
+            .recv()
+            .expect("Compiler thread failed to send response - this is a fatal error")
     }
 }
 
@@ -834,6 +975,8 @@ pub struct WorkDone<R> {
 
 impl<R> WorkDone<R> {
     pub fn mark_done(self, result: R) {
-        self.done_tx.send(result).unwrap();
+        self.done_tx
+            .send(result)
+            .expect("Failed to send result back to main thread - this is a fatal error");
     }
 }
