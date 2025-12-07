@@ -2,7 +2,7 @@ use crate::{
     builtins::debugger,
     machine_code::arm_codegen::{
         ArmAsm, LdpGenSelector, Register, SP, Size, StpGenSelector, StrImmGenSelector, X0, X9, X10,
-        X11, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29, X30, ZERO_REGISTER,
+        X11, X16, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29, X30, ZERO_REGISTER,
     },
     types::BuiltInTypes,
 };
@@ -532,11 +532,25 @@ impl LowLevelArm {
         // TODO: make better/faster/fewer instructions
         self.store_pair(X29, X30, SP, -2);
         self.mov_reg(X29, SP);
-        self.sub_stack_pointer(-self.max_locals);
+        // Add placeholder SUB instruction - will be replaced in patch_prelude_and_epilogue()
+        self.instructions.push(ArmAsm::SubAddsubImm {
+            sf: SP.sf(),
+            rn: SP,
+            rd: SP,
+            imm12: 0x1111, // Magic placeholder value
+            sh: 0,
+        });
     }
 
     pub fn epilogue(&mut self) {
-        self.add_stack_pointer(self.max_locals);
+        // Add placeholder ADD instruction - will be replaced in patch_prelude_and_epilogue()
+        self.instructions.push(ArmAsm::AddAddsubImm {
+            sf: SP.sf(),
+            rn: SP,
+            rd: SP,
+            imm12: 0x1111, // Magic placeholder value
+            sh: 0,
+        });
         self.load_pair(X29, X30, SP, 2);
     }
 
@@ -658,12 +672,42 @@ impl LowLevelArm {
     }
 
     pub fn store_on_stack(&mut self, reg: Register, offset: i32) {
-        self.instructions.push(ArmAsm::SturGen {
-            size: 0b11,
-            imm9: offset * 8,
-            rn: X29,
-            rt: reg,
-        })
+        const MAX_IMM9: i32 = 255; // 9-bit signed immediate: -256 to +255
+        const MIN_IMM9: i32 = -256;
+
+        let byte_offset = offset * 8;
+
+        if byte_offset >= MIN_IMM9 && byte_offset <= MAX_IMM9 {
+            // Offset fits in imm9 - use STUR directly
+            self.instructions.push(ArmAsm::SturGen {
+                size: 0b11,
+                imm9: byte_offset,
+                rn: X29,
+                rt: reg,
+            })
+        } else {
+            // Offset doesn't fit - use multi-instruction sequence
+            // TODO: We're using X16 as a temp register - need to ensure it's not in use
+            let temp_reg = X16;
+
+            // Load offset into temp register
+            for instr in Self::mov_64_bit_num(temp_reg, byte_offset as isize) {
+                self.instructions.push(instr);
+            }
+
+            // Calculate address: temp = FP + offset (using ADD with register)
+            self.instructions.push(add(temp_reg, X29, temp_reg));
+
+            // Store: STR reg, [temp, #0]
+            self.instructions.push(ArmAsm::StrRegGen {
+                size: 0b11,
+                rm: ZERO_REGISTER,
+                option: 0b011, // LSL
+                s: 0,
+                rn: temp_reg,
+                rt: reg,
+            })
+        }
     }
 
     pub fn push_to_stack(&mut self, reg: Register) {
@@ -675,31 +719,119 @@ impl LowLevelArm {
     }
 
     pub fn load_from_stack(&mut self, destination: Register, offset: i32) {
-        self.instructions.push(ArmAsm::LdurGen {
-            size: 0b11,
-            imm9: offset * 8,
-            rn: X29,
-            rt: destination,
-        });
+        const MAX_IMM9: i32 = 255;
+        const MIN_IMM9: i32 = -256;
+
+        let byte_offset = offset * 8;
+
+        if byte_offset >= MIN_IMM9 && byte_offset <= MAX_IMM9 {
+            // Offset fits in imm9 - use LDUR directly
+            self.instructions.push(ArmAsm::LdurGen {
+                size: 0b11,
+                imm9: byte_offset,
+                rn: X29,
+                rt: destination,
+            });
+        } else {
+            // Offset doesn't fit - use multi-instruction sequence
+            let temp_reg = X16;
+
+            // Load offset into temp register
+            for instr in Self::mov_64_bit_num(temp_reg, byte_offset as isize) {
+                self.instructions.push(instr);
+            }
+
+            // Calculate address: temp = FP + offset (using ADD with register)
+            self.instructions.push(add(temp_reg, X29, temp_reg));
+
+            // Load: LDR destination, [temp, #0]
+            self.instructions.push(ArmAsm::LdrRegGen {
+                size: 0b11,
+                rm: ZERO_REGISTER,
+                option: 0b011, // LSL
+                s: 0,
+                rn: temp_reg,
+                rt: destination,
+            });
+        }
     }
 
     pub fn load_from_stack_beginning(&mut self, destination: Register, offset: i32) {
-        self.instructions.push(ArmAsm::LdurGen {
-            size: 0b11,
-            imm9: offset * 8,
-            rn: X29,
-            rt: destination,
-        });
+        const MAX_IMM9: i32 = 255;
+        const MIN_IMM9: i32 = -256;
+
+        let byte_offset = offset * 8;
+
+        if byte_offset >= MIN_IMM9 && byte_offset <= MAX_IMM9 {
+            // Offset fits in imm9 - use LDUR directly
+            self.instructions.push(ArmAsm::LdurGen {
+                size: 0b11,
+                imm9: byte_offset,
+                rn: X29,
+                rt: destination,
+            });
+        } else {
+            // Offset doesn't fit - use multi-instruction sequence
+            let temp_reg = X16;
+
+            // Load offset into temp register
+            for instr in Self::mov_64_bit_num(temp_reg, byte_offset as isize) {
+                self.instructions.push(instr);
+            }
+
+            // Calculate address: temp = FP + offset (using ADD with register)
+            self.instructions.push(add(temp_reg, X29, temp_reg));
+
+            // Load: LDR destination, [temp, #0]
+            self.instructions.push(ArmAsm::LdrRegGen {
+                size: 0b11,
+                rm: ZERO_REGISTER,
+                option: 0b011, // LSL
+                s: 0,
+                rn: temp_reg,
+                rt: destination,
+            });
+        }
     }
 
     pub fn push_to_end_of_stack(&mut self, reg: Register, offset: i32) {
+        const MAX_IMM9: i32 = 255;
+        const MIN_IMM9: i32 = -256;
+
         self.max_stack_size += 1;
-        self.instructions.push(ArmAsm::SturGen {
-            size: 0b11,
-            imm9: offset * 8,
-            rn: SP,
-            rt: reg,
-        })
+
+        let byte_offset = offset * 8;
+
+        if byte_offset >= MIN_IMM9 && byte_offset <= MAX_IMM9 {
+            // Offset fits in imm9 - use STUR directly
+            self.instructions.push(ArmAsm::SturGen {
+                size: 0b11,
+                imm9: byte_offset,
+                rn: SP,
+                rt: reg,
+            })
+        } else {
+            // Offset doesn't fit - use multi-instruction sequence
+            let temp_reg = X16;
+
+            // Load offset into temp register
+            for instr in Self::mov_64_bit_num(temp_reg, byte_offset as isize) {
+                self.instructions.push(instr);
+            }
+
+            // Calculate address: temp = SP + offset (using ADD with register)
+            self.instructions.push(add(temp_reg, SP, temp_reg));
+
+            // Store: STR reg, [temp, #0]
+            self.instructions.push(ArmAsm::StrRegGen {
+                size: 0b11,
+                rm: ZERO_REGISTER,
+                option: 0b011, // LSL
+                s: 0,
+                rn: temp_reg,
+                rt: reg,
+            })
+        }
     }
 
     pub fn pop_from_stack_indexed(&mut self, reg: Register, offset: i32) {
@@ -831,12 +963,13 @@ impl LowLevelArm {
     }
 
     pub fn compile(&mut self) -> &Vec<ArmAsm> {
-        self.patch_labels();
         self.patch_prelude_and_epilogue();
+        self.patch_labels();
         &self.instructions
     }
 
     pub fn compile_directly(&mut self) -> Vec<u8> {
+        self.patch_prelude_and_epilogue();
         self.patch_labels();
 
         self.instructions
@@ -1013,6 +1146,119 @@ impl LowLevelArm {
         X0
     }
 
+    /// Generates ARM64 instructions to allocate a stack frame of any size.
+    ///
+    /// ARM64 SUB/ADD immediate instructions have a 12-bit immediate field (max 4095).
+    /// For larger stack frames, this function uses multiple strategies:
+    ///
+    /// 1. **Small frames (≤4095 bytes)**: Single SUB instruction
+    /// 2. **4096-byte multiples**: SUB with LSL#12 shift (more efficient)
+    /// 3. **Large frames**: Multiple SUB instructions (matches LLVM/GCC behavior)
+    ///
+    /// This approach has no artificial limit and matches industry-standard compilers.
+    fn generate_stack_allocation(bytes: i32) -> Vec<ArmAsm> {
+        const MAX_IMM12: i32 = 4095;
+        const PAGE_SIZE: i32 = 4096;
+
+        if bytes <= MAX_IMM12 {
+            // Single instruction: SUB SP, SP, #bytes
+            vec![ArmAsm::SubAddsubImm {
+                sf: SP.sf(),
+                rn: SP,
+                rd: SP,
+                imm12: bytes,
+                sh: 0,
+            }]
+        } else if bytes % PAGE_SIZE == 0 && bytes / PAGE_SIZE <= MAX_IMM12 {
+            // Use LSL#12 shift: SUB SP, SP, #(bytes/4096), LSL#12
+            vec![ArmAsm::SubAddsubImm {
+                sf: SP.sf(),
+                rn: SP,
+                rd: SP,
+                imm12: bytes / PAGE_SIZE,
+                sh: 1, // LSL#12
+            }]
+        } else {
+            // Multiple SUB instructions
+            let mut instructions = vec![];
+            let mut remaining = bytes;
+
+            while remaining > MAX_IMM12 {
+                instructions.push(ArmAsm::SubAddsubImm {
+                    sf: SP.sf(),
+                    rn: SP,
+                    rd: SP,
+                    imm12: MAX_IMM12,
+                    sh: 0,
+                });
+                remaining -= MAX_IMM12;
+            }
+
+            if remaining > 0 {
+                instructions.push(ArmAsm::SubAddsubImm {
+                    sf: SP.sf(),
+                    rn: SP,
+                    rd: SP,
+                    imm12: remaining,
+                    sh: 0,
+                });
+            }
+
+            instructions
+        }
+    }
+
+    /// Generates ARM64 instructions to deallocate a stack frame of any size.
+    /// (Same logic as generate_stack_allocation but uses ADD instead of SUB)
+    fn generate_stack_deallocation(bytes: i32) -> Vec<ArmAsm> {
+        const MAX_IMM12: i32 = 4095;
+        const PAGE_SIZE: i32 = 4096;
+
+        if bytes <= MAX_IMM12 {
+            vec![ArmAsm::AddAddsubImm {
+                sf: SP.sf(),
+                rn: SP,
+                rd: SP,
+                imm12: bytes,
+                sh: 0,
+            }]
+        } else if bytes % PAGE_SIZE == 0 && bytes / PAGE_SIZE <= MAX_IMM12 {
+            vec![ArmAsm::AddAddsubImm {
+                sf: SP.sf(),
+                rn: SP,
+                rd: SP,
+                imm12: bytes / PAGE_SIZE,
+                sh: 1,
+            }]
+        } else {
+            let mut instructions = vec![];
+            let mut remaining = bytes;
+
+            while remaining > MAX_IMM12 {
+                instructions.push(ArmAsm::AddAddsubImm {
+                    sf: SP.sf(),
+                    rn: SP,
+                    rd: SP,
+                    imm12: MAX_IMM12,
+                    sh: 0,
+                });
+                remaining -= MAX_IMM12;
+            }
+
+            if remaining > 0 {
+                instructions.push(ArmAsm::AddAddsubImm {
+                    sf: SP.sf(),
+                    rn: SP,
+                    rd: SP,
+                    imm12: remaining,
+                    sh: 0,
+                });
+            }
+
+            instructions
+        }
+    }
+
     pub fn patch_prelude_and_epilogue(&mut self) {
         let mut max = self.max_stack_size as u64 + self.max_locals as u64;
         let remainder = max % 2;
@@ -1020,29 +1266,79 @@ impl LowLevelArm {
             max += 1;
         }
 
-        let max = max as i32;
+        let stack_bytes = (max * 8) as i32;
 
-        // TODO: It is probably the case that I can get rid of this patching all together
-        if let Some(ArmAsm::SubAddsubImm { imm12, .. }) = self
-            .instructions
-            .iter_mut()
-            .position(|instruction| matches!(instruction, ArmAsm::SubAddsubImm { .. }))
-            .map(|i| &mut self.instructions[i])
-        {
-            *imm12 = max * 8;
+        // Find the placeholder SUB instruction in prelude (has magic value 0x1111)
+        let sub_index = self.instructions.iter().position(|inst| {
+            matches!(inst, ArmAsm::SubAddsubImm { rn, rd, imm12, .. }
+                     if *rn == SP && *rd == SP && *imm12 == 0x1111)
+        });
+
+        if let Some(index) = sub_index {
+            // Replace single SUB with sequence of instructions for stack allocation
+            let alloc_instructions = Self::generate_stack_allocation(stack_bytes);
+            let delta = alloc_instructions.len() as isize - 1;
+            self.instructions.splice(index..=index, alloc_instructions);
+
+            if delta != 0 {
+                // Shift label locations that come after the insertion point
+                for location in self.label_locations.values_mut() {
+                    if *location > index {
+                        *location = (*location as isize + delta) as usize;
+                    }
+                }
+                // Also shift stack_map entries (instruction indices) that come after the insertion point
+                self.stack_map = self
+                    .stack_map
+                    .drain()
+                    .map(|(k, v)| {
+                        if k > index {
+                            ((k as isize + delta) as usize, v)
+                        } else {
+                            (k, v)
+                        }
+                    })
+                    .collect();
+            }
         } else {
-            unreachable!();
+            unreachable!("Expected to find SUB placeholder instruction for stack allocation");
         }
 
-        if let Some(ArmAsm::AddAddsubImm { imm12, .. }) = self
-            .instructions
-            .iter_mut()
-            .rposition(|instruction| matches!(instruction, ArmAsm::AddAddsubImm { .. }))
-            .map(|i| &mut self.instructions[i])
-        {
-            *imm12 = max * 8;
+        // Find the placeholder ADD instruction in epilogue (has magic value 0x1111)
+        // Note: We need to search again after the splice operation
+        let add_index = self.instructions.iter().rposition(|inst| {
+            matches!(inst, ArmAsm::AddAddsubImm { rn, rd, imm12, .. }
+                     if *rn == SP && *rd == SP && *imm12 == 0x1111)
+        });
+
+        if let Some(index) = add_index {
+            // Replace single ADD with sequence of instructions for stack deallocation
+            let dealloc_instructions = Self::generate_stack_deallocation(stack_bytes);
+            let delta = dealloc_instructions.len() as isize - 1;
+            self.instructions
+                .splice(index..=index, dealloc_instructions);
+
+            if delta != 0 {
+                for location in self.label_locations.values_mut() {
+                    if *location > index {
+                        *location = (*location as isize + delta) as usize;
+                    }
+                }
+                // Also shift stack_map entries for epilogue splice
+                self.stack_map = self
+                    .stack_map
+                    .drain()
+                    .map(|(k, v)| {
+                        if k > index {
+                            ((k as isize + delta) as usize, v)
+                        } else {
+                            (k, v)
+                        }
+                    })
+                    .collect();
+            }
         } else {
-            unreachable!();
+            unreachable!("Expected to find ADD placeholder instruction for stack deallocation");
         }
     }
 
