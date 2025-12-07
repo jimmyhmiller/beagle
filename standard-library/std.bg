@@ -243,6 +243,7 @@ enum SystemError {
     FFIError { message, location }
     FunctionError { message, location }
     FieldError { message, location }
+    IndexError { message, location }
 }
 
 // Compiler warning information for programmatic inspection

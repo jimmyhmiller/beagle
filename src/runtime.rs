@@ -2353,7 +2353,22 @@ impl Runtime {
         let tag = BuiltInTypes::get_kind(string);
         if tag == BuiltInTypes::String {
             let string = self.get_str_literal(string);
-            let string = string[start..start + length].to_string();
+            let end = start + length;
+            if end > string.len() {
+                unsafe {
+                    crate::builtins::throw_runtime_error(
+                        stack_pointer,
+                        "IndexError",
+                        format!(
+                            "substring index out of bounds: start={}, length={}, but string length is {}",
+                            start,
+                            length,
+                            string.len()
+                        ),
+                    );
+                }
+            }
+            let string = string[start..end].to_string();
             self.allocate_string(stack_pointer, string)
         } else if tag == BuiltInTypes::HeapObject {
             let heap_object = HeapObject::from_tagged(string);
@@ -2371,7 +2386,22 @@ impl Runtime {
             }
             let bytes = heap_object.get_string_bytes();
             let string = unsafe { std::str::from_utf8_unchecked(bytes) };
-            let string = string[start..start + length].to_string();
+            let end = start + length;
+            if end > string.len() {
+                unsafe {
+                    crate::builtins::throw_runtime_error(
+                        stack_pointer,
+                        "IndexError",
+                        format!(
+                            "substring index out of bounds: start={}, length={}, but string length is {}",
+                            start,
+                            length,
+                            string.len()
+                        ),
+                    );
+                }
+            }
+            let string = string[start..end].to_string();
             self.allocate_string(stack_pointer, string)
         } else {
             unsafe {
