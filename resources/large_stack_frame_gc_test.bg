@@ -1,0 +1,594 @@
+namespace large_stack_frame_gc_test
+
+// This test verifies that stack maps are correctly adjusted when
+// the stack frame exceeds 4095 bytes (requiring multi-instruction
+// prologue/epilogue sequences).
+//
+// The bug: patch_prelude_and_epilogue shifts label_locations but NOT
+// stack_map when splicing multi-instruction prologues. This causes
+// GC to miss stack frames and potentially collect live objects.
+
+struct Node {
+    value
+    next
+}
+
+fn create_garbage() {
+    // Create garbage that will be collected
+    let g1 = Node { value: 999, next: null }
+    let g2 = Node { value: 998, next: g1 }
+    let g3 = Node { value: 997, next: g2 }
+    g3
+}
+
+fn force_gc_multiple_times() {
+    // Create garbage and force multiple GC cycles
+    create_garbage()
+    gc()
+    create_garbage()
+    gc()
+    create_garbage()
+    gc()
+    "gc done"
+}
+
+fn large_stack_with_live_heap_pointers() {
+    // Create 520 local variables to exceed 4095 bytes
+    // (520 * 8 = 4160 bytes > 4095)
+    let a0 = 0
+    let a1 = 1
+    let a2 = 2
+    let a3 = 3
+    let a4 = 4
+    let a5 = 5
+    let a6 = 6
+    let a7 = 7
+    let a8 = 8
+    let a9 = 9
+    let a10 = 10
+    let a11 = 11
+    let a12 = 12
+    let a13 = 13
+    let a14 = 14
+    let a15 = 15
+    let a16 = 16
+    let a17 = 17
+    let a18 = 18
+    let a19 = 19
+    let a20 = 20
+    let a21 = 21
+    let a22 = 22
+    let a23 = 23
+    let a24 = 24
+    let a25 = 25
+    let a26 = 26
+    let a27 = 27
+    let a28 = 28
+    let a29 = 29
+    let a30 = 30
+    let a31 = 31
+    let a32 = 32
+    let a33 = 33
+    let a34 = 34
+    let a35 = 35
+    let a36 = 36
+    let a37 = 37
+    let a38 = 38
+    let a39 = 39
+    let a40 = 40
+    let a41 = 41
+    let a42 = 42
+    let a43 = 43
+    let a44 = 44
+    let a45 = 45
+    let a46 = 46
+    let a47 = 47
+    let a48 = 48
+    let a49 = 49
+    let a50 = 50
+    let a51 = 51
+    let a52 = 52
+    let a53 = 53
+    let a54 = 54
+    let a55 = 55
+    let a56 = 56
+    let a57 = 57
+    let a58 = 58
+    let a59 = 59
+    let a60 = 60
+    let a61 = 61
+    let a62 = 62
+    let a63 = 63
+    let a64 = 64
+    let a65 = 65
+    let a66 = 66
+    let a67 = 67
+    let a68 = 68
+    let a69 = 69
+    let a70 = 70
+    let a71 = 71
+    let a72 = 72
+    let a73 = 73
+    let a74 = 74
+    let a75 = 75
+    let a76 = 76
+    let a77 = 77
+    let a78 = 78
+    let a79 = 79
+    let a80 = 80
+    let a81 = 81
+    let a82 = 82
+    let a83 = 83
+    let a84 = 84
+    let a85 = 85
+    let a86 = 86
+    let a87 = 87
+    let a88 = 88
+    let a89 = 89
+    let a90 = 90
+    let a91 = 91
+    let a92 = 92
+    let a93 = 93
+    let a94 = 94
+    let a95 = 95
+    let a96 = 96
+    let a97 = 97
+    let a98 = 98
+    let a99 = 99
+
+    let b0 = 100
+    let b1 = 101
+    let b2 = 102
+    let b3 = 103
+    let b4 = 104
+    let b5 = 105
+    let b6 = 106
+    let b7 = 107
+    let b8 = 108
+    let b9 = 109
+    let b10 = 110
+    let b11 = 111
+    let b12 = 112
+    let b13 = 113
+    let b14 = 114
+    let b15 = 115
+    let b16 = 116
+    let b17 = 117
+    let b18 = 118
+    let b19 = 119
+    let b20 = 120
+    let b21 = 121
+    let b22 = 122
+    let b23 = 123
+    let b24 = 124
+    let b25 = 125
+    let b26 = 126
+    let b27 = 127
+    let b28 = 128
+    let b29 = 129
+    let b30 = 130
+    let b31 = 131
+    let b32 = 132
+    let b33 = 133
+    let b34 = 134
+    let b35 = 135
+    let b36 = 136
+    let b37 = 137
+    let b38 = 138
+    let b39 = 139
+    let b40 = 140
+    let b41 = 141
+    let b42 = 142
+    let b43 = 143
+    let b44 = 144
+    let b45 = 145
+    let b46 = 146
+    let b47 = 147
+    let b48 = 148
+    let b49 = 149
+    let b50 = 150
+    let b51 = 151
+    let b52 = 152
+    let b53 = 153
+    let b54 = 154
+    let b55 = 155
+    let b56 = 156
+    let b57 = 157
+    let b58 = 158
+    let b59 = 159
+    let b60 = 160
+    let b61 = 161
+    let b62 = 162
+    let b63 = 163
+    let b64 = 164
+    let b65 = 165
+    let b66 = 166
+    let b67 = 167
+    let b68 = 168
+    let b69 = 169
+    let b70 = 170
+    let b71 = 171
+    let b72 = 172
+    let b73 = 173
+    let b74 = 174
+    let b75 = 175
+    let b76 = 176
+    let b77 = 177
+    let b78 = 178
+    let b79 = 179
+    let b80 = 180
+    let b81 = 181
+    let b82 = 182
+    let b83 = 183
+    let b84 = 184
+    let b85 = 185
+    let b86 = 186
+    let b87 = 187
+    let b88 = 188
+    let b89 = 189
+    let b90 = 190
+    let b91 = 191
+    let b92 = 192
+    let b93 = 193
+    let b94 = 194
+    let b95 = 195
+    let b96 = 196
+    let b97 = 197
+    let b98 = 198
+    let b99 = 199
+
+    let c0 = 200
+    let c1 = 201
+    let c2 = 202
+    let c3 = 203
+    let c4 = 204
+    let c5 = 205
+    let c6 = 206
+    let c7 = 207
+    let c8 = 208
+    let c9 = 209
+    let c10 = 210
+    let c11 = 211
+    let c12 = 212
+    let c13 = 213
+    let c14 = 214
+    let c15 = 215
+    let c16 = 216
+    let c17 = 217
+    let c18 = 218
+    let c19 = 219
+    let c20 = 220
+    let c21 = 221
+    let c22 = 222
+    let c23 = 223
+    let c24 = 224
+    let c25 = 225
+    let c26 = 226
+    let c27 = 227
+    let c28 = 228
+    let c29 = 229
+    let c30 = 230
+    let c31 = 231
+    let c32 = 232
+    let c33 = 233
+    let c34 = 234
+    let c35 = 235
+    let c36 = 236
+    let c37 = 237
+    let c38 = 238
+    let c39 = 239
+    let c40 = 240
+    let c41 = 241
+    let c42 = 242
+    let c43 = 243
+    let c44 = 244
+    let c45 = 245
+    let c46 = 246
+    let c47 = 247
+    let c48 = 248
+    let c49 = 249
+    let c50 = 250
+    let c51 = 251
+    let c52 = 252
+    let c53 = 253
+    let c54 = 254
+    let c55 = 255
+    let c56 = 256
+    let c57 = 257
+    let c58 = 258
+    let c59 = 259
+    let c60 = 260
+    let c61 = 261
+    let c62 = 262
+    let c63 = 263
+    let c64 = 264
+    let c65 = 265
+    let c66 = 266
+    let c67 = 267
+    let c68 = 268
+    let c69 = 269
+    let c70 = 270
+    let c71 = 271
+    let c72 = 272
+    let c73 = 273
+    let c74 = 274
+    let c75 = 275
+    let c76 = 276
+    let c77 = 277
+    let c78 = 278
+    let c79 = 279
+    let c80 = 280
+    let c81 = 281
+    let c82 = 282
+    let c83 = 283
+    let c84 = 284
+    let c85 = 285
+    let c86 = 286
+    let c87 = 287
+    let c88 = 288
+    let c89 = 289
+    let c90 = 290
+    let c91 = 291
+    let c92 = 292
+    let c93 = 293
+    let c94 = 294
+    let c95 = 295
+    let c96 = 296
+    let c97 = 297
+    let c98 = 298
+    let c99 = 299
+
+    let d0 = 300
+    let d1 = 301
+    let d2 = 302
+    let d3 = 303
+    let d4 = 304
+    let d5 = 305
+    let d6 = 306
+    let d7 = 307
+    let d8 = 308
+    let d9 = 309
+    let d10 = 310
+    let d11 = 311
+    let d12 = 312
+    let d13 = 313
+    let d14 = 314
+    let d15 = 315
+    let d16 = 316
+    let d17 = 317
+    let d18 = 318
+    let d19 = 319
+    let d20 = 320
+    let d21 = 321
+    let d22 = 322
+    let d23 = 323
+    let d24 = 324
+    let d25 = 325
+    let d26 = 326
+    let d27 = 327
+    let d28 = 328
+    let d29 = 329
+    let d30 = 330
+    let d31 = 331
+    let d32 = 332
+    let d33 = 333
+    let d34 = 334
+    let d35 = 335
+    let d36 = 336
+    let d37 = 337
+    let d38 = 338
+    let d39 = 339
+    let d40 = 340
+    let d41 = 341
+    let d42 = 342
+    let d43 = 343
+    let d44 = 344
+    let d45 = 345
+    let d46 = 346
+    let d47 = 347
+    let d48 = 348
+    let d49 = 349
+    let d50 = 350
+    let d51 = 351
+    let d52 = 352
+    let d53 = 353
+    let d54 = 354
+    let d55 = 355
+    let d56 = 356
+    let d57 = 357
+    let d58 = 358
+    let d59 = 359
+    let d60 = 360
+    let d61 = 361
+    let d62 = 362
+    let d63 = 363
+    let d64 = 364
+    let d65 = 365
+    let d66 = 366
+    let d67 = 367
+    let d68 = 368
+    let d69 = 369
+    let d70 = 370
+    let d71 = 371
+    let d72 = 372
+    let d73 = 373
+    let d74 = 374
+    let d75 = 375
+    let d76 = 376
+    let d77 = 377
+    let d78 = 378
+    let d79 = 379
+    let d80 = 380
+    let d81 = 381
+    let d82 = 382
+    let d83 = 383
+    let d84 = 384
+    let d85 = 385
+    let d86 = 386
+    let d87 = 387
+    let d88 = 388
+    let d89 = 389
+    let d90 = 390
+    let d91 = 391
+    let d92 = 392
+    let d93 = 393
+    let d94 = 394
+    let d95 = 395
+    let d96 = 396
+    let d97 = 397
+    let d98 = 398
+    let d99 = 399
+
+    let e0 = 400
+    let e1 = 401
+    let e2 = 402
+    let e3 = 403
+    let e4 = 404
+    let e5 = 405
+    let e6 = 406
+    let e7 = 407
+    let e8 = 408
+    let e9 = 409
+    let e10 = 410
+    let e11 = 411
+    let e12 = 412
+    let e13 = 413
+    let e14 = 414
+    let e15 = 415
+    let e16 = 416
+    let e17 = 417
+    let e18 = 418
+    let e19 = 419
+    let e20 = 420
+    let e21 = 421
+    let e22 = 422
+    let e23 = 423
+    let e24 = 424
+    let e25 = 425
+    let e26 = 426
+    let e27 = 427
+    let e28 = 428
+    let e29 = 429
+    let e30 = 430
+    let e31 = 431
+    let e32 = 432
+    let e33 = 433
+    let e34 = 434
+    let e35 = 435
+    let e36 = 436
+    let e37 = 437
+    let e38 = 438
+    let e39 = 439
+    let e40 = 440
+    let e41 = 441
+    let e42 = 442
+    let e43 = 443
+    let e44 = 444
+    let e45 = 445
+    let e46 = 446
+    let e47 = 447
+    let e48 = 448
+    let e49 = 449
+    let e50 = 450
+    let e51 = 451
+    let e52 = 452
+    let e53 = 453
+    let e54 = 454
+    let e55 = 455
+    let e56 = 456
+    let e57 = 457
+    let e58 = 458
+    let e59 = 459
+    let e60 = 460
+    let e61 = 461
+    let e62 = 462
+    let e63 = 463
+    let e64 = 464
+    let e65 = 465
+    let e66 = 466
+    let e67 = 467
+    let e68 = 468
+    let e69 = 469
+    let e70 = 470
+    let e71 = 471
+    let e72 = 472
+    let e73 = 473
+    let e74 = 474
+    let e75 = 475
+    let e76 = 476
+    let e77 = 477
+    let e78 = 478
+    let e79 = 479
+    let e80 = 480
+    let e81 = 481
+    let e82 = 482
+    let e83 = 483
+    let e84 = 484
+    let e85 = 485
+    let e86 = 486
+    let e87 = 487
+    let e88 = 488
+    let e89 = 489
+    let e90 = 490
+    let e91 = 491
+    let e92 = 492
+    let e93 = 493
+    let e94 = 494
+    let e95 = 495
+    let e96 = 496
+    let e97 = 497
+    let e98 = 498
+    let e99 = 499
+
+    // These are HEAP POINTERS that must survive GC
+    // They are stored in local variables in this large stack frame
+    let live1 = Node { value: 1, next: null }
+    let live2 = Node { value: 2, next: live1 }
+    let live3 = Node { value: 3, next: live2 }
+    let live4 = Node { value: 4, next: live3 }
+    let live5 = Node { value: 5, next: live4 }
+
+    // More padding to ensure we're well over the threshold
+    let f0 = 500
+    let f1 = 501
+    let f2 = 502
+    let f3 = 503
+    let f4 = 504
+    let f5 = 505
+    let f6 = 506
+    let f7 = 507
+    let f8 = 508
+    let f9 = 509
+    let f10 = 510
+    let f11 = 511
+    let f12 = 512
+    let f13 = 513
+    let f14 = 514
+
+    // NOW trigger GC while live1-live5 are on the stack
+    // If stack_map is wrong, GC won't find this frame's roots
+    // and may collect live1-live5
+    force_gc_multiple_times()
+
+    // Access live objects AFTER GC - if they were collected, this will crash
+    // or return garbage values
+    let sum = live1.value + live2.value + live3.value + live4.value + live5.value
+
+    // Also verify the linked list is intact
+    let check = live5.next.next.next.next.value
+
+    println(sum)
+    println(check)
+    sum
+}
+
+fn main() {
+    let result = large_stack_with_live_heap_pointers()
+    println("done")
+}
+
+// Expect
+// 15
+// 1
+// done
+// null
