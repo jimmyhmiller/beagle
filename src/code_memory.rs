@@ -4,9 +4,9 @@ pub struct CodeAllocator {
     unused_pages: Reserved,
     current_page: Option<ReservedMut>,
     current_offset: usize,
-    pending_pages: Option<Reserved>,
+    pending_pages: Vec<Reserved>,
     #[allow(dead_code)]
-    used_pages: Option<Mmap>,
+    used_pages: Vec<Mmap>,
 }
 
 impl Default for CodeAllocator {
@@ -23,8 +23,8 @@ impl CodeAllocator {
             .unwrap();
         Self {
             unused_pages,
-            used_pages: None,
-            pending_pages: None,
+            used_pages: Vec::new(),
+            pending_pages: Vec::new(),
             current_page: None,
             current_offset: 0,
         }
@@ -44,12 +44,7 @@ impl CodeAllocator {
         }
         if let Some(page) = self.current_page.take() {
             let page = page.make_read_only().unwrap();
-            if let Some(mut pending) = self.pending_pages.take() {
-                pending.merge(page).unwrap();
-                self.pending_pages = Some(pending);
-            } else {
-                self.pending_pages = Some(page);
-            }
+            self.pending_pages.push(page);
         }
 
         self.current_page = None;
@@ -105,21 +100,13 @@ impl CodeAllocator {
     pub fn make_executable(&mut self) {
         self.mark_page_as_pending();
 
-        if let Some(pending) = self.pending_pages.take() {
+        for pending in self.pending_pages.drain(..) {
             let pending = pending.make_exec().unwrap();
             let pending: Mmap = pending.try_into().unwrap();
-            if let Some(mut used) = self.used_pages.take() {
-                used.merge(pending).unwrap();
-                self.used_pages = Some(used);
-            } else {
-                self.used_pages = Some(pending);
-            }
+            self.used_pages.push(pending);
         }
-        // let used = self.used_pages.take();
-        // let used = used.unwrap().make_exec().unwrap();
-        // self.used_pages = Some(used);
 
         assert!(self.current_page.is_none());
-        assert!(self.pending_pages.is_none());
+        assert!(self.pending_pages.is_empty());
     }
 }
