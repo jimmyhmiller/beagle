@@ -1,6 +1,8 @@
 use std::{error::Error, ffi::c_void, io};
 
-use libc::{mprotect, vm_page_size};
+use libc::mprotect;
+
+use super::get_page_size;
 
 use crate::types::{BuiltInTypes, HeapObject, Word};
 
@@ -25,11 +27,11 @@ unsafe impl Sync for Space {}
 impl Space {
     #[allow(unused)]
     fn word_count(&self) -> usize {
-        (self.page_count * unsafe { vm_page_size }) / 8
+        (self.page_count * get_page_size()) / 8
     }
 
     fn byte_count(&self) -> usize {
-        self.page_count * unsafe { vm_page_size }
+        self.page_count * get_page_size()
     }
 
     fn contains(&self, pointer: *const u8) -> bool {
@@ -86,7 +88,7 @@ impl Space {
         let pre_allocated_space = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
-                vm_page_size * MAX_PAGE_COUNT,
+                get_page_size() * MAX_PAGE_COUNT,
                 libc::PROT_NONE,
                 libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
                 -1,
@@ -94,11 +96,7 @@ impl Space {
             )
         };
 
-        Self::commit_memory(
-            pre_allocated_space,
-            default_page_count * unsafe { vm_page_size },
-        )
-        .unwrap();
+        Self::commit_memory(pre_allocated_space, default_page_count * get_page_size()).unwrap();
 
         Self {
             start: pre_allocated_space as *const u8,
@@ -120,11 +118,7 @@ impl Space {
 
     fn double_committed_memory(&mut self) {
         let new_page_count = self.page_count * 2;
-        Self::commit_memory(
-            self.start as *mut c_void,
-            new_page_count * unsafe { vm_page_size },
-        )
-        .unwrap();
+        Self::commit_memory(self.start as *mut c_void, new_page_count * get_page_size()).unwrap();
         self.page_count = new_page_count;
     }
 

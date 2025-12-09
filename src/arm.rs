@@ -987,39 +987,48 @@ impl LowLevelArm {
             .collect()
     }
 
-    // TODO: I should pass this information to my debugger
-    // then I could visualize every stack frame
-    // and do dynamic checking if the invariants I expect to hold
-    // do in fact hold.
-    fn update_stack_map(&mut self) {
-        let offset = self.instructions.len() - 1;
-        let stack_size = self.stack_size as usize;
-        // TODO: Should I keep track of locals here?
-        // Right now I null them out, so it would never matter
-        self.stack_map.insert(offset, stack_size);
-    }
-
     pub fn translate_stack_map(&self, pc: usize) -> Vec<(usize, usize)> {
+        // Stack map keys are already byte offsets
         self.stack_map
             .iter()
-            .map(|(key, value)| ((*key * 4) + pc, *value))
+            .map(|(byte_offset, value)| (*byte_offset + pc, *value))
             .collect()
+    }
+
+    /// Get the current byte offset in the generated code.
+    /// ARM64 instructions are fixed 4 bytes each.
+    pub fn current_byte_offset(&self) -> usize {
+        self.instructions.len() * 4
+    }
+
+    /// Record a GC safepoint at the current position.
+    pub fn record_gc_safepoint(&mut self) {
+        let byte_offset = self.current_byte_offset();
+        let stack_size = self.stack_size as usize;
+        self.stack_map.insert(byte_offset, stack_size);
+    }
+
+    /// Get the adjustment for return address lookup.
+    /// ARM64 BLR instruction is 4 bytes.
+    pub fn return_address_adjustment() -> usize {
+        4
     }
 
     pub fn call(&mut self, register: Register) {
         self.instructions.push(branch_with_link_register(register));
-        // TODO: I could be smarter here and not to do leaf nodes
-        self.update_stack_map();
+        // Record safepoint after the call - this is the return address
+        self.record_gc_safepoint();
     }
 
     pub fn call_builtin(&mut self, register: Register) {
-        self.instructions.push(branch_with_link_register(register));
-        self.update_stack_map();
+        // Just use regular call - it records the safepoint
+        self.call(register);
     }
 
     pub fn recurse(&mut self, label: Label) {
         self.instructions.push(branch_with_link(label.index as i32));
-        self.update_stack_map();
+        // Record safepoint after the call - this is the return address
+        self.record_gc_safepoint();
     }
 
     pub fn patch_labels(&mut self) {
@@ -1104,6 +1113,15 @@ impl LowLevelArm {
             .expect("No free registers!");
         self.allocated_temporary_registers.push(next_register);
         next_register
+    }
+
+    pub fn free_temporary_register(&mut self, reg: Register) {
+        if self.canonical_temporary_registers.contains(&reg)
+            && !self.free_temporary_registers.contains(&reg)
+        {
+            self.free_temporary_registers.push(reg);
+            self.allocated_temporary_registers.retain(|r| *r != reg);
+        }
     }
 
     pub fn clear_temporary_registers(&mut self) {
@@ -1287,13 +1305,16 @@ impl LowLevelArm {
                         *location = (*location as isize + delta) as usize;
                     }
                 }
-                // Also shift stack_map entries (instruction indices) that come after the insertion point
+                // Also shift stack_map entries that come after the insertion point
+                // Note: stack_map keys are byte offsets, not instruction indices
+                let byte_index = index * 4;
+                let byte_delta = delta * 4;
                 self.stack_map = self
                     .stack_map
                     .drain()
                     .map(|(k, v)| {
-                        if k > index {
-                            ((k as isize + delta) as usize, v)
+                        if k > byte_index {
+                            ((k as isize + byte_delta) as usize, v)
                         } else {
                             (k, v)
                         }
@@ -1325,12 +1346,15 @@ impl LowLevelArm {
                     }
                 }
                 // Also shift stack_map entries for epilogue splice
+                // Note: stack_map keys are byte offsets, not instruction indices
+                let byte_index = index * 4;
+                let byte_delta = delta * 4;
                 self.stack_map = self
                     .stack_map
                     .drain()
                     .map(|(k, v)| {
-                        if k > index {
-                            ((k as isize + delta) as usize, v)
+                        if k > byte_index {
+                            ((k as isize + byte_delta) as usize, v)
                         } else {
                             (k, v)
                         }

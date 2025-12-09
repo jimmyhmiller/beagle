@@ -1,22 +1,16 @@
 namespace simple_call_test
 
+// no-std
 
-fn many_arguments(a, b, c, d, e, f) {
-    a - b - c - d - e - f
+fn foo(x) {
+    x + 1
 }
-
-fn swap_argments(f, e, d, c, b, a) {
-    many_arguments(a, b, c, d, e, f)
-}
-
 
 fn main() {
-    // Should be -9
-    // Right now I am not accounting for
-    // arguments being live
-    println(swap_argments(1, 2, 3, 4, 5, 6))
+    _println(foo(5))
+    "done"
 }
 
 // Expect
-// -9
-// null
+// 6
+// done

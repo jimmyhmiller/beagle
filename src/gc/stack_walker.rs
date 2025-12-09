@@ -29,11 +29,30 @@ impl StackWalker {
     {
         let stack = Self::get_live_stack(stack_base, stack_pointer);
 
+        #[cfg(feature = "debug-gc")]
+        eprintln!(
+            "[GC DEBUG] walk_stack_roots: stack_base={:#x}, stack_pointer={:#x}, stack.len={}",
+            stack_base,
+            stack_pointer,
+            stack.len()
+        );
+
         let mut i = 0;
         while i < stack.len() {
             let value = stack[i];
 
             if let Some(details) = stack_map.find_stack_data(value) {
+                #[cfg(feature = "debug-gc")]
+                eprintln!(
+                    "[GC DEBUG] Found return addr at i={}: {:#x}, fn={:?}, locals={}, max_stack={}, cur_stack={}",
+                    i,
+                    value,
+                    details.function_name,
+                    details.number_of_locals,
+                    details.max_stack_size,
+                    details.current_stack_size
+                );
+
                 let mut frame_size = details.max_stack_size + details.number_of_locals;
                 if frame_size % 2 != 0 {
                     frame_size += 1;
@@ -41,6 +60,16 @@ impl StackWalker {
 
                 let bottom_of_frame = i + frame_size + 1;
                 let active_frame = details.current_stack_size + details.number_of_locals;
+
+                #[cfg(feature = "debug-gc")]
+                eprintln!(
+                    "[GC DEBUG] frame_size={}, bottom_of_frame={}, active_frame={}, scanning [{}, {})",
+                    frame_size,
+                    bottom_of_frame,
+                    active_frame,
+                    bottom_of_frame - active_frame,
+                    bottom_of_frame
+                );
 
                 i = bottom_of_frame;
 
@@ -50,6 +79,14 @@ impl StackWalker {
                     .take(bottom_of_frame)
                     .skip(bottom_of_frame - active_frame)
                 {
+                    #[cfg(feature = "debug-gc")]
+                    eprintln!(
+                        "[GC DEBUG]   slot[{}] = {:#x}, is_heap_ptr={}",
+                        j,
+                        *slot,
+                        BuiltInTypes::is_heap_pointer(*slot)
+                    );
+
                     if BuiltInTypes::is_heap_pointer(*slot) {
                         let untagged = BuiltInTypes::untag(*slot);
                         debug_assert!(untagged % 8 == 0, "Pointer is not aligned");
@@ -60,6 +97,9 @@ impl StackWalker {
             }
             i += 1;
         }
+
+        #[cfg(feature = "debug-gc")]
+        eprintln!("[GC DEBUG] walk_stack_roots done");
     }
 
     /// Collect all heap pointers from the stack into a vector

@@ -1,7 +1,14 @@
 #![allow(clippy::match_like_matches_macro)]
 #![allow(clippy::missing_safety_doc)]
-use crate::machine_code::arm_codegen::{Register, SP, Size, X0, X1, X2, X3, X4, X10};
-use arm::LowLevelArm;
+
+// Backend-specific imports for runtime trampolines
+cfg_if::cfg_if! {
+    if #[cfg(feature = "backend-x86-64")] {
+        use crate::machine_code::x86_codegen::{RBX, RCX, RDX, RSI, RDI, R8, R10, RSP, X86Asm};
+    } else {
+        use crate::machine_code::arm_codegen::{SP, X0, X1, X2, X3, X4, X10};
+    }
+}
 use bincode::{Decode, Encode, config::standard};
 use clap::{Parser as ClapParser, command};
 use gc::{Allocator, StackMapDetails, get_allocate_options};
@@ -17,6 +24,7 @@ use std::{cell::UnsafeCell, env, error::Error, sync::OnceLock, time::Instant};
 
 mod arm;
 pub mod ast;
+pub mod backend;
 mod builtins;
 mod code_memory;
 pub mod common;
@@ -24,12 +32,16 @@ mod compiler;
 mod gc;
 pub mod ir;
 pub mod machine_code;
+pub mod mmap_utils;
 pub mod parser;
 mod pretty_print;
 mod primitives;
 mod register_allocation;
 pub mod runtime;
 mod types;
+
+#[cfg(feature = "backend-x86-64")]
+mod x86;
 
 #[derive(Debug, Encode, Decode, Clone, SerJson)]
 pub struct Message {
@@ -111,90 +123,181 @@ impl<T: Encode + Decode<()>> Serialize for T {
 const PADDING_FOR_ALIGNMENT: i64 = 2;
 
 fn compile_trampoline(runtime: &mut Runtime) {
-    let mut lang = LowLevelArm::new();
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "backend-x86-64")] {
+            let mut lang = x86::LowLevelX86::new();
 
-    // lang.breakpoint();
-    lang.prelude();
+            // We store callee-saved registers at local offsets 4-8, so we need max_locals >= 9
+            // Local 4-7: R12, R13, R14, R15
+            // Local 8: RBX (also callee-saved, needed for exception handling)
+            lang.set_max_locals(9);
+            lang.prelude();
 
-    // Should I store or push?
-    for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
-        lang.store_on_stack(*reg, -((i + 4_usize) as i32));
+            // Save callee-saved registers (R12-R15)
+            for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
+                lang.store_local(*reg, (i + 4) as i32);
+            }
+            // Also save RBX - it's callee-saved and gets corrupted by exception throws
+            lang.store_local(RBX, 8);
+
+            // x86-64 ABI: RDI=new_stack, RSI=func, RDX=arg0, RCX=arg1, R8=arg2
+            lang.mov_reg(R10, RSP);
+            lang.mov_reg(RSP, RDI);
+            // Use actual PUSH instruction to save old RSP on the NEW stack
+            // (push_to_stack uses RBP which still points to trampoline's frame)
+            lang.instructions.push(X86Asm::Push { reg: R10 });
+
+            lang.mov_reg(R10, RSI);
+            lang.mov_reg(RDI, RDX);
+            lang.mov_reg(RSI, RCX);
+            lang.mov_reg(RDX, R8);
+
+            lang.call(R10);
+
+            // Use actual POP instruction to restore old RSP from the NEW stack
+            lang.instructions.push(X86Asm::Pop { reg: R10 });
+            lang.mov_reg(RSP, R10);
+
+            // Restore RBX first
+            lang.load_local(RBX, 8);
+            // Restore callee-saved registers (R12-R15)
+            for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate().rev() {
+                lang.load_local(*reg, (i + 4) as i32);
+            }
+
+            lang.epilogue();
+            lang.ret();
+
+            runtime
+                .add_function_mark_executable("trampoline".to_string(), &lang.compile_to_bytes(), 0, 3)
+                .unwrap();
+        } else {
+            let mut lang = arm::LowLevelArm::new();
+
+            lang.prelude();
+
+            // Should I store or push?
+            for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
+                lang.store_on_stack(*reg, -((i + 4_usize) as i32));
+            }
+
+            lang.mov_reg(X10, SP);
+            lang.mov_reg(SP, X0);
+            lang.push_to_stack(X10);
+
+            lang.mov_reg(X10, X1);
+            lang.mov_reg(X0, X2);
+            lang.mov_reg(X1, X3);
+            lang.mov_reg(X2, X4);
+
+            lang.call(X10);
+
+            lang.pop_from_stack_indexed(X10, 0);
+            lang.mov_reg(SP, X10);
+            for (i, reg) in lang
+                .canonical_volatile_registers
+                .clone()
+                .iter()
+                .enumerate()
+                .rev()
+            {
+                lang.load_from_stack(*reg, -((i + 4_usize) as i32));
+            }
+            lang.epilogue();
+            lang.ret();
+
+            runtime
+                .add_function_mark_executable("trampoline".to_string(), &lang.compile_directly(), 0, 3)
+                .unwrap();
+        }
     }
-
-    lang.mov_reg(X10, SP);
-    lang.mov_reg(SP, X0);
-    lang.push_to_stack(X10);
-
-    lang.mov_reg(X10, X1);
-    lang.mov_reg(X0, X2);
-    lang.mov_reg(X1, X3);
-    lang.mov_reg(X2, X4);
-
-    lang.call(X10);
-    // lang.breakpoint();
-    lang.pop_from_stack_indexed(X10, 0);
-    lang.mov_reg(SP, X10);
-    for (i, reg) in lang
-        .canonical_volatile_registers
-        .clone()
-        .iter()
-        .enumerate()
-        .rev()
-    {
-        lang.load_from_stack(*reg, -((i + 4_usize) as i32));
-    }
-    lang.epilogue();
-    lang.ret();
-
-    runtime
-        .add_function_mark_executable("trampoline".to_string(), &lang.compile_directly(), 0, 3)
-        .unwrap();
 
     let function = runtime.get_function_by_name_mut("trampoline").unwrap();
     function.is_builtin = true;
 }
 
 fn compile_save_volatile_registers_for(runtime: &mut Runtime, register_num: usize) {
-    let call_register = Register {
-        index: (register_num) as u8,
-        size: Size::S64,
-    };
     let function_name =
         "beagle.builtin/save_volatile_registers".to_owned() + &register_num.to_string();
     let arity = register_num + 1;
 
-    let mut lang = LowLevelArm::new();
-    lang.prelude();
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "backend-x86-64")] {
+            let mut lang = x86::LowLevelX86::new();
+            // Use lang.arg() to get correct argument register for x86-64 ABI
+            // On x86-64, arg(n) maps to: RDI, RSI, RDX, RCX, R8, R9 (not sequential indices!)
+            let call_register = lang.arg(register_num as u8);
 
-    lang.sub_stack_pointer(
-        (lang.canonical_volatile_registers.len() + PADDING_FOR_ALIGNMENT as usize) as i32,
-    );
+            // We store volatile registers at local offsets 3-6, so need max_locals >= 7
+            // (store_local at offset n stores at [RBP - (n+1)*8])
+            let num_volatile = lang.canonical_volatile_registers.len();
+            let max_offset = num_volatile + PADDING_FOR_ALIGNMENT as usize;
+            lang.set_max_locals(max_offset + 1);
 
-    for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
-        lang.store_on_stack(*reg, -((i + PADDING_FOR_ALIGNMENT as usize + 1) as i32));
+            lang.prelude();
+
+            for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
+                lang.store_local(*reg, (i + PADDING_FOR_ALIGNMENT as usize + 1) as i32);
+            }
+
+            lang.call(call_register);
+
+            for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
+                lang.load_local(*reg, (i + PADDING_FOR_ALIGNMENT as usize + 1) as i32);
+            }
+
+            lang.epilogue();
+            lang.ret();
+
+            runtime
+                .add_function_mark_executable(
+                    function_name.to_string(),
+                    &lang.compile_to_bytes(),
+                    0,
+                    arity,
+                )
+                .unwrap();
+        } else {
+            use crate::machine_code::arm_codegen::Register;
+            let call_register = Register {
+                index: register_num as u8,
+                size: crate::machine_code::arm_codegen::Size::S64,
+            };
+            let mut lang = arm::LowLevelArm::new();
+            lang.prelude();
+
+            lang.sub_stack_pointer(
+                (lang.canonical_volatile_registers.len() + PADDING_FOR_ALIGNMENT as usize) as i32,
+            );
+
+            for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
+                lang.store_on_stack(*reg, -((i + PADDING_FOR_ALIGNMENT as usize + 1) as i32));
+            }
+
+            lang.call(call_register);
+
+            for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
+                lang.load_from_stack(*reg, -((i + PADDING_FOR_ALIGNMENT as usize + 1) as i32));
+            }
+
+            lang.add_stack_pointer(
+                (lang.canonical_volatile_registers.len() + PADDING_FOR_ALIGNMENT as usize) as i32,
+            );
+
+            lang.epilogue();
+            lang.ret();
+
+            runtime
+                .add_function_mark_executable(
+                    function_name.to_string(),
+                    &lang.compile_directly(),
+                    0,
+                    arity,
+                )
+                .unwrap();
+        }
     }
 
-    lang.call(call_register);
-
-    for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
-        lang.load_from_stack(*reg, -((i + PADDING_FOR_ALIGNMENT as usize + 1) as i32));
-    }
-
-    lang.add_stack_pointer(
-        (lang.canonical_volatile_registers.len() + PADDING_FOR_ALIGNMENT as usize) as i32,
-    );
-
-    lang.epilogue();
-    lang.ret();
-
-    runtime
-        .add_function_mark_executable(
-            function_name.to_string(),
-            &lang.compile_directly(),
-            0,
-            arity,
-        )
-        .unwrap();
     let function = runtime.get_function_by_name_mut(&function_name).unwrap();
     function.is_builtin = true;
 }
@@ -392,7 +495,16 @@ fn run_repl(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     runtime.start_compiler_thread();
 
     compile_trampoline(runtime);
-    for i in 1..=6 {
+    // x86-64 has 6 arg registers (0-5), ARM64 has 8 (0-7)
+    // The wrapper uses the last arg register for the function pointer
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "backend-x86-64")] {
+            let max_wrapper_args = 5; // Uses arg0-4 for data, arg5 for fn ptr
+        } else {
+            let max_wrapper_args = 6; // Uses arg0-5 for data, arg6 for fn ptr (ARM supports 8 args)
+        }
+    }
+    for i in 1..=max_wrapper_args {
         compile_save_volatile_registers_for(runtime, i);
     }
 
@@ -547,7 +659,16 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     runtime.start_compiler_thread();
 
     compile_trampoline(runtime);
-    for i in 1..=6 {
+    // x86-64 has 6 arg registers (0-5), ARM64 has 8 (0-7)
+    // The wrapper uses the last arg register for the function pointer
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "backend-x86-64")] {
+            let max_wrapper_args = 5; // Uses arg0-4 for data, arg5 for fn ptr
+        } else {
+            let max_wrapper_args = 6; // Uses arg0-5 for data, arg6 for fn ptr (ARM supports 8 args)
+        }
+    }
+    for i in 1..=max_wrapper_args {
         compile_save_volatile_registers_for(runtime, i);
     }
 

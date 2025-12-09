@@ -1,0 +1,1185 @@
+//! Low-level x86-64 code generation for Beagle
+//!
+//! This module provides the `LowLevelX86` struct which handles x86-64
+//! instruction generation, register allocation, and label management.
+
+use crate::{
+    common::Label,
+    compiler::CompileError,
+    ir::Condition,
+    machine_code::x86_codegen::{
+        Condition as X86Cond, R8, R9, R10, R11, R12, R13, R14, R15, RAX, RBP, RBX, RCX, RDI, RDX,
+        RSI, RSP, X86Asm, X86Register,
+    },
+    types::BuiltInTypes,
+};
+
+use std::collections::HashMap;
+
+/// Low-level x86-64 code generator
+#[derive(Debug)]
+pub struct LowLevelX86 {
+    pub instructions: Vec<X86Asm>,
+    pub label_locations: HashMap<usize, usize>,
+    pub label_index: usize,
+    pub labels: Vec<String>,
+    pub canonical_volatile_registers: Vec<X86Register>,
+    pub free_volatile_registers: Vec<X86Register>,
+    pub allocated_volatile_registers: Vec<X86Register>,
+    pub stack_size: i32,
+    pub max_stack_size: i32,
+    pub max_locals: i32,
+    pub stack_map: HashMap<usize, usize>,
+    free_temporary_registers: Vec<X86Register>,
+    allocated_temporary_registers: Vec<X86Register>,
+    canonical_temporary_registers: Vec<X86Register>,
+}
+
+impl Default for LowLevelX86 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LowLevelX86 {
+    pub fn new() -> Self {
+        // Register allocation strategy (matching ARM64 approach):
+        //
+        // We use R12-R15 as "value storage" registers for the linear scan allocator.
+        // Per System V AMD64 ABI, these are callee-saved, but we DON'T save them
+        // in prologue/epilogue. Instead, the CallWithSaves mechanism explicitly
+        // pushes/pops values that need to survive across function calls.
+        //
+        // Note: RBX (index 3) is excluded because its index conflicts with arg(3) mapping
+        //
+        // Caller-saved registers:
+        // - RAX: return value
+        // - RDI, RSI, RDX, RCX, R8, R9: argument registers (used for call args)
+        // - R10, R11: scratch registers (NOT argument registers, safe to use anytime)
+        //
+        // Temporary registers: Only use caller-saved (scratch) registers.
+        // R10 and R11 are scratch registers per System V ABI, and RAX is the return value register.
+        //
+        // IMPORTANT: Argument registers (RDI, RSI, RDX, RCX, R8, R9) must NOT be used as temps
+        // because during call setup, we first set the argument registers, then load the function
+        // pointer into a temp. If an arg register is used as the function temp, it clobbers
+        // the argument we just set.
+        let canonical_volatile_registers = vec![R12, R13, R14, R15];
+        let temporary_registers = vec![R10, R11, RAX];
+
+        LowLevelX86 {
+            instructions: vec![],
+            label_locations: HashMap::new(),
+            label_index: 0,
+            labels: vec![],
+            canonical_volatile_registers: canonical_volatile_registers.clone(),
+            canonical_temporary_registers: temporary_registers.clone(),
+            free_volatile_registers: canonical_volatile_registers,
+            free_temporary_registers: temporary_registers,
+            allocated_temporary_registers: vec![],
+            allocated_volatile_registers: vec![],
+            stack_size: 0,
+            max_stack_size: 0,
+            max_locals: 0,
+            stack_map: HashMap::new(),
+        }
+    }
+
+    pub fn increment_stack_size(&mut self, size: i32) {
+        self.stack_size += size;
+        if self.stack_size > self.max_stack_size {
+            self.max_stack_size = self.stack_size;
+        }
+    }
+
+    /// Generate function prologue
+    pub fn prelude(&mut self) {
+        // x86-64 function prologue (matching ARM64 approach):
+        // PUSH RBP
+        // MOV RBP, RSP
+        // SUB RSP, <stack_size>  ; placeholder, patched later
+        //
+        // Note: We don't save callee-saved registers (R12-R15) here because
+        // the CallWithSaves mechanism handles preserving values across calls.
+        // This matches ARM64's approach and keeps the frame layout consistent
+        // with what the GC expects.
+        self.instructions.push(X86Asm::Push { reg: RBP });
+        self.instructions.push(X86Asm::MovRR {
+            dest: RBP,
+            src: RSP,
+        });
+        // Placeholder SUB - magic value 0x11111111 will be patched
+        self.instructions.push(X86Asm::SubRI {
+            dest: RSP,
+            imm: 0x1111_1111_u32 as i32,
+        });
+    }
+
+    /// Generate function epilogue
+    pub fn epilogue(&mut self) {
+        // x86-64 function epilogue (matching ARM64 approach):
+        // ADD RSP, <stack_size>  ; placeholder, patched later
+        // POP RBP
+        //
+        // Note: No callee-saved register restoration needed since we don't
+        // save them in the prologue. CallWithSaves handles value preservation.
+        // Placeholder ADD - magic value 0x11111111 will be patched
+        self.instructions.push(X86Asm::AddRI {
+            dest: RSP,
+            imm: 0x1111_1111_u32 as i32,
+        });
+        self.instructions.push(X86Asm::Pop { reg: RBP });
+    }
+
+    pub fn get_label_index(&mut self) -> usize {
+        let current_label_index = self.label_index;
+        self.label_index += 1;
+        current_label_index
+    }
+
+    pub fn breakpoint(&mut self) {
+        self.instructions.push(X86Asm::Int3);
+    }
+
+    // === Move operations ===
+
+    pub fn mov(&mut self, destination: X86Register, input: u16) {
+        self.instructions.push(X86Asm::MovRI32 {
+            dest: destination,
+            imm: input as i32,
+        });
+    }
+
+    pub fn mov_64(&mut self, destination: X86Register, input: isize) {
+        if input >= i32::MIN as isize && input <= i32::MAX as isize {
+            // Use 32-bit sign-extended move for smaller values
+            self.instructions.push(X86Asm::MovRI32 {
+                dest: destination,
+                imm: input as i32,
+            });
+        } else {
+            // Use full 64-bit move
+            self.instructions.push(X86Asm::MovRI {
+                dest: destination,
+                imm: input as i64,
+            });
+        }
+    }
+
+    pub fn mov_reg(&mut self, destination: X86Register, source: X86Register) {
+        if destination != source {
+            self.instructions.push(X86Asm::MovRR {
+                dest: destination,
+                src: source,
+            });
+        }
+    }
+
+    // === Arithmetic operations ===
+
+    pub fn add(&mut self, destination: X86Register, a: X86Register, b: X86Register) {
+        // Debug: print which registers are being used for add
+        if std::env::var("DEBUG_ADD").is_ok() {
+            eprintln!("ADD: dest={:?}, a={:?}, b={:?}", destination, a, b);
+        }
+        // x86 ADD is destructive: dest = dest + src
+        // We need to handle cases where dest might clobber operands
+        if destination == a {
+            // Simple case: dest = a + b -> ADD dest, b
+            self.instructions.push(X86Asm::AddRR {
+                dest: destination,
+                src: b,
+            });
+        } else if destination == b {
+            // dest = a + b where dest == b
+            // ADD is commutative, so: dest = b + a -> ADD dest, a
+            self.instructions.push(X86Asm::AddRR {
+                dest: destination,
+                src: a,
+            });
+        } else {
+            // dest is different from both a and b
+            // mov dest, a; add dest, b
+            self.mov_reg(destination, a);
+            self.instructions.push(X86Asm::AddRR {
+                dest: destination,
+                src: b,
+            });
+        }
+    }
+
+    pub fn sub(&mut self, destination: X86Register, a: X86Register, b: X86Register) {
+        // x86 SUB is destructive: dest = dest - src
+        // Subtraction is NOT commutative, so we need careful handling
+        if destination == a {
+            // Simple case: dest = a - b -> SUB dest, b
+            self.instructions.push(X86Asm::SubRR {
+                dest: destination,
+                src: b,
+            });
+        } else if destination == b {
+            // dest = a - b where dest == b
+            // We can't swap operands (not commutative)
+            // Use: NEG dest; ADD dest, a (since -b + a = a - b)
+            self.instructions.push(X86Asm::Neg { reg: destination });
+            self.instructions.push(X86Asm::AddRR {
+                dest: destination,
+                src: a,
+            });
+        } else {
+            // dest is different from both a and b
+            // mov dest, a; sub dest, b
+            self.mov_reg(destination, a);
+            self.instructions.push(X86Asm::SubRR {
+                dest: destination,
+                src: b,
+            });
+        }
+    }
+
+    pub fn sub_imm(&mut self, destination: X86Register, a: X86Register, imm: i32) {
+        if destination != a {
+            self.mov_reg(destination, a);
+        }
+        self.instructions.push(X86Asm::SubRI {
+            dest: destination,
+            imm,
+        });
+    }
+
+    pub fn mul(&mut self, destination: X86Register, a: X86Register, b: X86Register) {
+        // IMUL r64, r/m64 is: dest = dest * src
+        // We want dest = a * b
+        // Multiplication is commutative, so we can swap operands if needed
+        if destination == a {
+            // Simple case: dest = a * b -> IMUL dest, b
+            self.instructions.push(X86Asm::ImulRR {
+                dest: destination,
+                src: b,
+            });
+        } else if destination == b {
+            // dest = a * b where dest == b
+            // Since mul is commutative: dest = b * a -> IMUL dest, a
+            self.instructions.push(X86Asm::ImulRR {
+                dest: destination,
+                src: a,
+            });
+        } else {
+            // dest is different from both a and b
+            // mov dest, a; imul dest, b
+            self.mov_reg(destination, a);
+            self.instructions.push(X86Asm::ImulRR {
+                dest: destination,
+                src: b,
+            });
+        }
+    }
+
+    pub fn div(&mut self, destination: X86Register, a: X86Register, b: X86Register) {
+        // IDIV uses RAX:RDX / divisor, quotient in RAX
+        // Need to save RDX, move dividend to RAX, sign-extend, divide, move result
+        self.instructions.push(X86Asm::Push { reg: RDX });
+        self.mov_reg(RAX, a);
+        self.instructions.push(X86Asm::Cqo); // Sign-extend RAX to RDX:RAX
+        self.instructions.push(X86Asm::Idiv { divisor: b });
+        self.mov_reg(destination, RAX);
+        self.instructions.push(X86Asm::Pop { reg: RDX });
+    }
+
+    // === Shift operations ===
+
+    pub fn shift_right_imm(&mut self, destination: X86Register, a: X86Register, imm: i32) {
+        if destination != a {
+            self.mov_reg(destination, a);
+        }
+        self.instructions.push(X86Asm::SarRI {
+            dest: destination,
+            imm: imm as u8,
+        });
+    }
+
+    pub fn shift_left_imm(&mut self, destination: X86Register, a: X86Register, imm: i32) {
+        if destination != a {
+            self.mov_reg(destination, a);
+        }
+        self.instructions.push(X86Asm::ShlRI {
+            dest: destination,
+            imm: imm as u8,
+        });
+    }
+
+    pub fn shift_left(&mut self, dest: X86Register, a: X86Register, b: X86Register) {
+        // SHL uses CL for variable shift
+        if dest != a {
+            self.mov_reg(dest, a);
+        }
+        self.mov_reg(RCX, b);
+        self.instructions.push(X86Asm::ShlRCL { dest });
+    }
+
+    pub fn shift_right(&mut self, dest: X86Register, a: X86Register, b: X86Register) {
+        // SAR (arithmetic shift right) uses CL
+        if dest != a {
+            self.mov_reg(dest, a);
+        }
+        self.mov_reg(RCX, b);
+        self.instructions.push(X86Asm::SarRCL { dest });
+    }
+
+    pub fn shift_right_zero(&mut self, dest: X86Register, a: X86Register, b: X86Register) {
+        // SHR (logical shift right) uses CL
+        if dest != a {
+            self.mov_reg(dest, a);
+        }
+        self.mov_reg(RCX, b);
+        self.instructions.push(X86Asm::ShrRCL { dest });
+    }
+
+    // === Bitwise operations ===
+
+    pub fn and(&mut self, destination: X86Register, a: X86Register, b: X86Register) {
+        if destination != a {
+            self.mov_reg(destination, a);
+        }
+        self.instructions.push(X86Asm::AndRR {
+            dest: destination,
+            src: b,
+        });
+    }
+
+    pub fn and_imm(&mut self, destination: X86Register, a: X86Register, imm: u64) {
+        if destination != a {
+            self.mov_reg(destination, a);
+        }
+        // x86-64 AND with 64-bit immediate needs special handling
+        if imm <= i32::MAX as u64 {
+            self.instructions.push(X86Asm::AndRI {
+                dest: destination,
+                imm: imm as i32,
+            });
+        } else {
+            // Need to load 64-bit immediate to temp register first
+            let temp = self.temporary_register();
+            self.mov_64(temp, imm as isize);
+            self.instructions.push(X86Asm::AndRR {
+                dest: destination,
+                src: temp,
+            });
+        }
+    }
+
+    pub fn or(&mut self, destination: X86Register, a: X86Register, b: X86Register) {
+        if destination != a {
+            self.mov_reg(destination, a);
+        }
+        self.instructions.push(X86Asm::OrRR {
+            dest: destination,
+            src: b,
+        });
+    }
+
+    pub fn xor(&mut self, dest: X86Register, a: X86Register, b: X86Register) {
+        if dest != a {
+            self.mov_reg(dest, a);
+        }
+        self.instructions.push(X86Asm::XorRR { dest, src: b });
+    }
+
+    // === Control flow ===
+
+    pub fn ret(&mut self) {
+        self.instructions.push(X86Asm::Ret);
+    }
+
+    pub fn compare(&mut self, a: X86Register, b: X86Register) {
+        self.instructions.push(X86Asm::CmpRR { a, b });
+    }
+
+    pub fn compare_bool(
+        &mut self,
+        condition: Condition,
+        dest: X86Register,
+        a: X86Register,
+        b: X86Register,
+    ) {
+        // Zero the destination first (BEFORE compare, since XOR modifies flags!)
+        self.instructions.push(X86Asm::XorRR { dest, src: dest });
+        // Now do the comparison (sets flags)
+        self.compare(a, b);
+        // Set byte based on condition flags
+        let cond = match condition {
+            Condition::Equal => X86Cond::E,
+            Condition::NotEqual => X86Cond::NE,
+            Condition::LessThan => X86Cond::L,
+            Condition::LessThanOrEqual => X86Cond::LE,
+            Condition::GreaterThan => X86Cond::G,
+            Condition::GreaterThanOrEqual => X86Cond::GE,
+        };
+        self.instructions.push(X86Asm::Setcc { dest, cond });
+    }
+
+    pub fn jump(&mut self, destination: Label) {
+        self.instructions.push(X86Asm::Jmp {
+            label_index: destination.index,
+        });
+    }
+
+    pub fn jump_equal(&mut self, destination: Label) {
+        self.instructions.push(X86Asm::Jcc {
+            label_index: destination.index,
+            cond: X86Cond::E,
+        });
+    }
+
+    pub fn jump_not_equal(&mut self, destination: Label) {
+        self.instructions.push(X86Asm::Jcc {
+            label_index: destination.index,
+            cond: X86Cond::NE,
+        });
+    }
+
+    pub fn jump_greater(&mut self, destination: Label) {
+        self.instructions.push(X86Asm::Jcc {
+            label_index: destination.index,
+            cond: X86Cond::G,
+        });
+    }
+
+    pub fn jump_greater_or_equal(&mut self, destination: Label) {
+        self.instructions.push(X86Asm::Jcc {
+            label_index: destination.index,
+            cond: X86Cond::GE,
+        });
+    }
+
+    pub fn jump_less(&mut self, destination: Label) {
+        self.instructions.push(X86Asm::Jcc {
+            label_index: destination.index,
+            cond: X86Cond::L,
+        });
+    }
+
+    pub fn jump_less_or_equal(&mut self, destination: Label) {
+        self.instructions.push(X86Asm::Jcc {
+            label_index: destination.index,
+            cond: X86Cond::LE,
+        });
+    }
+
+    pub fn call(&mut self, register: X86Register) {
+        self.instructions.push(X86Asm::CallR { target: register });
+        // Record safepoint after the call - this is the return address
+        self.record_gc_safepoint();
+    }
+
+    pub fn call_builtin(&mut self, register: X86Register) {
+        // Just use regular call - it records the safepoint
+        self.call(register);
+    }
+
+    pub fn recurse(&mut self, label: Label) {
+        self.instructions.push(X86Asm::CallRel {
+            label_index: label.index,
+        });
+        // Record safepoint after the call - this is the return address
+        self.record_gc_safepoint();
+    }
+
+    // === Memory operations ===
+
+    pub fn load_from_heap(&mut self, dest: X86Register, src: X86Register, offset: i32) {
+        // Offset is a field index, multiply by 8 for byte offset (64-bit values)
+        self.instructions.push(X86Asm::MovRM {
+            dest,
+            base: src,
+            offset: offset * 8,
+        });
+    }
+
+    pub fn store_on_heap(&mut self, ptr: X86Register, val: X86Register, offset: i32) {
+        // Offset is a field index, multiply by 8 for byte offset (64-bit values)
+        self.instructions.push(X86Asm::MovMR {
+            base: ptr,
+            offset: offset * 8,
+            src: val,
+        });
+    }
+
+    pub fn load_from_heap_with_reg_offset(
+        &mut self,
+        dest: X86Register,
+        src: X86Register,
+        offset: X86Register,
+    ) {
+        // x86 can do [base + index * scale], so we can avoid using a temp register
+        // by using SIB addressing: [src + offset] where offset is already scaled
+        // Use LEA to compute the address, then load from it
+        // Actually we can use the dest register as a temp since we're about to write to it
+        self.instructions.push(X86Asm::Lea {
+            dest,
+            base: src,
+            offset: 0,
+        });
+        self.add(dest, dest, offset);
+        self.instructions.push(X86Asm::MovRM {
+            dest,
+            base: dest,
+            offset: 0,
+        });
+    }
+
+    pub fn store_to_heap_with_reg_offset(
+        &mut self,
+        ptr: X86Register,
+        val: X86Register,
+        offset: X86Register,
+    ) {
+        let temp = self.temporary_register();
+        self.instructions.push(X86Asm::Lea {
+            dest: temp,
+            base: ptr,
+            offset: 0,
+        });
+        self.add(temp, temp, offset);
+        self.instructions.push(X86Asm::MovMR {
+            base: temp,
+            offset: 0,
+            src: val,
+        });
+        // Free the temp register immediately since we're done with it
+        self.free_temporary_register(temp);
+    }
+
+    // === Stack operations ===
+
+    pub fn push_to_stack(&mut self, reg: X86Register) {
+        // Store at a calculated offset instead of using PUSH (which modifies RSP).
+        // This matches ARM64's approach where stack_size tracks conceptual stack usage
+        // without actually changing the stack pointer.
+        //
+        // Stack temporaries are stored after locals:
+        // - Local 0 at [RBP - 8], Local 1 at [RBP - 16], ...
+        // - Local (max_locals-1) at [RBP - max_locals * 8]
+        // - Stack temp 0 at [RBP - (max_locals + 1) * 8], etc.
+        //
+        // After increment, stack_size is the 1-based index of this slot.
+        self.increment_stack_size(1);
+        let offset = self.max_locals + self.stack_size;
+        self.instructions.push(X86Asm::MovMR {
+            base: RBP,
+            offset: -(offset) * 8,
+            src: reg,
+        });
+    }
+
+    pub fn pop_from_stack(&mut self, reg: X86Register) {
+        // Load from a calculated offset instead of using POP (which modifies RSP).
+        // This is the inverse of push_to_stack - loads from where push_to_stack stored.
+        //
+        // Stack temporaries are at [RBP - (max_locals + stack_size) * 8]
+        let offset = self.max_locals + self.stack_size;
+        self.instructions.push(X86Asm::MovRM {
+            dest: reg,
+            base: RBP,
+            offset: -(offset) * 8,
+        });
+        self.stack_size -= 1;
+    }
+
+    pub fn load_local(&mut self, dest: X86Register, offset: i32) {
+        // Locals are at [RBP - (offset + 1) * 8]
+        // The +1 accounts for saved RBP:
+        //   [RBP + 0] = saved RBP from prologue
+        //   [RBP - 8] = local 0 (offset=0 -> -(0+1)*8 = -8)
+        self.instructions.push(X86Asm::MovRM {
+            dest,
+            base: RBP,
+            offset: -(offset + 1) * 8,
+        });
+    }
+
+    pub fn store_local(&mut self, src: X86Register, offset: i32) {
+        // Locals are at [RBP - (offset + 1) * 8]
+        // The +1 accounts for saved RBP
+        self.instructions.push(X86Asm::MovMR {
+            base: RBP,
+            offset: -(offset + 1) * 8,
+            src,
+        });
+    }
+
+    pub fn push_to_stack_indexed(&mut self, reg: X86Register, offset: i32) {
+        // Store to [RSP + offset * 8]
+        self.instructions.push(X86Asm::MovMR {
+            base: RSP,
+            offset: offset * 8,
+            src: reg,
+        });
+    }
+
+    pub fn pop_from_stack_indexed(&mut self, reg: X86Register, offset: i32) {
+        // Load from [RSP + offset * 8] and adjust stack
+        self.instructions.push(X86Asm::MovRM {
+            dest: reg,
+            base: RSP,
+            offset: offset * 8,
+        });
+        self.stack_size -= 1;
+    }
+
+    pub fn pop_from_stack_indexed_raw(&mut self, reg: X86Register, offset: i32) {
+        // Load from [RSP + offset * 8] without stack size adjustment
+        self.instructions.push(X86Asm::MovRM {
+            dest: reg,
+            base: RSP,
+            offset: offset * 8,
+        });
+    }
+
+    pub fn push_to_end_of_stack(&mut self, reg: X86Register, offset: i32) {
+        // Store to stack at offset from current position
+        self.instructions.push(X86Asm::MovMR {
+            base: RSP,
+            offset: offset * 8,
+            src: reg,
+        });
+    }
+
+    pub fn load_from_stack_beginning(&mut self, dest: X86Register, offset: i32) {
+        // Load from [RBP + offset * 8]
+        // On x86-64, stack arguments are above the saved frame pointer and return address.
+        // After prologue:
+        //   [RBP + 0] = saved RBP
+        //   [RBP + 8] = return address
+        //   [RBP + 16] = arg 6 (first stack arg)
+        //   [RBP + 24] = arg 7
+        //   etc.
+        // The offset from IR is (arg_index - 6) + 2, so for arg 6: offset = 2 -> [RBP + 16]
+        self.instructions.push(X86Asm::MovRM {
+            dest,
+            base: RBP,
+            offset: offset * 8,
+        });
+    }
+
+    pub fn get_stack_pointer(&mut self, dest: X86Register, offset: X86Register) {
+        self.instructions.push(X86Asm::Lea {
+            dest,
+            base: RSP,
+            offset: 0,
+        });
+        self.add(dest, dest, offset);
+    }
+
+    pub fn get_stack_pointer_imm(&mut self, dest: X86Register, offset: isize) {
+        self.instructions.push(X86Asm::Lea {
+            dest,
+            base: RSP,
+            offset: offset as i32,
+        });
+    }
+
+    pub fn get_current_stack_position(&mut self, dest: X86Register) {
+        // Return the address where the next push_to_stack will store its value.
+        // This matches ARM64's approach using frame-pointer-relative addressing.
+        //
+        // push_to_stack (after increment) stores at [RBP - (max_locals + stack_size) * 8]
+        // So the current stack position (where next push will go) is:
+        // RBP - (max_locals + stack_size + 1) * 8
+        let offset = (self.max_locals + self.stack_size + 1) * 8;
+        self.instructions.push(X86Asm::Lea {
+            dest,
+            base: RBP,
+            offset: -(offset),
+        });
+    }
+
+    pub fn add_stack_pointer(&mut self, bytes: i32) {
+        self.instructions.push(X86Asm::AddRI {
+            dest: RSP,
+            imm: bytes,
+        });
+    }
+
+    pub fn sub_stack_pointer(&mut self, bytes: i32) {
+        self.instructions.push(X86Asm::SubRI {
+            dest: RSP,
+            imm: bytes,
+        });
+    }
+
+    // === Register allocation ===
+
+    pub fn volatile_register(&mut self) -> X86Register {
+        self.free_volatile_registers
+            .pop()
+            .expect("No free volatile registers")
+    }
+
+    pub fn temporary_register(&mut self) -> X86Register {
+        if let Some(reg) = self.free_temporary_registers.pop() {
+            self.allocated_temporary_registers.push(reg);
+            reg
+        } else {
+            panic!("No free temporary registers")
+        }
+    }
+
+    pub fn free_temporary_register(&mut self, register: X86Register) {
+        if self.canonical_temporary_registers.contains(&register)
+            && !self.free_temporary_registers.contains(&register)
+        {
+            self.free_temporary_registers.push(register);
+            self.allocated_temporary_registers
+                .retain(|r| *r != register);
+        }
+    }
+
+    pub fn free_register(&mut self, register: X86Register) {
+        if self.canonical_volatile_registers.contains(&register)
+            && !self.free_volatile_registers.contains(&register)
+        {
+            self.free_volatile_registers.push(register);
+            self.allocated_volatile_registers.retain(|r| *r != register);
+        }
+    }
+
+    pub fn reserve_register(&mut self, register: X86Register) {
+        self.free_volatile_registers.retain(|r| *r != register);
+        if !self.allocated_volatile_registers.contains(&register) {
+            self.allocated_volatile_registers.push(register);
+        }
+    }
+
+    pub fn clear_temporary_registers(&mut self) {
+        self.free_temporary_registers = self.canonical_temporary_registers.clone();
+        self.allocated_temporary_registers.clear();
+    }
+
+    // === Label management ===
+
+    pub fn new_label(&mut self, name: &str) -> Label {
+        let index = self.get_label_index();
+        self.labels.push(name.to_string());
+        Label { index }
+    }
+
+    pub fn write_label(&mut self, label: Label) {
+        self.label_locations
+            .insert(label.index, self.instructions.len());
+        self.instructions.push(X86Asm::Label { index: label.index });
+    }
+
+    pub fn load_label_address(&mut self, dest: X86Register, label: Label) {
+        // LEA with RIP-relative addressing
+        // Uses LeaRipRel which will be patched to correct offset
+        self.instructions.push(X86Asm::LeaRipRel {
+            dest,
+            label_index: label.index,
+        });
+    }
+
+    pub fn get_label_by_name(&self, name: &str) -> Label {
+        let index = self
+            .labels
+            .iter()
+            .position(|n| n == name)
+            .expect("Label not found");
+        Label { index }
+    }
+
+    pub fn register_label_name(&mut self, name: &str) {
+        if !self.labels.contains(&name.to_string()) {
+            self.labels.push(name.to_string());
+        }
+    }
+
+    // === Floating point operations ===
+
+    pub fn fadd(&mut self, dest: X86Register, a: X86Register, b: X86Register) {
+        if dest != a {
+            self.instructions.push(X86Asm::MovsdRR { dest, src: a });
+        }
+        self.instructions.push(X86Asm::Addsd { dest, src: b });
+    }
+
+    pub fn fsub(&mut self, dest: X86Register, a: X86Register, b: X86Register) {
+        if dest != a {
+            self.instructions.push(X86Asm::MovsdRR { dest, src: a });
+        }
+        self.instructions.push(X86Asm::Subsd { dest, src: b });
+    }
+
+    pub fn fmul(&mut self, dest: X86Register, a: X86Register, b: X86Register) {
+        if dest != a {
+            self.instructions.push(X86Asm::MovsdRR { dest, src: a });
+        }
+        self.instructions.push(X86Asm::Mulsd { dest, src: b });
+    }
+
+    pub fn fdiv(&mut self, dest: X86Register, a: X86Register, b: X86Register) {
+        if dest != a {
+            self.instructions.push(X86Asm::MovsdRR { dest, src: a });
+        }
+        self.instructions.push(X86Asm::Divsd { dest, src: b });
+    }
+
+    pub fn fmov_to_float(&mut self, dest: X86Register, src: X86Register) {
+        self.instructions.push(X86Asm::MovqXR { dest, src });
+    }
+
+    pub fn fmov_from_float(&mut self, dest: X86Register, src: X86Register) {
+        self.instructions.push(X86Asm::MovqRX { dest, src });
+    }
+
+    // === Tagged value operations ===
+
+    pub fn tag_value(&mut self, dest: X86Register, value: X86Register, tag: X86Register) {
+        // Tag = (value << tag_size) | tag
+        if dest != value {
+            self.mov_reg(dest, value);
+        }
+        self.shift_left_imm(dest, dest, BuiltInTypes::tag_size() as i32);
+        self.or(dest, dest, tag);
+    }
+
+    pub fn get_tag(&mut self, dest: X86Register, value: X86Register) {
+        // Tag is in the low 3 bits
+        if dest != value {
+            self.mov_reg(dest, value);
+        }
+        self.and_imm(dest, dest, 0b111); // Tag mask = 0b111
+    }
+
+    pub fn guard_integer(&mut self, temp: X86Register, value: X86Register, error_label: Label) {
+        self.get_tag(temp, value);
+        self.instructions.push(X86Asm::CmpRI {
+            reg: temp,
+            imm: BuiltInTypes::Int.get_tag() as i32,
+        });
+        self.jump_not_equal(error_label);
+    }
+
+    pub fn guard_float(&mut self, temp: X86Register, value: X86Register, error_label: Label) {
+        self.get_tag(temp, value);
+        self.instructions.push(X86Asm::CmpRI {
+            reg: temp,
+            imm: BuiltInTypes::Float.get_tag() as i32,
+        });
+        self.jump_not_equal(error_label);
+    }
+
+    // === Atomic operations ===
+
+    pub fn atomic_load(&mut self, dest: X86Register, src: X86Register) {
+        // On x86-64, aligned loads are atomic
+        self.load_from_heap(dest, src, 0);
+        // Memory fence for acquire semantics
+        self.instructions.push(X86Asm::Mfence);
+    }
+
+    pub fn atomic_store(&mut self, ptr: X86Register, val: X86Register) {
+        // Memory fence for release semantics
+        self.instructions.push(X86Asm::Mfence);
+        // On x86-64, aligned stores are atomic
+        self.store_on_heap(ptr, val, 0);
+    }
+
+    pub fn compare_and_swap(&mut self, expected: X86Register, new: X86Register, ptr: X86Register) {
+        // LOCK CMPXCHG uses RAX for expected value
+        // IMPORTANT: We must handle the case where new or ptr might be RAX,
+        // since moving expected to RAX would clobber them.
+        //
+        // Strategy: Save any operand that's in RAX to R11 before moving expected to RAX.
+
+        let (actual_new, actual_ptr) = if expected == RAX {
+            // expected is already in RAX, no clobbering possible
+            (new, ptr)
+        } else if new == RAX && ptr == RAX {
+            // Both new and ptr are RAX (unlikely but handle it)
+            self.mov_reg(R11, RAX); // Save RAX to R11
+            self.mov_reg(RAX, expected);
+            (R11, R11)
+        } else if new == RAX {
+            // new is in RAX, save it to R11 before overwriting RAX
+            self.mov_reg(R11, RAX);
+            self.mov_reg(RAX, expected);
+            (R11, ptr)
+        } else if ptr == RAX {
+            // ptr is in RAX, save it to R11 before overwriting RAX
+            self.mov_reg(R11, RAX);
+            self.mov_reg(RAX, expected);
+            (new, R11)
+        } else {
+            // No conflicts, just move expected to RAX
+            self.mov_reg(RAX, expected);
+            (new, ptr)
+        };
+
+        self.instructions.push(X86Asm::LockCmpxchg {
+            base: actual_ptr,
+            src: actual_new,
+        });
+        // Result is in RAX
+        self.mov_reg(expected, RAX);
+    }
+
+    // === Utility methods ===
+
+    pub fn current_position(&self) -> usize {
+        self.instructions.len()
+    }
+
+    pub fn set_max_locals(&mut self, max_locals: usize) {
+        self.max_locals = max_locals as i32;
+    }
+
+    pub fn set_all_locals_to_null(&mut self, null_register: X86Register) {
+        for i in 0..self.max_locals {
+            self.store_local(null_register, i);
+        }
+    }
+
+    pub fn arg(&self, index: u8) -> X86Register {
+        // System V AMD64 ABI argument registers
+        match index {
+            0 => RDI,
+            1 => RSI,
+            2 => RDX,
+            3 => RCX,
+            4 => R8,
+            5 => R9,
+            _ => panic!("Too many arguments, stack passing not yet implemented"),
+        }
+    }
+
+    pub fn ret_reg(&self) -> X86Register {
+        RAX
+    }
+
+    pub fn get_volatile_register(&self, index: usize) -> X86Register {
+        self.canonical_volatile_registers[index]
+    }
+
+    pub fn register_from_index(&self, index: usize) -> X86Register {
+        // Map virtual register indices to physical registers.
+        //
+        // The register allocator assigns:
+        // - Indices 0-5 for function arguments (these map to arg registers)
+        // - Indices 12-15 for callee-saved registers (R12-R15)
+        //
+        // On x86-64, argument registers are NOT sequential:
+        // - arg(0) = RDI (raw index 7)
+        // - arg(1) = RSI (raw index 6)
+        // - arg(2) = RDX (raw index 2)
+        // - arg(3) = RCX (raw index 1)
+        // - arg(4) = R8  (raw index 8)
+        // - arg(5) = R9  (raw index 9)
+        //
+        // So we need to map virtual indices 0-5 to argument registers.
+        // Indices >= 6 are used for callee-saved or other registers.
+        match index {
+            0 => RDI, // arg 0
+            1 => RSI, // arg 1
+            2 => RDX, // arg 2
+            3 => RCX, // arg 3
+            4 => R8,  // arg 4
+            5 => R9,  // arg 5
+            // For other indices, use the raw register index
+            // This works for callee-saved R12-R15 (indices 12-15)
+            _ => X86Register::from_index(index),
+        }
+    }
+
+    // x86-64 doesn't have dedicated link/zero registers
+    pub fn link_register(&self) -> X86Register {
+        // Use R11 as scratch for return address when needed
+        R11
+    }
+
+    pub fn frame_pointer(&self) -> X86Register {
+        RBP
+    }
+
+    pub fn zero_register(&self) -> X86Register {
+        // x86-64 doesn't have a zero register
+        // Return a sentinel; users should XOR to zero
+        RAX // Caller must handle specially
+    }
+
+    /// Compile instructions to bytes
+    pub fn compile_to_bytes(&mut self) -> Vec<u8> {
+        // First, patch labels
+        self.patch_labels();
+        // Then patch prelude/epilogue stack sizes
+        self.patch_prelude_and_epilogue();
+        // Finally, encode all instructions
+        let mut bytes = Vec::new();
+        for instr in &self.instructions {
+            bytes.extend(instr.encode());
+        }
+        bytes
+    }
+
+    fn patch_labels(&mut self) {
+        // Calculate byte offsets for each label
+        let mut byte_offsets: HashMap<usize, usize> = HashMap::new();
+        let mut current_offset = 0;
+
+        for (i, instr) in self.instructions.iter().enumerate() {
+            if let X86Asm::Label { index } = instr {
+                byte_offsets.insert(*index, current_offset);
+            }
+            current_offset += instr.size();
+        }
+
+        // Patch jump/call instructions
+        current_offset = 0;
+        for instr in self.instructions.iter_mut() {
+            let instr_size = instr.size();
+            match instr {
+                X86Asm::Jmp { label_index } => {
+                    if let Some(&target) = byte_offsets.get(label_index) {
+                        // rel32 is relative to end of instruction
+                        let rel = (target as i64) - (current_offset as i64 + instr_size as i64);
+                        *instr = X86Asm::Jmp {
+                            label_index: rel as usize,
+                        };
+                    }
+                }
+                X86Asm::Jcc { label_index, cond } => {
+                    if let Some(&target) = byte_offsets.get(label_index) {
+                        let rel = (target as i64) - (current_offset as i64 + instr_size as i64);
+                        *instr = X86Asm::Jcc {
+                            label_index: rel as usize,
+                            cond: *cond,
+                        };
+                    }
+                }
+                X86Asm::CallRel { label_index } => {
+                    if let Some(&target) = byte_offsets.get(label_index) {
+                        let rel = (target as i64) - (current_offset as i64 + instr_size as i64);
+                        *instr = X86Asm::CallRel {
+                            label_index: rel as usize,
+                        };
+                    }
+                }
+                X86Asm::LeaRipRel { dest, label_index } => {
+                    if let Some(&target) = byte_offsets.get(label_index) {
+                        // RIP-relative offset is from end of instruction
+                        let rel = (target as i64) - (current_offset as i64 + instr_size as i64);
+                        *instr = X86Asm::LeaRipRel {
+                            dest: *dest,
+                            label_index: rel as usize,
+                        };
+                    }
+                }
+                _ => {}
+            }
+            current_offset += instr_size;
+        }
+    }
+
+    fn patch_prelude_and_epilogue(&mut self) {
+        // Calculate stack size needed (must be 16-byte aligned)
+        // After push RBP, RSP is 16-aligned. We need to keep it that way.
+        // So we allocate (max_locals + max_stack_size) slots, rounded up to even.
+        let mut slots = self.max_locals + self.max_stack_size;
+        if slots % 2 != 0 {
+            slots += 1; // Add 1 slot (8 bytes) to maintain 16-byte alignment
+        }
+        let aligned_size = (slots * 8) as i32;
+
+        for instr in self.instructions.iter_mut() {
+            match instr {
+                X86Asm::SubRI { dest, imm } if *dest == RSP && *imm == 0x1111_1111_u32 as i32 => {
+                    *imm = aligned_size;
+                }
+                X86Asm::AddRI { dest, imm } if *dest == RSP && *imm == 0x1111_1111_u32 as i32 => {
+                    *imm = aligned_size;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Translate stack map for GC
+    /// Stack map keys are already byte offsets
+    pub fn translate_stack_map(&self, base_pointer: usize) -> Vec<(usize, usize)> {
+        let mut result = Vec::new();
+        for (byte_offset, size) in &self.stack_map {
+            result.push((base_pointer + byte_offset, *size));
+        }
+        result
+    }
+
+    /// Get the current byte offset in the generated code.
+    /// x86-64 instructions are variable length, so we sum all sizes.
+    pub fn current_byte_offset(&self) -> usize {
+        self.instructions.iter().map(|i| i.size()).sum()
+    }
+
+    /// Record a GC safepoint at the current position.
+    pub fn record_gc_safepoint(&mut self) {
+        let byte_offset = self.current_byte_offset();
+        let stack_size = self.stack_size as usize;
+        self.stack_map.insert(byte_offset, stack_size);
+    }
+
+    /// Get the adjustment for return address lookup.
+    /// x86-64 CALL reg instruction is typically 2-3 bytes.
+    pub fn return_address_adjustment() -> usize {
+        // CALL reg (FF /2) with REX prefix is 3 bytes
+        // Without REX prefix it's 2 bytes
+        // We use 3 to be safe since most of our calls use 64-bit registers
+        3
+    }
+
+    /// Store a pair of registers (emulated for x86)
+    pub fn store_pair(
+        &mut self,
+        reg1: X86Register,
+        reg2: X86Register,
+        dest: X86Register,
+        offset: i32,
+    ) {
+        // x86 doesn't have STP, use two stores
+        self.instructions.push(X86Asm::MovMR {
+            base: dest,
+            offset: offset * 8,
+            src: reg1,
+        });
+        self.instructions.push(X86Asm::MovMR {
+            base: dest,
+            offset: (offset + 1) * 8,
+            src: reg2,
+        });
+    }
+
+    /// Load a pair of registers (emulated for x86)
+    pub fn load_pair(
+        &mut self,
+        reg1: X86Register,
+        reg2: X86Register,
+        location: X86Register,
+        offset: i32,
+    ) {
+        // x86 doesn't have LDP, use two loads
+        self.instructions.push(X86Asm::MovRM {
+            dest: reg1,
+            base: location,
+            offset: offset * 8,
+        });
+        self.instructions.push(X86Asm::MovRM {
+            dest: reg2,
+            base: location,
+            offset: (offset + 1) * 8,
+        });
+    }
+
+    /// Share label info for debugging (stub for now)
+    pub fn share_label_info_debug(&self, _function_pointer: usize) -> Result<(), CompileError> {
+        // TODO: Implement debug info sharing for x86-64
+        Ok(())
+    }
+}

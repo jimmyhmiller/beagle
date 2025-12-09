@@ -1955,14 +1955,22 @@ impl Runtime {
                 let value = BuiltInTypes::untag(value);
                 let value = value as *const f64;
                 let value = unsafe { *value.add(1) };
-                if value.is_infinite() {
+                if value.is_nan() {
+                    Some("NaN".to_string())
+                } else if value.is_infinite() {
                     if value.is_sign_positive() {
                         Some("infinity".to_string())
                     } else {
                         Some("-infinity".to_string())
                     }
                 } else {
-                    Some(value.to_string())
+                    // Ensure whole number floats display with decimal point (4.0 not 4)
+                    let s = value.to_string();
+                    if s.contains('.') || s.contains('e') || s.contains('E') {
+                        Some(s)
+                    } else {
+                        Some(format!("{}.0", s))
+                    }
                 }
             }
             BuiltInTypes::String => {
