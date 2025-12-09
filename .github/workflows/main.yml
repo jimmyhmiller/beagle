@@ -10,20 +10,109 @@ on:
 
 jobs:
   test:
-    runs-on: macos-latest
+    runs-on: ${{ matrix.os }}
 
     strategy:
       matrix:
-        feature-combination:
-          - "--features compacting,thread-safe"
-          - "--features generational,thread-safe"
-          - "--features mark-and-sweep,thread-safe"
-          - "--features generational"
-          - "--features compacting"
-          - "--features mark-and-sweep"
-        build-mode:
-          - "debug"
-          - "release"
+        include:
+          # Linux x86-64 configurations
+          - os: ubuntu-latest
+            gc-features: "compacting,thread-safe"
+            backend: "backend-x86-64"
+            build-mode: "debug"
+          - os: ubuntu-latest
+            gc-features: "compacting,thread-safe"
+            backend: "backend-x86-64"
+            build-mode: "release"
+          - os: ubuntu-latest
+            gc-features: "generational,thread-safe"
+            backend: "backend-x86-64"
+            build-mode: "debug"
+          - os: ubuntu-latest
+            gc-features: "generational,thread-safe"
+            backend: "backend-x86-64"
+            build-mode: "release"
+          - os: ubuntu-latest
+            gc-features: "mark-and-sweep,thread-safe"
+            backend: "backend-x86-64"
+            build-mode: "debug"
+          - os: ubuntu-latest
+            gc-features: "mark-and-sweep,thread-safe"
+            backend: "backend-x86-64"
+            build-mode: "release"
+          - os: ubuntu-latest
+            gc-features: "generational"
+            backend: "backend-x86-64"
+            build-mode: "debug"
+          - os: ubuntu-latest
+            gc-features: "generational"
+            backend: "backend-x86-64"
+            build-mode: "release"
+          - os: ubuntu-latest
+            gc-features: "compacting"
+            backend: "backend-x86-64"
+            build-mode: "debug"
+          - os: ubuntu-latest
+            gc-features: "compacting"
+            backend: "backend-x86-64"
+            build-mode: "release"
+          - os: ubuntu-latest
+            gc-features: "mark-and-sweep"
+            backend: "backend-x86-64"
+            build-mode: "debug"
+          - os: ubuntu-latest
+            gc-features: "mark-and-sweep"
+            backend: "backend-x86-64"
+            build-mode: "release"
+          # macOS ARM64 configurations
+          - os: macos-latest
+            gc-features: "compacting,thread-safe"
+            backend: "backend-arm64"
+            build-mode: "debug"
+          - os: macos-latest
+            gc-features: "compacting,thread-safe"
+            backend: "backend-arm64"
+            build-mode: "release"
+          - os: macos-latest
+            gc-features: "generational,thread-safe"
+            backend: "backend-arm64"
+            build-mode: "debug"
+          - os: macos-latest
+            gc-features: "generational,thread-safe"
+            backend: "backend-arm64"
+            build-mode: "release"
+          - os: macos-latest
+            gc-features: "mark-and-sweep,thread-safe"
+            backend: "backend-arm64"
+            build-mode: "debug"
+          - os: macos-latest
+            gc-features: "mark-and-sweep,thread-safe"
+            backend: "backend-arm64"
+            build-mode: "release"
+          - os: macos-latest
+            gc-features: "generational"
+            backend: "backend-arm64"
+            build-mode: "debug"
+          - os: macos-latest
+            gc-features: "generational"
+            backend: "backend-arm64"
+            build-mode: "release"
+          - os: macos-latest
+            gc-features: "compacting"
+            backend: "backend-arm64"
+            build-mode: "debug"
+          - os: macos-latest
+            gc-features: "compacting"
+            backend: "backend-arm64"
+            build-mode: "release"
+          - os: macos-latest
+            gc-features: "mark-and-sweep"
+            backend: "backend-arm64"
+            build-mode: "debug"
+          - os: macos-latest
+            gc-features: "mark-and-sweep"
+            backend: "backend-arm64"
+            build-mode: "release"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -38,15 +127,15 @@ jobs:
       - name: Run Rust tests with features (${{ matrix.build-mode }})
         run: |
           if [ "${{ matrix.build-mode }}" = "release" ]; then
-            RUST_BACKTRACE=1 cargo test ${{ matrix.feature-combination }} --release
+            RUST_BACKTRACE=1 cargo test --features ${{ matrix.gc-features }},${{ matrix.backend }} --release
           else
-            RUST_BACKTRACE=1 cargo test ${{ matrix.feature-combination }}
+            RUST_BACKTRACE=1 cargo test --features ${{ matrix.gc-features }},${{ matrix.backend }}
           fi
 
       - name: Run Beagle language tests (${{ matrix.build-mode }})
         run: |
           if [ "${{ matrix.build-mode }}" = "release" ]; then
-            cargo run ${{ matrix.feature-combination }} --release -- --all-tests
+            cargo run --features ${{ matrix.gc-features }},${{ matrix.backend }} --release -- --all-tests
           else
-            cargo run ${{ matrix.feature-combination }} -- --all-tests
+            cargo run --features ${{ matrix.gc-features }},${{ matrix.backend }} -- --all-tests
           fi
