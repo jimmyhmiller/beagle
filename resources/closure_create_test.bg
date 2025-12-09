@@ -1,0 +1,20 @@
+namespace closure_create_test
+
+// no-std
+
+fn make_fn(x) {
+    fn inner() {
+        x
+    }
+    inner
+}
+
+fn main() {
+    let f = make_fn(42)
+    _println("created closure")
+    "done"
+}
+
+// Expect
+// created closure
+// done

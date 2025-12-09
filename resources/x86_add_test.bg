@@ -1,0 +1,12 @@
+namespace x86_add_test
+
+// no-std
+
+fn main() {
+    _println(5 + 3)
+    "done"
+}
+
+// Expect
+// 8
+// done

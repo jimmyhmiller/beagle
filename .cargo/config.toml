@@ -1,0 +1,30 @@
+# Cargo configuration for Beagle cross-compilation
+#
+# This file configures cross-compilation targets, particularly for building
+# x86-64 binaries on Apple Silicon Macs to run under Rosetta 2.
+
+# Target-specific settings for x86-64 macOS (Rosetta 2)
+[target.x86_64-apple-darwin]
+# Use the default macOS linker (works for both native and cross-compilation)
+linker = "clang"
+# Pass architecture flag to ensure correct linking
+rustflags = ["-C", "link-arg=-arch", "-C", "link-arg=x86_64"]
+
+# Target-specific settings for native ARM64 macOS
+[target.aarch64-apple-darwin]
+linker = "clang"
+
+# Alias for common build profiles
+[alias]
+# Build for x86-64 (Rosetta 2)
+build-x86 = "build --target x86_64-apple-darwin --features backend-x86-64"
+run-x86 = "run --target x86_64-apple-darwin --features backend-x86-64"
+test-x86 = "run --target x86_64-apple-darwin --features backend-x86-64 -- --all-tests"
+
+# Build for native ARM64 (default)
+build-arm = "build --features backend-arm64"
+run-arm = "run --features backend-arm64"
+
+# Release builds
+release-x86 = "build --release --target x86_64-apple-darwin --features backend-x86-64"
+release-arm = "build --release --features backend-arm64"

@@ -1,12 +1,18 @@
 use std::collections::HashMap;
 
-use crate::{
-    ir::{Condition, Instruction, Value, VirtualRegister},
-    machine_code::arm_codegen::{
-        ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector,
-        StrImmGenSelector,
-    },
-};
+use crate::ir::{Condition, Instruction, Value, VirtualRegister};
+
+// Backend-specific imports
+cfg_if::cfg_if! {
+    if #[cfg(feature = "backend-x86-64")] {
+        use crate::machine_code::x86_codegen::{X86Asm, X86Register, Size};
+    } else {
+        use crate::machine_code::arm_codegen::{
+            ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector,
+            StrImmGenSelector,
+        };
+    }
+}
 
 pub trait PrettyPrint {
     fn pretty_print(&self) -> String;
@@ -479,18 +485,61 @@ impl PrettyPrint for Vec<Instruction> {
     }
 }
 
-impl PrettyPrint for Vec<ArmAsm> {
-    fn pretty_print(&self) -> String {
-        let mut result = String::new();
-        for instruction in self {
-            result.push_str(&instruction.pretty_print());
-            result.push('\n');
+cfg_if::cfg_if! {
+    if #[cfg(feature = "backend-x86-64")] {
+        impl PrettyPrint for Vec<X86Asm> {
+            fn pretty_print(&self) -> String {
+                let mut result = String::new();
+                for instruction in self {
+                    result.push_str(&instruction.pretty_print());
+                    result.push('\n');
+                }
+                result
+            }
         }
-        result
-    }
-}
 
-impl PrettyPrint for Register {
+        impl PrettyPrint for X86Register {
+            fn pretty_print(&self) -> String {
+                match self.index {
+                    0 => "rax".to_string(),
+                    1 => "rcx".to_string(),
+                    2 => "rdx".to_string(),
+                    3 => "rbx".to_string(),
+                    4 => "rsp".to_string(),
+                    5 => "rbp".to_string(),
+                    6 => "rsi".to_string(),
+                    7 => "rdi".to_string(),
+                    8 => "r8".to_string(),
+                    9 => "r9".to_string(),
+                    10 => "r10".to_string(),
+                    11 => "r11".to_string(),
+                    12 => "r12".to_string(),
+                    13 => "r13".to_string(),
+                    14 => "r14".to_string(),
+                    15 => "r15".to_string(),
+                    x => format!("??r{}", x),
+                }
+            }
+        }
+
+        impl PrettyPrint for X86Asm {
+            fn pretty_print(&self) -> String {
+                format!("{:?}", self)
+            }
+        }
+    } else {
+        impl PrettyPrint for Vec<ArmAsm> {
+            fn pretty_print(&self) -> String {
+                let mut result = String::new();
+                for instruction in self {
+                    result.push_str(&instruction.pretty_print());
+                    result.push('\n');
+                }
+                result
+            }
+        }
+
+        impl PrettyPrint for Register {
     fn pretty_print(&self) -> String {
         if self.size != Size::S64 {
             panic!("Need to deal with size since I'm using it now");
@@ -532,6 +581,8 @@ impl PrettyPrint for Register {
         }
     }
 }
+    }
+}
 
 impl PrettyPrint for Condition {
     fn pretty_print(&self) -> String {
@@ -546,6 +597,7 @@ impl PrettyPrint for Condition {
     }
 }
 
+#[cfg(not(feature = "backend-x86-64"))]
 impl PrettyPrint for ArmAsm {
     fn pretty_print(&self) -> String {
         match self {

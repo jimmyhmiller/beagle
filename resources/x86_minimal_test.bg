@@ -1,0 +1,10 @@
+namespace x86_minimal_test
+
+// no-std
+
+fn main() {
+    42
+}
+
+// Expect
+// 42

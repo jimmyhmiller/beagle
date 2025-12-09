@@ -1,7 +1,7 @@
 use crate::{
     CommandLineArguments, Data, Message,
-    arm::LowLevelArm,
     ast::{Ast, TokenRange},
+    backend::{Backend, CodegenBackend},
     builtins::debugger,
     code_memory::CodeAllocator,
     debug_only,
@@ -281,7 +281,7 @@ impl Compiler {
         let top_level_name =
             fn_name.unwrap_or_else(|| format!("{}/__top_level", self.current_namespace_name()));
         if ast.has_top_level() {
-            let arm = LowLevelArm::new();
+            let backend = Backend::new();
             let error_fn = self
                 .find_function("beagle.builtin/throw_error")
                 .ok_or_else(|| CompileError::FunctionNotFound {
@@ -294,11 +294,11 @@ impl Compiler {
             })?;
 
             ir.ir_range_to_token_range = token_map.clone();
-            let mut arm = ir.compile(arm, error_fn_pointer);
+            let mut backend = ir.compile(backend, error_fn_pointer);
             let token_map = ir.ir_range_to_token_range.clone();
-            let max_locals = arm.max_locals as usize;
+            let max_locals = backend.max_locals() as usize;
             let function_pointer =
-                self.upsert_function(Some(&top_level_name), &mut arm, max_locals, 0)?;
+                self.upsert_function(Some(&top_level_name), &mut backend, max_locals, 0)?;
             debug_only! {
                 debugger(Message {
                     kind: "ir".to_string(),
@@ -314,7 +314,7 @@ impl Compiler {
                 });
 
                 let pretty_arm_instructions =
-                    arm.instructions.iter().map(|x| x.pretty_print()).collect();
+                    backend.instructions_mut().iter().map(|x| x.pretty_print()).collect();
                 let ir_to_machine_code_range = ir
                     .ir_to_machine_code_range
                     .iter()
@@ -572,19 +572,19 @@ impl Compiler {
         runtime.get_function_pointer(f).ok().map(|x| x as usize)
     }
 
-    pub fn upsert_function(
+    pub fn upsert_function<B: CodegenBackend>(
         &mut self,
         function_name: Option<&str>,
-        arm: &mut LowLevelArm,
+        backend: &mut B,
         max_locals: usize,
         number_of_args: usize,
     ) -> Result<usize, Box<dyn Error>> {
-        let code = arm.compile_to_bytes();
+        let code = backend.compile_to_bytes();
         let pointer = self.add_code(&code)?;
         let runtime = get_runtime().get_mut();
         // TODO: Before this we did some weird stuff of mapping over the stack_map details
         // and I don't remember why
-        let stack_map = arm
+        let stack_map = backend
             .translate_stack_map(pointer as usize)
             .iter()
             .map(|(key, value)| {
@@ -593,8 +593,8 @@ impl Compiler {
                     StackMapDetails {
                         function_name: function_name.map(|x| x.to_string()),
                         current_stack_size: *value,
-                        number_of_locals: arm.max_locals as usize,
-                        max_stack_size: arm.max_stack_size as usize,
+                        number_of_locals: backend.max_locals() as usize,
+                        max_stack_size: backend.max_stack_size() as usize,
                     },
                 )
             })

@@ -3,13 +3,22 @@ use std::collections::HashMap;
 
 use bincode::{Decode, Encode};
 
-use crate::arm::FmovDirection;
 use crate::ast::IRRange;
-use crate::machine_code::arm_codegen::{Register, X0, X29, X30};
+use crate::backend::CodegenBackend;
 
+// Backend-specific register imports for TryInto implementations
+cfg_if::cfg_if! {
+    if #[cfg(feature = "backend-x86-64")] {
+        use crate::machine_code::x86_codegen::X86Register as Register;
+    } else {
+        use crate::machine_code::arm_codegen::Register;
+    }
+}
+
+use crate::common::Label;
+use crate::pretty_print::PrettyPrint;
 use crate::register_allocation::linear_scan::LinearScan;
 use crate::types::BuiltInTypes;
-use crate::{arm::LowLevelArm, common::Label};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Encode, Decode)]
 pub enum Condition {
@@ -650,10 +659,18 @@ pub struct Ir {
     after_return: Label,
     pub ir_to_machine_code_range: Vec<(usize, MachineCodeRange)>,
     pub ir_range_to_token_range: Vec<(crate::ast::TokenRange, IRRange)>,
+    /// Number of argument registers for the target architecture (8 for ARM64, 6 for x86-64)
+    num_arg_registers: usize,
 }
 
 impl Ir {
     pub fn new(allocate_fn_pointer: usize) -> Self {
+        // Determine number of argument registers based on target architecture
+        #[cfg(feature = "backend-x86-64")]
+        let num_arg_registers = 6; // x86-64 SysV ABI: RDI, RSI, RDX, RCX, R8, R9
+        #[cfg(not(feature = "backend-x86-64"))]
+        let num_arg_registers = 8; // ARM64: X0-X7
+
         let mut me = Self {
             register_index: 0,
             instructions: vec![],
@@ -665,6 +682,7 @@ impl Ir {
             after_return: Label { index: 0 },
             ir_to_machine_code_range: vec![],
             ir_range_to_token_range: vec![],
+            num_arg_registers,
         };
 
         me.insert_label("after_return", me.after_return);
@@ -687,10 +705,11 @@ impl Ir {
     }
 
     pub fn arg(&mut self, n: usize) -> Value {
-        if n >= 8 {
-            // Stack arguments are passed above the frame header (saved FP and LR)
-            // which is 2 words, so we add 2 to the offset
-            return Value::Stack((n as isize) - 8 + 2);
+        if n >= self.num_arg_registers {
+            // Stack arguments are passed above the frame header
+            // For ARM64: saved FP and LR = 2 words, so offset = (n - 8) + 2
+            // For x86-64: return address + saved RBP = 2 words, so offset = (n - 6) + 2
+            return Value::Stack((n as isize) - (self.num_arg_registers as isize) + 2);
         }
         let register = self.next_register(Some(n), true);
         Value::Register(register)
@@ -1043,33 +1062,73 @@ impl Ir {
             .insert(self.instructions.len(), label.index);
     }
 
-    pub fn compile(&mut self, mut lang: LowLevelArm, error_fn_pointer: usize) -> LowLevelArm {
+    pub fn compile<B: CodegenBackend>(&mut self, mut backend: B, error_fn_pointer: usize) -> B {
         debug_assert!(!self.ir_range_to_token_range.is_empty());
 
-        // lang.breakpoint();
+        // backend.breakpoint();
+
+        // Debug: print IR before register allocation
+        if std::env::var("DEBUG_IR").is_ok() {
+            eprintln!("=== IR BEFORE REGISTER ALLOCATION ===");
+            for (i, instr) in self.instructions.iter().enumerate() {
+                eprintln!("{:4}: {}", i, instr.pretty_print());
+            }
+        }
 
         let mut linear_scan = LinearScan::new(self.instructions.clone(), self.num_locals);
+
+        // Debug: print lifetimes
+        if std::env::var("DEBUG_IR").is_ok() {
+            eprintln!("\n=== REGISTER LIFETIMES ===");
+            let mut lifetimes: Vec<_> = linear_scan.lifetimes.iter().collect();
+            lifetimes.sort_by_key(|(_, (start, _))| *start);
+            for (reg, (start, end)) in lifetimes {
+                eprintln!("  {:?}: {} - {}", reg, start, end);
+            }
+        }
+
         linear_scan.allocate();
+
+        // Debug: print allocated registers
+        if std::env::var("DEBUG_IR").is_ok() {
+            eprintln!("\n=== ALLOCATED REGISTERS ===");
+            for (virt, phys) in &linear_scan.allocated_registers {
+                eprintln!("  {:?} -> {:?}", virt, phys);
+            }
+            eprintln!("\n=== SPILLED REGISTERS ===");
+            for (virt, slot) in &linear_scan.location {
+                eprintln!("  {:?} -> stack slot {}", virt, slot);
+            }
+        }
+
         self.instructions = linear_scan.instructions.clone();
         let num_spills = linear_scan.location.len();
         self.num_locals += num_spills;
-        lang.set_max_locals(self.num_locals);
+        backend.set_max_locals(self.num_locals);
 
-        let before_prelude = lang.new_label("before_prelude");
-        lang.write_label(before_prelude);
+        // Debug: print IR after register allocation
+        if std::env::var("DEBUG_IR").is_ok() {
+            eprintln!("\n=== IR AFTER REGISTER ALLOCATION ===");
+            for (i, instr) in self.instructions.iter().enumerate() {
+                eprintln!("{:4}: {}", i, instr.pretty_print());
+            }
+        }
 
-        lang.prelude();
+        let before_prelude = backend.new_label("before_prelude");
+        backend.write_label(before_prelude);
+
+        backend.prelude();
 
         // I believe this is fine because it is volatile and we
         // are at the beginning of the function
-        let register = lang.canonical_volatile_registers[0];
-        lang.mov_64(register, BuiltInTypes::null_value());
-        lang.set_all_locals_to_null(register);
+        let register = backend.get_volatile_register(0);
+        backend.mov_64(register, BuiltInTypes::null_value());
+        backend.set_all_locals_to_null(register);
 
-        let after_prelude = lang.new_label("after_prelude");
-        lang.write_label(after_prelude);
+        let after_prelude = backend.new_label("after_prelude");
+        backend.write_label(after_prelude);
 
-        let exit = lang.new_label("exit");
+        let exit = backend.new_label("exit");
 
         // let mut simple_register_allocator = SimpleRegisterAllocator::new(
         //     self.instructions.clone(),
@@ -1083,48 +1142,57 @@ impl Ir {
         // self.label_locations = simple_register_allocator.label_locations.clone();
         // self.ir_range_to_token_range = simple_register_allocator.ir_range_to_token_range.clone();
 
-        // println!("{}", self.instructions.pretty_print());
-        self.compile_instructions(&mut lang, exit, before_prelude, after_prelude);
+        // eprintln!("{}", self.instructions.pretty_print());
+        self.compile_instructions(&mut backend, exit, before_prelude, after_prelude);
 
-        lang.write_label(exit);
+        backend.write_label(exit);
 
-        lang.epilogue();
-        lang.ret();
+        backend.epilogue();
+        backend.ret();
         // TODO: ugly
-        let lang_after_return = lang.get_label_by_name("after_return");
-        lang.write_label(lang_after_return);
-        let register = lang.canonical_volatile_registers[0];
-        lang.mov_64(register, error_fn_pointer as isize);
-        lang.get_stack_pointer_imm(X0, 0);
-        lang.call(register);
-        lang
+        let backend_after_return = backend.get_label_by_name("after_return");
+        backend.write_label(backend_after_return);
+        let register = backend.get_volatile_register(0);
+        backend.mov_64(register, error_fn_pointer as isize);
+        backend.get_stack_pointer_imm(backend.arg(0), 0);
+        backend.call(register);
+        backend
     }
 
-    pub fn value_to_register(&self, value: &Value, lang: &mut LowLevelArm) -> Register {
+    pub fn value_to_register<B: CodegenBackend>(
+        &self,
+        value: &Value,
+        backend: &mut B,
+    ) -> B::Register {
         match value {
-            Value::Register(register) => Register::from_index(register.index),
+            Value::Register(register) => backend.register_from_index(register.index),
             Value::Local(index) => {
-                let temp_reg = lang.temporary_register();
-                lang.load_local(temp_reg, *index as i32);
+                let temp_reg = backend.temporary_register();
+                backend.load_local(temp_reg, *index as i32);
                 temp_reg
             }
             Value::Spill(_register, index) => {
-                let temp_reg = lang.temporary_register();
-                lang.load_local(temp_reg, *index as i32);
+                let temp_reg = backend.temporary_register();
+                backend.load_local(temp_reg, *index as i32);
                 temp_reg
             }
             Value::RawValue(val) => {
-                let temp_reg = lang.temporary_register();
-                lang.mov_64(temp_reg, *val as isize);
+                let temp_reg = backend.temporary_register();
+                backend.mov_64(temp_reg, *val as isize);
                 temp_reg
             }
             _ => panic!("Expected register got {:?}", value),
         }
     }
 
-    fn store_spill(&self, dest: Register, dest_spill: Option<usize>, lang: &mut LowLevelArm) {
+    fn store_spill<B: CodegenBackend>(
+        &self,
+        dest: B::Register,
+        dest_spill: Option<usize>,
+        backend: &mut B,
+    ) {
         if let Some(dest_spill) = dest_spill {
-            lang.store_local(dest, dest_spill as i32);
+            backend.store_local(dest, dest_spill as i32);
         }
     }
 
@@ -1135,9 +1203,9 @@ impl Ir {
         }
     }
 
-    fn compile_instructions(
+    fn compile_instructions<B: CodegenBackend>(
         &mut self,
-        lang: &mut LowLevelArm,
+        backend: &mut B,
         exit: Label,
         before_prelude: Label,
         after_prelude: Label,
@@ -1146,597 +1214,716 @@ impl Ir {
         let mut labels: Vec<&Label> = self.labels.iter().collect();
         labels.sort_by_key(|label| label.index);
         for label in labels.iter() {
-            let new_label = lang.new_label(&self.label_names[label.index]);
+            let new_label = backend.new_label(&self.label_names[label.index]);
             ir_label_to_lang_label.insert(**label, new_label);
         }
 
         for (index, instruction) in self.instructions.iter().enumerate() {
-            let start_machine_code = lang.current_position();
+            let start_machine_code = backend.current_position();
             let label = self.label_locations.get(&index);
             if let Some(label) = label {
-                lang.write_label(ir_label_to_lang_label[&self.labels[*label]]);
+                backend.write_label(ir_label_to_lang_label[&self.labels[*label]]);
             }
-            lang.clear_temporary_registers();
+            backend.clear_temporary_registers();
             // println!("instruction {:?}", instruction);
             match instruction {
                 Instruction::Breakpoint => {
-                    lang.breakpoint();
+                    backend.breakpoint();
                 }
                 Instruction::Label(_) => {}
                 Instruction::ExtendLifeTime(_) => {}
                 Instruction::Sub(dest, a, b) => {
-                    let a = self.value_to_register(a, lang);
-                    let b = self.value_to_register(b, lang);
+                    let a = self.value_to_register(a, backend);
+                    let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
+                    let dest = self.value_to_register(dest, backend);
 
-                    lang.guard_integer(dest, a, self.after_return);
-                    lang.guard_integer(dest, b, self.after_return);
+                    // Use a temporary register for guard checks to avoid clobbering operands
+                    // if dest happens to be the same register as a or b
+                    let guard_temp = backend.temporary_register();
+                    backend.guard_integer(guard_temp, a, self.after_return);
+                    backend.guard_integer(guard_temp, b, self.after_return);
+                    backend.free_temporary_register(guard_temp);
 
-                    lang.shift_right_imm(a, a, BuiltInTypes::tag_size());
-                    lang.shift_right_imm(b, b, BuiltInTypes::tag_size());
-                    lang.sub(dest, a, b);
-                    lang.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
-                    lang.shift_left_imm(a, a, BuiltInTypes::tag_size());
-                    lang.shift_left_imm(b, b, BuiltInTypes::tag_size());
-                    self.store_spill(dest, dest_spill, lang);
+                    backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
+                    backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    backend.sub(dest, a, b);
+                    backend.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
+                    // Only re-tag operands if they're different from dest
+                    if a != dest {
+                        backend.shift_left_imm(a, a, BuiltInTypes::tag_size());
+                    }
+                    if b != dest {
+                        backend.shift_left_imm(b, b, BuiltInTypes::tag_size());
+                    }
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::AddInt(dest, a, b) => {
-                    let a = self.value_to_register(a, lang);
-                    let b = self.value_to_register(b, lang);
+                    let a = self.value_to_register(a, backend);
+                    let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
+                    let dest = self.value_to_register(dest, backend);
 
-                    lang.add(dest, a, b);
-                    self.store_spill(dest, dest_spill, lang);
+                    backend.add(dest, a, b);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::Mul(dest, a, b) => {
-                    let a = self.value_to_register(a, lang);
-                    let b = self.value_to_register(b, lang);
+                    let a = self.value_to_register(a, backend);
+                    let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
+                    let dest = self.value_to_register(dest, backend);
 
-                    // lang.breakpoint();
-                    lang.guard_integer(dest, a, self.after_return);
-                    lang.guard_integer(dest, b, self.after_return);
+                    // Use a temporary register for guard checks to avoid clobbering operands
+                    // if dest happens to be the same register as a or b
+                    let guard_temp = backend.temporary_register();
+                    backend.guard_integer(guard_temp, a, self.after_return);
+                    backend.guard_integer(guard_temp, b, self.after_return);
+                    backend.free_temporary_register(guard_temp);
 
-                    lang.shift_right_imm(a, a, BuiltInTypes::tag_size());
-                    lang.shift_right_imm(b, b, BuiltInTypes::tag_size());
-                    lang.mul(dest, a, b);
-                    lang.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
-                    lang.shift_left_imm(a, a, BuiltInTypes::tag_size());
-                    lang.shift_left_imm(b, b, BuiltInTypes::tag_size());
-                    self.store_spill(dest, dest_spill, lang);
+                    backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
+                    backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    backend.mul(dest, a, b);
+                    backend.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
+                    // Only re-tag operands if they're different from dest to avoid
+                    // double-shifting the result
+                    if a != dest {
+                        backend.shift_left_imm(a, a, BuiltInTypes::tag_size());
+                    }
+                    if b != dest {
+                        backend.shift_left_imm(b, b, BuiltInTypes::tag_size());
+                    }
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::Div(dest, a, b) => {
-                    let a = self.value_to_register(a, lang);
-                    let b = self.value_to_register(b, lang);
+                    let a = self.value_to_register(a, backend);
+                    let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
+                    let dest = self.value_to_register(dest, backend);
 
-                    lang.guard_integer(dest, a, self.after_return);
-                    lang.guard_integer(dest, b, self.after_return);
+                    // Use a temporary register for guard checks to avoid clobbering operands
+                    // if dest happens to be the same register as a or b
+                    let guard_temp = backend.temporary_register();
+                    backend.guard_integer(guard_temp, a, self.after_return);
+                    backend.guard_integer(guard_temp, b, self.after_return);
+                    backend.free_temporary_register(guard_temp);
 
-                    lang.shift_right_imm(a, a, BuiltInTypes::tag_size());
-                    lang.shift_right_imm(b, b, BuiltInTypes::tag_size());
-                    lang.div(dest, a, b);
-                    lang.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
-                    lang.shift_left_imm(a, a, BuiltInTypes::tag_size());
-                    lang.shift_left_imm(b, b, BuiltInTypes::tag_size());
-                    self.store_spill(dest, dest_spill, lang);
+                    backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
+                    backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    backend.div(dest, a, b);
+                    backend.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
+                    // Only re-tag operands if they're different from dest
+                    if a != dest {
+                        backend.shift_left_imm(a, a, BuiltInTypes::tag_size());
+                    }
+                    if b != dest {
+                        backend.shift_left_imm(b, b, BuiltInTypes::tag_size());
+                    }
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::ShiftRightImm(dest, value, shift) => {
-                    let value = self.value_to_register(value, lang);
+                    let value = self.value_to_register(value, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
+                    let dest = self.value_to_register(dest, backend);
 
-                    lang.guard_integer(dest, value, self.after_return);
+                    backend.guard_integer(dest, value, self.after_return);
 
-                    lang.shift_right_imm(dest, value, *shift);
-                    self.store_spill(dest, dest_spill, lang);
+                    backend.shift_right_imm(dest, value, *shift);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::ShiftRightImmRaw(dest, value, shift) => {
-                    let value = self.value_to_register(value, lang);
+                    let value = self.value_to_register(value, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.shift_right_imm(dest, value, *shift);
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.shift_right_imm(dest, value, *shift);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::AndImm(dest, value, imm) => {
-                    let value = self.value_to_register(value, lang);
+                    let value = self.value_to_register(value, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.and_imm(dest, value, *imm);
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.and_imm(dest, value, *imm);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::ShiftLeft(dest, a, b) => {
-                    let a = self.value_to_register(a, lang);
-                    let b = self.value_to_register(b, lang);
+                    let a = self.value_to_register(a, backend);
+                    let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
+                    let dest = self.value_to_register(dest, backend);
 
-                    lang.guard_integer(dest, a, self.after_return);
-                    lang.guard_integer(dest, b, self.after_return);
+                    backend.guard_integer(dest, a, self.after_return);
+                    backend.guard_integer(dest, b, self.after_return);
 
-                    lang.shift_right_imm(a, a, BuiltInTypes::tag_size());
-                    lang.shift_right_imm(b, b, BuiltInTypes::tag_size());
-                    lang.shift_left(dest, a, b);
-                    lang.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
-                    lang.shift_left_imm(a, a, BuiltInTypes::tag_size());
-                    lang.shift_left_imm(b, b, BuiltInTypes::tag_size());
-                    self.store_spill(dest, dest_spill, lang);
+                    backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
+                    backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    backend.shift_left(dest, a, b);
+                    backend.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
+                    backend.shift_left_imm(a, a, BuiltInTypes::tag_size());
+                    backend.shift_left_imm(b, b, BuiltInTypes::tag_size());
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::ShiftRight(dest, a, b) => {
-                    let a = self.value_to_register(a, lang);
-                    let b = self.value_to_register(b, lang);
+                    let a = self.value_to_register(a, backend);
+                    let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
+                    let dest = self.value_to_register(dest, backend);
 
-                    lang.guard_integer(dest, a, self.after_return);
-                    lang.guard_integer(dest, b, self.after_return);
+                    backend.guard_integer(dest, a, self.after_return);
+                    backend.guard_integer(dest, b, self.after_return);
 
-                    lang.shift_right_imm(a, a, BuiltInTypes::tag_size());
-                    lang.shift_right_imm(b, b, BuiltInTypes::tag_size());
-                    lang.shift_right(dest, a, b);
-                    lang.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
-                    lang.shift_left_imm(a, a, BuiltInTypes::tag_size());
-                    lang.shift_left_imm(b, b, BuiltInTypes::tag_size());
-                    self.store_spill(dest, dest_spill, lang);
+                    backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
+                    backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    backend.shift_right(dest, a, b);
+                    backend.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
+                    backend.shift_left_imm(a, a, BuiltInTypes::tag_size());
+                    backend.shift_left_imm(b, b, BuiltInTypes::tag_size());
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::ShiftRightZero(dest, a, b) => {
-                    let a = self.value_to_register(a, lang);
-                    let b = self.value_to_register(b, lang);
+                    let a = self.value_to_register(a, backend);
+                    let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
+                    let dest = self.value_to_register(dest, backend);
 
-                    lang.guard_integer(dest, a, self.after_return);
-                    lang.guard_integer(dest, b, self.after_return);
+                    backend.guard_integer(dest, a, self.after_return);
+                    backend.guard_integer(dest, b, self.after_return);
 
-                    lang.shift_right_imm(a, a, BuiltInTypes::tag_size());
-                    lang.shift_right_imm(b, b, BuiltInTypes::tag_size());
-                    lang.and_imm(a, a, 0xFFFFFFFF);
-                    lang.shift_right_zero(dest, a, b);
-                    lang.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
-                    lang.shift_left_imm(a, a, BuiltInTypes::tag_size());
-                    lang.shift_left_imm(b, b, BuiltInTypes::tag_size());
-                    self.store_spill(dest, dest_spill, lang);
+                    backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
+                    backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    backend.and_imm(a, a, 0xFFFFFFFF);
+                    backend.shift_right_zero(dest, a, b);
+                    backend.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
+                    backend.shift_left_imm(a, a, BuiltInTypes::tag_size());
+                    backend.shift_left_imm(b, b, BuiltInTypes::tag_size());
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::And(dest, a, b) => {
-                    let a = self.value_to_register(a, lang);
-                    let b = self.value_to_register(b, lang);
+                    let a = self.value_to_register(a, backend);
+                    let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.and(dest, a, b);
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.and(dest, a, b);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::Or(dest, a, b) => {
-                    let a = self.value_to_register(a, lang);
-                    let b = self.value_to_register(b, lang);
+                    let a = self.value_to_register(a, backend);
+                    let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.or(dest, a, b);
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.or(dest, a, b);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::Xor(dest, a, b) => {
-                    let a = self.value_to_register(a, lang);
-                    let b = self.value_to_register(b, lang);
+                    let a = self.value_to_register(a, backend);
+                    let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.xor(dest, a, b);
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.xor(dest, a, b);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::GuardInt(dest, value, label) => {
-                    let value = self.value_to_register(value, lang);
+                    let value = self.value_to_register(value, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.guard_integer(dest, value, ir_label_to_lang_label[label]);
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.guard_integer(dest, value, ir_label_to_lang_label[label]);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::GuardFloat(dest, value, label) => {
-                    let value = self.value_to_register(value, lang);
+                    let value = self.value_to_register(value, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.guard_float(dest, value, ir_label_to_lang_label[label]);
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.guard_float(dest, value, ir_label_to_lang_label[label]);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::FmovGeneralToFloat(dest, src) => {
-                    let src = self.value_to_register(src, lang);
+                    let src = self.value_to_register(src, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.fmov(dest, src, FmovDirection::FromGeneralToFloat);
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.fmov_to_float(dest, src);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::FmovFloatToGeneral(dest, src) => {
-                    let src = self.value_to_register(src, lang);
+                    let src = self.value_to_register(src, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.fmov(dest, src, FmovDirection::FromFloatToGeneral);
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.fmov_from_float(dest, src);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::AddFloat(dest, a, b) => {
-                    let a = self.value_to_register(a, lang);
-                    let b = self.value_to_register(b, lang);
+                    let a = self.value_to_register(a, backend);
+                    let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.fadd(dest, a, b);
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.fadd(dest, a, b);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::SubFloat(dest, a, b) => {
-                    let a = self.value_to_register(a, lang);
-                    let b = self.value_to_register(b, lang);
+                    let a = self.value_to_register(a, backend);
+                    let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.fsub(dest, a, b);
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.fsub(dest, a, b);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::MulFloat(dest, a, b) => {
-                    let a = self.value_to_register(a, lang);
-                    let b = self.value_to_register(b, lang);
+                    let a = self.value_to_register(a, backend);
+                    let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.fmul(dest, a, b);
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.fmul(dest, a, b);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::DivFloat(dest, a, b) => {
-                    let a = self.value_to_register(a, lang);
-                    let b = self.value_to_register(b, lang);
+                    let a = self.value_to_register(a, backend);
+                    let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.fdiv(dest, a, b);
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.fdiv(dest, a, b);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::Assign(dest, val) => {
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
+                    let dest = self.value_to_register(dest, backend);
                     match val {
                         Value::Register(_virt_reg) => {
-                            let register = self.value_to_register(val, lang);
-                            lang.mov_reg(dest, register);
-                            self.store_spill(dest, dest_spill, lang);
+                            let register = self.value_to_register(val, backend);
+                            backend.mov_reg(dest, register);
+                            self.store_spill(dest, dest_spill, backend);
                         }
                         Value::TaggedConstant(i) => {
                             let tagged = BuiltInTypes::construct_int(*i);
-                            lang.mov_64(dest, tagged);
-                            self.store_spill(dest, dest_spill, lang);
+                            backend.mov_64(dest, tagged);
+                            self.store_spill(dest, dest_spill, backend);
                         }
                         Value::StringConstantPtr(ptr) => {
                             let tagged = BuiltInTypes::String.tag(*ptr as isize);
-                            lang.mov_64(dest, tagged);
-                            self.store_spill(dest, dest_spill, lang);
+                            backend.mov_64(dest, tagged);
+                            self.store_spill(dest, dest_spill, backend);
                         }
                         Value::KeywordConstantPtr(ptr) => {
                             // Just pass the raw index, not tagged
-                            lang.mov_64(dest, *ptr as isize);
-                            self.store_spill(dest, dest_spill, lang);
+                            backend.mov_64(dest, *ptr as isize);
+                            self.store_spill(dest, dest_spill, backend);
                         }
                         Value::Function(id) => {
                             let function = BuiltInTypes::Function.tag(*id as isize);
-                            lang.mov_64(dest, function);
-                            self.store_spill(dest, dest_spill, lang);
+                            backend.mov_64(dest, function);
+                            self.store_spill(dest, dest_spill, backend);
                         }
                         Value::Pointer(ptr) => {
-                            lang.mov_64(dest, *ptr as isize);
-                            self.store_spill(dest, dest_spill, lang);
+                            backend.mov_64(dest, *ptr as isize);
+                            self.store_spill(dest, dest_spill, backend);
                         }
                         Value::RawValue(value) => {
-                            lang.mov_64(dest, *value as isize);
-                            self.store_spill(dest, dest_spill, lang);
+                            backend.mov_64(dest, *value as isize);
+                            self.store_spill(dest, dest_spill, backend);
                         }
                         Value::True => {
-                            lang.mov_64(dest, BuiltInTypes::construct_boolean(true));
-                            self.store_spill(dest, dest_spill, lang);
+                            backend.mov_64(dest, BuiltInTypes::construct_boolean(true));
+                            self.store_spill(dest, dest_spill, backend);
                         }
                         Value::False => {
-                            lang.mov_64(dest, BuiltInTypes::construct_boolean(false));
-                            self.store_spill(dest, dest_spill, lang);
+                            backend.mov_64(dest, BuiltInTypes::construct_boolean(false));
+                            self.store_spill(dest, dest_spill, backend);
                         }
                         Value::Local(local) => {
-                            lang.load_local(dest, *local as i32);
-                            self.store_spill(dest, dest_spill, lang);
+                            backend.load_local(dest, *local as i32);
+                            self.store_spill(dest, dest_spill, backend);
                         }
                         Value::Null => {
-                            lang.mov_64(dest, 0b111_isize);
-                            self.store_spill(dest, dest_spill, lang);
+                            backend.mov_64(dest, 0b111_isize);
+                            self.store_spill(dest, dest_spill, backend);
                         }
                         Value::Spill(_register, index) => {
-                            let temp_reg = lang.temporary_register();
-                            lang.load_local(temp_reg, (*index) as i32);
-                            lang.mov_reg(dest, temp_reg);
-                            self.store_spill(dest, dest_spill, lang);
+                            let temp_reg = backend.temporary_register();
+                            backend.load_local(temp_reg, (*index) as i32);
+                            backend.mov_reg(dest, temp_reg);
+                            self.store_spill(dest, dest_spill, backend);
                         }
                         Value::Stack(offset) => {
-                            lang.load_from_stack_beginning(dest, *offset as i32);
-                            self.store_spill(dest, dest_spill, lang);
+                            backend.load_from_stack_beginning(dest, *offset as i32);
+                            self.store_spill(dest, dest_spill, backend);
                         }
                     }
                 }
                 Instruction::LoadConstant(dest, val) => {
-                    let val = self.value_to_register(val, lang);
+                    let val = self.value_to_register(val, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.mov_reg(dest, val);
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.mov_reg(dest, val);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::LoadLocal(dest, local) => {
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
+                    let dest = self.value_to_register(dest, backend);
                     let local = local.as_local();
-                    lang.load_local(dest, local as i32);
-                    self.store_spill(dest, dest_spill, lang);
+                    backend.load_local(dest, local as i32);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::StoreLocal(dest, value) => {
-                    let value = self.value_to_register(value, lang);
-                    lang.store_local(value, dest.as_local() as i32);
+                    let value = self.value_to_register(value, backend);
+                    backend.store_local(value, dest.as_local() as i32);
                 }
                 Instruction::LoadTrue(dest) => {
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.mov_64(dest, BuiltInTypes::construct_boolean(true));
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.mov_64(dest, BuiltInTypes::construct_boolean(true));
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::LoadFalse(dest) => {
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.mov_64(dest, BuiltInTypes::construct_boolean(false));
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.mov_64(dest, BuiltInTypes::construct_boolean(false));
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::StoreFloat(dest, temp, value) => {
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    let temp = self.value_to_register(temp, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    let temp = self.value_to_register(temp, backend);
                     // need to turn string to float precisely
                     let value: f64 = value.parse().unwrap();
 
-                    lang.mov_64(temp, value.to_bits() as isize);
+                    backend.mov_64(temp, value.to_bits() as isize);
                     // The header is the first field, so offset is 1
-                    lang.store_on_heap(dest, temp, 1);
-                    self.store_spill(dest, dest_spill, lang);
+                    backend.store_on_heap(dest, temp, 1);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::Recurse(dest, args) => {
                     // TODO: Clean up duplication
-                    for (index, arg) in args.iter().enumerate().rev() {
-                        let arg = self.value_to_register(arg, lang);
-                        lang.mov_reg(lang.arg(index as u8), arg);
+                    let num_arg_regs = backend.num_arg_registers();
+                    for (arg_index, arg) in args.iter().enumerate().rev() {
+                        let arg = self.value_to_register(arg, backend);
+                        if arg_index < num_arg_regs {
+                            backend.mov_reg(backend.arg(arg_index as u8), arg);
+                        } else {
+                            backend.push_to_end_of_stack(
+                                arg,
+                                (arg_index as i32) - (num_arg_regs as i32 - 1),
+                            );
+                        }
                     }
-                    lang.recurse(before_prelude);
+                    backend.recurse(before_prelude);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.mov_reg(dest, lang.ret_reg());
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.mov_reg(dest, backend.ret_reg());
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::RecurseWithSaves(dest, args, saves) => {
                     // TODO: Clean up duplication
                     for save in saves.iter() {
-                        let save = self.value_to_register(save, lang);
-                        lang.push_to_stack(save);
+                        let save = self.value_to_register(save, backend);
+                        backend.push_to_stack(save);
                     }
-                    for (index, arg) in args.iter().enumerate().rev() {
-                        let arg = self.value_to_register(arg, lang);
-                        lang.mov_reg(lang.arg(index as u8), arg);
+                    let num_arg_regs = backend.num_arg_registers();
+                    for (arg_index, arg) in args.iter().enumerate().rev() {
+                        let arg = self.value_to_register(arg, backend);
+                        if arg_index < num_arg_regs {
+                            backend.mov_reg(backend.arg(arg_index as u8), arg);
+                        } else {
+                            backend.push_to_end_of_stack(
+                                arg,
+                                (arg_index as i32) - (num_arg_regs as i32 - 1),
+                            );
+                        }
                     }
-                    lang.recurse(before_prelude);
+                    backend.recurse(before_prelude);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.mov_reg(dest, lang.ret_reg());
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.mov_reg(dest, backend.ret_reg());
+                    self.store_spill(dest, dest_spill, backend);
 
                     for save in saves.iter().rev() {
-                        let save = self.value_to_register(save, lang);
-                        lang.pop_from_stack(save);
+                        let save = self.value_to_register(save, backend);
+                        backend.pop_from_stack(save);
                     }
                 }
                 Instruction::TailRecurse(dest, args) => {
-                    for (index, arg) in args.iter().enumerate().rev() {
-                        let arg = self.value_to_register(arg, lang);
-                        lang.mov_reg(lang.arg(index as u8), arg);
+                    let num_arg_regs = backend.num_arg_registers();
+                    for (arg_index, arg) in args.iter().enumerate().rev() {
+                        let arg = self.value_to_register(arg, backend);
+                        if arg_index < num_arg_regs {
+                            backend.mov_reg(backend.arg(arg_index as u8), arg);
+                        } else {
+                            backend.push_to_end_of_stack(
+                                arg,
+                                (arg_index as i32) - (num_arg_regs as i32 - 1),
+                            );
+                        }
                     }
-                    lang.jump(after_prelude);
+                    backend.jump(after_prelude);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.mov_reg(dest, lang.ret_reg());
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.mov_reg(dest, backend.ret_reg());
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::Call(dest, function, args, builtin) => {
                     // TODO: I think I should never hit this with how my register allocator works
+                    let num_arg_regs = backend.num_arg_registers();
                     for (arg_index, arg) in args.iter().enumerate().rev() {
-                        let arg = self.value_to_register(arg, lang);
-                        if arg_index < 8 {
-                            lang.mov_reg(lang.arg(arg_index as u8), arg);
+                        let arg = self.value_to_register(arg, backend);
+                        if arg_index < num_arg_regs {
+                            backend.mov_reg(backend.arg(arg_index as u8), arg);
                         } else {
-                            lang.push_to_end_of_stack(arg, (arg_index as i32) - 7);
+                            backend.push_to_end_of_stack(
+                                arg,
+                                (arg_index as i32) - (num_arg_regs as i32 - 1),
+                            );
                         }
                     }
                     // TODO: I am not actually checking any tags here
                     // or unmasking or anything. Just straight up calling it
-                    let function = self.value_to_register(function, lang);
-                    lang.shift_right_imm(function, function, BuiltInTypes::tag_size());
+                    let function = self.value_to_register(function, backend);
+                    backend.shift_right_imm(function, function, BuiltInTypes::tag_size());
                     if *builtin {
-                        lang.call_builtin(function);
+                        backend.call_builtin(function);
                     } else {
-                        lang.call(function);
+                        backend.call(function);
                     }
 
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.mov_reg(dest, lang.ret_reg());
-                    self.store_spill(dest, dest_spill, lang);
+                    // For dest, we need a register to store the result into.
+                    // Don't use value_to_register for Spill because it loads from
+                    // the spill slot, which might use RAX as a temp and clobber
+                    // the function result that's currently in RAX.
+                    let dest_reg = match dest {
+                        Value::Register(register) => backend.register_from_index(register.index),
+                        Value::Spill(_, _) => backend.temporary_register(),
+                        _ => panic!("Unexpected dest type for call: {:?}", dest),
+                    };
+                    backend.mov_reg(dest_reg, backend.ret_reg());
+                    self.store_spill(dest_reg, dest_spill, backend);
+                    if matches!(dest, Value::Spill(_, _)) {
+                        backend.free_temporary_register(dest_reg);
+                    }
                 }
                 Instruction::CallWithSaves(dest, function, args, builtin, saves) => {
+                    // Check if function is in a register that will be saved
+                    let function_in_save = if let Value::Register(reg) = function {
+                        saves.iter().any(|save| {
+                            if let Value::Register(save_reg) = save {
+                                save_reg.index == reg.index
+                            } else {
+                                false
+                            }
+                        })
+                    } else {
+                        false
+                    };
+
+                    // If function is in a register that will be pushed as a save,
+                    // we need to capture it BEFORE pushing saves
+                    let pre_captured_function = if function_in_save {
+                        let function_reg = self.value_to_register(function, backend);
+                        let temp = backend.temporary_register();
+                        backend.mov_reg(temp, function_reg);
+                        Some(temp)
+                    } else {
+                        None
+                    };
+
+                    // Push saves to stack
                     for save in saves.iter() {
-                        let save = self.value_to_register(save, lang);
-                        lang.push_to_stack(save);
+                        let save_reg = self.value_to_register(save, backend);
+                        backend.push_to_stack(save_reg);
                     }
 
-                    // TODO: Deduplicate copied from save
+                    // Set up arguments, freeing temps after each to avoid exhaustion
+                    let num_arg_regs = backend.num_arg_registers();
                     for (arg_index, arg) in args.iter().enumerate().rev() {
-                        let arg = self.value_to_register(arg, lang);
-                        if arg_index < 8 {
-                            lang.mov_reg(lang.arg(arg_index as u8), arg);
+                        let arg_reg = self.value_to_register(arg, backend);
+                        if arg_index < num_arg_regs {
+                            backend.mov_reg(backend.arg(arg_index as u8), arg_reg);
                         } else {
-                            lang.push_to_end_of_stack(arg, (arg_index as i32) - 8);
+                            backend.push_to_end_of_stack(
+                                arg_reg,
+                                (arg_index as i32) - num_arg_regs as i32,
+                            );
                         }
+                        // Free temp if it was one (no-op for physical registers)
+                        backend.free_temporary_register(arg_reg);
                     }
-                    // TODO: I am not actually checking any tags here
-                    // or unmasking or anything. Just straight up calling it
-                    let function = self.value_to_register(function, lang);
-                    lang.shift_right_imm(function, function, BuiltInTypes::tag_size());
-                    if *builtin {
-                        lang.call_builtin(function);
+
+                    // Get function pointer - either from pre-captured temp or load fresh
+                    let call_target = if let Some(temp) = pre_captured_function {
+                        temp
                     } else {
-                        lang.call(function);
+                        self.value_to_register(function, backend)
+                    };
+
+                    // Untag function pointer and call
+                    backend.shift_right_imm(call_target, call_target, BuiltInTypes::tag_size());
+                    if *builtin {
+                        backend.call_builtin(call_target);
+                    } else {
+                        backend.call(call_target);
                     }
+                    backend.free_temporary_register(call_target);
 
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.mov_reg(dest, lang.ret_reg());
-                    self.store_spill(dest, dest_spill, lang);
+                    // For dest, we need a register to store the result into.
+                    // Don't use value_to_register for Spill because it loads from
+                    // the spill slot, which might use RAX as a temp and clobber
+                    // the function result that's currently in RAX.
+                    let dest_reg = match dest {
+                        Value::Register(register) => backend.register_from_index(register.index),
+                        Value::Spill(_, _) => {
+                            // Just get a temp register, don't load anything
+                            backend.temporary_register()
+                        }
+                        _ => panic!("Unexpected dest type for call: {:?}", dest),
+                    };
+                    backend.mov_reg(dest_reg, backend.ret_reg());
+                    self.store_spill(dest_reg, dest_spill, backend);
+                    if matches!(dest, Value::Spill(_, _)) {
+                        backend.free_temporary_register(dest_reg);
+                    }
 
+                    // Restore saves from stack
                     for save in saves.iter().rev() {
-                        let save = self.value_to_register(save, lang);
-                        lang.pop_from_stack(save);
+                        let save_reg = self.value_to_register(save, backend);
+                        backend.pop_from_stack(save_reg);
                     }
                 }
                 Instruction::Compare(dest, a, b, condition) => {
-                    let a = self.value_to_register(a, lang);
-                    let b = self.value_to_register(b, lang);
+                    let a = self.value_to_register(a, backend);
+                    let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.compare_bool(*condition, dest, a, b);
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.compare_bool(*condition, dest, a, b);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::Tag(dest, a, b) => {
-                    let a = self.value_to_register(a, lang);
-                    let b = self.value_to_register(b, lang);
+                    let a = self.value_to_register(a, backend);
+                    let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.tag_value(dest, a, b);
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.tag_value(dest, a, b);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::JumpIf(label, condition, a, b) => {
-                    let a = self.value_to_register(a, lang);
-                    let b = self.value_to_register(b, lang);
+                    let a = self.value_to_register(a, backend);
+                    let b = self.value_to_register(b, backend);
                     let label = ir_label_to_lang_label.get(label).unwrap();
-                    lang.compare(a, b);
+                    backend.compare(a, b);
                     match condition {
-                        Condition::LessThanOrEqual => lang.jump_less_or_equal(*label),
-                        Condition::LessThan => lang.jump_less(*label),
-                        Condition::Equal => lang.jump_equal(*label),
-                        Condition::NotEqual => lang.jump_not_equal(*label),
-                        Condition::GreaterThan => lang.jump_greater(*label),
-                        Condition::GreaterThanOrEqual => lang.jump_greater_or_equal(*label),
+                        Condition::LessThanOrEqual => backend.jump_less_or_equal(*label),
+                        Condition::LessThan => backend.jump_less(*label),
+                        Condition::Equal => backend.jump_equal(*label),
+                        Condition::NotEqual => backend.jump_not_equal(*label),
+                        Condition::GreaterThan => backend.jump_greater(*label),
+                        Condition::GreaterThanOrEqual => backend.jump_greater_or_equal(*label),
                     }
                 }
                 Instruction::Jump(label) => {
                     let label = ir_label_to_lang_label.get(label).unwrap();
-                    lang.jump(*label);
+                    backend.jump(*label);
                 }
                 Instruction::Ret(value) => match value {
                     Value::Register(_virt_reg) => {
-                        let register = self.value_to_register(value, lang);
-                        if register == lang.ret_reg() {
-                            lang.jump(exit);
+                        let register = self.value_to_register(value, backend);
+                        if register == backend.ret_reg() {
+                            backend.jump(exit);
                         } else {
-                            lang.mov_reg(lang.ret_reg(), register);
-                            lang.jump(exit);
+                            backend.mov_reg(backend.ret_reg(), register);
+                            backend.jump(exit);
                         }
                     }
                     Value::TaggedConstant(i) => {
-                        lang.mov_64(lang.ret_reg(), BuiltInTypes::construct_int(*i));
-                        lang.jump(exit);
+                        backend.mov_64(backend.ret_reg(), BuiltInTypes::construct_int(*i));
+                        backend.jump(exit);
                     }
                     Value::StringConstantPtr(ptr) => {
-                        lang.mov_64(lang.ret_reg(), *ptr as isize);
-                        lang.jump(exit);
+                        backend.mov_64(backend.ret_reg(), *ptr as isize);
+                        backend.jump(exit);
                     }
                     Value::KeywordConstantPtr(ptr) => {
                         // Just pass the raw index
-                        lang.mov_64(lang.ret_reg(), *ptr as isize);
-                        lang.jump(exit);
+                        backend.mov_64(backend.ret_reg(), *ptr as isize);
+                        backend.jump(exit);
                     }
                     Value::Function(id) => {
-                        lang.mov_64(lang.ret_reg(), *id as isize);
-                        lang.jump(exit);
+                        backend.mov_64(backend.ret_reg(), *id as isize);
+                        backend.jump(exit);
                     }
                     Value::Pointer(ptr) => {
-                        lang.mov_64(lang.ret_reg(), *ptr as isize);
-                        lang.jump(exit);
+                        backend.mov_64(backend.ret_reg(), *ptr as isize);
+                        backend.jump(exit);
                     }
                     Value::True => {
-                        lang.mov_64(lang.ret_reg(), BuiltInTypes::construct_boolean(true));
-                        lang.jump(exit);
+                        backend.mov_64(backend.ret_reg(), BuiltInTypes::construct_boolean(true));
+                        backend.jump(exit);
                     }
                     Value::False => {
-                        lang.mov_64(lang.ret_reg(), BuiltInTypes::construct_boolean(false));
-                        lang.jump(exit);
+                        backend.mov_64(backend.ret_reg(), BuiltInTypes::construct_boolean(false));
+                        backend.jump(exit);
                     }
                     Value::RawValue(_) => {
                         panic!("Should we be returing a raw value?")
                     }
                     Value::Null => {
-                        lang.mov_64(lang.ret_reg(), 0b111);
-                        lang.jump(exit);
+                        backend.mov_64(backend.ret_reg(), 0b111);
+                        backend.jump(exit);
                     }
                     Value::Local(local) => {
-                        lang.load_local(lang.ret_reg(), *local as i32);
-                        lang.jump(exit);
+                        backend.load_local(backend.ret_reg(), *local as i32);
+                        backend.jump(exit);
                     }
                     Value::Spill(_register, index) => {
-                        let temp_reg = lang.temporary_register();
-                        lang.load_local(temp_reg, (*index) as i32);
-                        lang.mov_reg(lang.ret_reg(), temp_reg);
-                        lang.jump(exit);
+                        let temp_reg = backend.temporary_register();
+                        backend.load_local(temp_reg, (*index) as i32);
+                        backend.mov_reg(backend.ret_reg(), temp_reg);
+                        backend.jump(exit);
                     }
                     Value::Stack(offset) => {
-                        lang.load_from_stack_beginning(lang.ret_reg(), *offset as i32);
-                        lang.jump(exit);
+                        backend.load_from_stack_beginning(backend.ret_reg(), *offset as i32);
+                        backend.jump(exit);
                     }
                 },
                 Instruction::HeapLoad(dest, ptr, offset) => {
-                    let ptr = self.value_to_register(ptr, lang);
+                    let ptr = self.value_to_register(ptr, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.load_from_heap(dest, ptr, *offset);
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.load_from_heap(dest, ptr, *offset);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::AtomicLoad(dest, ptr) => {
                     // TODO: Does the spill work properly here?
-                    let ptr = self.value_to_register(ptr, lang);
+                    let ptr = self.value_to_register(ptr, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.atomic_load(dest, ptr);
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.atomic_load(dest, ptr);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::AtomicStore(ptr, val) => {
-                    let ptr = self.value_to_register(ptr, lang);
-                    let val = self.value_to_register(val, lang);
-                    lang.atomic_store(ptr, val);
+                    let ptr = self.value_to_register(ptr, backend);
+                    let val = self.value_to_register(val, backend);
+                    backend.atomic_store(ptr, val);
                 }
                 Instruction::CompareAndSwap(dest, ptr, val) => {
-                    let ptr = self.value_to_register(ptr, lang);
-                    let val = self.value_to_register(val, lang);
+                    let ptr = self.value_to_register(ptr, backend);
+                    let val = self.value_to_register(val, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.compare_and_swap(dest, ptr, val);
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.compare_and_swap(dest, ptr, val);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::HeapLoadReg(dest, ptr, offset) => {
-                    let ptr = self.value_to_register(ptr, lang);
+                    let ptr = self.value_to_register(ptr, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    let offset = self.value_to_register(offset, lang);
-                    lang.load_from_heap_with_reg_offset(dest, ptr, offset);
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    let offset = self.value_to_register(offset, backend);
+                    backend.load_from_heap_with_reg_offset(dest, ptr, offset);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::HeapStore(ptr, val) => {
-                    let ptr = self.value_to_register(ptr, lang);
-                    let val = self.value_to_register(val, lang);
-                    lang.store_on_heap(ptr, val, 0);
+                    let ptr = self.value_to_register(ptr, backend);
+                    let val = self.value_to_register(val, backend);
+                    backend.store_on_heap(ptr, val, 0);
                 }
 
                 Instruction::HeapStoreOffset(ptr, val, offset) => {
-                    let ptr = self.value_to_register(ptr, lang);
-                    let val = self.value_to_register(val, lang);
-                    lang.store_on_heap(ptr, val, *offset as i32);
+                    let ptr = self.value_to_register(ptr, backend);
+                    let val = self.value_to_register(val, backend);
+                    backend.store_on_heap(ptr, val, *offset as i32);
                 }
                 Instruction::HeapStoreByteOffsetMasked(
                     ptr,
@@ -1750,68 +1937,68 @@ impl Ir {
                     // We are trying to write to a specific byte in a word
                     // We need to load the word, mask out the byte, or in the new value
                     // and then store it back
-                    let ptr = self.value_to_register(ptr, lang);
-                    let val = self.value_to_register(val, lang);
-                    let dest = self.value_to_register(temp1, lang);
+                    let ptr = self.value_to_register(ptr, backend);
+                    let val = self.value_to_register(val, backend);
+                    let dest = self.value_to_register(temp1, backend);
 
-                    // lang.breakpoint();
-                    lang.load_from_heap(dest, ptr, *offset as i32);
-                    let mask_register = self.value_to_register(temp2, lang);
-                    lang.mov_64(mask_register, *mask as isize);
-                    lang.and(dest, dest, mask_register);
-                    lang.free_register(mask_register);
-                    lang.shift_left_imm(val, val, (byte_offset * 8) as i32);
-                    lang.or(dest, dest, val);
-                    lang.store_on_heap(ptr, dest, *offset as i32);
-                    lang.free_register(dest);
+                    // backend.breakpoint();
+                    backend.load_from_heap(dest, ptr, *offset as i32);
+                    let mask_register = self.value_to_register(temp2, backend);
+                    backend.mov_64(mask_register, *mask as isize);
+                    backend.and(dest, dest, mask_register);
+                    backend.free_register(mask_register);
+                    backend.shift_left_imm(val, val, (byte_offset * 8) as i32);
+                    backend.or(dest, dest, val);
+                    backend.store_on_heap(ptr, dest, *offset as i32);
+                    backend.free_register(dest);
                 }
                 Instruction::HeapStoreOffsetReg(ptr, val, offset) => {
-                    let ptr = self.value_to_register(ptr, lang);
-                    let val = self.value_to_register(val, lang);
-                    let offset = self.value_to_register(offset, lang);
-                    lang.store_to_heap_with_reg_offset(ptr, val, offset);
+                    let ptr = self.value_to_register(ptr, backend);
+                    let val = self.value_to_register(val, backend);
+                    let offset = self.value_to_register(offset, backend);
+                    backend.store_to_heap_with_reg_offset(ptr, val, offset);
                 }
                 Instruction::RegisterArgument(_arg) => {}
                 Instruction::PushStack(val) => {
-                    let val = self.value_to_register(val, lang);
-                    lang.push_to_stack(val);
+                    let val = self.value_to_register(val, backend);
+                    backend.push_to_stack(val);
                 }
                 Instruction::PopStack(val) => {
-                    let val = self.value_to_register(val, lang);
-                    lang.pop_from_stack(val);
+                    let val = self.value_to_register(val, backend);
+                    backend.pop_from_stack(val);
                 }
                 Instruction::GetStackPointer(dest, offset) => {
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    let offset = self.value_to_register(offset, lang);
-                    lang.get_stack_pointer(dest, offset);
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    let offset = self.value_to_register(offset, backend);
+                    backend.get_stack_pointer(dest, offset);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::GetStackPointerImm(dest, offset) => {
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.get_stack_pointer_imm(dest, *offset);
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.get_stack_pointer_imm(dest, *offset);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::CurrentStackPosition(dest) => {
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.get_current_stack_position(dest);
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.get_current_stack_position(dest);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::GetTag(dest, value) => {
-                    let value = self.value_to_register(value, lang);
+                    let value = self.value_to_register(value, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.get_tag(dest, value);
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.get_tag(dest, value);
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::Untag(dest, value) => {
-                    let value = self.value_to_register(value, lang);
+                    let value = self.value_to_register(value, backend);
                     let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, lang);
-                    lang.shift_right_imm(dest, value, BuiltInTypes::tag_size());
-                    self.store_spill(dest, dest_spill, lang);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.shift_right_imm(dest, value, BuiltInTypes::tag_size());
+                    self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::PushExceptionHandler(label, result_local, builtin_fn) => {
                     // Call push_exception_handler builtin
@@ -1821,51 +2008,52 @@ impl Ir {
                     let catch_label = ir_label_to_lang_label.get(label).unwrap();
 
                     // Load the address of the catch label into arg 0
-                    lang.load_label_address(lang.arg(0), *catch_label);
+                    backend.load_label_address(backend.arg(0), *catch_label);
 
                     // Load result_local offset into arg 1
                     // result_local is a Value::Local(index)
-                    // Locals are stored at FP - ((index + 1) * 8), so we need to pass the negative offset
+                    // Use backend-specific method to get the correct byte offset
                     let local_index = result_local.as_local();
-                    let local_offset = -(((local_index + 1) * 8) as isize); // Negative offset from FP
-                    lang.mov_64(lang.arg(1), local_offset);
+                    let local_offset = backend.get_local_byte_offset(local_index);
+                    backend.mov_64(backend.arg(1), local_offset);
 
-                    // Copy link register (x30) to arg 2 BEFORE calling the builtin
-                    lang.mov_reg(lang.arg(2), X30);
+                    // Load return address into arg 2 BEFORE calling the builtin
+                    // On ARM64 this copies from LR, on x86-64 it loads from [RBP + 8]
+                    backend.load_return_address(backend.arg(2));
 
                     // Get stack pointer into arg 3
-                    lang.get_stack_pointer_imm(lang.arg(3), 0);
+                    backend.get_stack_pointer_imm(backend.arg(3), 0);
 
-                    // Copy frame pointer (x29) to arg 4
-                    lang.mov_reg(lang.arg(4), X29);
+                    // Copy frame pointer to arg 4
+                    backend.mov_reg(backend.arg(4), backend.frame_pointer());
 
                     // Call the push_exception_handler builtin
-                    let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), lang);
-                    lang.call_builtin(fn_ptr);
+                    let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
+                    backend.call_builtin(fn_ptr);
                 }
                 Instruction::PopExceptionHandler(builtin_fn) => {
                     // Call pop_exception_handler builtin - no arguments
-                    let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), lang);
-                    lang.call_builtin(fn_ptr);
+                    let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
+                    backend.call_builtin(fn_ptr);
                 }
                 Instruction::Throw(value, builtin_fn) => {
                     // Call throw_exception builtin with stack pointer and value
                     // Arguments: (stack_pointer, exception_value)
 
                     // Load stack pointer into arg 0
-                    lang.get_stack_pointer_imm(lang.arg(0), 0);
+                    backend.get_stack_pointer_imm(backend.arg(0), 0);
 
                     // Load exception value into arg 1
-                    let value_reg = self.value_to_register(value, lang);
-                    lang.mov_reg(lang.arg(1), value_reg);
+                    let value_reg = self.value_to_register(value, backend);
+                    backend.mov_reg(backend.arg(1), value_reg);
 
                     // Call the throw_exception builtin (does not return)
-                    let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), lang);
-                    lang.call_builtin(fn_ptr);
+                    let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
+                    backend.call_builtin(fn_ptr);
                     // Note: execution never continues past this point
                 }
             }
-            let end_machine_code = lang.current_position();
+            let end_machine_code = backend.current_position();
             self.ir_to_machine_code_range.push((
                 index,
                 MachineCodeRange::new(start_machine_code, end_machine_code),

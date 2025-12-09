@@ -1,0 +1,10 @@
+namespace x86_add_only_test
+
+// no-std
+
+fn main() {
+    5 + 3
+}
+
+// Expect
+// 8

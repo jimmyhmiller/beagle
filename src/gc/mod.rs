@@ -5,6 +5,9 @@ use nanoserde::SerJson;
 
 use crate::{CommandLineArguments, types::BuiltInTypes};
 
+// Re-export get_page_size from mmap_utils for backward compatibility
+pub use crate::mmap_utils::get_page_size;
+
 pub mod compacting;
 pub mod generational;
 pub mod mark_and_sweep;
@@ -39,8 +42,10 @@ impl StackMap {
     }
 
     pub fn find_stack_data(&self, pointer: usize) -> Option<&StackMapDetails> {
+        // Stack map now stores the exact return address (recorded after the call instruction)
+        // No adjustment needed - just match the pointer directly
         for (key, value) in self.details.iter() {
-            if *key == pointer.saturating_sub(4) {
+            if *key == pointer {
                 return Some(value);
             }
         }

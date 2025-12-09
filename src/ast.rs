@@ -4,7 +4,7 @@ use std::{collections::HashMap, hash::Hash};
 
 use crate::{
     Data, Message,
-    arm::LowLevelArm,
+    backend::{Backend, CodegenBackend},
     builtins::debugger,
     common::Label,
     compiler::Compiler,
@@ -691,7 +691,7 @@ impl AstCompiler<'_> {
                 self.name = old_name;
                 self.current_function_arity = old_arity;
 
-                let lang = LowLevelArm::new();
+                let backend = Backend::new();
 
                 let error_fn_pointer = self
                     .compiler
@@ -705,7 +705,7 @@ impl AstCompiler<'_> {
                 let token_map = self.ir_range_to_token_range.pop().unwrap();
                 self.ir.ir_range_to_token_range = token_map.clone();
 
-                let mut code = self.ir.compile(lang, error_fn_pointer);
+                let mut backend = self.ir.compile(backend, error_fn_pointer);
                 let token_map = self.ir.ir_range_to_token_range.clone();
 
                 let full_function_name = name
@@ -716,13 +716,13 @@ impl AstCompiler<'_> {
                     .compiler
                     .upsert_function(
                         full_function_name.as_deref(),
-                        &mut code,
+                        &mut backend,
                         self.ir.num_locals,
                         args.len(),
                     )
                     .unwrap();
 
-                let _ = code.share_label_info_debug(function_pointer);
+                let _ = backend.share_label_info_debug(function_pointer);
 
                 debugger(Message {
                     kind: "ir".to_string(),
@@ -747,8 +747,11 @@ impl AstCompiler<'_> {
                     },
                 });
 
-                let pretty_arm_instructions =
-                    code.instructions.iter().map(|x| x.pretty_print()).collect();
+                let pretty_arm_instructions = backend
+                    .instructions_mut()
+                    .iter()
+                    .map(|x| x.pretty_print())
+                    .collect();
                 let ir_to_machine_code_range = self
                     .ir
                     .ir_to_machine_code_range
@@ -1733,7 +1736,10 @@ impl AstCompiler<'_> {
 
                 let exit_property_access = self.ir.label("exit_property_access");
                 let slow_property_path = self.ir.label("slow_property_path");
-                // self.ir.jump(slow_property_path);
+                #[cfg(feature = "backend-x86-64")]
+                {
+                    self.ir.jump(slow_property_path); // Disable fast path on x86-64 for debugging
+                }
                 self.ir.jump_if(
                     slow_property_path,
                     Condition::NotEqual,

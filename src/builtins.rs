@@ -318,10 +318,19 @@ pub fn get_current_stack_pointer() -> usize {
     use core::arch::asm;
     let sp: usize;
     unsafe {
-        asm!(
-            "mov {0}, sp",
-            out(reg) sp
-        );
+        cfg_if::cfg_if! {
+            if #[cfg(target_arch = "x86_64")] {
+                asm!(
+                    "mov {0}, rsp",
+                    out(reg) sp
+                );
+            } else {
+                asm!(
+                    "mov {0}, sp",
+                    out(reg) sp
+                );
+            }
+        }
     }
     sp
 }
@@ -419,13 +428,22 @@ fn print_stack(_stack_pointer: usize) {
     let stack_base = runtime.get_stack_base();
     let stack_begin = stack_base - STACK_SIZE;
 
-    // Get the current frame pointer (X29) directly from the register
+    // Get the current frame pointer directly from the register
     let fp: usize;
     let mut current_frame_ptr = unsafe {
-        asm!(
-            "mov {0}, x29",
-            out(reg) fp
-        );
+        cfg_if::cfg_if! {
+            if #[cfg(target_arch = "x86_64")] {
+                asm!(
+                    "mov {0}, rbp",
+                    out(reg) fp
+                );
+            } else {
+                asm!(
+                    "mov {0}, x29",
+                    out(reg) fp
+                );
+            }
+        }
         fp
     };
 
@@ -1617,17 +1635,36 @@ pub unsafe extern "C" fn throw_exception(stack_pointer: usize, value: usize) -> 
 
         // Jump to handler with restored SP, FP, and LR
         unsafe {
-            asm!(
-                "mov sp, {0}",
-                "mov x29, {1}",
-                "mov x30, {2}",
-                "br {3}",
-                in(reg) new_sp,
-                in(reg) new_fp,
-                in(reg) new_lr,
-                in(reg) handler_address,
-                options(noreturn)
-            );
+            cfg_if::cfg_if! {
+                if #[cfg(target_arch = "x86_64")] {
+                    // x86-64: restore RSP, RBP, and jump
+                    // The return address is already on the stack at [RBP + 8]
+                    // so we don't need to push it (unlike ARM64 which uses LR register)
+                    let _ = new_lr; // unused on x86-64, return addr is on stack
+                    asm!(
+                        "mov rsp, {0}",
+                        "mov rbp, {1}",
+                        "jmp {2}",
+                        in(reg) new_sp,
+                        in(reg) new_fp,
+                        in(reg) handler_address,
+                        options(noreturn)
+                    );
+                } else {
+                    // ARM64: restore SP, X29 (FP), X30 (LR), and branch
+                    asm!(
+                        "mov sp, {0}",
+                        "mov x29, {1}",
+                        "mov x30, {2}",
+                        "br {3}",
+                        in(reg) new_sp,
+                        in(reg) new_fp,
+                        in(reg) new_lr,
+                        in(reg) handler_address,
+                        options(noreturn)
+                    );
+                }
+            }
         }
     } else {
         // No try-catch handler found

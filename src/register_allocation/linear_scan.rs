@@ -27,7 +27,21 @@ fn physical(index: usize) -> VirtualRegister {
 impl LinearScan {
     pub fn new(instructions: Vec<Instruction>, num_locals: usize) -> Self {
         let lifetimes = Self::get_register_lifetime(&instructions);
-        let physical_registers: Vec<VirtualRegister> = (19..=28).map(physical).collect();
+
+        // Select physical registers based on backend
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "backend-x86-64")] {
+                // x86-64: callee-saved registers
+                // We use R12-R15 (indices 12-15) because they don't conflict with
+                // argument register indices (0-5 are mapped to RDI, RSI, RDX, RCX, R8, R9).
+                // Note: RBX(3) is excluded because its index conflicts with arg(3).
+                let physical_registers: Vec<VirtualRegister> =
+                    vec![12, 13, 14, 15].into_iter().map(physical).collect();
+            } else {
+                // ARM64: callee-saved registers X19-X28
+                let physical_registers: Vec<VirtualRegister> = (19..=28).map(physical).collect();
+            }
+        }
         let max_registers = physical_registers.len();
 
         LinearScan {
@@ -101,9 +115,12 @@ impl LinearScan {
                 self.spill_at_interval(*start, *end, *register, &mut active);
             } else {
                 if register.argument.is_some() {
+                    // For argument registers, use the argument NUMBER as the index
+                    // so that register_from_index() maps it to the correct physical register.
+                    // This works because register_from_index(0) returns arg(0), etc.
                     let new_register = VirtualRegister {
                         argument: register.argument,
-                        index: register.index,
+                        index: register.argument.unwrap(), // Use argument number, not virtual index
                         volatile: false,
                         is_physical: true,
                     };
@@ -114,7 +131,7 @@ impl LinearScan {
                         .insert(*register, physical_register);
                 }
                 active.push(*i);
-                active.sort_by_key(|(end, _, _)| *end);
+                active.sort_by_key(|(_, end, _)| *end);
             }
         }
         self.replace_spilled_registers_with_spill();
@@ -142,22 +159,27 @@ impl LinearScan {
 
     fn spill_at_interval(
         &mut self,
-        _start: usize,
+        start: usize,
         end: usize,
         register: VirtualRegister,
         active: &mut Vec<(usize, usize, VirtualRegister)>,
     ) {
         let spill = *active.last().unwrap();
         if spill.1 > end {
+            // The new interval (register) ends earlier than the spill victim,
+            // so the new interval steals the physical register and the old one gets spilled.
             let physical_register = *self.allocated_registers.get(&spill.2).unwrap();
             self.allocated_registers.insert(register, physical_register);
             let stack_location = self.new_stack_location();
             assert!(!self.location.contains_key(&spill.2));
             self.location.insert(spill.2, stack_location);
             active.retain(|x| *x != spill);
-            self.free_register(physical_register);
+            // NOTE: Do NOT free the physical_register here - it's now in use by `register`.
+            // The register will be freed when the new interval expires.
+            active.push((start, end, register));
             active.sort_by_key(|(_, end, _)| *end);
         } else {
+            // The new interval ends later, so it should be spilled directly.
             assert!(!self.location.contains_key(&register));
             let stack_location = self.new_stack_location();
             self.location.insert(register, stack_location);
@@ -206,8 +228,8 @@ impl LinearScan {
                 // we want to add them to the list of saves
                 let mut saves = Vec::new();
                 for (original_register, (start, end)) in self.lifetimes.iter() {
-                    if *start < i && *end > i + 1 && !self.location.contains_key(original_register)
-                    {
+                    // *end > i: register is used after the call (at instruction i+1 or later)
+                    if *start < i && *end > i && !self.location.contains_key(original_register) {
                         let register = self.allocated_registers.get(original_register).unwrap();
                         // if register.index == 20 {
                         //     println!("20");
@@ -224,8 +246,8 @@ impl LinearScan {
             } else if let Instruction::Recurse(dest, args) = instruction {
                 let mut saves = Vec::new();
                 for (original_register, (start, end)) in self.lifetimes.iter() {
-                    if *start < i && *end > i + 1 && !self.location.contains_key(original_register)
-                    {
+                    // *end > i: register is used after the call (at instruction i+1 or later)
+                    if *start < i && *end > i && !self.location.contains_key(original_register) {
                         let register = self.allocated_registers.get(original_register).unwrap();
                         if let Value::Register(dest) = dest
                             && dest == register
