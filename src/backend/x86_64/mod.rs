@@ -539,4 +539,8 @@ impl CodegenBackend for X86_64Backend {
     fn register_from_index(&self, index: usize) -> Self::Register {
         self.inner.register_from_index(index)
     }
+
+    fn set_function_name(&mut self, name: &str) {
+        self.inner.set_function_name(name);
+    }
 }

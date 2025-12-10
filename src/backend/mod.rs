@@ -311,6 +311,9 @@ pub trait CodegenBackend: Sized {
 
     /// Instruction type for this backend
     type Instruction: std::fmt::Debug;
+
+    /// Set the function name for debugging output (optional, default is no-op)
+    fn set_function_name(&mut self, _name: &str) {}
 }
 
 // Select the backend type based on feature flags

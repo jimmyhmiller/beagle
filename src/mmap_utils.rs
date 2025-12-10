@@ -1,15 +1,19 @@
 use std::ffi::c_void;
 use std::ops::{Index, IndexMut, Range, RangeFrom, RangeFull, RangeTo};
+use std::sync::OnceLock;
 
-/// Cross-platform function to get the system page size
+/// Cached page size to avoid repeated sysconf calls
+static PAGE_SIZE: OnceLock<usize> = OnceLock::new();
+
+/// Cross-platform function to get the system page size (cached)
 #[cfg(target_os = "macos")]
 pub fn get_page_size() -> usize {
-    unsafe { libc::vm_page_size }
+    *PAGE_SIZE.get_or_init(|| unsafe { libc::vm_page_size })
 }
 
 #[cfg(target_os = "linux")]
 pub fn get_page_size() -> usize {
-    unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }
+    *PAGE_SIZE.get_or_init(|| unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize })
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]

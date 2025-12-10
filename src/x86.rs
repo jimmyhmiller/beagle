@@ -33,6 +33,7 @@ pub struct LowLevelX86 {
     free_temporary_registers: Vec<X86Register>,
     allocated_temporary_registers: Vec<X86Register>,
     canonical_temporary_registers: Vec<X86Register>,
+    current_function_name: Option<String>,
 }
 
 impl Default for LowLevelX86 {
@@ -45,12 +46,12 @@ impl LowLevelX86 {
     pub fn new() -> Self {
         // Register allocation strategy (matching ARM64 approach):
         //
-        // We use R12-R15 as "value storage" registers for the linear scan allocator.
+        // We use R12-R15 and RBX as "value storage" registers for the linear scan allocator.
         // Per System V AMD64 ABI, these are callee-saved, but we DON'T save them
         // in prologue/epilogue. Instead, the CallWithSaves mechanism explicitly
         // pushes/pops values that need to survive across function calls.
         //
-        // Note: RBX (index 3) is excluded because its index conflicts with arg(3) mapping
+        // Note: RBX has raw index 3 but uses virtual index 16 to avoid arg(3) conflict.
         //
         // Caller-saved registers:
         // - RAX: return value
@@ -64,7 +65,7 @@ impl LowLevelX86 {
         // because during call setup, we first set the argument registers, then load the function
         // pointer into a temp. If an arg register is used as the function temp, it clobbers
         // the argument we just set.
-        let canonical_volatile_registers = vec![R12, R13, R14, R15];
+        let canonical_volatile_registers = vec![R12, R13, R14, R15, RBX];
         let temporary_registers = vec![R10, R11, RAX];
 
         LowLevelX86 {
@@ -82,7 +83,12 @@ impl LowLevelX86 {
             max_stack_size: 0,
             max_locals: 0,
             stack_map: HashMap::new(),
+            current_function_name: None,
         }
+    }
+
+    pub fn set_function_name(&mut self, name: &str) {
+        self.current_function_name = Some(name.to_string());
     }
 
     pub fn increment_stack_size(&mut self, size: i32) {
@@ -259,12 +265,26 @@ impl LowLevelX86 {
     }
 
     pub fn div(&mut self, destination: X86Register, a: X86Register, b: X86Register) {
-        // IDIV uses RAX:RDX / divisor, quotient in RAX
-        // Need to save RDX, move dividend to RAX, sign-extend, divide, move result
+        // IDIV uses RDX:RAX / divisor, quotient in RAX, remainder in RDX
+        // Need to handle cases where divisor (b) might be RAX or RDX
         self.instructions.push(X86Asm::Push { reg: RDX });
+
+        // If divisor is RAX, we need to save it before moving dividend to RAX
+        // Use R11 as a temporary (caller-saved, safe to clobber)
+        let actual_divisor = if b == RAX {
+            self.mov_reg(R11, b); // Save divisor before clobbering RAX
+            R11
+        } else if b == RDX {
+            // Divisor is RDX, but we just pushed RDX and will clobber it with CQO
+            self.mov_reg(R11, b); // Save divisor
+            R11
+        } else {
+            b
+        };
+
         self.mov_reg(RAX, a);
         self.instructions.push(X86Asm::Cqo); // Sign-extend RAX to RDX:RAX
-        self.instructions.push(X86Asm::Idiv { divisor: b });
+        self.instructions.push(X86Asm::Idiv { divisor: actual_divisor });
         self.mov_reg(destination, RAX);
         self.instructions.push(X86Asm::Pop { reg: RDX });
     }
@@ -494,20 +514,12 @@ impl LowLevelX86 {
         src: X86Register,
         offset: X86Register,
     ) {
-        // x86 can do [base + index * scale], so we can avoid using a temp register
-        // by using SIB addressing: [src + offset] where offset is already scaled
-        // Use LEA to compute the address, then load from it
-        // Actually we can use the dest register as a temp since we're about to write to it
-        self.instructions.push(X86Asm::Lea {
+        // Use SIB addressing: MOV dest, [src + offset*1]
+        // Single instruction instead of LEA + ADD + MOV
+        self.instructions.push(X86Asm::MovRMIndexed {
             dest,
             base: src,
-            offset: 0,
-        });
-        self.add(dest, dest, offset);
-        self.instructions.push(X86Asm::MovRM {
-            dest,
-            base: dest,
-            offset: 0,
+            index: offset,
         });
     }
 
@@ -517,20 +529,13 @@ impl LowLevelX86 {
         val: X86Register,
         offset: X86Register,
     ) {
-        let temp = self.temporary_register();
-        self.instructions.push(X86Asm::Lea {
-            dest: temp,
+        // Use SIB addressing: MOV [ptr + offset*1], val
+        // Single instruction instead of LEA + ADD + MOV
+        self.instructions.push(X86Asm::MovMRIndexed {
             base: ptr,
-            offset: 0,
-        });
-        self.add(temp, temp, offset);
-        self.instructions.push(X86Asm::MovMR {
-            base: temp,
-            offset: 0,
+            index: offset,
             src: val,
         });
-        // Free the temp register immediately since we're done with it
-        self.free_temporary_register(temp);
     }
 
     // === Stack operations ===
@@ -831,16 +836,16 @@ impl LowLevelX86 {
     // === Atomic operations ===
 
     pub fn atomic_load(&mut self, dest: X86Register, src: X86Register) {
-        // On x86-64, aligned loads are atomic
+        // On x86-64, aligned loads are atomic and have acquire semantics by default
+        // due to x86's strong memory model (loads are not reordered with other loads).
+        // No MFENCE needed for acquire semantics - that would be extremely expensive.
         self.load_from_heap(dest, src, 0);
-        // Memory fence for acquire semantics
-        self.instructions.push(X86Asm::Mfence);
     }
 
     pub fn atomic_store(&mut self, ptr: X86Register, val: X86Register) {
-        // Memory fence for release semantics
-        self.instructions.push(X86Asm::Mfence);
-        // On x86-64, aligned stores are atomic
+        // On x86-64, aligned stores are atomic and have release semantics by default
+        // due to x86's strong memory model (stores are not reordered with other stores).
+        // No MFENCE needed for release semantics - that would be extremely expensive.
         self.store_on_heap(ptr, val, 0);
     }
 
@@ -944,6 +949,7 @@ impl LowLevelX86 {
             3 => RCX, // arg 3
             4 => R8,  // arg 4
             5 => R9,  // arg 5
+            16 => RBX, // Additional callee-saved register (virtual index 16 -> RBX)
             // For other indices, use the raw register index
             // This works for callee-saved R12-R15 (indices 12-15)
             _ => X86Register::from_index(index),
@@ -972,12 +978,49 @@ impl LowLevelX86 {
         self.patch_labels();
         // Then patch prelude/epilogue stack sizes
         self.patch_prelude_and_epilogue();
+
+        // Debug: dump instructions before encoding
+        if std::env::var("DUMP_X86").is_ok() {
+            self.dump_instructions_named(self.current_function_name.as_deref());
+        }
+
         // Finally, encode all instructions
         let mut bytes = Vec::new();
         for instr in &self.instructions {
             bytes.extend(instr.encode());
         }
         bytes
+    }
+
+    /// Dump all instructions for debugging
+    pub fn dump_instructions(&self) {
+        self.dump_instructions_named(None);
+    }
+
+    /// Dump all instructions for debugging, with optional function name
+    pub fn dump_instructions_named(&self, function_name: Option<&str>) {
+        // Check if we should filter by function name
+        if let Ok(filter) = std::env::var("DUMP_X86_FILTER") {
+            if let Some(name) = function_name {
+                if !name.contains(&filter) {
+                    return;
+                }
+            } else {
+                return;
+            }
+        }
+
+        let name_str = function_name.unwrap_or("<anonymous>");
+        eprintln!("\n=== X86 Instructions for {} ({} total) ===", name_str, self.instructions.len());
+        let mut byte_offset = 0;
+        for (i, instr) in self.instructions.iter().enumerate() {
+            let size = instr.size();
+            let bytes = instr.encode();
+            let hex: String = bytes.iter().map(|b| format!("{:02x} ", b)).collect();
+            eprintln!("{:4} [{:04x}] {:20} {:?}", i, byte_offset, hex.trim(), instr);
+            byte_offset += size;
+        }
+        eprintln!("=== Total: {} bytes ===\n", byte_offset);
     }
 
     fn patch_labels(&mut self) {

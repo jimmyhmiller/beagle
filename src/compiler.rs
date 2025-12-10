@@ -579,6 +579,9 @@ impl Compiler {
         max_locals: usize,
         number_of_args: usize,
     ) -> Result<usize, Box<dyn Error>> {
+        if let Some(name) = function_name {
+            backend.set_function_name(name);
+        }
         let code = backend.compile_to_bytes();
         let pointer = self.add_code(&code)?;
         let runtime = get_runtime().get_mut();
