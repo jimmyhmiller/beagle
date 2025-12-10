@@ -1575,7 +1575,7 @@ extern "C" fn pop_count(stack_pointer: usize, value: usize) -> usize {
 // Exception handling builtins
 pub unsafe extern "C" fn push_exception_handler_runtime(
     handler_address: usize,
-    result_local: usize,
+    result_local: isize,
     link_register: usize,
     stack_pointer: usize,
     frame_pointer: usize,
@@ -1625,10 +1625,7 @@ pub unsafe extern "C" fn throw_exception(stack_pointer: usize, value: usize) -> 
         let new_lr = handler.link_register;
         let result_local_offset = handler.result_local;
 
-        // Store exception value in the result local
-        // The result local is at FP - offset (locals are below FP)
-        // result_local_offset is already the byte offset (negative from FP)
-        let result_ptr = (new_fp.wrapping_add(result_local_offset)) as *mut usize;
+        let result_ptr = (new_fp as isize).wrapping_add(result_local_offset) as *mut usize;
         unsafe {
             *result_ptr = exception;
         }

@@ -94,21 +94,11 @@ impl LowLevelX86 {
 
     /// Generate function prologue
     pub fn prelude(&mut self) {
-        // x86-64 function prologue (matching ARM64 approach):
-        // PUSH RBP
-        // MOV RBP, RSP
-        // SUB RSP, <stack_size>  ; placeholder, patched later
-        //
-        // Note: We don't save callee-saved registers (R12-R15) here because
-        // the CallWithSaves mechanism handles preserving values across calls.
-        // This matches ARM64's approach and keeps the frame layout consistent
-        // with what the GC expects.
         self.instructions.push(X86Asm::Push { reg: RBP });
         self.instructions.push(X86Asm::MovRR {
             dest: RBP,
             src: RSP,
         });
-        // Placeholder SUB - magic value 0x11111111 will be patched
         self.instructions.push(X86Asm::SubRI {
             dest: RSP,
             imm: 0x1111_1111_u32 as i32,
@@ -117,13 +107,6 @@ impl LowLevelX86 {
 
     /// Generate function epilogue
     pub fn epilogue(&mut self) {
-        // x86-64 function epilogue (matching ARM64 approach):
-        // ADD RSP, <stack_size>  ; placeholder, patched later
-        // POP RBP
-        //
-        // Note: No callee-saved register restoration needed since we don't
-        // save them in the prologue. CallWithSaves handles value preservation.
-        // Placeholder ADD - magic value 0x11111111 will be patched
         self.instructions.push(X86Asm::AddRI {
             dest: RSP,
             imm: 0x1111_1111_u32 as i32,
@@ -552,58 +535,40 @@ impl LowLevelX86 {
 
     // === Stack operations ===
 
+    const CALLEE_SAVED_SIZE: i32 = 0;
+
     pub fn push_to_stack(&mut self, reg: X86Register) {
-        // Store at a calculated offset instead of using PUSH (which modifies RSP).
-        // This matches ARM64's approach where stack_size tracks conceptual stack usage
-        // without actually changing the stack pointer.
-        //
-        // Stack temporaries are stored after locals:
-        // - Local 0 at [RBP - 8], Local 1 at [RBP - 16], ...
-        // - Local (max_locals-1) at [RBP - max_locals * 8]
-        // - Stack temp 0 at [RBP - (max_locals + 1) * 8], etc.
-        //
-        // After increment, stack_size is the 1-based index of this slot.
         self.increment_stack_size(1);
-        let offset = self.max_locals + self.stack_size;
+        let offset = Self::CALLEE_SAVED_SIZE + (self.max_locals + self.stack_size) * 8;
         self.instructions.push(X86Asm::MovMR {
             base: RBP,
-            offset: -(offset) * 8,
+            offset: -offset,
             src: reg,
         });
     }
 
     pub fn pop_from_stack(&mut self, reg: X86Register) {
-        // Load from a calculated offset instead of using POP (which modifies RSP).
-        // This is the inverse of push_to_stack - loads from where push_to_stack stored.
-        //
-        // Stack temporaries are at [RBP - (max_locals + stack_size) * 8]
-        let offset = self.max_locals + self.stack_size;
+        let offset = Self::CALLEE_SAVED_SIZE + (self.max_locals + self.stack_size) * 8;
         self.instructions.push(X86Asm::MovRM {
             dest: reg,
             base: RBP,
-            offset: -(offset) * 8,
+            offset: -offset,
         });
         self.stack_size -= 1;
     }
 
     pub fn load_local(&mut self, dest: X86Register, offset: i32) {
-        // Locals are at [RBP - (offset + 1) * 8]
-        // The +1 accounts for saved RBP:
-        //   [RBP + 0] = saved RBP from prologue
-        //   [RBP - 8] = local 0 (offset=0 -> -(0+1)*8 = -8)
         self.instructions.push(X86Asm::MovRM {
             dest,
             base: RBP,
-            offset: -(offset + 1) * 8,
+            offset: -Self::CALLEE_SAVED_SIZE - (offset + 1) * 8,
         });
     }
 
     pub fn store_local(&mut self, src: X86Register, offset: i32) {
-        // Locals are at [RBP - (offset + 1) * 8]
-        // The +1 accounts for saved RBP
         self.instructions.push(X86Asm::MovMR {
             base: RBP,
-            offset: -(offset + 1) * 8,
+            offset: -Self::CALLEE_SAVED_SIZE - (offset + 1) * 8,
             src,
         });
     }
@@ -680,17 +645,11 @@ impl LowLevelX86 {
     }
 
     pub fn get_current_stack_position(&mut self, dest: X86Register) {
-        // Return the address where the next push_to_stack will store its value.
-        // This matches ARM64's approach using frame-pointer-relative addressing.
-        //
-        // push_to_stack (after increment) stores at [RBP - (max_locals + stack_size) * 8]
-        // So the current stack position (where next push will go) is:
-        // RBP - (max_locals + stack_size + 1) * 8
-        let offset = (self.max_locals + self.stack_size + 1) * 8;
+        let offset = Self::CALLEE_SAVED_SIZE + (self.max_locals + self.stack_size + 1) * 8;
         self.instructions.push(X86Asm::Lea {
             dest,
             base: RBP,
-            offset: -(offset),
+            offset: -offset,
         });
     }
 
@@ -1081,12 +1040,9 @@ impl LowLevelX86 {
     }
 
     fn patch_prelude_and_epilogue(&mut self) {
-        // Calculate stack size needed (must be 16-byte aligned)
-        // After push RBP, RSP is 16-aligned. We need to keep it that way.
-        // So we allocate (max_locals + max_stack_size) slots, rounded up to even.
         let mut slots = self.max_locals + self.max_stack_size;
         if slots % 2 != 0 {
-            slots += 1; // Add 1 slot (8 bytes) to maintain 16-byte alignment
+            slots += 1;
         }
         let aligned_size = (slots * 8) as i32;
 

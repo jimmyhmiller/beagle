@@ -1613,6 +1613,7 @@ impl Ir {
                         let save = self.value_to_register(save, backend);
                         backend.push_to_stack(save);
                     }
+
                     let num_arg_regs = backend.num_arg_registers();
                     for (arg_index, arg) in args.iter().enumerate().rev() {
                         let arg = self.value_to_register(arg, backend);
@@ -1720,7 +1721,6 @@ impl Ir {
                         None
                     };
 
-                    // Push saves to stack
                     for save in saves.iter() {
                         let save_reg = self.value_to_register(save, backend);
                         backend.push_to_stack(save_reg);
@@ -1777,7 +1777,6 @@ impl Ir {
                         backend.free_temporary_register(dest_reg);
                     }
 
-                    // Restore saves from stack
                     for save in saves.iter().rev() {
                         let save_reg = self.value_to_register(save, backend);
                         backend.pop_from_stack(save_reg);

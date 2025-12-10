@@ -463,8 +463,6 @@ impl CodegenBackend for X86_64Backend {
     }
 
     fn get_local_byte_offset(&self, local_index: usize) -> isize {
-        // On x86-64, locals are at [RBP - (local_index + 1) * 8]
-        // The +1 accounts for: saved RBP
         -(((local_index + 1) * 8) as isize)
     }
 

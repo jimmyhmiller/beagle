@@ -781,7 +781,7 @@ pub struct ExceptionHandler {
     pub stack_pointer: usize,
     pub frame_pointer: usize,
     pub link_register: usize,
-    pub result_local: usize,
+    pub result_local: isize,
 }
 
 pub struct Runtime {
@@ -927,6 +927,8 @@ impl Runtime {
     }
 
     pub fn reset(&mut self) {
+        self.wait_for_other_threads();
+
         self.memory.reset();
         self.namespaces = NamespaceManager::new();
         self.structs = StructManager::new();

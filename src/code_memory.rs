@@ -5,7 +5,6 @@ pub struct CodeAllocator {
     current_page: Option<ReservedMut>,
     current_offset: usize,
     pending_pages: Vec<Reserved>,
-    #[allow(dead_code)]
     used_pages: Vec<Mmap>,
 }
 

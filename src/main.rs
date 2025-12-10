@@ -125,27 +125,21 @@ const PADDING_FOR_ALIGNMENT: i64 = 2;
 fn compile_trampoline(runtime: &mut Runtime) {
     cfg_if::cfg_if! {
         if #[cfg(feature = "backend-x86-64")] {
+            use crate::machine_code::x86_codegen::{RBP, RBX, R12, R13, R14, R15};
             let mut lang = x86::LowLevelX86::new();
 
-            // We store callee-saved registers at local offsets 4-8, so we need max_locals >= 9
-            // Local 4-7: R12, R13, R14, R15
-            // Local 8: RBX (also callee-saved, needed for exception handling)
-            lang.set_max_locals(9);
-            lang.prelude();
+            lang.instructions.push(X86Asm::Push { reg: RBP });
+            lang.instructions.push(X86Asm::MovRR { dest: RBP, src: RSP });
+            lang.instructions.push(X86Asm::Push { reg: RBX });
+            lang.instructions.push(X86Asm::Push { reg: R12 });
+            lang.instructions.push(X86Asm::Push { reg: R13 });
+            lang.instructions.push(X86Asm::Push { reg: R14 });
+            lang.instructions.push(X86Asm::Push { reg: R15 });
 
-            // Save callee-saved registers (R12-R15)
-            for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
-                lang.store_local(*reg, (i + 4) as i32);
-            }
-            // Also save RBX - it's callee-saved and gets corrupted by exception throws
-            lang.store_local(RBX, 8);
-
-            // x86-64 ABI: RDI=new_stack, RSI=func, RDX=arg0, RCX=arg1, R8=arg2
             lang.mov_reg(R10, RSP);
             lang.mov_reg(RSP, RDI);
-            // Use actual PUSH instruction to save old RSP on the NEW stack
-            // (push_to_stack uses RBP which still points to trampoline's frame)
             lang.instructions.push(X86Asm::Push { reg: R10 });
+            lang.instructions.push(X86Asm::SubRI { dest: RSP, imm: 8 });
 
             lang.mov_reg(R10, RSI);
             lang.mov_reg(RDI, RDX);
@@ -154,18 +148,16 @@ fn compile_trampoline(runtime: &mut Runtime) {
 
             lang.call(R10);
 
-            // Use actual POP instruction to restore old RSP from the NEW stack
+            lang.instructions.push(X86Asm::AddRI { dest: RSP, imm: 8 });
             lang.instructions.push(X86Asm::Pop { reg: R10 });
             lang.mov_reg(RSP, R10);
 
-            // Restore RBX first
-            lang.load_local(RBX, 8);
-            // Restore callee-saved registers (R12-R15)
-            for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate().rev() {
-                lang.load_local(*reg, (i + 4) as i32);
-            }
-
-            lang.epilogue();
+            lang.instructions.push(X86Asm::Pop { reg: R15 });
+            lang.instructions.push(X86Asm::Pop { reg: R14 });
+            lang.instructions.push(X86Asm::Pop { reg: R13 });
+            lang.instructions.push(X86Asm::Pop { reg: R12 });
+            lang.instructions.push(X86Asm::Pop { reg: RBX });
+            lang.instructions.push(X86Asm::Pop { reg: RBP });
             lang.ret();
 
             runtime

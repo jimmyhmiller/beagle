@@ -200,14 +200,15 @@ impl CompactingHeap {
             return heap_object.tagged_pointer();
         }
 
-        // If marked, object has been forwarded - get forwarding pointer from header
-        if heap_object.marked() {
-            // The header contains the forwarding pointer with marked bit preserved
-            let untagged = heap_object.untagged();
-            let pointer = untagged as *mut usize;
-            let header_data = unsafe { *pointer };
-            // Clear the marked bit to get the clean forwarding pointer
-            return Header::clear_marked_bit(header_data);
+        // If forwarded, object has been moved - get forwarding pointer from header
+        // We check the forwarding bit (bit 3) which doesn't conflict with type tags
+        let untagged = heap_object.untagged();
+        let pointer = untagged as *mut usize;
+        let header_data = unsafe { *pointer };
+        if Header::is_forwarding_bit_set(header_data) {
+            // The header contains the forwarding pointer with forwarding bit set
+            // Clear the forwarding bit to get the clean tagged pointer
+            return Header::clear_forwarding_bit(header_data);
         }
 
         // Copy the object to to_space
@@ -217,10 +218,8 @@ impl CompactingHeap {
 
         // Store forwarding pointer in header for all objects
         let tagged_new = heap_object.get_object_type().unwrap().tag(new_pointer) as usize;
-        let untagged = heap_object.untagged();
-        let pointer = untagged as *mut usize;
-        // Set the forwarding pointer with marked bit preserved
-        unsafe { *pointer = Header::set_marked_bit(tagged_new) };
+        // Set the forwarding bit to mark this as a forwarding pointer
+        unsafe { *pointer = Header::set_forwarding_bit(tagged_new) };
 
         tagged_new
     }
