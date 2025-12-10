@@ -2095,7 +2095,7 @@ impl Runtime {
             .fields
             .iter()
             .position(|f| f == string)
-            .ok_or(format!(
+            .ok_or_else(|| format!(
                 "Field not found {} for struct {:?}",
                 string, struct_value
             ))?;
@@ -2153,7 +2153,7 @@ impl Runtime {
         };
 
         // Look up the type descriptor binding from beagle.core
-        let slot = self.find_binding(beagle_core_id, type_name).ok_or(format!(
+        let slot = self.find_binding(beagle_core_id, type_name).ok_or_else(|| format!(
             "Type descriptor '{}' not found in beagle.core",
             type_name
         ))?;

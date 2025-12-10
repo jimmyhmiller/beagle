@@ -1736,10 +1736,6 @@ impl AstCompiler<'_> {
 
                 let exit_property_access = self.ir.label("exit_property_access");
                 let slow_property_path = self.ir.label("slow_property_path");
-                #[cfg(feature = "backend-x86-64")]
-                {
-                    self.ir.jump(slow_property_path); // Disable fast path on x86-64 for debugging
-                }
                 self.ir.jump_if(
                     slow_property_path,
                     Condition::NotEqual,

@@ -32,11 +32,11 @@ impl LinearScan {
         cfg_if::cfg_if! {
             if #[cfg(feature = "backend-x86-64")] {
                 // x86-64: callee-saved registers
-                // We use R12-R15 (indices 12-15) because they don't conflict with
-                // argument register indices (0-5 are mapped to RDI, RSI, RDX, RCX, R8, R9).
-                // Note: RBX(3) is excluded because its index conflicts with arg(3).
+                // We use R12-R15 (indices 12-15) and RBX (virtual index 16) because they
+                // don't conflict with argument register indices (0-5 map to RDI, RSI, RDX, RCX, R8, R9).
+                // RBX has raw x86 index 3 but we use virtual index 16 to avoid arg(3) conflict.
                 let physical_registers: Vec<VirtualRegister> =
-                    vec![12, 13, 14, 15].into_iter().map(physical).collect();
+                    vec![12, 13, 14, 15, 16].into_iter().map(physical).collect();
             } else {
                 // ARM64: callee-saved registers X19-X28
                 let physical_registers: Vec<VirtualRegister> = (19..=28).map(physical).collect();

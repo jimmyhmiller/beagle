@@ -252,6 +252,18 @@ pub enum X86Asm {
         offset: i32,
         src: X86Register,
     },
+    /// MOV r64, [base + index*1] - SIB addressing with scale=1
+    MovRMIndexed {
+        dest: X86Register,
+        base: X86Register,
+        index: X86Register,
+    },
+    /// MOV [base + index*1], r64 - SIB addressing with scale=1
+    MovMRIndexed {
+        base: X86Register,
+        index: X86Register,
+        src: X86Register,
+    },
     /// LEA r64, [base + offset]
     Lea {
         dest: X86Register,
@@ -536,6 +548,58 @@ impl X86Asm {
             X86Asm::MovMR { base, offset, src } => {
                 // MOV [base + offset], r64: REX.W + 89 /r
                 encode_mem_op(0x89, src.index, base.index, *offset, true)
+            }
+
+            X86Asm::MovRMIndexed { dest, base, index } => {
+                // MOV r64, [base + index*1]: REX.W + 8B /r with SIB
+                // ModRM: mod=00, reg=dest, rm=100 (SIB follows)
+                // SIB: scale=00 (1x), index=index, base=base
+                let base_idx = base.index;
+                let index_idx = index.index;
+                let dest_idx = dest.index;
+
+                // REX prefix: W=1, R=(dest>>3), X=(index>>3), B=(base>>3)
+                let rex = 0x48
+                    | ((dest_idx >> 3) << 2)  // REX.R
+                    | ((index_idx >> 3) << 1) // REX.X
+                    | (base_idx >> 3);        // REX.B
+
+                // ModRM: mod=00, reg=dest[2:0], rm=100 (SIB)
+                let modrm = ((dest_idx & 0b111) << 3) | 0b100;
+
+                // SIB: scale=00, index=index[2:0], base=base[2:0]
+                let sib_byte = ((index_idx & 0b111) << 3) | (base_idx & 0b111);
+
+                // Handle RBP/R13 as base (requires disp8 of 0)
+                if (base_idx & 0b111) == 5 {
+                    // mod=01 with disp8=0
+                    let modrm = 0b01_000_100 | ((dest_idx & 0b111) << 3);
+                    vec![rex, 0x8B, modrm, sib_byte, 0x00]
+                } else {
+                    vec![rex, 0x8B, modrm, sib_byte]
+                }
+            }
+
+            X86Asm::MovMRIndexed { base, index, src } => {
+                // MOV [base + index*1], r64: REX.W + 89 /r with SIB
+                let base_idx = base.index;
+                let index_idx = index.index;
+                let src_idx = src.index;
+
+                let rex = 0x48
+                    | ((src_idx >> 3) << 2)   // REX.R
+                    | ((index_idx >> 3) << 1) // REX.X
+                    | (base_idx >> 3);        // REX.B
+
+                let modrm = ((src_idx & 0b111) << 3) | 0b100;
+                let sib_byte = ((index_idx & 0b111) << 3) | (base_idx & 0b111);
+
+                if (base_idx & 0b111) == 5 {
+                    let modrm = 0b01_000_100 | ((src_idx & 0b111) << 3);
+                    vec![rex, 0x89, modrm, sib_byte, 0x00]
+                } else {
+                    vec![rex, 0x89, modrm, sib_byte]
+                }
             }
 
             X86Asm::Lea { dest, base, offset } => {
