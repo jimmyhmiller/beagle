@@ -131,6 +131,7 @@ pub enum Token {
     Colon,
     Comma,
     Dot,
+    DotDotDot,
     NewLine,
     Fn,
     Loop,
@@ -232,6 +233,7 @@ impl Token {
             Token::Colon => Ok(":".to_string()),
             Token::Comma => Ok(",".to_string()),
             Token::Dot => Ok(".".to_string()),
+            Token::DotDotDot => Ok("...".to_string()),
             Token::NewLine => Ok("\n".to_string()),
             Token::Fn => Ok("fn".to_string()),
             Token::And => Ok("&&".to_string()),
@@ -663,6 +665,11 @@ impl Tokenizer {
         } else if self.is_close_bracket(input_bytes) {
             self.consume(input_bytes);
             Token::CloseBracket
+        } else if self.is_dot_dot_dot(input_bytes) {
+            self.consume(input_bytes);
+            self.consume(input_bytes);
+            self.consume(input_bytes);
+            Token::DotDotDot
         } else if self.is_dot(input_bytes) {
             self.consume(input_bytes);
             Token::Dot
@@ -691,6 +698,13 @@ impl Tokenizer {
 
     pub fn is_dot(&self, input_bytes: &[u8]) -> bool {
         self.current_byte(input_bytes) == b'.'
+    }
+
+    pub fn is_dot_dot_dot(&self, input_bytes: &[u8]) -> bool {
+        self.position + 2 < input_bytes.len()
+            && input_bytes[self.position] == b'.'
+            && input_bytes[self.position + 1] == b'.'
+            && input_bytes[self.position + 2] == b'.'
     }
 
     // TODO: Make a lazy method of tokenizing
@@ -1018,7 +1032,7 @@ impl Parser {
                 // Values use 3-bit tagging (shifted left by 3), so only 61 bits available
                 const MAX_61_BIT: i64 = (1i64 << 60) - 1;
                 const MIN_61_BIT: i64 = -(1i64 << 60);
-                if parsed_value > MAX_61_BIT || parsed_value < MIN_61_BIT {
+                if !(MIN_61_BIT..=MAX_61_BIT).contains(&parsed_value) {
                     return Err(ParseError::InvalidNumberLiteral {
                         literal: format!(
                             "{} (tagged integers use 61 bits: {} to {})",
@@ -1138,13 +1152,14 @@ impl Parser {
             _ => None,
         };
         self.expect_open_paren()?;
-        let args = self.parse_args()?;
+        let (args, rest_param) = self.parse_args()?;
         self.expect_close_paren()?;
         let body = self.parse_block()?;
         let end_position = self.position;
         Ok(Ast::Function {
             name,
             args,
+            rest_param,
             body,
             token_range: TokenRange::new(start_position, end_position),
         })
@@ -1389,7 +1404,7 @@ impl Parser {
                 };
                 self.move_to_next_non_whitespace();
                 self.expect_open_paren()?;
-                let args = self.parse_args()?;
+                let (args, rest_param) = self.parse_args()?;
                 self.expect_close_paren()?;
                 self.skip_spaces();
                 if self.is_open_curly() {
@@ -1398,6 +1413,7 @@ impl Parser {
                     Ok(Ast::Function {
                         name: Some(name),
                         args,
+                        rest_param,
                         body,
                         token_range: TokenRange::new(self.position, end_position),
                     })
@@ -1406,6 +1422,7 @@ impl Parser {
                     Ok(Ast::FunctionStub {
                         name,
                         args,
+                        rest_param,
                         token_range: TokenRange::new(self.position, end_position),
                     })
                 }
@@ -1627,14 +1644,32 @@ impl Parser {
         self.current_token() == Token::Comma
     }
 
-    fn parse_args(&mut self) -> ParseResult<Vec<String>> {
+    fn parse_args(&mut self) -> ParseResult<(Vec<String>, Option<String>)> {
         let mut result = Vec::new();
+        let mut rest_param = None;
         self.skip_whitespace();
         while !self.at_end() && !self.is_close_paren() {
-            result.push(self.parse_arg()?);
+            let (name, is_rest) = self.parse_arg()?;
+            if is_rest {
+                if rest_param.is_some() {
+                    return Err(ParseError::InvalidDeclaration {
+                        message: "Only one rest parameter allowed".to_string(),
+                        position: self.position,
+                    });
+                }
+                rest_param = Some(name);
+            } else {
+                if rest_param.is_some() {
+                    return Err(ParseError::InvalidDeclaration {
+                        message: "Rest parameter must be last".to_string(),
+                        position: self.position,
+                    });
+                }
+                result.push(name);
+            }
             self.skip_whitespace();
         }
-        Ok(result)
+        Ok((result, rest_param))
     }
 
     fn parse_struct_fields(&mut self) -> ParseResult<Vec<Ast>> {
@@ -1750,7 +1785,16 @@ impl Parser {
         }
     }
 
-    fn parse_arg(&mut self) -> ParseResult<String> {
+    fn parse_arg(&mut self) -> ParseResult<(String, bool)> {
+        // Check for rest parameter syntax: ...name
+        let is_rest = if self.current_token() == Token::DotDotDot {
+            self.consume();
+            self.skip_spaces();
+            true
+        } else {
+            false
+        };
+
         match self.current_token() {
             Token::Atom((start, end)) => {
                 let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
@@ -1760,7 +1804,7 @@ impl Parser {
                 if !self.is_close_paren() {
                     self.expect_comma()?;
                 }
-                Ok(name)
+                Ok((name, is_rest))
             }
             _ => Err(ParseError::UnexpectedToken {
                 expected: "argument name".to_string(),

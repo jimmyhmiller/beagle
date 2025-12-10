@@ -284,7 +284,9 @@ impl LowLevelX86 {
 
         self.mov_reg(RAX, a);
         self.instructions.push(X86Asm::Cqo); // Sign-extend RAX to RDX:RAX
-        self.instructions.push(X86Asm::Idiv { divisor: actual_divisor });
+        self.instructions.push(X86Asm::Idiv {
+            divisor: actual_divisor,
+        });
         self.mov_reg(destination, RAX);
         self.instructions.push(X86Asm::Pop { reg: RDX });
     }
@@ -943,12 +945,12 @@ impl LowLevelX86 {
         // So we need to map virtual indices 0-5 to argument registers.
         // Indices >= 6 are used for callee-saved or other registers.
         match index {
-            0 => RDI, // arg 0
-            1 => RSI, // arg 1
-            2 => RDX, // arg 2
-            3 => RCX, // arg 3
-            4 => R8,  // arg 4
-            5 => R9,  // arg 5
+            0 => RDI,  // arg 0
+            1 => RSI,  // arg 1
+            2 => RDX,  // arg 2
+            3 => RCX,  // arg 3
+            4 => R8,   // arg 4
+            5 => R9,   // arg 5
             16 => RBX, // Additional callee-saved register (virtual index 16 -> RBX)
             // For other indices, use the raw register index
             // This works for callee-saved R12-R15 (indices 12-15)
@@ -1011,13 +1013,23 @@ impl LowLevelX86 {
         }
 
         let name_str = function_name.unwrap_or("<anonymous>");
-        eprintln!("\n=== X86 Instructions for {} ({} total) ===", name_str, self.instructions.len());
+        eprintln!(
+            "\n=== X86 Instructions for {} ({} total) ===",
+            name_str,
+            self.instructions.len()
+        );
         let mut byte_offset = 0;
         for (i, instr) in self.instructions.iter().enumerate() {
             let size = instr.size();
             let bytes = instr.encode();
             let hex: String = bytes.iter().map(|b| format!("{:02x} ", b)).collect();
-            eprintln!("{:4} [{:04x}] {:20} {:?}", i, byte_offset, hex.trim(), instr);
+            eprintln!(
+                "{:4} [{:04x}] {:20} {:?}",
+                i,
+                byte_offset,
+                hex.trim(),
+                instr
+            );
             byte_offset += size;
         }
         eprintln!("=== Total: {} bytes ===\n", byte_offset);

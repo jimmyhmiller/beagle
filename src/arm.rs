@@ -677,7 +677,7 @@ impl LowLevelArm {
 
         let byte_offset = offset * 8;
 
-        if byte_offset >= MIN_IMM9 && byte_offset <= MAX_IMM9 {
+        if (MIN_IMM9..=MAX_IMM9).contains(&byte_offset) {
             // Offset fits in imm9 - use STUR directly
             self.instructions.push(ArmAsm::SturGen {
                 size: 0b11,
@@ -724,7 +724,7 @@ impl LowLevelArm {
 
         let byte_offset = offset * 8;
 
-        if byte_offset >= MIN_IMM9 && byte_offset <= MAX_IMM9 {
+        if (MIN_IMM9..=MAX_IMM9).contains(&byte_offset) {
             // Offset fits in imm9 - use LDUR directly
             self.instructions.push(ArmAsm::LdurGen {
                 size: 0b11,
@@ -762,7 +762,7 @@ impl LowLevelArm {
 
         let byte_offset = offset * 8;
 
-        if byte_offset >= MIN_IMM9 && byte_offset <= MAX_IMM9 {
+        if (MIN_IMM9..=MAX_IMM9).contains(&byte_offset) {
             // Offset fits in imm9 - use LDUR directly
             self.instructions.push(ArmAsm::LdurGen {
                 size: 0b11,
@@ -802,7 +802,7 @@ impl LowLevelArm {
 
         let byte_offset = offset * 8;
 
-        if byte_offset >= MIN_IMM9 && byte_offset <= MAX_IMM9 {
+        if (MIN_IMM9..=MAX_IMM9).contains(&byte_offset) {
             // Offset fits in imm9 - use STUR directly
             self.instructions.push(ArmAsm::SturGen {
                 size: 0b11,

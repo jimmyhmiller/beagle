@@ -174,7 +174,7 @@ impl Compiler {
                     function_name: top_level.clone(),
                 }
             })?;
-            let function_pointer = self.get_pointer_for_function(function).ok_or_else(|| {
+            let function_pointer = self.get_pointer_for_function(function).ok_or({
                 CompileError::InvalidFunctionPointer {
                     function_name: top_level,
                 }
@@ -210,10 +210,10 @@ impl Compiler {
         // (when no files have been compiled yet). This ensures:
         // 1. Sequential compilations (e.g., multiple eval() calls) start fresh
         // 2. Warnings from dependencies within a single compilation accumulate
-        if self.compiled_file_cache.is_empty() {
-            if let Ok(mut warnings) = self.warnings.lock() {
-                warnings.clear();
-            }
+        if self.compiled_file_cache.is_empty()
+            && let Ok(mut warnings) = self.warnings.lock()
+        {
+            warnings.clear();
         }
         if self.command_line_arguments.verbose {
             println!("Compiling {:?}", file_name);
@@ -298,7 +298,7 @@ impl Compiler {
             let token_map = ir.ir_range_to_token_range.clone();
             let max_locals = backend.max_locals() as usize;
             let function_pointer =
-                self.upsert_function(Some(&top_level_name), &mut backend, max_locals, 0)?;
+                self.upsert_function(Some(&top_level_name), &mut backend, max_locals, 0, false, 0)?;
             debug_only! {
                 debugger(Message {
                     kind: "ir".to_string(),
@@ -441,38 +441,37 @@ impl Compiler {
         }
 
         // Try two levels up (for cargo run - target/debug -> target -> root)
-        if let Some(parent) = exe_path.parent() {
-            if let Some(grandparent) = parent.parent() {
-                let grandparent_stdlib_path =
-                    grandparent.join(format!("standard-library/{}.bg", import_name));
-                if grandparent_stdlib_path.exists() {
-                    return grandparent_stdlib_path
-                        .to_str()
-                        .ok_or_else(|| CompileError::PathConversion {
-                            path: format!("{:?}", grandparent_stdlib_path),
-                        })
-                        .map(|s| s.to_string())
-                        .map_err(|e| e.into());
-                }
+        if let Some(parent) = exe_path.parent()
+            && let Some(grandparent) = parent.parent()
+        {
+            let grandparent_stdlib_path =
+                grandparent.join(format!("standard-library/{}.bg", import_name));
+            if grandparent_stdlib_path.exists() {
+                return grandparent_stdlib_path
+                    .to_str()
+                    .ok_or_else(|| CompileError::PathConversion {
+                        path: format!("{:?}", grandparent_stdlib_path),
+                    })
+                    .map(|s| s.to_string())
+                    .map_err(|e| e.into());
             }
         }
 
         // Try three levels up (for cargo test - target/debug/deps -> target/debug -> target -> root)
-        if let Some(parent) = exe_path.parent() {
-            if let Some(grandparent) = parent.parent() {
-                if let Some(great_grandparent) = grandparent.parent() {
-                    let great_grandparent_stdlib_path =
-                        great_grandparent.join(format!("standard-library/{}.bg", import_name));
-                    if great_grandparent_stdlib_path.exists() {
-                        return great_grandparent_stdlib_path
-                            .to_str()
-                            .ok_or_else(|| CompileError::PathConversion {
-                                path: format!("{:?}", great_grandparent_stdlib_path),
-                            })
-                            .map(|s| s.to_string())
-                            .map_err(|e| e.into());
-                    }
-                }
+        if let Some(parent) = exe_path.parent()
+            && let Some(grandparent) = parent.parent()
+            && let Some(great_grandparent) = grandparent.parent()
+        {
+            let great_grandparent_stdlib_path =
+                great_grandparent.join(format!("standard-library/{}.bg", import_name));
+            if great_grandparent_stdlib_path.exists() {
+                return great_grandparent_stdlib_path
+                    .to_str()
+                    .ok_or_else(|| CompileError::PathConversion {
+                        path: format!("{:?}", great_grandparent_stdlib_path),
+                    })
+                    .map(|s| s.to_string())
+                    .map_err(|e| e.into());
             }
         }
 
@@ -578,6 +577,8 @@ impl Compiler {
         backend: &mut B,
         max_locals: usize,
         number_of_args: usize,
+        is_variadic: bool,
+        min_args: usize,
     ) -> Result<usize, Box<dyn Error>> {
         if let Some(name) = function_name {
             backend.set_function_name(name);
@@ -609,6 +610,8 @@ impl Compiler {
             max_locals,
             stack_map,
             number_of_args,
+            is_variadic,
+            min_args,
         )
     }
 
@@ -618,6 +621,8 @@ impl Compiler {
         code: Vec<u8>,
         max_locals: usize,
         number_of_args: usize,
+        is_variadic: bool,
+        min_args: usize,
     ) -> Result<usize, Box<dyn Error>> {
         let pointer = self.add_code(&code)?;
         let runtime = get_runtime().get_mut();
@@ -629,6 +634,8 @@ impl Compiler {
             max_locals,
             stack_map,
             number_of_args,
+            is_variadic,
+            min_args,
         )
     }
 
@@ -644,6 +651,8 @@ impl Compiler {
             function.size,
             function.number_of_locals,
             function.number_of_args,
+            function.is_variadic,
+            function.min_args,
         )?;
         Ok(())
     }
@@ -677,10 +686,12 @@ impl Compiler {
         &mut self,
         full_function_name: &str,
         number_of_args: usize,
+        is_variadic: bool,
+        min_args: usize,
     ) -> Option<Function> {
         let runtime = get_runtime().get_mut();
         runtime
-            .reserve_function(full_function_name, number_of_args)
+            .reserve_function(full_function_name, number_of_args, is_variadic, min_args)
             .ok()
     }
 
@@ -779,6 +790,7 @@ impl Compiler {
             elements: vec![Ast::Function {
                 name: Some(method_name.clone()),
                 args: args.clone(),
+                rest_param: None,
                 body: vec![self.build_method_if_chain(default_method, protocol_methods, args)],
                 token_range: TokenRange::new(0, 0),
             }],
@@ -890,6 +902,8 @@ impl CompilerThread {
                             Some(&name),
                             code,
                             max_locals,
+                            number_of_args,
+                            false,
                             number_of_args,
                         ) {
                             Ok(_) => {

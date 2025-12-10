@@ -1,0 +1,89 @@
+namespace variadic_recursive_test
+
+// Test recursive variadic function - sum all numbers using helper
+fn sum(...nums) {
+    let len = length(nums)
+    if len == 0 {
+        0
+    } else {
+        sum_helper(nums, 0, len)
+    }
+}
+
+// Helper to sum from index i to end - uses tail recursion
+fn sum_helper(arr, i, len) {
+    if i >= len {
+        0
+    } else {
+        get(arr, i) + sum_helper(arr, i + 1, len)
+    }
+}
+
+// Test variadic with min_args > 0 - should print count of items after prefix
+fn count_items(prefix, ...items) {
+    let len = length(items)
+    _print(prefix)
+    _print(" count: ")
+    _println(format(len, 0))
+    len
+}
+
+// Test true recursive variadic call - countdown that calls itself with fewer args
+fn countdown(...nums) {
+    let len = length(nums)
+    if len == 0 {
+        println("done counting")
+        0
+    } else {
+        // Print current args
+        print("counting:")
+        let mut i = 0
+        while i < len {
+            print(" ", get(nums, i))
+            i = i + 1
+        }
+        print("\n")
+        // Recursive call with one fewer element
+        if len == 1 {
+            countdown()
+        } else if len == 2 {
+            countdown(get(nums, 1))
+        } else if len == 3 {
+            countdown(get(nums, 1), get(nums, 2))
+        } else {
+            countdown(get(nums, 1), get(nums, 2), get(nums, 3))
+        }
+    }
+}
+
+fn main() {
+    // Test basic variadic with helper
+    println(sum(1, 2, 3, 4, 5))
+
+    // Test with single arg
+    println(sum(42))
+
+    // Test with no args
+    println(sum())
+
+    // Test variadic with prefix arg (min_args = 1)
+    count_items("Test1")
+    count_items("Test2", 1, 2, 3)
+
+    // Test recursive variadic calls
+    countdown(3, 2, 1)
+
+    "done"
+}
+
+// Expect
+// 15
+// 42
+// 0
+// Test1 count: 0
+// Test2 count: 3
+// counting:  3  2  1
+// counting:  2  1
+// counting:  1
+// done counting
+// done

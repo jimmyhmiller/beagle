@@ -1,0 +1,23 @@
+namespace variadic_simple_test
+
+fn sum(...nums) {
+    let mut total = 0
+    let mut i = 0
+    let len = length(nums)
+    while i < len {
+        total = total + get(nums, i)
+        i = i + 1
+    }
+    total
+}
+
+fn main() {
+    _println(format(sum(1, 2, 3), 0))
+    _println(format(sum(10, 20, 30, 40), 0))
+    "done"
+}
+
+// Expect
+// 6
+// 100
+// done

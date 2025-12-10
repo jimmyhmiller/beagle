@@ -38,6 +38,7 @@ pub enum Ast {
         name: Option<String>,
         // TODO: Change this to a Vec<Ast>
         args: Vec<String>,
+        rest_param: Option<String>,
         body: Vec<Ast>,
         token_range: TokenRange,
     },
@@ -74,6 +75,7 @@ pub enum Ast {
     FunctionStub {
         name: String,
         args: Vec<String>,
+        rest_param: Option<String>,
         token_range: TokenRange,
     },
     If {
@@ -383,6 +385,8 @@ impl Ast {
             mutable_pass_env_stack: vec![HashMap::new()],
             loop_exit_stack: vec![],
             current_function_arity: 0,
+            current_function_is_variadic: false,
+            current_function_min_args: 0,
             token_line_column_map,
         };
 
@@ -534,6 +538,8 @@ pub struct AstCompiler<'a> {
     pub mutable_pass_env_stack: Vec<HashMap<String, MutablePassInfo>>,
     pub loop_exit_stack: Vec<(Label, VirtualRegister, Label)>,
     pub current_function_arity: usize,
+    pub current_function_is_variadic: bool,
+    pub current_function_min_args: usize,
     pub token_line_column_map: Vec<(usize, usize)>,
 }
 
@@ -596,11 +602,19 @@ impl AstCompiler<'_> {
                 self.ir.ret(last)
             }
             Ast::Function {
-                name, args, body, ..
+                name,
+                args,
+                rest_param,
+                body,
+                ..
             } => {
                 self.create_new_environment();
 
                 let is_not_top_level = self.environment_stack.len() > 2;
+                let is_variadic = rest_param.is_some();
+                let min_args = args.len();
+                // For variadic functions, the actual arity is min_args + 1 (for the rest vector)
+                let actual_arity = if is_variadic { min_args + 1 } else { min_args };
 
                 let variable_locaton = if is_not_top_level {
                     // We are inside a function already, so this isn't a top level function
@@ -622,10 +636,14 @@ impl AstCompiler<'_> {
                 let old_ir = std::mem::replace(&mut self.ir, Ir::new(allocate_fn_pointer));
                 let old_name = self.name.clone();
                 let old_arity = self.current_function_arity;
+                let old_is_variadic = self.current_function_is_variadic;
+                let old_min_args = self.current_function_min_args;
                 self.ir_range_to_token_range.push(Vec::new());
 
                 self.name = name.clone();
-                self.current_function_arity = args.len();
+                self.current_function_arity = actual_arity;
+                self.current_function_is_variadic = is_variadic;
+                self.current_function_min_args = min_args;
                 if is_not_top_level {
                     let context_name = "<closure_context>";
                     let reg = self.ir.arg(0);
@@ -648,6 +666,21 @@ impl AstCompiler<'_> {
                     let local = VariableLocation::Local(local);
                     self.register_arg_location(index, local.clone());
                     self.insert_variable(arg.clone(), local);
+                }
+
+                // Handle rest parameter - it comes as a PersistentVector
+                if let Some(rest_name) = rest_param {
+                    let mut rest_index = args.len();
+                    if is_not_top_level {
+                        rest_index += 1;
+                    }
+                    let reg = self.ir.arg(rest_index);
+                    let local = self.find_or_insert_local(&rest_name);
+                    let reg = self.ir.assign_new(reg);
+                    self.ir.store_local(local, reg.into());
+                    let local = VariableLocation::Local(local);
+                    self.register_arg_location(rest_index, local.clone());
+                    self.insert_variable(rest_name.clone(), local);
                 }
 
                 let should_pause_atom = self.compiler.get_pause_atom();
@@ -690,6 +723,8 @@ impl AstCompiler<'_> {
 
                 self.name = old_name;
                 self.current_function_arity = old_arity;
+                self.current_function_is_variadic = old_is_variadic;
+                self.current_function_min_args = old_min_args;
 
                 let backend = Backend::new();
 
@@ -718,7 +753,9 @@ impl AstCompiler<'_> {
                         full_function_name.as_deref(),
                         &mut backend,
                         self.ir.num_locals,
-                        args.len(),
+                        actual_arity,
+                        is_variadic,
+                        min_args,
                     )
                     .unwrap();
 
@@ -928,23 +965,23 @@ impl AstCompiler<'_> {
                     value: Box::new(Ast::Call {
                         name: "beagle.core/seq".to_string(),
                         args: vec![*collection.clone()],
-                        token_range: token_range.clone(),
+                        token_range,
                     }),
-                    token_range: token_range.clone(),
+                    token_range,
                 });
 
                 // Second: let mut __first = true
                 self.call_compile(&Ast::LetMut {
                     name: Box::new(Ast::Identifier(first_var.clone(), token_range.start)),
                     value: Box::new(Ast::True(token_range.start)),
-                    token_range: token_range.clone(),
+                    token_range,
                 });
 
                 // Third: let mut __result = null
                 self.call_compile(&Ast::LetMut {
                     name: Box::new(Ast::Identifier(result_var.clone(), token_range.start)),
                     value: Box::new(Ast::Null(token_range.start)),
-                    token_range: token_range.clone(),
+                    token_range,
                 });
 
                 // Third: loop { ... }
@@ -955,25 +992,25 @@ impl AstCompiler<'_> {
                             operator: Condition::Equal,
                             left: Box::new(Ast::Identifier(first_var.clone(), token_range.start)),
                             right: Box::new(Ast::False(token_range.start)),
-                            token_range: token_range.clone(),
+                            token_range,
                         }),
                         then: vec![Ast::Assignment {
                             name: Box::new(Ast::Identifier(seq_var.clone(), token_range.start)),
                             value: Box::new(Ast::Call {
                                 name: "beagle.core/next".to_string(),
                                 args: vec![Ast::Identifier(seq_var.clone(), token_range.start)],
-                                token_range: token_range.clone(),
+                                token_range,
                             }),
-                            token_range: token_range.clone(),
+                            token_range,
                         }],
                         else_: vec![],
-                        token_range: token_range.clone(),
+                        token_range,
                     },
                     // __first = false
                     Ast::Assignment {
                         name: Box::new(Ast::Identifier(first_var.clone(), token_range.start)),
                         value: Box::new(Ast::False(token_range.start)),
-                        token_range: token_range.clone(),
+                        token_range,
                     },
                     // if __seq == null { break(__result) }
                     Ast::If {
@@ -981,14 +1018,14 @@ impl AstCompiler<'_> {
                             operator: Condition::Equal,
                             left: Box::new(Ast::Identifier(seq_var.clone(), token_range.start)),
                             right: Box::new(Ast::Null(token_range.start)),
-                            token_range: token_range.clone(),
+                            token_range,
                         }),
                         then: vec![Ast::Break {
                             value: Box::new(Ast::Identifier(result_var.clone(), token_range.start)),
-                            token_range: token_range.clone(),
+                            token_range,
                         }],
                         else_: vec![],
-                        token_range: token_range.clone(),
+                        token_range,
                     },
                     // let binding = first(__seq)
                     Ast::Let {
@@ -996,9 +1033,9 @@ impl AstCompiler<'_> {
                         value: Box::new(Ast::Call {
                             name: "beagle.core/first".to_string(),
                             args: vec![Ast::Identifier(seq_var.clone(), token_range.start)],
-                            token_range: token_range.clone(),
+                            token_range,
                         }),
-                        token_range: token_range.clone(),
+                        token_range,
                     },
                 ];
 
@@ -1010,7 +1047,7 @@ impl AstCompiler<'_> {
                         loop_body.push(Ast::Assignment {
                             name: Box::new(Ast::Identifier(result_var.clone(), token_range.start)),
                             value: Box::new(stmt.clone()),
-                            token_range: token_range.clone(),
+                            token_range,
                         });
                     } else {
                         // Not last: just execute it
@@ -1020,7 +1057,7 @@ impl AstCompiler<'_> {
 
                 self.call_compile(&Ast::Loop {
                     body: loop_body,
-                    token_range: token_range.clone(),
+                    token_range,
                 })
             }
             Ast::Try {
@@ -1353,6 +1390,7 @@ impl AstCompiler<'_> {
             Ast::FunctionStub {
                 name,
                 args,
+                rest_param,
                 token_range,
             } => {
                 // TODO: I should store funcitons in slots instead of a big global list
@@ -1362,6 +1400,7 @@ impl AstCompiler<'_> {
                 self.call_compile(&Ast::Function {
                     name: Some(name),
                     args,
+                    rest_param,
                     body: vec![Ast::Call {
                         name: "beagle.builtin/throw_error".to_string(),
                         args: vec![],
@@ -1379,7 +1418,11 @@ impl AstCompiler<'_> {
             } => {
                 for ast in body.iter() {
                     if let Ast::Function {
-                        name, args, body, ..
+                        name,
+                        args,
+                        rest_param,
+                        body,
+                        ..
                     } = ast
                     {
                         let name = name.clone().unwrap();
@@ -1388,6 +1431,7 @@ impl AstCompiler<'_> {
                         self.call_compile(&Ast::Function {
                             name: Some(new_name.clone()),
                             args: args.clone(),
+                            rest_param: rest_param.clone(),
                             body: body.clone(),
                             token_range: ast.token_range(),
                         });
@@ -1906,17 +1950,24 @@ impl AstCompiler<'_> {
                 self.ir.bitwise_xor(left, right)
             }
             Ast::Recurse { args, .. } | Ast::TailRecurse { args, .. } => {
-                let args = args
+                let mut compiled_args: Vec<Value> = args
                     .iter()
                     .map(|arg| {
                         self.not_tail_position();
                         self.call_compile(&Box::new(arg.clone()))
                     })
                     .collect();
+
+                // For variadic recursive calls, pack extra arguments
+                if self.current_function_is_variadic {
+                    compiled_args =
+                        self.pack_variadic_args(compiled_args, self.current_function_min_args);
+                }
+
                 if matches!(ast, Ast::TailRecurse { .. }) {
-                    self.ir.tail_recurse(args)
+                    self.ir.tail_recurse(compiled_args)
                 } else {
-                    self.ir.recurse(args)
+                    self.ir.recurse(compiled_args)
                 }
             }
             Ast::Call {
@@ -1927,7 +1978,18 @@ impl AstCompiler<'_> {
                 let name = self.get_qualified_function_name(&name);
 
                 if self.name_matches(&name) {
-                    if args.len() != self.current_function_arity {
+                    // Check arity for recursive calls
+                    if self.current_function_is_variadic {
+                        // For variadic functions, we need at least min_args arguments
+                        if args.len() < self.current_function_min_args {
+                            panic!(
+                                "Recursive call to variadic '{}' requires at least {} argument(s), but {} were provided",
+                                self.name.as_ref().unwrap_or(&"<unknown>".to_string()),
+                                self.current_function_min_args,
+                                args.len()
+                            );
+                        }
+                    } else if args.len() != self.current_function_arity {
                         panic!(
                             "Recursive call to '{}' expects {} argument(s), but {} were provided",
                             self.name.as_ref().unwrap_or(&"<unknown>".to_string()),
@@ -2215,6 +2277,8 @@ impl AstCompiler<'_> {
 
         let builtin = function.is_builtin;
         let needs_stack_pointer = function.needs_stack_pointer;
+        let is_variadic = function.is_variadic;
+        let min_args = function.min_args;
 
         // Arity check - for functions that need stack pointer, number_of_args includes it
         let expected_user_args = if needs_stack_pointer {
@@ -2223,7 +2287,19 @@ impl AstCompiler<'_> {
             function.number_of_args
         };
 
-        if args.len() != expected_user_args {
+        if is_variadic {
+            // For variadic functions, we need at least min_args arguments
+            if args.len() < min_args {
+                panic!(
+                    "Variadic function '{}' requires at least {} argument(s), but {} were provided",
+                    name,
+                    min_args,
+                    args.len()
+                );
+            }
+            // Pack extra arguments into a PersistentVector
+            args = self.pack_variadic_args(args, min_args);
+        } else if args.len() != expected_user_args {
             panic!(
                 "Function '{}' expects {} argument(s), but {} were provided\n\
                  (function.number_of_args={}, needs_stack_pointer={}, is_builtin={})",
@@ -2253,6 +2329,177 @@ impl AstCompiler<'_> {
         } else {
             self.ir.call(function, args)
         }
+    }
+
+    /// Create an empty heap-allocated array (type_id=1, size=0)
+    fn create_empty_array(&mut self) -> Value {
+        let allocate = self
+            .compiler
+            .find_function("beagle.builtin/allocate")
+            .unwrap();
+        let allocate = self.compiler.get_function_pointer(allocate).unwrap();
+        let allocate = self.ir.assign_new(allocate);
+
+        let size = Value::TaggedConstant(0);
+        let size_reg = self.ir.assign_new(size);
+        let stack_pointer = self.ir.get_stack_pointer_imm(0);
+
+        let array_ptr = self
+            .ir
+            .call_builtin(allocate.into(), vec![stack_pointer, size_reg.into()]);
+
+        let array_pointer = self.ir.untag(array_ptr);
+        let type_id_value = Value::RawValue(1);
+        self.ir.write_type_id(array_pointer, type_id_value);
+
+        self.ir
+            .tag(array_pointer, BuiltInTypes::HeapObject.get_tag())
+    }
+
+    /// Pack a slice of arguments into a heap-allocated array
+    /// The args should already be evaluated Values
+    fn pack_args_into_array(&mut self, args: &[Value]) -> Value {
+        let num_args = args.len();
+
+        if num_args == 0 {
+            return self.create_empty_array();
+        }
+
+        // Push args to stack so they survive GC during allocation
+        for arg in args {
+            let reg = self.ir.assign_new(*arg);
+            self.ir.push_to_stack(reg.into());
+        }
+
+        // Allocate array
+        let allocate = self
+            .compiler
+            .find_function("beagle.builtin/allocate")
+            .unwrap();
+        let allocate = self.compiler.get_function_pointer(allocate).unwrap();
+        let allocate = self.ir.assign_new(allocate);
+
+        let size = Value::TaggedConstant(num_args as isize);
+        let size_reg = self.ir.assign_new(size);
+        let stack_pointer = self.ir.get_stack_pointer_imm(0);
+
+        let array_ptr = self
+            .ir
+            .call_builtin(allocate.into(), vec![stack_pointer, size_reg.into()]);
+
+        let array_pointer = self.ir.untag(array_ptr);
+
+        // Set type_id to 1 (raw array type)
+        let type_id_value = Value::RawValue(1);
+        self.ir.write_type_id(array_pointer, type_id_value);
+
+        // Pop args from stack (in reverse order) and write to array
+        for i in (0..num_args).rev() {
+            let value = self.ir.pop_from_stack();
+            let offset = i + 1;
+            self.ir.heap_store_offset(array_pointer, value, offset);
+        }
+
+        // Tag the array pointer
+        self.ir
+            .tag(array_pointer, BuiltInTypes::HeapObject.get_tag())
+    }
+
+    /// Call a variadic function through a function value, handling min_args dynamically.
+    /// This uses a runtime trampoline to avoid complex IR branching that confuses
+    /// the register allocator.
+    ///
+    /// The trampoline (call_variadic_function_value in builtins.rs) handles:
+    /// 1. Reading min_args from function metadata at runtime
+    /// 2. Packing extra args into a rest array
+    /// 3. Dispatching the call with the correct number of arguments
+    ///
+    /// Returns a VirtualRegister containing the call result.
+    fn call_variadic_function_dynamic(
+        &mut self,
+        function_value: Value,
+        args: Vec<Value>,
+        _min_args_reg: VirtualRegister, // No longer used - trampoline reads from function metadata
+        is_closure: bool,
+        closure_reg: Option<VirtualRegister>,
+    ) -> VirtualRegister {
+        // Pack all args into a single array for the trampoline
+        let args_array = self.pack_args_into_array(&args);
+
+        // Build trampoline call arguments - must assign to registers, not pass raw Values
+        let is_closure_val = if is_closure {
+            self.ir.assign_new(Value::True)
+        } else {
+            self.ir.assign_new(Value::False)
+        };
+        let closure_val = match closure_reg {
+            Some(r) => r,
+            None => self.ir.assign_new(Value::Null),
+        };
+
+        // Single call to trampoline - fixed 4 args (stack_pointer added automatically)
+        let result = self.call_builtin(
+            "beagle.builtin/call_variadic_function_value",
+            vec![
+                function_value,
+                args_array,
+                is_closure_val.into(),
+                closure_val.into(),
+            ],
+        );
+        self.ir.assign_new(result)
+    }
+
+    /// Pack variadic arguments into a raw array
+    /// Takes the first min_args as regular arguments, packs the rest into an array
+    fn pack_variadic_args(&mut self, mut args: Vec<Value>, min_args: usize) -> Vec<Value> {
+        // Split args: keep first min_args, pack the rest
+        let extra_args: Vec<Value> = args.drain(min_args..).collect();
+        let num_extra = extra_args.len();
+
+        // Push extra args to stack so they survive GC during allocation
+        for arg in &extra_args {
+            let reg = self.ir.assign_new(*arg);
+            self.ir.push_to_stack(reg.into());
+        }
+
+        // Allocate a raw array with type_id = 1
+        // This uses the same pattern as struct allocation but with type_id instead of struct_id
+        let allocate = self
+            .compiler
+            .find_function("beagle.builtin/allocate")
+            .unwrap();
+        let allocate = self.compiler.get_function_pointer(allocate).unwrap();
+        let allocate = self.ir.assign_new(allocate);
+
+        let size = Value::TaggedConstant(num_extra as isize);
+        let size_reg = self.ir.assign_new(size);
+        let stack_pointer = self.ir.get_stack_pointer_imm(0);
+
+        let array_ptr = self
+            .ir
+            .call_builtin(allocate.into(), vec![stack_pointer, size_reg.into()]);
+
+        let array_pointer = self.ir.untag(array_ptr);
+
+        // Set type_id to 1 (raw array type)
+        let type_id_value = Value::RawValue(1);
+        self.ir.write_type_id(array_pointer, type_id_value);
+
+        // Pop the extra args from stack (in reverse order) and write to array
+        for i in (0..num_extra).rev() {
+            let value = self.ir.pop_from_stack();
+            // Write field at index i (offset in words, +1 to skip header)
+            let offset = i + 1;
+            self.ir.heap_store_offset(array_pointer, value, offset);
+        }
+
+        // Tag the array pointer and append as final argument
+        let tagged_array = self
+            .ir
+            .tag(array_pointer, BuiltInTypes::HeapObject.get_tag());
+        args.push(tagged_array);
+        args
     }
 
     fn create_free_if_closable(&mut self, name: &String) -> Option<VariableLocation> {
@@ -2329,7 +2576,8 @@ impl AstCompiler<'_> {
         self.ir
             .jump_if(call_closure, Condition::Equal, tag, closure_tag);
 
-        // Runtime arity check for non-closure function call
+        // Non-closure function call path
+        // Runtime arity check (handles both variadic and non-variadic)
         let expected_count = self
             .ir
             .assign_new(Value::TaggedConstant(args.len() as isize));
@@ -2338,24 +2586,62 @@ impl AstCompiler<'_> {
             vec![function_register.into(), expected_count.into()],
         );
 
+        // Check if function is variadic and pack args if needed
+        let is_variadic = self.call_builtin(
+            "beagle.builtin/is_function_variadic",
+            vec![function_register.into()],
+        );
+        let is_variadic_reg = self.ir.assign_new(is_variadic);
+
+        let call_variadic = self.ir.label("call_variadic_fn");
+        let after_fn_call = self.ir.label("after_fn_call");
+
+        self.ir.jump_if(
+            call_variadic,
+            Condition::Equal,
+            is_variadic_reg,
+            Value::True,
+        );
+
+        // Non-variadic: call directly
         let result = self.ir.call(function_register.into(), args.clone());
         self.ir.assign(ret_register, result);
+        self.ir.jump(after_fn_call);
+
+        // Variadic: use dispatch table to handle min_args correctly
+        self.ir.write_label(call_variadic);
+        let min_args = self.call_builtin(
+            "beagle.builtin/get_function_min_args",
+            vec![function_register.into()],
+        );
+        let min_args_reg = self.ir.assign_new(min_args);
+        let variadic_result = self.call_variadic_function_dynamic(
+            function_register.into(),
+            args.clone(),
+            min_args_reg,
+            false, // not a closure
+            None,
+        );
+        self.ir.assign(ret_register, variadic_result);
+
+        self.ir.write_label(after_fn_call);
         self.ir.jump(exit_closure_call);
         self.ir.write_label(call_closure);
 
+        // Closure call path
         // I need to grab the function pointer
         // Closures are a pointer to a structure like this
         // struct Closure {
         //     function_pointer: *const u8,
         //     num_free_variables: usize,
-        //     ree_variables: *const Value,
+        //     free_variables: *const Value,
         // }
         let untagged_closure_register = self.ir.untag(closure_register.into());
         // self.ir.breakpoint();
         // Load function pointer from closure structure (field 0 = offset 1, after 8-byte header)
         let function_pointer = self.ir.load_from_memory(untagged_closure_register, 1);
 
-        // Runtime arity check for closure call
+        // Runtime arity check for closure call (handles both variadic and non-variadic)
         let expected_count = self
             .ir
             .assign_new(Value::TaggedConstant(args.len() as isize));
@@ -2364,13 +2650,47 @@ impl AstCompiler<'_> {
             vec![function_pointer, expected_count.into()],
         );
 
-        // make the first argument to the closure be the values pointer
-        // the rest of the arguments are the arguments passed to the closure
-        let mut args = args;
-        args.insert(0, closure_register.into());
-        let result = self.ir.call(function_pointer, args);
-        self.ir.assign(ret_register, result);
+        // Check if closure's function is variadic
+        let is_variadic = self.call_builtin(
+            "beagle.builtin/is_function_variadic",
+            vec![function_pointer],
+        );
+        let is_variadic_reg = self.ir.assign_new(is_variadic);
 
+        let call_variadic_closure = self.ir.label("call_variadic_closure");
+        let after_closure_call = self.ir.label("after_closure_call");
+
+        self.ir.jump_if(
+            call_variadic_closure,
+            Condition::Equal,
+            is_variadic_reg,
+            Value::True,
+        );
+
+        // Non-variadic closure: call directly
+        let mut closure_args = args.clone();
+        closure_args.insert(0, closure_register.into());
+        let result = self.ir.call(function_pointer, closure_args);
+        self.ir.assign(ret_register, result);
+        self.ir.jump(after_closure_call);
+
+        // Variadic closure: use dispatch table to handle min_args correctly
+        self.ir.write_label(call_variadic_closure);
+        let min_args = self.call_builtin(
+            "beagle.builtin/get_function_min_args",
+            vec![function_pointer],
+        );
+        let min_args_reg = self.ir.assign_new(min_args);
+        let variadic_result = self.call_variadic_function_dynamic(
+            function_pointer,
+            args.clone(),
+            min_args_reg,
+            true, // is a closure
+            Some(closure_register),
+        );
+        self.ir.assign(ret_register, variadic_result);
+
+        self.ir.write_label(after_closure_call);
         self.ir.write_label(exit_closure_call);
         ret_register.into()
         // self.ir.breakpoint();
@@ -2602,13 +2922,17 @@ impl AstCompiler<'_> {
             Ast::Function {
                 name,
                 args,
+                rest_param,
                 body: _,
                 ..
             } => {
                 if let Some(name) = name {
                     let full_function_name = self.compiler.current_namespace_name() + "/" + name;
+                    let min_args = args.len();
+                    let is_variadic = rest_param.is_some();
+                    let arity = min_args + if is_variadic { 1 } else { 0 };
                     self.compiler
-                        .reserve_function(&full_function_name, args.len())
+                        .reserve_function(&full_function_name, arity, is_variadic, min_args)
                         .unwrap();
                 } else {
                     panic!("Why do we have a top level function without a name? Is that allowed?");
@@ -2732,13 +3056,17 @@ impl AstCompiler<'_> {
             Ast::FunctionStub {
                 name,
                 args,
+                rest_param,
                 token_range: _,
             } => {
                 // TODO: Functions should just be stored in the namespace slot
                 // self.compiler.reserve_namespace_slot(&name);
                 let full_function_name = self.compiler.current_namespace_name() + "/" + name;
+                let min_args = args.len();
+                let is_variadic = rest_param.is_some();
+                let arity = min_args + if is_variadic { 1 } else { 0 };
                 self.compiler
-                    .reserve_function(&full_function_name, args.len())
+                    .reserve_function(&full_function_name, arity, is_variadic, min_args)
                     .unwrap();
             }
             _ => {}
@@ -2827,10 +3155,12 @@ impl AstCompiler<'_> {
             let namespace = self
                 .compiler
                 .get_namespace_from_alias(alias)
-                .expect(&format!(
-                    "Namespace alias '{}' not found - did you forget to import it?",
-                    alias
-                ));
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Namespace alias '{}' not found - did you forget to import it?",
+                        alias
+                    )
+                });
             (namespace, name.to_string())
         } else {
             (self.compiler.current_namespace_name(), name.to_string())
@@ -2904,6 +3234,7 @@ impl AstCompiler<'_> {
             Ast::Function {
                 name,
                 args: _,
+                rest_param: _,
                 body,
                 token_range: _,
             } => {
@@ -3264,7 +3595,7 @@ impl AstCompiler<'_> {
             }
             Pattern::Literal { value, .. } => {
                 // Compile the literal value
-                let literal_value = self.call_compile(&value);
+                let literal_value = self.call_compile(value);
 
                 // Ensure literal is in a register
                 let literal_reg = match literal_value {
@@ -3376,7 +3707,7 @@ impl AstCompiler<'_> {
                 } => {
                     enum_coverage
                         .entry(enum_name.clone())
-                        .or_insert_with(HashSet::new)
+                        .or_default()
                         .insert(variant_name.clone());
                 }
                 Pattern::Wildcard { .. } => {

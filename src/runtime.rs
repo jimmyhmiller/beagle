@@ -304,6 +304,8 @@ pub struct Function {
     pub number_of_locals: usize,
     pub size: usize,
     pub number_of_args: usize,
+    pub is_variadic: bool,
+    pub min_args: usize,
 }
 
 pub struct MMapMutWithOffset {
@@ -486,7 +488,7 @@ impl Memory {
 
         // Layout: [hash (8 bytes)][keyword text bytes]
         // Size includes hash word + text words
-        let text_words = (bytes.len() + 7) / 8; // Round up
+        let text_words = bytes.len().div_ceil(8); // Round up
         let total_words = 1 + text_words; // 1 for hash + text
 
         heap_object.writer_header_direct(Header {
@@ -1039,7 +1041,7 @@ impl Runtime {
     ) -> Result<Tagged, Box<dyn Error>> {
         let bytes = keyword_text.as_bytes();
         // Need space for: 1 word for hash + words for text
-        let text_words = (bytes.len() + 7) / 8; // Round up
+        let text_words = bytes.len().div_ceil(8); // Round up
         let words = 1 + text_words;
         let pointer = self.allocate(words, stack_pointer, BuiltInTypes::HeapObject)?;
         let pointer = self.memory.allocate_keyword(bytes, pointer)?;
@@ -1276,7 +1278,7 @@ impl Runtime {
         let thread_id = std::thread::current().id();
         self.exception_handlers
             .entry(thread_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(handler);
     }
 
@@ -1296,11 +1298,11 @@ impl Runtime {
         let thread_id = std::thread::current().id();
 
         // Remove old handler from GC roots if it exists
-        if let Some(&old_handler) = self.thread_exception_handler_fns.get(&thread_id) {
-            if BuiltInTypes::is_heap_pointer(old_handler) {
-                self.memory
-                    .remove_namespace_root(self.exception_handler_namespace, old_handler);
-            }
+        if let Some(&old_handler) = self.thread_exception_handler_fns.get(&thread_id)
+            && BuiltInTypes::is_heap_pointer(old_handler)
+        {
+            self.memory
+                .remove_namespace_root(self.exception_handler_namespace, old_handler);
         }
 
         self.thread_exception_handler_fns
@@ -1322,11 +1324,11 @@ impl Runtime {
         }
 
         // Remove old handler from GC roots if it exists
-        if let Some(old_handler) = self.default_exception_handler_fn {
-            if BuiltInTypes::is_heap_pointer(old_handler) {
-                self.memory
-                    .remove_namespace_root(self.exception_handler_namespace, old_handler);
-            }
+        if let Some(old_handler) = self.default_exception_handler_fn
+            && BuiltInTypes::is_heap_pointer(old_handler)
+        {
+            self.memory
+                .remove_namespace_root(self.exception_handler_namespace, old_handler);
         }
 
         self.default_exception_handler_fn = Some(handler_fn);
@@ -1358,20 +1360,20 @@ impl Runtime {
                     }
 
                     // Update default handler
-                    if let Some(ref mut default) = self.default_exception_handler_fn {
-                        if *default == old_ptr {
-                            *default = new_ptr;
-                        }
+                    if let Some(ref mut default) = self.default_exception_handler_fn
+                        && *default == old_ptr
+                    {
+                        *default = new_ptr;
                     }
                 }
             } else if namespace_id == self.keyword_namespace {
                 // Update keyword cache after GC relocation
                 for (old_ptr, new_ptr) in relocs {
                     for cached_ptr in self.keyword_heap_ptrs.iter_mut() {
-                        if let Some(ptr) = cached_ptr {
-                            if *ptr == old_ptr {
-                                *ptr = new_ptr;
-                            }
+                        if let Some(ptr) = cached_ptr
+                            && *ptr == old_ptr
+                        {
+                            *ptr = new_ptr;
                         }
                     }
                 }
@@ -1399,11 +1401,11 @@ impl Runtime {
 
         for thread_id in dead_threads {
             // Remove handler from GC roots before removing from map
-            if let Some(&handler_fn) = self.thread_exception_handler_fns.get(&thread_id) {
-                if BuiltInTypes::is_heap_pointer(handler_fn) {
-                    self.memory
-                        .remove_namespace_root(self.exception_handler_namespace, handler_fn);
-                }
+            if let Some(&handler_fn) = self.thread_exception_handler_fns.get(&thread_id)
+                && BuiltInTypes::is_heap_pointer(handler_fn)
+            {
+                self.memory
+                    .remove_namespace_root(self.exception_handler_namespace, handler_fn);
             }
 
             self.exception_handlers.remove(&thread_id);
@@ -1441,12 +1443,12 @@ impl Runtime {
             for (namespace, values) in relocations {
                 for (old, new) in values {
                     // Skip if namespace doesn't exist (e.g., keyword namespace before any keywords created)
-                    if let Some(ns) = self.namespaces.namespaces.get_mut(namespace) {
-                        if let Ok(namespace) = ns.get_mut() {
-                            for (_, value) in namespace.bindings.iter_mut() {
-                                if *value == old {
-                                    *value = new;
-                                }
+                    if let Some(ns) = self.namespaces.namespaces.get_mut(namespace)
+                        && let Ok(namespace) = ns.get_mut()
+                    {
+                        for (_, value) in namespace.bindings.iter_mut() {
+                            if *value == old {
+                                *value = new;
                             }
                         }
                     }
@@ -1459,20 +1461,20 @@ impl Runtime {
                             }
                         }
 
-                        if let Some(ref mut default) = self.default_exception_handler_fn {
-                            if *default == old {
-                                *default = new;
-                            }
+                        if let Some(ref mut default) = self.default_exception_handler_fn
+                            && *default == old
+                        {
+                            *default = new;
                         }
                     }
 
                     // Update keyword cache after GC relocation
                     if namespace == self.keyword_namespace {
                         for cached_ptr in self.keyword_heap_ptrs.iter_mut() {
-                            if let Some(ptr) = cached_ptr {
-                                if *ptr == old {
-                                    *ptr = new;
-                                }
+                            if let Some(ptr) = cached_ptr
+                                && *ptr == old
+                            {
+                                *ptr = new;
                             }
                         }
                     }
@@ -1542,12 +1544,12 @@ impl Runtime {
         for (namespace, values) in relocations {
             for (old, new) in values {
                 // Skip if namespace doesn't exist (e.g., keyword namespace before any keywords created)
-                if let Some(ns) = self.namespaces.namespaces.get_mut(namespace) {
-                    if let Ok(namespace) = ns.get_mut() {
-                        for (_, value) in namespace.bindings.iter_mut() {
-                            if *value == old {
-                                *value = new;
-                            }
+                if let Some(ns) = self.namespaces.namespaces.get_mut(namespace)
+                    && let Ok(namespace) = ns.get_mut()
+                {
+                    for (_, value) in namespace.bindings.iter_mut() {
+                        if *value == old {
+                            *value = new;
                         }
                     }
                 }
@@ -1560,20 +1562,20 @@ impl Runtime {
                         }
                     }
 
-                    if let Some(ref mut default) = self.default_exception_handler_fn {
-                        if *default == old {
-                            *default = new;
-                        }
+                    if let Some(ref mut default) = self.default_exception_handler_fn
+                        && *default == old
+                    {
+                        *default = new;
                     }
                 }
 
                 // Update keyword cache after GC relocation
                 if namespace == self.keyword_namespace {
                     for cached_ptr in self.keyword_heap_ptrs.iter_mut() {
-                        if let Some(ptr) = cached_ptr {
-                            if *ptr == old {
-                                *ptr = new;
-                            }
+                        if let Some(ptr) = cached_ptr
+                            && *ptr == old
+                        {
+                            *ptr = new;
                         }
                     }
                 }
@@ -2095,10 +2097,7 @@ impl Runtime {
             .fields
             .iter()
             .position(|f| f == string)
-            .ok_or_else(|| format!(
-                "Field not found {} for struct {:?}",
-                string, struct_value
-            ))?;
+            .ok_or_else(|| format!("Field not found {} for struct {:?}", string, struct_value))?;
         Ok((heap_object.get_field(field_index), field_index))
     }
 
@@ -2153,10 +2152,9 @@ impl Runtime {
         };
 
         // Look up the type descriptor binding from beagle.core
-        let slot = self.find_binding(beagle_core_id, type_name).ok_or_else(|| format!(
-            "Type descriptor '{}' not found in beagle.core",
-            type_name
-        ))?;
+        let slot = self
+            .find_binding(beagle_core_id, type_name)
+            .ok_or_else(|| format!("Type descriptor '{}' not found in beagle.core", type_name))?;
         Ok(self.get_binding(beagle_core_id, slot))
     }
 
@@ -2444,6 +2442,8 @@ impl Runtime {
             number_of_locals: 0,
             size: 0,
             number_of_args,
+            is_variadic: false,
+            min_args: number_of_args,
         });
         debugger(Message {
             kind: "foreign_function".to_string(),
@@ -2493,6 +2493,8 @@ impl Runtime {
             number_of_locals: 0,
             size: 0,
             number_of_args,
+            is_variadic: false,
+            min_args: number_of_args,
         });
         let pointer = Self::get_function_pointer(
             self,
@@ -2557,6 +2559,8 @@ impl Runtime {
         number_of_locals: usize,
         stack_map: Vec<(usize, StackMapDetails)>,
         number_of_args: usize,
+        is_variadic: bool,
+        min_args: usize,
     ) -> Result<usize, Box<dyn Error>> {
         let mut already_defined = false;
         let mut function_pointer = 0;
@@ -2564,6 +2568,9 @@ impl Runtime {
             for (index, function) in self.functions.iter_mut().enumerate() {
                 if function.name == n {
                     function_pointer = self.overwrite_function(index, pointer, size)?;
+                    // Update variadic info on existing function
+                    self.functions[index].is_variadic = is_variadic;
+                    self.functions[index].min_args = min_args;
                     // self.namespaces.add_binding(name.unwrap(), function_pointer);
                     already_defined = true;
                     break;
@@ -2571,8 +2578,15 @@ impl Runtime {
             }
         }
         if !already_defined {
-            function_pointer =
-                self.add_function(name, pointer, size, number_of_locals, number_of_args)?;
+            function_pointer = self.add_function(
+                name,
+                pointer,
+                size,
+                number_of_locals,
+                number_of_args,
+                is_variadic,
+                min_args,
+            )?;
         }
         assert!(function_pointer != 0);
 
@@ -2594,9 +2608,14 @@ impl Runtime {
         &mut self,
         name: &str,
         number_of_args: usize,
+        is_variadic: bool,
+        min_args: usize,
     ) -> Result<Function, Box<dyn Error>> {
         for function in self.functions.iter_mut() {
             if function.name == name {
+                function.number_of_args = number_of_args;
+                function.is_variadic = is_variadic;
+                function.min_args = min_args;
                 return Ok(function.clone());
             }
         }
@@ -2613,6 +2632,8 @@ impl Runtime {
             number_of_locals: 0,
             size: 0,
             number_of_args,
+            is_variadic,
+            min_args,
         };
         self.functions.push(function.clone());
         Ok(function)
@@ -2625,6 +2646,8 @@ impl Runtime {
         size: usize,
         number_of_locals: usize,
         number_of_args: usize,
+        is_variadic: bool,
+        min_args: usize,
     ) -> Result<usize, Box<dyn Error>> {
         let index = self.functions.len();
         self.functions.push(Function {
@@ -2638,6 +2661,8 @@ impl Runtime {
             number_of_locals,
             size,
             number_of_args,
+            is_variadic,
+            min_args,
         });
         let function_pointer = Self::get_function_pointer(
             self,
