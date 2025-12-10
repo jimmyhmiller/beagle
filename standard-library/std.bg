@@ -195,6 +195,20 @@ extend String with Length {
     }
 }
 
+// Array protocol extensions for variadic function arguments
+// Arrays are raw mutable arrays with type_id = 1
+extend Array with Indexed {
+    fn get(arr, i) {
+        primitive/read_field(arr, i)
+    }
+}
+
+extend Array with Length {
+    fn length(arr) {
+        primitive/size(arr)
+    }
+}
+
 
 // // TODO: Need a way to re-export rather than wrap
 // fn get(coll, i) {
@@ -205,12 +219,46 @@ extend String with Length {
 //     persistent_vector/push(coll, value)
 // }
 
-fn println(value) {
-    _println(format(value, 0))
+// print: prints arguments separated by spaces, NO newline at end
+fn print(...args) {
+    let len = length(args)
+    if len == 0 {
+        null
+    } else {
+        let mut last = null
+        let mut i = 0
+        while i < len {
+            if i > 0 {
+                _print(" ")
+            }
+            last = get(args, i)
+            _print(format(last, 0))
+            i = i + 1
+        }
+        last
+    }
 }
 
-fn print(value) {
-    _print(format(value, 0))
+// println: prints arguments separated by spaces, WITH newline at end
+fn println(...args) {
+    let len = length(args)
+    if len == 0 {
+        _print("\n")
+        null
+    } else {
+        let mut last = null
+        let mut i = 0
+        while i < len {
+            if i > 0 {
+                _print(" ")
+            }
+            last = get(args, i)
+            _print(format(last, 0))
+            i = i + 1
+        }
+        _print("\n")
+        last
+    }
 }
 
 // Keyword functions

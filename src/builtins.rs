@@ -409,18 +409,325 @@ pub unsafe extern "C" fn check_arity(
     if let Some(function) = runtime.get_function_by_pointer(untagged_ptr) {
         // expected_args is a tagged integer, need to untag it
         let expected_args_untagged = BuiltInTypes::untag(expected_args as usize);
-        if function.number_of_args != expected_args_untagged {
-            println!(
-                "Arity mismatch for '{}': expected {} args, got {}",
-                function.name, function.number_of_args, expected_args_untagged
-            );
-            unsafe {
-                throw_error(stack_pointer);
+
+        if function.is_variadic {
+            // For variadic functions, we need at least min_args arguments
+            if expected_args_untagged < function.min_args {
+                println!(
+                    "Arity mismatch for variadic '{}': expected at least {} args, got {}",
+                    function.name, function.min_args, expected_args_untagged
+                );
+                unsafe {
+                    throw_error(stack_pointer);
+                }
+            }
+        } else {
+            // For non-variadic functions, exact match required
+            if function.number_of_args != expected_args_untagged {
+                println!(
+                    "Arity mismatch for '{}': expected {} args, got {}",
+                    function.name, function.number_of_args, expected_args_untagged
+                );
+                unsafe {
+                    throw_error(stack_pointer);
+                }
             }
         }
     }
 
     0 // Return value unused
+}
+
+/// Check if a function is variadic. Returns tagged boolean.
+pub unsafe extern "C" fn is_function_variadic(function_pointer: usize) -> usize {
+    let runtime = get_runtime().get();
+
+    // Function pointer is tagged, need to untag
+    let untagged_ptr = (function_pointer >> BuiltInTypes::tag_size()) as *const u8;
+
+    if let Some(function) = runtime.get_function_by_pointer(untagged_ptr) {
+        if function.is_variadic {
+            BuiltInTypes::true_value() as usize
+        } else {
+            BuiltInTypes::false_value() as usize
+        }
+    } else {
+        BuiltInTypes::false_value() as usize
+    }
+}
+
+/// Get the min_args for a variadic function. Returns tagged int.
+pub unsafe extern "C" fn get_function_min_args(function_pointer: usize) -> usize {
+    let runtime = get_runtime().get();
+
+    // Function pointer is tagged, need to untag
+    let untagged_ptr = (function_pointer >> BuiltInTypes::tag_size()) as *const u8;
+
+    if let Some(function) = runtime.get_function_by_pointer(untagged_ptr) {
+        BuiltInTypes::Int.tag(function.min_args as isize) as usize
+    } else {
+        BuiltInTypes::Int.tag(0) as usize
+    }
+}
+
+/// Pack variadic arguments from stack into an array.
+/// stack_pointer: current stack pointer
+/// args_base: pointer to first arg on stack (args are contiguous)
+/// total_args: total number of args (tagged int)
+/// min_args: minimum args before rest param (tagged int)
+/// Returns: tagged array pointer containing args[min_args..total_args]
+pub unsafe extern "C" fn pack_variadic_args_from_stack(
+    stack_pointer: usize,
+    args_base: usize,
+    total_args: usize,
+    min_args: usize,
+) -> usize {
+    let runtime = get_runtime().get_mut();
+
+    let total = BuiltInTypes::untag(total_args);
+    let min = BuiltInTypes::untag(min_args);
+
+    // Number of extra args to pack
+    let num_extra = if total > min { total - min } else { 0 };
+
+    // Allocate array for extra args
+    let array_ptr = runtime
+        .allocate(num_extra, stack_pointer, BuiltInTypes::HeapObject)
+        .unwrap();
+
+    // Set type_id to 1 (raw array)
+    let mut heap_obj = HeapObject::from_tagged(array_ptr);
+    heap_obj.write_type_id(1);
+
+    // Copy extra args from stack to array
+    // Args on stack are at args_base, args_base+8, args_base+16, etc.
+    let args_ptr = args_base as *const usize;
+    let array_data = heap_obj.untagged() as *mut usize;
+
+    for i in 0..num_extra {
+        // Read arg at index (min + i) from args on stack
+        // SAFETY: args_ptr and array_data are valid pointers set up by the caller,
+        // and indices are bounds-checked via num_extra calculation
+        unsafe {
+            let arg = *args_ptr.add(min + i);
+            // Write to array field i (offset 1 to skip header)
+            *array_data.add(i + 1) = arg;
+        }
+    }
+
+    array_ptr
+}
+
+/// Call a variadic function through a function value.
+/// This handles the min_args dispatch at runtime, avoiding complex IR branching
+/// that confuses the register allocator.
+///
+/// Arguments:
+/// - stack_pointer: For GC safety during allocation
+/// - function_ptr: Tagged function pointer
+/// - args_array_ptr: Tagged pointer to array containing all call arguments
+/// - is_closure: Tagged boolean - true if calling through a closure
+/// - closure_ptr: Tagged closure pointer (or null if not a closure)
+///
+/// Returns: The function's return value
+pub unsafe extern "C" fn call_variadic_function_value(
+    stack_pointer: usize,
+    function_ptr: usize,
+    args_array_ptr: usize,
+    is_closure: usize,
+    closure_ptr: usize,
+) -> usize {
+    let runtime = get_runtime().get();
+
+    // Get function metadata
+    let untagged_fn = (function_ptr >> BuiltInTypes::tag_size()) as *const u8;
+    let function = runtime
+        .get_function_by_pointer(untagged_fn)
+        .expect("Invalid function pointer in call_variadic_function_value");
+    let min_args = function.min_args;
+    let is_closure_bool = is_closure == BuiltInTypes::true_value() as usize;
+
+    // Get args from array
+    let args_heap = HeapObject::from_tagged(args_array_ptr);
+    let all_args = args_heap.get_fields();
+    let total_args = all_args.len();
+
+    // Build rest array for args[min_args..]
+    let num_extra = if total_args > min_args {
+        total_args - min_args
+    } else {
+        0
+    };
+
+    // Allocate array for extra args
+    let runtime_mut = get_runtime().get_mut();
+    let rest_array = runtime_mut
+        .allocate(num_extra, stack_pointer, BuiltInTypes::HeapObject)
+        .unwrap();
+
+    // Set type_id to 1 (raw array)
+    let mut rest_heap = HeapObject::from_tagged(rest_array);
+    rest_heap.write_type_id(1);
+
+    // Copy extra args into rest array
+    let rest_fields = rest_heap.get_fields_mut();
+    for i in 0..num_extra {
+        rest_fields[i] = all_args[min_args + i];
+    }
+
+    // Dispatch based on (min_args, is_closure)
+    // We support min_args 0-7 which covers typical use cases
+    // SAFETY: We're transmuting function pointers to call them with the correct number of arguments.
+    // The function pointer comes from get_function_by_pointer which validates it's a known function.
+    unsafe {
+        match (min_args, is_closure_bool) {
+            (0, false) => {
+                let f: fn(usize) -> usize = transmute(untagged_fn);
+                f(rest_array)
+            }
+            (0, true) => {
+                let f: fn(usize, usize) -> usize = transmute(untagged_fn);
+                f(closure_ptr, rest_array)
+            }
+            (1, false) => {
+                let f: fn(usize, usize) -> usize = transmute(untagged_fn);
+                f(all_args[0], rest_array)
+            }
+            (1, true) => {
+                let f: fn(usize, usize, usize) -> usize = transmute(untagged_fn);
+                f(closure_ptr, all_args[0], rest_array)
+            }
+            (2, false) => {
+                let f: fn(usize, usize, usize) -> usize = transmute(untagged_fn);
+                f(all_args[0], all_args[1], rest_array)
+            }
+            (2, true) => {
+                let f: fn(usize, usize, usize, usize) -> usize = transmute(untagged_fn);
+                f(closure_ptr, all_args[0], all_args[1], rest_array)
+            }
+            (3, false) => {
+                let f: fn(usize, usize, usize, usize) -> usize = transmute(untagged_fn);
+                f(all_args[0], all_args[1], all_args[2], rest_array)
+            }
+            (3, true) => {
+                let f: fn(usize, usize, usize, usize, usize) -> usize = transmute(untagged_fn);
+                f(
+                    closure_ptr,
+                    all_args[0],
+                    all_args[1],
+                    all_args[2],
+                    rest_array,
+                )
+            }
+            (4, false) => {
+                let f: fn(usize, usize, usize, usize, usize) -> usize = transmute(untagged_fn);
+                f(
+                    all_args[0],
+                    all_args[1],
+                    all_args[2],
+                    all_args[3],
+                    rest_array,
+                )
+            }
+            (4, true) => {
+                let f: fn(usize, usize, usize, usize, usize, usize) -> usize =
+                    transmute(untagged_fn);
+                f(
+                    closure_ptr,
+                    all_args[0],
+                    all_args[1],
+                    all_args[2],
+                    all_args[3],
+                    rest_array,
+                )
+            }
+            (5, false) => {
+                let f: fn(usize, usize, usize, usize, usize, usize) -> usize =
+                    transmute(untagged_fn);
+                f(
+                    all_args[0],
+                    all_args[1],
+                    all_args[2],
+                    all_args[3],
+                    all_args[4],
+                    rest_array,
+                )
+            }
+            (5, true) => {
+                let f: fn(usize, usize, usize, usize, usize, usize, usize) -> usize =
+                    transmute(untagged_fn);
+                f(
+                    closure_ptr,
+                    all_args[0],
+                    all_args[1],
+                    all_args[2],
+                    all_args[3],
+                    all_args[4],
+                    rest_array,
+                )
+            }
+            (6, false) => {
+                let f: fn(usize, usize, usize, usize, usize, usize, usize) -> usize =
+                    transmute(untagged_fn);
+                f(
+                    all_args[0],
+                    all_args[1],
+                    all_args[2],
+                    all_args[3],
+                    all_args[4],
+                    all_args[5],
+                    rest_array,
+                )
+            }
+            (6, true) => {
+                let f: fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize =
+                    transmute(untagged_fn);
+                f(
+                    closure_ptr,
+                    all_args[0],
+                    all_args[1],
+                    all_args[2],
+                    all_args[3],
+                    all_args[4],
+                    all_args[5],
+                    rest_array,
+                )
+            }
+            (7, false) => {
+                let f: fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize =
+                    transmute(untagged_fn);
+                f(
+                    all_args[0],
+                    all_args[1],
+                    all_args[2],
+                    all_args[3],
+                    all_args[4],
+                    all_args[5],
+                    all_args[6],
+                    rest_array,
+                )
+            }
+            (7, true) => {
+                let f: fn(usize, usize, usize, usize, usize, usize, usize, usize, usize) -> usize =
+                    transmute(untagged_fn);
+                f(
+                    closure_ptr,
+                    all_args[0],
+                    all_args[1],
+                    all_args[2],
+                    all_args[3],
+                    all_args[4],
+                    all_args[5],
+                    all_args[6],
+                    rest_array,
+                )
+            }
+            _ => panic!(
+                "Unsupported min_args value {} for variadic function call through function value",
+                min_args
+            ),
+        }
+    }
 }
 
 fn print_stack(_stack_pointer: usize) {
@@ -1858,6 +2165,34 @@ impl Runtime {
         )?;
 
         self.add_builtin_function(
+            "beagle.builtin/is_function_variadic",
+            is_function_variadic as *const u8,
+            false,
+            1, // function_pointer
+        )?;
+
+        self.add_builtin_function(
+            "beagle.builtin/get_function_min_args",
+            get_function_min_args as *const u8,
+            false,
+            1, // function_pointer
+        )?;
+
+        self.add_builtin_function(
+            "beagle.builtin/pack_variadic_args_from_stack",
+            pack_variadic_args_from_stack as *const u8,
+            true, // needs_stack_pointer
+            4,    // stack_pointer, args_base, total_args, min_args
+        )?;
+
+        self.add_builtin_function(
+            "beagle.builtin/call_variadic_function_value",
+            call_variadic_function_value as *const u8,
+            true, // needs_stack_pointer
+            5,    // stack_pointer, function_ptr, args_array, is_closure, closure_ptr
+        )?;
+
+        self.add_builtin_function(
             "beagle.builtin/push_exception_handler",
             push_exception_handler_runtime as *const u8,
             false,
@@ -2152,7 +2487,7 @@ unsafe fn allocate_struct(
     unsafe {
         let current_header = *header_ptr;
         let mask = 0x00FFFFFFFF000000; // Mask for bits 24-55 (bytes 3-6, the type_data field)
-        let shifted_type_id = (struct_id as usize) << 24; // Shift to bit 24
+        let shifted_type_id = struct_id << 24; // Shift to bit 24
         let new_header = (current_header & !mask) | shifted_type_id;
         *header_ptr = new_header;
     }
@@ -2268,7 +2603,7 @@ pub unsafe extern "C" fn compiler_warnings(stack_pointer: usize) -> usize {
     let mut vec = unsafe { call_fn_1(runtime, "persistent_vector/vec", 0) };
 
     // Convert each warning to struct and add to persistent vector
-    for (_, warning) in warnings.iter().enumerate() {
+    for warning in warnings.iter() {
         match unsafe { warning_to_struct(runtime, stack_pointer, warning) } {
             Ok(warning_struct) => {
                 let root_id = runtime.register_temporary_root(warning_struct);

@@ -1,0 +1,29 @@
+namespace variadic_fn_value_test
+
+// Test calling variadic functions through function values
+
+fn apply_to_values(f, a, b, c) {
+    f(a, b, c)
+}
+
+fn main() {
+    // Test calling println through function value (min_args = 0)
+    let my_print = println
+    my_print("hello", "world")
+
+    // Test calling print through function value (min_args = 0)
+    let my_print2 = print
+    my_print2("a", "b", "c")
+    _println("")
+
+    // Test variadic function passed to higher-order function
+    apply_to_values(println, 1, 2, 3)
+
+    "done"
+}
+
+// Expect
+// hello world
+// a b c
+// 1 2 3
+// done

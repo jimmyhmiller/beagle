@@ -562,7 +562,7 @@ impl X86Asm {
                 let rex = 0x48
                     | ((dest_idx >> 3) << 2)  // REX.R
                     | ((index_idx >> 3) << 1) // REX.X
-                    | (base_idx >> 3);        // REX.B
+                    | (base_idx >> 3); // REX.B
 
                 // ModRM: mod=00, reg=dest[2:0], rm=100 (SIB)
                 let modrm = ((dest_idx & 0b111) << 3) | 0b100;
@@ -589,7 +589,7 @@ impl X86Asm {
                 let rex = 0x48
                     | ((src_idx >> 3) << 2)   // REX.R
                     | ((index_idx >> 3) << 1) // REX.X
-                    | (base_idx >> 3);        // REX.B
+                    | (base_idx >> 3); // REX.B
 
                 let modrm = ((src_idx & 0b111) << 3) | 0b100;
                 let sib_byte = ((index_idx & 0b111) << 3) | (base_idx & 0b111);
