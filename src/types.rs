@@ -235,6 +235,38 @@ impl Header {
     pub const fn is_marked_bit_set(header_value: usize) -> bool {
         (header_value & Self::marked_bit_mask()) != 0
     }
+
+    // === Forwarding pointer operations ===
+    //
+    // When an object is forwarded during compacting GC, we store the new tagged
+    // pointer in the object's header location. We need a bit to mark that this
+    // has happened. We can't use bit 0-2 because those are used by type tags.
+    // Bit 3 is the lowest bit of the shifted pointer value (tagged = raw << 3 | tag),
+    // and since raw pointers are 8-byte aligned, bit 3 is always 0 in a valid
+    // tagged pointer. So we use bit 3 as the forwarding marker.
+
+    /// Position of the forwarding bit for tagged pointers
+    const FORWARDING_BIT_POSITION: u32 = 3;
+
+    /// Get the bit mask for the forwarding bit
+    pub const fn forwarding_bit_mask() -> usize {
+        1 << Self::FORWARDING_BIT_POSITION
+    }
+
+    /// Set the forwarding bit in a tagged pointer, preserving other bits
+    pub const fn set_forwarding_bit(tagged_pointer: usize) -> usize {
+        tagged_pointer | Self::forwarding_bit_mask()
+    }
+
+    /// Clear the forwarding bit in a tagged pointer, preserving other bits
+    pub const fn clear_forwarding_bit(tagged_pointer: usize) -> usize {
+        tagged_pointer & !Self::forwarding_bit_mask()
+    }
+
+    /// Check if the forwarding bit is set in a tagged pointer
+    pub const fn is_forwarding_bit_set(value: usize) -> bool {
+        (value & Self::forwarding_bit_mask()) != 0
+    }
 }
 
 #[cfg(test)]
