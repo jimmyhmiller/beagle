@@ -2551,6 +2551,7 @@ impl Runtime {
         Err(format!("Function {} not found in function table", name).into())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert_function(
         &mut self,
         name: Option<&str>,
@@ -2639,6 +2640,7 @@ impl Runtime {
         Ok(function)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add_function(
         &mut self,
         name: Option<&str>,

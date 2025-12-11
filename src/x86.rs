@@ -805,7 +805,7 @@ impl LowLevelX86 {
         if dest != value {
             self.mov_reg(dest, value);
         }
-        self.shift_left_imm(dest, dest, BuiltInTypes::tag_size() as i32);
+        self.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
         self.or(dest, dest, tag);
     }
 
@@ -923,10 +923,6 @@ impl LowLevelX86 {
         RAX
     }
 
-    pub fn get_volatile_register(&self, index: usize) -> X86Register {
-        self.canonical_volatile_registers[index]
-    }
-
     pub fn register_from_index(&self, index: usize) -> X86Register {
         // Map virtual register indices to physical registers.
         //
@@ -958,22 +954,6 @@ impl LowLevelX86 {
         }
     }
 
-    // x86-64 doesn't have dedicated link/zero registers
-    pub fn link_register(&self) -> X86Register {
-        // Use R11 as scratch for return address when needed
-        R11
-    }
-
-    pub fn frame_pointer(&self) -> X86Register {
-        RBP
-    }
-
-    pub fn zero_register(&self) -> X86Register {
-        // x86-64 doesn't have a zero register
-        // Return a sentinel; users should XOR to zero
-        RAX // Caller must handle specially
-    }
-
     /// Compile instructions to bytes
     pub fn compile_to_bytes(&mut self) -> Vec<u8> {
         // First, patch labels
@@ -992,11 +972,6 @@ impl LowLevelX86 {
             bytes.extend(instr.encode());
         }
         bytes
-    }
-
-    /// Dump all instructions for debugging
-    pub fn dump_instructions(&self) {
-        self.dump_instructions_named(None);
     }
 
     /// Dump all instructions for debugging, with optional function name
@@ -1040,7 +1015,7 @@ impl LowLevelX86 {
         let mut byte_offsets: HashMap<usize, usize> = HashMap::new();
         let mut current_offset = 0;
 
-        for (i, instr) in self.instructions.iter().enumerate() {
+        for instr in self.instructions.iter() {
             if let X86Asm::Label { index } = instr {
                 byte_offsets.insert(*index, current_offset);
             }
@@ -1099,7 +1074,7 @@ impl LowLevelX86 {
         if slots % 2 != 0 {
             slots += 1;
         }
-        let aligned_size = (slots * 8) as i32;
+        let aligned_size = slots * 8;
 
         for instr in self.instructions.iter_mut() {
             match instr {

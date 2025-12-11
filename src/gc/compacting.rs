@@ -17,6 +17,7 @@ struct Space {
     start: *const u8,
     page_count: usize,
     allocation_offset: usize,
+    #[cfg(debug_assertions)]
     protected: bool,
 }
 
@@ -81,6 +82,7 @@ impl Space {
         }
     }
 
+    #[cfg(debug_assertions)]
     fn protect(&mut self) {
         unsafe {
             mprotect(
@@ -92,6 +94,7 @@ impl Space {
         self.protected = true;
     }
 
+    #[cfg(debug_assertions)]
     fn unprotect(&mut self) {
         unsafe {
             mprotect(
@@ -100,7 +103,6 @@ impl Space {
                 libc::PROT_READ | libc::PROT_WRITE,
             )
         };
-
         self.protected = false;
     }
 
@@ -124,6 +126,7 @@ impl Space {
             start: pre_allocated_space as *const u8,
             page_count: default_page_count,
             allocation_offset: 0,
+            #[cfg(debug_assertions)]
             protected: false,
         }
     }

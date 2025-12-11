@@ -1070,7 +1070,7 @@ fn encode_modrm_mem(bytes: &mut Vec<u8>, reg: u8, base: u8, offset: i32) {
         if needs_sib {
             bytes.push(sib(0, 4, base_low)); // SIB with no index
         }
-    } else if offset >= -128 && offset <= 127 {
+    } else if (-128..=127).contains(&offset) {
         // [base + disp8]
         bytes.push(modrm(0b01, reg, base));
         if needs_sib {

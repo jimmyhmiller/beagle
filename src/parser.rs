@@ -303,8 +303,6 @@ impl Token {
 
 enum Associativity {
     Left,
-    #[allow(dead_code)]
-    Right,
 }
 
 static ZERO: u8 = b'0';
@@ -708,6 +706,7 @@ impl Tokenizer {
     }
 
     // TODO: Make a lazy method of tokenizing
+    #[allow(clippy::type_complexity)]
     pub fn parse_all(
         &mut self,
         input_bytes: &[u8],
@@ -740,8 +739,6 @@ fn test_tokenizer1() {
 pub struct Parser {
     file_name: String,
     source: String,
-    #[allow(dead_code)]
-    tokenizer: Tokenizer,
     position: usize,
     tokens: Vec<Token>,
     token_line_column_map: Vec<(usize, usize)>,
@@ -770,7 +767,6 @@ impl Parser {
         Ok(Parser {
             file_name,
             source,
-            tokenizer,
             position: 0,
             tokens,
             token_line_column_map,
