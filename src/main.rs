@@ -4,12 +4,14 @@
 // Backend-specific imports for runtime trampolines
 cfg_if::cfg_if! {
     if #[cfg(feature = "backend-x86-64")] {
-        use crate::machine_code::x86_codegen::{RBX, RCX, RDX, RSI, RDI, R8, R10, RSP, X86Asm};
+        use crate::machine_code::x86_codegen::{RCX, RDX, RSI, RDI, R8, R10, RSP, X86Asm};
     } else {
         use crate::machine_code::arm_codegen::{SP, X0, X1, X2, X3, X4, X10};
     }
 }
-use bincode::{Decode, Encode, config::standard};
+#[cfg(all(debug_assertions, not(feature = "json")))]
+use bincode::config::standard;
+use bincode::{Decode, Encode};
 use clap::{Parser as ClapParser, command};
 use gc::{Allocator, StackMapDetails, get_allocate_options};
 #[allow(unused)]
@@ -22,6 +24,7 @@ use runtime::{DefaultPrinter, Printer, Runtime, TestPrinter};
 
 use std::{cell::UnsafeCell, env, error::Error, sync::OnceLock, time::Instant};
 
+#[cfg(not(feature = "backend-x86-64"))]
 mod arm;
 pub mod ast;
 pub mod backend;
@@ -104,19 +107,16 @@ enum Data {
     },
 }
 
+// Serialize is only used in debug builds without the json feature
+#[cfg(all(debug_assertions, not(feature = "json")))]
 trait Serialize {
     fn to_binary(&self) -> Vec<u8>;
-    #[allow(unused)]
-    fn from_binary(data: &[u8]) -> Self;
 }
 
+#[cfg(all(debug_assertions, not(feature = "json")))]
 impl<T: Encode + Decode<()>> Serialize for T {
     fn to_binary(&self) -> Vec<u8> {
         bincode::encode_to_vec(self, standard()).unwrap()
-    }
-    fn from_binary(data: &[u8]) -> T {
-        let (data, _) = bincode::decode_from_slice(data, standard()).unwrap();
-        data
     }
 }
 

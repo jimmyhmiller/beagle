@@ -1,18 +1,20 @@
 use crate::{
-    CommandLineArguments, Data, Message,
+    CommandLineArguments,
     ast::{Ast, TokenRange},
     backend::{Backend, CodegenBackend},
-    builtins::debugger,
     code_memory::CodeAllocator,
     debug_only,
     gc::{StackMap, StackMapDetails},
     get_runtime,
     ir::{StringValue, Value},
     parser::Parser,
-    pretty_print::PrettyPrint,
     runtime::{Enum, Function, ProtocolMethodInfo, Struct},
     types::BuiltInTypes,
 };
+
+// These imports are only used in debug_only! blocks
+#[cfg(debug_assertions)]
+use crate::{Data, Message, builtins::debugger, pretty_print::PrettyPrint};
 
 use mmap_rs::{MmapMut, MmapOptions};
 use std::{
@@ -295,18 +297,18 @@ impl Compiler {
 
             ir.ir_range_to_token_range = token_map.clone();
             let mut backend = ir.compile(backend, error_fn_pointer);
-            let token_map = ir.ir_range_to_token_range.clone();
+            let _token_map = ir.ir_range_to_token_range.clone();
             let max_locals = backend.max_locals() as usize;
-            let function_pointer =
+            let _function_pointer =
                 self.upsert_function(Some(&top_level_name), &mut backend, max_locals, 0, false, 0)?;
             debug_only! {
                 debugger(Message {
                     kind: "ir".to_string(),
                     data: Data::Ir {
-                        function_pointer,
+                        function_pointer: _function_pointer,
                         file_name: file_name.to_string(),
                         instructions: ir.instructions.iter().map(|x| x.pretty_print()).collect(),
-                        token_range_to_ir_range: token_map
+                        token_range_to_ir_range: _token_map
                             .iter()
                             .map(|(token, ir)| ((token.start, token.end), (ir.start, ir.end)))
                             .collect(),
@@ -324,7 +326,7 @@ impl Compiler {
                 debugger(crate::Message {
                     kind: "asm".to_string(),
                     data: Data::Arm {
-                        function_pointer,
+                        function_pointer: _function_pointer,
                         file_name: file_name.to_string(),
                         instructions: pretty_arm_instructions,
                         ir_to_machine_code_range,

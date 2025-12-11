@@ -2060,7 +2060,6 @@ impl Ir {
         }
     }
 
-    #[allow(dead_code)]
     pub fn breakpoint(&mut self) {
         self.instructions.push(Instruction::Breakpoint);
     }

@@ -5,7 +5,7 @@ use crate::ir::{Condition, Instruction, Value, VirtualRegister};
 // Backend-specific imports
 cfg_if::cfg_if! {
     if #[cfg(feature = "backend-x86-64")] {
-        use crate::machine_code::x86_codegen::{X86Asm, X86Register, Size};
+        use crate::machine_code::x86_codegen::{X86Asm, X86Register};
     } else {
         use crate::machine_code::arm_codegen::{
             ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, Size, StpGenSelector,

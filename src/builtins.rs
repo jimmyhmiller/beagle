@@ -98,28 +98,25 @@ macro_rules! debug_flag_only {
     };
 }
 
-pub fn debugger(message: Message) {
+pub fn debugger(_message: Message) {
     debug_only! {
         let serialized_message : Vec<u8>;
         #[cfg(feature="json")] {
         use nanoserde::SerJson;
-            let serialized : String = SerJson::serialize_json(&message);
+            let serialized : String = SerJson::serialize_json(&_message);
             serialized_message = serialized.into_bytes();
         }
         #[cfg(not(feature="json"))] {
             use crate::Serialize;
-            serialized_message = message.to_binary();
+            serialized_message = _message.to_binary();
         }
-        let message = serialized_message;
-        let ptr = message.as_ptr();
-        let length = message.len();
-        mem::forget(message);
+        let ptr = serialized_message.as_ptr();
+        let length = serialized_message.len();
+        mem::forget(serialized_message);
         unsafe {
             debugger_info(ptr, length);
         }
-        #[allow(unused)]
-        let message = unsafe { from_raw_parts(ptr, length) };
-        // Should make it is so we clean up this memory
+        // TODO: Should clean up this memory
     }
 }
 
@@ -160,9 +157,9 @@ pub unsafe extern "C" fn to_number(stack_pointer: usize, value: usize) -> usize 
 }
 
 #[inline(always)]
-fn print_call_builtin(runtime: &Runtime, name: &str) {
-    debug_only!(if runtime.get_command_line_args().print_builtin_calls {
-        println!("Calling: {}", name);
+fn print_call_builtin(_runtime: &Runtime, _name: &str) {
+    debug_only!(if _runtime.get_command_line_args().print_builtin_calls {
+        println!("Calling: {}", _name);
     });
 }
 
@@ -488,7 +485,7 @@ pub unsafe extern "C" fn pack_variadic_args_from_stack(
     let min = BuiltInTypes::untag(min_args);
 
     // Number of extra args to pack
-    let num_extra = if total > min { total - min } else { 0 };
+    let num_extra = total.saturating_sub(min);
 
     // Allocate array for extra args
     let array_ptr = runtime
@@ -553,11 +550,7 @@ pub unsafe extern "C" fn call_variadic_function_value(
     let total_args = all_args.len();
 
     // Build rest array for args[min_args..]
-    let num_extra = if total_args > min_args {
-        total_args - min_args
-    } else {
-        0
-    };
+    let num_extra = total_args.saturating_sub(min_args);
 
     // Allocate array for extra args
     let runtime_mut = get_runtime().get_mut();
@@ -571,9 +564,7 @@ pub unsafe extern "C" fn call_variadic_function_value(
 
     // Copy extra args into rest array
     let rest_fields = rest_heap.get_fields_mut();
-    for i in 0..num_extra {
-        rest_fields[i] = all_args[min_args + i];
-    }
+    rest_fields[..num_extra].copy_from_slice(&all_args[min_args..(num_extra + min_args)]);
 
     // Dispatch based on (min_args, is_closure)
     // We support min_args 0-7 which covers typical use cases
