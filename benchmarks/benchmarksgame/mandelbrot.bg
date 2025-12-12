@@ -1,0 +1,97 @@
+namespace mandelbrot
+
+// The Computer Language Benchmarks Game
+// https://salsa.debian.org/benchmarksgame-team/benchmarksgame/
+//
+// Beagle implementation
+//
+// NOTE: This benchmark is BLOCKED due to a float comparison bug in Beagle.
+// Float-to-float comparisons (a > b, a < b) return incorrect results.
+// The algorithm requires `mag > 4.0` which doesn't work correctly.
+// Once the float comparison bug is fixed, this should work.
+
+import "beagle.builtin" as builtin
+
+let MAX_ITER = 50
+
+fn run(n) {
+    // Print PBM header
+    print("P4\n")
+    print(n)
+    print(" ")
+    print(n)
+    print("\n")
+
+    let inv_n = 2.0 / to_float(n)
+    let limit = 4.0  // Pass as variable to avoid float literal comparison bug
+    draw_rows(n, inv_n, 0, limit)
+}
+
+fn draw_rows(n, inv_n, y, limit) {
+    if y >= n {
+        null
+    } else {
+        let ci = to_float(y) * inv_n - 1.0
+        draw_row(n, inv_n, ci, 0, 0, 0, limit)
+        draw_rows(n, inv_n, y + 1, limit)
+    }
+}
+
+fn draw_row(n, inv_n, ci, x, byte_acc, bit_num, limit) {
+    if x >= n {
+        // End of row - flush remaining bits if any
+        if bit_num > 0 {
+            // Shift left to fill remaining bits
+            let shifted = shift_left(byte_acc, 8 - bit_num)
+            builtin/print_byte(shifted)
+        }
+    } else {
+        let cr = to_float(x) * inv_n - 1.5
+        let escape = mandel(cr, ci, 0.0, 0.0, 0, limit)
+
+        // Shift byte_acc left by 1 and add escape bit
+        let new_byte_acc = shift_left(byte_acc, 1) + escape
+        let new_bit_num = bit_num + 1
+
+        if new_bit_num == 8 {
+            builtin/print_byte(new_byte_acc)
+            draw_row(n, inv_n, ci, x + 1, 0, 0, limit)
+        } else {
+            draw_row(n, inv_n, ci, x + 1, new_byte_acc, new_bit_num, limit)
+        }
+    }
+}
+
+fn shift_left(n, amount) {
+    shift_left_loop(n, amount)
+}
+
+fn shift_left_loop(n, amount) {
+    if amount <= 0 {
+        n
+    } else {
+        shift_left_loop(n * 2, amount - 1)
+    }
+}
+
+fn mandel(cr, ci, zr, zi, iter, limit) {
+    if iter >= MAX_ITER {
+        1  // Inside set - black pixel
+    } else {
+        let tr = zr * zr - zi * zi + cr
+        let ti = 2.0 * zr * zi + ci
+        let mag = tr * tr + ti * ti
+        // Note: Use mag > limit (variable), not mag > 4.0 (literal) due to comparison bug
+        if mag > limit {
+            0  // Escaped - white pixel
+        } else {
+            mandel(cr, ci, tr, ti, iter + 1, limit)
+        }
+    }
+}
+
+fn main(args) {
+    let n = if length(args) > 0 { to_number(get(args, 0)) } else { 8 }
+    run(n)
+    ""
+}

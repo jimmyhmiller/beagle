@@ -47,7 +47,7 @@ fn read_field(array, index) {
 }
 
 fn new_array(size) {
-    if size < 0 || size > 256 {
+    if size < 0 {
         primitive/panic("Negative size")
     }
     let array = allocate_array_unsafe(size)
@@ -81,6 +81,12 @@ fn copy_from_array_to(from, to) {
         primitive/panic("Array from size must be less than or equal to array to size")
     }
     unsafe_copy_from_array_to(from, to)
+}
+
+fn copy_range(from, to, start, count) {
+    panic_if_not_array("copy_range from", from)
+    panic_if_not_array("copy_range to", to)
+    builtin/copy_array_range(from, to, start, count)
 }
 
 

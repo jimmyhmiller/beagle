@@ -1,0 +1,128 @@
+namespace spectral_norm
+
+// The Computer Language Benchmarks Game
+// https://salsa.debian.org/benchmarksgame-team/benchmarksgame/
+//
+// Beagle implementation
+
+import "raw_mutable_array" as arr
+
+fn A(i, j) {
+    let ij = i + j
+    let div = (ij * (ij + 1)) / 2 + i + 1
+    1.0 / to_float(div)
+}
+
+fn Au(u, w, len) {
+    Au_loop(u, w, len, 0)
+}
+
+fn Au_loop(u, w, len, i) {
+    if i >= len {
+        null
+    } else {
+        let t = Au_inner(u, len, i, 0, 0.0)
+        arr/write_field(w, i, t)
+        Au_loop(u, w, len, i + 1)
+    }
+}
+
+fn Au_inner(u, len, i, j, t) {
+    if j >= len {
+        t
+    } else {
+        let new_t = t + A(i, j) * arr/read_field(u, j)
+        Au_inner(u, len, i, j + 1, new_t)
+    }
+}
+
+fn Atu(w, v, len) {
+    Atu_loop(w, v, len, 0)
+}
+
+fn Atu_loop(w, v, len, i) {
+    if i >= len {
+        null
+    } else {
+        let t = Atu_inner(w, len, i, 0, 0.0)
+        arr/write_field(v, i, t)
+        Atu_loop(w, v, len, i + 1)
+    }
+}
+
+fn Atu_inner(w, len, i, j, t) {
+    if j >= len {
+        t
+    } else {
+        let new_t = t + A(j, i) * arr/read_field(w, j)
+        Atu_inner(w, len, i, j + 1, new_t)
+    }
+}
+
+fn AtAu(u, v, w, len) {
+    Au(u, w, len)
+    Atu(w, v, len)
+}
+
+fn fill_ones(arr, n, i) {
+    if i >= n {
+        null
+    } else {
+        arr/write_field(arr, i, 1.0)
+        fill_ones(arr, n, i + 1)
+    }
+}
+
+fn spectral_norm(n) {
+    let u = arr/new_array(n)
+    let v = arr/new_array(n)
+    let w = arr/new_array(n)
+
+    fill_ones(u, n, 0)
+
+    // 10 iterations
+    iterate(u, v, w, n, 10)
+
+    // Calculate final result
+    let sums = calculate_sums(u, v, n, 0, 0.0, 0.0)
+    sqrt(sums.vBv / sums.vv)
+}
+
+struct Sums {
+    vBv
+    vv
+}
+
+fn calculate_sums(u, v, n, i, vBv, vv) {
+    if i >= n {
+        Sums { vBv: vBv, vv: vv }
+    } else {
+        let ui = arr/read_field(u, i)
+        let vi = arr/read_field(v, i)
+        calculate_sums(u, v, n, i + 1, vBv + ui * vi, vv + vi * vi)
+    }
+}
+
+fn iterate(u, v, w, n, count) {
+    if count <= 0 {
+        null
+    } else {
+        AtAu(u, v, w, n)
+        AtAu(v, u, w, n)
+        iterate(u, v, w, n, count - 1)
+    }
+}
+
+fn run(n) {
+    let result = spectral_norm(n)
+    println(result)
+}
+
+fn main(args) {
+    let n = if length(args) > 0 { to_number(get(args, 0)) } else { 100 }
+    run(n)
+}
+
+// Expect
+// 1.2742199912349306
+// 1.2742199912349306

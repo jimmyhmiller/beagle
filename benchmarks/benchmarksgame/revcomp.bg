@@ -1,0 +1,175 @@
+namespace revcomp
+
+// The Computer Language Benchmarks Game
+// https://salsa.debian.org/benchmarksgame-team/benchmarksgame/
+//
+// Beagle implementation
+
+import "beagle.builtin" as builtin
+import "raw_mutable_array" as arr
+import "persistent_vector" as vec
+
+let LINE_WIDTH = 60
+
+fn string_length(s) {
+    builtin/get_string_length(s)
+}
+
+fn char_code(s) {
+    builtin/char_code(s)
+}
+
+// Build complement lookup table (256 entries)
+fn make_complement_table() {
+    let tbl = arr/new_array(256)
+
+    // Initialize with identity mapping
+    init_table(tbl, 0)
+
+    // Set up the complement pairs
+    // A <-> T
+    arr/write_field(tbl, 65, 84)   // A -> T
+    arr/write_field(tbl, 97, 84)   // a -> T
+    arr/write_field(tbl, 84, 65)   // T -> A
+    arr/write_field(tbl, 116, 65)  // t -> A
+
+    // C <-> G
+    arr/write_field(tbl, 67, 71)   // C -> G
+    arr/write_field(tbl, 99, 71)   // c -> G
+    arr/write_field(tbl, 71, 67)   // G -> C
+    arr/write_field(tbl, 103, 67)  // g -> C
+
+    // U -> A (like T)
+    arr/write_field(tbl, 85, 65)   // U -> A
+    arr/write_field(tbl, 117, 65)  // u -> A
+
+    // M <-> K
+    arr/write_field(tbl, 77, 75)   // M -> K
+    arr/write_field(tbl, 109, 75)  // m -> K
+    arr/write_field(tbl, 75, 77)   // K -> M
+    arr/write_field(tbl, 107, 77)  // k -> M
+
+    // R <-> Y
+    arr/write_field(tbl, 82, 89)   // R -> Y
+    arr/write_field(tbl, 114, 89)  // r -> Y
+    arr/write_field(tbl, 89, 82)   // Y -> R
+    arr/write_field(tbl, 121, 82)  // y -> R
+
+    // W <-> W (self-complement)
+    arr/write_field(tbl, 87, 87)   // W -> W
+    arr/write_field(tbl, 119, 87)  // w -> W
+
+    // S <-> S (self-complement)
+    arr/write_field(tbl, 83, 83)   // S -> S
+    arr/write_field(tbl, 115, 83)  // s -> S
+
+    // V <-> B
+    arr/write_field(tbl, 86, 66)   // V -> B
+    arr/write_field(tbl, 118, 66)  // v -> B
+    arr/write_field(tbl, 66, 86)   // B -> V
+    arr/write_field(tbl, 98, 86)   // b -> V
+
+    // H <-> D
+    arr/write_field(tbl, 72, 68)   // H -> D
+    arr/write_field(tbl, 104, 68)  // h -> D
+    arr/write_field(tbl, 68, 72)   // D -> H
+    arr/write_field(tbl, 100, 72)  // d -> H
+
+    // N <-> N (self-complement)
+    arr/write_field(tbl, 78, 78)   // N -> N
+    arr/write_field(tbl, 110, 78)  // n -> N
+
+    tbl
+}
+
+fn init_table(tbl, i) {
+    if i >= 256 {
+        null
+    } else {
+        arr/write_field(tbl, i, i)
+        init_table(tbl, i + 1)
+    }
+}
+
+// Accumulate sequence characters into a persistent vector
+// Returns the new vector
+fn accumulate_line(seq, line, tbl) {
+    let line_len = string_length(line)
+    accumulate_chars(seq, line, 0, line_len, tbl)
+}
+
+fn accumulate_chars(seq, line, i, line_len, tbl) {
+    if i >= line_len {
+        seq
+    } else {
+        let ch = line[i]
+        let code = char_code(ch)
+        let complement = arr/read_field(tbl, code)
+        let new_seq = vec/push(seq, complement)
+        accumulate_chars(new_seq, line, i + 1, line_len, tbl)
+    }
+}
+
+// Output sequence in reverse, 60 chars per line
+fn output_sequence(seq) {
+    let len = vec/count(seq)
+    if len > 0 {
+        output_reversed(seq, len - 1, 0)
+    }
+}
+
+fn output_reversed(seq, idx, col) {
+    if idx < 0 {
+        if col > 0 {
+            println("")
+        }
+    } else {
+        let code = vec/get(seq, idx)
+        builtin/print_byte(code)
+        let new_col = col + 1
+        if new_col >= LINE_WIDTH {
+            println("")
+            output_reversed(seq, idx - 1, 0)
+        } else {
+            output_reversed(seq, idx - 1, new_col)
+        }
+    }
+}
+
+// Main processing loop
+fn process_input(tbl, seq, header) {
+    let line = builtin/read_line()
+    if line == null {
+        // EOF - output final sequence
+        if header != null {
+            println(header)
+            output_sequence(seq)
+        }
+    } else {
+        if string_length(line) > 0 {
+            let first_char = line[0]
+            if first_char == ">" {
+                // New header - output previous sequence first
+                if header != null {
+                    println(header)
+                    output_sequence(seq)
+                }
+                // Start new sequence
+                process_input(tbl, vec/vec(), line)
+            } else {
+                // Sequence line - accumulate
+                let new_seq = accumulate_line(seq, line, tbl)
+                process_input(tbl, new_seq, header)
+            }
+        } else {
+            // Empty line - skip
+            process_input(tbl, seq, header)
+        }
+    }
+}
+
+fn main() {
+    let tbl = make_complement_table()
+    process_input(tbl, vec/vec(), null)
+    ""
+}

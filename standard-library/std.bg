@@ -199,7 +199,11 @@ extend String with Length {
 // Arrays are raw mutable arrays with type_id = 1
 extend Array with Indexed {
     fn get(arr, i) {
-        primitive/read_field(arr, i)
+        if i < 0 || i >= primitive/size(arr) {
+            null
+        } else {
+            primitive/read_field(arr, i)
+        }
     }
 }
 

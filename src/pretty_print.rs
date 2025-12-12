@@ -168,6 +168,15 @@ impl PrettyPrint for Instruction {
                     condition
                 )
             }
+            Instruction::CompareFloat(value, value1, value2, condition) => {
+                format!(
+                    "compare_float {}, {}, {}, {:?}",
+                    value.pretty_print(),
+                    value1.pretty_print(),
+                    value2.pretty_print(),
+                    condition
+                )
+            }
             Instruction::Tag(value, value1, value2) => {
                 format!(
                     "tag {}, {}, {}",
@@ -1169,6 +1178,12 @@ impl PrettyPrint for ArmAsm {
                     rn.pretty_print(),
                     rm.pretty_print()
                 )
+            }
+            ArmAsm::FcmpFloat { ftype, rm, rn } => {
+                if *ftype != 0b01 {
+                    panic!("Need to deal with ftype since I'm using it now");
+                }
+                format!("fcmp {}, {}", rn.pretty_print(), rm.pretty_print())
             }
         }
     }

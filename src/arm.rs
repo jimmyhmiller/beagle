@@ -379,6 +379,44 @@ pub fn compare_bool(
     ]
 }
 
+pub fn compare_float_bool(
+    condition: Condition,
+    destination: Register,
+    a: Register,
+    b: Register,
+) -> Vec<ArmAsm> {
+    // FCMP compares Rn against Rm and sets flags directly for "Rn <cond> Rm"
+    // Unlike SUBS (used for integers) which computes rn - rm backwards,
+    // FCMP semantics match the natural comparison "a <cond> b"
+    //
+    // After FCMP Rn=a, Rm=b:
+    // - If a > b: N=0, Z=0, C=1, V=0 -> GT (Z=0 and N==V) is TRUE
+    // - If a < b: N=1, Z=0, C=0, V=0 -> LT (N!=V) is TRUE
+    // - If a == b: N=0, Z=1, C=1, V=0 -> EQ (Z=1) is TRUE
+    //
+    // For CSET, we need to invert the condition because CSINC returns 1 when condition is FALSE
+    let inverted_cond = match condition {
+        Condition::Equal => 1,               // EQ(0) -> NE(1)
+        Condition::NotEqual => 0,            // NE(1) -> EQ(0)
+        Condition::GreaterThan => 13,        // GT(12) -> LE(13)
+        Condition::GreaterThanOrEqual => 11, // GE(10) -> LT(11)
+        Condition::LessThan => 10,           // LT(11) -> GE(10)
+        Condition::LessThanOrEqual => 12,    // LE(13) -> GT(12)
+    };
+    vec![
+        ArmAsm::FcmpFloat {
+            ftype: 1, // Double precision
+            rm: b,    // Compare a with b
+            rn: a,
+        },
+        ArmAsm::CsetCsinc {
+            sf: destination.sf(),
+            cond: inverted_cond,
+            rd: destination,
+        },
+    ]
+}
+
 pub fn jump_equal(destination: u32) -> ArmAsm {
     ArmAsm::BCond {
         imm19: destination as i32,
@@ -637,6 +675,16 @@ impl LowLevelArm {
     pub fn compare_bool(&mut self, condition: Condition, dest: Register, a: Register, b: Register) {
         self.instructions
             .extend(compare_bool(condition, dest, a, b));
+    }
+    pub fn compare_float_bool(
+        &mut self,
+        condition: Condition,
+        dest: Register,
+        a: Register,
+        b: Register,
+    ) {
+        self.instructions
+            .extend(compare_float_bool(condition, dest, a, b));
     }
     pub fn tag_value(&mut self, destination: Register, value: Register, tag: Register) {
         self.instructions.extend(tag_value(destination, value, tag));

@@ -818,6 +818,7 @@ pub enum CompilerMessage {
     AddFunctionMarkExecutable(String, Vec<u8>, usize, usize),
     CompileProtocolMethod(String, String, Vec<ProtocolMethodInfo>),
     SetPauseAtomPointer(usize),
+    GetCodeBaseAddress,
     Reset,
 }
 
@@ -826,6 +827,7 @@ pub enum CompilerResponse {
     FunctionsToRun(Vec<String>),
     FunctionPointer(usize),
     CompileError(String),
+    CodeBaseAddress(usize),
 }
 
 pub struct CompilerThread {
@@ -944,6 +946,10 @@ impl CompilerThread {
                                     .mark_done(CompilerResponse::CompileError(format!("{}", e)));
                             }
                         }
+                    }
+                    CompilerMessage::GetCodeBaseAddress => {
+                        let base = self.compiler.code_allocator.base_address();
+                        work_done.mark_done(CompilerResponse::CodeBaseAddress(base));
                     }
                 },
                 Err(_) => {

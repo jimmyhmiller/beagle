@@ -163,6 +163,7 @@ pub enum Instruction {
     SubFloat(Value, Value, Value),
     MulFloat(Value, Value, Value),
     DivFloat(Value, Value, Value),
+    CompareFloat(Value, Value, Value, Condition),
     ShiftRightImm(Value, Value, i32),
     ShiftRightImmRaw(Value, Value, i32),
     AndImm(Value, Value, u64),
@@ -421,6 +422,9 @@ impl Instruction {
             Instruction::Compare(a, b, c, _) => {
                 get_registers!(a, b, c)
             }
+            Instruction::CompareFloat(a, b, c, _) => {
+                get_registers!(a, b, c)
+            }
             Instruction::Tag(a, b, c) => {
                 get_registers!(a, b, c)
             }
@@ -533,6 +537,7 @@ impl Instruction {
             | Instruction::MulFloat(value, value1, value2)
             | Instruction::DivFloat(value, value1, value2)
             | Instruction::Compare(value, value1, value2, _)
+            | Instruction::CompareFloat(value, value1, value2, _)
             | Instruction::Tag(value, value1, value2)
             | Instruction::CompareAndSwap(value, value1, value2) => {
                 replace_register!(value, old_register, new_register);
@@ -899,6 +904,58 @@ impl Ir {
             tag.into(),
         ));
         Value::Register(register)
+    }
+
+    pub fn compare_any(&mut self, a: Value, b: Value, condition: Condition) -> Value {
+        let result_register = self.assign_new(Value::TaggedConstant(0));
+        let a: VirtualRegister = self.assign_new(a);
+        let b: VirtualRegister = self.assign_new(b);
+        let compare_float_label: Label = self.label("compare_float");
+        let default_compare_label: Label = self.label("default_compare");
+        let after_compare = self.label("after_compare");
+
+        // Check if BOTH values are floats - only then use float comparison
+        self.guard_float(a.into(), default_compare_label);
+        self.guard_float(b.into(), default_compare_label);
+
+        // Float path - both are floats
+        self.write_label(compare_float_label);
+        let a_untagged = self.untag(a.into());
+        let b_untagged = self.untag(b.into());
+        let a_raw = self.load_from_heap(a_untagged, 1);
+        let b_raw = self.load_from_heap(b_untagged, 1);
+        let a_float = self.fmov_general_to_float(a_raw);
+        let b_float = self.fmov_general_to_float(b_raw);
+
+        let tag2 = self.assign_new(Value::RawValue(BuiltInTypes::Bool.get_tag() as usize));
+        let dest2 = self.volatile_register();
+        self.instructions.push(Instruction::CompareFloat(
+            dest2.into(),
+            a_float,
+            b_float,
+            condition,
+        ));
+        self.instructions
+            .push(Instruction::Tag(dest2.into(), dest2.into(), tag2.into()));
+        self.assign(result_register, dest2);
+        self.jump(after_compare);
+
+        // Default path - use regular comparison (works for ints, bools, null, pointers, etc.)
+        self.write_label(default_compare_label);
+        let tag = self.assign_new(Value::RawValue(BuiltInTypes::Bool.get_tag() as usize));
+        let dest = self.volatile_register();
+        self.instructions.push(Instruction::Compare(
+            dest.into(),
+            a.into(),
+            b.into(),
+            condition,
+        ));
+        self.instructions
+            .push(Instruction::Tag(dest.into(), dest.into(), tag.into()));
+        self.assign(result_register, dest);
+
+        self.write_label(after_compare);
+        Value::Register(result_register)
     }
 
     pub fn jump_if<A, B>(&mut self, label: Label, condition: Condition, a: A, b: B)
@@ -1788,6 +1845,14 @@ impl Ir {
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, backend);
                     backend.compare_bool(*condition, dest, a, b);
+                    self.store_spill(dest, dest_spill, backend);
+                }
+                Instruction::CompareFloat(dest, a, b, condition) => {
+                    let a = self.value_to_register(a, backend);
+                    let b = self.value_to_register(b, backend);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.compare_float_bool(*condition, dest, a, b);
                     self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::Tag(dest, a, b) => {

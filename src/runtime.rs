@@ -83,6 +83,7 @@ impl StructManager {
 pub trait Printer: Send + Sync {
     fn print(&mut self, value: String);
     fn println(&mut self, value: String);
+    fn print_byte(&mut self, byte: u8);
     // Gross just for testing. I'll need to do better;
     fn get_output(&self) -> Vec<String>;
     fn reset(&mut self);
@@ -97,6 +98,11 @@ impl Printer for DefaultPrinter {
 
     fn println(&mut self, value: String) {
         println!("{}", value);
+    }
+
+    fn print_byte(&mut self, byte: u8) {
+        use std::io::Write;
+        let _ = std::io::stdout().write_all(&[byte]);
     }
 
     fn get_output(&self) -> Vec<String> {
@@ -131,6 +137,11 @@ impl Printer for TestPrinter {
     fn println(&mut self, value: String) {
         self.output.push(value.clone() + "\n");
         // self.other_printer.println(value);
+    }
+
+    fn print_byte(&mut self, byte: u8) {
+        // For testing, convert byte to a string representation
+        self.output.push(format!("{}", byte as char));
     }
 
     fn get_output(&self) -> Vec<String> {
@@ -468,7 +479,7 @@ impl Memory {
         heap_object.writer_header_direct(Header {
             type_id: 2,
             type_data: bytes.len() as u32,
-            size: words as u8,
+            size: words as u16,
             opaque: true,
             marked: false,
         });
@@ -494,7 +505,7 @@ impl Memory {
         heap_object.writer_header_direct(Header {
             type_id: 3,
             type_data: bytes.len() as u32, // Store text length
-            size: total_words as u8,
+            size: total_words as u16,
             opaque: true,
             marked: false,
         });
@@ -1032,6 +1043,27 @@ impl Runtime {
         let pointer = self.allocate(words, stack_pointer, BuiltInTypes::HeapObject)?;
         let pointer = self.memory.allocate_string(bytes, pointer)?;
         Ok(pointer)
+    }
+
+    /// Creates a Beagle array of strings from Rust strings.
+    /// Returns a tagged pointer to the array.
+    pub fn create_string_array(
+        &mut self,
+        stack_pointer: usize,
+        strings: &[String],
+    ) -> Result<usize, Box<dyn Error>> {
+        let num_elements = strings.len();
+        let array_ptr = self.allocate(num_elements, stack_pointer, BuiltInTypes::HeapObject)?;
+
+        let mut heap_obj = HeapObject::from_tagged(array_ptr);
+        heap_obj.write_type_id(1); // type_id=1 marks raw array
+
+        for (i, s) in strings.iter().enumerate() {
+            let string_ptr = self.allocate_string(stack_pointer, s.clone())?;
+            heap_obj.write_field(i as i32, string_ptr.into());
+        }
+
+        Ok(array_ptr)
     }
 
     pub fn allocate_keyword(
@@ -1689,8 +1721,15 @@ impl Runtime {
         Some(Box::new(move || trampoline(stack_pointer, start)))
     }
 
-    #[allow(unused)]
-    fn get_function1(&self, name: &str) -> Option<Box<dyn Fn(u64) -> u64>> {
+    /// Returns the number of arguments a function takes, or None if the function doesn't exist.
+    pub fn get_function_arity(&self, name: &str) -> Option<usize> {
+        self.functions
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| f.number_of_args)
+    }
+
+    pub fn get_function1(&self, name: &str) -> Option<Box<dyn Fn(u64) -> u64>> {
         let (stack_pointer, start, trampoline_start) = self.get_function_base(name)?;
         let f: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
         Some(Box::new(move |arg1| f(stack_pointer, start, arg1)))
@@ -1798,14 +1837,23 @@ impl Runtime {
         // START SIZE symbolname
         // START and SIZE are hex numbers without 0x.
         // symbolname is the rest of the line, so it could contain special characters.
+        // Perf map format uses absolute virtual addresses.
+        // IMPORTANT: Entries must be sorted by address for samply's symbol table lookup.
 
-        for function in self.functions.iter() {
-            if function.is_foreign || function.is_builtin {
-                continue;
-            }
-            let start: usize = function.pointer.into();
-            let size = function.size;
-            let name = function.name.clone();
+        // Collect and sort functions by address
+        // Include builtins that have JIT code (size > 0), exclude foreign functions
+        let mut entries: Vec<_> = self
+            .functions
+            .iter()
+            .filter(|f| !f.is_foreign && f.size > 0)
+            .map(|f| {
+                let start: usize = f.pointer.into();
+                (start, f.size, f.name.clone())
+            })
+            .collect();
+        entries.sort_by_key(|(start, _, _)| *start);
+
+        for (start, size, name) in entries {
             let line = format!("{:x} {:x} {}\n", start, size, name);
             file.write_all(line.as_bytes())
                 .expect("Failed to write to pid map file - this is a fatal error");
@@ -2193,7 +2241,14 @@ impl Runtime {
         match a_tag {
             BuiltInTypes::Null => true,
             BuiltInTypes::Int => a == b,
-            BuiltInTypes::Float => a == b,
+            BuiltInTypes::Float => {
+                // Floats are heap-allocated, so we need to compare the actual values
+                let a_ptr = BuiltInTypes::untag(a) as *const f64;
+                let b_ptr = BuiltInTypes::untag(b) as *const f64;
+                let a_val = unsafe { *a_ptr.add(1) };
+                let b_val = unsafe { *b_ptr.add(1) };
+                a_val == b_val
+            }
             BuiltInTypes::String => a == b,
             BuiltInTypes::Bool => a == b,
             BuiltInTypes::Function => a == b,
@@ -3083,6 +3138,7 @@ mod tests {
     fn test_stack_segment_integration() {
         let args = CommandLineArguments {
             program: None,
+            program_args: vec![],
             show_times: false,
             show_gc_times: false,
             print_ast: false,

@@ -1,0 +1,117 @@
+namespace fannkuch_redux
+
+// The Computer Language Benchmarks Game
+// https://salsa.debian.org/benchmarksgame-team/benchmarksgame/
+//
+// Beagle implementation matching Node.js node-8 structure exactly
+
+import "raw_mutable_array" as arr
+
+fn fannkuch(n) {
+    let perm1 = arr/new_array(n)
+    let mut i = 0
+    while i < n {
+        arr/write_field(perm1, i, i)
+        i = i + 1
+        null
+    }
+
+    let perm = arr/new_array(n)
+    let count = arr/new_array(n)
+    let mut f = 0
+    let mut flips = 0
+    let mut nperm = 0
+    let mut checksum = 0
+    let mut k = 0
+    let mut r = n
+    let mut done = false
+
+    while r > 0 && done == false {
+        i = 0
+        while r != 1 {
+            arr/write_field(count, r - 1, r)
+            r = r - 1
+            null
+        }
+        arr/copy_from_array_to(perm1, perm)
+
+        // Count flips and update max and checksum
+        f = 0
+        k = arr/read_field(perm, 0)
+        while k != 0 {
+            i = 0
+            while 2 * i < k {
+                let t = arr/read_field(perm, i)
+                arr/write_field(perm, i, arr/read_field(perm, k - i))
+                arr/write_field(perm, k - i, t)
+                i = i + 1
+                null
+            }
+            k = arr/read_field(perm, 0)
+            f = f + 1
+            null
+        }
+        if f > flips {
+            flips = f
+        }
+        if (nperm & 1) == 0 {
+            checksum = checksum + f
+        } else {
+            checksum = checksum - f
+        }
+
+        // Use incremental change to generate another permutation
+        let mut more = true
+        while more {
+            if r == n {
+                println(checksum)
+                done = true
+                more = false
+                null
+            } else {
+                let p0 = arr/read_field(perm1, 0)
+                i = 0
+                while i < r {
+                    let j = i + 1
+                    arr/write_field(perm1, i, arr/read_field(perm1, j))
+                    i = j
+                    null
+                }
+                arr/write_field(perm1, r, p0)
+
+                let cnt = arr/read_field(count, r) - 1
+                arr/write_field(count, r, cnt)
+                if cnt > 0 {
+                    more = false
+                } else {
+                    r = r + 1
+                }
+                null
+            }
+        }
+        if done == false {
+            nperm = nperm + 1
+        }
+        null
+    }
+    flips
+}
+
+fn run(n) {
+    let flips = fannkuch(n)
+    print("Pfannkuchen(")
+    print(n)
+    print(") = ")
+    println(flips)
+    flips
+}
+
+fn main(args) {
+    let n = if length(args) > 0 { to_number(get(args, 0)) } else { 7 }
+    run(n)
+}
+
+// Expect
+// 228
+// Pfannkuchen(7) = 16
+// 16

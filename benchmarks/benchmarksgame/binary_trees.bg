@@ -1,0 +1,108 @@
+namespace binary_trees
+
+// The Computer Language Benchmarks Game
+// https://salsa.debian.org/benchmarksgame-team/benchmarksgame/
+//
+// Beagle implementation
+
+struct TreeNode {
+    left
+    right
+}
+
+fn item_check(node) {
+    if node.left == null {
+        1
+    } else {
+        1 + item_check(node.left) + item_check(node.right)
+    }
+}
+
+fn bottom_up_tree(depth) {
+    if depth > 0 {
+        TreeNode {
+            left: bottom_up_tree(depth - 1),
+            right: bottom_up_tree(depth - 1)
+        }
+    } else {
+        TreeNode {
+            left: null,
+            right: null
+        }
+    }
+}
+
+fn max(a, b) {
+    if a > b { a } else { b }
+}
+
+fn pow2(exp) {
+    pow2_helper(exp, 1)
+}
+
+fn pow2_helper(exp, accum) {
+    if exp == 0 {
+        accum
+    } else {
+        pow2_helper(exp - 1, accum * 2)
+    }
+}
+
+fn loop_depths(depth, max_depth, min_depth) {
+    if depth <= max_depth {
+        let iterations = pow2(max_depth - depth + min_depth)
+        let check = sum_checks(iterations, depth, 0, 0)
+        print(iterations)
+        print("\t trees of depth ")
+        print(depth)
+        print("\t check: ")
+        println(check)
+        loop_depths(depth + 2, max_depth, min_depth)
+    } else {
+        null
+    }
+}
+
+fn sum_checks(iterations, depth, i, accum) {
+    if i < iterations {
+        let check = item_check(bottom_up_tree(depth))
+        sum_checks(iterations, depth, i + 1, accum + check)
+    } else {
+        accum
+    }
+}
+
+fn run(n) {
+    let min_depth = 4
+    let max_depth = max(min_depth + 2, n)
+
+    let stretch_depth = max_depth + 1
+    let stretch_tree = bottom_up_tree(stretch_depth)
+    print("stretch tree of depth ")
+    print(stretch_depth)
+    print("\t check: ")
+    println(item_check(stretch_tree))
+
+    let long_lived_tree = bottom_up_tree(max_depth)
+
+    loop_depths(min_depth, max_depth, min_depth)
+
+    print("long lived tree of depth ")
+    print(max_depth)
+    print("\t check: ")
+    println(item_check(long_lived_tree))
+}
+
+fn main(args) {
+    let n = if length(args) > 0 { to_number(get(args, 0)) } else { 10 }
+    run(n)
+}
+
+// Expect
+// stretch tree of depth 11	 check: 4095
+// 1024	 trees of depth 4	 check: 31744
+// 256	 trees of depth 6	 check: 32512
+// 64	 trees of depth 8	 check: 32704
+// 16	 trees of depth 10	 check: 32752
+// long lived tree of depth 10	 check: 2047
+// 2047

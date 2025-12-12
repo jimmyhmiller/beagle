@@ -155,17 +155,17 @@ fn tag_and_untag() {
 pub struct Header {
     pub type_id: u8,
     pub type_data: u32,
-    pub size: u8,
+    pub size: u16, // Changed from u8 to u16 to allow larger arrays
     pub opaque: bool,
     pub marked: bool,
 }
 
 impl Header {
-    // | Byte 7  | Bytes 3-6     | Byte 2 | Byte 1  | Byte 0               |
-    // |---------|---------------|--------|---------|----------------------|
-    // | Type    | Type Metadata | Size   | Padding | Flag bits            |
-    // |         | (4 bytes)     |        |         | Opaque object (bit 1) |
-    // |         |               |        |         | Marked (bit 0)       |
+    // | Byte 7  | Bytes 3-6     | Bytes 1-2 | Byte 0               |
+    // |---------|---------------|-----------|----------------------|
+    // | Type    | Type Metadata | Size      | Flag bits            |
+    // |         | (4 bytes)     | (2 bytes) | Opaque object (bit 1) |
+    // |         |               |           | Marked (bit 0)       |
 
     /// Position of the marked bit in the header.
     /// IMPORTANT: This MUST be in the 3 least significant bits (0, 1, or 2) for
@@ -179,7 +179,7 @@ impl Header {
         let mut data: usize = 0;
         data |= (self.type_id as usize) << 56;
         data |= (self.type_data as usize) << 24;
-        data |= (self.size as usize) << 16;
+        data |= (self.size as usize) << 8; // Size now uses bytes 1-2
         if self.opaque {
             data |= 1 << Self::OPAQUE_BIT_POSITION;
         }
@@ -192,7 +192,7 @@ impl Header {
     pub fn from_usize(data: usize) -> Self {
         let _type = (data >> 56) as u8;
         let type_data = (data >> 24) as u32;
-        let size = (data >> 16) as u8;
+        let size = ((data >> 8) & 0xFFFF) as u16; // Extract 16 bits for size
         let opaque = (data & (1 << Self::OPAQUE_BIT_POSITION)) != 0;
         let marked = (data & (1 << Self::MARKED_BIT_POSITION)) != 0;
         Header {
@@ -213,7 +213,7 @@ impl Header {
     }
 
     pub fn size_offset() -> usize {
-        2
+        1 // Size is now at bytes 1-2 (u16)
     }
 
     /// Get the bit mask for the marked bit
@@ -334,7 +334,7 @@ fn header() {
     assert!((data & 0b10) == 0b10);
 
     for t in 0..u8::MAX {
-        for s in 0..u8::MAX {
+        for s in 0..256u16 {
             for sm in [true, false].iter() {
                 for m in [true, false].iter() {
                     let header = Header {
@@ -530,7 +530,7 @@ impl HeapObject {
         let header = Header {
             type_id: 0,
             type_data: 0,
-            size: field_size.to_words() as u8,
+            size: field_size.to_words() as u16,
             opaque: false,
             marked: false,
         };

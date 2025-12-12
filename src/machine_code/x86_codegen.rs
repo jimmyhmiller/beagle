@@ -490,6 +490,11 @@ pub enum X86Asm {
         dest: X86Register,
         src: X86Register,
     },
+    /// UCOMISD xmm, xmm (unordered compare scalar double)
+    Ucomisd {
+        a: X86Register,
+        b: X86Register,
+    },
 
     // === Atomic instructions ===
     /// MFENCE
@@ -976,6 +981,16 @@ impl X86Asm {
                     0x6E,
                     modrm(0b11, dest.index, src.index),
                 ]
+            }
+
+            X86Asm::Ucomisd { a, b } => {
+                // UCOMISD xmm, xmm: 66 0F 2E /r
+                let mut bytes = vec![0x66];
+                if a.needs_rex_ext() || b.needs_rex_ext() {
+                    bytes.push(rex(false, a.index >= 8, false, b.index >= 8));
+                }
+                bytes.extend_from_slice(&[0x0F, 0x2E, modrm(0b11, a.index, b.index)]);
+                bytes
             }
 
             // === Atomic instructions ===

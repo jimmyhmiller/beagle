@@ -1,0 +1,317 @@
+namespace knucleotide
+
+// The Computer Language Benchmarks Game
+// https://salsa.debian.org/benchmarksgame-team/benchmarksgame/
+//
+// Beagle implementation
+
+import "beagle.builtin" as builtin
+import "persistent_map" as map
+import "persistent_vector" as vec
+
+fn string_length(s) {
+    builtin/get_string_length(s)
+}
+
+fn char_code(s) {
+    builtin/char_code(s)
+}
+
+fn to_upper(s) {
+    let code = char_code(s)
+    // If lowercase a-z (97-122), convert to uppercase (65-90)
+    if code >= 97 {
+        if code <= 122 {
+            builtin/char_from_code(code - 32)
+        } else {
+            s
+        }
+    } else {
+        s
+    }
+}
+
+fn uppercase_string(s) {
+    uppercase_loop(s, 0, string_length(s), "")
+}
+
+fn uppercase_loop(s, i, len, acc) {
+    if i >= len {
+        acc
+    } else {
+        let ch = to_upper(s[i])
+        uppercase_loop(s, i + 1, len, acc ++ ch)
+    }
+}
+
+// Skip lines until we find one starting with ">THREE"
+fn skip_to_three() {
+    let line = builtin/read_line()
+    if line == null {
+        ""
+    } else {
+        if string_length(line) >= 6 {
+            let prefix = substring(line, 0, 6)
+            if prefix == ">THREE" {
+                ""
+            } else {
+                skip_to_three()
+            }
+        } else {
+            skip_to_three()
+        }
+    }
+}
+
+fn substring(s, start, end) {
+    substring_loop(s, start, end, "")
+}
+
+fn substring_loop(s, i, end, acc) {
+    if i >= end {
+        acc
+    } else {
+        substring_loop(s, i + 1, end, acc ++ s[i])
+    }
+}
+
+// Read all sequence lines and concatenate into a single string
+fn read_sequence(acc) {
+    let line = builtin/read_line()
+    if line == null {
+        acc
+    } else {
+        if string_length(line) > 0 {
+            let first = line[0]
+            if first == ">" {
+                acc
+            } else {
+                read_sequence(acc ++ uppercase_string(line))
+            }
+        } else {
+            read_sequence(acc)
+        }
+    }
+}
+
+// Count all k-mers of given length
+fn count_kmers(seq, k) {
+    let len = string_length(seq)
+    let n = len - k + 1
+    count_kmers_loop(seq, k, 0, n, map/map())
+}
+
+fn count_kmers_loop(seq, k, i, n, counts) {
+    if i >= n {
+        counts
+    } else {
+        let kmer = substring(seq, i, i + k)
+        let cur = get(counts, kmer)
+        let new_count = if cur == null { 1 } else { cur + 1 }
+        let new_counts = map/assoc(counts, kmer, new_count)
+        count_kmers_loop(seq, k, i + 1, n, new_counts)
+    }
+}
+
+// Get count for a specific sequence
+fn get_count(counts, seq) {
+    let c = get(counts, seq)
+    if c == null { 0 } else { c }
+}
+
+// Collect all keys and counts into a vector of pairs
+fn collect_counts(counts) {
+    let keys_vec = keys(counts)
+    collect_counts_loop(counts, keys_vec, 0, map/count(counts), vec/vec())
+}
+
+fn collect_counts_loop(counts, keys_vec, i, len, acc) {
+    if i >= len {
+        acc
+    } else {
+        let key = vec/get(keys_vec, i)
+        let count = get(counts, key)
+        let pair = vec/vec()
+        let pair2 = vec/push(pair, key)
+        let pair3 = vec/push(pair2, count)
+        collect_counts_loop(counts, keys_vec, i + 1, len, vec/push(acc, pair3))
+    }
+}
+
+// Sort pairs by count descending, then by key ascending
+fn sort_pairs(pairs) {
+    let len = vec/count(pairs)
+    bubble_sort(pairs, len)
+}
+
+fn bubble_sort(pairs, len) {
+    bubble_sort_outer(pairs, len, 0)
+}
+
+fn bubble_sort_outer(pairs, len, i) {
+    if i >= len - 1 {
+        pairs
+    } else {
+        let pairs2 = bubble_sort_inner(pairs, len - 1 - i, 0)
+        bubble_sort_outer(pairs2, len, i + 1)
+    }
+}
+
+fn bubble_sort_inner(pairs, limit, j) {
+    if j >= limit {
+        pairs
+    } else {
+        let p1 = vec/get(pairs, j)
+        let p2 = vec/get(pairs, j + 1)
+        let k1 = vec/get(p1, 0)
+        let k2 = vec/get(p2, 0)
+        let c1 = vec/get(p1, 1)
+        let c2 = vec/get(p2, 1)
+        // Sort by count descending, then by key ascending
+        let should_swap = if c1 < c2 {
+            true
+        } else {
+            if c1 > c2 {
+                false
+            } else {
+                // Same count - compare keys (ascending)
+                string_less_than(k2, k1)
+            }
+        }
+        if should_swap {
+            let swapped = swap_at(pairs, j, j + 1)
+            bubble_sort_inner(swapped, limit, j + 1)
+        } else {
+            bubble_sort_inner(pairs, limit, j + 1)
+        }
+    }
+}
+
+fn string_less_than(a, b) {
+    string_compare(a, b, 0) < 0
+}
+
+fn string_compare(a, b, i) {
+    let len_a = string_length(a)
+    let len_b = string_length(b)
+    if i >= len_a {
+        if i >= len_b { 0 } else { -1 }
+    } else {
+        if i >= len_b {
+            1
+        } else {
+            let ca = char_code(a[i])
+            let cb = char_code(b[i])
+            if ca < cb {
+                -1
+            } else {
+                if ca > cb {
+                    1
+                } else {
+                    string_compare(a, b, i + 1)
+                }
+            }
+        }
+    }
+}
+
+fn swap_at(pairs, i, j) {
+    let pi = vec/get(pairs, i)
+    let pj = vec/get(pairs, j)
+    let pairs2 = vec/assoc(pairs, i, pj)
+    vec/assoc(pairs2, j, pi)
+}
+
+// Print frequency percentage with 3 decimal places
+fn print_percent(count, total) {
+    // Add total/2 for rounding (equivalent to +0.5)
+    let pct = ((count * 100000) + (total / 2)) / total
+    let int_part = pct / 1000
+    let frac_part = pct - int_part * 1000
+    print(int_part)
+    print(".")
+    print_frac(frac_part)
+}
+
+fn print_frac(n) {
+    if n < 10 {
+        print("00")
+        print(n)
+    } else {
+        if n < 100 {
+            print("0")
+            print(n)
+        } else {
+            print(n)
+        }
+    }
+}
+
+// Print frequency table
+fn print_freq_table(pairs, total) {
+    print_freq_loop(pairs, total, 0, vec/count(pairs))
+}
+
+fn print_freq_loop(pairs, total, i, len) {
+    if i >= len {
+        null
+    } else {
+        let pair = vec/get(pairs, i)
+        let key = vec/get(pair, 0)
+        let count = vec/get(pair, 1)
+        print(key)
+        print(" ")
+        print_percent(count, total)
+        println("")
+        print_freq_loop(pairs, total, i + 1, len)
+    }
+}
+
+// Print count for a specific sequence
+fn print_count(seq, counts) {
+    let c = get_count(counts, seq)
+    print(c)
+    print("\t")
+    println(seq)
+}
+
+fn main() {
+    // Skip to THREE section
+    skip_to_three()
+
+    // Read the sequence
+    let seq = read_sequence("")
+    let len = string_length(seq)
+
+    // 1-mer frequencies
+    let counts1 = count_kmers(seq, 1)
+    let pairs1 = collect_counts(counts1)
+    let sorted1 = sort_pairs(pairs1)
+    print_freq_table(sorted1, len)
+    println("")
+
+    // 2-mer frequencies
+    let counts2 = count_kmers(seq, 2)
+    let pairs2 = collect_counts(counts2)
+    let sorted2 = sort_pairs(pairs2)
+    print_freq_table(sorted2, len - 1)
+    println("")
+
+    // Specific sequence counts
+    let counts3 = count_kmers(seq, 3)
+    print_count("GGT", counts3)
+
+    let counts4 = count_kmers(seq, 4)
+    print_count("GGTA", counts4)
+
+    let counts6 = count_kmers(seq, 6)
+    print_count("GGTATT", counts6)
+
+    let counts12 = count_kmers(seq, 12)
+    print_count("GGTATTTTAATT", counts12)
+
+    let counts18 = count_kmers(seq, 18)
+    print_count("GGTATTTTAATTTATAGT", counts18)
+
+    ""
+}
