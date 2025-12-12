@@ -18,7 +18,7 @@ use crate::{
     Message, debug_only,
     gc::{Allocator, STACK_SIZE},
     get_runtime,
-    runtime::{FFIInfo, FFIType, RawPtr, Runtime, SyncWrapper},
+    runtime::{DispatchTable, FFIInfo, FFIType, RawPtr, Runtime, SyncWrapper},
     types::{BuiltInTypes, HeapObject},
 };
 
@@ -361,6 +361,74 @@ extern "C" fn property_access(
     buffer[0] = type_id;
     buffer[1] = index * 8;
     result
+}
+
+/// Slow path for protocol dispatch - looks up function in dispatch table and updates cache
+/// Returns the function pointer to call
+///
+/// Type identification for dispatch:
+/// - Tagged primitives (Int, Float, Bool): high bit marker + (tag + 16)
+/// - Heap objects with type_id > 0 (Array=1, String=2, Keyword=3): high bit marker + type_id
+/// - Heap objects with type_id = 0 (structs): struct_id from type_data (tagged)
+extern "C" fn protocol_dispatch(
+    first_arg: usize,
+    cache_location: usize,
+    dispatch_table_ptr: usize,
+) -> usize {
+    let type_id = if BuiltInTypes::is_heap_pointer(first_arg) {
+        let heap_obj = HeapObject::from_tagged(first_arg);
+        let header_type_id = heap_obj.get_type_id();
+
+        if header_type_id == 0 {
+            // Custom struct - use struct_id from type_data (tagged)
+            heap_obj.get_struct_id()
+        } else {
+            // Built-in heap type (Array=1, String=2, Keyword=3)
+            // Use primitive dispatch with header_type_id
+            0x8000_0000_0000_0000 | header_type_id
+        }
+    } else {
+        // Tagged primitive (Int, Float, Bool, String constant, etc.)
+        let kind = BuiltInTypes::get_kind(first_arg);
+        let tag = kind.get_tag() as usize;
+        // Map tags to primitive indices:
+        // - String constant (tag 2) -> index 2 (same as heap String)
+        // - Int (tag 0) -> index 16
+        // - Float (tag 1) -> index 17
+        // - Bool (tag 3) -> index 19
+        let primitive_index = if tag == 2 {
+            2 // String constant uses same index as heap String
+        } else {
+            tag + 16
+        };
+        0x8000_0000_0000_0000 | primitive_index
+    };
+
+    // Look up function pointer in dispatch table
+    let dispatch_table = unsafe { &*(dispatch_table_ptr as *const DispatchTable) };
+    let fn_ptr = if type_id & 0x8000_0000_0000_0000 != 0 {
+        // Primitive/built-in type
+        let primitive_index = (type_id & 0x7FFF_FFFF_FFFF_FFFF) as usize;
+        dispatch_table.lookup_primitive(primitive_index)
+    } else {
+        // Struct type - struct_id is tagged in header, need to untag
+        let struct_id = BuiltInTypes::untag(type_id);
+        dispatch_table.lookup_struct(struct_id)
+    };
+
+    if fn_ptr == 0 {
+        panic!(
+            "Protocol dispatch failed: no implementation found for type_id={:#x}",
+            type_id
+        );
+    }
+
+    // Update cache
+    let buffer = unsafe { from_raw_parts_mut(cache_location as *mut usize, 2) };
+    buffer[0] = type_id;
+    buffer[1] = fn_ptr;
+
+    fn_ptr
 }
 
 extern "C" fn type_of(stack_pointer: usize, value: usize) -> usize {
@@ -1938,6 +2006,18 @@ extern "C" fn sleep(time: usize) -> usize {
     BuiltInTypes::null_value() as usize
 }
 
+/// High-precision timer returning nanoseconds since an arbitrary epoch
+/// Useful for benchmarking - subtract two values to get elapsed time
+extern "C" fn time_now() -> usize {
+    use std::time::Instant;
+    // Use a static instant as the epoch to avoid overflow
+    // This gives us relative timing which is what we need for benchmarks
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let start = START.get_or_init(Instant::now);
+    let elapsed = start.elapsed().as_nanos() as isize;
+    BuiltInTypes::Int.tag(elapsed) as usize
+}
+
 pub extern "C" fn register_extension(
     struct_name: usize,
     protocol_name: usize,
@@ -2389,6 +2469,13 @@ impl Runtime {
             3,
         )?;
 
+        self.add_builtin_function(
+            "beagle.builtin/protocol_dispatch",
+            protocol_dispatch as *const u8,
+            false,
+            3, // first_arg, cache_location, dispatch_table_ptr
+        )?;
+
         self.add_builtin_function("beagle.core/type-of", type_of as *const u8, true, 2)?;
 
         self.add_builtin_function("beagle.core/equal", equal as *const u8, false, 2)?;
@@ -2636,6 +2723,8 @@ impl Runtime {
         self.add_builtin_function("beagle.core/eval", eval as *const u8, true, 2)?;
 
         self.add_builtin_function("beagle.core/sleep", sleep as *const u8, false, 1)?;
+
+        self.add_builtin_function("beagle.core/time_now", time_now as *const u8, false, 0)?;
 
         self.add_builtin_function(
             "beagle.builtin/register_extension",

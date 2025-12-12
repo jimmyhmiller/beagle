@@ -261,6 +261,21 @@ pub enum Ast {
         arms: Vec<MatchArm>,
         token_range: TokenRange,
     },
+    /// Protocol dispatch with inline caching
+    /// Generates optimized dispatch code using a dispatch table and inline cache
+    ProtocolDispatch {
+        /// Arguments to the protocol method (first arg is the dispatch target)
+        args: Vec<String>,
+        /// Address of the 16-byte inline cache [type_id, fn_ptr]
+        cache_location: usize,
+        /// Address of the DispatchTable struct
+        dispatch_table_ptr: usize,
+        /// Default method function pointer (0 if none)
+        default_fn_ptr: usize,
+        /// Number of arguments the protocol method expects
+        num_args: usize,
+        token_range: TokenRange,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -342,7 +357,8 @@ impl Ast {
             | Ast::EnumCreation { token_range, .. }
             | Ast::Try { token_range, .. }
             | Ast::Throw { token_range, .. }
-            | Ast::Match { token_range, .. } => *token_range,
+            | Ast::Match { token_range, .. }
+            | Ast::ProtocolDispatch { token_range, .. } => *token_range,
             Ast::IntegerLiteral(_, position)
             | Ast::FloatLiteral(_, position)
             | Ast::Identifier(_, position)
@@ -2249,6 +2265,140 @@ impl AstCompiler<'_> {
                     vec![constant_ptr.into()],
                 )
             }
+            Ast::ProtocolDispatch {
+                args,
+                cache_location,
+                dispatch_table_ptr,
+                default_fn_ptr: _,
+                num_args: _,
+                ..
+            } => {
+                // Protocol dispatch with inline caching
+                // cache: [type_id (8 bytes), fn_ptr (8 bytes)]
+
+                // 1. Load arg0 (the dispatch target) into a register
+                let arg0_loc = self.get_variable_alloc_free_variable(&args[0]);
+                let arg0_val = self
+                    .resolve_variable(&arg0_loc)
+                    .expect("Could not resolve first argument");
+                let arg0_reg = self.ir.assign_new(arg0_val);
+
+                // 2. Get the tag to determine if heap object or primitive
+                let tag = self.ir.get_tag(arg0_reg.into());
+
+                // 3. Set up labels
+                let slow_path_label = self.ir.label("protocol_slow_path");
+                let exit_label = self.ir.label("protocol_exit");
+                let compute_primitive_type_id = self.ir.label("compute_primitive_type_id");
+                let type_id_computed = self.ir.label("type_id_computed");
+
+                let result_reg = self.ir.assign_new(Value::Null);
+                let type_id_reg = self.ir.volatile_register();
+
+                // Assign cache and dispatch_table pointers BEFORE any jumps
+                let cache_ptr = Value::Pointer(cache_location);
+                let cache_ptr_reg = self.ir.assign_new(cache_ptr);
+                let dispatch_table_ptr_val = Value::Pointer(dispatch_table_ptr);
+                let dispatch_table_ptr_reg = self.ir.assign_new(dispatch_table_ptr_val);
+
+                // Get all args for the call (needed in both paths)
+                let mut call_args = Vec::new();
+                for arg_name in args.iter() {
+                    let arg_loc = self.get_variable_alloc_free_variable(arg_name);
+                    let arg_val = self
+                        .resolve_variable(&arg_loc)
+                        .expect("Could not resolve argument");
+                    call_args.push(arg_val);
+                }
+
+                // 4. Check if HeapObject (tag == 0b110)
+                let heap_object_tag = Value::RawValue(BuiltInTypes::HeapObject.get_tag() as usize);
+                self.ir.jump_if(
+                    compute_primitive_type_id,
+                    Condition::NotEqual,
+                    tag,
+                    heap_object_tag,
+                );
+
+                // 5. HeapObject path: read struct_id
+                let untagged = self.ir.untag(arg0_reg.into());
+                let struct_id = self.ir.read_struct_id(untagged);
+                self.ir.assign(type_id_reg, struct_id);
+                self.ir.jump(type_id_computed);
+
+                // 6. Primitive path: compute type_id to match slow path
+                // Slow path uses: tag==2 -> index 2, else -> tag+16
+                // So: Int(0)->16, Float(1)->17, String(2)->2, Bool(3)->19
+                self.ir.write_label(compute_primitive_type_id);
+                let high_bit = Value::Pointer(0x8000_0000_0000_0000);
+                let high_bit_reg = self.ir.assign_new(high_bit);
+
+                // Check if tag == 2 (String constant)
+                let string_tag = Value::RawValue(2);
+                let use_tag_plus_16 = self.ir.label("use_tag_plus_16");
+                let primitive_type_id_done = self.ir.label("primitive_type_id_done");
+                let primitive_index_reg = self.ir.volatile_register();
+
+                self.ir.jump_if(use_tag_plus_16, Condition::NotEqual, tag, string_tag);
+
+                // tag == 2: use index 2
+                let index_2 = Value::RawValue(2);
+                self.ir.assign(primitive_index_reg, index_2);
+                self.ir.jump(primitive_type_id_done);
+
+                // tag != 2: use tag + 16
+                self.ir.write_label(use_tag_plus_16);
+                let sixteen = Value::RawValue(16);
+                let sixteen_reg = self.ir.assign_new(sixteen);
+                let tag_plus_16 = self.ir.add_int(tag, sixteen_reg);
+                self.ir.assign(primitive_index_reg, tag_plus_16);
+
+                self.ir.write_label(primitive_type_id_done);
+                let primitive_type_id =
+                    self.ir.bitwise_or(high_bit_reg.into(), primitive_index_reg.into());
+                self.ir.assign(type_id_reg, primitive_type_id);
+
+                // 7. Compare with cached type_id
+                self.ir.write_label(type_id_computed);
+                let cached_type_id = self.ir.load_from_memory(cache_ptr_reg.into(), 0);
+
+                self.ir.jump_if(
+                    slow_path_label,
+                    Condition::NotEqual,
+                    type_id_reg,
+                    cached_type_id,
+                );
+
+                // 8. FAST PATH: load fn_ptr and call
+                let fn_ptr = self.ir.load_from_memory(cache_ptr_reg.into(), 1);
+                let fn_val = self.ir.function(fn_ptr);
+
+                let call_result = self.ir.call(fn_val, call_args.clone());
+                self.ir.assign(result_reg, call_result);
+                self.ir.jump(exit_label);
+
+                // 9. SLOW PATH: call builtin to get fn_ptr, then call it
+                self.ir.write_label(slow_path_label);
+
+                // Call protocol_dispatch(first_arg, cache_location, dispatch_table_ptr) -> fn_ptr
+                let slow_fn_ptr = self.call_builtin(
+                    "beagle.builtin/protocol_dispatch",
+                    vec![
+                        arg0_reg.into(),
+                        cache_ptr_reg.into(),
+                        dispatch_table_ptr_reg.into(),
+                    ],
+                );
+
+                // Call the returned fn_ptr with all args
+                let fn_val = self.ir.function(slow_fn_ptr);
+                let slow_call_result = self.ir.call(fn_val, call_args);
+                self.ir.assign(result_reg, slow_call_result);
+
+                // 10. Exit
+                self.ir.write_label(exit_label);
+                result_reg.into()
+            }
             Ast::True(_) => Value::True,
             Ast::False(_) => Value::False,
             Ast::Null(_) => Value::Null,
@@ -3475,6 +3625,9 @@ impl AstCompiler<'_> {
                 for ast in body.iter() {
                     self.find_mutable_vars_that_need_boxing(ast);
                 }
+            }
+            Ast::ProtocolDispatch { .. } => {
+                // Protocol dispatch has no sub-expressions, just argument names
             }
         }
     }

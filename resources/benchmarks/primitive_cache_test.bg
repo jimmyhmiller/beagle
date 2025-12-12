@@ -1,0 +1,36 @@
+namespace primitive_cache_test
+
+// Test that primitive protocol dispatch uses cache properly
+
+protocol Format {
+    fn format(self) {
+        "default"
+    }
+}
+
+extend Int with Format {
+    fn format(self) { "int" }
+}
+
+fn time_ms(start, end) {
+    (end - start) / 1000000
+}
+
+fn main() {
+    let iterations = 1000000
+
+    // Primitive (Int) dispatch - should hit cache after first call
+    let start = time_now()
+    let mut i = 0
+    while i < iterations {
+        format(42)
+        i = i + 1
+        null
+    }
+    let end = time_now()
+    print("Int protocol dispatch (1M): ")
+    print(time_ms(start, end))
+    println("ms")
+
+    "done"
+}

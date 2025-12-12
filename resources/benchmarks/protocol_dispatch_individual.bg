@@ -1,0 +1,97 @@
+namespace protocol_dispatch_individual
+
+// Individual timing for each dispatch pattern
+// Run with: cargo run --release -- resources/benchmarks/protocol_dispatch_individual.bg
+
+protocol Dispatcher {
+    fn dispatch(self)
+}
+
+struct TypeA { value }
+struct TypeB { value }
+struct TypeC { value }
+struct TypeD { value }
+struct TypeE { value }
+
+extend TypeA with Dispatcher { fn dispatch(self) { self.value } }
+extend TypeB with Dispatcher { fn dispatch(self) { self.value * 2 } }
+extend TypeC with Dispatcher { fn dispatch(self) { self.value + 1 } }
+extend TypeD with Dispatcher { fn dispatch(self) { self.value - 1 } }
+extend TypeE with Dispatcher { fn dispatch(self) { self.value + 10 } }
+
+fn benchmark_monomorphic(iterations) {
+    let a = TypeA { value: 42 }
+    let mut sum = 0
+    let mut i = 0
+    while i < iterations {
+        sum = sum + dispatch(a)
+        i = i + 1
+        null
+    }
+    sum
+}
+
+fn benchmark_poly_2(iterations) {
+    let a = TypeA { value: 1 }
+    let b = TypeB { value: 2 }
+    let mut sum = 0
+    let mut i = 0
+    while i < iterations {
+        sum = sum + dispatch(a) + dispatch(b)
+        i = i + 1
+        null
+    }
+    sum
+}
+
+fn benchmark_mega_5(iterations) {
+    let a = TypeA { value: 1 }
+    let b = TypeB { value: 2 }
+    let c = TypeC { value: 3 }
+    let d = TypeD { value: 4 }
+    let e = TypeE { value: 5 }
+    let mut sum = 0
+    let mut i = 0
+    while i < iterations {
+        sum = sum + dispatch(a) + dispatch(b) + dispatch(c) + dispatch(d) + dispatch(e)
+        i = i + 1
+        null
+    }
+    sum
+}
+
+fn time_ms(start, end) {
+    (end - start) / 1000000
+}
+
+fn main() {
+    let iterations = 1000000
+
+    println("Protocol Dispatch - Individual Timings")
+    println("======================================")
+    println("")
+
+    let start = time_now()
+    let r1 = benchmark_monomorphic(iterations)
+    let end = time_now()
+    print("Monomorphic (1M calls, same type): ")
+    print(time_ms(start, end))
+    println("ms")
+
+    let start = time_now()
+    let r2 = benchmark_poly_2(iterations / 2)
+    let end = time_now()
+    print("Polymorphic 2 (1M calls, alternating): ")
+    print(time_ms(start, end))
+    println("ms")
+
+    let start = time_now()
+    let r3 = benchmark_mega_5(iterations / 5)
+    let end = time_now()
+    print("Megamorphic 5 (1M calls, 5 types): ")
+    print(time_ms(start, end))
+    println("ms")
+
+    // Prevent optimization
+    r1 + r2 + r3
+}

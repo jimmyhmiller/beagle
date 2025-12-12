@@ -1,0 +1,66 @@
+Protocol Dispatch Benchmark - BASELINE (Before Optimization)
+============================================================
+Date: 2024-12
+Commit: 4d9b5e7 (main branch)
+
+Configuration:
+- Release build
+- 1M dispatch calls per test category
+- ARM64 (Apple Silicon)
+
+Results (average of 3 runs):
+- Total time: ~230ms
+
+Full output:
+Protocol Dispatch Benchmark
+===========================
+Each test runs the same number of dispatch() calls
+
+Monomorphic (1 type, 1M calls):
+42000000
+
+Polymorphic 2 types (500K iterations, 2 calls each = 1M calls):
+2500000
+
+Polymorphic 3 types (333K iterations, 3 calls each ~= 1M calls):
+2999997
+
+Megamorphic 5 types (200K iterations, 5 calls each = 1M calls):
+5400000
+done
+Time 230.669416ms
+
+Notes:
+- Current implementation uses if-chains with instance_of checks
+- O(N) dispatch where N = number of protocol implementations
+- Each instance_of is a full function call
+
+============================================================
+INFRASTRUCTURE ADDED (NOT YET ACTIVATED)
+============================================================
+
+The following infrastructure has been added to support fast protocol dispatch:
+
+1. DispatchTable struct (runtime.rs:790-854)
+   - Dense array for struct_dispatch (positive IDs)
+   - Sparse array for primitive_dispatch (negative IDs)
+   - O(1) lookup methods: lookup_struct(), lookup_primitive()
+
+2. dispatch_tables HashMap in Runtime (runtime.rs:896-898)
+   - Key = "protocol_namespace/method_name"
+   - Populated when protocols are registered
+
+3. protocol_dispatch_cache in Compiler (compiler.rs:107-110)
+   - mmap'd memory for inline cache entries
+   - 16 bytes per entry: [type_id (8), fn_ptr (8)]
+   - add_protocol_dispatch_cache() method
+
+4. protocol_dispatch builtin (builtins.rs:366-402)
+   - Slow path for cache misses
+   - Looks up fn_ptr in dispatch table
+   - Updates cache and returns fn_ptr
+
+REMAINING WORK:
+- Generate IR code that uses inline cache (fast path)
+- Add support for indirect function calls through fn_ptr
+- Activate build_optimized_dispatch() instead of if-chain
