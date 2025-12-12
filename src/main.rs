@@ -300,6 +300,9 @@ fn compile_save_volatile_registers_for(runtime: &mut Runtime, register_num: usiz
 #[command(bin_name = "beag")]
 pub struct CommandLineArguments {
     program: Option<String>,
+    /// Arguments to pass to the Beagle program's main(args) function
+    #[clap(trailing_var_arg = true, allow_hyphen_values = true)]
+    program_args: Vec<String>,
     #[clap(long, default_value = "false")]
     show_times: bool,
     #[clap(long, default_value = "false")]
@@ -450,6 +453,7 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         println!("Running test: {}", path);
         let args = CommandLineArguments {
             program: Some(path.to_string()),
+            program_args: vec![], // Tests don't receive extra args
             show_times: args.show_times,
             show_gc_times: args.show_gc_times,
             print_ast: args.print_ast,
@@ -702,8 +706,24 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     }
     runtime.set_current_namespace(current_namespace);
     let fully_qualified_main = runtime.current_namespace_name() + "/main";
-    if let Some(f) = runtime.get_function0(&fully_qualified_main) {
-        let result = f();
+
+    // Check if main exists and how many arguments it takes
+    if let Some(arity) = runtime.get_function_arity(&fully_qualified_main) {
+        let result = if arity == 0 {
+            // main() - call with no arguments
+            let f = runtime.get_function0(&fully_qualified_main).unwrap();
+            f()
+        } else if arity == 1 {
+            // main(args) - create args array and pass it
+            let stack_pointer = runtime.get_stack_base();
+            let args_array = runtime
+                .create_string_array(stack_pointer, &args.program_args)
+                .expect("Failed to create args array");
+            let f = runtime.get_function1(&fully_qualified_main).unwrap();
+            f(args_array as u64)
+        } else {
+            panic!("main() must take 0 or 1 arguments, got {}", arity);
+        };
         runtime.println(result as usize).unwrap();
     } else if args.debug {
         println!("No main function");
@@ -758,6 +778,7 @@ fn get_expect(source: &str) -> String {
 fn try_all_examples() -> Result<(), Box<dyn Error>> {
     let args = CommandLineArguments {
         program: None,
+        program_args: vec![],
         show_times: false,
         show_gc_times: false,
         print_ast: false,

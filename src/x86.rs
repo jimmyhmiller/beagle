@@ -423,6 +423,31 @@ impl LowLevelX86 {
         self.instructions.push(X86Asm::Setcc { dest, cond });
     }
 
+    pub fn compare_float_bool(
+        &mut self,
+        condition: Condition,
+        dest: X86Register,
+        a: X86Register,
+        b: X86Register,
+    ) {
+        // Zero the destination first (BEFORE compare, since XOR modifies flags!)
+        self.instructions.push(X86Asm::XorRR { dest, src: dest });
+        // Now do the float comparison (sets flags)
+        self.instructions.push(X86Asm::Ucomisd { a, b });
+        // Set byte based on condition flags
+        // Note: For UCOMISD, we need unsigned comparison flags (A/B/AE/BE)
+        // because it sets CF and ZF (unsigned-style), not SF/OF (signed-style)
+        let cond = match condition {
+            Condition::Equal => X86Cond::E,
+            Condition::NotEqual => X86Cond::NE,
+            Condition::LessThan => X86Cond::B, // Below (unsigned)
+            Condition::LessThanOrEqual => X86Cond::BE, // Below or Equal
+            Condition::GreaterThan => X86Cond::A, // Above (unsigned)
+            Condition::GreaterThanOrEqual => X86Cond::AE, // Above or Equal
+        };
+        self.instructions.push(X86Asm::Setcc { dest, cond });
+    }
+
     pub fn jump(&mut self, destination: Label) {
         self.instructions.push(X86Asm::Jmp {
             label_index: destination.index,

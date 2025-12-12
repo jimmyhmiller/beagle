@@ -1,0 +1,192 @@
+namespace fasta
+
+// The Computer Language Benchmarks Game
+// https://salsa.debian.org/benchmarksgame-team/benchmarksgame/
+//
+// Beagle implementation
+
+import "raw_mutable_array" as arr
+import "beagle.builtin" as builtin
+
+let LINE_WIDTH = 60
+let IM = 139968
+let IA = 3877
+let IC = 29573
+
+// ALU sequence for repeat
+let ALU = "GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGGGAGGCCGAGGCGGGCGGATCACCTGAGGTCAGGAGTTCGAGACCAGCCTGGCCAACATGGTGAAACCCCGTCTCTACTAAAAATACAAAAATTAGCCGGGCGTGGTGGCGCGCGCCTGTAATCCCAGCTACTCGGGAGGCTGAGGCAGGAGAATCGCTTGAACCCGGGAGGCGGAGGTTGCAGTGAGCCGAGATCGCGCCACTGCACTCCAGCCTGGGCGACAGAGCGAGACTCCGTCTCAAAAA"
+
+fn mod(a, b) {
+    a - (a / b) * b
+}
+
+fn string_length(s) {
+    builtin/get_string_length(s)
+}
+
+// State for the random number generator
+struct RngState {
+    seed
+}
+
+fn next_random(state) {
+    let new_seed = mod(state.seed * IA + IC, IM)
+    RngState { seed: new_seed }
+}
+
+// Write a repeated sequence with line breaks
+fn write_repeat_fasta(alu, size) {
+    let alu_len = string_length(alu)
+    write_repeat_loop(alu, alu_len, size, 0)
+}
+
+fn write_repeat_loop(alu, alu_len, remaining, offset) {
+    if remaining <= 0 {
+        null
+    } else {
+        let line_len = if remaining < LINE_WIDTH { remaining } else { LINE_WIDTH }
+        write_repeat_line(alu, alu_len, line_len, offset, 0)
+        println("")
+        let new_offset = mod(offset + line_len, alu_len)
+        write_repeat_loop(alu, alu_len, remaining - line_len, new_offset)
+    }
+}
+
+fn write_repeat_line(alu, alu_len, line_len, offset, col) {
+    if col >= line_len {
+        null
+    } else {
+        let idx = mod(offset + col, alu_len)
+        print(alu[idx])
+        write_repeat_line(alu, alu_len, line_len, offset, col + 1)
+    }
+}
+
+// IUB codes and probabilities
+fn make_iub_codes() {
+    "acgtBDHKMNRSVWY"
+}
+
+fn make_iub_probs() {
+    let probs = arr/new_array(15)
+    // Cumulative probabilities * IM (as integers for comparison)
+    // 0.27, 0.12, 0.12, 0.27, then 0.02 * 11
+    // Using ceil(cumulative * IM) to match float comparison behavior
+    arr/write_field(probs, 0, 37792)   // ceil(0.27 * 139968)
+    arr/write_field(probs, 1, 54588)   // ceil(0.39 * 139968)
+    arr/write_field(probs, 2, 71384)   // ceil(0.51 * 139968)
+    arr/write_field(probs, 3, 109176)  // ceil(0.78 * 139968)
+    arr/write_field(probs, 4, 111975)  // ceil(0.80 * 139968)
+    arr/write_field(probs, 5, 114774)  // ceil(0.82 * 139968)
+    arr/write_field(probs, 6, 117574)  // ceil(0.84 * 139968)
+    arr/write_field(probs, 7, 120373)  // ceil(0.86 * 139968)
+    arr/write_field(probs, 8, 123172)  // ceil(0.88 * 139968)
+    arr/write_field(probs, 9, 125972)  // ceil(0.90 * 139968)
+    arr/write_field(probs, 10, 128771) // ceil(0.92 * 139968)
+    arr/write_field(probs, 11, 131570) // ceil(0.94 * 139968)
+    arr/write_field(probs, 12, 134370) // ceil(0.96 * 139968)
+    arr/write_field(probs, 13, 137169) // ceil(0.98 * 139968)
+    arr/write_field(probs, 14, 139969) // ceil(1.00 * 139968)
+    probs
+}
+
+// Homo sapiens codes and probabilities
+fn make_homo_codes() {
+    "acgt"
+}
+
+fn make_homo_probs() {
+    let probs = arr/new_array(4)
+    // Cumulative probabilities * IM (as integers)
+    // 0.3029549426680, 0.5009432431601, 0.6984905497992, 1.0
+    // Using ceil to match float comparison behavior
+    arr/write_field(probs, 0, 42404)  // ceil(0.3029549426680 * 139968)
+    arr/write_field(probs, 1, 70117)  // ceil(0.5009432431601 * 139968)
+    arr/write_field(probs, 2, 97767)  // ceil(0.6984905497992 * 139968)
+    arr/write_field(probs, 3, 139968) // 1.0 * 139968
+    probs
+}
+
+// Write random sequence based on weighted probabilities
+// add_final_newline: true to add newline after last line, false to omit
+fn write_random_fasta(codes, probs, probs_len, size, state, add_final_newline) {
+    write_random_loop(codes, probs, probs_len, size, state, add_final_newline)
+}
+
+fn write_random_loop(codes, probs, probs_len, remaining, state, add_final_newline) {
+    if remaining <= 0 {
+        state
+    } else {
+        let line_len = if remaining < LINE_WIDTH { remaining } else { LINE_WIDTH }
+        let new_state = write_random_line(codes, probs, probs_len, line_len, 0, state)
+        let next_remaining = remaining - line_len
+        if next_remaining > 0 {
+            println("")
+            write_random_loop(codes, probs, probs_len, next_remaining, new_state, add_final_newline)
+        } else {
+            if add_final_newline {
+                println("")
+            }
+            new_state
+        }
+    }
+}
+
+fn write_random_line(codes, probs, probs_len, line_len, col, state) {
+    if col >= line_len {
+        state
+    } else {
+        let new_state = next_random(state)
+        let r = new_state.seed
+        let idx = find_code_index(probs, probs_len, r, 0)
+        print(codes[idx])
+        write_random_line(codes, probs, probs_len, line_len, col + 1, new_state)
+    }
+}
+
+fn find_code_index(probs, probs_len, r, i) {
+    if i >= probs_len - 1 {
+        probs_len - 1
+    } else {
+        let p = arr/read_field(probs, i)
+        if p > r {
+            i
+        } else {
+            find_code_index(probs, probs_len, r, i + 1)
+        }
+    }
+}
+
+fn run(n) {
+    println(">ONE Homo sapiens alu")
+    write_repeat_fasta(ALU, n * 2)
+
+    let iub_codes = make_iub_codes()
+    let iub_probs = make_iub_probs()
+    let initial_state = RngState { seed: 42 }
+
+    println(">TWO IUB ambiguity codes")
+    let state2 = write_random_fasta(iub_codes, iub_probs, 15, n * 3, initial_state, true)
+
+    let homo_codes = make_homo_codes()
+    let homo_probs = make_homo_probs()
+
+    println(">THREE Homo sapiens frequency")
+    write_random_fasta(homo_codes, homo_probs, 4, n * 5, state2, false)
+
+    ""
+}
+
+fn main(args) {
+    let n = if length(args) > 0 { to_number(get(args, 0)) } else { 10 }
+    run(n)
+    ""
+}
+
+// Expect
+// >ONE Homo sapiens alu
+// GGCCGGGCGCGGTGGCTCAC
+// >TWO IUB ambiguity codes
+// cttBtatcatatgctaKggNcataaaSatg
+// >THREE Homo sapiens frequency
+// taaatcttgtgcttcgttagaagtctcgactacgtgtagcctagtgtttg

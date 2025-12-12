@@ -193,6 +193,13 @@ pub trait CodegenBackend: Sized {
         a: Self::Register,
         b: Self::Register,
     );
+    fn compare_float_bool(
+        &mut self,
+        condition: Condition,
+        dest: Self::Register,
+        a: Self::Register,
+        b: Self::Register,
+    );
 
     // === Tagged value operations (Beagle-specific) ===
 

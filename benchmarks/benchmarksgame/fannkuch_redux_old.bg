@@ -1,0 +1,165 @@
+namespace fannkuch_redux
+
+// The Computer Language Benchmarks Game
+// https://salsa.debian.org/benchmarksgame-team/benchmarksgame/
+//
+// Beagle implementation, based on Dart version by Jos Hirth
+
+import "raw_mutable_array" as arr
+
+struct Result {
+    sum
+    maxflips
+}
+
+fn fannkuch(n) {
+    let p = arr/new_array(n)
+    let q = arr/new_array(n)
+    let s = arr/new_array(n)
+
+    // Initialize arrays
+    init_arrays(p, q, s, n, 0)
+
+    let m = n - 1
+    fannkuch_loop(n, m, p, q, s, 1, 0, 0)
+}
+
+fn init_arrays(p, q, s, n, i) {
+    if i < n {
+        arr/write_field(p, i, i)
+        arr/write_field(q, i, i)
+        arr/write_field(s, i, i)
+        init_arrays(p, q, s, n, i + 1)
+    } else {
+        null
+    }
+}
+
+fn fannkuch_loop(n, m, p, q, s, sign, maxflips, sum) {
+    // Copy and flip
+    let q0 = arr/read_field(p, 0)
+    let flip_result = if q0 != 0 {
+        // Copy p to q (starting from index 1) using fast memcpy
+        arr/copy_range(p, q, 1, n - 1)
+        count_flips(n, q, q0, 1)
+    } else {
+        Result { sum: 0, maxflips: 0 }
+    }
+
+    let new_sum = sum + sign * flip_result.sum
+    let new_maxflips = if flip_result.maxflips > maxflips {
+        flip_result.maxflips
+    } else {
+        maxflips
+    }
+
+    // Permute
+    let perm_result = permute(n, m, p, s, sign)
+
+    if perm_result.done {
+        Result { sum: new_sum, maxflips: new_maxflips }
+    } else {
+        fannkuch_loop(n, m, p, q, s, perm_result.new_sign, new_maxflips, new_sum)
+    }
+}
+
+fn count_flips(n, q, q0, flips) {
+    let qq = arr/read_field(q, q0)
+    if qq == 0 {
+        // Done flipping
+        Result { sum: flips, maxflips: flips }
+    } else {
+        arr/write_field(q, q0, q0)
+        if q0 >= 3 {
+            reverse_inner(q, 1, q0 - 1)
+        } else {
+            null
+        }
+        count_flips(n, q, qq, flips + 1)
+    }
+}
+
+fn reverse_inner(q, i, j) {
+    if i < j {
+        let t = arr/read_field(q, i)
+        arr/write_field(q, i, arr/read_field(q, j))
+        arr/write_field(q, j, t)
+        reverse_inner(q, i + 1, j - 1)
+    } else {
+        null
+    }
+}
+
+struct PermResult {
+    new_sign
+    done
+}
+
+fn permute(n, m, p, s, sign) {
+    if sign == 1 {
+        // Rotate 0<-1
+        let t = arr/read_field(p, 1)
+        arr/write_field(p, 1, arr/read_field(p, 0))
+        arr/write_field(p, 0, t)
+        PermResult { new_sign: 0 - 1, done: false }
+    } else {
+        // Rotate 0<-1 and 0<-1<-2
+        let t = arr/read_field(p, 1)
+        arr/write_field(p, 1, arr/read_field(p, 2))
+        arr/write_field(p, 2, t)
+        permute_loop(n, m, p, s, 2)
+    }
+}
+
+fn permute_loop(n, m, p, s, i) {
+    if i >= n {
+        // Should never reach here if i starts at 2
+        PermResult { new_sign: 1, done: true }
+    } else {
+        let sx = arr/read_field(s, i)
+        if sx != 0 {
+            arr/write_field(s, i, sx - 1)
+            PermResult { new_sign: 1, done: false }
+        } else {
+            if i == m {
+                // Out of permutations
+                PermResult { new_sign: 1, done: true }
+            } else {
+                arr/write_field(s, i, i)
+                // Rotate 0<-...<-i+1
+                let t = arr/read_field(p, 0)
+                rotate_p(p, i, 0)
+                arr/write_field(p, i + 1, t)
+                permute_loop(n, m, p, s, i + 1)
+            }
+        }
+    }
+}
+
+fn rotate_p(p, i, j) {
+    if j <= i {
+        arr/write_field(p, j, arr/read_field(p, j + 1))
+        rotate_p(p, i, j + 1)
+    } else {
+        null
+    }
+}
+
+fn run(n) {
+    let result = fannkuch(n)
+    println(result.sum)
+    print("Pfannkuchen(")
+    print(n)
+    print(") = ")
+    println(result.maxflips)
+}
+
+fn main(args) {
+    let n = if length(args) > 0 { to_number(get(args, 0)) } else { 7 }
+    run(n)
+}
+
+// Expect
+// 228
+// Pfannkuchen(7) = 16
+// 16

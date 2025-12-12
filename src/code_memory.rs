@@ -6,6 +6,7 @@ pub struct CodeAllocator {
     current_offset: usize,
     pending_pages: Vec<Reserved>,
     used_pages: Vec<Mmap>,
+    base_address: usize,
 }
 
 impl Default for CodeAllocator {
@@ -20,13 +21,19 @@ impl CodeAllocator {
             .unwrap()
             .reserve()
             .unwrap();
+        let base_address = unused_pages.as_ptr() as usize;
         Self {
             unused_pages,
             used_pages: Vec::new(),
             pending_pages: Vec::new(),
             current_page: None,
             current_offset: 0,
+            base_address,
         }
+    }
+
+    pub fn base_address(&self) -> usize {
+        self.base_address
     }
 
     pub fn take_page(&mut self) -> ReservedMut {

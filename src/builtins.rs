@@ -169,6 +169,13 @@ pub unsafe extern "C" fn print_value(value: usize) -> usize {
     0b111
 }
 
+pub extern "C" fn print_byte(value: usize) -> usize {
+    let byte_value = BuiltInTypes::untag(value) as u8;
+    let runtime = get_runtime().get_mut();
+    runtime.printer.print_byte(byte_value);
+    0b111
+}
+
 extern "C" fn allocate(stack_pointer: usize, size: usize) -> usize {
     let size = BuiltInTypes::untag(size);
     let runtime = get_runtime().get_mut();
@@ -790,6 +797,173 @@ pub unsafe extern "C" fn gc_add_root(old: usize) -> usize {
     let runtime = get_runtime().get_mut();
     runtime.gc_add_root(old);
     BuiltInTypes::null_value() as usize
+}
+
+/// sqrt builtin - computes square root of a float
+/// Takes a tagged float pointer, returns a new tagged float pointer with the result
+pub unsafe extern "C" fn sqrt_builtin(stack_pointer: usize, value: usize) -> usize {
+    unsafe {
+        let runtime = get_runtime().get_mut();
+
+        // Read the float value from the heap object
+        let untagged = BuiltInTypes::untag(value);
+        let float_ptr = untagged as *const f64;
+        let float_value = *float_ptr.add(1); // Float value is at offset 1 (after header)
+
+        // Compute sqrt
+        let result = float_value.sqrt();
+
+        // Allocate a new float object for the result
+        let new_float_ptr = runtime
+            .allocate(1, stack_pointer, BuiltInTypes::Float)
+            .unwrap();
+
+        // Write the result
+        let untagged_result = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged_result as *mut f64;
+        *result_ptr.add(1) = result;
+
+        new_float_ptr
+    }
+}
+
+/// floor builtin - computes floor of a float
+pub unsafe extern "C" fn floor_builtin(stack_pointer: usize, value: usize) -> usize {
+    unsafe {
+        let runtime = get_runtime().get_mut();
+
+        let untagged = BuiltInTypes::untag(value);
+        let float_ptr = untagged as *const f64;
+        let float_value = *float_ptr.add(1);
+
+        let result = float_value.floor();
+
+        let new_float_ptr = runtime
+            .allocate(1, stack_pointer, BuiltInTypes::Float)
+            .unwrap();
+
+        let untagged_result = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged_result as *mut f64;
+        *result_ptr.add(1) = result;
+
+        new_float_ptr
+    }
+}
+
+/// ceil builtin - computes ceiling of a float
+pub unsafe extern "C" fn ceil_builtin(stack_pointer: usize, value: usize) -> usize {
+    unsafe {
+        let runtime = get_runtime().get_mut();
+
+        let untagged = BuiltInTypes::untag(value);
+        let float_ptr = untagged as *const f64;
+        let float_value = *float_ptr.add(1);
+
+        let result = float_value.ceil();
+
+        let new_float_ptr = runtime
+            .allocate(1, stack_pointer, BuiltInTypes::Float)
+            .unwrap();
+
+        let untagged_result = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged_result as *mut f64;
+        *result_ptr.add(1) = result;
+
+        new_float_ptr
+    }
+}
+
+/// abs builtin - computes absolute value of a float
+pub unsafe extern "C" fn abs_builtin(stack_pointer: usize, value: usize) -> usize {
+    unsafe {
+        let runtime = get_runtime().get_mut();
+
+        let untagged = BuiltInTypes::untag(value);
+        let float_ptr = untagged as *const f64;
+        let float_value = *float_ptr.add(1);
+
+        let result = float_value.abs();
+
+        let new_float_ptr = runtime
+            .allocate(1, stack_pointer, BuiltInTypes::Float)
+            .unwrap();
+
+        let untagged_result = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged_result as *mut f64;
+        *result_ptr.add(1) = result;
+
+        new_float_ptr
+    }
+}
+
+/// sin builtin - computes sine of a float (in radians)
+pub unsafe extern "C" fn sin_builtin(stack_pointer: usize, value: usize) -> usize {
+    unsafe {
+        let runtime = get_runtime().get_mut();
+
+        let untagged = BuiltInTypes::untag(value);
+        let float_ptr = untagged as *const f64;
+        let float_value = *float_ptr.add(1);
+
+        let result = float_value.sin();
+
+        let new_float_ptr = runtime
+            .allocate(1, stack_pointer, BuiltInTypes::Float)
+            .unwrap();
+
+        let untagged_result = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged_result as *mut f64;
+        *result_ptr.add(1) = result;
+
+        new_float_ptr
+    }
+}
+
+/// cos builtin - computes cosine of a float (in radians)
+pub unsafe extern "C" fn cos_builtin(stack_pointer: usize, value: usize) -> usize {
+    unsafe {
+        let runtime = get_runtime().get_mut();
+
+        let untagged = BuiltInTypes::untag(value);
+        let float_ptr = untagged as *const f64;
+        let float_value = *float_ptr.add(1);
+
+        let result = float_value.cos();
+
+        let new_float_ptr = runtime
+            .allocate(1, stack_pointer, BuiltInTypes::Float)
+            .unwrap();
+
+        let untagged_result = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged_result as *mut f64;
+        *result_ptr.add(1) = result;
+
+        new_float_ptr
+    }
+}
+
+/// to_float builtin - converts an integer to a float
+pub unsafe extern "C" fn to_float_builtin(stack_pointer: usize, value: usize) -> usize {
+    unsafe {
+        let runtime = get_runtime().get_mut();
+
+        // Get the integer value (tagged integers have 0b000 tag)
+        let int_value = BuiltInTypes::untag(value) as i64;
+
+        // Convert to f64
+        let float_value = int_value as f64;
+
+        // Allocate a new float object for the result
+        let new_float_ptr = runtime
+            .allocate(1, stack_pointer, BuiltInTypes::Float)
+            .unwrap();
+
+        let untagged_result = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged_result as *mut f64;
+        *result_ptr.add(1) = float_value;
+
+        new_float_ptr
+    }
 }
 
 #[allow(unused)]
@@ -1448,6 +1622,33 @@ pub unsafe extern "C" fn copy_from_to_object(from: usize, to: usize) -> usize {
     to.tagged_pointer()
 }
 
+pub unsafe extern "C" fn copy_array_range(
+    from: usize,
+    to: usize,
+    start: usize,
+    count: usize,
+) -> usize {
+    let from_obj = HeapObject::from_tagged(from);
+    let mut to_obj = HeapObject::from_tagged(to);
+
+    let from_fields = from_obj.get_fields();
+    let to_fields = to_obj.get_fields_mut();
+
+    let start_idx = BuiltInTypes::untag(start) as usize;
+    let count_val = BuiltInTypes::untag(count) as usize;
+
+    // Use ptr::copy_nonoverlapping for fast memcpy
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            from_fields.as_ptr().add(start_idx),
+            to_fields.as_mut_ptr().add(start_idx),
+            count_val,
+        );
+    }
+
+    to
+}
+
 unsafe extern "C" fn ffi_allocate(size: usize) -> usize {
     unsafe {
         let runtime = get_runtime().get_mut();
@@ -1622,6 +1823,57 @@ extern "C" fn wait_for_input(stack_pointer: usize) -> usize {
     let runtime = get_runtime().get_mut();
     let string = runtime.allocate_string(stack_pointer, input);
     string.unwrap().into()
+}
+
+// Get the ASCII code of the first character of a string
+extern "C" fn char_code(stack_pointer: usize, string: usize) -> usize {
+    let runtime = get_runtime().get_mut();
+    let string = runtime.get_string(stack_pointer, string);
+    if let Some(ch) = string.chars().next() {
+        BuiltInTypes::Int.tag(ch as isize) as usize
+    } else {
+        // Empty string returns -1
+        BuiltInTypes::Int.tag(-1) as usize
+    }
+}
+
+// Create a single-character string from an ASCII code
+extern "C" fn char_from_code(stack_pointer: usize, code: usize) -> usize {
+    let code = BuiltInTypes::untag(code) as u8;
+    let ch = code as char;
+    let runtime = get_runtime().get_mut();
+    runtime
+        .allocate_string(stack_pointer, ch.to_string())
+        .unwrap()
+        .into()
+}
+
+// Read a line from stdin, stripping the trailing newline
+// Returns null if EOF is reached
+extern "C" fn read_line(stack_pointer: usize) -> usize {
+    let mut input = String::new();
+    match std::io::stdin().read_line(&mut input) {
+        Ok(0) => {
+            // EOF reached
+            BuiltInTypes::null_value() as usize
+        }
+        Ok(_) => {
+            // Remove trailing newline if present
+            if input.ends_with('\n') {
+                input.pop();
+                if input.ends_with('\r') {
+                    input.pop();
+                }
+            }
+            let runtime = get_runtime().get_mut();
+            let string = runtime.allocate_string(stack_pointer, input);
+            string.unwrap().into()
+        }
+        Err(_) => {
+            // Error - return null
+            BuiltInTypes::null_value() as usize
+        }
+    }
 }
 
 extern "C" fn read_full_file(stack_pointer: usize, file_name: usize) -> usize {
@@ -2117,6 +2369,13 @@ impl Runtime {
         )?;
 
         self.add_builtin_function(
+            "beagle.builtin/copy_array_range",
+            copy_array_range as *const u8,
+            false,
+            4,
+        )?;
+
+        self.add_builtin_function(
             "beagle.builtin/make_closure",
             make_closure as *const u8,
             true,
@@ -2243,6 +2502,20 @@ impl Runtime {
             1,
         )?;
 
+        // Math builtins
+        self.add_builtin_function("beagle.core/sqrt", sqrt_builtin as *const u8, true, 2)?;
+        self.add_builtin_function("beagle.core/floor", floor_builtin as *const u8, true, 2)?;
+        self.add_builtin_function("beagle.core/ceil", ceil_builtin as *const u8, true, 2)?;
+        self.add_builtin_function("beagle.core/abs", abs_builtin as *const u8, true, 2)?;
+        self.add_builtin_function("beagle.core/sin", sin_builtin as *const u8, true, 2)?;
+        self.add_builtin_function("beagle.core/cos", cos_builtin as *const u8, true, 2)?;
+        self.add_builtin_function(
+            "beagle.core/to_float",
+            to_float_builtin as *const u8,
+            true,
+            2,
+        )?;
+
         self.add_builtin_function("beagle.core/thread", new_thread as *const u8, true, 2)?;
 
         self.add_builtin_function(
@@ -2340,6 +2613,24 @@ impl Runtime {
             wait_for_input as *const u8,
             true,
             1,
+        )?;
+
+        self.add_builtin_function("beagle.builtin/read_line", read_line as *const u8, true, 1)?;
+
+        self.add_builtin_function(
+            "beagle.builtin/print_byte",
+            print_byte as *const u8,
+            false,
+            1,
+        )?;
+
+        self.add_builtin_function("beagle.builtin/char_code", char_code as *const u8, true, 2)?;
+
+        self.add_builtin_function(
+            "beagle.builtin/char_from_code",
+            char_from_code as *const u8,
+            true,
+            2,
         )?;
 
         self.add_builtin_function("beagle.core/eval", eval as *const u8, true, 2)?;

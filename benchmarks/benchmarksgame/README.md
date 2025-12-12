@@ -10,32 +10,30 @@ The Benchmarks Game is a well-known collection of micro-benchmarks used to compa
 
 | Benchmark | Status | Notes |
 |-----------|--------|-------|
-| [binary-trees](#binary-trees) | Ready | Existing implementation needs output format adjustment |
-| [fannkuch-redux](#fannkuch-redux) | Ready | Feasible with current language features |
-| [fasta](#fasta) | Ready | Feasible with current language features |
-| [n-body](#n-body) | Blocked | Requires `sqrt()` function |
-| [spectral-norm](#spectral-norm) | Blocked | Requires `sqrt()` function |
-| [mandelbrot](#mandelbrot) | Ready | Feasible with current language features |
-| [pidigits](#pidigits) | Blocked | Requires arbitrary precision integers |
-| [k-nucleotide](#k-nucleotide) | Partial | Requires hash map (persistent_map available) |
-| [reverse-complement](#reverse-complement) | Ready | Feasible with current language features |
-| [regex-redux](#regex-redux) | Blocked | Requires regex library |
+| [binary-trees](#binary-trees) | ✅ Complete | `binary_trees.bg` |
+| [fannkuch-redux](#fannkuch-redux) | ✅ Complete | `fannkuch_redux.bg` |
+| [n-body](#n-body) | ✅ Complete | `nbody.bg` |
+| [spectral-norm](#spectral-norm) | ✅ Complete | `spectral_norm.bg` |
+| [fasta](#fasta) | ✅ Complete | `fasta.bg` |
+| [reverse-complement](#reverse-complement) | ✅ Complete | `revcomp.bg` |
+| [k-nucleotide](#k-nucleotide) | ✅ Complete | `knucleotide.bg` |
+| [mandelbrot](#mandelbrot) | ⏳ Blocked | Float comparison bug prevents correct execution |
+| [pidigits](#pidigits) | ❌ Not Feasible | Requires arbitrary precision integers |
+| [regex-redux](#regex-redux) | ❌ Not Feasible | Requires regex library |
 
-## Benchmark Descriptions
+## Implemented Benchmarks
 
 ### binary-trees
 
-**Status:** Ready
+**Status:** ✅ Complete
 
 Allocate and deallocate many binary trees to stress test memory allocation and garbage collection.
 
-**Algorithm:**
-1. Create a "stretch" tree of depth N+1 and compute its checksum
-2. Create a long-lived tree of depth N
-3. For depths 4 to N (step 2), create many trees and sum their checksums
-4. Output the long-lived tree's checksum
+```bash
+cargo run -- benchmarks/benchmarksgame/binary_trees.bg
+```
 
-**Expected Output (N=10):**
+**Output (N=10):**
 ```
 stretch tree of depth 11	 check: 4095
 1024	 trees of depth 4	 check: 31744
@@ -45,220 +43,198 @@ stretch tree of depth 11	 check: 4095
 long lived tree of depth 10	 check: 2047
 ```
 
-**Beagle Features Required:** structs, recursion, basic arithmetic
-
 ---
 
 ### fannkuch-redux
 
-**Status:** Ready
+**Status:** ✅ Complete
 
 Count permutations and track maximum "pancake flips" (reversing prefixes).
 
-**Algorithm:**
-1. Generate all permutations of [1..N]
-2. For each permutation, count flips needed to bring 1 to front
-3. Track maximum flips and alternating sum of flip counts
+```bash
+cargo run -- benchmarks/benchmarksgame/fannkuch_redux.bg
+```
 
-**Expected Output (N=7):**
+**Output (N=7):**
 ```
 228
 Pfannkuchen(7) = 16
 ```
 
-**Beagle Features Required:** arrays, while loops, array mutation
-
----
-
-### fasta
-
-**Status:** Ready
-
-Generate DNA sequences using repeat and random selection algorithms.
-
-**Algorithm:**
-1. Output a repeated sequence (ALU) for "ONE"
-2. Output random nucleotides with IUB frequencies for "TWO"
-3. Output random nucleotides with human frequencies for "THREE"
-
-**Expected Output (N=1000):** FASTA format DNA sequences (~5000 characters)
-
-**Beagle Features Required:** arrays, string concatenation, modular arithmetic, floating-point
-
 ---
 
 ### n-body
 
-**Status:** Blocked - needs `sqrt()`
+**Status:** ✅ Complete
 
 Simulate the solar system using Newtonian physics.
 
-**Algorithm:**
-1. Initialize 5 bodies (Sun, Jupiter, Saturn, Uranus, Neptune)
-2. Offset momentum to center of mass
-3. Advance N timesteps using symplectic integrator
-4. Output initial and final system energy
-
-**Expected Output (N=1000):**
-```
--0.169075164
--0.169087605
+```bash
+cargo run -- benchmarks/benchmarksgame/nbody.bg
 ```
 
-**Beagle Features Required:** structs, floating-point math, `sqrt()` function
-
-**Blocker:** Beagle doesn't have a built-in `sqrt()` function. Options:
-- Implement via FFI (call C's `sqrt`)
-- Implement Newton-Raphson square root in pure Beagle
+**Output (N=1000):**
+```
+-0.16907516382852442
+-0.16908760523460603
+```
 
 ---
 
 ### spectral-norm
 
-**Status:** Blocked - needs `sqrt()`
+**Status:** ✅ Complete
 
 Calculate an eigenvalue using the power method.
 
-**Algorithm:**
-1. Initialize vector u = [1, 1, ..., 1]
-2. Repeatedly multiply by matrix A and its transpose
-3. Compute sqrt(vBv / vv) as the spectral norm
-
-**Expected Output (N=100):**
-```
-1.274219991
+```bash
+cargo run -- benchmarks/benchmarksgame/spectral_norm.bg
 ```
 
-**Beagle Features Required:** arrays, floating-point math, `sqrt()` function
-
-**Blocker:** Same as n-body - needs `sqrt()`
+**Output (N=100):**
+```
+1.2742199912349306
+```
 
 ---
 
-### mandelbrot
+### fasta
 
-**Status:** Ready
+**Status:** ✅ Complete
 
-Generate a Mandelbrot set image in PBM format.
+Generate DNA sequences using repeat and random selection algorithms.
 
-**Algorithm:**
-1. For each pixel, iterate z = z² + c until escape or max iterations
-2. Pack 8 pixels into each byte
-3. Output as binary PBM image
-
-**Expected Output (N=200):** Binary PBM image (200x200 pixels)
-
-**Beagle Features Required:** floating-point math, bit operations, binary output
-
-**Note:** May need to output as text-based representation if binary output is problematic
-
----
-
-### pidigits
-
-**Status:** Blocked - needs arbitrary precision integers
-
-Calculate digits of pi using a streaming spigot algorithm.
-
-**Algorithm:**
-1. Use the unbounded spigot algorithm with matrix transformations
-2. Extract digits one at a time
-3. Output in groups of 10
-
-**Expected Output (N=27):**
-```
-3141592653	:10
-5897932384	:20
-6264338   	:27
+```bash
+cargo run -- benchmarks/benchmarksgame/fasta.bg
 ```
 
-**Beagle Features Required:** Arbitrary precision integer arithmetic (bigint)
+**Output (N=10):**
+```
+>ONE Homo sapiens alu
+GGCCGGGCGCGGTGGCTCAC
+>TWO IUB ambiguity codes
+cttBtatcatatgctaKggNcataaaSatg
+>THREE Homo sapiens frequency
+taaatcttgtgcttcgttagaagtctcgactacgtgtagcctagtgtttg
+```
 
-**Blocker:** Beagle only has 62-bit integers. This benchmark fundamentally requires unbounded integers for the matrix multiplication.
-
----
-
-### k-nucleotide
-
-**Status:** Partial
-
-Count occurrences of nucleotide subsequences in DNA.
-
-**Algorithm:**
-1. Read DNA sequence from input
-2. Count all 1-mers and 2-mers, output by frequency
-3. Count specific sequences (GGT, GGTA, etc.)
-
-**Expected Output:** Frequency tables and specific sequence counts
-
-**Beagle Features Required:** hash maps, string slicing, sorting
-
-**Note:** Beagle has `persistent_map` which should work, but may need additional features like iteration over map entries.
+**Implementation Notes:**
+- Uses integer thresholds (ceiling values) to work around Beagle's float comparison bug
+- String indexing (`s[i]`) provides character-level access
+- Linear Congruential Generator (LCG) for random number generation
 
 ---
 
 ### reverse-complement
 
-**Status:** Ready
+**Status:** ✅ Complete
 
-Compute the reverse complement of DNA sequences.
+Read DNA sequences from stdin, compute the reverse complement, and output with 60-char line wrapping.
 
-**Algorithm:**
-1. Read FASTA sequences
-2. Reverse each sequence
-3. Complement each nucleotide (A↔T, G↔C, etc.)
-4. Output in FASTA format
+```bash
+cat input.fasta | cargo run -- benchmarks/benchmarksgame/revcomp.bg
+```
 
-**Beagle Features Required:** string manipulation, character mapping
+**Implementation Notes:**
+- Uses `read_line` builtin for stdin reading (returns null on EOF)
+- Uses `print_byte` builtin for binary output
+- Uses persistent_vector for efficient sequence accumulation
+- Complement table lookup for character transformation
+
+---
+
+### k-nucleotide
+
+**Status:** ✅ Complete
+
+Count occurrences of nucleotide subsequences in DNA sequences.
+
+```bash
+cat input.fasta | cargo run -- benchmarks/benchmarksgame/knucleotide.bg
+```
+
+**Output (1000-line input):**
+```
+T 31.520
+A 29.600
+C 19.480
+G 19.400
+
+AT 9.922
+...
+54	GGT
+24	GGTA
+4	GGTATT
+0	GGTATTTTAATT
+0	GGTATTTTAATTTATAGT
+```
+
+**Implementation Notes:**
+- Uses `read_line` builtin for stdin reading
+- Uses persistent_map for frequency counting
+- Bubble sort for sorting results (simple but functional)
+- Integer rounding workaround for percentage formatting
+
+---
+
+## Blocked Benchmarks
+
+### mandelbrot
+
+**Status:** ⏳ Blocked
+
+Generate a Mandelbrot set image in PBM format.
+
+**Blocker:** Float comparison bug in Beagle. Float-to-float comparisons (`a > b`, `a < b`) return incorrect results. The mandelbrot algorithm requires `mag > 4.0` to check for escape, but this comparison doesn't work correctly.
+
+**Code Status:** Implementation exists in `mandelbrot.bg` but produces incorrect output due to the bug.
+
+---
+
+## Not Feasible
+
+### pidigits
+
+**Status:** ❌ Not Feasible
+
+Calculate digits of pi using a streaming spigot algorithm.
+
+**Blocker:** Requires arbitrary precision integers. Beagle only has 62-bit integers.
 
 ---
 
 ### regex-redux
 
-**Status:** Blocked - needs regex library
+**Status:** ❌ Not Feasible
 
 Count regex pattern matches and perform substitutions.
 
-**Algorithm:**
-1. Read DNA sequence
-2. Count matches for 9 specific patterns
-3. Perform 5 substitutions
-4. Output match counts and sequence lengths
-
-**Beagle Features Required:** Regular expression library
-
-**Blocker:** Beagle doesn't have regex support. Would need to either:
-- Implement regex via FFI
-- Write a regex engine in Beagle (complex)
+**Blocker:** Requires a regex library. Would need FFI wrapper for PCRE or similar.
 
 ---
 
-## Missing Language Features
+## Added Builtins
 
-To implement all benchmarks, Beagle needs:
+To support these benchmarks, the following builtin functions were added to Beagle:
 
-### High Priority (blocks multiple benchmarks)
+**Math functions:**
+- `sqrt(x)` - Square root of a float
+- `floor(x)` - Floor of a float
+- `ceil(x)` - Ceiling of a float
+- `abs(x)` - Absolute value of a float
+- `sin(x)` - Sine of a float (radians)
+- `cos(x)` - Cosine of a float (radians)
+- `to_float(n)` - Convert an integer to a float
 
-1. **`sqrt()` function** - Blocks n-body and spectral-norm
-   - Option A: Add as builtin (call libc sqrt)
-   - Option B: Implement Newton-Raphson in Beagle
-   - Option C: Add FFI wrapper for libm
+**I/O functions:**
+- `read_line()` - Read a line from stdin (returns null on EOF)
+- `print_byte(n)` - Output a single byte (for binary output)
 
-### Medium Priority
+**String functions:**
+- `char_code(s)` - Get ASCII code of first character in string
+- `char_from_code(n)` - Create single-character string from ASCII code
 
-2. **Arbitrary precision integers** - Blocks pidigits
-   - Would need a bigint library implementation
-
-3. **Regex support** - Blocks regex-redux
-   - Could use FFI to wrap PCRE or similar
-
-### Low Priority (workarounds exist)
-
-4. **Binary file output** - For mandelbrot
-   - Can output text-based representation instead
-
-5. **stdin reading** - For k-nucleotide, reverse-complement, regex-redux
-   - Can use file input as alternative
+---
 
 ## Running Benchmarks
 
@@ -269,8 +245,8 @@ cargo run -- benchmarks/benchmarksgame/binary_trees.bg
 # Run with timing
 cargo run -- --show-times benchmarks/benchmarksgame/binary_trees.bg
 
-# Compare with reference implementation
-ruby /path/to/benchmarksgame-sourcecode/binarytrees/binarytrees.ruby 10
+# Run all tests (includes benchmarks)
+cargo run -- --all-tests
 ```
 
 ## Reference Implementations

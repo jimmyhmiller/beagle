@@ -2235,7 +2235,7 @@ impl AstCompiler<'_> {
                 let a = self.call_compile(&left);
                 self.not_tail_position();
                 let b = self.call_compile(&right);
-                self.ir.compare(a, b, operator)
+                self.ir.compare_any(a, b, operator)
             }
             Ast::String(str, _) => {
                 let constant_ptr = self.string_constant(str);

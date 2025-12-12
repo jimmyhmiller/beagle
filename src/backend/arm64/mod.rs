@@ -362,6 +362,16 @@ impl CodegenBackend for Arm64Backend {
         self.inner.compare_bool(condition, dest, a, b);
     }
 
+    fn compare_float_bool(
+        &mut self,
+        condition: Condition,
+        dest: Self::Register,
+        a: Self::Register,
+        b: Self::Register,
+    ) {
+        self.inner.compare_float_bool(condition, dest, a, b);
+    }
+
     // === Tagged value operations ===
 
     fn tag_value(&mut self, dest: Self::Register, value: Self::Register, tag: Self::Register) {

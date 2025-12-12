@@ -706,6 +706,14 @@ pub enum ArmAsm {
         rn: Register,
         rd: Register,
     },
+    /// FCMP -- A64
+    /// Floating-point Compare (scalar)
+    /// FCMP  <Dn>, <Dm>
+    FcmpFloat {
+        ftype: i32,
+        rm: Register,
+        rn: Register,
+    },
 }
 #[derive(Debug, PartialEq, Eq)]
 pub enum LdpGenSelector {
@@ -1275,6 +1283,11 @@ impl ArmAsm {
                     | (rm << 16)
                     | (rn << 5)
                     | (rd << 0)
+            }
+            ArmAsm::FcmpFloat { ftype, rm, rn } => {
+                // FCMP Dn, Dm encoding (from ARM XML spec via arm-codegen-generic):
+                // 0b0_0_0_11110_00_1_00000_00_1000_00000_00_000 = 0x1E202000
+                0x1E202000 | ((*ftype as u32) << 22) | (rm << 16) | (rn << 5)
             }
         }
     }
