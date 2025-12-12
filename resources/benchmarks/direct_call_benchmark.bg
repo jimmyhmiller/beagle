@@ -1,0 +1,106 @@
+namespace direct_call_benchmark
+
+// Direct Function Call Benchmark - baseline for comparing protocol dispatch overhead
+// Run with: cargo run --release -- --show-times resources/benchmarks/direct_call_benchmark.bg
+
+struct TypeA { value }
+struct TypeB { value }
+struct TypeC { value }
+struct TypeD { value }
+struct TypeE { value }
+
+// Direct functions instead of protocol dispatch
+fn dispatch_a(self) { self.value }
+fn dispatch_b(self) { self.value * 2 }
+fn dispatch_c(self) { self.value + 1 }
+fn dispatch_d(self) { self.value - 1 }
+fn dispatch_e(self) { self.value + 10 }
+
+// Monomorphic: same type every call
+fn benchmark_monomorphic(iterations) {
+    let a = TypeA { value: 42 }
+    let mut sum = 0
+    let mut i = 0
+    while i < iterations {
+        sum = sum + dispatch_a(a)
+        i = i + 1
+        null
+    }
+    sum
+}
+
+// Polymorphic: 2 types per iteration
+fn benchmark_poly_2_inline(iterations) {
+    let a = TypeA { value: 1 }
+    let b = TypeB { value: 2 }
+    let mut sum = 0
+    let mut i = 0
+    while i < iterations {
+        sum = sum + dispatch_a(a) + dispatch_b(b)
+        i = i + 1
+        null
+    }
+    sum
+}
+
+// Polymorphic: 3 types per iteration
+fn benchmark_poly_3_inline(iterations) {
+    let a = TypeA { value: 1 }
+    let b = TypeB { value: 2 }
+    let c = TypeC { value: 3 }
+    let mut sum = 0
+    let mut i = 0
+    while i < iterations {
+        sum = sum + dispatch_a(a) + dispatch_b(b) + dispatch_c(c)
+        i = i + 1
+        null
+    }
+    sum
+}
+
+// Megamorphic: 5 types per iteration
+fn benchmark_mega_5_inline(iterations) {
+    let a = TypeA { value: 1 }
+    let b = TypeB { value: 2 }
+    let c = TypeC { value: 3 }
+    let d = TypeD { value: 4 }
+    let e = TypeE { value: 5 }
+    let mut sum = 0
+    let mut i = 0
+    while i < iterations {
+        sum = sum + dispatch_a(a) + dispatch_b(b) + dispatch_c(c) + dispatch_d(d) + dispatch_e(e)
+        i = i + 1
+        null
+    }
+    sum
+}
+
+fn main() {
+    let iterations = 1000000
+
+    println("Direct Function Call Benchmark")
+    println("===============================")
+    println("Each test runs the same number of function calls")
+    println("")
+
+    println("Monomorphic (1 type, 1M calls):")
+    let mono_result = benchmark_monomorphic(iterations)
+    println(mono_result)
+
+    println("")
+    println("Polymorphic 2 types (500K iterations, 2 calls each = 1M calls):")
+    let poly2_result = benchmark_poly_2_inline(iterations / 2)
+    println(poly2_result)
+
+    println("")
+    println("Polymorphic 3 types (333K iterations, 3 calls each ~= 1M calls):")
+    let poly3_result = benchmark_poly_3_inline(iterations / 3)
+    println(poly3_result)
+
+    println("")
+    println("Megamorphic 5 types (200K iterations, 5 calls each = 1M calls):")
+    let mega5_result = benchmark_mega_5_inline(iterations / 5)
+    println(mega5_result)
+
+    "done"
+}

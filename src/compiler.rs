@@ -104,6 +104,10 @@ pub struct Compiler {
     pub property_look_up_cache_offset: usize,
     pub compiled_file_cache: HashSet<String>,
     pub warnings: Arc<Mutex<Vec<CompilerWarning>>>,
+    /// Cache for protocol dispatch inline caching
+    /// Layout per entry: [type_id (8 bytes), fn_ptr (8 bytes)]
+    pub protocol_dispatch_cache: MmapMut,
+    pub protocol_dispatch_cache_offset: usize,
 }
 
 impl Compiler {
@@ -118,6 +122,15 @@ impl Compiler {
                 CompileError::MemoryMapping(format!("Failed to make mmap mutable: {}", e))
             })?;
         self.property_look_up_cache_offset = 0;
+        self.protocol_dispatch_cache = MmapOptions::new(MmapOptions::page_size())
+            .map_err(|e| CompileError::MemoryMapping(format!("Failed to create mmap: {}", e)))?
+            .map_mut()
+            .map_err(|e| CompileError::MemoryMapping(format!("Failed to map mmap: {}", e)))?
+            .make_mut()
+            .map_err(|(_map, e)| {
+                CompileError::MemoryMapping(format!("Failed to make mmap mutable: {}", e))
+            })?;
+        self.protocol_dispatch_cache_offset = 0;
         self.stack_map = StackMap::new();
         self.pause_atom_ptr = None;
         self.compiled_file_cache.clear();
@@ -361,6 +374,28 @@ impl Compiler {
                 .add(self.property_look_up_cache_offset) as usize
         };
         self.property_look_up_cache_offset += 2 * 8;
+        Ok(location)
+    }
+
+    /// Allocate a 16-byte inline cache entry for protocol dispatch
+    /// Layout: [type_id (8 bytes), fn_ptr (8 bytes)]
+    pub fn add_protocol_dispatch_cache(&mut self) -> Result<usize, CompileError> {
+        if self.protocol_dispatch_cache_offset >= self.protocol_dispatch_cache.len() {
+            return Err(CompileError::PropertyCacheFull); // Reuse error type for now
+        }
+        let location = unsafe {
+            self.protocol_dispatch_cache
+                .as_ptr()
+                .add(self.protocol_dispatch_cache_offset) as usize
+        };
+        // Initialize type_id with sentinel value that will never match a real type_id
+        // This ensures the first call always goes to slow path (struct_id=0 would otherwise match)
+        unsafe {
+            let cache_ptr = location as *mut usize;
+            *cache_ptr = usize::MAX; // Sentinel: impossible type_id
+        }
+        // 16 bytes: type_id (8) + fn_ptr (8)
+        self.protocol_dispatch_cache_offset += 2 * 8;
         Ok(location)
     }
 
@@ -733,6 +768,9 @@ impl Compiler {
                 "beagle.builtin/throw_error".to_string()
             });
 
+        // Use instance_of for type checking
+        // TODO: Future optimization - inline the struct_id comparison for struct types
+        // with proper guard for heap objects
         Ast::If {
             condition: Box::new(Ast::Call {
                 name: "beagle.core/instance_of".to_string(),
@@ -759,6 +797,36 @@ impl Compiler {
         }
     }
 
+    /// Build an optimized dispatch using inline cache and dispatch table
+    /// This replaces the if-chain with O(1) lookup
+    fn build_optimized_dispatch(
+        &mut self,
+        protocol_name: &str,
+        method_name: &str,
+        default_method: Option<&Function>,
+        args: Vec<String>,
+    ) -> Option<Ast> {
+        let runtime = get_runtime().get();
+
+        // Get dispatch table pointer - if none exists, fall back to if-chain
+        let dispatch_table_ptr = runtime.get_dispatch_table_ptr(protocol_name, method_name)?;
+
+        // Allocate inline cache entry
+        let cache_location = self.add_protocol_dispatch_cache().ok()?;
+
+        // Get default method pointer (0 if no default)
+        let default_fn_ptr = default_method.map(|f| usize::from(f.pointer)).unwrap_or(0);
+
+        Some(Ast::ProtocolDispatch {
+            args,
+            cache_location,
+            dispatch_table_ptr,
+            default_fn_ptr,
+            num_args: default_method.map(|f| f.number_of_args).unwrap_or(1),
+            token_range: TokenRange::new(0, 0),
+        })
+    }
+
     fn compile_protocol_method(
         &mut self,
         protocol_name: String,
@@ -766,13 +834,23 @@ impl Compiler {
         protocol_methods: Vec<ProtocolMethodInfo>,
     ) -> Result<(), Box<dyn Error>> {
         let runtime = get_runtime().get_mut();
-        let (protocol_namespace, protocol_name) = protocol_name
+        let (protocol_namespace, protocol_name_only) = protocol_name
             .split_once("/")
             .ok_or_else(|| format!("Invalid protocol name format: {}", protocol_name))?;
         let full_method_name = format!("{}/{}", protocol_namespace, method_name);
-        let fully_qualified_name =
-            format!("{}/{}_{}", protocol_namespace, protocol_name, method_name);
-        let default_method = runtime.get_function_by_name(&fully_qualified_name);
+        let fully_qualified_name = format!(
+            "{}/{}_{}",
+            protocol_namespace, protocol_name_only, method_name
+        );
+        // Clone the function to release the borrow on runtime
+        let default_method = runtime.get_function_by_name(&fully_qualified_name).cloned();
+        // Set the default method on the dispatch table for fallback when no specific impl exists
+        if let Some(ref default_fn) = default_method {
+            // Tag the raw pointer as a function (tag = 0b100 = 4)
+            let raw_ptr = usize::from(default_fn.pointer);
+            let default_ptr = (raw_ptr << 3) | 4;
+            runtime.set_dispatch_table_default(&protocol_name, &method_name, default_ptr);
+        }
         let function = self.find_function(&full_method_name).ok_or_else(|| {
             CompileError::FunctionNotFound {
                 function_name: full_method_name.clone(),
@@ -788,12 +866,29 @@ impl Compiler {
             .ok_or_else(|| format!("Protocol namespace not found: {}", protocol_namespace))?;
         self.set_current_namespace(protocol_namespace_id);
 
+        // Try optimized dispatch first
+        let body = if let Some(optimized) = self.build_optimized_dispatch(
+            &protocol_name,
+            &method_name,
+            default_method.as_ref(),
+            args.clone(),
+        ) {
+            vec![optimized]
+        } else {
+            // Fall back to if-chain
+            vec![self.build_method_if_chain(
+                default_method.as_ref(),
+                protocol_methods,
+                args.clone(),
+            )]
+        };
+
         let ast = Ast::Program {
             elements: vec![Ast::Function {
                 name: Some(method_name.clone()),
                 args: args.clone(),
                 rest_param: None,
-                body: vec![self.build_method_if_chain(default_method, protocol_methods, args)],
+                body,
                 token_range: TokenRange::new(0, 0),
             }],
             token_range: TokenRange::new(0, 0),
@@ -855,6 +950,17 @@ impl CompilerThread {
                         CompileError::MemoryMapping(format!("Failed to make mmap mutable: {}", e))
                     })?,
                 property_look_up_cache_offset: 0,
+                protocol_dispatch_cache: MmapOptions::new(MmapOptions::page_size())
+                    .map_err(|e| {
+                        CompileError::MemoryMapping(format!("Failed to create mmap: {}", e))
+                    })?
+                    .map_mut()
+                    .map_err(|e| CompileError::MemoryMapping(format!("Failed to map mmap: {}", e)))?
+                    .make_mut()
+                    .map_err(|(_map, e)| {
+                        CompileError::MemoryMapping(format!("Failed to make mmap mutable: {}", e))
+                    })?,
+                protocol_dispatch_cache_offset: 0,
                 command_line_arguments: command_line_arguments.clone(),
                 stack_map: StackMap::new(),
                 pause_atom_ptr: None,

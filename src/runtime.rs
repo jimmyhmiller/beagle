@@ -787,6 +787,78 @@ pub struct ProtocolMethodInfo {
     pub fn_pointer: usize,
 }
 
+/// Dispatch table for O(1) protocol method lookup
+/// Maps type_id -> function pointer for fast protocol dispatch
+#[derive(Debug, Clone)]
+pub struct DispatchTable {
+    /// Dense array for struct IDs (positive IDs, index = struct_id)
+    /// Value = function pointer (0 if not implemented for this type)
+    pub struct_dispatch: Vec<usize>,
+    /// Sparse array for primitive types (negative IDs mapped to indices)
+    /// Index mapping: -1 -> 0, -2 -> 1, etc.
+    pub primitive_dispatch: Vec<usize>,
+    /// Default method pointer (if protocol has default implementation)
+    pub default_method: Option<usize>,
+}
+
+impl DispatchTable {
+    pub fn new(default_method: Option<usize>) -> Self {
+        Self {
+            struct_dispatch: Vec::new(),
+            primitive_dispatch: Vec::new(),
+            default_method,
+        }
+    }
+
+    /// Register an implementation for a type
+    /// type_id: positive for structs, negative for primitives
+    pub fn register(&mut self, type_id: isize, fn_pointer: usize) {
+        if type_id < 0 {
+            // Primitive type - map negative ID to index
+            let index = (-type_id - 1) as usize;
+            if index >= self.primitive_dispatch.len() {
+                self.primitive_dispatch.resize(index + 1, 0);
+            }
+            self.primitive_dispatch[index] = fn_pointer;
+        } else {
+            // Struct type - use ID as index
+            let index = type_id as usize;
+            if index >= self.struct_dispatch.len() {
+                self.struct_dispatch.resize(index + 1, 0);
+            }
+            self.struct_dispatch[index] = fn_pointer;
+        }
+    }
+
+    /// Lookup function pointer for a struct type ID
+    pub fn lookup_struct(&self, struct_id: usize) -> usize {
+        if struct_id < self.struct_dispatch.len() {
+            let ptr = self.struct_dispatch[struct_id];
+            if ptr != 0 {
+                return ptr;
+            }
+        }
+        self.default_method.unwrap_or(0)
+    }
+
+    /// Lookup function pointer for a primitive type
+    /// primitive_index: 0 for Int (-1), 1 for Float (-2), etc.
+    pub fn lookup_primitive(&self, primitive_index: usize) -> usize {
+        if primitive_index < self.primitive_dispatch.len() {
+            let ptr = self.primitive_dispatch[primitive_index];
+            if ptr != 0 {
+                return ptr;
+            }
+        }
+        self.default_method.unwrap_or(0)
+    }
+
+    /// Set the default method pointer for this dispatch table
+    pub fn set_default_method(&mut self, fn_ptr: usize) {
+        self.default_method = Some(fn_ptr);
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct ExceptionHandler {
@@ -826,6 +898,9 @@ pub struct Runtime {
     compiler_channel: Option<BlockingSender<CompilerMessage, CompilerResponse>>,
     compiler_thread: Option<JoinHandle<()>>,
     protocol_info: HashMap<String, Vec<ProtocolMethodInfo>>,
+    /// Dispatch tables for O(1) protocol method lookup
+    /// Key = "protocol_name/method_name"
+    dispatch_tables: HashMap<String, DispatchTable>,
     stack_segments: StackSegmentAllocator,
     stacks_for_continuation_swapping: Vec<ContinuationStack>,
     // Per-thread try-catch handler stacks
@@ -921,6 +996,7 @@ impl Runtime {
             compiler_channel: None,
             compiler_thread: None,
             protocol_info: HashMap::new(),
+            dispatch_tables: HashMap::new(),
             stack_segments: StackSegmentAllocator::new(),
             compiler_warnings: Arc::new(Mutex::new(Vec::new())),
             stacks_for_continuation_swapping: vec![ContinuationStack {
@@ -966,6 +1042,7 @@ impl Runtime {
             .expect("Compiler channel not initialized - this is a fatal error")
             .send(CompilerMessage::Reset);
         self.protocol_info.clear();
+        self.dispatch_tables.clear();
     }
 
     pub fn start_compiler_thread(&mut self) {
@@ -3025,6 +3102,86 @@ impl Runtime {
                 method_name: method_name.to_string(),
                 fn_pointer: f,
             });
+
+        // Also update the dispatch table for O(1) lookup
+        // Key format: "protocol_namespace/method_name" (e.g., "myapp/dispatch")
+        let (protocol_namespace, _protocol_name) =
+            protocol_name.split_once("/").unwrap_or(("", protocol_name));
+        let dispatch_key = format!("{}/{}", protocol_namespace, method_name);
+
+        // f is already a tagged function pointer from Beagle code
+        // (tagged with Function tag 0b100 = 4)
+
+        // Check for built-in types first
+        // Built-in heap types use primitive dispatch with their type_id
+        // Tagged primitives use primitive dispatch with tag + 16
+        let builtin_primitive_id = match struct_name {
+            "beagle.core/Array" => Some(1),   // type_id for Array
+            "beagle.core/String" => Some(2),  // type_id for String
+            "beagle.core/Keyword" => Some(3), // type_id for Keyword
+            "beagle.core/Int" => Some(16),    // tag 0 + 16
+            "beagle.core/Float" => Some(17),  // tag 1 + 16
+            "beagle.core/Bool" => Some(19),   // tag 3 + 16
+            _ => None,
+        };
+
+        if let Some(primitive_id) = builtin_primitive_id {
+            // Built-in type - register in primitive dispatch
+            let dispatch_table = self
+                .dispatch_tables
+                .entry(dispatch_key)
+                .or_insert_with(|| DispatchTable::new(None));
+            // Use negative ID for primitive types (DispatchTable converts to index)
+            dispatch_table.register(-(primitive_id as isize + 1), f);
+        } else if let Some((struct_id, _)) = self.structs.get(struct_name) {
+            // Custom struct - register with struct_id
+            let dispatch_table = self
+                .dispatch_tables
+                .entry(dispatch_key)
+                .or_insert_with(|| DispatchTable::new(None));
+            dispatch_table.register(struct_id as isize, f);
+        }
+        // Note: silently ignore unknown types for now (could be forward references)
+    }
+
+    /// Get the dispatch table pointer for a protocol method
+    /// Returns the raw pointer to the DispatchTable struct for use in generated code
+    pub fn get_dispatch_table_ptr(&self, protocol_name: &str, method_name: &str) -> Option<usize> {
+        let (protocol_namespace, _protocol_name) =
+            protocol_name.split_once("/").unwrap_or(("", protocol_name));
+        let dispatch_key = format!("{}/{}", protocol_namespace, method_name);
+
+        self.dispatch_tables
+            .get(&dispatch_key)
+            .map(|table| table as *const DispatchTable as usize)
+    }
+
+    /// Get a reference to a dispatch table
+    pub fn get_dispatch_table(
+        &self,
+        protocol_name: &str,
+        method_name: &str,
+    ) -> Option<&DispatchTable> {
+        let (protocol_namespace, _protocol_name) =
+            protocol_name.split_once("/").unwrap_or(("", protocol_name));
+        let dispatch_key = format!("{}/{}", protocol_namespace, method_name);
+
+        self.dispatch_tables.get(&dispatch_key)
+    }
+
+    /// Set the default method for a dispatch table
+    pub fn set_dispatch_table_default(
+        &mut self,
+        protocol_name: &str,
+        method_name: &str,
+        default_fn_ptr: usize,
+    ) {
+        let (protocol_namespace, _) = protocol_name.split_once("/").unwrap_or(("", protocol_name));
+        let dispatch_key = format!("{}/{}", protocol_namespace, method_name);
+
+        if let Some(table) = self.dispatch_tables.get_mut(&dispatch_key) {
+            table.set_default_method(default_fn_ptr);
+        }
     }
 
     pub fn compile_protocol_method(&self, protocol_name: &str, method_name: &str) -> usize {

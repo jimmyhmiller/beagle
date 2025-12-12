@@ -1,0 +1,50 @@
+namespace mono_vs_direct
+
+protocol Dispatcher {
+    fn dispatch(self)
+}
+
+struct TypeA { value }
+
+extend TypeA with Dispatcher { fn dispatch(self) { self.value } }
+
+fn direct_call(obj) { obj.value }
+
+fn time_ms(start, end) {
+    (end - start) / 1000000
+}
+
+fn main() {
+    let iterations = 1000000
+    let a = TypeA { value: 42 }
+
+    // Direct call
+    let start = time_now()
+    let mut sum = 0
+    let mut i = 0
+    while i < iterations {
+        sum = sum + direct_call(a)
+        i = i + 1
+        null
+    }
+    let end = time_now()
+    print("Direct call: ")
+    print(time_ms(start, end))
+    println("ms")
+
+    // Protocol dispatch (monomorphic - cache hits)
+    let start = time_now()
+    let mut sum = 0
+    let mut i = 0
+    while i < iterations {
+        sum = sum + dispatch(a)
+        i = i + 1
+        null
+    }
+    let end = time_now()
+    print("Protocol dispatch: ")
+    print(time_ms(start, end))
+    println("ms")
+
+    "done"
+}

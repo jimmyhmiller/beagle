@@ -1,0 +1,88 @@
+namespace protocol_dispatch_cache_test
+
+// Tests actual cache hit/miss behavior
+// Run with: cargo run --release -- resources/benchmarks/protocol_dispatch_cache_test.bg
+
+protocol Dispatcher {
+    fn dispatch(self)
+}
+
+struct TypeA { value }
+struct TypeB { value }
+
+extend TypeA with Dispatcher { fn dispatch(self) { self.value } }
+extend TypeB with Dispatcher { fn dispatch(self) { self.value * 2 } }
+
+// Same call site, always same type = cache always hits
+fn benchmark_cache_hits(iterations, obj) {
+    let mut sum = 0
+    let mut i = 0
+    while i < iterations {
+        sum = sum + dispatch(obj)
+        i = i + 1
+        null
+    }
+    sum
+}
+
+// Same call site, alternating types = cache always misses
+fn benchmark_cache_misses(iterations, a, b) {
+    let mut sum = 0
+    let mut i = 0
+    while i < iterations {
+        sum = sum + dispatch(a)
+        sum = sum + dispatch(b)  // Different call site - still hits
+        i = i + 1
+        null
+    }
+    sum
+}
+
+// TRUE cache thrashing: same call site, different types each call
+fn call_dispatch(obj) {
+    dispatch(obj)
+}
+
+fn benchmark_true_megamorphic(iterations, a, b) {
+    let mut sum = 0
+    let mut i = 0
+    while i < iterations {
+        // Same call site (inside call_dispatch), alternating types
+        sum = sum + call_dispatch(a)
+        sum = sum + call_dispatch(b)
+        i = i + 1
+        null
+    }
+    sum
+}
+
+fn time_ms(start, end) {
+    (end - start) / 1000000
+}
+
+fn main() {
+    let iterations = 1000000
+    let a = TypeA { value: 1 }
+    let b = TypeB { value: 2 }
+
+    println("Protocol Dispatch - Cache Behavior Test")
+    println("=======================================")
+    println("")
+
+    let start = time_now()
+    let r1 = benchmark_cache_hits(iterations, a)
+    let end = time_now()
+    print("Monomorphic (1M calls, cache hits): ")
+    print(time_ms(start, end))
+    println("ms")
+
+    let start = time_now()
+    let r2 = benchmark_true_megamorphic(iterations, a, b)
+    let end = time_now()
+    print("Megamorphic (2M calls via same site, cache misses): ")
+    print(time_ms(start, end))
+    println("ms")
+
+    // Prevent optimization
+    r1 + r2
+}
