@@ -1,0 +1,54 @@
+namespace modulo_test
+
+import "beagle.builtin" as builtin
+
+fn hash_string_v1(s, capacity) {
+    let h = builtin/hash(s)
+    let h2 = if h < 0 { 0 - h } else { h }
+    h2 - (h2 / capacity) * capacity
+}
+
+fn main() {
+    let capacity = 125000
+
+    println("Testing hash for A:")
+    let h_a = builtin/hash("A")
+    println(h_a)
+    let h2_a = if h_a < 0 { 0 - h_a } else { h_a }
+    println("abs:")
+    println(h2_a)
+    let div_a = h2_a / capacity
+    println("div:")
+    println(div_a)
+    let mult_a = div_a * capacity
+    println("mult:")
+    println(mult_a)
+    let mod_a = h2_a - mult_a
+    println("mod:")
+    println(mod_a)
+
+    println("")
+    println("Index via function:")
+    println(hash_string_v1("A", capacity))
+
+    println("")
+    println("Two different A strings:")
+    let a1 = "A"
+    let a2 = substring("ABCD", 0, 1)
+    println("a1:")
+    println(a1)
+    println("a2:")
+    println(a2)
+    println("hash(a1):")
+    println(builtin/hash(a1))
+    println("hash(a2):")
+    println(builtin/hash(a2))
+    println("index(a1):")
+    println(hash_string_v1(a1, capacity))
+    println("index(a2):")
+    println(hash_string_v1(a2, capacity))
+    println("a1 == a2:")
+    println(a1 == a2)
+
+    ""
+}

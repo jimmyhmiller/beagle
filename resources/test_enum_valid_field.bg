@@ -16,4 +16,3 @@ fn main() {
 // Expect
 // Color.Red
 // Color.Blue { value: 255 }
-// done

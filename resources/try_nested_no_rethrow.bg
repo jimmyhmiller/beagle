@@ -28,4 +28,3 @@ fn main() {
 // Handled, not rethrowing
 // After inner try-catch
 // All done
-// done

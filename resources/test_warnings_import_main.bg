@@ -35,4 +35,3 @@ fn main() {
 // Warning count from main + imported file:
 // 2
 // PASS: Got 2 warnings as expected
-// done

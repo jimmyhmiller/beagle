@@ -1,0 +1,286 @@
+namespace beagle.io
+
+import "beagle.ffi" as ffi
+import "beagle.builtin" as builtin
+
+// Load libc
+let libc = ffi/load_library("/usr/lib/libSystem.dylib")
+
+// Result type for error handling
+enum Result {
+    Ok { value },
+    Err { code, message }
+}
+
+fn ok(value) { Result.Ok { value: value } }
+fn err(code, msg) { Result.Err { code: code, message: msg } }
+
+// Check if a result is ok
+fn ok?(result) {
+    match result {
+        Result.Ok { value } => true,
+        Result.Err { code, message } => false
+    }
+}
+
+// Unwrap a result, printing error and returning null on error
+fn unwrap(result) {
+    match result {
+        Result.Ok { value } => value,
+        Result.Err { code, message } => {
+            println("Error: ", message)
+            null
+        }
+    }
+}
+
+// FFI function bindings for FILE* operations
+let _fopen = ffi/get_function(libc, "fopen",
+    [ffi/Type.String, ffi/Type.String], ffi/Type.Pointer)
+let _fclose = ffi/get_function(libc, "fclose",
+    [ffi/Type.Pointer], ffi/Type.I32)
+let _fread = ffi/get_function(libc, "fread",
+    [ffi/Type.Pointer, ffi/Type.U64, ffi/Type.U64, ffi/Type.Pointer], ffi/Type.U64)
+let _fwrite = ffi/get_function(libc, "fwrite",
+    [ffi/Type.Pointer, ffi/Type.U64, ffi/Type.U64, ffi/Type.Pointer], ffi/Type.U64)
+let _fgetc = ffi/get_function(libc, "fgetc",
+    [ffi/Type.Pointer], ffi/Type.I32)
+let _fputc = ffi/get_function(libc, "fputc",
+    [ffi/Type.I32, ffi/Type.Pointer], ffi/Type.I32)
+let _fflush = ffi/get_function(libc, "fflush",
+    [ffi/Type.Pointer], ffi/Type.I32)
+let _feof = ffi/get_function(libc, "feof",
+    [ffi/Type.Pointer], ffi/Type.I32)
+
+// FFI bindings for fd-based operations (stdin/stdout/stderr)
+let _read = ffi/get_function(libc, "read",
+    [ffi/Type.I32, ffi/Type.Pointer, ffi/Type.U64], ffi/Type.I32)
+let _write = ffi/get_function(libc, "write",
+    [ffi/Type.I32, ffi/Type.Pointer, ffi/Type.U64], ffi/Type.I32)
+
+// File struct wrapper
+struct File { handle }
+
+// Buffer result for read operations
+struct BufferResult { buffer, length }
+
+// Standard file descriptors
+let STDIN_FD = 0
+let STDOUT_FD = 1
+let STDERR_FD = 2
+
+// Helper: check if a pointer is null
+fn is_null(pointer) {
+    pointer.ptr == 0
+}
+
+// Helper: copy string bytes to a buffer
+// Returns a buffer containing the string bytes
+fn string_to_buffer(s) {
+    let len = length(s)
+    let buf = ffi/allocate(len)
+    let mut i = 0
+    while i < len {
+        let char = get(s, i)
+        let byte = builtin/char_code(char)
+        ffi/set_u8(buf, i, byte)
+        i = i + 1
+    }
+    buf
+}
+
+// === FILE* based operations (for regular files) ===
+
+fn open(path, mode) {
+    let handle = _fopen(path, mode, 0, 0, 0, 0)
+    if is_null(handle) {
+        err(-1, "Failed to open file")
+    } else {
+        ok(File { handle: handle })
+    }
+}
+
+fn close(file) {
+    let result = _fclose(file.handle, 0, 0, 0, 0, 0)
+    if result == 0 {
+        ok(null)
+    } else {
+        err(result, "Failed to close file")
+    }
+}
+
+fn read_bytes(file, n) {
+    let buf = ffi/allocate(n)
+    let bytes_read = _fread(buf, 1, n, file.handle, 0, 0)
+    ok(BufferResult { buffer: buf, length: bytes_read })
+}
+
+fn read_char(file) {
+    let c = _fgetc(file.handle, 0, 0, 0, 0, 0)
+    if c == -1 {
+        err(-1, "EOF or error")
+    } else {
+        ok(c)
+    }
+}
+
+fn write_bytes(file, buf, len) {
+    let written = _fwrite(buf, 1, len, file.handle, 0, 0)
+    ok(written)
+}
+
+fn write_string(file, s) {
+    let len = length(s)
+    let buf = string_to_buffer(s)
+    let written = _fwrite(buf, 1, len, file.handle, 0, 0)
+    ffi/deallocate(buf)
+    ok(written)
+}
+
+fn flush(file) {
+    let result = _fflush(file.handle, 0, 0, 0, 0, 0)
+    if result == 0 {
+        ok(null)
+    } else {
+        err(result, "Failed to flush file")
+    }
+}
+
+fn eof?(file) {
+    _feof(file.handle, 0, 0, 0, 0, 0) != 0
+}
+
+// Read a line from a file (up to newline or max_len bytes)
+fn read_line(file, max_len) {
+    let buf = ffi/allocate(max_len)
+    let mut i = 0
+    let mut done = false
+    // Use done == false instead of !done for while condition
+    while i < max_len && done == false {
+        let c = _fgetc(file.handle, 0, 0, 0, 0, 0)
+        if c == -1 {
+            done = true
+        } else if c == 10 {
+            // newline character
+            ffi/set_u8(buf, i, c)
+            i = i + 1
+            done = true
+        } else {
+            ffi/set_u8(buf, i, c)
+            i = i + 1
+        }
+    }
+    if i == 0 && done {
+        ffi/deallocate(buf)
+        err(-1, "EOF")
+    } else {
+        let s = ffi/get_string(buf, 0, i)
+        ffi/deallocate(buf)
+        ok(s)
+    }
+}
+
+// === FD-based operations (for stdin/stdout/stderr) ===
+
+fn read_stdin(n) {
+    let buf = ffi/allocate(n)
+    let bytes_read = _read(STDIN_FD, buf, n, 0, 0, 0)
+    if bytes_read < 0 {
+        ffi/deallocate(buf)
+        err(bytes_read, "Read error")
+    } else {
+        ok(BufferResult { buffer: buf, length: bytes_read })
+    }
+}
+
+fn read_stdin_string(n) {
+    let result = read_stdin(n)
+    match result {
+        Result.Ok { value } => {
+            let s = ffi/get_string(value.buffer, 0, value.length)
+            ffi/deallocate(value.buffer)
+            ok(s)
+        },
+        Result.Err { code, message } => err(code, message)
+    }
+}
+
+fn write_stdout(s) {
+    let len = length(s)
+    let buf = string_to_buffer(s)
+    let written = _write(STDOUT_FD, buf, len, 0, 0, 0)
+    ffi/deallocate(buf)
+    if written < 0 {
+        err(written, "Write error")
+    } else {
+        ok(written)
+    }
+}
+
+// Write raw buffer to stdout - no string conversion overhead
+fn write_stdout_buffer(buf, len) {
+    let written = _write(STDOUT_FD, buf, len, 0, 0, 0)
+    if written < 0 {
+        err(written, "Write error")
+    } else {
+        ok(written)
+    }
+}
+
+fn write_stderr(s) {
+    let len = length(s)
+    let buf = string_to_buffer(s)
+    let written = _write(STDERR_FD, buf, len, 0, 0, 0)
+    ffi/deallocate(buf)
+    if written < 0 {
+        err(written, "Write error")
+    } else {
+        ok(written)
+    }
+}
+
+// Write from buffer at offset to stdout - for efficient partial buffer writes
+fn write_stdout_buffer_offset(buf, offset, len) {
+    let written = ffi/write_buffer_offset(STDOUT_FD, buf, offset, len)
+    if written < 0 {
+        err(written, "Write error")
+    } else {
+        ok(written)
+    }
+}
+
+// Read a line from stdin (up to max_len bytes)
+fn read_stdin_line(max_len) {
+    let buf = ffi/allocate(max_len)
+    let one_byte_buf = ffi/allocate(1)
+    let mut i = 0
+    let mut done = false
+    // Use done == false instead of !done for while condition
+    while i < max_len && done == false {
+        let bytes_read = _read(STDIN_FD, one_byte_buf, 1, 0, 0, 0)
+        if bytes_read <= 0 {
+            done = true
+        } else {
+            // Read the byte we just got and copy to main buffer
+            let char_str = ffi/get_string(one_byte_buf, 0, 1)
+            let c = builtin/char_code(char_str)
+            ffi/set_u8(buf, i, c)
+            if c == 10 {
+                // newline
+                i = i + 1
+                done = true
+            } else {
+                i = i + 1
+            }
+        }
+    }
+    ffi/deallocate(one_byte_buf)
+    if i == 0 {
+        ffi/deallocate(buf)
+        err(-1, "EOF")
+    } else {
+        let s = ffi/get_string(buf, 0, i)
+        ffi/deallocate(buf)
+        ok(s)
+    }
+}

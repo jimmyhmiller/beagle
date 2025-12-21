@@ -1,0 +1,32 @@
+namespace array_index_boundary2_test
+
+import "raw_mutable_array" as arr
+
+fn test_index(a, idx) {
+    arr/write_field(a, idx, "test")
+    let v = arr/read_field(a, idx)
+    if v == null {
+        print(idx)
+        println(": FAIL")
+    } else {
+        print(idx)
+        println(": OK")
+    }
+}
+
+fn main() {
+    let a = arr/new_array(125000)
+
+    test_index(a, 59000)
+    test_index(a, 59500)
+    test_index(a, 59600)
+    test_index(a, 59700)
+    test_index(a, 59800)
+    test_index(a, 59900)
+    test_index(a, 59950)
+    test_index(a, 59990)
+    test_index(a, 59999)
+    test_index(a, 60000)
+
+    ""
+}

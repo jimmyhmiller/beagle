@@ -338,6 +338,7 @@ fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Erro
         "persistent_vector.bg",
         "persistent_map.bg",
         "beagle.ffi.bg",
+        "beagle.io.bg",
     ];
     let mut all_top_levels = vec![];
 
@@ -724,7 +725,7 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         } else {
             panic!("main() must take 0 or 1 arguments, got {}", arity);
         };
-        runtime.println(result as usize).unwrap();
+        let _ = result; // Silence unused variable warning
     } else if args.debug {
         println!("No main function");
     }

@@ -1,0 +1,52 @@
+namespace large_array_test
+
+import "raw_mutable_array" as arr
+
+fn main() {
+    let capacity = 125000
+    let a = arr/new_array(capacity)
+
+    // Write to various slots
+    arr/write_field(a, 32005, "A")
+    arr/write_field(a, 50000, "G")
+    arr/write_field(a, 30000, "C")
+    arr/write_field(a, 70000, "T")
+
+    // Read back
+    println("Slot 32005:")
+    println(arr/read_field(a, 32005))
+
+    println("Slot 50000:")
+    println(arr/read_field(a, 50000))
+
+    println("Slot 30000:")
+    println(arr/read_field(a, 30000))
+
+    println("Slot 70000:")
+    println(arr/read_field(a, 70000))
+
+    // Check empty slot
+    println("Slot 0:")
+    println(arr/read_field(a, 0))
+
+    // Write again to same slot
+    arr/write_field(a, 32005, "NEW_A")
+    println("Slot 32005 after overwrite:")
+    println(arr/read_field(a, 32005))
+
+    ""
+}
+
+// Exp ect
+// Slot 32005:
+// A
+// Slot 50000:
+// G
+// Slot 30000:
+// C
+// Slot 70000:
+// T
+// Slot 0:
+// null
+// Slot 32005 after overwrite:
+// NEW_A

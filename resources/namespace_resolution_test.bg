@@ -12,4 +12,3 @@ fn main() {
 // 2
 // 2
 // Action.run { speed: 2 }
-// Action.run { speed: 2 }

@@ -275,6 +275,17 @@ extern "C" fn substring(stack_pointer: usize, string: usize, start: usize, lengt
     string.into()
 }
 
+extern "C" fn uppercase(stack_pointer: usize, string: usize) -> usize {
+    print_call_builtin(get_runtime().get(), "uppercase");
+    let runtime = get_runtime().get_mut();
+    let string_value = runtime.get_string(stack_pointer, string);
+    let uppercased = string_value.to_uppercase();
+    runtime
+        .allocate_string(stack_pointer, uppercased)
+        .unwrap()
+        .into()
+}
+
 extern "C" fn fill_object_fields(object_pointer: usize, value: usize) -> usize {
     print_call_builtin(get_runtime().get(), "fill_object_fields");
     let mut object = HeapObject::from_tagged(object_pointer);
@@ -1769,6 +1780,16 @@ unsafe extern "C" fn ffi_set_u8(buffer: usize, offset: usize, value: usize) -> u
     }
 }
 
+unsafe extern "C" fn ffi_get_u8(buffer: usize, offset: usize) -> usize {
+    unsafe {
+        let buffer_object = HeapObject::from_tagged(buffer);
+        let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+        let offset = BuiltInTypes::untag(offset);
+        let value = *(buffer.add(offset));
+        BuiltInTypes::Int.tag(value as isize) as usize
+    }
+}
+
 unsafe extern "C" fn ffi_set_i32(buffer: usize, offset: usize, value: usize) -> usize {
     unsafe {
         let buffer_object = HeapObject::from_tagged(buffer);
@@ -1878,6 +1899,201 @@ unsafe extern "C" fn ffi_create_array(
         std::mem::forget(buffer);
         let buffer = BuiltInTypes::Int.tag(buffer_ptr as isize) as usize;
         call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", buffer)
+    }
+}
+
+// Copy bytes between FFI buffers with offsets
+// ffi_copy_bytes(src, src_off, dst, dst_off, len) -> null
+unsafe extern "C" fn ffi_copy_bytes(
+    src: usize,
+    src_off: usize,
+    dst: usize,
+    dst_off: usize,
+    len: usize,
+) -> usize {
+    unsafe {
+        let src_object = HeapObject::from_tagged(src);
+        let src_ptr = BuiltInTypes::untag(src_object.get_field(0)) as *const u8;
+        let src_off = BuiltInTypes::untag(src_off);
+
+        let dst_object = HeapObject::from_tagged(dst);
+        let dst_ptr = BuiltInTypes::untag(dst_object.get_field(0)) as *mut u8;
+        let dst_off = BuiltInTypes::untag(dst_off);
+
+        let len = BuiltInTypes::untag(len);
+
+        std::ptr::copy_nonoverlapping(src_ptr.add(src_off), dst_ptr.add(dst_off), len);
+
+        BuiltInTypes::null_value() as usize
+    }
+}
+
+// Reallocate an FFI buffer to a new size
+// ffi_realloc(buffer, new_size) -> new_buffer
+unsafe extern "C" fn ffi_realloc(buffer: usize, new_size: usize) -> usize {
+    unsafe {
+        let runtime = get_runtime().get_mut();
+        let buffer_object = HeapObject::from_tagged(buffer);
+        let old_ptr = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+        let old_size = BuiltInTypes::untag(buffer_object.get_field(1));
+        let new_size_val = BuiltInTypes::untag(new_size);
+
+        // Create new buffer
+        let mut new_buffer: Vec<u8> = vec![0; new_size_val];
+        let new_ptr: *mut u8 = new_buffer.as_mut_ptr();
+
+        // Copy old data
+        let copy_len = std::cmp::min(old_size, new_size_val);
+        std::ptr::copy_nonoverlapping(old_ptr, new_ptr, copy_len);
+
+        // Free old buffer
+        let _old_buffer = Vec::from_raw_parts(old_ptr, old_size, old_size);
+
+        // Forget new buffer (we're taking ownership)
+        std::mem::forget(new_buffer);
+
+        let new_ptr_tagged = BuiltInTypes::Int.tag(new_ptr as isize) as usize;
+        let new_size_tagged = BuiltInTypes::Int.tag(new_size_val as isize) as usize;
+        call_fn_2(
+            runtime,
+            "beagle.ffi/__make_buffer_struct",
+            new_ptr_tagged,
+            new_size_tagged,
+        )
+    }
+}
+
+// Get the size of an FFI buffer
+// ffi_buffer_size(buffer) -> size
+unsafe extern "C" fn ffi_buffer_size(buffer: usize) -> usize {
+    let buffer_object = HeapObject::from_tagged(buffer);
+    let size = BuiltInTypes::untag(buffer_object.get_field(1));
+    BuiltInTypes::Int.tag(size as isize) as usize
+}
+
+// Write from buffer at offset to a file descriptor
+// ffi_write_buffer_offset(fd, buffer, offset, len) -> bytes_written
+unsafe extern "C" fn ffi_write_buffer_offset(
+    fd: usize,
+    buffer: usize,
+    offset: usize,
+    len: usize,
+) -> usize {
+    unsafe {
+        let fd = BuiltInTypes::untag(fd) as i32;
+        let buffer_object = HeapObject::from_tagged(buffer);
+        let buffer_ptr = BuiltInTypes::untag(buffer_object.get_field(0)) as *const u8;
+        let offset = BuiltInTypes::untag(offset);
+        let len = BuiltInTypes::untag(len);
+
+        let result = libc::write(fd, buffer_ptr.add(offset) as *const libc::c_void, len);
+
+        BuiltInTypes::Int.tag(result as isize) as usize
+    }
+}
+
+// Translate bytes in buffer using a 256-byte lookup table
+// ffi_translate_bytes(buffer, offset, len, table) -> null
+unsafe extern "C" fn ffi_translate_bytes(
+    buffer: usize,
+    offset: usize,
+    len: usize,
+    table: usize,
+) -> usize {
+    unsafe {
+        let buffer_object = HeapObject::from_tagged(buffer);
+        let buffer_ptr = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+        let offset = BuiltInTypes::untag(offset);
+        let len = BuiltInTypes::untag(len);
+
+        let table_object = HeapObject::from_tagged(table);
+        let table_ptr = BuiltInTypes::untag(table_object.get_field(0)) as *const u8;
+
+        for i in 0..len {
+            let byte = *buffer_ptr.add(offset + i);
+            let translated = *table_ptr.add(byte as usize);
+            *buffer_ptr.add(offset + i) = translated;
+        }
+
+        BuiltInTypes::null_value() as usize
+    }
+}
+
+// Reverse bytes in buffer in place
+// ffi_reverse_bytes(buffer, offset, len) -> null
+unsafe extern "C" fn ffi_reverse_bytes(buffer: usize, offset: usize, len: usize) -> usize {
+    unsafe {
+        let buffer_object = HeapObject::from_tagged(buffer);
+        let buffer_ptr = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+        let offset = BuiltInTypes::untag(offset);
+        let len = BuiltInTypes::untag(len);
+
+        let mut left = 0;
+        let mut right = len.saturating_sub(1);
+
+        while left < right {
+            let tmp = *buffer_ptr.add(offset + left);
+            *buffer_ptr.add(offset + left) = *buffer_ptr.add(offset + right);
+            *buffer_ptr.add(offset + right) = tmp;
+            left += 1;
+            right -= 1;
+        }
+
+        BuiltInTypes::null_value() as usize
+    }
+}
+
+// Find first occurrence of a byte in buffer (like memchr)
+// ffi_find_byte(buffer, offset, len, byte) -> index or -1
+unsafe extern "C" fn ffi_find_byte(buffer: usize, offset: usize, len: usize, byte: usize) -> usize {
+    unsafe {
+        let buffer_object = HeapObject::from_tagged(buffer);
+        let buffer_ptr = BuiltInTypes::untag(buffer_object.get_field(0)) as *const u8;
+        let offset = BuiltInTypes::untag(offset);
+        let len = BuiltInTypes::untag(len);
+        let byte = BuiltInTypes::untag(byte) as u8;
+
+        let slice = std::slice::from_raw_parts(buffer_ptr.add(offset), len);
+        match slice.iter().position(|&b| b == byte) {
+            Some(pos) => BuiltInTypes::Int.tag((offset + pos) as isize) as usize,
+            None => BuiltInTypes::Int.tag(-1) as usize,
+        }
+    }
+}
+
+// Copy bytes from src to dst, skipping instances of skip_byte
+// Returns number of bytes written to dst
+// ffi_copy_bytes_filter(src, src_off, dst, dst_off, len, skip_byte) -> bytes_written
+unsafe extern "C" fn ffi_copy_bytes_filter(
+    src: usize,
+    src_off: usize,
+    dst: usize,
+    dst_off: usize,
+    len: usize,
+    skip_byte: usize,
+) -> usize {
+    unsafe {
+        let src_object = HeapObject::from_tagged(src);
+        let src_ptr = BuiltInTypes::untag(src_object.get_field(0)) as *const u8;
+        let src_off = BuiltInTypes::untag(src_off);
+
+        let dst_object = HeapObject::from_tagged(dst);
+        let dst_ptr = BuiltInTypes::untag(dst_object.get_field(0)) as *mut u8;
+        let dst_off = BuiltInTypes::untag(dst_off);
+
+        let len = BuiltInTypes::untag(len);
+        let skip_byte = BuiltInTypes::untag(skip_byte) as u8;
+
+        let mut written = 0;
+        for i in 0..len {
+            let byte = *src_ptr.add(src_off + i);
+            if byte != skip_byte {
+                *dst_ptr.add(dst_off + written) = byte;
+                written += 1;
+            }
+        }
+
+        BuiltInTypes::Int.tag(written as isize) as usize
     }
 }
 
@@ -2642,6 +2858,8 @@ impl Runtime {
 
         self.add_builtin_function("beagle.ffi/set_u8", ffi_set_u8 as *const u8, false, 3)?;
 
+        self.add_builtin_function("beagle.ffi/get_u8", ffi_get_u8 as *const u8, false, 2)?;
+
         self.add_builtin_function("beagle.ffi/get_i32", ffi_get_i32 as *const u8, false, 2)?;
 
         self.add_builtin_function(
@@ -2656,6 +2874,52 @@ impl Runtime {
             ffi_create_array as *const u8,
             true,
             3,
+        )?;
+
+        self.add_builtin_function(
+            "beagle.ffi/copy_bytes",
+            ffi_copy_bytes as *const u8,
+            false,
+            5,
+        )?;
+
+        self.add_builtin_function("beagle.ffi/realloc", ffi_realloc as *const u8, false, 2)?;
+
+        self.add_builtin_function(
+            "beagle.ffi/buffer_size",
+            ffi_buffer_size as *const u8,
+            false,
+            1,
+        )?;
+
+        self.add_builtin_function(
+            "beagle.ffi/write_buffer_offset",
+            ffi_write_buffer_offset as *const u8,
+            false,
+            4,
+        )?;
+
+        self.add_builtin_function(
+            "beagle.ffi/translate_bytes",
+            ffi_translate_bytes as *const u8,
+            false,
+            4,
+        )?;
+
+        self.add_builtin_function(
+            "beagle.ffi/reverse_bytes",
+            ffi_reverse_bytes as *const u8,
+            false,
+            3,
+        )?;
+
+        self.add_builtin_function("beagle.ffi/find_byte", ffi_find_byte as *const u8, false, 4)?;
+
+        self.add_builtin_function(
+            "beagle.ffi/copy_bytes_filter",
+            ffi_copy_bytes_filter as *const u8,
+            false,
+            6,
         )?;
 
         self.add_builtin_function("beagle.builtin/__pause", __pause as *const u8, true, 1)?;
@@ -2755,6 +3019,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_function("beagle.core/substring", substring as *const u8, true, 4)?;
+        self.add_builtin_function("beagle.core/uppercase", uppercase as *const u8, true, 2)?;
 
         self.add_builtin_function("beagle.builtin/hash", hash as *const u8, true, 2)?;
 

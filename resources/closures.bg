@@ -50,4 +50,3 @@ fn main() {
 // Expect
 // Closure { function, 8, 16, [32, ] }
 // 32
-// done

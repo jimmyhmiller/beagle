@@ -1,0 +1,53 @@
+namespace string_equality_test
+
+// Test string equality between literals and substring results
+
+fn main() {
+    let s = "HELLO"
+
+    // Get a substring that should equal "H"
+    let sub = substring(s, 0, 1)
+
+    println("Substring result:")
+    println(sub)
+
+    println("Literal:")
+    println("H")
+
+    println("Are they equal with ==?")
+    println(sub == "H")
+
+    println("Reverse comparison:")
+    println("H" == sub)
+
+    // Try with a longer substring
+    let sub2 = substring(s, 0, 5)
+    println("Full substring:")
+    println(sub2)
+    println("Equals HELLO?")
+    println(sub2 == "HELLO")
+
+    // Try comparing two substrings
+    let s2 = "HELLO WORLD"
+    let sub3 = substring(s2, 0, 5)
+    println("Two substrings equal?")
+    println(sub2 == sub3)
+
+    ""
+}
+
+// Expect
+// Substring result:
+// H
+// Literal:
+// H
+// Are they equal with ==?
+// true
+// Reverse comparison:
+// true
+// Full substring:
+// HELLO
+// Equals HELLO?
+// true
+// Two substrings equal?
+// true

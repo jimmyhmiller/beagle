@@ -22,4 +22,3 @@ fn main() {
 // Expect
 // BitmapIndexedNode { bit_map: 134219776, children: [ BitmapIndexedNode { bit_map: 2048, children: [ PairNode { key: "key2", val: "value2" } ] }, PairNode { key: "key1", val: "value1" } ] }
 // 1
-// 1

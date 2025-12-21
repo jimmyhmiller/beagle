@@ -359,6 +359,8 @@ impl MMapMutWithOffset {
     }
 
     pub fn write_u32(&mut self, value: u32) -> *const u32 {
+        // Align to 4 bytes
+        self.offset = (self.offset + 3) & !3;
         let start = self.offset;
         let bytes = value.to_le_bytes();
         for byte in bytes {
@@ -369,6 +371,8 @@ impl MMapMutWithOffset {
     }
 
     pub fn write_u64(&mut self, value: u64) -> *const u64 {
+        // Align to 8 bytes
+        self.offset = (self.offset + 7) & !7;
         let start = self.offset;
         let bytes = value.to_le_bytes();
         for byte in bytes {
@@ -379,6 +383,8 @@ impl MMapMutWithOffset {
     }
 
     pub fn write_i32(&mut self, value: i32) -> *const i32 {
+        // Align to 4 bytes
+        self.offset = (self.offset + 3) & !3;
         let start = self.offset;
         let bytes = value.to_le_bytes();
         for byte in bytes {
@@ -398,6 +404,8 @@ impl MMapMutWithOffset {
     }
 
     pub fn write_pointer(&mut self, value: usize) -> *const *mut c_void {
+        // Align to 8 bytes for pointer types
+        self.offset = (self.offset + 7) & !7;
         let start = self.offset;
         let bytes = value.to_le_bytes();
         for byte in bytes {
@@ -1090,10 +1098,16 @@ impl Runtime {
             .as_ref()
             .expect("Compiler channel not initialized - this is a fatal error")
             .send(CompilerMessage::CompileFile(file_name.to_string()));
-        if let CompilerResponse::FunctionsToRun(functions) = response {
-            Ok(functions)
-        } else {
-            Err("Error compiling".into())
+        match response {
+            CompilerResponse::FunctionsToRun(functions) => Ok(functions),
+            CompilerResponse::CompileError(msg) => {
+                eprintln!("Compile error: {}", msg);
+                Err(format!("Error compiling: {}", msg).into())
+            }
+            _ => {
+                eprintln!("Unexpected compiler response");
+                Err("Error compiling".into())
+            }
         }
     }
 
