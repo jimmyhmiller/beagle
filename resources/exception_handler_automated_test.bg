@@ -35,4 +35,3 @@ fn main() {
 // Caught in try-catch:
 // caught error
 // Try-catch took priority as expected
-// done

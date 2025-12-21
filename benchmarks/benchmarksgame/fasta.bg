@@ -3,176 +3,229 @@ namespace fasta
 // The Computer Language Benchmarks Game
 // https://salsa.debian.org/benchmarksgame-team/benchmarksgame/
 //
-// Beagle implementation
+// Beagle implementation - fast buffered I/O version
 
-import "raw_mutable_array" as arr
+import "beagle.ffi" as ffi
+import "beagle.io" as io
 import "beagle.builtin" as builtin
+import "raw_mutable_array" as arr
 
 let LINE_WIDTH = 60
 let IM = 139968
 let IA = 3877
 let IC = 29573
+let OUT_BUF_SIZE = 65536
 
 // ALU sequence for repeat
 let ALU = "GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGGGAGGCCGAGGCGGGCGGATCACCTGAGGTCAGGAGTTCGAGACCAGCCTGGCCAACATGGTGAAACCCCGTCTCTACTAAAAATACAAAAATTAGCCGGGCGTGGTGGCGCGCGCCTGTAATCCCAGCTACTCGGGAGGCTGAGGCAGGAGAATCGCTTGAACCCGGGAGGCGGAGGTTGCAGTGAGCCGAGATCGCGCCACTGCACTCCAGCCTGGGCGACAGAGCGAGACTCCGTCTCAAAAA"
 
-fn mod(a, b) {
-    a - (a / b) * b
-}
-
-fn string_length(s) {
-    builtin/get_string_length(s)
-}
-
-// State for the random number generator
-struct RngState {
-    seed
-}
-
-fn next_random(state) {
-    let new_seed = mod(state.seed * IA + IC, IM)
-    RngState { seed: new_seed }
-}
-
-// Write a repeated sequence with line breaks
-fn write_repeat_fasta(alu, size) {
-    let alu_len = string_length(alu)
-    write_repeat_loop(alu, alu_len, size, 0)
-}
-
-fn write_repeat_loop(alu, alu_len, remaining, offset) {
-    if remaining <= 0 {
-        null
-    } else {
-        let line_len = if remaining < LINE_WIDTH { remaining } else { LINE_WIDTH }
-        write_repeat_line(alu, alu_len, line_len, offset, 0)
-        println("")
-        let new_offset = mod(offset + line_len, alu_len)
-        write_repeat_loop(alu, alu_len, remaining - line_len, new_offset)
+// Convert ALU string to a byte buffer for fast access
+fn make_alu_buffer() {
+    let len = length(ALU)
+    let buf = ffi/allocate(len)
+    let mut i = 0
+    while i < len {
+        let char = get(ALU, i)
+        let byte = builtin/char_code(char)
+        ffi/set_u8(buf, i, byte)
+        i = i + 1
     }
+    buf
 }
 
-fn write_repeat_line(alu, alu_len, line_len, offset, col) {
-    if col >= line_len {
-        null
-    } else {
-        let idx = mod(offset + col, alu_len)
-        print(alu[idx])
-        write_repeat_line(alu, alu_len, line_len, offset, col + 1)
+// Convert code string to byte buffer
+fn make_codes_buffer(codes) {
+    let len = length(codes)
+    let buf = ffi/allocate(len)
+    let mut i = 0
+    while i < len {
+        let char = get(codes, i)
+        let byte = builtin/char_code(char)
+        ffi/set_u8(buf, i, byte)
+        i = i + 1
     }
+    buf
 }
 
-// IUB codes and probabilities
-fn make_iub_codes() {
-    "acgtBDHKMNRSVWY"
-}
-
+// IUB cumulative probabilities (scaled to IM)
 fn make_iub_probs() {
     let probs = arr/new_array(15)
-    // Cumulative probabilities * IM (as integers for comparison)
-    // 0.27, 0.12, 0.12, 0.27, then 0.02 * 11
-    // Using ceil(cumulative * IM) to match float comparison behavior
-    arr/write_field(probs, 0, 37792)   // ceil(0.27 * 139968)
-    arr/write_field(probs, 1, 54588)   // ceil(0.39 * 139968)
-    arr/write_field(probs, 2, 71384)   // ceil(0.51 * 139968)
-    arr/write_field(probs, 3, 109176)  // ceil(0.78 * 139968)
-    arr/write_field(probs, 4, 111975)  // ceil(0.80 * 139968)
-    arr/write_field(probs, 5, 114774)  // ceil(0.82 * 139968)
-    arr/write_field(probs, 6, 117574)  // ceil(0.84 * 139968)
-    arr/write_field(probs, 7, 120373)  // ceil(0.86 * 139968)
-    arr/write_field(probs, 8, 123172)  // ceil(0.88 * 139968)
-    arr/write_field(probs, 9, 125972)  // ceil(0.90 * 139968)
-    arr/write_field(probs, 10, 128771) // ceil(0.92 * 139968)
-    arr/write_field(probs, 11, 131570) // ceil(0.94 * 139968)
-    arr/write_field(probs, 12, 134370) // ceil(0.96 * 139968)
-    arr/write_field(probs, 13, 137169) // ceil(0.98 * 139968)
-    arr/write_field(probs, 14, 139969) // ceil(1.00 * 139968)
+    arr/write_field(probs, 0, 37792)
+    arr/write_field(probs, 1, 54588)
+    arr/write_field(probs, 2, 71384)
+    arr/write_field(probs, 3, 109176)
+    arr/write_field(probs, 4, 111975)
+    arr/write_field(probs, 5, 114774)
+    arr/write_field(probs, 6, 117574)
+    arr/write_field(probs, 7, 120373)
+    arr/write_field(probs, 8, 123172)
+    arr/write_field(probs, 9, 125972)
+    arr/write_field(probs, 10, 128771)
+    arr/write_field(probs, 11, 131570)
+    arr/write_field(probs, 12, 134370)
+    arr/write_field(probs, 13, 137169)
+    arr/write_field(probs, 14, 139969)
     probs
 }
 
-// Homo sapiens codes and probabilities
-fn make_homo_codes() {
-    "acgt"
-}
-
+// Homo sapiens cumulative probabilities (scaled to IM)
 fn make_homo_probs() {
     let probs = arr/new_array(4)
-    // Cumulative probabilities * IM (as integers)
-    // 0.3029549426680, 0.5009432431601, 0.6984905497992, 1.0
-    // Using ceil to match float comparison behavior
-    arr/write_field(probs, 0, 42404)  // ceil(0.3029549426680 * 139968)
-    arr/write_field(probs, 1, 70117)  // ceil(0.5009432431601 * 139968)
-    arr/write_field(probs, 2, 97767)  // ceil(0.6984905497992 * 139968)
-    arr/write_field(probs, 3, 139968) // 1.0 * 139968
+    arr/write_field(probs, 0, 42404)
+    arr/write_field(probs, 1, 70117)
+    arr/write_field(probs, 2, 97767)
+    arr/write_field(probs, 3, 139968)
     probs
 }
 
-// Write random sequence based on weighted probabilities
-// add_final_newline: true to add newline after last line, false to omit
-fn write_random_fasta(codes, probs, probs_len, size, state, add_final_newline) {
-    write_random_loop(codes, probs, probs_len, size, state, add_final_newline)
-}
-
-fn write_random_loop(codes, probs, probs_len, remaining, state, add_final_newline) {
-    if remaining <= 0 {
-        state
-    } else {
-        let line_len = if remaining < LINE_WIDTH { remaining } else { LINE_WIDTH }
-        let new_state = write_random_line(codes, probs, probs_len, line_len, 0, state)
-        let next_remaining = remaining - line_len
-        if next_remaining > 0 {
-            println("")
-            write_random_loop(codes, probs, probs_len, next_remaining, new_state, add_final_newline)
-        } else {
-            if add_final_newline {
-                println("")
-            }
-            new_state
-        }
-    }
-}
-
-fn write_random_line(codes, probs, probs_len, line_len, col, state) {
-    if col >= line_len {
-        state
-    } else {
-        let new_state = next_random(state)
-        let r = new_state.seed
-        let idx = find_code_index(probs, probs_len, r, 0)
-        print(codes[idx])
-        write_random_line(codes, probs, probs_len, line_len, col + 1, new_state)
-    }
-}
-
-fn find_code_index(probs, probs_len, r, i) {
-    if i >= probs_len - 1 {
-        probs_len - 1
-    } else {
+// Find code index using linear search
+fn find_code_index(probs, probs_len, r) {
+    let mut i = 0
+    let mut found = false
+    while i < probs_len && found == false {
         let p = arr/read_field(probs, i)
         if p > r {
-            i
+            found = true
         } else {
-            find_code_index(probs, probs_len, r, i + 1)
+            i = i + 1
         }
     }
+    if i >= probs_len { probs_len - 1 } else { i }
+}
+
+// Write a header string to stdout
+fn write_header(s) {
+    let len = length(s)
+    let buf = ffi/allocate(len + 1)
+    let mut i = 0
+    while i < len {
+        let char = get(s, i)
+        let byte = builtin/char_code(char)
+        ffi/set_u8(buf, i, byte)
+        i = i + 1
+    }
+    ffi/set_u8(buf, len, 10)  // newline
+    io/write_stdout_buffer(buf, len + 1)
+    ffi/deallocate(buf)
+    null
+}
+
+// Write repeated ALU sequence with line wrapping
+fn write_repeat_fasta(alu_buf, alu_len, size) {
+    let out_buf = ffi/allocate(OUT_BUF_SIZE)
+    let mut out_pos = 0
+    let mut alu_idx = 0
+    let mut remaining = size
+
+    while remaining > 0 {
+        let line_len = if remaining < LINE_WIDTH { remaining } else { LINE_WIDTH }
+
+        // Check if we need to flush
+        if out_pos + line_len + 1 > OUT_BUF_SIZE {
+            io/write_stdout_buffer(out_buf, out_pos)
+            out_pos = 0
+        }
+
+        // Write one line
+        let mut col = 0
+        while col < line_len {
+            let byte = ffi/get_u8(alu_buf, alu_idx)
+            ffi/set_u8(out_buf, out_pos, byte)
+            out_pos = out_pos + 1
+            alu_idx = alu_idx + 1
+            if alu_idx >= alu_len {
+                alu_idx = 0
+            }
+            col = col + 1
+        }
+
+        // Add newline
+        ffi/set_u8(out_buf, out_pos, 10)
+        out_pos = out_pos + 1
+
+        remaining = remaining - line_len
+    }
+
+    // Flush remaining
+    if out_pos > 0 {
+        io/write_stdout_buffer(out_buf, out_pos)
+    }
+
+    ffi/deallocate(out_buf)
+    null
+}
+
+// Write random sequence with line wrapping
+// Returns the final seed value
+fn write_random_fasta(codes_buf, probs, probs_len, size, seed, add_final_newline) {
+    let out_buf = ffi/allocate(OUT_BUF_SIZE)
+    let mut out_pos = 0
+    let mut remaining = size
+    let mut current_seed = seed
+
+    while remaining > 0 {
+        let line_len = if remaining < LINE_WIDTH { remaining } else { LINE_WIDTH }
+
+        // Check if we need to flush
+        if out_pos + line_len + 1 > OUT_BUF_SIZE {
+            io/write_stdout_buffer(out_buf, out_pos)
+            out_pos = 0
+        }
+
+        // Write one line
+        let mut col = 0
+        while col < line_len {
+            // Generate next random number
+            current_seed = (current_seed * IA + IC) - ((current_seed * IA + IC) / IM) * IM
+            let idx = find_code_index(probs, probs_len, current_seed)
+            let byte = ffi/get_u8(codes_buf, idx)
+            ffi/set_u8(out_buf, out_pos, byte)
+            out_pos = out_pos + 1
+            col = col + 1
+        }
+
+        // Add newline (except possibly for last line)
+        remaining = remaining - line_len
+        if remaining > 0 || add_final_newline {
+            ffi/set_u8(out_buf, out_pos, 10)
+            out_pos = out_pos + 1
+        }
+    }
+
+    // Flush remaining
+    if out_pos > 0 {
+        io/write_stdout_buffer(out_buf, out_pos)
+    }
+
+    ffi/deallocate(out_buf)
+    current_seed
 }
 
 fn run(n) {
-    println(">ONE Homo sapiens alu")
-    write_repeat_fasta(ALU, n * 2)
+    // Prepare ALU buffer
+    let alu_buf = make_alu_buffer()
+    let alu_len = length(ALU)
 
-    let iub_codes = make_iub_codes()
+    // ONE: repeat ALU
+    write_header(">ONE Homo sapiens alu")
+    write_repeat_fasta(alu_buf, alu_len, n * 2)
+
+    // TWO: IUB random
+    let iub_codes = make_codes_buffer("acgtBDHKMNRSVWY")
     let iub_probs = make_iub_probs()
-    let initial_state = RngState { seed: 42 }
+    write_header(">TWO IUB ambiguity codes")
+    let seed2 = write_random_fasta(iub_codes, iub_probs, 15, n * 3, 42, true)
 
-    println(">TWO IUB ambiguity codes")
-    let state2 = write_random_fasta(iub_codes, iub_probs, 15, n * 3, initial_state, true)
-
-    let homo_codes = make_homo_codes()
+    // THREE: Homo sapiens random
+    let homo_codes = make_codes_buffer("acgt")
     let homo_probs = make_homo_probs()
+    write_header(">THREE Homo sapiens frequency")
+    write_random_fasta(homo_codes, homo_probs, 4, n * 5, seed2, false)
 
-    println(">THREE Homo sapiens frequency")
-    write_random_fasta(homo_codes, homo_probs, 4, n * 5, state2, false)
+    // Cleanup
+    ffi/deallocate(alu_buf)
+    ffi/deallocate(iub_codes)
+    ffi/deallocate(homo_codes)
 
     ""
 }

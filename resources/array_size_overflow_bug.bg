@@ -1,0 +1,24 @@
+namespace array_size_overflow_bug
+
+import "raw_mutable_array" as arr
+import "beagle.primitive" as primitive
+
+fn main() {
+    // Request an array of 125000 elements
+    let a = arr/new_array(125000)
+
+    // Check what size we actually got
+    println("Requested size: 125000")
+    print("Actual size: ")
+    println(primitive/size(a))
+
+    // The difference is exactly 65536 (2^16)
+    // 125000 - 65536 = 59464
+    // This indicates a 16-bit overflow in the allocator
+
+    ""
+}
+
+// Expe ct
+// Requested size: 125000
+// Actual size: 125000

@@ -57,4 +57,3 @@ fn main() {
 // Warnings after eval:
 // 1
 // PASS: Got 1 warning as expected (eval cleared previous warnings)
-// done

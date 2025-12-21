@@ -25,4 +25,3 @@ fn main() {
 // inner error
 // Outer catch:
 // outer error
-// done

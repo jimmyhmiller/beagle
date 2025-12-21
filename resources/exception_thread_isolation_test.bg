@@ -38,4 +38,3 @@ fn main() {
 // Expect
 // thread1 error
 // thread2 error
-// done

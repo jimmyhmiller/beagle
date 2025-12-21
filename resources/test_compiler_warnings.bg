@@ -28,4 +28,3 @@ fn main() {
 // Warning count:
 // [CompilerWarning { kind: "NonExhaustiveMatch", file_name: "resources/test_compiler_warnings.bg", line: 13, column: 23, message: "Non-exhaustive match on enum 'Color'. Missing variants: blue", enum_name: "Color", missing_variants: PersistentVector { count: 1, shift: 5, root: [  ], tail: [ "blue" ] } }]
 // RED
-// done

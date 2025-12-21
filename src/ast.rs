@@ -2339,7 +2339,8 @@ impl AstCompiler<'_> {
                 let primitive_type_id_done = self.ir.label("primitive_type_id_done");
                 let primitive_index_reg = self.ir.volatile_register();
 
-                self.ir.jump_if(use_tag_plus_16, Condition::NotEqual, tag, string_tag);
+                self.ir
+                    .jump_if(use_tag_plus_16, Condition::NotEqual, tag, string_tag);
 
                 // tag == 2: use index 2
                 let index_2 = Value::RawValue(2);
@@ -2354,8 +2355,9 @@ impl AstCompiler<'_> {
                 self.ir.assign(primitive_index_reg, tag_plus_16);
 
                 self.ir.write_label(primitive_type_id_done);
-                let primitive_type_id =
-                    self.ir.bitwise_or(high_bit_reg.into(), primitive_index_reg.into());
+                let primitive_type_id = self
+                    .ir
+                    .bitwise_or(high_bit_reg.into(), primitive_index_reg.into());
                 self.ir.assign(type_id_reg, primitive_type_id);
 
                 // 7. Compare with cached type_id

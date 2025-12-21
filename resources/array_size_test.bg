@@ -1,0 +1,33 @@
+namespace array_size_test
+
+import "raw_mutable_array" as arr
+import "beagle.primitive" as primitive
+
+fn main() {
+    let a = arr/new_array(125000)
+
+    println("Array size:")
+    println(primitive/size(a))
+
+    println("Array:")
+    println(a)
+
+    // Test bounds check directly
+    println("Test at 59000:")
+    let idx = 59000
+    if idx < 0 || idx >= primitive/size(a) {
+        println("Out of bounds!")
+    } else {
+        println("In bounds")
+    }
+
+    println("Test at 59500:")
+    let idx2 = 59500
+    if idx2 < 0 || idx2 >= primitive/size(a) {
+        println("Out of bounds!")
+    } else {
+        println("In bounds")
+    }
+
+    ""
+}

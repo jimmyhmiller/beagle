@@ -28,4 +28,3 @@ fn main() {
 // inner
 // Outside match, value is:
 // outer
-// done

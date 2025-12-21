@@ -120,4 +120,3 @@ fn main() {
 // thread-safe
 // Expect
 // 22
-// done

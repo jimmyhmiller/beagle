@@ -43,4 +43,3 @@ fn main() {
 // HeapThing { x: 1, y: 2, z: 3 }
 // HeapThing { x: HeapThing { x: 1, y: 2, z: 3 }, y: HeapThing { x: 1, y: 2, z: 3 }, z: HeapThing { x: 1, y: 2, z: 3 } }
 // PersistentVector { count: 0, shift: 5, root: [  ], tail: [  ] }
-// done

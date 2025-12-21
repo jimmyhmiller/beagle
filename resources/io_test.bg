@@ -1,0 +1,90 @@
+namespace io_test
+
+import "beagle.io" as io
+
+fn test_file_write_read() {
+    println("Testing file write/read...")
+
+    // Write to a temp file
+    let file_result = io/open("/tmp/beagle_io_test.txt", "w")
+    match file_result {
+        io/Result.Ok { value } => {
+            let file = value
+            io/write_string(file, "Hello from Beagle!\n")
+            io/write_string(file, "Second line\n")
+            io/close(file)
+            println("Write successful")
+        },
+        io/Result.Err { code, message } => {
+            println("Failed to open file for writing: ", message)
+        }
+    }
+
+    // Read it back
+    let file_result = io/open("/tmp/beagle_io_test.txt", "r")
+    match file_result {
+        io/Result.Ok { value } => {
+            let file = value
+            let line1 = io/read_line(file, 256)
+            match line1 {
+                io/Result.Ok { value } => println("Line 1: ", value),
+                io/Result.Err { code, message } => println("Read error: ", message)
+            }
+            let line2 = io/read_line(file, 256)
+            match line2 {
+                io/Result.Ok { value } => println("Line 2: ", value),
+                io/Result.Err { code, message } => println("Read error: ", message)
+            }
+            io/close(file)
+            println("Read successful")
+        },
+        io/Result.Err { code, message } => {
+            println("Failed to open file for reading: ", message)
+        }
+    }
+}
+
+fn test_stderr() {
+    println("Testing stderr output...")
+    let result = io/write_stderr("This goes to stderr\n")
+    match result {
+        io/Result.Ok { value } => println("Wrote ", value, " bytes to stderr"),
+        io/Result.Err { code, message } => println("stderr error: ", message)
+    }
+}
+
+fn test_result_helpers() {
+    println("Testing Result helpers...")
+
+    let good = io/ok(42)
+    let bad = io/err(-1, "something went wrong")
+
+    println("ok?(good) = ", io/ok?(good))
+    println("ok?(bad) = ", io/ok?(bad))
+    println("unwrap(good) = ", io/unwrap(good))
+}
+
+fn main() {
+    println("=== Beagle IO Tests ===")
+    test_result_helpers()
+    test_file_write_read()
+    test_stderr()
+    println("=== Tests Complete ===")
+}
+
+// Expect
+// === Beagle IO Tests ===
+// Testing Result helpers...
+// ok?(good) =  true
+// ok?(bad) =  false
+// unwrap(good) =  42
+// Testing file write/read...
+// Write successful
+// Line 1:  Hello from Beagle!
+//
+// Line 2:  Second line
+//
+// Read successful
+// Testing stderr output...
+// Wrote  20  bytes to stderr
+// === Tests Complete ===

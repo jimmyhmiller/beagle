@@ -14,4 +14,3 @@ fn main() {
 
 // Expect
 // SystemError.StructError { message: "Struct 'Point' not found in namespace 'test_system_error'", location: null }
-// done

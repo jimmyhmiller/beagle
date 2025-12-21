@@ -1,0 +1,42 @@
+namespace uppercase_equality_test
+
+// Test string equality with uppercase results
+
+fn main() {
+    let s = "hello"
+    let upper = uppercase(s)
+
+    println("Uppercase result:")
+    println(upper)
+
+    println("Equals HELLO?")
+    println(upper == "HELLO")
+
+    // Test substring of uppercase
+    let sub = substring(upper, 0, 1)
+    println("Substring of uppercase:")
+    println(sub)
+    println("Equals H?")
+    println(sub == "H")
+
+    // Now the real test - compare two uppercased substrings
+    let s2 = "ha"
+    let upper2 = uppercase(s2)
+    let sub2 = substring(upper2, 0, 1)
+    println("Two uppercase substrings equal?")
+    println(sub == sub2)
+
+    ""
+}
+
+// Expect
+// Uppercase result:
+// HELLO
+// Equals HELLO?
+// true
+// Substring of uppercase:
+// H
+// Equals H?
+// true
+// Two uppercase substrings equal?
+// true

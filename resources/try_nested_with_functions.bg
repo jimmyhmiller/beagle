@@ -47,4 +47,3 @@ fn main() {
 // re-thrown from middle_function
 // Caught in main outer catch:
 // final error from main
-// done

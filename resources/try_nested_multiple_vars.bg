@@ -43,4 +43,3 @@ fn main() {
 // inner error
 // Back in outer catch, accessing outer_e:
 // outer error
-// done

@@ -27,4 +27,3 @@ fn main() {
 // 66
 // 55
 // Thing { x: 9, y: 10 }
-// done
