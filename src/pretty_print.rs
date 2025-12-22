@@ -4,7 +4,7 @@ use crate::ir::{Condition, Instruction, Value, VirtualRegister};
 
 // Backend-specific imports
 cfg_if::cfg_if! {
-    if #[cfg(feature = "backend-x86-64")] {
+    if #[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))] {
         use crate::machine_code::x86_codegen::{X86Asm, X86Register};
     } else {
         use crate::machine_code::arm_codegen::{
@@ -495,7 +495,7 @@ impl PrettyPrint for Vec<Instruction> {
 }
 
 cfg_if::cfg_if! {
-    if #[cfg(feature = "backend-x86-64")] {
+    if #[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))] {
         impl PrettyPrint for Vec<X86Asm> {
             fn pretty_print(&self) -> String {
                 let mut result = String::new();
@@ -606,7 +606,10 @@ impl PrettyPrint for Condition {
     }
 }
 
-#[cfg(not(feature = "backend-x86-64"))]
+#[cfg(not(any(
+    feature = "backend-x86-64",
+    all(target_arch = "x86_64", not(feature = "backend-arm64"))
+)))]
 impl PrettyPrint for ArmAsm {
     fn pretty_print(&self) -> String {
         match self {

@@ -30,7 +30,7 @@ impl LinearScan {
 
         // Select physical registers based on backend
         cfg_if::cfg_if! {
-            if #[cfg(feature = "backend-x86-64")] {
+            if #[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))] {
                 // x86-64: callee-saved registers
                 // We use R12-R15 (indices 12-15) and RBX (virtual index 16) because they
                 // don't conflict with argument register indices (0-5 map to RDI, RSI, RDX, RCX, R8, R9).

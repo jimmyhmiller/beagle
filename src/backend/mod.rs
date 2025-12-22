@@ -17,10 +17,16 @@
 //! cargo run --features backend-cranelift -- program.bg   # future
 //! ```
 
-#[cfg(not(feature = "backend-x86-64"))]
+#[cfg(not(any(
+    feature = "backend-x86-64",
+    all(target_arch = "x86_64", not(feature = "backend-arm64"))
+)))]
 pub mod arm64;
 
-#[cfg(feature = "backend-x86-64")]
+#[cfg(any(
+    feature = "backend-x86-64",
+    all(target_arch = "x86_64", not(feature = "backend-arm64"))
+))]
 pub mod x86_64;
 
 use std::collections::HashMap;
@@ -323,17 +329,16 @@ pub trait CodegenBackend: Sized {
     fn set_function_name(&mut self, _name: &str) {}
 }
 
-// Select the backend type based on feature flags
+// Select the backend type based on feature flags or target architecture
 cfg_if::cfg_if! {
-    if #[cfg(feature = "backend-x86-64")] {
+    if #[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))] {
         pub type Backend = x86_64::X86_64Backend;
     } else if #[cfg(feature = "backend-llvm")] {
         compile_error!("LLVM backend not yet implemented");
     } else if #[cfg(feature = "backend-cranelift")] {
         compile_error!("Cranelift backend not yet implemented");
     } else {
-        // Default to ARM64 when no backend feature is specified
-        // This includes explicit backend-arm64 feature
+        // Default to ARM64 for aarch64 or when no specific backend is determined
         pub type Backend = arm64::Arm64Backend;
     }
 }

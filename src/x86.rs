@@ -634,6 +634,11 @@ impl LowLevelX86 {
     }
 
     pub fn push_to_end_of_stack(&mut self, reg: X86Register, offset: i32) {
+        // Ensure frame has space for outgoing stack arguments.
+        // Like ARM64, we track this in max_stack_size so the prologue
+        // allocates enough space below RSP.
+        self.max_stack_size += 1;
+
         // Store to stack at offset from current position
         self.instructions.push(X86Asm::MovMR {
             base: RSP,

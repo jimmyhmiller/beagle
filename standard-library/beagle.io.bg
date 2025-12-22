@@ -3,8 +3,20 @@ namespace beagle.io
 import "beagle.ffi" as ffi
 import "beagle.builtin" as builtin
 
-// Load libc
-let libc = ffi/load_library("/usr/lib/libSystem.dylib")
+// Load libc (platform-specific path)
+fn get_libc_path() {
+    let os = get-os()
+    if os == "macos" {
+        "/usr/lib/libSystem.dylib"
+    } else if os == "linux" {
+        "libc.so.6"
+    } else {
+        // Windows or unknown - this will fail but provides a clear error
+        "libc"
+    }
+}
+
+let libc = ffi/load_library(get_libc_path())
 
 // Result type for error handling
 enum Result {
