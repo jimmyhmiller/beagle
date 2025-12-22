@@ -1671,38 +1671,25 @@ impl Ir {
                     self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::RecurseWithSaves(dest, args, saves) => {
-                    // Same approach as CallWithSaves: store args at standard positions,
-                    // then saves above them, without modifying RSP.
-                    let num_arg_regs = backend.num_arg_registers();
-                    let num_stack_args = if args.len() > num_arg_regs {
-                        args.len() - num_arg_regs
-                    } else {
-                        0
-                    };
+                    // Save registers using RBP-relative push_to_stack
+                    for save in saves.iter() {
+                        let save = self.value_to_register(save, backend);
+                        backend.push_to_stack(save);
+                    }
 
-                    // Set up arguments first - stack args at their natural positions
+                    // Set up arguments - no adjustment for saves since they don't change RSP
+                    let num_arg_regs = backend.num_arg_registers();
                     for (arg_index, arg) in args.iter().enumerate().rev() {
                         let arg = self.value_to_register(arg, backend);
                         if arg_index < num_arg_regs {
                             backend.mov_reg(backend.arg(arg_index as u8), arg);
                         } else {
-                            // Stack args at [RSP + (arg_index - num_arg_regs)*8]
-                            // Note: Recurse uses a different base offset than Call
-                            // because recurse is a jump, not a call instruction
+                            // Recurse uses a different formula because it's a jump, not a call
                             backend.push_to_end_of_stack(
                                 arg,
                                 (arg_index as i32) - (num_arg_regs as i32 - 1),
                             );
                         }
-                    }
-
-                    // Store saves at offsets above the stack args
-                    for (save_index, save) in saves.iter().enumerate() {
-                        let save_reg = self.value_to_register(save, backend);
-                        backend.push_to_end_of_stack(
-                            save_reg,
-                            (num_stack_args + save_index) as i32,
-                        );
                     }
 
                     backend.recurse(before_prelude);
@@ -1711,13 +1698,10 @@ impl Ir {
                     backend.mov_reg(dest, backend.ret_reg());
                     self.store_spill(dest, dest_spill, backend);
 
-                    // Restore saves from the same offsets
-                    for (save_index, save) in saves.iter().enumerate() {
-                        let save_reg = self.value_to_register(save, backend);
-                        backend.pop_from_stack_indexed_raw(
-                            save_reg,
-                            (num_stack_args + save_index) as i32,
-                        );
+                    // Restore saved registers (in reverse order)
+                    for save in saves.iter().rev() {
+                        let save = self.value_to_register(save, backend);
+                        backend.pop_from_stack(save);
                     }
                 }
                 Instruction::TailRecurse(dest, args) => {
@@ -1780,38 +1764,51 @@ impl Ir {
                     }
                 }
                 Instruction::CallWithSaves(dest, function, args, builtin, saves) => {
-                    // New approach: Store args at standard positions, then saves above them.
-                    // This avoids the problem where pushed saves shift RSP and break
-                    // the callee's expected stack arg positions.
-                    //
-                    // Layout before call:
-                    //   [RSP + 0]                     = first stack arg (if any)
-                    //   [RSP + 8]                     = second stack arg (if any)
-                    //   ...
-                    //   [RSP + num_stack_args*8]      = save 0
-                    //   [RSP + (num_stack_args+1)*8]  = save 1
-                    //   ...
-                    //
-                    // After call instruction (push ret addr), callee sees:
-                    //   [RSP + 8] = first stack arg  -> [RBP + 16] after prologue ✓
-                    //
-                    // After ret, RSP is restored, so saves are at same positions.
+                    // The saves are stored using push_to_stack which uses RBP-relative
+                    // addressing and doesn't modify RSP. Therefore, stack args should
+                    // be placed at their standard RSP-relative positions WITHOUT
+                    // accounting for saves.
 
-                    let num_arg_regs = backend.num_arg_registers();
-                    let num_stack_args = if args.len() > num_arg_regs {
-                        args.len() - num_arg_regs
+                    // Check if function is in a register that will be saved
+                    let function_in_save = if let Value::Register(reg) = function {
+                        saves.iter().any(|save| {
+                            if let Value::Register(save_reg) = save {
+                                save_reg.index == reg.index
+                            } else {
+                                false
+                            }
+                        })
                     } else {
-                        0
+                        false
                     };
 
-                    // Set up arguments first - stack args at their natural positions
+                    // If function is in a register that will be saved,
+                    // we need to capture it BEFORE saving
+                    let pre_captured_function = if function_in_save {
+                        let function_reg = self.value_to_register(function, backend);
+                        let temp = backend.temporary_register();
+                        backend.mov_reg(temp, function_reg);
+                        Some(temp)
+                    } else {
+                        None
+                    };
+
+                    // Save registers that are live across the call
+                    // push_to_stack uses RBP-relative addressing, not RSP
+                    for save in saves.iter() {
+                        let save_reg = self.value_to_register(save, backend);
+                        backend.push_to_stack(save_reg);
+                    }
+
+                    // Set up arguments
+                    let num_arg_regs = backend.num_arg_registers();
                     for (arg_index, arg) in args.iter().enumerate().rev() {
                         let arg_reg = self.value_to_register(arg, backend);
                         if arg_index < num_arg_regs {
                             backend.mov_reg(backend.arg(arg_index as u8), arg_reg);
                         } else {
                             // Stack args at [RSP + (arg_index - num_arg_regs)*8]
-                            // This is the standard calling convention position
+                            // NO adjustment for saves because saves don't change RSP
                             backend.push_to_end_of_stack(
                                 arg_reg,
                                 (arg_index as i32) - num_arg_regs as i32,
@@ -1820,19 +1817,12 @@ impl Ir {
                         backend.free_temporary_register(arg_reg);
                     }
 
-                    // Store saves at offsets ABOVE the stack args (higher addresses)
-                    // Saves at [RSP + (num_stack_args + save_index)*8]
-                    // These won't interfere with callee's stack arg access
-                    for (save_index, save) in saves.iter().enumerate() {
-                        let save_reg = self.value_to_register(save, backend);
-                        backend.push_to_end_of_stack(
-                            save_reg,
-                            (num_stack_args + save_index) as i32,
-                        );
-                    }
-
                     // Get function pointer
-                    let call_target = self.value_to_register(function, backend);
+                    let call_target = if let Some(temp) = pre_captured_function {
+                        temp
+                    } else {
+                        self.value_to_register(function, backend)
+                    };
 
                     // Untag function pointer and call
                     backend.shift_right_imm(call_target, call_target, BuiltInTypes::tag_size());
@@ -1844,16 +1834,9 @@ impl Ir {
                     backend.free_temporary_register(call_target);
 
                     let dest_spill = self.dest_spill(dest);
-                    // For dest, we need a register to store the result into.
-                    // Don't use value_to_register for Spill because it loads from
-                    // the spill slot, which might use RAX as a temp and clobber
-                    // the function result that's currently in RAX.
                     let dest_reg = match dest {
                         Value::Register(register) => backend.register_from_index(register.index),
-                        Value::Spill(_, _) => {
-                            // Just get a temp register, don't load anything
-                            backend.temporary_register()
-                        }
+                        Value::Spill(_, _) => backend.temporary_register(),
                         _ => panic!("Unexpected dest type for call: {:?}", dest),
                     };
                     backend.mov_reg(dest_reg, backend.ret_reg());
@@ -1862,14 +1845,10 @@ impl Ir {
                         backend.free_temporary_register(dest_reg);
                     }
 
-                    // Restore saves from [RSP + (num_stack_args + save_index)*8]
-                    // After ret, RSP is back to its pre-call position
-                    for (save_index, save) in saves.iter().enumerate() {
+                    // Restore saved registers (in reverse order)
+                    for save in saves.iter().rev() {
                         let save_reg = self.value_to_register(save, backend);
-                        backend.pop_from_stack_indexed_raw(
-                            save_reg,
-                            (num_stack_args + save_index) as i32,
-                        );
+                        backend.pop_from_stack(save_reg);
                     }
                 }
                 Instruction::Compare(dest, a, b, condition) => {
