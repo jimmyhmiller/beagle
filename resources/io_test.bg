@@ -1,3 +1,4 @@
+// macos-only (FFI calls don't work on x86-64 Linux yet)
 namespace io_test
 
 import "beagle.io" as io
