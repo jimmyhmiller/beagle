@@ -4,7 +4,7 @@ use libc::mprotect;
 
 use super::get_page_size;
 
-use crate::types::{BuiltInTypes, HeapObject, Word};
+use crate::types::{BuiltInTypes, Header, HeapObject, Word};
 
 use super::{AllocateAction, Allocator, AllocatorOptions, StackMap, stack_walker::StackWalker};
 
@@ -224,7 +224,13 @@ pub struct MarkAndSweep {
 impl MarkAndSweep {
     fn can_allocate(&self, words: usize) -> bool {
         let words = Word::from_word(words);
-        let size = words.to_bytes() + HeapObject::header_size();
+        // Large objects need 16-byte header, small objects need 8-byte header
+        let header_size = if words.to_words() > Header::MAX_INLINE_SIZE {
+            16
+        } else {
+            8
+        };
+        let size = words.to_bytes() + header_size;
         let spot = self
             .free_list
             .iter()
@@ -238,7 +244,13 @@ impl MarkAndSweep {
         words: Word,
         data: Option<&[u8]>,
     ) -> Result<AllocateAction, Box<dyn Error>> {
-        let size_bytes = words.to_bytes() + HeapObject::header_size();
+        // Large objects need 16-byte header, small objects need 8-byte header
+        let header_size = if words.to_words() > Header::MAX_INLINE_SIZE {
+            16
+        } else {
+            8
+        };
+        let size_bytes = words.to_bytes() + header_size;
 
         let offset = self.free_list.allocate(size_bytes);
         if let Some(offset) = offset {

@@ -65,7 +65,13 @@ impl Space {
     fn allocate(&mut self, words: usize) -> *const u8 {
         let offset = self.allocation_offset;
         let size = Word::from_word(words);
-        let full_size = size.to_bytes() + HeapObject::header_size();
+        // Large objects need 16-byte header, small objects need 8-byte header
+        let header_size = if words > Header::MAX_INLINE_SIZE {
+            16
+        } else {
+            8
+        };
+        let full_size = size.to_bytes() + header_size;
         let pointer = self.write_object(offset, size);
         self.increment_current_offset(full_size);
         pointer

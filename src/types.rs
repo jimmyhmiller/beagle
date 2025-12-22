@@ -155,17 +155,22 @@ fn tag_and_untag() {
 pub struct Header {
     pub type_id: u8,
     pub type_data: u32,
-    pub size: u16, // Changed from u8 to u16 to allow larger arrays
+    pub size: u16, // Size in words. For large objects (>65535), this is 0xFFFF and actual size is in extended header
     pub opaque: bool,
     pub marked: bool,
+    pub large: bool, // Large object flag - when set, actual size is stored in word after header
 }
 
 impl Header {
-    // | Byte 7  | Bytes 3-6     | Bytes 1-2 | Byte 0               |
-    // |---------|---------------|-----------|----------------------|
-    // | Type    | Type Metadata | Size      | Flag bits            |
-    // |         | (4 bytes)     | (2 bytes) | Opaque object (bit 1) |
-    // |         |               |           | Marked (bit 0)       |
+    // | Byte 7  | Bytes 3-6     | Bytes 1-2 | Byte 0                   |
+    // |---------|---------------|-----------|--------------------------|
+    // | Type    | Type Metadata | Size      | Flag bits                |
+    // |         | (4 bytes)     | (2 bytes) | Large object (bit 2)     |
+    // |         |               |           | Opaque object (bit 1)    |
+    // |         |               |           | Marked (bit 0)           |
+    //
+    // For large objects (size > 65535 words), the large flag is set and the actual
+    // size is stored in an 8-byte word immediately following the header.
 
     /// Position of the marked bit in the header.
     /// IMPORTANT: This MUST be in the 3 least significant bits (0, 1, or 2) for
@@ -174,6 +179,13 @@ impl Header {
 
     /// Position of the opaque bit in the header.
     const OPAQUE_BIT_POSITION: u32 = 1;
+
+    /// Position of the large object bit in the header.
+    /// When set, the actual size is stored in the word after the header.
+    pub const LARGE_OBJECT_BIT_POSITION: u32 = 2;
+
+    /// Maximum size that fits in the inline size field (u16)
+    pub const MAX_INLINE_SIZE: usize = 0xFFFF;
 
     pub fn to_usize(self) -> usize {
         let mut data: usize = 0;
@@ -186,6 +198,9 @@ impl Header {
         if self.marked {
             data |= 1 << Self::MARKED_BIT_POSITION;
         }
+        if self.large {
+            data |= 1 << Self::LARGE_OBJECT_BIT_POSITION;
+        }
         data
     }
 
@@ -195,12 +210,14 @@ impl Header {
         let size = ((data >> 8) & 0xFFFF) as u16; // Extract 16 bits for size
         let opaque = (data & (1 << Self::OPAQUE_BIT_POSITION)) != 0;
         let marked = (data & (1 << Self::MARKED_BIT_POSITION)) != 0;
+        let large = (data & (1 << Self::LARGE_OBJECT_BIT_POSITION)) != 0;
         Header {
             type_id: _type,
             type_data,
             size,
             opaque,
             marked,
+            large,
         }
     }
 
@@ -234,6 +251,18 @@ impl Header {
     /// Check if the marked bit is set in a raw header value
     pub const fn is_marked_bit_set(header_value: usize) -> bool {
         (header_value & Self::marked_bit_mask()) != 0
+    }
+
+    // === Large object bit operations ===
+
+    /// Get the bit mask for the large object bit
+    pub const fn large_object_bit_mask() -> usize {
+        1 << Self::LARGE_OBJECT_BIT_POSITION
+    }
+
+    /// Check if the large object bit is set in a raw header value
+    pub const fn is_large_object_bit_set(header_value: usize) -> bool {
+        (header_value & Self::large_object_bit_mask()) != 0
     }
 
     // === Forwarding pointer operations ===
@@ -305,6 +334,7 @@ mod header_layout_tests {
             size: 16,
             opaque: true,
             marked: false,
+            large: false,
         };
 
         let header_value = header.to_usize();
@@ -327,6 +357,7 @@ fn header() {
         size: 0b0,
         opaque: true,
         marked: false,
+        large: false,
     };
     let data = header.to_usize();
     // println the binary representation of the data
@@ -343,6 +374,7 @@ fn header() {
                         size: s,
                         opaque: *sm,
                         marked: *m,
+                        large: false,
                     };
                     let data = header.to_usize();
                     let new_header = Header::from_usize(data);
@@ -418,10 +450,17 @@ impl HeapObject {
 
     pub fn fields_size(&self) -> usize {
         let untagged = self.untagged();
-        let pointer = untagged as *mut isize;
-        let data: usize = unsafe { *pointer.cast::<usize>() };
+        let pointer = untagged as *mut usize;
+        let data: usize = unsafe { *pointer };
         let header = Header::from_usize(data);
-        header.size as usize * 8
+
+        if header.large {
+            // For large objects, the actual size is in the word after the header
+            let size_ptr = unsafe { pointer.add(1) };
+            unsafe { *size_ptr * 8 }
+        } else {
+            header.size as usize * 8
+        }
     }
 
     pub fn get_fields(&self) -> &[usize] {
@@ -431,7 +470,7 @@ impl HeapObject {
         let size = self.fields_size();
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
-        let pointer = unsafe { pointer.add(Self::header_size() / 8) };
+        let pointer = unsafe { pointer.add(self.header_size() / 8) };
         unsafe { std::slice::from_raw_parts(pointer, size / 8) }
     }
 
@@ -440,7 +479,7 @@ impl HeapObject {
         let bytes = header.type_data as usize;
         let untagged = self.untagged();
         let pointer = untagged as *mut u8;
-        let pointer = unsafe { pointer.add(Self::header_size()) };
+        let pointer = unsafe { pointer.add(self.header_size()) };
         unsafe { std::slice::from_raw_parts(pointer, bytes) }
     }
 
@@ -453,7 +492,7 @@ impl HeapObject {
     pub fn get_keyword_hash(&self) -> u64 {
         let untagged = self.untagged();
         let pointer = untagged as *mut u8;
-        let pointer = unsafe { pointer.add(Self::header_size()) };
+        let pointer = unsafe { pointer.add(self.header_size()) };
         unsafe { *(pointer as *const u64) }
     }
 
@@ -463,8 +502,8 @@ impl HeapObject {
         let text_len = header.type_data as usize;
         let untagged = self.untagged();
         let pointer = untagged as *mut u8;
-        // Skip header (8 bytes) and hash (8 bytes)
-        let pointer = unsafe { pointer.add(Self::header_size() + 8) };
+        // Skip header and hash (8 bytes)
+        let pointer = unsafe { pointer.add(self.header_size() + 8) };
         unsafe { std::slice::from_raw_parts(pointer, text_len) }
     }
 
@@ -492,7 +531,7 @@ impl HeapObject {
         let size = self.fields_size();
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
-        let pointer = unsafe { pointer.add(1) };
+        let pointer = unsafe { pointer.add(self.header_size() / 8) };
         unsafe { std::slice::from_raw_parts_mut(pointer, size / 8) }
     }
 
@@ -505,12 +544,21 @@ impl HeapObject {
     }
 
     pub fn full_size(&self) -> usize {
-        self.fields_size() + Self::header_size()
+        self.fields_size() + self.header_size()
     }
 
-    pub fn header_size() -> usize {
-        8
+    /// Header size for this object (8 for normal, 16 for large objects)
+    pub fn header_size(&self) -> usize {
+        let header = self.get_header();
+        if header.large {
+            16 // 8 bytes header + 8 bytes extended size
+        } else {
+            8
+        }
     }
+
+    /// Minimum header size constant (8 bytes)
+    pub const MIN_HEADER_SIZE: usize = 8;
 
     pub fn writer_header_direct(&mut self, header: Header) {
         let untagged = self.untagged();
@@ -527,15 +575,25 @@ impl HeapObject {
             panic!("Size is not aligned");
         }
 
+        let words = field_size.to_words();
+        let is_large = words > Header::MAX_INLINE_SIZE;
+
         let header = Header {
             type_id: 0,
             type_data: 0,
-            size: field_size.to_words() as u16,
+            size: if is_large { 0xFFFF } else { words as u16 },
             opaque: false,
             marked: false,
+            large: is_large,
         };
 
         unsafe { *pointer.cast::<usize>() = header.to_usize() };
+
+        // For large objects, write the actual size in the next word
+        if is_large {
+            let size_ptr = unsafe { pointer.add(1) };
+            unsafe { *size_ptr = words };
+        }
     }
 
     pub fn write_full_object(&mut self, data: &[u8]) {
@@ -553,7 +611,8 @@ impl HeapObject {
 
     pub fn copy_object_except_header(&self, to_object: &mut HeapObject) {
         let data = self.get_full_object_data();
-        to_object.write_fields(&data[Self::header_size()..]);
+        // Skip the actual header (8 or 16 bytes) when copying fields
+        to_object.write_fields(&data[self.header_size()..]);
     }
 
     pub fn get_pointer(&self) -> *const u8 {
@@ -565,14 +624,14 @@ impl HeapObject {
         debug_assert!(index < self.fields_size() as i32);
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
-        let pointer = unsafe { pointer.add(index as usize + Self::header_size() / 8) };
+        let pointer = unsafe { pointer.add(index as usize + self.header_size() / 8) };
         unsafe { *pointer = value };
     }
 
     pub fn get_field(&self, arg: usize) -> usize {
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
-        let pointer = unsafe { pointer.add(arg + Self::header_size() / 8) };
+        let pointer = unsafe { pointer.add(arg + self.header_size() / 8) };
         unsafe { *pointer }
     }
 
@@ -636,16 +695,17 @@ impl HeapObject {
     pub fn write_fields(&mut self, fields: &[u8]) {
         let untagged = self.untagged();
         let pointer = untagged as *mut u8;
-        let pointer = unsafe { pointer.add(Self::header_size()) };
+        let pointer = unsafe { pointer.add(self.header_size()) };
         unsafe { std::ptr::copy_nonoverlapping(fields.as_ptr(), pointer, fields.len()) };
     }
 
     pub fn is_zero_size(&self) -> bool {
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
-        let data: usize = unsafe { *pointer.cast::<usize>() };
+        let data: usize = unsafe { *pointer };
         let header = Header::from_usize(data);
-        header.size == 0
+        // Large objects are never zero-size
+        !header.large && header.size == 0
     }
 }
 
@@ -725,6 +785,7 @@ impl Ir {
             size: 1,
             opaque: true,
             marked: false,
+            large: false,
         };
         self.heap_store(small_object_pointer, Value::RawValue(header.to_usize()));
     }
