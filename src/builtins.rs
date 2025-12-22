@@ -1463,9 +1463,11 @@ pub unsafe extern "C" fn call_ffi_info(
     a5: usize,
     a6: usize,
 ) -> usize {
+    eprintln!("DEBUG: call_ffi_info called with ffi_info_id={}", ffi_info_id);
     unsafe {
         let runtime = get_runtime().get_mut();
         let ffi_info_id = BuiltInTypes::untag(ffi_info_id);
+        eprintln!("DEBUG: untagged ffi_info_id={}", ffi_info_id);
         // Extract only what we need without cloning the Cif (cloning Cif breaks on x86-64 Linux)
         let (code_ptr, number_of_arguments, argument_types, return_type) = {
             let ffi_info = runtime.get_ffi_info(ffi_info_id);
