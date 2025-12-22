@@ -19,6 +19,6 @@ fn main() {
     ""
 }
 
-// Expe ct
+// Expect
 // Requested size: 125000
 // Actual size: 125000

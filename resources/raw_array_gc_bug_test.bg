@@ -33,7 +33,7 @@ fn main() {
     ""
 }
 
-// Exp ect
+// Expect
 // After 1 write, 60000:
 // test1
 // After 2 writes, 60000:

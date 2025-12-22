@@ -484,13 +484,20 @@ impl Memory {
     fn allocate_string(&mut self, bytes: &[u8], pointer: usize) -> Result<Tagged, Box<dyn Error>> {
         let mut heap_object = HeapObject::from_tagged(pointer);
         let words = bytes.len() / 8 + 1;
+        let is_large = words > Header::MAX_INLINE_SIZE;
         heap_object.writer_header_direct(Header {
             type_id: 2,
             type_data: bytes.len() as u32,
-            size: words as u16,
+            size: if is_large { 0xFFFF } else { words as u16 },
             opaque: true,
             marked: false,
+            large: is_large,
         });
+        // For large objects, write the actual size in the next word
+        if is_large {
+            let size_ptr = (heap_object.untagged() + 8) as *mut usize;
+            unsafe { *size_ptr = words };
+        }
         heap_object.write_fields(bytes);
         Ok(BuiltInTypes::HeapObject.tagged(pointer))
     }
@@ -510,13 +517,20 @@ impl Memory {
         let text_words = bytes.len().div_ceil(8); // Round up
         let total_words = 1 + text_words; // 1 for hash + text
 
+        let is_large = total_words > Header::MAX_INLINE_SIZE;
         heap_object.writer_header_direct(Header {
             type_id: 3,
             type_data: bytes.len() as u32, // Store text length
-            size: total_words as u16,
+            size: if is_large { 0xFFFF } else { total_words as u16 },
             opaque: true,
             marked: false,
+            large: is_large,
         });
+        // For large objects, write the actual size in the next word
+        if is_large {
+            let size_ptr = (heap_object.untagged() + 8) as *mut usize;
+            unsafe { *size_ptr = total_words };
+        }
 
         // Write hash as first 8 bytes, then the text
         let mut data = Vec::with_capacity(total_words * 8);

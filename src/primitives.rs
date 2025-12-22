@@ -100,26 +100,79 @@ impl AstCompiler<'_> {
                 self.ir.read_struct_id(pointer)
             }
             "beagle.primitive/write_field" => {
-                // self.ir.breakpoint();
                 let pointer = args[0];
                 let untagged = self.ir.untag(pointer);
                 let field = args[1];
-                let field = self.ir.add_int(field, Value::TaggedConstant(1));
-                let field = self.ir.mul(field, Value::RawValue(8));
-                // let untagged_field = self.ir.untag(field);
+
+                // Check large flag to determine header size (1 word or 2 words)
+                let header = self.ir.load_from_heap(untagged, 0);
+                let large_flag = self
+                    .ir
+                    .and_imm(header, 1 << Header::LARGE_OBJECT_BIT_POSITION);
+                let zero = self.ir.assign_new(Value::RawValue(0));
+
+                let not_large_label = self.ir.label("write_not_large");
+                let done_label = self.ir.label("write_done");
+                let offset_reg = self.ir.volatile_register();
+
+                // If large flag is 0, jump to not_large
+                self.ir
+                    .jump_if(not_large_label, Condition::Equal, large_flag, zero);
+
+                // Large object: add 2 to field (16-byte header)
+                let field_large = self.ir.add_int(field, Value::TaggedConstant(2));
+                let field_large = self.ir.mul(field_large, Value::RawValue(8));
+                self.ir.assign(offset_reg, field_large);
+                self.ir.jump(done_label);
+
+                // Small object: add 1 to field (8-byte header)
+                self.ir.write_label(not_large_label);
+                let field_small = self.ir.add_int(field, Value::TaggedConstant(1));
+                let field_small = self.ir.mul(field_small, Value::RawValue(8));
+                self.ir.assign(offset_reg, field_small);
+
+                self.ir.write_label(done_label);
                 let value = args[2];
-                self.ir.heap_store_with_reg_offset(untagged, value, field);
+                self.ir
+                    .heap_store_with_reg_offset(untagged, value, offset_reg.into());
                 self.call_builtin("beagle.builtin/gc_add_root", vec![pointer]);
                 Value::Null
             }
             "beagle.primitive/read_field" => {
                 let pointer = args[0];
-                let pointer = self.ir.untag(pointer);
+                let untagged = self.ir.untag(pointer);
                 let field = args[1];
-                let field = self.ir.add_int(field, Value::TaggedConstant(1));
-                let field = self.ir.mul(field, Value::RawValue(8));
-                // self.ir.breakpoint();
-                self.ir.heap_load_with_reg_offset(pointer, field)
+
+                // Check large flag to determine header size (1 word or 2 words)
+                let header = self.ir.load_from_heap(untagged, 0);
+                let large_flag = self
+                    .ir
+                    .and_imm(header, 1 << Header::LARGE_OBJECT_BIT_POSITION);
+                let zero = self.ir.assign_new(Value::RawValue(0));
+
+                let not_large_label = self.ir.label("read_not_large");
+                let done_label = self.ir.label("read_done");
+                let offset_reg = self.ir.volatile_register();
+
+                // If large flag is 0, jump to not_large
+                self.ir
+                    .jump_if(not_large_label, Condition::Equal, large_flag, zero);
+
+                // Large object: add 2 to field (16-byte header)
+                let field_large = self.ir.add_int(field, Value::TaggedConstant(2));
+                let field_large = self.ir.mul(field_large, Value::RawValue(8));
+                self.ir.assign(offset_reg, field_large);
+                self.ir.jump(done_label);
+
+                // Small object: add 1 to field (8-byte header)
+                self.ir.write_label(not_large_label);
+                let field_small = self.ir.add_int(field, Value::TaggedConstant(1));
+                let field_small = self.ir.mul(field_small, Value::RawValue(8));
+                self.ir.assign(offset_reg, field_small);
+
+                self.ir.write_label(done_label);
+                self.ir
+                    .heap_load_with_reg_offset(untagged, offset_reg.into())
             }
             "beagle.primitive/breakpoint" => {
                 self.ir.breakpoint();
@@ -129,12 +182,37 @@ impl AstCompiler<'_> {
                 let pointer = args[0];
                 let pointer = self.ir.untag(pointer);
                 let header = self.ir.load_from_heap(pointer, 0);
-                // mask and shift so we get the size
-                let size_offset = Header::size_offset();
-                let value = self.ir.shift_right_imm(header, (size_offset * 8) as i32);
 
-                let value = self.ir.and_imm(value, 0x0000_0000_0000_FFFF);
-                self.ir.tag(value, BuiltInTypes::Int.get_tag())
+                // Check if large flag (bit 2) is set
+                let large_flag = self
+                    .ir
+                    .and_imm(header, 1 << Header::LARGE_OBJECT_BIT_POSITION);
+                let zero = self.ir.assign_new(Value::RawValue(0));
+
+                let not_large_label = self.ir.label("size_not_large");
+                let done_label = self.ir.label("size_done");
+                let result_reg = self.ir.volatile_register();
+
+                // If large flag is 0, jump to not_large
+                self.ir
+                    .jump_if(not_large_label, Condition::Equal, large_flag, zero);
+
+                // Large object: read size from second word (offset 1 = 8 bytes)
+                let extended_size = self.ir.load_from_heap(pointer, 1);
+                self.ir.assign(result_reg, extended_size);
+                self.ir.jump(done_label);
+
+                // Small object: extract inline size from header
+                self.ir.write_label(not_large_label);
+                let size_offset = Header::size_offset();
+                let inline_size = self
+                    .ir
+                    .shift_right_imm_raw(header, (size_offset * 8) as i32);
+                let inline_size = self.ir.and_imm(inline_size, 0x0000_0000_0000_FFFF);
+                self.ir.assign(result_reg, inline_size);
+
+                self.ir.write_label(done_label);
+                self.ir.tag(result_reg.into(), BuiltInTypes::Int.get_tag())
             }
             "beagle.primitive/panic" => {
                 let message = args[0];

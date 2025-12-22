@@ -4,7 +4,7 @@ use libc::mprotect;
 
 use super::get_page_size;
 
-use crate::types::{BuiltInTypes, HeapObject, Word};
+use crate::types::{BuiltInTypes, Header, HeapObject, Word};
 
 use super::{
     AllocateAction, Allocator, AllocatorOptions, StackMap, mark_and_sweep::MarkAndSweep,
@@ -67,7 +67,13 @@ impl Space {
 
     fn allocate(&mut self, size: Word) -> *const u8 {
         let offset = self.allocation_offset;
-        let full_size = size.to_bytes() + HeapObject::header_size();
+        // Large objects need 16-byte header, small objects need 8-byte header
+        let header_size = if size.to_words() > Header::MAX_INLINE_SIZE {
+            16
+        } else {
+            8
+        };
+        let full_size = size.to_bytes() + header_size;
         let pointer = self.write_object(offset, size);
         self.increment_current_offset(full_size);
         pointer
@@ -118,8 +124,14 @@ impl Space {
     }
 
     fn can_allocate(&self, size: Word) -> bool {
-        let size = size.to_bytes() + HeapObject::header_size();
-        let new_offset = self.allocation_offset + size;
+        // Large objects need 16-byte header, small objects need 8-byte header
+        let header_size = if size.to_words() > Header::MAX_INLINE_SIZE {
+            16
+        } else {
+            8
+        };
+        let alloc_size = size.to_bytes() + header_size;
+        let new_offset = self.allocation_offset + alloc_size;
         if new_offset > self.byte_count() {
             return false;
         }
