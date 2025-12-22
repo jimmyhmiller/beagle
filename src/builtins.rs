@@ -1609,6 +1609,10 @@ pub unsafe extern "C" fn call_ffi_info(
 
         // Get a fresh reference to the Cif without cloning (cloning breaks on x86-64 Linux)
         let cif = runtime.get_ffi_info(ffi_info_id).cif.get();
+        eprintln!(
+            "DEBUG: calling FFI function at {:?} with {} args",
+            code_ptr.ptr, argument_pointers.len()
+        );
         let return_value = match return_type {
             FFIType::Void => {
                 cif.call::<()>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
