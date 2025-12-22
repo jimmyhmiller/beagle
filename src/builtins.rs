@@ -301,6 +301,13 @@ extern "C" fn make_closure(
     free_variable_pointer: usize,
 ) -> usize {
     print_call_builtin(get_runtime().get(), "make_closure");
+    eprintln!(
+        "DEBUG make_closure: function={:#x} (untagged={:#x}), num_free={}, free_var_ptr={:#x}",
+        function,
+        crate::types::BuiltInTypes::untag(function),
+        num_free,
+        free_variable_pointer
+    );
     let runtime = get_runtime().get_mut();
     if BuiltInTypes::get_kind(function) != BuiltInTypes::Function {
         unsafe {
@@ -507,7 +514,13 @@ pub unsafe extern "C" fn check_arity(
     // Function pointer is tagged, need to untag
     let untagged_ptr = (function_pointer >> BuiltInTypes::tag_size()) as *const u8;
 
+    eprintln!(
+        "DEBUG check_arity: function_pointer={:#x} (untagged={:#x}), expected_args={}",
+        function_pointer, untagged_ptr as usize, expected_args
+    );
+
     if let Some(function) = runtime.get_function_by_pointer(untagged_ptr) {
+        eprintln!("DEBUG check_arity: found function '{}'", function.name);
         // expected_args is a tagged integer, need to untag it
         let expected_args_untagged = BuiltInTypes::untag(expected_args as usize);
 
