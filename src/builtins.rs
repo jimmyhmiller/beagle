@@ -301,10 +301,6 @@ extern "C" fn make_closure(
     free_variable_pointer: usize,
 ) -> usize {
     print_call_builtin(get_runtime().get(), "make_closure");
-    eprintln!(
-        "DEBUG make_closure: function={:#x}, num_free={}, free_var_ptr={:#x}",
-        function, num_free, free_variable_pointer
-    );
     let runtime = get_runtime().get_mut();
     if BuiltInTypes::get_kind(function) != BuiltInTypes::Function {
         unsafe {
@@ -1467,7 +1463,10 @@ pub unsafe extern "C" fn call_ffi_info(
     a5: usize,
     a6: usize,
 ) -> usize {
-    eprintln!("DEBUG: call_ffi_info called with ffi_info_id={}", ffi_info_id);
+    eprintln!(
+        "DEBUG: call_ffi_info called with ffi_info_id={}",
+        ffi_info_id
+    );
     unsafe {
         let runtime = get_runtime().get_mut();
         let ffi_info_id = BuiltInTypes::untag(ffi_info_id);
@@ -1617,7 +1616,8 @@ pub unsafe extern "C" fn call_ffi_info(
         let cif = runtime.get_ffi_info(ffi_info_id).cif.get();
         eprintln!(
             "DEBUG: calling FFI function at {:?} with {} args",
-            code_ptr.ptr, argument_pointers.len()
+            code_ptr.ptr,
+            argument_pointers.len()
         );
         let return_value = match return_type {
             FFIType::Void => {

@@ -8,7 +8,7 @@ use crate::backend::CodegenBackend;
 
 // Backend-specific register imports for TryInto implementations
 cfg_if::cfg_if! {
-    if #[cfg(feature = "backend-x86-64")] {
+    if #[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))] {
         use crate::machine_code::x86_codegen::X86Register as Register;
     } else {
         use crate::machine_code::arm_codegen::Register;
@@ -671,9 +671,15 @@ pub struct Ir {
 impl Ir {
     pub fn new(allocate_fn_pointer: usize) -> Self {
         // Determine number of argument registers based on target architecture
-        #[cfg(feature = "backend-x86-64")]
+        #[cfg(any(
+            feature = "backend-x86-64",
+            all(target_arch = "x86_64", not(feature = "backend-arm64"))
+        ))]
         let num_arg_registers = 6; // x86-64 SysV ABI: RDI, RSI, RDX, RCX, R8, R9
-        #[cfg(not(feature = "backend-x86-64"))]
+        #[cfg(not(any(
+            feature = "backend-x86-64",
+            all(target_arch = "x86_64", not(feature = "backend-arm64"))
+        )))]
         let num_arg_registers = 8; // ARM64: X0-X7
 
         let mut me = Self {
