@@ -301,6 +301,10 @@ extern "C" fn make_closure(
     free_variable_pointer: usize,
 ) -> usize {
     print_call_builtin(get_runtime().get(), "make_closure");
+    eprintln!(
+        "DEBUG make_closure: function={:#x}, num_free={}, free_var_ptr={:#x}",
+        function, num_free, free_variable_pointer
+    );
     let runtime = get_runtime().get_mut();
     if BuiltInTypes::get_kind(function) != BuiltInTypes::Function {
         unsafe {
