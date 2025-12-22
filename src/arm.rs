@@ -888,7 +888,35 @@ impl LowLevelArm {
     }
 
     pub fn pop_from_stack_indexed_raw(&mut self, reg: Register, offset: i32) {
-        self.load_from_stack(reg, -(offset))
+        // Load from [SP + offset * 8] - SP-relative, no stack size adjustment
+        // This matches push_to_end_of_stack which stores at [SP + offset * 8]
+        const MAX_IMM9: i32 = 255;
+        const MIN_IMM9: i32 = -256;
+
+        let byte_offset = offset * 8;
+
+        if (MIN_IMM9..=MAX_IMM9).contains(&byte_offset) {
+            self.instructions.push(ArmAsm::LdurGen {
+                size: 0b11,
+                imm9: byte_offset,
+                rn: SP,
+                rt: reg,
+            });
+        } else {
+            let temp_reg = X16;
+            for instr in Self::mov_64_bit_num(temp_reg, byte_offset as isize) {
+                self.instructions.push(instr);
+            }
+            self.instructions.push(add(temp_reg, SP, temp_reg));
+            self.instructions.push(ArmAsm::LdrRegGen {
+                size: 0b11,
+                rm: ZERO_REGISTER,
+                option: 0b011,
+                s: 0,
+                rn: temp_reg,
+                rt: reg,
+            });
+        }
     }
 
     pub fn pop_from_stack(&mut self, reg: Register) {
