@@ -268,9 +268,19 @@ impl MarkAndSweep {
     #[allow(unused)]
     pub fn copy_data_to_offset(&mut self, data: &[u8]) -> *const u8 {
         // TODO: I could amortize this by copying lazily and coalescing
-        // the copies together if they are continuouss
+        // the copies together if they are continuous
+
+        // Read the header from the data to determine if it's a large object.
+        // Large objects have 16-byte headers, small objects have 8-byte headers.
+        let header_value = usize::from_ne_bytes(data[0..8].try_into().unwrap());
+        let header_size = if Header::is_large_object_bit_set(header_value) {
+            16
+        } else {
+            8
+        };
+
         let pointer = self
-            .allocate_inner(Word::from_bytes(data.len() - 8), Some(data))
+            .allocate_inner(Word::from_bytes(data.len() - header_size), Some(data))
             .unwrap();
 
         if let AllocateAction::Allocated(pointer) = pointer {
