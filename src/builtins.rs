@@ -559,7 +559,13 @@ pub unsafe extern "C" fn is_function_variadic(function_pointer: usize) -> usize 
     // Function pointer is tagged, need to untag
     let untagged_ptr = (function_pointer >> BuiltInTypes::tag_size()) as *const u8;
 
+    eprintln!(
+        "DEBUG is_function_variadic: function_pointer={:#x} (untagged={:#x})",
+        function_pointer, untagged_ptr as usize
+    );
+
     if let Some(function) = runtime.get_function_by_pointer(untagged_ptr) {
+        eprintln!("DEBUG is_function_variadic: found function '{}'", function.name);
         if function.is_variadic {
             BuiltInTypes::true_value() as usize
         } else {
