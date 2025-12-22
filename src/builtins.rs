@@ -1466,11 +1466,18 @@ pub unsafe extern "C" fn call_ffi_info(
     unsafe {
         let runtime = get_runtime().get_mut();
         let ffi_info_id = BuiltInTypes::untag(ffi_info_id);
-        let ffi_info = runtime.get_ffi_info(ffi_info_id).clone();
-        let code_ptr = ffi_info.function;
+        // Extract only what we need without cloning the Cif (cloning Cif breaks on x86-64 Linux)
+        let (code_ptr, number_of_arguments, argument_types, return_type) = {
+            let ffi_info = runtime.get_ffi_info(ffi_info_id);
+            (
+                ffi_info.function,
+                ffi_info.number_of_arguments,
+                ffi_info.argument_types.clone(),
+                ffi_info.return_type.clone(),
+            )
+        };
         let arguments = [a1, a2, a3, a4, a5, a6];
-        let args = &arguments[..ffi_info.number_of_arguments];
-        let argument_types = ffi_info.argument_types;
+        let args = &arguments[..number_of_arguments];
         let mut argument_pointers = vec![];
 
         for (argument, ffi_type) in args.iter().zip(argument_types.iter()) {
@@ -1600,70 +1607,53 @@ pub unsafe extern "C" fn call_ffi_info(
             }
         }
 
-        let return_value = match ffi_info.return_type {
+        // Get a fresh reference to the Cif without cloning (cloning breaks on x86-64 Linux)
+        let cif = runtime.get_ffi_info(ffi_info_id).cif.get();
+        let return_value = match return_type {
             FFIType::Void => {
-                ffi_info
-                    .cif
-                    .get()
-                    .call::<()>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
+                cif.call::<()>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
                 BuiltInTypes::null_value() as usize
             }
             FFIType::U8 => {
-                let result = ffi_info
-                    .cif
-                    .get()
-                    .call::<u8>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
+                let result =
+                    cif.call::<u8>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
                 BuiltInTypes::Int.tag(result as isize) as usize
             }
             FFIType::U16 => {
-                let result = ffi_info
-                    .cif
-                    .get()
-                    .call::<u16>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
+                let result =
+                    cif.call::<u16>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
                 BuiltInTypes::Int.tag(result as isize) as usize
             }
             FFIType::U32 => {
-                let result = ffi_info
-                    .cif
-                    .get()
-                    .call::<u32>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
+                let result =
+                    cif.call::<u32>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
                 BuiltInTypes::Int.tag(result as isize) as usize
             }
             FFIType::U64 => {
-                let result = ffi_info
-                    .cif
-                    .get()
-                    .call::<u64>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
+                let result =
+                    cif.call::<u64>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
                 BuiltInTypes::Int.tag(result as isize) as usize
             }
             FFIType::I32 => {
-                let result = ffi_info
-                    .cif
-                    .get()
-                    .call::<i32>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
+                let result =
+                    cif.call::<i32>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
                 BuiltInTypes::Int.tag(result as isize) as usize
             }
             FFIType::Pointer => {
-                let result = ffi_info
-                    .cif
-                    .get()
-                    .call::<*mut u8>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
+                let result =
+                    cif.call::<*mut u8>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
                 let pointer_value = BuiltInTypes::Int.tag(result as isize) as usize;
                 call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", pointer_value)
             }
             FFIType::MutablePointer => {
-                let result = ffi_info
-                    .cif
-                    .get()
-                    .call::<*mut u8>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
+                let result =
+                    cif.call::<*mut u8>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
                 let pointer_value = BuiltInTypes::Int.tag(result as isize) as usize;
                 call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", pointer_value)
             }
             FFIType::String => {
-                let result = ffi_info
-                    .cif
-                    .get()
-                    .call::<*mut u8>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
+                let result =
+                    cif.call::<*mut u8>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
                 if result.is_null() {
                     return BuiltInTypes::null_value() as usize;
                 }

@@ -450,13 +450,6 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
                 continue;
             }
         }
-        // Skip macOS-only tests on non-macOS platforms (e.g., FFI tests)
-        #[cfg(not(target_os = "macos"))]
-        {
-            if source.contains("// macos-only") {
-                continue;
-            }
-        }
 
         println!("Running test: {}", path);
         let args = CommandLineArguments {
