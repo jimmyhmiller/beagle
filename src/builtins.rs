@@ -448,6 +448,24 @@ extern "C" fn type_of(stack_pointer: usize, value: usize) -> usize {
     runtime.type_of(stack_pointer, value).unwrap()
 }
 
+extern "C" fn get_os(stack_pointer: usize) -> usize {
+    print_call_builtin(get_runtime().get(), "get_os");
+    let runtime = get_runtime().get_mut();
+    let os_name = if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "unknown"
+    };
+    runtime
+        .allocate_string(stack_pointer, os_name.to_string())
+        .unwrap()
+        .into()
+}
+
 extern "C" fn equal(a: usize, b: usize) -> usize {
     print_call_builtin(get_runtime().get(), "equal");
     let runtime = get_runtime().get_mut();
@@ -2693,6 +2711,8 @@ impl Runtime {
         )?;
 
         self.add_builtin_function("beagle.core/type-of", type_of as *const u8, true, 2)?;
+
+        self.add_builtin_function("beagle.core/get-os", get_os as *const u8, true, 1)?;
 
         self.add_builtin_function("beagle.core/equal", equal as *const u8, false, 2)?;
 
