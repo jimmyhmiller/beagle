@@ -160,8 +160,10 @@ fn compile_trampoline(runtime: &mut Runtime) {
             lang.instructions.push(X86Asm::Pop { reg: RBP });
             lang.ret();
 
+            let bytes = lang.compile_to_bytes();
+            eprintln!("DEBUG: trampoline bytes ({} bytes): {:02x?}", bytes.len(), &bytes[..bytes.len().min(50)]);
             runtime
-                .add_function_mark_executable("trampoline".to_string(), &lang.compile_to_bytes(), 0, 3)
+                .add_function_mark_executable("trampoline".to_string(), &bytes, 0, 3)
                 .unwrap();
         } else {
             let mut lang = arm::LowLevelArm::new();
