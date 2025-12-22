@@ -1672,6 +1672,7 @@ impl Ir {
                 }
                 Instruction::RecurseWithSaves(dest, args, saves) => {
                     // TODO: Clean up duplication
+                    let num_saves = saves.len();
                     for save in saves.iter() {
                         let save = self.value_to_register(save, backend);
                         backend.push_to_stack(save);
@@ -1683,9 +1684,10 @@ impl Ir {
                         if arg_index < num_arg_regs {
                             backend.mov_reg(backend.arg(arg_index as u8), arg);
                         } else {
+                            // Stack args must be placed above the saves
                             backend.push_to_end_of_stack(
                                 arg,
-                                (arg_index as i32) - (num_arg_regs as i32 - 1),
+                                (arg_index as i32) - (num_arg_regs as i32 - 1) + num_saves as i32,
                             );
                         }
                     }
@@ -1784,6 +1786,7 @@ impl Ir {
                         None
                     };
 
+                    let num_saves = saves.len();
                     for save in saves.iter() {
                         let save_reg = self.value_to_register(save, backend);
                         backend.push_to_stack(save_reg);
@@ -1796,9 +1799,13 @@ impl Ir {
                         if arg_index < num_arg_regs {
                             backend.mov_reg(backend.arg(arg_index as u8), arg_reg);
                         } else {
+                            // Stack args must be placed above the saves
+                            // After pushing N saves, RSP is N*8 lower than it was.
+                            // Stack args should go at positive offsets from RSP to be
+                            // above the saves in memory (where the callee expects them).
                             backend.push_to_end_of_stack(
                                 arg_reg,
-                                (arg_index as i32) - num_arg_regs as i32,
+                                (arg_index as i32) - num_arg_regs as i32 + num_saves as i32,
                             );
                         }
                         // Free temp if it was one (no-op for physical registers)
