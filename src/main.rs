@@ -2,8 +2,11 @@
 #![allow(clippy::missing_safety_doc)]
 
 // Backend-specific imports for runtime trampolines
+// Use x86-64 backend if:
+//   - Explicit feature flag is set, OR
+//   - Building for x86_64 architecture (and no explicit ARM64 feature)
 cfg_if::cfg_if! {
-    if #[cfg(feature = "backend-x86-64")] {
+    if #[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))] {
         use crate::machine_code::x86_codegen::{RCX, RDX, RSI, RDI, R8, R10, RSP, X86Asm};
     } else {
         use crate::machine_code::arm_codegen::{SP, X0, X1, X2, X3, X4, X10};
@@ -24,7 +27,10 @@ use runtime::{DefaultPrinter, Printer, Runtime, TestPrinter};
 
 use std::{cell::UnsafeCell, env, error::Error, sync::OnceLock, time::Instant};
 
-#[cfg(not(feature = "backend-x86-64"))]
+#[cfg(not(any(
+    feature = "backend-x86-64",
+    all(target_arch = "x86_64", not(feature = "backend-arm64"))
+)))]
 mod arm;
 pub mod ast;
 pub mod backend;
@@ -43,7 +49,10 @@ mod register_allocation;
 pub mod runtime;
 mod types;
 
-#[cfg(feature = "backend-x86-64")]
+#[cfg(any(
+    feature = "backend-x86-64",
+    all(target_arch = "x86_64", not(feature = "backend-arm64"))
+))]
 mod x86;
 
 #[derive(Debug, Encode, Decode, Clone, SerJson)]
@@ -124,7 +133,7 @@ const PADDING_FOR_ALIGNMENT: i64 = 2;
 
 fn compile_trampoline(runtime: &mut Runtime) {
     cfg_if::cfg_if! {
-        if #[cfg(feature = "backend-x86-64")] {
+        if #[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))] {
             use crate::machine_code::x86_codegen::{RBP, RBX, R12, R13, R14, R15};
             let mut lang = x86::LowLevelX86::new();
 
@@ -214,7 +223,7 @@ fn compile_save_volatile_registers_for(runtime: &mut Runtime, register_num: usiz
     let arity = register_num + 1;
 
     cfg_if::cfg_if! {
-        if #[cfg(feature = "backend-x86-64")] {
+        if #[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))] {
             let mut lang = x86::LowLevelX86::new();
             // Use lang.arg() to get correct argument register for x86-64 ABI
             // On x86-64, arg(n) maps to: RDI, RSI, RDX, RCX, R8, R9 (not sequential indices!)
@@ -495,7 +504,7 @@ fn run_repl(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     // x86-64 has 6 arg registers (0-5), ARM64 has 8 (0-7)
     // The wrapper uses the last arg register for the function pointer
     cfg_if::cfg_if! {
-        if #[cfg(feature = "backend-x86-64")] {
+        if #[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))] {
             let max_wrapper_args = 5; // Uses arg0-4 for data, arg5 for fn ptr
         } else {
             let max_wrapper_args = 6; // Uses arg0-5 for data, arg6 for fn ptr (ARM supports 8 args)
@@ -659,7 +668,7 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     // x86-64 has 6 arg registers (0-5), ARM64 has 8 (0-7)
     // The wrapper uses the last arg register for the function pointer
     cfg_if::cfg_if! {
-        if #[cfg(feature = "backend-x86-64")] {
+        if #[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))] {
             let max_wrapper_args = 5; // Uses arg0-4 for data, arg5 for fn ptr
         } else {
             let max_wrapper_args = 6; // Uses arg0-5 for data, arg6 for fn ptr (ARM supports 8 args)
