@@ -1,0 +1,14 @@
+namespace gc_null_pointer_test
+
+// Minimal reproducer for GC bug where uninitialized stack slots
+// with values like 0x5 (closure tag with null ptr) were treated
+// as valid heap pointers, causing null pointer dereference.
+//
+// Run with: cargo run --features mark-and-sweep -- --gc-always resources/gc_null_pointer_test.bg
+
+fn main() {
+    println("done")
+}
+
+// Expect
+// done

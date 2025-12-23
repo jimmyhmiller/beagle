@@ -1561,12 +1561,16 @@ impl Runtime {
     }
 
     pub fn gc(&mut self, stack_pointer: usize) {
+        // Use frame pointer for FP-chain based stack walking
+        let frame_pointer = crate::builtins::get_current_frame_pointer();
+        // Note: stack_pointer is still used for __pause calls in multi-threaded case
+
         if self.memory.threads.len() == 1 {
             // If there is only one thread, that is us
             // that means nothing else could spin up a thread in the mean time
             // so there is no need to lock anything
-            // Collect all stack pointers: regular stacks + saved stack segments
-            let mut all_stack_pointers = vec![(self.get_stack_base(), stack_pointer)];
+            // Collect all frame pointers: regular stacks + saved stack segments
+            let mut all_stack_pointers = vec![(self.get_stack_base(), frame_pointer)];
             all_stack_pointers.extend(self.stack_segments.get_all_stack_pointers());
 
             self.memory
@@ -1666,7 +1670,7 @@ impl Runtime {
         }
 
         let mut stack_pointers = thread_state.stack_pointers.clone();
-        stack_pointers.push((self.get_stack_base(), stack_pointer));
+        stack_pointers.push((self.get_stack_base(), frame_pointer));
         // Add saved stack segments to the GC scan
         stack_pointers.extend(self.stack_segments.get_all_stack_pointers());
 
