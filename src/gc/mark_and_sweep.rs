@@ -312,6 +312,15 @@ impl MarkAndSweep {
             to_mark.push(HeapObject::from_tagged(*root));
         }
 
+        // Mark temporary roots (used by builtins to protect values during allocation)
+        for temp_root in self.temporary_roots.iter() {
+            if let Some(root) = temp_root {
+                if BuiltInTypes::is_heap_pointer(*root) {
+                    to_mark.push(HeapObject::from_tagged(*root));
+                }
+            }
+        }
+
         // Use the new stack walker to find heap pointers
         StackWalker::walk_stack_roots(stack_base, stack_pointer, stack_map, |_, pointer| {
             to_mark.push(HeapObject::from_tagged(pointer));
@@ -323,8 +332,8 @@ impl MarkAndSweep {
             }
 
             object.mark();
-            for object in object.get_heap_references() {
-                to_mark.push(object);
+            for child in object.get_heap_references() {
+                to_mark.push(child);
             }
         }
     }

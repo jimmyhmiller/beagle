@@ -3,99 +3,128 @@ use crate::types::BuiltInTypes;
 use super::StackMap;
 
 /// A simple abstraction for walking the stack and finding heap pointers
+/// Uses frame pointer chain traversal for accurate stack walking.
 pub struct StackWalker;
 
 impl StackWalker {
-    /// Get the live portion of the stack as a slice
-    pub fn get_live_stack(stack_base: usize, stack_pointer: usize) -> &'static [usize] {
-        let distance_till_end = stack_base - stack_pointer;
+    /// Get the live portion of the stack as a slice (used for pointer updates in compacting GC)
+    #[allow(dead_code)]
+    pub fn get_live_stack(stack_base: usize, frame_pointer: usize) -> &'static [usize] {
+        let distance_till_end = stack_base - frame_pointer;
         let num_words = (distance_till_end / 8) + 1;
 
-        // Start one word before the stack pointer to match original behavior
-        let start_ptr = stack_pointer - 8;
-
-        unsafe { std::slice::from_raw_parts(start_ptr as *const usize, num_words) }
+        unsafe { std::slice::from_raw_parts(frame_pointer as *const usize, num_words) }
     }
 
-    /// Walk the stack and call a callback for each heap pointer found
-    /// The callback receives (stack_offset, heap_pointer_value)
+    /// Walk the stack using the frame pointer chain and call a callback for each heap pointer found.
+    /// The callback receives (slot_address, heap_pointer_value).
+    ///
+    /// ARM64 frame layout (stack grows down):
+    ///   [FP+8]  = return address (LR) - tells us about the CALLER's frame
+    ///   [FP]    = saved frame pointer (the CALLER's FP)
+    ///   [FP-8]  = local 0 of CURRENT frame
+    ///
+    /// When we find a return address in the stack map, it describes the CALLER's frame,
+    /// so we scan relative to the saved FP (caller's FP), not the current FP.
     pub fn walk_stack_roots<F>(
         stack_base: usize,
-        stack_pointer: usize,
+        frame_pointer: usize,
         stack_map: &StackMap,
         mut callback: F,
     ) where
         F: FnMut(usize, usize),
     {
-        let stack = Self::get_live_stack(stack_base, stack_pointer);
+        let mut fp = frame_pointer;
 
         #[cfg(feature = "debug-gc")]
         eprintln!(
-            "[GC DEBUG] walk_stack_roots: stack_base={:#x}, stack_pointer={:#x}, stack.len={}",
-            stack_base,
-            stack_pointer,
-            stack.len()
+            "[GC DEBUG] walk_stack_roots (FP-chain): stack_base={:#x}, frame_pointer={:#x}",
+            stack_base, frame_pointer
         );
 
-        let mut i = 0;
-        while i < stack.len() {
-            let value = stack[i];
+        // Follow the frame pointer chain
+        while fp != 0 && fp < stack_base {
+            // Read the return address at [FP+8] - this is where we return TO (in the caller)
+            let return_addr = unsafe { *((fp + 8) as *const usize) };
+            // Read the saved frame pointer at [FP] - this IS the caller's FP
+            let caller_fp = unsafe { *(fp as *const usize) };
 
-            if let Some(details) = stack_map.find_stack_data(value) {
+            #[cfg(feature = "debug-gc")]
+            eprintln!(
+                "[GC DEBUG] Frame at FP={:#x}, return_addr={:#x}, caller_fp={:#x}",
+                fp, return_addr, caller_fp
+            );
+
+            // Check if this return address is a known Beagle safepoint
+            // If so, the stack map describes the CALLER's frame (where we'll return to)
+            if let Some(details) = stack_map.find_stack_data(return_addr) {
                 #[cfg(feature = "debug-gc")]
                 eprintln!(
-                    "[GC DEBUG] Found return addr at i={}: {:#x}, fn={:?}, locals={}, max_stack={}, cur_stack={}",
-                    i,
-                    value,
+                    "[GC DEBUG] Found Beagle frame: fn={:?}, locals={}, max_stack={}, cur_stack={}",
                     details.function_name,
                     details.number_of_locals,
                     details.max_stack_size,
                     details.current_stack_size
                 );
 
-                let mut frame_size = details.max_stack_size + details.number_of_locals;
-                if frame_size % 2 != 0 {
-                    frame_size += 1;
-                }
+                // Calculate how many slots to scan in the CALLER's frame
+                // Locals are at [caller_fp-8], [caller_fp-16], etc.
+                let active_slots = details.number_of_locals + details.current_stack_size;
 
-                let bottom_of_frame = i + frame_size + 1;
-                let active_frame = details.current_stack_size + details.number_of_locals;
+                // Scan the active slots relative to the CALLER's FP
+                for i in 0..active_slots {
+                    let slot_addr = caller_fp - 8 - (i * 8);
+                    let slot_value = unsafe { *(slot_addr as *const usize) };
 
-                #[cfg(feature = "debug-gc")]
-                eprintln!(
-                    "[GC DEBUG] frame_size={}, bottom_of_frame={}, active_frame={}, scanning [{}, {})",
-                    frame_size,
-                    bottom_of_frame,
-                    active_frame,
-                    bottom_of_frame - active_frame,
-                    bottom_of_frame
-                );
-
-                i = bottom_of_frame;
-
-                for (j, slot) in stack
-                    .iter()
-                    .enumerate()
-                    .take(bottom_of_frame)
-                    .skip(bottom_of_frame - active_frame)
-                {
                     #[cfg(feature = "debug-gc")]
-                    eprintln!(
-                        "[GC DEBUG]   slot[{}] = {:#x}, is_heap_ptr={}",
-                        j,
-                        *slot,
-                        BuiltInTypes::is_heap_pointer(*slot)
-                    );
+                    {
+                        let tag = slot_value & 0x7;
+                        let untagged = slot_value >> 3;
+                        let tag_name = match tag {
+                            0 => "Int",
+                            1 => "Float",
+                            2 => "String",
+                            3 => "Bool",
+                            4 => "Function",
+                            5 => "Closure",
+                            6 => "HeapObject",
+                            7 => "Null",
+                            _ => "Unknown",
+                        };
+                        eprintln!(
+                            "[GC DEBUG]   slot[{}] @ {:#x} = {:#x} (tag={} [{}], untagged={:#x}), is_heap_ptr={}",
+                            i,
+                            slot_addr,
+                            slot_value,
+                            tag,
+                            tag_name,
+                            untagged,
+                            BuiltInTypes::is_heap_pointer(slot_value)
+                        );
+                    }
 
-                    if BuiltInTypes::is_heap_pointer(*slot) {
-                        let untagged = BuiltInTypes::untag(*slot);
+                    if BuiltInTypes::is_heap_pointer(slot_value) {
+                        let untagged = BuiltInTypes::untag(slot_value);
                         debug_assert!(untagged % 8 == 0, "Pointer is not aligned");
-                        callback(j, *slot);
+                        callback(slot_addr, slot_value);
                     }
                 }
-                continue;
             }
-            i += 1;
+
+            #[cfg(feature = "debug-gc")]
+            eprintln!("[GC DEBUG] Next FP: {:#x}", caller_fp);
+
+            // Safety check: FP should be moving towards stack_base (higher addresses)
+            if caller_fp != 0 && caller_fp <= fp {
+                #[cfg(feature = "debug-gc")]
+                eprintln!(
+                    "[GC DEBUG] FP chain invalid: caller_fp={:#x} <= fp={:#x}, stopping",
+                    caller_fp, fp
+                );
+                break;
+            }
+
+            fp = caller_fp;
         }
 
         #[cfg(feature = "debug-gc")]
@@ -103,28 +132,26 @@ impl StackWalker {
     }
 
     /// Collect all heap pointers from the stack into a vector
-    /// Returns (stack_offset, heap_pointer_value) pairs
+    /// Returns (slot_address, heap_pointer_value) pairs
     pub fn collect_stack_roots(
         stack_base: usize,
-        stack_pointer: usize,
+        frame_pointer: usize,
         stack_map: &StackMap,
     ) -> Vec<(usize, usize)> {
         let mut roots = Vec::with_capacity(32);
-        Self::walk_stack_roots(stack_base, stack_pointer, stack_map, |offset, pointer| {
-            roots.push((offset, pointer));
+        Self::walk_stack_roots(stack_base, frame_pointer, stack_map, |addr, pointer| {
+            roots.push((addr, pointer));
         });
         roots
     }
 
     /// Get a mutable slice of the live stack for updating pointers after GC
-    pub fn get_live_stack_mut(stack_base: usize, stack_pointer: usize) -> &'static mut [usize] {
-        let distance_till_end = stack_base - stack_pointer;
+    #[allow(dead_code)]
+    pub fn get_live_stack_mut(stack_base: usize, frame_pointer: usize) -> &'static mut [usize] {
+        let distance_till_end = stack_base - frame_pointer;
         let num_words = (distance_till_end / 8) + 1;
 
-        // Start one word before the stack pointer to match original behavior
-        let start_ptr = stack_pointer - 8;
-
-        unsafe { std::slice::from_raw_parts_mut(start_ptr as *mut usize, num_words) }
+        unsafe { std::slice::from_raw_parts_mut(frame_pointer as *mut usize, num_words) }
     }
 }
 
@@ -136,13 +163,13 @@ mod tests {
     fn test_stack_slice_calculation() {
         // Test the calculation logic with known values
         let stack_base = 0x1000;
-        let stack_pointer = 0x0F00; // 256 bytes down from base
+        let frame_pointer = 0x0F00; // 256 bytes down from base
 
-        let slice = StackWalker::get_live_stack(stack_base, stack_pointer);
+        let slice = StackWalker::get_live_stack(stack_base, frame_pointer);
 
         // Distance is 256 bytes = 32 words, +1 = 33 words
         assert_eq!(slice.len(), 33);
-        // Should start 8 bytes before stack_pointer
-        assert_eq!(slice.as_ptr() as usize, stack_pointer - 8);
+        // Slice should start at frame_pointer
+        assert_eq!(slice.as_ptr() as usize, frame_pointer);
     }
 }

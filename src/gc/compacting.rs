@@ -343,17 +343,20 @@ impl Allocator for CompactingHeap {
             self.temporary_roots[*i] = Some(*new_root);
         }
 
-        for (stack_base, stack_pointer) in stack_pointers.iter() {
-            let roots = self.gather_roots(*stack_base, stack_map, *stack_pointer);
+        for (stack_base, frame_pointer) in stack_pointers.iter() {
+            let roots = self.gather_roots(*stack_base, stack_map, *frame_pointer);
             let new_roots = unsafe { self.copy_all(roots.iter().map(|x| x.1).collect()) };
 
-            let stack_buffer = StackWalker::get_live_stack_mut(*stack_base, *stack_pointer);
-            for (i, (stack_offset, _)) in roots.iter().enumerate() {
+            // With FP-chain based walking, roots contain (slot_address, value) pairs
+            // Write new roots directly to their addresses
+            for (i, (slot_addr, _)) in roots.iter().enumerate() {
                 debug_assert!(
                     BuiltInTypes::untag(new_roots[i]) % 8 == 0,
                     "Pointer is not aligned"
                 );
-                stack_buffer[*stack_offset] = new_roots[i];
+                unsafe {
+                    *(*slot_addr as *mut usize) = new_roots[i];
+                }
             }
         }
 

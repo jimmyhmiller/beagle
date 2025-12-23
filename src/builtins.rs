@@ -350,6 +350,27 @@ pub fn get_current_stack_pointer() -> usize {
     sp
 }
 
+pub fn get_current_frame_pointer() -> usize {
+    use core::arch::asm;
+    let fp: usize;
+    unsafe {
+        cfg_if::cfg_if! {
+            if #[cfg(target_arch = "x86_64")] {
+                asm!(
+                    "mov {0}, rbp",
+                    out(reg) fp
+                );
+            } else {
+                asm!(
+                    "mov {0}, x29",
+                    out(reg) fp
+                );
+            }
+        }
+    }
+    fp
+}
+
 extern "C" fn property_access(
     struct_pointer: usize,
     str_constant_ptr: usize,
@@ -648,23 +669,32 @@ pub unsafe extern "C" fn call_variadic_function_value(
     let min_args = function.min_args;
     let is_closure_bool = is_closure == BuiltInTypes::true_value() as usize;
 
-    // Get args from array
+    // Get arg count before allocation (allocation can trigger GC)
     let args_heap = HeapObject::from_tagged(args_array_ptr);
-    let all_args = args_heap.get_fields();
-    let total_args = all_args.len();
+    let total_args = args_heap.get_fields().len();
 
     // Build rest array for args[min_args..]
     let num_extra = total_args.saturating_sub(min_args);
 
-    // Allocate array for extra args
+    // Register args_array as a temporary root before allocation
     let runtime_mut = get_runtime().get_mut();
+    let args_root_id = runtime_mut.register_temporary_root(args_array_ptr);
+
+    // Allocate array for extra args (can trigger GC)
     let rest_array = runtime_mut
         .allocate(num_extra, stack_pointer, BuiltInTypes::HeapObject)
         .unwrap();
 
+    // Unregister args_array root after allocation is complete
+    runtime_mut.unregister_temporary_root(args_root_id);
+
     // Set type_id to 1 (raw array)
     let mut rest_heap = HeapObject::from_tagged(rest_array);
     rest_heap.write_type_id(1);
+
+    // Now get the args fields - AFTER allocation to ensure they're still valid
+    let args_heap = HeapObject::from_tagged(args_array_ptr);
+    let all_args = args_heap.get_fields();
 
     // Copy extra args into rest array
     let rest_fields = rest_heap.get_fields_mut();
@@ -1110,10 +1140,12 @@ pub unsafe extern "C" fn set_current_namespace(namespace: usize) -> usize {
     BuiltInTypes::null_value() as usize
 }
 
-pub unsafe extern "C" fn __pause(stack_pointer: usize) -> usize {
+pub unsafe extern "C" fn __pause(_stack_pointer: usize) -> usize {
     let runtime = get_runtime().get_mut();
 
-    pause_current_thread(stack_pointer, runtime);
+    // Use frame pointer for accurate stack walking instead of passed stack_pointer
+    let frame_pointer = get_current_frame_pointer();
+    pause_current_thread(frame_pointer, runtime);
 
     while runtime.is_paused() {
         // Park can unpark itself even if I haven't called unpark
@@ -1127,12 +1159,13 @@ pub unsafe extern "C" fn __pause(stack_pointer: usize) -> usize {
     BuiltInTypes::null_value() as usize
 }
 
-fn pause_current_thread(stack_pointer: usize, runtime: &mut Runtime) {
+fn pause_current_thread(frame_pointer: usize, runtime: &mut Runtime) {
     let thread_state = runtime.thread_state.clone();
     let (lock, condvar) = &*thread_state;
     let mut state = lock.lock().unwrap();
     let stack_base = runtime.get_stack_base();
-    state.pause((stack_base, stack_pointer));
+    // Store (stack_base, frame_pointer) for FP-chain based stack walking
+    state.pause((stack_base, frame_pointer));
     condvar.notify_one();
     drop(state);
 }
@@ -1145,13 +1178,15 @@ fn unpause_current_thread(runtime: &mut Runtime) {
     condvar.notify_one();
 }
 
-pub extern "C" fn register_c_call(stack_pointer: usize) -> usize {
+pub extern "C" fn register_c_call(_stack_pointer: usize) -> usize {
+    // Use frame pointer for FP-chain based stack walking
+    let frame_pointer = get_current_frame_pointer();
     let runtime = get_runtime().get_mut();
     let thread_state = runtime.thread_state.clone();
     let (lock, condvar) = &*thread_state;
     let mut state = lock.lock().unwrap();
     let stack_base = runtime.get_stack_base();
-    state.register_c_call((stack_base, stack_pointer));
+    state.register_c_call((stack_base, frame_pointer));
     condvar.notify_one();
     BuiltInTypes::null_value() as usize
 }
@@ -3146,38 +3181,78 @@ unsafe fn allocate_struct(
 }
 
 /// Converts a CompilerWarning to a Beagle struct.
+/// Wrapper that ensures temporary roots are always cleaned up.
 unsafe fn warning_to_struct(
     runtime: &mut Runtime,
     stack_pointer: usize,
     warning: &crate::compiler::CompilerWarning,
 ) -> Result<usize, String> {
+    let mut temp_roots: Vec<usize> = Vec::new();
+
+    // Do all the work that might fail
+    // SAFETY: warning_to_struct_impl is unsafe for the same reasons as this function
+    let result =
+        unsafe { warning_to_struct_impl(runtime, stack_pointer, warning, &mut temp_roots) };
+
+    // Always clean up temporary roots, whether success or failure
+    for root_id in temp_roots {
+        runtime.unregister_temporary_root(root_id);
+    }
+
+    result
+}
+
+/// Inner implementation that does the actual work.
+/// Any early return via ? will be caught by the wrapper which cleans up temp_roots.
+unsafe fn warning_to_struct_impl(
+    runtime: &mut Runtime,
+    stack_pointer: usize,
+    warning: &crate::compiler::CompilerWarning,
+    temp_roots: &mut Vec<usize>,
+) -> Result<usize, String> {
     // Use line and column directly from the warning struct
     let line = warning.line;
     let column = warning.column;
+
+    // Helper macro to allocate and register as temp root
+    macro_rules! alloc_and_root {
+        ($expr:expr) => {{
+            let val: usize = $expr;
+            let root_id = runtime.register_temporary_root(val);
+            temp_roots.push(root_id);
+            val
+        }};
+    }
 
     // Create kind string based on warning type
     let kind_str = match &warning.kind {
         crate::compiler::WarningKind::NonExhaustiveMatch { .. } => "NonExhaustiveMatch",
         crate::compiler::WarningKind::UnreachablePattern => "UnreachablePattern",
     };
-    let kind_tagged = runtime
-        .allocate_string(stack_pointer, kind_str.to_string())
-        .map_err(|e| format!("Failed to create kind string: {}", e))?
-        .into();
+    let kind_tagged = alloc_and_root!(
+        runtime
+            .allocate_string(stack_pointer, kind_str.to_string())
+            .map_err(|e| format!("Failed to create kind string: {}", e))?
+            .into()
+    );
 
     // Create file_name string
-    let file_name_tagged = runtime
-        .allocate_string(stack_pointer, warning.file_name.clone())
-        .map_err(|e| format!("Failed to create file_name string: {}", e))?
-        .into();
+    let file_name_tagged = alloc_and_root!(
+        runtime
+            .allocate_string(stack_pointer, warning.file_name.clone())
+            .map_err(|e| format!("Failed to create file_name string: {}", e))?
+            .into()
+    );
 
     // Create message string
-    let message_tagged = runtime
-        .allocate_string(stack_pointer, warning.message.clone())
-        .map_err(|e| format!("Failed to create message string: {}", e))?
-        .into();
+    let message_tagged = alloc_and_root!(
+        runtime
+            .allocate_string(stack_pointer, warning.message.clone())
+            .map_err(|e| format!("Failed to create message string: {}", e))?
+            .into()
+    );
 
-    // Create line and column as tagged ints
+    // Create line and column as tagged ints (no allocation, no rooting needed)
     let line_tagged = BuiltInTypes::Int.tag(line as isize) as usize;
     let column_tagged = BuiltInTypes::Int.tag(column as isize) as usize;
 
@@ -3188,20 +3263,34 @@ unsafe fn warning_to_struct(
             missing_variants,
         } => {
             // Create enum_name string
-            let enum_name_str = runtime
-                .allocate_string(stack_pointer, enum_name.clone())
-                .map_err(|e| format!("Failed to create enum_name string: {}", e))?
-                .into();
+            let enum_name_str = alloc_and_root!(
+                runtime
+                    .allocate_string(stack_pointer, enum_name.clone())
+                    .map_err(|e| format!("Failed to create enum_name string: {}", e))?
+                    .into()
+            );
 
             // Build persistent vector of variant strings
             let empty_vec = unsafe { call_fn_1(runtime, "persistent_vector/vec", 0) };
             let mut vec = empty_vec;
+            let mut vec_root_id = runtime.register_temporary_root(vec);
+            // Track vec_root_id immediately so it gets cleaned up on early return
+            temp_roots.push(vec_root_id);
+            let vec_root_index = temp_roots.len() - 1;
+
             for variant in missing_variants {
                 let variant_str: usize = runtime
                     .allocate_string(stack_pointer, variant.clone())
                     .map_err(|e| format!("Failed to create variant string: {}", e))?
                     .into();
+                let variant_root_id = runtime.register_temporary_root(variant_str);
                 vec = unsafe { call_fn_2(runtime, "persistent_vector/push", vec, variant_str) };
+                runtime.unregister_temporary_root(variant_root_id);
+                // Update vec root to point to new vec
+                runtime.unregister_temporary_root(vec_root_id);
+                vec_root_id = runtime.register_temporary_root(vec);
+                // Update the tracked root ID so cleanup uses the current one
+                temp_roots[vec_root_index] = vec_root_id;
             }
 
             (enum_name_str, vec)
@@ -3248,13 +3337,19 @@ pub unsafe extern "C" fn compiler_warnings(stack_pointer: usize) -> usize {
     // Start with empty persistent vector
     let mut vec = unsafe { call_fn_1(runtime, "persistent_vector/vec", 0) };
 
+    // Register vec as a temporary root to protect it from GC during the loop
+    let mut vec_root_id = runtime.register_temporary_root(vec);
+
     // Convert each warning to struct and add to persistent vector
     for warning in warnings.iter() {
         match unsafe { warning_to_struct(runtime, stack_pointer, warning) } {
             Ok(warning_struct) => {
-                let root_id = runtime.register_temporary_root(warning_struct);
+                let warning_root_id = runtime.register_temporary_root(warning_struct);
                 vec = unsafe { call_fn_2(runtime, "persistent_vector/push", vec, warning_struct) };
-                runtime.unregister_temporary_root(root_id);
+                runtime.unregister_temporary_root(warning_root_id);
+                // Update the root to point to the new vec
+                runtime.unregister_temporary_root(vec_root_id);
+                vec_root_id = runtime.register_temporary_root(vec);
             }
             Err(e) => {
                 // Log error but continue processing other warnings
@@ -3262,6 +3357,9 @@ pub unsafe extern "C" fn compiler_warnings(stack_pointer: usize) -> usize {
             }
         }
     }
+
+    // Unregister final vec root before returning
+    runtime.unregister_temporary_root(vec_root_id);
 
     vec
 }

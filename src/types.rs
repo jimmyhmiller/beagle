@@ -118,14 +118,14 @@ impl BuiltInTypes {
     }
 
     pub fn is_heap_pointer(value: usize) -> bool {
+        // With proper FP-chain based stack walking, we only scan actual Beagle
+        // locals, not garbage from Rust frames. So we can use the simple check.
         match BuiltInTypes::get_kind(value) {
             BuiltInTypes::Int => false,
-            BuiltInTypes::Float => true,
+            BuiltInTypes::Float | BuiltInTypes::Closure | BuiltInTypes::HeapObject => true,
             BuiltInTypes::String => false,
             BuiltInTypes::Bool => false,
             BuiltInTypes::Function => false,
-            BuiltInTypes::Closure => true,
-            BuiltInTypes::HeapObject => true,
             BuiltInTypes::Null => false,
         }
     }
