@@ -133,6 +133,16 @@ extend String with Format {
 // this makes that idea simple
 fn __call_fn(f) { f() }
 
+// Used by thread spawning. The temp_root_id points to a closure registered
+// as a temporary GC root. This function reads the closure from the root,
+// unregisters the root, then calls the closure. By doing this in Beagle code
+// (rather than Rust), the closure value is on the Beagle stack where GC can
+// update it if needed.
+fn __call_fn_from_root(temp_root_id) {
+    let f = builtin/__get_and_unregister_temp_root(temp_root_id);
+    f()
+}
+
 struct Atom {
     value
 }

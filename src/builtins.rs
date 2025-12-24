@@ -1,6 +1,7 @@
 use core::panic;
 use std::{
     arch::asm,
+    cell::Cell,
     error::Error,
     ffi::{CStr, c_void},
     hash::{DefaultHasher, Hasher},
@@ -24,6 +25,25 @@ use crate::{
 
 use std::hash::Hash;
 use std::hint::black_box;
+
+// Thread-local storage for the frame pointer at builtin entry.
+// This is set by builtins that receive frame_pointer from Beagle code.
+// Used by gc() when triggered internally (e.g., during allocation).
+thread_local! {
+    static SAVED_FRAME_POINTER: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Save the frame pointer for later use by gc().
+/// Called by builtins that receive frame_pointer from Beagle.
+pub fn save_frame_pointer(fp: usize) {
+    SAVED_FRAME_POINTER.with(|cell| cell.set(fp));
+}
+
+/// Get the saved frame pointer.
+/// Returns 0 if none has been saved (shouldn't happen in normal operation).
+pub fn get_saved_frame_pointer() -> usize {
+    SAVED_FRAME_POINTER.with(|cell| cell.get())
+}
 
 pub unsafe extern "C" fn debug_stack_segments() -> usize {
     let runtime = get_runtime().get();
@@ -125,18 +145,20 @@ pub unsafe extern "C" fn println_value(value: usize) -> usize {
     let result = runtime.println(value);
     if let Err(error) = result {
         let stack_pointer = get_current_stack_pointer();
+        let frame_pointer = get_saved_frame_pointer();
         println!("Error: {:?}", error);
-        unsafe { throw_error(stack_pointer) };
+        unsafe { throw_error(stack_pointer, frame_pointer) };
     }
     0b111
 }
 
-pub unsafe extern "C" fn to_string(stack_pointer: usize, value: usize) -> usize {
+pub unsafe extern "C" fn to_string(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     let runtime = get_runtime().get_mut();
     let result = runtime.get_repr(value, 0);
     if result.is_none() {
         let stack_pointer = get_current_stack_pointer();
-        unsafe { throw_error(stack_pointer) };
+        unsafe { throw_error(stack_pointer, frame_pointer) };
     }
     let result = result.unwrap();
     runtime
@@ -145,7 +167,8 @@ pub unsafe extern "C" fn to_string(stack_pointer: usize, value: usize) -> usize 
         .into()
 }
 
-pub unsafe extern "C" fn to_number(stack_pointer: usize, value: usize) -> usize {
+pub unsafe extern "C" fn to_number(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     let runtime = get_runtime().get_mut();
     let string = runtime.get_string(stack_pointer, value);
     if string.contains(".") {
@@ -176,7 +199,8 @@ pub extern "C" fn print_byte(value: usize) -> usize {
     0b111
 }
 
-extern "C" fn allocate(stack_pointer: usize, size: usize) -> usize {
+extern "C" fn allocate(stack_pointer: usize, frame_pointer: usize, size: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     let size = BuiltInTypes::untag(size);
     let runtime = get_runtime().get_mut();
 
@@ -189,7 +213,8 @@ extern "C" fn allocate(stack_pointer: usize, size: usize) -> usize {
     result
 }
 
-extern "C" fn allocate_float(stack_pointer: usize, size: usize) -> usize {
+extern "C" fn allocate_float(stack_pointer: usize, frame_pointer: usize, size: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     let runtime = get_runtime().get_mut();
     let value = BuiltInTypes::untag(size);
 
@@ -202,7 +227,8 @@ extern "C" fn allocate_float(stack_pointer: usize, size: usize) -> usize {
     result
 }
 
-extern "C" fn get_string_index(stack_pointer: usize, string: usize, index: usize) -> usize {
+extern "C" fn get_string_index(stack_pointer: usize, frame_pointer: usize, string: usize, index: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     print_call_builtin(get_runtime().get(), "get_string_index");
     let runtime = get_runtime().get_mut();
     if BuiltInTypes::get_kind(string) == BuiltInTypes::String {
@@ -250,7 +276,8 @@ extern "C" fn get_string_length(string: usize) -> usize {
     }
 }
 
-extern "C" fn string_concat(stack_pointer: usize, a: usize, b: usize) -> usize {
+extern "C" fn string_concat(stack_pointer: usize, frame_pointer: usize, a: usize, b: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     print_call_builtin(get_runtime().get(), "string_concat");
     let runtime = get_runtime().get_mut();
     let a = runtime.get_string(stack_pointer, a);
@@ -262,7 +289,8 @@ extern "C" fn string_concat(stack_pointer: usize, a: usize, b: usize) -> usize {
         .into()
 }
 
-extern "C" fn substring(stack_pointer: usize, string: usize, start: usize, length: usize) -> usize {
+extern "C" fn substring(stack_pointer: usize, frame_pointer: usize, string: usize, start: usize, length: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     print_call_builtin(get_runtime().get(), "substring");
     let runtime = get_runtime().get_mut();
     let string_pointer = runtime.register_temporary_root(string);
@@ -275,7 +303,8 @@ extern "C" fn substring(stack_pointer: usize, string: usize, start: usize, lengt
     string.into()
 }
 
-extern "C" fn uppercase(stack_pointer: usize, string: usize) -> usize {
+extern "C" fn uppercase(stack_pointer: usize, frame_pointer: usize, string: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     print_call_builtin(get_runtime().get(), "uppercase");
     let runtime = get_runtime().get_mut();
     let string_value = runtime.get_string(stack_pointer, string);
@@ -296,10 +325,12 @@ extern "C" fn fill_object_fields(object_pointer: usize, value: usize) -> usize {
 
 extern "C" fn make_closure(
     stack_pointer: usize,
+    frame_pointer: usize,
     function: usize,
     num_free: usize,
     free_variable_pointer: usize,
 ) -> usize {
+    save_frame_pointer(frame_pointer);
     print_call_builtin(get_runtime().get(), "make_closure");
     let runtime = get_runtime().get_mut();
     if BuiltInTypes::get_kind(function) != BuiltInTypes::Function {
@@ -350,6 +381,10 @@ pub fn get_current_stack_pointer() -> usize {
     sp
 }
 
+/// Get the current frame pointer (RBP on x86-64, X29 on ARM64).
+/// Note: This is currently unused because Rust functions may not preserve
+/// frame pointers, making FP-chain traversal unreliable for GC.
+#[allow(dead_code)]
 pub fn get_current_frame_pointer() -> usize {
     use core::arch::asm;
     let fp: usize;
@@ -381,11 +416,12 @@ extern "C" fn property_access(
         .property_access(struct_pointer, str_constant_ptr)
         .unwrap_or_else(|error| {
             let stack_pointer = get_current_stack_pointer();
+            let frame_pointer = get_saved_frame_pointer();
             let heap_object = HeapObject::from_tagged(struct_pointer);
             println!("Heap object: {:?}", heap_object.get_header());
             println!("Error: {:?}", error);
             unsafe {
-                throw_error(stack_pointer);
+                throw_error(stack_pointer, frame_pointer);
             };
         });
     let type_id = HeapObject::from_tagged(struct_pointer).get_struct_id();
@@ -463,13 +499,15 @@ extern "C" fn protocol_dispatch(
     fn_ptr
 }
 
-extern "C" fn type_of(stack_pointer: usize, value: usize) -> usize {
+extern "C" fn type_of(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     print_call_builtin(get_runtime().get(), "type_of");
     let runtime = get_runtime().get_mut();
     runtime.type_of(stack_pointer, value).unwrap()
 }
 
-extern "C" fn get_os(stack_pointer: usize) -> usize {
+extern "C" fn get_os(stack_pointer: usize, frame_pointer: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     print_call_builtin(get_runtime().get(), "get_os");
     let runtime = get_runtime().get_mut();
     let os_name = if cfg!(target_os = "macos") {
@@ -499,11 +537,13 @@ extern "C" fn equal(a: usize, b: usize) -> usize {
 
 extern "C" fn write_field(
     stack_pointer: usize,
+    frame_pointer: usize,
     struct_pointer: usize,
     str_constant_ptr: usize,
     property_cache_location: usize,
     value: usize,
 ) -> usize {
+    save_frame_pointer(frame_pointer);
     let runtime = get_runtime().get_mut();
     let index = runtime.write_field(stack_pointer, struct_pointer, str_constant_ptr, value);
     let type_id = HeapObject::from_tagged(struct_pointer).get_struct_id();
@@ -513,16 +553,19 @@ extern "C" fn write_field(
     BuiltInTypes::null_value() as usize
 }
 
-pub unsafe extern "C" fn throw_error(stack_pointer: usize) -> ! {
+pub unsafe extern "C" fn throw_error(stack_pointer: usize, frame_pointer: usize) -> ! {
+    save_frame_pointer(frame_pointer);
     print_stack(stack_pointer);
     panic!("Error!");
 }
 
 pub unsafe extern "C" fn check_arity(
     stack_pointer: usize,
+    frame_pointer: usize,
     function_pointer: usize,
     expected_args: isize,
 ) -> isize {
+    save_frame_pointer(frame_pointer);
     let runtime = get_runtime().get();
 
     // Function pointer is tagged, need to untag
@@ -540,7 +583,7 @@ pub unsafe extern "C" fn check_arity(
                     function.name, function.min_args, expected_args_untagged
                 );
                 unsafe {
-                    throw_error(stack_pointer);
+                    throw_error(stack_pointer, frame_pointer);
                 }
             }
         } else {
@@ -551,7 +594,7 @@ pub unsafe extern "C" fn check_arity(
                     function.name, function.number_of_args, expected_args_untagged
                 );
                 unsafe {
-                    throw_error(stack_pointer);
+                    throw_error(stack_pointer, frame_pointer);
                 }
             }
         }
@@ -600,10 +643,12 @@ pub unsafe extern "C" fn get_function_min_args(function_pointer: usize) -> usize
 /// Returns: tagged array pointer containing args[min_args..total_args]
 pub unsafe extern "C" fn pack_variadic_args_from_stack(
     stack_pointer: usize,
+    frame_pointer: usize,
     args_base: usize,
     total_args: usize,
     min_args: usize,
 ) -> usize {
+    save_frame_pointer(frame_pointer);
     let runtime = get_runtime().get_mut();
 
     let total = BuiltInTypes::untag(total_args);
@@ -646,6 +691,7 @@ pub unsafe extern "C" fn pack_variadic_args_from_stack(
 ///
 /// Arguments:
 /// - stack_pointer: For GC safety during allocation
+/// - frame_pointer: For GC stack walking
 /// - function_ptr: Tagged function pointer
 /// - args_array_ptr: Tagged pointer to array containing all call arguments
 /// - is_closure: Tagged boolean - true if calling through a closure
@@ -654,11 +700,13 @@ pub unsafe extern "C" fn pack_variadic_args_from_stack(
 /// Returns: The function's return value
 pub unsafe extern "C" fn call_variadic_function_value(
     stack_pointer: usize,
+    frame_pointer: usize,
     function_ptr: usize,
     args_array_ptr: usize,
     is_closure: usize,
     closure_ptr: usize,
 ) -> usize {
+    save_frame_pointer(frame_pointer);
     let runtime = get_runtime().get();
 
     // Get function metadata
@@ -914,9 +962,21 @@ fn print_stack(_stack_pointer: usize) {
     }
 }
 
-pub unsafe extern "C" fn gc(stack_pointer: usize) -> usize {
+pub unsafe extern "C" fn gc(stack_pointer: usize, frame_pointer: usize) -> usize {
+    save_frame_pointer(frame_pointer);
+    // The gc() call's return address is at [stack_pointer - 8]
+    // (stack_pointer was RSP before the CALL instruction)
+    // This return address is needed because:
+    // - frame_pointer is main's RBP (good for scanning locals)
+    // - But [frame_pointer + 8] is main's return address to the TRAMPOLINE (not in stack map)
+    // - The gc() call's return address IS in the stack map (it's a call site in main)
+    let gc_return_addr = unsafe { *((stack_pointer - 8) as *const usize) };
+    #[cfg(feature = "debug-gc")]
+    {
+        eprintln!("DEBUG gc: stack_pointer={:#x}, frame_pointer={:#x}, gc_return_addr={:#x}", stack_pointer, frame_pointer, gc_return_addr);
+    }
     let runtime = get_runtime().get_mut();
-    runtime.gc(stack_pointer);
+    runtime.gc_impl(stack_pointer, frame_pointer, gc_return_addr);
     BuiltInTypes::null_value() as usize
 }
 
@@ -928,7 +988,8 @@ pub unsafe extern "C" fn gc_add_root(old: usize) -> usize {
 
 /// sqrt builtin - computes square root of a float
 /// Takes a tagged float pointer, returns a new tagged float pointer with the result
-pub unsafe extern "C" fn sqrt_builtin(stack_pointer: usize, value: usize) -> usize {
+pub unsafe extern "C" fn sqrt_builtin(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
 
@@ -955,7 +1016,8 @@ pub unsafe extern "C" fn sqrt_builtin(stack_pointer: usize, value: usize) -> usi
 }
 
 /// floor builtin - computes floor of a float
-pub unsafe extern "C" fn floor_builtin(stack_pointer: usize, value: usize) -> usize {
+pub unsafe extern "C" fn floor_builtin(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
 
@@ -978,7 +1040,8 @@ pub unsafe extern "C" fn floor_builtin(stack_pointer: usize, value: usize) -> us
 }
 
 /// ceil builtin - computes ceiling of a float
-pub unsafe extern "C" fn ceil_builtin(stack_pointer: usize, value: usize) -> usize {
+pub unsafe extern "C" fn ceil_builtin(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
 
@@ -1001,7 +1064,8 @@ pub unsafe extern "C" fn ceil_builtin(stack_pointer: usize, value: usize) -> usi
 }
 
 /// abs builtin - computes absolute value of a float
-pub unsafe extern "C" fn abs_builtin(stack_pointer: usize, value: usize) -> usize {
+pub unsafe extern "C" fn abs_builtin(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
 
@@ -1024,7 +1088,8 @@ pub unsafe extern "C" fn abs_builtin(stack_pointer: usize, value: usize) -> usiz
 }
 
 /// sin builtin - computes sine of a float (in radians)
-pub unsafe extern "C" fn sin_builtin(stack_pointer: usize, value: usize) -> usize {
+pub unsafe extern "C" fn sin_builtin(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
 
@@ -1047,7 +1112,8 @@ pub unsafe extern "C" fn sin_builtin(stack_pointer: usize, value: usize) -> usiz
 }
 
 /// cos builtin - computes cosine of a float (in radians)
-pub unsafe extern "C" fn cos_builtin(stack_pointer: usize, value: usize) -> usize {
+pub unsafe extern "C" fn cos_builtin(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
 
@@ -1070,7 +1136,8 @@ pub unsafe extern "C" fn cos_builtin(stack_pointer: usize, value: usize) -> usiz
 }
 
 /// to_float builtin - converts an integer to a float
-pub unsafe extern "C" fn to_float_builtin(stack_pointer: usize, value: usize) -> usize {
+pub unsafe extern "C" fn to_float_builtin(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
 
@@ -1094,7 +1161,8 @@ pub unsafe extern "C" fn to_float_builtin(stack_pointer: usize, value: usize) ->
 }
 
 #[allow(unused)]
-pub unsafe extern "C" fn new_thread(stack_pointer: usize, function: usize) -> usize {
+pub unsafe extern "C" fn new_thread(stack_pointer: usize, frame_pointer: usize, function: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     #[cfg(feature = "thread-safe")]
     {
         let runtime = get_runtime().get_mut();
@@ -1140,11 +1208,10 @@ pub unsafe extern "C" fn set_current_namespace(namespace: usize) -> usize {
     BuiltInTypes::null_value() as usize
 }
 
-pub unsafe extern "C" fn __pause(_stack_pointer: usize) -> usize {
+pub unsafe extern "C" fn __pause(_stack_pointer: usize, frame_pointer: usize) -> usize {
     let runtime = get_runtime().get_mut();
 
-    // Use frame pointer for accurate stack walking instead of passed stack_pointer
-    let frame_pointer = get_current_frame_pointer();
+    // Use frame_pointer passed from Beagle code for FP-chain stack walking
     pause_current_thread(frame_pointer, runtime);
 
     while runtime.is_paused() {
@@ -1178,9 +1245,8 @@ fn unpause_current_thread(runtime: &mut Runtime) {
     condvar.notify_one();
 }
 
-pub extern "C" fn register_c_call(_stack_pointer: usize) -> usize {
-    // Use frame pointer for FP-chain based stack walking
-    let frame_pointer = get_current_frame_pointer();
+pub extern "C" fn register_c_call(_stack_pointer: usize, frame_pointer: usize) -> usize {
+    // Use frame_pointer passed from Beagle code for FP-chain stack walking
     let runtime = get_runtime().get_mut();
     let thread_state = runtime.thread_state.clone();
     let (lock, condvar) = &*thread_state;
@@ -1203,6 +1269,75 @@ pub extern "C" fn unregister_c_call() -> usize {
         thread::park();
     }
     BuiltInTypes::null_value() as usize
+}
+
+/// Called from a newly spawned thread to safely get a closure from a temporary root and call it.
+/// This function:
+/// 1. Unregisters from C-call (so this thread can participate in GC safepoints)
+/// 2. Peeks the current closure value from the temporary root (which may have been updated by GC)
+/// 3. Unregisters the temporary root
+/// 4. Calls the closure via __call_fn
+///
+/// The temporary_root_id is passed as a tagged integer.
+/// Get a value from a temporary root and unregister it.
+/// This is called from Beagle code after entering a managed context.
+pub extern "C" fn get_and_unregister_temp_root(temporary_root_id: usize) -> usize {
+    let runtime = get_runtime().get_mut();
+    let root_id = BuiltInTypes::untag(temporary_root_id);
+    // Read and unregister in one operation
+    runtime.unregister_temporary_root(root_id)
+}
+
+pub extern "C" fn thread_call_fn_from_root(temporary_root_id: usize) -> usize {
+    // We enter this function while registered as C-calling.
+    // We need to:
+    // 1. Unregister from C-call and properly pause if GC is in progress
+    // 2. Call __call_fn_from_root which will read the temp root and call the closure
+    //
+    // IMPORTANT: We do NOT read the closure here in Rust. If we did, GC could relocate
+    // the closure between our read and when we use it. Instead, we pass the root ID to
+    // Beagle code, which reads the closure value at a safepoint where GC can update
+    // stack slots if needed.
+
+    let runtime = get_runtime().get_mut();
+    let thread_state = runtime.thread_state.clone();
+
+    // Unregister from C-call. We use the same pattern as __pause to properly
+    // participate in GC coordination.
+    let stack_base = runtime.get_stack_base();
+
+    {
+        let (lock, condvar) = &*thread_state;
+        let mut state = lock.lock().unwrap();
+        state.unregister_c_call();
+
+        // If GC is in progress (is_paused), we need to register as paused so GC can proceed
+        if runtime.is_paused() {
+            // Register as paused with our current stack position
+            state.pause((stack_base, stack_base));
+            condvar.notify_one();
+            drop(state);
+
+            // Wait until GC is done
+            while runtime.is_paused() {
+                thread::park();
+            }
+
+            // Unregister from paused state
+            let (lock, condvar) = &*thread_state;
+            let mut state = lock.lock().unwrap();
+            state.unpause();
+            condvar.notify_one();
+        } else {
+            condvar.notify_one();
+        }
+    }
+
+    // Call the Beagle function that will read the temp root and call the closure.
+    // The temp root ID is passed as a tagged integer.
+    unsafe {
+        call_fn_1(runtime, "beagle.core/__call_fn_from_root", temporary_root_id)
+    }
 }
 
 pub unsafe fn call_fn_1(runtime: &Runtime, function_name: &str, arg1: usize) -> usize {
@@ -1379,11 +1514,13 @@ fn array_to_vec(object: HeapObject) -> Vec<usize> {
 
 pub extern "C" fn get_function(
     stack_pointer: usize,
+    frame_pointer: usize,
     library_struct: usize,
     function_name: usize,
     types: usize,
     return_type: usize,
 ) -> usize {
+    save_frame_pointer(frame_pointer);
     let runtime = get_runtime().get_mut();
     let library = runtime.get_library(library_struct);
     let function_name = runtime.get_string_literal(function_name);
@@ -1490,6 +1627,7 @@ pub extern "C" fn get_function(
 // instead of hardcoding 0
 pub unsafe extern "C" fn call_ffi_info(
     stack_pointer: usize,
+    _frame_pointer: usize, // Frame pointer for GC stack walking
     ffi_info_id: usize,
     a1: usize,
     a2: usize,
@@ -1708,7 +1846,8 @@ pub unsafe extern "C" fn call_ffi_info(
     }
 }
 
-pub unsafe extern "C" fn copy_object(stack_pointer: usize, object_pointer: usize) -> usize {
+pub unsafe extern "C" fn copy_object(stack_pointer: usize, frame_pointer: usize, object_pointer: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     let runtime = get_runtime().get_mut();
     let object_pointer_id = runtime.register_temporary_root(object_pointer);
     let to_pointer = {
@@ -1725,7 +1864,7 @@ pub unsafe extern "C" fn copy_object(stack_pointer: usize, object_pointer: usize
     if let Err(error) = result {
         let stack_pointer = get_current_stack_pointer();
         println!("Error: {:?}", error);
-        unsafe { throw_error(stack_pointer) };
+        unsafe { throw_error(stack_pointer, frame_pointer) };
     } else {
         result.unwrap()
     }
@@ -1867,6 +2006,7 @@ unsafe extern "C" fn ffi_get_i32(buffer: usize, offset: usize) -> usize {
 
 unsafe extern "C" fn ffi_get_string(
     stack_pointer: usize,
+    _frame_pointer: usize, // Frame pointer for GC stack walking
     buffer: usize,
     offset: usize,
     len: usize,
@@ -1888,6 +2028,7 @@ unsafe extern "C" fn ffi_get_string(
 
 unsafe extern "C" fn ffi_create_array(
     stack_pointer: usize,
+    _frame_pointer: usize, // Frame pointer for GC stack walking
     ffi_type: usize,
     array: usize,
 ) -> usize {
@@ -2144,7 +2285,8 @@ extern "C" fn placeholder() -> usize {
     BuiltInTypes::null_value() as usize
 }
 
-extern "C" fn wait_for_input(stack_pointer: usize) -> usize {
+extern "C" fn wait_for_input(stack_pointer: usize, frame_pointer: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).unwrap();
     let runtime = get_runtime().get_mut();
@@ -2153,7 +2295,8 @@ extern "C" fn wait_for_input(stack_pointer: usize) -> usize {
 }
 
 // Get the ASCII code of the first character of a string
-extern "C" fn char_code(stack_pointer: usize, string: usize) -> usize {
+extern "C" fn char_code(stack_pointer: usize, frame_pointer: usize, string: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     let runtime = get_runtime().get_mut();
     let string = runtime.get_string(stack_pointer, string);
     if let Some(ch) = string.chars().next() {
@@ -2165,7 +2308,8 @@ extern "C" fn char_code(stack_pointer: usize, string: usize) -> usize {
 }
 
 // Create a single-character string from an ASCII code
-extern "C" fn char_from_code(stack_pointer: usize, code: usize) -> usize {
+extern "C" fn char_from_code(stack_pointer: usize, frame_pointer: usize, code: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     let code = BuiltInTypes::untag(code) as u8;
     let ch = code as char;
     let runtime = get_runtime().get_mut();
@@ -2177,7 +2321,8 @@ extern "C" fn char_from_code(stack_pointer: usize, code: usize) -> usize {
 
 // Read a line from stdin, stripping the trailing newline
 // Returns null if EOF is reached
-extern "C" fn read_line(stack_pointer: usize) -> usize {
+extern "C" fn read_line(stack_pointer: usize, frame_pointer: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     let mut input = String::new();
     match std::io::stdin().read_line(&mut input) {
         Ok(0) => {
@@ -2203,7 +2348,8 @@ extern "C" fn read_line(stack_pointer: usize) -> usize {
     }
 }
 
-extern "C" fn read_full_file(stack_pointer: usize, file_name: usize) -> usize {
+extern "C" fn read_full_file(stack_pointer: usize, frame_pointer: usize, file_name: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     let runtime = get_runtime().get_mut();
     let file_name = runtime.get_string(stack_pointer, file_name);
     let file = std::fs::read_to_string(file_name).unwrap();
@@ -2211,7 +2357,8 @@ extern "C" fn read_full_file(stack_pointer: usize, file_name: usize) -> usize {
     string.unwrap().into()
 }
 
-extern "C" fn eval(stack_pointer: usize, code: usize) -> usize {
+extern "C" fn eval(stack_pointer: usize, frame_pointer: usize, code: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     let runtime = get_runtime().get_mut();
     let code = match BuiltInTypes::get_kind(code) {
         BuiltInTypes::String => runtime.get_string_literal(code),
@@ -2301,7 +2448,8 @@ pub extern "C" fn register_extension(
     BuiltInTypes::null_value() as usize
 }
 
-extern "C" fn hash(stack_pointer: usize, value: usize) -> usize {
+extern "C" fn hash(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     print_call_builtin(get_runtime().get(), "hash");
     let tag = BuiltInTypes::get_kind(value);
     match tag {
@@ -2357,7 +2505,8 @@ pub extern "C" fn is_keyword(value: usize) -> usize {
     BuiltInTypes::construct_boolean(is_kw) as usize
 }
 
-pub extern "C" fn keyword_to_string(stack_pointer: usize, keyword: usize) -> usize {
+pub extern "C" fn keyword_to_string(stack_pointer: usize, frame_pointer: usize, keyword: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     let runtime = get_runtime().get_mut();
 
     // Check if it's a HeapObject before calling from_tagged
@@ -2393,7 +2542,8 @@ pub extern "C" fn keyword_to_string(stack_pointer: usize, keyword: usize) -> usi
         .into()
 }
 
-pub extern "C" fn string_to_keyword(stack_pointer: usize, string_value: usize) -> usize {
+pub extern "C" fn string_to_keyword(stack_pointer: usize, frame_pointer: usize, string_value: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     let runtime = get_runtime().get_mut();
     let keyword_text = runtime.get_string(stack_pointer, string_value);
 
@@ -2401,7 +2551,8 @@ pub extern "C" fn string_to_keyword(stack_pointer: usize, string_value: usize) -
     runtime.intern_keyword(stack_pointer, keyword_text).unwrap()
 }
 
-pub extern "C" fn load_keyword_constant_runtime(stack_pointer: usize, index: usize) -> usize {
+pub extern "C" fn load_keyword_constant_runtime(stack_pointer: usize, frame_pointer: usize, index: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     let runtime = get_runtime().get_mut();
 
     // Check if we already allocated this keyword
@@ -2442,7 +2593,8 @@ extern "C" fn many_args(
     BuiltInTypes::Int.tag(result as isize) as usize
 }
 
-extern "C" fn pop_count(stack_pointer: usize, value: usize) -> usize {
+extern "C" fn pop_count(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     print_call_builtin(get_runtime().get(), "pop_count");
     let tag = BuiltInTypes::get_kind(value);
     match tag {
@@ -2493,7 +2645,8 @@ pub unsafe extern "C" fn pop_exception_handler_runtime() -> usize {
     BuiltInTypes::null_value() as usize
 }
 
-pub unsafe extern "C" fn throw_exception(stack_pointer: usize, value: usize) -> ! {
+pub unsafe extern "C" fn throw_exception(stack_pointer: usize, frame_pointer: usize, value: usize) -> ! {
+    save_frame_pointer(frame_pointer);
     print_call_builtin(get_runtime().get(), "throw_exception");
 
     // Create exception object
@@ -2567,7 +2720,7 @@ pub unsafe extern "C" fn throw_exception(stack_pointer: usize, value: usize) -> 
             // Handler ran, now terminate since exception was uncaught
             println!("Uncaught exception after thread handler:");
             get_runtime().get_mut().println(exception).ok();
-            unsafe { throw_error(stack_pointer) };
+            unsafe { throw_error(stack_pointer, frame_pointer) };
         }
 
         // Check default (global) uncaught exception handler
@@ -2583,13 +2736,13 @@ pub unsafe extern "C" fn throw_exception(stack_pointer: usize, value: usize) -> 
             // Handler ran, now panic since exception was uncaught
             println!("Uncaught exception after default handler:");
             get_runtime().get_mut().println(exception).ok();
-            unsafe { throw_error(stack_pointer) };
+            unsafe { throw_error(stack_pointer, frame_pointer) };
         }
 
         // No handler at all - panic with stack trace
         println!("Uncaught exception:");
         get_runtime().get_mut().println(exception).ok();
-        unsafe { throw_error(stack_pointer) };
+        unsafe { throw_error(stack_pointer, frame_pointer) };
     }
 }
 
@@ -2607,9 +2760,10 @@ pub unsafe extern "C" fn set_default_exception_handler(handler_fn: usize) {
 /// Returns tagged heap pointer to Error { kind, message, location }
 pub unsafe extern "C" fn create_error(
     stack_pointer: usize,
-    kind_str: usize, // Tagged string specifying the error variant (e.g., "StructError", "TypeError")
-    message_str: usize, // Tagged string
-    location_str: usize, // Tagged string or null
+    _frame_pointer: usize, // Frame pointer for GC stack walking (needed since create_struct can allocate)
+    kind_str: usize,       // Tagged string specifying the error variant (e.g., "StructError", "TypeError")
+    message_str: usize,    // Tagged string
+    location_str: usize,   // Tagged string or null
 ) -> usize {
     print_call_builtin(get_runtime().get(), "create_error");
 
@@ -2634,6 +2788,9 @@ pub unsafe extern "C" fn create_error(
 /// Helper to throw a runtime error with kind and message strings
 /// This is a convenience function for Rust code to throw structured exceptions
 pub unsafe fn throw_runtime_error(stack_pointer: usize, kind: &str, message: String) -> ! {
+    // Get frame_pointer from thread-local (set by the builtin entry)
+    let frame_pointer = get_saved_frame_pointer();
+
     // Allocate strings and create error in a scoped block to avoid aliasing
     let (kind_str, message_str) = {
         let runtime = get_runtime().get_mut();
@@ -2653,8 +2810,8 @@ pub unsafe fn throw_runtime_error(stack_pointer: usize, kind: &str, message: Str
 
     // Create the Error struct and throw it
     unsafe {
-        let error = create_error(stack_pointer, kind_str, message_str, null_location);
-        throw_exception(stack_pointer, error);
+        let error = create_error(stack_pointer, frame_pointer, kind_str, message_str, null_location);
+        throw_exception(stack_pointer, frame_pointer, error);
     }
 }
 
@@ -2674,16 +2831,21 @@ impl Runtime {
 
         self.add_builtin_function("beagle.core/_print", print_value as *const u8, false, 1)?;
 
-        self.add_builtin_function("beagle.core/to_string", to_string as *const u8, true, 2)?;
-        self.add_builtin_function("beagle.core/to_number", to_number as *const u8, true, 2)?;
+        // to_string now takes (stack_pointer, frame_pointer, value)
+        self.add_builtin_function_with_fp("beagle.core/to_string", to_string as *const u8, true, true, 3)?;
+        // to_number now takes (stack_pointer, frame_pointer, value)
+        self.add_builtin_function_with_fp("beagle.core/to_number", to_number as *const u8, true, true, 3)?;
 
-        self.add_builtin_function("beagle.builtin/allocate", allocate as *const u8, true, 2)?;
+        // allocate now takes (stack_pointer, frame_pointer, size)
+        self.add_builtin_function_with_fp("beagle.builtin/allocate", allocate as *const u8, true, true, 3)?;
 
-        self.add_builtin_function(
+        // allocate_float now takes (stack_pointer, frame_pointer, size)
+        self.add_builtin_function_with_fp(
             "beagle.builtin/allocate_float",
             allocate_float as *const u8,
             true,
-            2,
+            true,
+            3,
         )?;
 
         self.add_builtin_function(
@@ -2693,11 +2855,13 @@ impl Runtime {
             2,
         )?;
 
-        self.add_builtin_function(
+        // copy_object now takes (stack_pointer, frame_pointer, object_pointer)
+        self.add_builtin_function_with_fp(
             "beagle.builtin/copy_object",
             copy_object as *const u8,
             true,
-            2,
+            true,
+            3,
         )?;
 
         self.add_builtin_function(
@@ -2714,11 +2878,13 @@ impl Runtime {
             4,
         )?;
 
-        self.add_builtin_function(
+        // make_closure now takes (stack_pointer, frame_pointer, function, num_free, free_variable_pointer)
+        self.add_builtin_function_with_fp(
             "beagle.builtin/make_closure",
             make_closure as *const u8,
             true,
-            4,
+            true,
+            5,
         )?;
 
         self.add_builtin_function(
@@ -2735,31 +2901,39 @@ impl Runtime {
             3, // first_arg, cache_location, dispatch_table_ptr
         )?;
 
-        self.add_builtin_function("beagle.core/type-of", type_of as *const u8, true, 2)?;
+        // type_of now takes (stack_pointer, frame_pointer, value)
+        self.add_builtin_function_with_fp("beagle.core/type-of", type_of as *const u8, true, true, 3)?;
 
-        self.add_builtin_function("beagle.core/get-os", get_os as *const u8, true, 1)?;
+        // get_os now takes (stack_pointer, frame_pointer)
+        self.add_builtin_function_with_fp("beagle.core/get-os", get_os as *const u8, true, true, 2)?;
 
         self.add_builtin_function("beagle.core/equal", equal as *const u8, false, 2)?;
 
-        self.add_builtin_function(
+        // write_field now takes (stack_pointer, frame_pointer, struct_pointer, str_constant_ptr, property_cache_location, value)
+        self.add_builtin_function_with_fp(
             "beagle.builtin/write_field",
             write_field as *const u8,
-            true, // Now takes stack_pointer
-            5,    // stack_pointer + 4 original args
+            true,
+            true,
+            6, // stack_pointer + frame_pointer + 4 original args
         )?;
 
-        self.add_builtin_function(
+        // throw_error now takes (stack_pointer, frame_pointer)
+        self.add_builtin_function_with_fp(
             "beagle.builtin/throw_error",
             throw_error as *const u8,
             true,
-            1,
+            true,
+            2,
         )?;
 
-        self.add_builtin_function(
+        // check_arity now takes (stack_pointer, frame_pointer, function_pointer, expected_args)
+        self.add_builtin_function_with_fp(
             "beagle.builtin/check_arity",
             check_arity as *const u8,
-            true, // needs_stack_pointer
-            3,    // stack_pointer, function_pointer, expected_args
+            true,
+            true,
+            4,
         )?;
 
         self.add_builtin_function(
@@ -2776,18 +2950,22 @@ impl Runtime {
             1, // function_pointer
         )?;
 
-        self.add_builtin_function(
+        // pack_variadic_args_from_stack now takes (stack_pointer, frame_pointer, args_base, total_args, min_args)
+        self.add_builtin_function_with_fp(
             "beagle.builtin/pack_variadic_args_from_stack",
             pack_variadic_args_from_stack as *const u8,
-            true, // needs_stack_pointer
-            4,    // stack_pointer, args_base, total_args, min_args
+            true,
+            true,
+            5,
         )?;
 
-        self.add_builtin_function(
+        // call_variadic_function_value now takes (stack_pointer, frame_pointer, function_ptr, args_array, is_closure, closure_ptr)
+        self.add_builtin_function_with_fp(
             "beagle.builtin/call_variadic_function_value",
             call_variadic_function_value as *const u8,
-            true, // needs_stack_pointer
-            5,    // stack_pointer, function_ptr, args_array, is_closure, closure_ptr
+            true,
+            true,
+            6,
         )?;
 
         self.add_builtin_function(
@@ -2804,11 +2982,13 @@ impl Runtime {
             0,
         )?;
 
-        self.add_builtin_function(
+        // throw_exception now takes (stack_pointer, frame_pointer, value)
+        self.add_builtin_function_with_fp(
             "beagle.builtin/throw_exception",
             throw_exception as *const u8,
             true,
-            2,
+            true,
+            3,
         )?;
 
         self.add_builtin_function(
@@ -2834,7 +3014,9 @@ impl Runtime {
 
         self.add_builtin_function("beagle.builtin/assert!", placeholder as *const u8, false, 0)?;
 
-        self.add_builtin_function("beagle.core/gc", gc as *const u8, true, 1)?;
+        // gc needs both stack_pointer and frame_pointer
+        // stack_pointer is arg 0, frame_pointer is arg 1
+        self.add_builtin_function_with_fp("beagle.core/gc", gc as *const u8, true, true, 2)?;
 
         self.add_builtin_function(
             "beagle.debug/stack_segments",
@@ -2850,21 +3032,23 @@ impl Runtime {
             1,
         )?;
 
-        // Math builtins
-        self.add_builtin_function("beagle.core/sqrt", sqrt_builtin as *const u8, true, 2)?;
-        self.add_builtin_function("beagle.core/floor", floor_builtin as *const u8, true, 2)?;
-        self.add_builtin_function("beagle.core/ceil", ceil_builtin as *const u8, true, 2)?;
-        self.add_builtin_function("beagle.core/abs", abs_builtin as *const u8, true, 2)?;
-        self.add_builtin_function("beagle.core/sin", sin_builtin as *const u8, true, 2)?;
-        self.add_builtin_function("beagle.core/cos", cos_builtin as *const u8, true, 2)?;
-        self.add_builtin_function(
+        // Math builtins - all now take (stack_pointer, frame_pointer, value)
+        self.add_builtin_function_with_fp("beagle.core/sqrt", sqrt_builtin as *const u8, true, true, 3)?;
+        self.add_builtin_function_with_fp("beagle.core/floor", floor_builtin as *const u8, true, true, 3)?;
+        self.add_builtin_function_with_fp("beagle.core/ceil", ceil_builtin as *const u8, true, true, 3)?;
+        self.add_builtin_function_with_fp("beagle.core/abs", abs_builtin as *const u8, true, true, 3)?;
+        self.add_builtin_function_with_fp("beagle.core/sin", sin_builtin as *const u8, true, true, 3)?;
+        self.add_builtin_function_with_fp("beagle.core/cos", cos_builtin as *const u8, true, true, 3)?;
+        self.add_builtin_function_with_fp(
             "beagle.core/to_float",
             to_float_builtin as *const u8,
             true,
-            2,
+            true,
+            3,
         )?;
 
-        self.add_builtin_function("beagle.core/thread", new_thread as *const u8, true, 2)?;
+        // new_thread now takes (stack_pointer, frame_pointer, function)
+        self.add_builtin_function_with_fp("beagle.core/thread", new_thread as *const u8, true, true, 3)?;
 
         self.add_builtin_function(
             "beagle.ffi/load_library",
@@ -2873,11 +3057,13 @@ impl Runtime {
             1,
         )?;
 
-        self.add_builtin_function(
+        // get_function now takes (stack_pointer, frame_pointer, library_struct, function_name, types, return_type)
+        self.add_builtin_function_with_fp(
             "beagle.ffi/get_function",
             get_function as *const u8,
             true,
-            5,
+            true,
+            6,
         )?;
 
         self.add_builtin_function(
@@ -2967,13 +3153,16 @@ impl Runtime {
             6,
         )?;
 
-        self.add_builtin_function("beagle.builtin/__pause", __pause as *const u8, true, 1)?;
+        // __pause needs both stack_pointer and frame_pointer for FP-chain walking
+        self.add_builtin_function_with_fp("beagle.builtin/__pause", __pause as *const u8, true, true, 2)?;
 
-        self.add_builtin_function(
+        // register_c_call needs both stack_pointer and frame_pointer for FP-chain walking
+        self.add_builtin_function_with_fp(
             "beagle.builtin/__register_c_call",
             register_c_call as *const u8,
             true,
-            1,
+            true,
+            2,
         )?;
 
         self.add_builtin_function(
@@ -2981,6 +3170,20 @@ impl Runtime {
             unregister_c_call as *const u8,
             false,
             0,
+        )?;
+
+        self.add_builtin_function(
+            "beagle.builtin/__thread_call_fn_from_root",
+            thread_call_fn_from_root as *const u8,
+            false,
+            1,
+        )?;
+
+        self.add_builtin_function(
+            "beagle.builtin/__get_and_unregister_temp_root",
+            get_and_unregister_temp_root as *const u8,
+            false,
+            1,
         )?;
 
         self.add_builtin_function(
@@ -3004,14 +3207,17 @@ impl Runtime {
             1,
         )?;
 
-        self.add_builtin_function(
+        // wait_for_input now takes (stack_pointer, frame_pointer)
+        self.add_builtin_function_with_fp(
             "beagle.builtin/wait_for_input",
             wait_for_input as *const u8,
             true,
-            1,
+            true,
+            2,
         )?;
 
-        self.add_builtin_function("beagle.builtin/read_line", read_line as *const u8, true, 1)?;
+        // read_line now takes (stack_pointer, frame_pointer)
+        self.add_builtin_function_with_fp("beagle.builtin/read_line", read_line as *const u8, true, true, 2)?;
 
         self.add_builtin_function(
             "beagle.builtin/print_byte",
@@ -3020,16 +3226,20 @@ impl Runtime {
             1,
         )?;
 
-        self.add_builtin_function("beagle.builtin/char_code", char_code as *const u8, true, 2)?;
+        // char_code now takes (stack_pointer, frame_pointer, string)
+        self.add_builtin_function_with_fp("beagle.builtin/char_code", char_code as *const u8, true, true, 3)?;
 
-        self.add_builtin_function(
+        // char_from_code now takes (stack_pointer, frame_pointer, code)
+        self.add_builtin_function_with_fp(
             "beagle.builtin/char_from_code",
             char_from_code as *const u8,
             true,
-            2,
+            true,
+            3,
         )?;
 
-        self.add_builtin_function("beagle.core/eval", eval as *const u8, true, 2)?;
+        // eval now takes (stack_pointer, frame_pointer, code)
+        self.add_builtin_function_with_fp("beagle.core/eval", eval as *const u8, true, true, 3)?;
 
         self.add_builtin_function("beagle.core/sleep", sleep as *const u8, false, 1)?;
 
@@ -3042,11 +3252,13 @@ impl Runtime {
             4,
         )?;
 
-        self.add_builtin_function(
+        // get_string_index now takes (stack_pointer, frame_pointer, string, index)
+        self.add_builtin_function_with_fp(
             "beagle.builtin/get_string_index",
             get_string_index as *const u8,
             true,
-            3,
+            true,
+            4,
         )?;
 
         self.add_builtin_function(
@@ -3056,17 +3268,22 @@ impl Runtime {
             1,
         )?;
 
-        self.add_builtin_function(
+        // string_concat now takes (stack_pointer, frame_pointer, a, b)
+        self.add_builtin_function_with_fp(
             "beagle.core/string_concat",
             string_concat as *const u8,
             true,
-            3,
+            true,
+            4,
         )?;
 
-        self.add_builtin_function("beagle.core/substring", substring as *const u8, true, 4)?;
-        self.add_builtin_function("beagle.core/uppercase", uppercase as *const u8, true, 2)?;
+        // substring now takes (stack_pointer, frame_pointer, string, start, length)
+        self.add_builtin_function_with_fp("beagle.core/substring", substring as *const u8, true, true, 5)?;
+        // uppercase now takes (stack_pointer, frame_pointer, string)
+        self.add_builtin_function_with_fp("beagle.core/uppercase", uppercase as *const u8, true, true, 3)?;
 
-        self.add_builtin_function("beagle.builtin/hash", hash as *const u8, true, 2)?;
+        // hash now takes (stack_pointer, frame_pointer, value)
+        self.add_builtin_function_with_fp("beagle.builtin/hash", hash as *const u8, true, true, 3)?;
 
         self.add_builtin_function(
             "beagle.builtin/is_keyword",
@@ -3075,41 +3292,52 @@ impl Runtime {
             1,
         )?;
 
-        self.add_builtin_function(
+        // keyword_to_string now takes (stack_pointer, frame_pointer, keyword)
+        self.add_builtin_function_with_fp(
             "beagle.builtin/keyword_to_string",
             keyword_to_string as *const u8,
             true,
-            2,
+            true,
+            3,
         )?;
 
-        self.add_builtin_function(
+        // string_to_keyword now takes (stack_pointer, frame_pointer, string_value)
+        self.add_builtin_function_with_fp(
             "beagle.builtin/string_to_keyword",
             string_to_keyword as *const u8,
             true,
-            2,
+            true,
+            3,
         )?;
 
-        self.add_builtin_function(
+        // load_keyword_constant_runtime now takes (stack_pointer, frame_pointer, index)
+        self.add_builtin_function_with_fp(
             "beagle.builtin/load_keyword_constant_runtime",
             load_keyword_constant_runtime as *const u8,
             true,
-            2,
+            true,
+            3,
         )?;
 
-        self.add_builtin_function("beagle.builtin/pop_count", pop_count as *const u8, true, 2)?;
+        // pop_count now takes (stack_pointer, frame_pointer, value)
+        self.add_builtin_function_with_fp("beagle.builtin/pop_count", pop_count as *const u8, true, true, 3)?;
 
-        self.add_builtin_function(
+        // read_full_file now takes (stack_pointer, frame_pointer, file_name)
+        self.add_builtin_function_with_fp(
             "beagle.core/read_full_file",
             read_full_file as *const u8,
             true,
-            2,
+            true,
+            3,
         )?;
 
-        self.add_builtin_function(
+        // compiler_warnings now takes (stack_pointer, frame_pointer)
+        self.add_builtin_function_with_fp(
             "beagle.core/compiler-warnings",
             compiler_warnings as *const u8,
             true,
-            1,
+            true,
+            2,
         )?;
 
         Ok(())
@@ -3325,7 +3553,8 @@ unsafe fn warning_to_struct_impl(
     }
 }
 
-pub unsafe extern "C" fn compiler_warnings(stack_pointer: usize) -> usize {
+pub unsafe extern "C" fn compiler_warnings(stack_pointer: usize, frame_pointer: usize) -> usize {
+    save_frame_pointer(frame_pointer);
     let runtime = get_runtime().get_mut();
 
     // Clone warnings to avoid holding the lock while processing

@@ -186,7 +186,7 @@ impl Allocator for GenerationalGC {
         Ok(pointer)
     }
 
-    fn gc(&mut self, stack_map: &super::StackMap, stack_pointers: &[(usize, usize)]) {
+    fn gc(&mut self, stack_map: &super::StackMap, stack_pointers: &[(usize, usize, usize)]) {
         // TODO: Need to figure out when to do a Major GC
         if !self.options.gc {
             return;
@@ -255,6 +255,10 @@ impl Allocator for GenerationalGC {
         self.temporary_roots[id] = None;
         value.unwrap()
     }
+
+    fn peek_temporary_root(&self, id: usize) -> usize {
+        self.temporary_roots[id].unwrap()
+    }
 }
 
 impl GenerationalGC {
@@ -271,7 +275,7 @@ impl GenerationalGC {
         }
     }
 
-    fn minor_gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
+    fn minor_gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
         let start = std::time::Instant::now();
 
         self.process_temporary_roots();
@@ -345,9 +349,14 @@ impl GenerationalGC {
         }
     }
 
-    fn process_stack_roots(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
-        for (stack_base, frame_pointer) in stack_pointers.iter() {
-            let roots = self.gather_roots(*stack_base, stack_map, *frame_pointer);
+    fn full_gc(&mut self, stack_map: &super::StackMap, stack_pointers: &[(usize, usize, usize)]) {
+        self.minor_gc(stack_map, stack_pointers);
+        self.old.gc(stack_map, stack_pointers);
+    }
+
+    fn process_stack_roots(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
+        for (stack_base, frame_pointer, gc_return_addr) in stack_pointers.iter() {
+            let roots = self.gather_roots(*stack_base, stack_map, *frame_pointer, *gc_return_addr);
             let new_roots: Vec<usize> = roots.iter().map(|x| x.1).collect();
             let new_roots = unsafe { self.copy_all(new_roots) };
 
@@ -367,9 +376,23 @@ impl GenerationalGC {
         }
     }
 
-    fn full_gc(&mut self, stack_map: &super::StackMap, stack_pointers: &[(usize, usize)]) {
-        self.minor_gc(stack_map, stack_pointers);
-        self.old.gc(stack_map, stack_pointers);
+    pub fn gather_roots(
+        &mut self,
+        stack_base: usize,
+        stack_map: &StackMap,
+        frame_pointer: usize,
+        gc_return_addr: usize,
+    ) -> Vec<(usize, usize)> {
+        let mut roots: Vec<(usize, usize)> = Vec::with_capacity(36);
+
+        StackWalker::walk_stack_roots_with_return_addr(stack_base, frame_pointer, gc_return_addr, stack_map, |offset, pointer| {
+            let untagged = BuiltInTypes::untag(pointer);
+            if self.young.contains(untagged as *const u8) {
+                roots.push((offset, pointer));
+            }
+        });
+
+        roots
     }
 
     unsafe fn copy_all(&mut self, roots: Vec<usize>) -> Vec<usize> {
@@ -466,24 +489,5 @@ impl GenerationalGC {
                 *datum = new_pointer;
             }
         }
-    }
-
-    // Stolen from simple mark and sweep
-    pub fn gather_roots(
-        &mut self,
-        stack_base: usize,
-        stack_map: &StackMap,
-        stack_pointer: usize,
-    ) -> Vec<(usize, usize)> {
-        let mut roots: Vec<(usize, usize)> = Vec::with_capacity(36);
-
-        StackWalker::walk_stack_roots(stack_base, stack_pointer, stack_map, |offset, pointer| {
-            let untagged = BuiltInTypes::untag(pointer);
-            if self.young.contains(untagged as *const u8) {
-                roots.push((offset, pointer));
-            }
-        });
-
-        roots
     }
 }

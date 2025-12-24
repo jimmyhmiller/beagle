@@ -311,6 +311,7 @@ pub struct Function {
     pub is_foreign: bool,
     pub is_builtin: bool,
     pub needs_stack_pointer: bool,
+    pub needs_frame_pointer: bool,
     pub is_defined: bool,
     pub number_of_locals: usize,
     pub size: usize,
@@ -611,7 +612,7 @@ impl Allocator for Memory {
         self.heap.try_allocate(words, kind)
     }
 
-    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
+    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
         self.heap.gc(stack_map, stack_pointers);
     }
 
@@ -629,6 +630,10 @@ impl Allocator for Memory {
 
     fn unregister_temporary_root(&mut self, id: usize) -> usize {
         self.heap.unregister_temporary_root(id)
+    }
+
+    fn peek_temporary_root(&self, id: usize) -> usize {
+        self.heap.peek_temporary_root(id)
     }
 
     fn add_namespace_root(&mut self, namespace_id: usize, root: usize) {
@@ -1235,8 +1240,11 @@ impl Runtime {
     ) -> Result<usize, Box<dyn Error>> {
         let options = self.memory.heap.get_allocation_options();
 
+        // Get frame pointer from thread-local storage (set by builtin entry)
+        let frame_pointer = crate::builtins::get_saved_frame_pointer();
+
         if options.gc_always {
-            self.gc(stack_pointer);
+            self.run_gc(stack_pointer, frame_pointer);
         }
 
         let result = self.memory.heap.try_allocate(words, kind);
@@ -1248,7 +1256,7 @@ impl Runtime {
                 Ok(value as usize)
             }
             Ok(AllocateAction::Gc) => {
-                self.gc(stack_pointer);
+                self.run_gc(stack_pointer, frame_pointer);
                 let result = self.memory.heap.try_allocate(words, kind);
                 if let Ok(AllocateAction::Allocated(result)) = result {
                     // tag
@@ -1560,18 +1568,38 @@ impl Runtime {
         Ok(value)
     }
 
-    pub fn gc(&mut self, stack_pointer: usize) {
-        // Use frame pointer for FP-chain based stack walking
-        let frame_pointer = crate::builtins::get_current_frame_pointer();
-        // Note: stack_pointer is still used for __pause calls in multi-threaded case
+    /// GC entry point called when allocation fails or gc_always is set.
+    /// Computes gc_return_addr from stack_pointer.
+    fn run_gc(&mut self, stack_pointer: usize, frame_pointer: usize) {
+        // The gc() call's return address is at [stack_pointer - 8]
+        let gc_return_addr = unsafe { *((stack_pointer - 8) as *const usize) };
+        self.gc_impl(stack_pointer, frame_pointer, gc_return_addr);
+    }
+
+    pub fn gc_impl(&mut self, stack_pointer: usize, frame_pointer: usize, gc_return_addr: usize) {
+        let _ = stack_pointer; // Available if needed for __pause calls
+        // Use frame_pointer passed from Beagle code for FP-chain based stack walking.
+        // We can't read RBP from inside this Rust function because Rust may not
+        // preserve RBP as a frame pointer. Instead, Beagle code passes its RBP
+        // which is valid at the call site.
+        //
+        // gc_return_addr is the return address of the gc() call - this is the
+        // safepoint address in the stack map that describes the caller's frame.
 
         if self.memory.threads.len() == 1 {
             // If there is only one thread, that is us
             // that means nothing else could spin up a thread in the mean time
             // so there is no need to lock anything
-            // Collect all frame pointers: regular stacks + saved stack segments
-            let mut all_stack_pointers = vec![(self.get_stack_base(), frame_pointer)];
-            all_stack_pointers.extend(self.stack_segments.get_all_stack_pointers());
+            // Collect all frame pointers with their return addresses
+            // The tuple is (stack_base, frame_pointer, gc_return_addr)
+            let mut all_stack_pointers = vec![(self.get_stack_base(), frame_pointer, gc_return_addr)];
+            // For saved stack segments, we don't have a gc_return_addr, so use 0
+            // (the stack walker will fall back to FP+8 lookup)
+            all_stack_pointers.extend(
+                self.stack_segments.get_all_stack_pointers()
+                    .into_iter()
+                    .map(|(base, fp)| (base, fp, 0usize))
+            );
 
             self.memory
                 .heap
@@ -1630,14 +1658,14 @@ impl Runtime {
             match e {
                 TryLockError::WouldBlock => {
                     drop(locked);
-                    unsafe { __pause(stack_pointer) };
+                    unsafe { __pause(stack_pointer, frame_pointer) };
                 }
                 TryLockError::Poisoned(e) => {
                     eprintln!("Warning: Poisoned lock in GC: {:?}", e);
                     // Try to recover by using the poisoned data anyway
                     // The lock is poisoned but the data might still be usable
                     drop(locked);
-                    unsafe { __pause(stack_pointer) };
+                    unsafe { __pause(stack_pointer, frame_pointer) };
                 }
             }
 
@@ -1651,7 +1679,7 @@ impl Runtime {
         );
         if result != Ok(0) {
             drop(locked);
-            unsafe { __pause(stack_pointer) };
+            unsafe { __pause(stack_pointer, frame_pointer) };
             return;
         }
 
@@ -1669,10 +1697,21 @@ impl Runtime {
                 .expect("Failed waiting on condition variable - this is a fatal error");
         }
 
-        let mut stack_pointers = thread_state.stack_pointers.clone();
-        stack_pointers.push((self.get_stack_base(), frame_pointer));
-        // Add saved stack segments to the GC scan
-        stack_pointers.extend(self.stack_segments.get_all_stack_pointers());
+        // Convert paused threads' (base, fp) pairs to (base, fp, 0) triples
+        // The 0 gc_return_addr tells the stack walker to use FP+8 lookup instead
+        let mut stack_pointers: Vec<(usize, usize, usize)> = thread_state
+            .stack_pointers
+            .iter()
+            .map(|(base, fp)| (*base, *fp, 0usize))
+            .collect();
+        // Main thread uses its actual gc_return_addr for accurate first-frame scanning
+        stack_pointers.push((self.get_stack_base(), frame_pointer, gc_return_addr));
+        // Add saved stack segments to the GC scan (no gc_return_addr)
+        stack_pointers.extend(
+            self.stack_segments.get_all_stack_pointers()
+                .into_iter()
+                .map(|(base, fp)| (base, fp, 0usize))
+        );
 
         drop(thread_state);
 
@@ -1769,6 +1808,10 @@ impl Runtime {
         self.memory.heap.unregister_temporary_root(id)
     }
 
+    pub fn peek_temporary_root(&self, id: usize) -> usize {
+        self.memory.heap.peek_temporary_root(id)
+    }
+
     pub fn register_parked_thread(&mut self, stack_pointer: usize) {
         self.memory
             .heap
@@ -1856,13 +1899,25 @@ impl Runtime {
     pub fn new_thread(&mut self, f: usize) {
         let trampoline = self.get_trampoline();
         let trampoline: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline) };
-        let call_fn = self
-            .get_function_by_name("beagle.core/__call_fn")
-            .expect("beagle.core/__call_fn not found - this is a fatal error");
+
+        // Get the __thread_call_fn_from_root builtin which will:
+        // 1. Unregister from C-call
+        // 2. Get the closure from the temporary root
+        // 3. Unregister the temporary root
+        // 4. Call the closure
+        let thread_call_fn = self
+            .get_function_by_name("beagle.builtin/__thread_call_fn_from_root")
+            .expect("beagle.builtin/__thread_call_fn_from_root not found - this is a fatal error");
         let function_pointer = self
-            .get_pointer(call_fn)
-            .expect("Failed to get pointer for __call_fn - this is a fatal error")
+            .get_pointer(thread_call_fn)
+            .expect("Failed to get pointer for __thread_call_fn_from_root - this is a fatal error")
             as usize;
+
+        // Register the closure as a temporary root to protect it from GC
+        // until the new thread retrieves it. The builtin will unregister it.
+        let closure_root_id = self.memory.heap.register_temporary_root(f);
+        // Tag the root ID as an integer so it can be passed through trampoline
+        let tagged_root_id = BuiltInTypes::Int.tag(closure_root_id as isize) as usize;
 
         let new_stack = MmapOptions::new(STACK_SIZE)
             .expect("Failed to create mmap for thread stack - out of memory")
@@ -1870,13 +1925,47 @@ impl Runtime {
             .expect("Failed to map thread stack memory - this is a fatal error");
         let stack_pointer = new_stack.as_ptr() as usize + STACK_SIZE;
         let thread_state = self.thread_state.clone();
+
+        // Create a barrier to ensure the spawned thread waits until it's fully registered.
+        // This prevents a race where GC could run while the thread is active but not counted.
+        use std::sync::Barrier;
+        let barrier = Arc::new(Barrier::new(2));
+        let barrier_clone = barrier.clone();
+
         let thread = thread::spawn(move || {
-            let result = trampoline(stack_pointer as u64, function_pointer as u64, f as u64);
-            // If we end while another thread is waiting for us to pause
-            // we need to notify that waiter so they can see we are dead.
-            let (_lock, cvar) = &*thread_state;
-            cvar.notify_one();
-            result
+            // Wait for main thread to finish registering us
+            barrier_clone.wait();
+
+            // Register as C-calling immediately. This ensures that if any GC runs
+            // before we call the builtin, we're counted as "ready" and the temporary
+            // root protects our closure.
+            //
+            // The key insight: we stay C-calling until __thread_call_fn_from_root
+            // unregisters us. At that point, we're inside Beagle code and can safely
+            // read the (possibly relocated) closure from the temporary root.
+            {
+                let runtime = crate::get_runtime().get_mut();
+                let thread_state_for_c_call = runtime.thread_state.clone();
+                {
+                    let (lock, condvar) = &*thread_state_for_c_call;
+                    let mut state = lock.lock().unwrap();
+                    state.register_c_call((stack_pointer, stack_pointer));
+                    condvar.notify_one();
+                }
+
+                // Call trampoline with the temporary root ID. The builtin will:
+                // 1. Unregister from C-call (so we can participate in GC)
+                // 2. Read the current closure value from the temp root (updated by any prior GC)
+                // 3. Unregister the temp root
+                // 4. Call the closure
+                let result = trampoline(stack_pointer as u64, function_pointer as u64, tagged_root_id as u64);
+
+                // If we end while another thread is waiting for us to pause
+                // we need to notify that waiter so they can see we are dead.
+                let (_lock, cvar) = &*thread_state;
+                cvar.notify_one();
+                result
+            }
         });
 
         self.memory.stacks.push((thread.thread().id(), new_stack));
@@ -1888,6 +1977,10 @@ impl Runtime {
 
         self.memory.threads.push(thread.thread().clone());
         self.memory.join_handles.push(thread);
+
+        // Signal the spawned thread that registration is complete.
+        // The thread was waiting on this barrier before starting execution.
+        barrier.wait();
     }
 
     pub fn wait_for_other_threads(&mut self) {
@@ -2602,6 +2695,7 @@ impl Runtime {
             is_foreign: true,
             is_builtin: false,
             needs_stack_pointer: false,
+            needs_frame_pointer: false,
             is_defined: true,
             number_of_locals: 0,
             size: 0,
@@ -2642,6 +2736,25 @@ impl Runtime {
         needs_stack_pointer: bool,
         number_of_args: usize,
     ) -> Result<usize, Box<dyn Error>> {
+        // When needs_stack_pointer is true, we also need frame_pointer for GC stack walking.
+        // The frame_pointer is passed as the second implicit argument (after stack_pointer).
+        // We need to add 1 to number_of_args to account for the frame_pointer.
+        let adjusted_args = if needs_stack_pointer {
+            number_of_args + 1
+        } else {
+            number_of_args
+        };
+        self.add_builtin_function_with_fp(name, function, needs_stack_pointer, needs_stack_pointer, adjusted_args)
+    }
+
+    pub fn add_builtin_function_with_fp(
+        &mut self,
+        name: &str,
+        function: *const u8,
+        needs_stack_pointer: bool,
+        needs_frame_pointer: bool,
+        number_of_args: usize,
+    ) -> Result<usize, Box<dyn Error>> {
         let index = self.functions.len();
         let pointer = function;
 
@@ -2653,6 +2766,7 @@ impl Runtime {
             is_foreign: true,
             is_builtin: true,
             needs_stack_pointer,
+            needs_frame_pointer,
             is_defined: true,
             number_of_locals: 0,
             size: 0,
@@ -2793,6 +2907,7 @@ impl Runtime {
             is_foreign: false,
             is_builtin: false,
             needs_stack_pointer: false,
+            needs_frame_pointer: false,
             is_defined: false,
             number_of_locals: 0,
             size: 0,
@@ -2823,6 +2938,7 @@ impl Runtime {
             is_foreign: false,
             is_builtin: false,
             needs_stack_pointer: false,
+            needs_frame_pointer: false,
             is_defined: true,
             number_of_locals,
             size,

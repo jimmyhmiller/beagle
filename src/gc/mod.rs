@@ -44,6 +44,27 @@ impl StackMap {
     pub fn find_stack_data(&self, pointer: usize) -> Option<&StackMapDetails> {
         // Stack map now stores the exact return address (recorded after the call instruction)
         // No adjustment needed - just match the pointer directly
+        #[cfg(feature = "debug-gc")]
+        {
+            eprintln!("[GC DEBUG] find_stack_data: looking for {:#x}", pointer);
+            eprintln!("[GC DEBUG] Stack map has {} entries", self.details.len());
+            // Show entries around the target address
+            let close_entries: Vec<_> = self.details.iter()
+                .filter(|(k, _)| (*k as isize - pointer as isize).abs() < 0x10000)
+                .take(5)
+                .collect();
+            if !close_entries.is_empty() {
+                eprintln!("[GC DEBUG] Close entries:");
+                for (key, details) in close_entries {
+                    eprintln!("[GC DEBUG]   {:#x} ({:?})", key, details.function_name);
+                }
+            } else {
+                eprintln!("[GC DEBUG] No close entries found! Sample entries:");
+                for (key, details) in self.details.iter().take(5) {
+                    eprintln!("[GC DEBUG]   {:#x} ({:?})", key, details.function_name);
+                }
+            }
+        }
         for (key, value) in self.details.iter() {
             if *key == pointer {
                 return Some(value);
@@ -88,12 +109,18 @@ pub trait Allocator {
         kind: BuiltInTypes,
     ) -> Result<AllocateAction, Box<dyn Error>>;
 
-    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]);
+    /// GC with explicit return address for the first frame.
+    /// The tuple is (stack_base, frame_pointer, gc_return_addr).
+    /// gc_return_addr is the return address of the gc() call, which is the
+    /// safepoint in the stack map describing the caller's frame.
+    /// If gc_return_addr is 0, the stack walker falls back to [FP+8] lookup.
+    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]);
 
     fn grow(&mut self);
     fn gc_add_root(&mut self, old: usize);
     fn register_temporary_root(&mut self, root: usize) -> usize;
     fn unregister_temporary_root(&mut self, id: usize) -> usize;
+    fn peek_temporary_root(&self, id: usize) -> usize;
     fn add_namespace_root(&mut self, namespace_id: usize, root: usize);
     fn remove_namespace_root(&mut self, namespace_id: usize, root: usize) -> bool;
     // TODO: Get rid of allocation

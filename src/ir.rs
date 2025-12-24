@@ -142,6 +142,7 @@ pub enum Instruction {
     PopStack(Value),
     GetStackPointer(Value, Value),
     GetStackPointerImm(Value, isize),
+    GetFramePointer(Value),
     GetTag(Value, Value),
     Untag(Value, Value),
     HeapStoreOffset(Value, Value, usize),
@@ -488,6 +489,9 @@ impl Instruction {
             Instruction::GetStackPointerImm(a, _) => {
                 get_register!(a)
             }
+            Instruction::GetFramePointer(a) => {
+                get_register!(a)
+            }
             Instruction::GetTag(a, b) => {
                 get_registers!(a, b)
             }
@@ -576,6 +580,7 @@ impl Instruction {
             | Instruction::PushStack(value)
             | Instruction::PopStack(value)
             | Instruction::GetStackPointerImm(value, _)
+            | Instruction::GetFramePointer(value)
             | Instruction::CurrentStackPosition(value)
             | Instruction::ExtendLifeTime(value) => {
                 replace_register!(value, old_register, new_register);
@@ -1218,6 +1223,8 @@ impl Ir {
         let register = backend.get_volatile_register(0);
         backend.mov_64(register, error_fn_pointer as isize);
         backend.get_stack_pointer_imm(backend.arg(0), 0);
+        // throw_error expects (stack_pointer, frame_pointer)
+        backend.mov_reg(backend.arg(1), backend.frame_pointer());
         backend.call(register);
         backend
     }
@@ -1726,13 +1733,15 @@ impl Ir {
                 Instruction::Call(dest, function, args, builtin) => {
                     // TODO: I think I should never hit this with how my register allocator works
                     let num_arg_regs = backend.num_arg_registers();
+
                     for (arg_index, arg) in args.iter().enumerate().rev() {
-                        let arg = self.value_to_register(arg, backend);
+                        let arg_reg = self.value_to_register(arg, backend);
+
                         if arg_index < num_arg_regs {
-                            backend.mov_reg(backend.arg(arg_index as u8), arg);
+                            backend.mov_reg(backend.arg(arg_index as u8), arg_reg);
                         } else {
                             backend.push_to_end_of_stack(
-                                arg,
+                                arg_reg,
                                 (arg_index as i32) - (num_arg_regs as i32 - 1),
                             );
                         }
@@ -2056,6 +2065,12 @@ impl Ir {
                     backend.get_stack_pointer_imm(dest, *offset);
                     self.store_spill(dest, dest_spill, backend);
                 }
+                Instruction::GetFramePointer(dest) => {
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.mov_reg(dest, backend.frame_pointer());
+                    self.store_spill(dest, dest_spill, backend);
+                }
                 Instruction::CurrentStackPosition(dest) => {
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, backend);
@@ -2113,15 +2128,18 @@ impl Ir {
                     backend.call_builtin(fn_ptr);
                 }
                 Instruction::Throw(value, builtin_fn) => {
-                    // Call throw_exception builtin with stack pointer and value
-                    // Arguments: (stack_pointer, exception_value)
+                    // Call throw_exception builtin with stack pointer, frame pointer, and value
+                    // Arguments: (stack_pointer, frame_pointer, exception_value)
 
                     // Load stack pointer into arg 0
                     backend.get_stack_pointer_imm(backend.arg(0), 0);
 
-                    // Load exception value into arg 1
+                    // Load frame pointer into arg 1
+                    backend.mov_reg(backend.arg(1), backend.frame_pointer());
+
+                    // Load exception value into arg 2
                     let value_reg = self.value_to_register(value, backend);
-                    backend.mov_reg(backend.arg(1), value_reg);
+                    backend.mov_reg(backend.arg(2), value_reg);
 
                     // Call the throw_exception builtin (does not return)
                     let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
@@ -2345,6 +2363,12 @@ impl Ir {
         dest
     }
 
+    pub fn get_frame_pointer(&mut self) -> Value {
+        let dest = self.volatile_register().into();
+        self.instructions.push(Instruction::GetFramePointer(dest));
+        dest
+    }
+
     pub fn load_from_memory(&mut self, source: Value, offset: i32) -> Value {
         let dest = self.volatile_register();
         self.instructions
@@ -2461,8 +2485,9 @@ impl Ir {
 
     fn allocate(&mut self, size: Value) -> Value {
         let stack_pointer = self.get_stack_pointer_imm(0);
+        let frame_pointer = self.get_frame_pointer();
         let f = self.assign_new(Value::Function(self.allocate_fn_pointer));
-        self.call_builtin(f.into(), vec![stack_pointer, size])
+        self.call_builtin(f.into(), vec![stack_pointer, frame_pointer, size])
     }
 
     fn insert_label(&mut self, name: &str, label: Label) -> usize {

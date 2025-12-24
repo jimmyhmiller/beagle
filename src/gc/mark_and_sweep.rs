@@ -291,18 +291,7 @@ impl MarkAndSweep {
         }
     }
 
-    fn mark_and_sweep(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
-        let start = std::time::Instant::now();
-        for (stack_base, stack_pointer) in stack_pointers {
-            self.mark(*stack_base, stack_map, *stack_pointer);
-        }
-        self.sweep();
-        if self.options.print_stats {
-            println!("Mark and sweep took {:?}", start.elapsed());
-        }
-    }
-
-    fn mark(&self, stack_base: usize, stack_map: &super::StackMap, stack_pointer: usize) {
+    fn mark(&self, stack_base: usize, stack_map: &super::StackMap, frame_pointer: usize, gc_return_addr: usize) {
         let mut to_mark: Vec<HeapObject> = Vec::with_capacity(128);
 
         for (_, root) in self.namespace_roots.iter() {
@@ -321,8 +310,8 @@ impl MarkAndSweep {
             }
         }
 
-        // Use the new stack walker to find heap pointers
-        StackWalker::walk_stack_roots(stack_base, stack_pointer, stack_map, |_, pointer| {
+        // Use the stack walker with explicit return address
+        StackWalker::walk_stack_roots_with_return_addr(stack_base, frame_pointer, gc_return_addr, stack_map, |_, pointer| {
             to_mark.push(HeapObject::from_tagged(pointer));
         });
 
@@ -408,8 +397,18 @@ impl Allocator for MarkAndSweep {
         }
     }
 
-    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
-        self.mark_and_sweep(stack_map, stack_pointers);
+    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
+        if !self.options.gc {
+            return;
+        }
+        let start = std::time::Instant::now();
+        for (stack_base, frame_pointer, gc_return_addr) in stack_pointers {
+            self.mark(*stack_base, stack_map, *frame_pointer, *gc_return_addr);
+        }
+        self.sweep();
+        if self.options.print_stats {
+            println!("Mark and sweep took {:?}", start.elapsed());
+        }
     }
 
     fn grow(&mut self) {
@@ -457,6 +456,10 @@ impl Allocator for MarkAndSweep {
         let value = self.temporary_roots[id];
         self.temporary_roots[id] = None;
         value.unwrap()
+    }
+
+    fn peek_temporary_root(&self, id: usize) -> usize {
+        self.temporary_roots[id].unwrap()
     }
 
     fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)> {

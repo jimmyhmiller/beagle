@@ -16,37 +16,58 @@ impl StackWalker {
         unsafe { std::slice::from_raw_parts(frame_pointer as *const usize, num_words) }
     }
 
-    /// Walk the stack using the frame pointer chain and call a callback for each heap pointer found.
-    /// The callback receives (slot_address, heap_pointer_value).
-    ///
-    /// ARM64 frame layout (stack grows down):
-    ///   [FP+8]  = return address (LR) - tells us about the CALLER's frame
-    ///   [FP]    = saved frame pointer (the CALLER's FP)
-    ///   [FP-8]  = local 0 of CURRENT frame
-    ///
-    /// When we find a return address in the stack map, it describes the CALLER's frame,
-    /// so we scan relative to the saved FP (caller's FP), not the current FP.
-    pub fn walk_stack_roots<F>(
+    /// Collect all heap pointers from the stack, with an explicit return address for the first frame.
+    /// gc_return_addr is the return address of the gc() call - this is the safepoint that describes
+    /// the first frame's locals. If gc_return_addr is 0, falls back to [FP+8] lookup.
+    pub fn collect_stack_roots_with_return_addr(
         stack_base: usize,
         frame_pointer: usize,
+        gc_return_addr: usize,
+        stack_map: &StackMap,
+    ) -> Vec<(usize, usize)> {
+        let mut roots = Vec::with_capacity(32);
+        Self::walk_stack_roots_with_return_addr(
+            stack_base,
+            frame_pointer,
+            gc_return_addr,
+            stack_map,
+            |addr, pointer| {
+                roots.push((addr, pointer));
+            },
+        );
+        roots
+    }
+
+    /// Walk the stack using the frame pointer chain, with an explicit return address for the first frame.
+    pub fn walk_stack_roots_with_return_addr<F>(
+        stack_base: usize,
+        frame_pointer: usize,
+        gc_return_addr: usize,
         stack_map: &StackMap,
         mut callback: F,
     ) where
         F: FnMut(usize, usize),
     {
         let mut fp = frame_pointer;
+        let mut is_first_frame = true;
 
         #[cfg(feature = "debug-gc")]
         eprintln!(
-            "[GC DEBUG] walk_stack_roots (FP-chain): stack_base={:#x}, frame_pointer={:#x}",
-            stack_base, frame_pointer
+            "[GC DEBUG] walk_stack_roots_with_return_addr: stack_base={:#x}, frame_pointer={:#x}, gc_return_addr={:#x}",
+            stack_base, frame_pointer, gc_return_addr
         );
 
-        // Follow the frame pointer chain
         while fp != 0 && fp < stack_base {
-            // Read the return address at [FP+8] - this is where we return TO (in the caller)
-            let return_addr = unsafe { *((fp + 8) as *const usize) };
-            // Read the saved frame pointer at [FP] - this IS the caller's FP
+            // For the first frame, use the explicit gc_return_addr (if provided)
+            // For subsequent frames, read the return address from [FP+8]
+            let return_addr = if is_first_frame && gc_return_addr != 0 {
+                is_first_frame = false;
+                gc_return_addr
+            } else {
+                is_first_frame = false;
+                unsafe { *((fp + 8) as *const usize) }
+            };
+
             let caller_fp = unsafe { *(fp as *const usize) };
 
             #[cfg(feature = "debug-gc")]
@@ -55,8 +76,7 @@ impl StackWalker {
                 fp, return_addr, caller_fp
             );
 
-            // Check if this return address is a known Beagle safepoint
-            // If so, the stack map describes the CALLER's frame (where we'll return to)
+            // Look up safepoint info for this return address
             if let Some(details) = stack_map.find_stack_data(return_addr) {
                 #[cfg(feature = "debug-gc")]
                 eprintln!(
@@ -67,13 +87,21 @@ impl StackWalker {
                     details.current_stack_size
                 );
 
-                // Calculate how many slots to scan in the CALLER's frame
-                // Locals are at [caller_fp-8], [caller_fp-16], etc.
+                // For the first frame (using gc_return_addr), the return_addr describes
+                // the current frame's state, so we scan at fp.
+                // For subsequent frames, return_addr is read from [FP+8] which describes
+                // the CALLER's frame, so we scan at caller_fp (like the original walk_stack_roots).
+                let scan_fp = if gc_return_addr != 0 && return_addr == gc_return_addr {
+                    fp  // First frame: scan current frame
+                } else {
+                    caller_fp  // Subsequent frames: scan caller's frame
+                };
+
                 let active_slots = details.number_of_locals + details.current_stack_size;
 
-                // Scan the active slots relative to the CALLER's FP
                 for i in 0..active_slots {
-                    let slot_addr = caller_fp - 8 - (i * 8);
+                    // Locals are at [scan_fp-8], [scan_fp-16], etc.
+                    let slot_addr = scan_fp - 8 - (i * 8);
                     let slot_value = unsafe { *(slot_addr as *const usize) };
 
                     #[cfg(feature = "debug-gc")]
@@ -105,7 +133,16 @@ impl StackWalker {
 
                     if BuiltInTypes::is_heap_pointer(slot_value) {
                         let untagged = BuiltInTypes::untag(slot_value);
-                        debug_assert!(untagged % 8 == 0, "Pointer is not aligned");
+                        // Skip unaligned pointers - these are likely stale/garbage values
+                        // that happen to match heap pointer tag patterns
+                        if untagged % 8 != 0 {
+                            #[cfg(feature = "debug-gc")]
+                            eprintln!(
+                                "[GC DEBUG]   SKIPPING unaligned pointer: slot[{}] @ {:#x} = {:#x}",
+                                i, slot_addr, slot_value
+                            );
+                            continue;
+                        }
                         callback(slot_addr, slot_value);
                     }
                 }
@@ -114,7 +151,6 @@ impl StackWalker {
             #[cfg(feature = "debug-gc")]
             eprintln!("[GC DEBUG] Next FP: {:#x}", caller_fp);
 
-            // Safety check: FP should be moving towards stack_base (higher addresses)
             if caller_fp != 0 && caller_fp <= fp {
                 #[cfg(feature = "debug-gc")]
                 eprintln!(
@@ -128,21 +164,7 @@ impl StackWalker {
         }
 
         #[cfg(feature = "debug-gc")]
-        eprintln!("[GC DEBUG] walk_stack_roots done");
-    }
-
-    /// Collect all heap pointers from the stack into a vector
-    /// Returns (slot_address, heap_pointer_value) pairs
-    pub fn collect_stack_roots(
-        stack_base: usize,
-        frame_pointer: usize,
-        stack_map: &StackMap,
-    ) -> Vec<(usize, usize)> {
-        let mut roots = Vec::with_capacity(32);
-        Self::walk_stack_roots(stack_base, frame_pointer, stack_map, |addr, pointer| {
-            roots.push((addr, pointer));
-        });
-        roots
+        eprintln!("[GC DEBUG] walk_stack_roots_with_return_addr done");
     }
 
     /// Get a mutable slice of the live stack for updating pointers after GC

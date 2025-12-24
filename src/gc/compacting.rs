@@ -268,15 +268,6 @@ impl CompactingHeap {
             }
         }
     }
-
-    pub fn gather_roots(
-        &mut self,
-        stack_base: usize,
-        stack_map: &StackMap,
-        stack_pointer: usize,
-    ) -> Vec<(usize, usize)> {
-        StackWalker::collect_stack_roots(stack_base, stack_pointer, stack_map)
-    }
 }
 
 impl Allocator for CompactingHeap {
@@ -314,7 +305,7 @@ impl Allocator for CompactingHeap {
         Ok(AllocateAction::Allocated(pointer))
     }
 
-    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
+    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
         if !self.options.gc {
             return;
         }
@@ -343,8 +334,14 @@ impl Allocator for CompactingHeap {
             self.temporary_roots[*i] = Some(*new_root);
         }
 
-        for (stack_base, frame_pointer) in stack_pointers.iter() {
-            let roots = self.gather_roots(*stack_base, stack_map, *frame_pointer);
+        for (stack_base, frame_pointer, gc_return_addr) in stack_pointers.iter() {
+            // Use the explicit gc_return_addr for accurate first-frame scanning
+            let roots = StackWalker::collect_stack_roots_with_return_addr(
+                *stack_base,
+                *frame_pointer,
+                *gc_return_addr,
+                stack_map,
+            );
             let new_roots = unsafe { self.copy_all(roots.iter().map(|x| x.1).collect()) };
 
             // With FP-chain based walking, roots contain (slot_address, value) pairs
@@ -426,6 +423,10 @@ impl Allocator for CompactingHeap {
         let value = self.temporary_roots[id];
         self.temporary_roots[id] = None;
         value.unwrap()
+    }
+
+    fn peek_temporary_root(&self, id: usize) -> usize {
+        self.temporary_roots[id].unwrap()
     }
 
     fn add_namespace_root(&mut self, namespace_id: usize, root: usize) {

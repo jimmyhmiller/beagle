@@ -35,7 +35,7 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         result
     }
 
-    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
+    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
         if self.registered_threads == 0 {
             return self.alloc.gc(stack_map, stack_pointers);
         }
@@ -78,6 +78,16 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         }
         let lock = self.mutex.lock().unwrap();
         let result = self.alloc.unregister_temporary_root(id);
+        drop(lock);
+        result
+    }
+
+    fn peek_temporary_root(&self, id: usize) -> usize {
+        if self.registered_threads == 0 {
+            return self.alloc.peek_temporary_root(id);
+        }
+        let lock = self.mutex.lock().unwrap();
+        let result = self.alloc.peek_temporary_root(id);
         drop(lock);
         result
     }
