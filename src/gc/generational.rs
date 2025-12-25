@@ -1,4 +1,4 @@
-use std::{error::Error, ffi::c_void, io};
+use std::{collections::HashMap, error::Error, ffi::c_void, io, thread::ThreadId};
 
 use libc::mprotect;
 
@@ -154,6 +154,7 @@ pub struct GenerationalGC {
     namespace_roots: Vec<(usize, usize)>,
     relocated_namespace_roots: Vec<(usize, Vec<(usize, usize)>)>,
     temporary_roots: Vec<Option<usize>>,
+    thread_roots: HashMap<ThreadId, usize>,
     atomic_pause: [u8; 8],
     options: AllocatorOptions,
 }
@@ -172,6 +173,7 @@ impl Allocator for GenerationalGC {
             namespace_roots: vec![],
             relocated_namespace_roots: vec![],
             temporary_roots: vec![],
+            thread_roots: HashMap::new(),
             atomic_pause: [0; 8],
             options,
         }
@@ -186,7 +188,7 @@ impl Allocator for GenerationalGC {
         Ok(pointer)
     }
 
-    fn gc(&mut self, stack_map: &super::StackMap, stack_pointers: &[(usize, usize)]) {
+    fn gc(&mut self, stack_map: &super::StackMap, stack_pointers: &[(usize, usize, usize)]) {
         // TODO: Need to figure out when to do a Major GC
         if !self.options.gc {
             return;
@@ -255,6 +257,22 @@ impl Allocator for GenerationalGC {
         self.temporary_roots[id] = None;
         value.unwrap()
     }
+
+    fn peek_temporary_root(&self, id: usize) -> usize {
+        self.temporary_roots[id].unwrap()
+    }
+
+    fn add_thread_root(&mut self, thread_id: ThreadId, thread_object: usize) {
+        self.thread_roots.insert(thread_id, thread_object);
+    }
+
+    fn remove_thread_root(&mut self, thread_id: ThreadId) {
+        self.thread_roots.remove(&thread_id);
+    }
+
+    fn get_thread_root(&self, thread_id: ThreadId) -> Option<usize> {
+        self.thread_roots.get(&thread_id).copied()
+    }
 }
 
 impl GenerationalGC {
@@ -271,13 +289,15 @@ impl GenerationalGC {
         }
     }
 
-    fn minor_gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
+    fn minor_gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
         let start = std::time::Instant::now();
 
         self.process_temporary_roots();
         self.process_additional_roots();
         self.process_namespace_roots();
+        self.process_thread_roots();
         self.update_old_generation_namespace_roots();
+        self.update_old_generation_thread_roots();
         self.process_stack_roots(stack_map, stack_pointers);
 
         self.young.clear();
@@ -345,9 +365,46 @@ impl GenerationalGC {
         }
     }
 
-    fn process_stack_roots(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
-        for (stack_base, frame_pointer) in stack_pointers.iter() {
-            let roots = self.gather_roots(*stack_base, stack_map, *frame_pointer);
+    fn process_thread_roots(&mut self) {
+        let thread_roots: Vec<(ThreadId, usize)> = self.thread_roots.drain().collect();
+        for (thread_id, root) in thread_roots.into_iter() {
+            if !BuiltInTypes::is_heap_pointer(root) {
+                self.thread_roots.insert(thread_id, root);
+                continue;
+            }
+            let mut heap_object = HeapObject::from_tagged(root);
+            if self.young.contains(heap_object.get_pointer()) && heap_object.marked() {
+                // Already copied, first field points to new location
+                let new_pointer = heap_object.get_field(0);
+                self.thread_roots.insert(thread_id, new_pointer);
+            } else if self.young.contains(heap_object.get_pointer()) {
+                let new_pointer = unsafe { self.copy(root) };
+                self.thread_roots.insert(thread_id, new_pointer);
+                self.move_objects_referenced_from_old_to_old(&mut HeapObject::from_tagged(
+                    new_pointer,
+                ));
+            } else {
+                self.thread_roots.insert(thread_id, root);
+                self.move_objects_referenced_from_old_to_old(&mut heap_object);
+            }
+        }
+    }
+
+    fn update_old_generation_thread_roots(&mut self) {
+        self.old.clear_thread_roots();
+        for (thread_id, root) in self.thread_roots.iter() {
+            self.old.add_thread_root(*thread_id, *root);
+        }
+    }
+
+    fn full_gc(&mut self, stack_map: &super::StackMap, stack_pointers: &[(usize, usize, usize)]) {
+        self.minor_gc(stack_map, stack_pointers);
+        self.old.gc(stack_map, stack_pointers);
+    }
+
+    fn process_stack_roots(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
+        for (stack_base, frame_pointer, gc_return_addr) in stack_pointers.iter() {
+            let roots = self.gather_roots(*stack_base, stack_map, *frame_pointer, *gc_return_addr);
             let new_roots: Vec<usize> = roots.iter().map(|x| x.1).collect();
             let new_roots = unsafe { self.copy_all(new_roots) };
 
@@ -367,9 +424,23 @@ impl GenerationalGC {
         }
     }
 
-    fn full_gc(&mut self, stack_map: &super::StackMap, stack_pointers: &[(usize, usize)]) {
-        self.minor_gc(stack_map, stack_pointers);
-        self.old.gc(stack_map, stack_pointers);
+    pub fn gather_roots(
+        &mut self,
+        stack_base: usize,
+        stack_map: &StackMap,
+        frame_pointer: usize,
+        gc_return_addr: usize,
+    ) -> Vec<(usize, usize)> {
+        let mut roots: Vec<(usize, usize)> = Vec::with_capacity(36);
+
+        StackWalker::walk_stack_roots_with_return_addr(stack_base, frame_pointer, gc_return_addr, stack_map, |offset, pointer| {
+            let untagged = BuiltInTypes::untag(pointer);
+            if self.young.contains(untagged as *const u8) {
+                roots.push((offset, pointer));
+            }
+        });
+
+        roots
     }
 
     unsafe fn copy_all(&mut self, roots: Vec<usize>) -> Vec<usize> {
@@ -466,24 +537,5 @@ impl GenerationalGC {
                 *datum = new_pointer;
             }
         }
-    }
-
-    // Stolen from simple mark and sweep
-    pub fn gather_roots(
-        &mut self,
-        stack_base: usize,
-        stack_map: &StackMap,
-        stack_pointer: usize,
-    ) -> Vec<(usize, usize)> {
-        let mut roots: Vec<(usize, usize)> = Vec::with_capacity(36);
-
-        StackWalker::walk_stack_roots(stack_base, stack_pointer, stack_map, |offset, pointer| {
-            let untagged = BuiltInTypes::untag(pointer);
-            if self.young.contains(untagged as *const u8) {
-                roots.push((offset, pointer));
-            }
-        });
-
-        roots
     }
 }

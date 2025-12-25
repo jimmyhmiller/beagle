@@ -958,6 +958,7 @@ impl LowLevelX86 {
         //
         // The register allocator assigns:
         // - Indices 0-5 for function arguments (these map to arg registers)
+        // - Indices 6-11 for scratch/callee-saved registers
         // - Indices 12-15 for callee-saved registers (R12-R15)
         //
         // On x86-64, argument registers are NOT sequential:
@@ -968,8 +969,10 @@ impl LowLevelX86 {
         // - arg(4) = R8  (raw index 8)
         // - arg(5) = R9  (raw index 9)
         //
-        // So we need to map virtual indices 0-5 to argument registers.
-        // Indices >= 6 are used for callee-saved or other registers.
+        // IMPORTANT: We must ensure virtual indices 6-11 do NOT map to the same
+        // physical registers as indices 0-5, otherwise we get register collisions.
+        // Virtual 6-9 use scratch registers (R10, R11) and callee-saved (RBX, R12).
+        // Virtual 10-11 continue with R13, R14.
         match index {
             0 => RDI,  // arg 0
             1 => RSI,  // arg 1
@@ -977,9 +980,14 @@ impl LowLevelX86 {
             3 => RCX,  // arg 3
             4 => R8,   // arg 4
             5 => R9,   // arg 5
+            6 => R10,  // scratch register
+            7 => R11,  // scratch register
+            8 => RBX,  // callee-saved (careful: also used as volatile register)
+            9 => R12,  // callee-saved
+            10 => R13, // callee-saved
+            11 => R14, // callee-saved
             16 => RBX, // Additional callee-saved register (virtual index 16 -> RBX)
-            // For other indices, use the raw register index
-            // This works for callee-saved R12-R15 (indices 12-15)
+            // For indices 12-15, use the raw register index (maps to R12-R15)
             _ => X86Register::from_index(index),
         }
     }

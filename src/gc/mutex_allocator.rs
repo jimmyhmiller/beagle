@@ -1,4 +1,4 @@
-use std::{error::Error, sync::Mutex};
+use std::{error::Error, sync::Mutex, thread::ThreadId};
 
 use crate::types::BuiltInTypes;
 
@@ -35,7 +35,7 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         result
     }
 
-    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
+    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
         if self.registered_threads == 0 {
             return self.alloc.gc(stack_map, stack_pointers);
         }
@@ -82,6 +82,16 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         result
     }
 
+    fn peek_temporary_root(&self, id: usize) -> usize {
+        if self.registered_threads == 0 {
+            return self.alloc.peek_temporary_root(id);
+        }
+        let lock = self.mutex.lock().unwrap();
+        let result = self.alloc.peek_temporary_root(id);
+        drop(lock);
+        result
+    }
+
     fn add_namespace_root(&mut self, namespace_id: usize, root: usize) {
         if self.registered_threads == 0 {
             return self.alloc.add_namespace_root(namespace_id, root);
@@ -121,5 +131,29 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
 
     fn remove_thread(&mut self, _thread_id: std::thread::ThreadId) {
         self.registered_threads -= 1;
+    }
+
+    fn add_thread_root(&mut self, thread_id: ThreadId, thread_object: usize) {
+        if self.registered_threads == 0 {
+            return self.alloc.add_thread_root(thread_id, thread_object);
+        }
+        let lock = self.mutex.lock().unwrap();
+        self.alloc.add_thread_root(thread_id, thread_object);
+        drop(lock)
+    }
+
+    fn remove_thread_root(&mut self, thread_id: ThreadId) {
+        if self.registered_threads == 0 {
+            return self.alloc.remove_thread_root(thread_id);
+        }
+        let lock = self.mutex.lock().unwrap();
+        self.alloc.remove_thread_root(thread_id);
+        drop(lock)
+    }
+
+    fn get_thread_root(&self, thread_id: ThreadId) -> Option<usize> {
+        // Note: This is potentially racy if used concurrently, but
+        // typically thread roots are accessed by their own thread
+        self.alloc.get_thread_root(thread_id)
     }
 }

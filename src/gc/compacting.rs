@@ -1,4 +1,4 @@
-use std::{ffi::c_void, io::Error, mem};
+use std::{collections::HashMap, ffi::c_void, io::Error, mem, thread::ThreadId};
 
 use libc::mprotect;
 
@@ -189,6 +189,7 @@ pub struct CompactingHeap {
     to_space: Space,
     from_space: Space,
     namespace_roots: Vec<(usize, usize)>,
+    thread_roots: HashMap<ThreadId, usize>,
     temporary_roots: Vec<Option<usize>>,
     namespace_relocations: Vec<(usize, Vec<(usize, usize)>)>,
     options: AllocatorOptions,
@@ -268,15 +269,6 @@ impl CompactingHeap {
             }
         }
     }
-
-    pub fn gather_roots(
-        &mut self,
-        stack_base: usize,
-        stack_map: &StackMap,
-        stack_pointer: usize,
-    ) -> Vec<(usize, usize)> {
-        StackWalker::collect_stack_roots(stack_base, stack_pointer, stack_map)
-    }
 }
 
 impl Allocator for CompactingHeap {
@@ -288,6 +280,7 @@ impl Allocator for CompactingHeap {
             to_space,
             from_space,
             namespace_roots: vec![],
+            thread_roots: HashMap::new(),
             temporary_roots: vec![],
             namespace_relocations: vec![],
             options,
@@ -314,7 +307,7 @@ impl Allocator for CompactingHeap {
         Ok(AllocateAction::Allocated(pointer))
     }
 
-    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
+    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
         if !self.options.gc {
             return;
         }
@@ -343,8 +336,14 @@ impl Allocator for CompactingHeap {
             self.temporary_roots[*i] = Some(*new_root);
         }
 
-        for (stack_base, frame_pointer) in stack_pointers.iter() {
-            let roots = self.gather_roots(*stack_base, stack_map, *frame_pointer);
+        for (stack_base, frame_pointer, gc_return_addr) in stack_pointers.iter() {
+            // Use the explicit gc_return_addr for accurate first-frame scanning
+            let roots = StackWalker::collect_stack_roots_with_return_addr(
+                *stack_base,
+                *frame_pointer,
+                *gc_return_addr,
+                stack_map,
+            );
             let new_roots = unsafe { self.copy_all(roots.iter().map(|x| x.1).collect()) };
 
             // With FP-chain based walking, roots contain (slot_address, value) pairs
@@ -372,6 +371,19 @@ impl Allocator for CompactingHeap {
                 self.namespace_roots.push((namespace_id, new_pointer));
             }
         }
+
+        // Process thread roots (Thread objects for running threads)
+        let thread_roots: Vec<(ThreadId, usize)> = self.thread_roots.drain().collect();
+        for (thread_id, root) in thread_roots.into_iter() {
+            if BuiltInTypes::is_heap_pointer(root) {
+                let heap_object = HeapObject::from_tagged(root);
+                let new_pointer = self.copy_using_cheneys_algorithm(heap_object);
+                self.thread_roots.insert(thread_id, new_pointer);
+            } else {
+                self.thread_roots.insert(thread_id, root);
+            }
+        }
+
         unsafe { self.copy_remaining(start_offset) };
 
         mem::swap(&mut self.from_space, &mut self.to_space);
@@ -428,6 +440,10 @@ impl Allocator for CompactingHeap {
         value.unwrap()
     }
 
+    fn peek_temporary_root(&self, id: usize) -> usize {
+        self.temporary_roots[id].unwrap()
+    }
+
     fn add_namespace_root(&mut self, namespace_id: usize, root: usize) {
         self.namespace_roots.push((namespace_id, root));
     }
@@ -451,5 +467,17 @@ impl Allocator for CompactingHeap {
 
     fn get_allocation_options(&self) -> AllocatorOptions {
         self.options
+    }
+
+    fn add_thread_root(&mut self, thread_id: ThreadId, thread_object: usize) {
+        self.thread_roots.insert(thread_id, thread_object);
+    }
+
+    fn remove_thread_root(&mut self, thread_id: ThreadId) {
+        self.thread_roots.remove(&thread_id);
+    }
+
+    fn get_thread_root(&self, thread_id: ThreadId) -> Option<usize> {
+        self.thread_roots.get(&thread_id).copied()
     }
 }
