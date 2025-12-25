@@ -39,6 +39,9 @@ impl StackWalker {
     }
 
     /// Walk the stack using the frame pointer chain, with an explicit return address for the first frame.
+    ///
+    /// Key insight: The return address at [FP+8] describes the CALLER's frame, not the current frame.
+    /// So we track the "pending" return address from the previous frame to know how to scan the current frame.
     pub fn walk_stack_roots_with_return_addr<F>(
         stack_base: usize,
         frame_pointer: usize,
@@ -49,7 +52,10 @@ impl StackWalker {
         F: FnMut(usize, usize),
     {
         let mut fp = frame_pointer;
-        let mut is_first_frame = true;
+        // pending_return_addr describes the CURRENT frame (fp).
+        // For the first frame, this is gc_return_addr.
+        // For subsequent frames, this is the return address read from the PREVIOUS frame.
+        let mut pending_return_addr = gc_return_addr;
 
         #[cfg(feature = "debug-gc")]
         eprintln!(
@@ -58,92 +64,77 @@ impl StackWalker {
         );
 
         while fp != 0 && fp < stack_base {
-            // For the first frame, use the explicit gc_return_addr (if provided)
-            // For subsequent frames, read the return address from [FP+8]
-            let return_addr = if is_first_frame && gc_return_addr != 0 {
-                is_first_frame = false;
-                gc_return_addr
-            } else {
-                is_first_frame = false;
-                unsafe { *((fp + 8) as *const usize) }
-            };
-
             let caller_fp = unsafe { *(fp as *const usize) };
+            // Read return address from current frame - this describes the CALLER (caller_fp)
+            let return_addr_for_caller = unsafe { *((fp + 8) as *const usize) };
 
             #[cfg(feature = "debug-gc")]
             eprintln!(
-                "[GC DEBUG] Frame at FP={:#x}, return_addr={:#x}, caller_fp={:#x}",
-                fp, return_addr, caller_fp
+                "[GC DEBUG] Frame at FP={:#x}, pending_return_addr={:#x}, caller_fp={:#x}, return_addr_for_caller={:#x}",
+                fp, pending_return_addr, caller_fp, return_addr_for_caller
             );
 
-            // Look up safepoint info for this return address
-            if let Some(details) = stack_map.find_stack_data(return_addr) {
-                #[cfg(feature = "debug-gc")]
-                eprintln!(
-                    "[GC DEBUG] Found Beagle frame: fn={:?}, locals={}, max_stack={}, cur_stack={}",
-                    details.function_name,
-                    details.number_of_locals,
-                    details.max_stack_size,
-                    details.current_stack_size
-                );
-
-                // For the first frame (using gc_return_addr), the return_addr describes
-                // the current frame's state, so we scan at fp.
-                // For subsequent frames, return_addr is read from [FP+8] which describes
-                // the CALLER's frame, so we scan at caller_fp (like the original walk_stack_roots).
-                let scan_fp = if gc_return_addr != 0 && return_addr == gc_return_addr {
-                    fp  // First frame: scan current frame
-                } else {
-                    caller_fp  // Subsequent frames: scan caller's frame
-                };
-
-                let active_slots = details.number_of_locals + details.current_stack_size;
-
-                for i in 0..active_slots {
-                    // Locals are at [scan_fp-8], [scan_fp-16], etc.
-                    let slot_addr = scan_fp - 8 - (i * 8);
-                    let slot_value = unsafe { *(slot_addr as *const usize) };
-
+            // Use pending_return_addr to scan the CURRENT frame (fp)
+            if pending_return_addr != 0 {
+                if let Some(details) = stack_map.find_stack_data(pending_return_addr) {
                     #[cfg(feature = "debug-gc")]
-                    {
-                        let tag = slot_value & 0x7;
-                        let untagged = slot_value >> 3;
-                        let tag_name = match tag {
-                            0 => "Int",
-                            1 => "Float",
-                            2 => "String",
-                            3 => "Bool",
-                            4 => "Function",
-                            5 => "Closure",
-                            6 => "HeapObject",
-                            7 => "Null",
-                            _ => "Unknown",
-                        };
-                        eprintln!(
-                            "[GC DEBUG]   slot[{}] @ {:#x} = {:#x} (tag={} [{}], untagged={:#x}), is_heap_ptr={}",
-                            i,
-                            slot_addr,
-                            slot_value,
-                            tag,
-                            tag_name,
-                            untagged,
-                            BuiltInTypes::is_heap_pointer(slot_value)
-                        );
-                    }
+                    eprintln!(
+                        "[GC DEBUG] Scanning frame at FP={:#x}: fn={:?}, locals={}, max_stack={}, cur_stack={}",
+                        fp,
+                        details.function_name,
+                        details.number_of_locals,
+                        details.max_stack_size,
+                        details.current_stack_size
+                    );
 
-                    if BuiltInTypes::is_heap_pointer(slot_value) {
-                        let untagged = BuiltInTypes::untag(slot_value);
-                        // Skip unaligned pointers - these are likely stale/garbage values
-                        // that happen to match heap pointer tag patterns
-                        if untagged % 8 != 0 {
-                            #[cfg(feature = "debug-gc")]
+                    let active_slots = details.number_of_locals + details.current_stack_size;
+
+                    for i in 0..active_slots {
+                        // Locals are at [fp-8], [fp-16], etc.
+                        let slot_addr = fp - 8 - (i * 8);
+                        let slot_value = unsafe { *(slot_addr as *const usize) };
+
+                        #[cfg(feature = "debug-gc")]
+                        {
+                            let tag = slot_value & 0x7;
+                            let untagged = slot_value >> 3;
+                            let tag_name = match tag {
+                                0 => "Int",
+                                1 => "Float",
+                                2 => "String",
+                                3 => "Bool",
+                                4 => "Function",
+                                5 => "Closure",
+                                6 => "HeapObject",
+                                7 => "Null",
+                                _ => "Unknown",
+                            };
                             eprintln!(
-                                "[GC DEBUG]   SKIPPING unaligned pointer: slot[{}] @ {:#x} = {:#x}",
-                                i, slot_addr, slot_value
+                                "[GC DEBUG]   slot[{}] @ {:#x} = {:#x} (tag={} [{}], untagged={:#x}), is_heap_ptr={}",
+                                i,
+                                slot_addr,
+                                slot_value,
+                                tag,
+                                tag_name,
+                                untagged,
+                                BuiltInTypes::is_heap_pointer(slot_value)
                             );
-                            continue;
                         }
-                        callback(slot_addr, slot_value);
+
+                        if BuiltInTypes::is_heap_pointer(slot_value) {
+                            let untagged = BuiltInTypes::untag(slot_value);
+                            // Skip unaligned pointers - these are likely stale/garbage values
+                            // that happen to match heap pointer tag patterns
+                            if untagged % 8 != 0 {
+                                #[cfg(feature = "debug-gc")]
+                                eprintln!(
+                                    "[GC DEBUG]   SKIPPING unaligned pointer: slot[{}] @ {:#x} = {:#x}",
+                                    i, slot_addr, slot_value
+                                );
+                                continue;
+                            }
+                            callback(slot_addr, slot_value);
+                        }
                     }
                 }
             }
@@ -160,7 +151,10 @@ impl StackWalker {
                 break;
             }
 
+            // Move to caller frame
             fp = caller_fp;
+            // The return address we read describes the caller (now current fp)
+            pending_return_addr = return_addr_for_caller;
         }
 
         #[cfg(feature = "debug-gc")]
