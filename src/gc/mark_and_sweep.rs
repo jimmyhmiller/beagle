@@ -1,4 +1,4 @@
-use std::{error::Error, ffi::c_void, io};
+use std::{collections::HashMap, error::Error, ffi::c_void, io, thread::ThreadId};
 
 use libc::mprotect;
 
@@ -216,6 +216,7 @@ pub struct MarkAndSweep {
     space: Space,
     free_list: FreeList,
     namespace_roots: Vec<(usize, usize)>,
+    thread_roots: HashMap<ThreadId, usize>,
     options: AllocatorOptions,
     temporary_roots: Vec<Option<usize>>,
 }
@@ -291,18 +292,7 @@ impl MarkAndSweep {
         }
     }
 
-    fn mark_and_sweep(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
-        let start = std::time::Instant::now();
-        for (stack_base, stack_pointer) in stack_pointers {
-            self.mark(*stack_base, stack_map, *stack_pointer);
-        }
-        self.sweep();
-        if self.options.print_stats {
-            println!("Mark and sweep took {:?}", start.elapsed());
-        }
-    }
-
-    fn mark(&self, stack_base: usize, stack_map: &super::StackMap, stack_pointer: usize) {
+    fn mark(&self, stack_base: usize, stack_map: &super::StackMap, frame_pointer: usize, gc_return_addr: usize) {
         let mut to_mark: Vec<HeapObject> = Vec::with_capacity(128);
 
         for (_, root) in self.namespace_roots.iter() {
@@ -321,8 +311,15 @@ impl MarkAndSweep {
             }
         }
 
-        // Use the new stack walker to find heap pointers
-        StackWalker::walk_stack_roots(stack_base, stack_pointer, stack_map, |_, pointer| {
+        // Mark thread roots (Thread objects for running threads)
+        for (_, root) in self.thread_roots.iter() {
+            if BuiltInTypes::is_heap_pointer(*root) {
+                to_mark.push(HeapObject::from_tagged(*root));
+            }
+        }
+
+        // Use the stack walker with explicit return address
+        StackWalker::walk_stack_roots_with_return_addr(stack_base, frame_pointer, gc_return_addr, stack_map, |_, pointer| {
             to_mark.push(HeapObject::from_tagged(pointer));
         });
 
@@ -377,6 +374,11 @@ impl MarkAndSweep {
         self.namespace_roots.clear();
     }
 
+    #[allow(unused)]
+    pub fn clear_thread_roots(&mut self) {
+        self.thread_roots.clear();
+    }
+
     pub fn new_with_page_count(page_count: usize, options: AllocatorOptions) -> Self {
         let space = Space::new(page_count);
         let size = space.byte_count();
@@ -384,6 +386,7 @@ impl MarkAndSweep {
             space,
             free_list: FreeList::new(FreeListEntry { offset: 0, size }),
             namespace_roots: vec![],
+            thread_roots: HashMap::new(),
             options,
             temporary_roots: vec![],
         }
@@ -408,8 +411,18 @@ impl Allocator for MarkAndSweep {
         }
     }
 
-    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize)]) {
-        self.mark_and_sweep(stack_map, stack_pointers);
+    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
+        if !self.options.gc {
+            return;
+        }
+        let start = std::time::Instant::now();
+        for (stack_base, frame_pointer, gc_return_addr) in stack_pointers {
+            self.mark(*stack_base, stack_map, *frame_pointer, *gc_return_addr);
+        }
+        self.sweep();
+        if self.options.print_stats {
+            println!("Mark and sweep took {:?}", start.elapsed());
+        }
     }
 
     fn grow(&mut self) {
@@ -459,6 +472,10 @@ impl Allocator for MarkAndSweep {
         value.unwrap()
     }
 
+    fn peek_temporary_root(&self, id: usize) -> usize {
+        self.temporary_roots[id].unwrap()
+    }
+
     fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)> {
         // This mark and sweep doesn't relocate
         // so we don't have any relocations
@@ -467,5 +484,17 @@ impl Allocator for MarkAndSweep {
 
     fn get_allocation_options(&self) -> AllocatorOptions {
         self.options
+    }
+
+    fn add_thread_root(&mut self, thread_id: ThreadId, thread_object: usize) {
+        self.thread_roots.insert(thread_id, thread_object);
+    }
+
+    fn remove_thread_root(&mut self, thread_id: ThreadId) {
+        self.thread_roots.remove(&thread_id);
+    }
+
+    fn get_thread_root(&self, thread_id: ThreadId) -> Option<usize> {
+        self.thread_roots.get(&thread_id).copied()
     }
 }

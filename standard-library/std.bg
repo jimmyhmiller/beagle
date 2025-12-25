@@ -133,6 +133,21 @@ extend String with Format {
 // this makes that idea simple
 fn __call_fn(f) { f() }
 
+// Thread struct - holds the closure to be executed and serves as a GC root
+// for running threads. The Thread object keeps the closure alive while the
+// thread is running.
+struct Thread {
+    closure
+}
+
+// Called by the runtime to get the closure from a Thread object and execute it.
+// The Thread object is registered as a GC root, so the closure it contains
+// is protected from collection and properly relocated if GC moves it.
+fn __run_thread_closure(thread_obj) {
+    let f = thread_obj.closure;
+    f()
+}
+
 struct Atom {
     value
 }
