@@ -716,6 +716,7 @@ impl AstCompiler<'_> {
                         Value::RawValue(0),
                     );
                     let stack_pointer = self.ir.get_stack_pointer_imm(0);
+                    let frame_pointer = self.ir.get_frame_pointer();
                     let pause_function = self
                         .compiler
                         .get_function_by_name("beagle.builtin/__pause")
@@ -726,7 +727,7 @@ impl AstCompiler<'_> {
                         .unwrap();
                     let pause_function = self.ir.assign_new(pause_function);
                     self.ir
-                        .call_builtin(pause_function.into(), vec![stack_pointer]);
+                        .call_builtin(pause_function.into(), vec![stack_pointer, frame_pointer]);
                     self.ir.write_label(skip_pause);
                 }
 
@@ -1555,10 +1556,11 @@ impl AstCompiler<'_> {
 
                 let size_reg = self.ir.assign_new(size);
                 let stack_pointer = self.ir.get_stack_pointer_imm(0);
+                let frame_pointer = self.ir.get_frame_pointer();
 
                 let struct_ptr = self
                     .ir
-                    .call_builtin(allocate.into(), vec![stack_pointer, size_reg.into()]);
+                    .call_builtin(allocate.into(), vec![stack_pointer, frame_pointer, size_reg.into()]);
 
                 let struct_pointer = self.ir.untag(struct_ptr);
                 self.ir.write_struct_id(struct_pointer, struct_id);
@@ -1636,10 +1638,11 @@ impl AstCompiler<'_> {
 
                 let size_reg = self.ir.assign_new(struct_type.size());
                 let stack_pointer = self.ir.get_stack_pointer_imm(0);
+                let frame_pointer = self.ir.get_frame_pointer();
 
                 let struct_ptr = self
                     .ir
-                    .call_builtin(allocate.into(), vec![stack_pointer, size_reg.into()]);
+                    .call_builtin(allocate.into(), vec![stack_pointer, frame_pointer, size_reg.into()]);
 
                 let struct_pointer = self.ir.untag(struct_ptr);
                 self.ir.write_struct_id(struct_pointer, struct_id);
@@ -2082,10 +2085,11 @@ impl AstCompiler<'_> {
 
                 let size_reg = self.ir.assign_new(1);
                 let stack_pointer = self.ir.get_stack_pointer_imm(0);
+                let frame_pointer = self.ir.get_frame_pointer();
 
                 let float_pointer = self
                     .ir
-                    .call_builtin(allocate.into(), vec![stack_pointer, size_reg.into()]);
+                    .call_builtin(allocate.into(), vec![stack_pointer, frame_pointer, size_reg.into()]);
 
                 let float_pointer = self.ir.untag(float_pointer);
                 self.ir.write_small_object_header(float_pointer);
@@ -2429,15 +2433,14 @@ impl AstCompiler<'_> {
 
         let builtin = function.is_builtin;
         let needs_stack_pointer = function.needs_stack_pointer;
+        let needs_frame_pointer = function.needs_frame_pointer;
         let is_variadic = function.is_variadic;
         let min_args = function.min_args;
 
-        // Arity check - for functions that need stack pointer, number_of_args includes it
-        let expected_user_args = if needs_stack_pointer {
-            function.number_of_args.saturating_sub(1)
-        } else {
-            function.number_of_args
-        };
+        // Arity check - for functions that need stack/frame pointer, number_of_args includes them
+        let implicit_args = (if needs_stack_pointer { 1 } else { 0 })
+            + (if needs_frame_pointer { 1 } else { 0 });
+        let expected_user_args = function.number_of_args.saturating_sub(implicit_args);
 
         if is_variadic {
             // For variadic functions, we need at least min_args arguments
@@ -2454,14 +2457,20 @@ impl AstCompiler<'_> {
         } else if args.len() != expected_user_args {
             panic!(
                 "Function '{}' expects {} argument(s), but {} were provided\n\
-                 (function.number_of_args={}, needs_stack_pointer={}, is_builtin={})",
+                 (function.number_of_args={}, needs_stack_pointer={}, needs_frame_pointer={}, is_builtin={})",
                 name,
                 expected_user_args,
                 args.len(),
                 function.number_of_args,
                 needs_stack_pointer,
+                needs_frame_pointer,
                 builtin
             );
+        }
+        // Insert frame_pointer first (so it becomes arg 1 after stack_pointer is inserted)
+        if needs_frame_pointer {
+            let frame_pointer = self.ir.get_frame_pointer();
+            args.insert(0, frame_pointer);
         }
         if needs_stack_pointer {
             let stack_pointer_reg = self.ir.volatile_register();
@@ -2495,10 +2504,11 @@ impl AstCompiler<'_> {
         let size = Value::TaggedConstant(0);
         let size_reg = self.ir.assign_new(size);
         let stack_pointer = self.ir.get_stack_pointer_imm(0);
+        let frame_pointer = self.ir.get_frame_pointer();
 
         let array_ptr = self
             .ir
-            .call_builtin(allocate.into(), vec![stack_pointer, size_reg.into()]);
+            .call_builtin(allocate.into(), vec![stack_pointer, frame_pointer, size_reg.into()]);
 
         let array_pointer = self.ir.untag(array_ptr);
         let type_id_value = Value::RawValue(1);
@@ -2534,10 +2544,11 @@ impl AstCompiler<'_> {
         let size = Value::TaggedConstant(num_args as isize);
         let size_reg = self.ir.assign_new(size);
         let stack_pointer = self.ir.get_stack_pointer_imm(0);
+        let frame_pointer = self.ir.get_frame_pointer();
 
         let array_ptr = self
             .ir
-            .call_builtin(allocate.into(), vec![stack_pointer, size_reg.into()]);
+            .call_builtin(allocate.into(), vec![stack_pointer, frame_pointer, size_reg.into()]);
 
         let array_pointer = self.ir.untag(array_ptr);
 
@@ -2627,10 +2638,11 @@ impl AstCompiler<'_> {
         let size = Value::TaggedConstant(num_extra as isize);
         let size_reg = self.ir.assign_new(size);
         let stack_pointer = self.ir.get_stack_pointer_imm(0);
+        let frame_pointer = self.ir.get_frame_pointer();
 
         let array_ptr = self
             .ir
-            .call_builtin(allocate.into(), vec![stack_pointer, size_reg.into()]);
+            .call_builtin(allocate.into(), vec![stack_pointer, frame_pointer, size_reg.into()]);
 
         let array_pointer = self.ir.untag(array_ptr);
 
@@ -2915,11 +2927,13 @@ impl AstCompiler<'_> {
             .assign(function_pointer_reg, Value::RawValue(function_pointer));
 
         let stack_pointer = self.ir.get_stack_pointer_imm(0);
+        let frame_pointer = self.ir.get_frame_pointer();
 
         self.ir.call(
             make_closure_reg.into(),
             vec![
                 stack_pointer,
+                frame_pointer,
                 function_pointer_reg.into(),
                 num_free_reg.into(),
                 free_variable_pointer,

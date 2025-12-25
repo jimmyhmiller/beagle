@@ -479,6 +479,9 @@ impl PrettyPrint for Instruction {
             Instruction::Throw(value, _) => {
                 format!("throw {}", value.pretty_print())
             }
+            Instruction::GetFramePointer(dest) => {
+                format!("get_frame_pointer {}", dest.pretty_print())
+            }
         }
     }
 }
