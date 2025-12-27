@@ -1,4 +1,4 @@
-namespace io_test
+namespace io-test
 
 import "beagle.io" as io
 
@@ -10,8 +10,8 @@ fn test_file_write_read() {
     match file_result {
         io/Result.Ok { value } => {
             let file = value
-            io/write_string(file, "Hello from Beagle!\n")
-            io/write_string(file, "Second line\n")
+            io/write-string(file, "Hello from Beagle!\n")
+            io/write-string(file, "Second line\n")
             io/close(file)
             println("Write successful")
         },
@@ -25,12 +25,12 @@ fn test_file_write_read() {
     match file_result {
         io/Result.Ok { value } => {
             let file = value
-            let line1 = io/read_line(file, 256)
+            let line1 = io/read-line(file, 256)
             match line1 {
                 io/Result.Ok { value } => println("Line 1: ", value),
                 io/Result.Err { code, message } => println("Read error: ", message)
             }
-            let line2 = io/read_line(file, 256)
+            let line2 = io/read-line(file, 256)
             match line2 {
                 io/Result.Ok { value } => println("Line 2: ", value),
                 io/Result.Err { code, message } => println("Read error: ", message)
@@ -46,7 +46,7 @@ fn test_file_write_read() {
 
 fn test_stderr() {
     println("Testing stderr output...")
-    let result = io/write_stderr("This goes to stderr\n")
+    let result = io/write-stderr("This goes to stderr\n")
     match result {
         io/Result.Ok { value } => println("Wrote ", value, " bytes to stderr"),
         io/Result.Err { code, message } => println("stderr error: ", message)

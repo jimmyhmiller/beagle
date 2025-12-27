@@ -95,7 +95,7 @@ protocol Length {
 
 protocol Format {
     fn format(self, depth) {
-        to_string(self)
+        to-string(self)
     }
 }
 
@@ -143,8 +143,8 @@ struct Thread {
 // Called by the runtime to get the closure from a Thread object and execute it.
 // The Thread object is registered as a GC root, so the closure it contains
 // is protected from collection and properly relocated if GC moves it.
-fn __run_thread_closure(thread_obj) {
-    let f = thread_obj.closure;
+fn __run_thread_closure(thread-obj) {
+    let f = thread-obj.closure;
     f()
 }
 
@@ -160,7 +160,7 @@ fn deref(atom) {
 fn swap!(atom, f) {
     let initial = deref(atom);
     let new = f(initial);
-    let result = compare_and_swap!(atom, initial, new);
+    let result = compare-and-swap!(atom, initial, new);
     if result {
         new
     } else {
@@ -173,9 +173,9 @@ fn reset!(atom, value) {
     primitive/reset!(atom, value)
 }
 
-fn compare_and_swap!(atom, old, new) {
+fn compare-and-swap!(atom, old, new) {
     // assert!(atom is Atom)
-    primitive/compare_and_swap!(atom, old, new)
+    primitive/compare-and-swap!(atom, old, new)
 }
 
 fn atom(value) {
@@ -185,39 +185,39 @@ fn atom(value) {
 
 // TODO: If I move the || on the next line,
 // my parser is unhappy
-// TODO: Need to make sure type is instance_of Struct
+// TODO: Need to make sure type is instance-of Struct
 // but how do I do that in a reasonable way?
-fn instance_of(value, type) {
+fn instance-of(value, type) {
     if type.id < 0 {
         // Primitive type - use type-of equality
         equal(type-of(value), type)
     } else {
-        // Custom struct - check struct_id
-        primitive/is_object(value) && primitive/read_struct_id(value) == type.id
+        // Custom struct - check struct-id
+        primitive/is-object(value) && primitive/read-struct-id(value) == type.id
     }
 }
 
 
 extend String with Indexed {
     fn get(str, i) {
-        builtin/get_string_index(str, i)
+        builtin/get-string-index(str, i)
     }
 }
 
 extend String with Length {
     fn length(str) {
-        builtin/get_string_length(str)
+        builtin/get-string-length(str)
     }
 }
 
 // Array protocol extensions for variadic function arguments
-// Arrays are raw mutable arrays with type_id = 1
+// Arrays are raw mutable arrays with type-id = 1
 extend Array with Indexed {
     fn get(arr, i) {
         if i < 0 || i >= primitive/size(arr) {
             null
         } else {
-            primitive/read_field(arr, i)
+            primitive/read-field(arr, i)
         }
     }
 }
@@ -231,11 +231,11 @@ extend Array with Length {
 
 // // TODO: Need a way to re-export rather than wrap
 // fn get(coll, i) {
-//     persistent_vector/get(coll, i)
+//     persistent-vector/get(coll, i)
 // }
 
 // fn push(coll, value) {
-//     persistent_vector/push(coll, value)
+//     persistent-vector/push(coll, value)
 // }
 
 // print: prints arguments separated by spaces, NO newline at end
@@ -282,15 +282,15 @@ fn println(...args) {
 
 // Keyword functions
 fn keyword?(value) {
-    builtin/is_keyword(value)
+    builtin/is-keyword(value)
 }
 
 fn keyword->string(kw) {
-    builtin/keyword_to_string(kw)
+    builtin/keyword-to-string(kw)
 }
 
 fn string->keyword(str) {
-    builtin/string_to_keyword(str)
+    builtin/string-to-keyword(str)
 }
 
 
@@ -316,12 +316,12 @@ enum SystemError {
 // Compiler warning information for programmatic inspection
 struct CompilerWarning {
     kind             // String: warning type identifier
-    file_name        // String: source file path
+    file-name        // String: source file path
     line             // Int: 1-based line number
     column           // Int: 1-based column number
     message          // String: human-readable description
-    enum_name        // String or null: for NonExhaustiveMatch warnings
-    missing_variants // PersistentVector or null: for NonExhaustiveMatch warnings
+    enum-name        // String or null: for NonExhaustiveMatch warnings
+    missing-variants // PersistentVector or null: for NonExhaustiveMatch warnings
 }
 
 // Range type for iteration
@@ -335,7 +335,7 @@ fn range(start, end) {
     Range { current: start, end: end, step: 1 }
 }
 
-fn range_step(start, end, step) {
+fn range-step(start, end, step) {
     Range { current: start, end: end, step: step }
 }
 
@@ -355,11 +355,11 @@ extend Range with Seq {
     }
 
     fn next(r) {
-        let next_val = r.current + r.step
-        if next_val >= r.end {
+        let next-val = r.current + r.step
+        if next-val >= r.end {
             null
         } else {
-            Range { current: next_val, end: r.end, step: r.step }
+            Range { current: next-val, end: r.end, step: r.step }
         }
     }
 }
@@ -386,12 +386,11 @@ extend StringSeq with Seq {
     }
 
     fn next(seq) {
-        let next_index = seq.index + 1
-        if next_index >= length(seq.str) {
+        let next-index = seq.index + 1
+        if next-index >= length(seq.str) {
             null
         } else {
-            StringSeq { str: seq.str, index: next_index }
+            StringSeq { str: seq.str, index: next-index }
         }
     }
 }
-

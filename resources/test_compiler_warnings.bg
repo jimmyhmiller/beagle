@@ -1,4 +1,4 @@
-namespace test_compiler_warnings
+namespace test-compiler-warnings
 
 enum Color {
     red,
@@ -26,5 +26,5 @@ fn main() {
 
 // Expect
 // Warning count:
-// [CompilerWarning { kind: "NonExhaustiveMatch", file_name: "resources/test_compiler_warnings.bg", line: 13, column: 23, message: "Non-exhaustive match on enum 'Color'. Missing variants: blue", enum_name: "Color", missing_variants: PersistentVector { count: 1, shift: 5, root: [  ], tail: [ "blue" ] } }]
+// [CompilerWarning { kind: "NonExhaustiveMatch", file-name: "resources/test_compiler_warnings.bg", line: 13, column: 23, message: "Non-exhaustive match on enum 'Color'. Missing variants: blue", enum-name: "Color", missing-variants: PersistentVector { count: 1, shift: 5, root: [  ], tail: [ "blue" ] } }]
 // RED

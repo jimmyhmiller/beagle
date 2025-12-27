@@ -1,42 +1,42 @@
 namespace array_gc_test
 
-import "raw_mutable_array" as arr
+import "raw-mutable-array" as arr
 
 fn main() {
-    let a = arr/new_array(125000)
+    let a = arr/new-array(125000)
 
     // Write to slots
-    arr/write_field(a, 10000, "10K")
-    arr/write_field(a, 20000, "20K")
-    arr/write_field(a, 30000, "30K")
-    arr/write_field(a, 40000, "40K")
-    arr/write_field(a, 50000, "50K")
-    arr/write_field(a, 60000, "60K")
-    arr/write_field(a, 70000, "70K")
+    arr/write-field(a, 10000, "10K")
+    arr/write-field(a, 20000, "20K")
+    arr/write-field(a, 30000, "30K")
+    arr/write-field(a, 40000, "40K")
+    arr/write-field(a, 50000, "50K")
+    arr/write-field(a, 60000, "60K")
+    arr/write-field(a, 70000, "70K")
 
     // Now read them all back
     println("After writing all, reading back:")
 
     println("10000:")
-    println(arr/read_field(a, 10000))
+    println(arr/read-field(a, 10000))
 
     println("20000:")
-    println(arr/read_field(a, 20000))
+    println(arr/read-field(a, 20000))
 
     println("30000:")
-    println(arr/read_field(a, 30000))
+    println(arr/read-field(a, 30000))
 
     println("40000:")
-    println(arr/read_field(a, 40000))
+    println(arr/read-field(a, 40000))
 
     println("50000:")
-    println(arr/read_field(a, 50000))
+    println(arr/read-field(a, 50000))
 
     println("60000:")
-    println(arr/read_field(a, 60000))
+    println(arr/read-field(a, 60000))
 
     println("70000:")
-    println(arr/read_field(a, 70000))
+    println(arr/read-field(a, 70000))
 
     ""
 }

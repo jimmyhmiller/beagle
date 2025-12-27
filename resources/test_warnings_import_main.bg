@@ -1,7 +1,7 @@
 namespace test_warnings_import_main
 
 import "test_warnings_import_dependency" as dep
-import "persistent_vector" as vec
+import "persistent-vector" as vec
 
 enum Shape {
     Circle,

@@ -49,7 +49,9 @@ impl StackMap {
             eprintln!("[GC DEBUG] find_stack_data: looking for {:#x}", pointer);
             eprintln!("[GC DEBUG] Stack map has {} entries", self.details.len());
             // Show entries around the target address
-            let close_entries: Vec<_> = self.details.iter()
+            let close_entries: Vec<_> = self
+                .details
+                .iter()
                 .filter(|(k, _)| (*k as isize - pointer as isize).abs() < 0x10000)
                 .take(5)
                 .collect();

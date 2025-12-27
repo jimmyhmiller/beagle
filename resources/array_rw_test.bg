@@ -1,26 +1,26 @@
 namespace array_rw_test
 
-import "raw_mutable_array" as arr
+import "raw-mutable-array" as arr
 
 fn main() {
-    let a = arr/new_array(100)
+    let a = arr/new-array(100)
 
     // Write to slot 50
-    arr/write_field(a, 50, "hello")
+    arr/write-field(a, 50, "hello")
 
     // Read back from slot 50
-    let v = arr/read_field(a, 50)
+    let v = arr/read-field(a, 50)
     println("Read from slot 50:")
     println(v)
 
     // Read from unwritten slot
-    let v2 = arr/read_field(a, 51)
+    let v2 = arr/read-field(a, 51)
     println("Read from slot 51:")
     println(v2)
 
     // Write to a large index
-    arr/write_field(a, 99, "world")
-    let v3 = arr/read_field(a, 99)
+    arr/write-field(a, 99, "world")
+    let v3 = arr/read-field(a, 99)
     println("Read from slot 99:")
     println(v3)
 

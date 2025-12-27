@@ -1,40 +1,40 @@
 namespace array_boundary_test
 
-import "raw_mutable_array" as arr
+import "raw-mutable-array" as arr
 
 fn main() {
-    let a = arr/new_array(125000)
+    let a = arr/new-array(125000)
 
     println("Testing various indices:")
 
     // Test incrementing indices
-    arr/write_field(a, 60000, "60K")
+    arr/write-field(a, 60000, "60K")
     println("60000:")
-    println(arr/read_field(a, 60000))
+    println(arr/read-field(a, 60000))
 
-    arr/write_field(a, 65000, "65K")
+    arr/write-field(a, 65000, "65K")
     println("65000:")
-    println(arr/read_field(a, 65000))
+    println(arr/read-field(a, 65000))
 
-    arr/write_field(a, 65535, "65535")
+    arr/write-field(a, 65535, "65535")
     println("65535:")
-    println(arr/read_field(a, 65535))
+    println(arr/read-field(a, 65535))
 
-    arr/write_field(a, 65536, "65536")
+    arr/write-field(a, 65536, "65536")
     println("65536:")
-    println(arr/read_field(a, 65536))
+    println(arr/read-field(a, 65536))
 
-    arr/write_field(a, 65537, "65537")
+    arr/write-field(a, 65537, "65537")
     println("65537:")
-    println(arr/read_field(a, 65537))
+    println(arr/read-field(a, 65537))
 
-    arr/write_field(a, 70000, "70K")
+    arr/write-field(a, 70000, "70K")
     println("70000:")
-    println(arr/read_field(a, 70000))
+    println(arr/read-field(a, 70000))
 
-    arr/write_field(a, 100000, "100K")
+    arr/write-field(a, 100000, "100K")
     println("100000:")
-    println(arr/read_field(a, 100000))
+    println(arr/read-field(a, 100000))
 
     ""
 }

@@ -1,34 +1,34 @@
 namespace raw_array_gc_bug_test
 
-import "raw_mutable_array" as arr
+import "raw-mutable-array" as arr
 
 fn main() {
-    let a = arr/new_array(125000)
+    let a = arr/new-array(125000)
 
     // Write strings to the array - this triggers allocations and eventually GC
-    arr/write_field(a, 60000, "test1")
+    arr/write-field(a, 60000, "test1")
     println("After 1 write, 60000:")
-    println(arr/read_field(a, 60000))
+    println(arr/read-field(a, 60000))
 
-    arr/write_field(a, 60001, "test2")
+    arr/write-field(a, 60001, "test2")
     println("After 2 writes, 60000:")
-    println(arr/read_field(a, 60000))
+    println(arr/read-field(a, 60000))
 
-    arr/write_field(a, 60002, "test3")
+    arr/write-field(a, 60002, "test3")
     println("After 3 writes, 60000:")
-    println(arr/read_field(a, 60000))
+    println(arr/read-field(a, 60000))
 
-    arr/write_field(a, 60003, "test4")
+    arr/write-field(a, 60003, "test4")
     println("After 4 writes, 60000:")
-    println(arr/read_field(a, 60000))
+    println(arr/read-field(a, 60000))
 
-    arr/write_field(a, 60004, "test5")
+    arr/write-field(a, 60004, "test5")
     println("After 5 writes, 60000:")
-    println(arr/read_field(a, 60000))
+    println(arr/read-field(a, 60000))
 
-    arr/write_field(a, 60005, "test6")
+    arr/write-field(a, 60005, "test6")
     println("After 6 writes, 60000:")
-    println(arr/read_field(a, 60000))
+    println(arr/read-field(a, 60000))
 
     ""
 }

@@ -1,6 +1,6 @@
 namespace test.gc.in.namespaces
 
-import "raw_mutable_array" as array
+import "raw-mutable-array" as array
 
 struct HeapThing {
     x
@@ -18,8 +18,8 @@ struct PersistentVector {
 let EMPTY = PersistentVector {
     count: 0
     shift: 5
-    root: array/new_array(0)
-    tail: array/new_array(0)
+    root: array/new-array(0)
+    tail: array/new-array(0)
 }
 
 

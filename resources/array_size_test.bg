@@ -1,10 +1,10 @@
 namespace array_size_test
 
-import "raw_mutable_array" as arr
+import "raw-mutable-array" as arr
 import "beagle.primitive" as primitive
 
 fn main() {
-    let a = arr/new_array(125000)
+    let a = arr/new-array(125000)
 
     println("Array size:")
     println(primitive/size(a))

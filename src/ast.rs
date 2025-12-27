@@ -747,7 +747,7 @@ impl AstCompiler<'_> {
 
                 let error_fn_pointer = self
                     .compiler
-                    .find_function("beagle.builtin/throw_error")
+                    .find_function("beagle.builtin/throw-error")
                     .unwrap();
                 let error_fn_pointer = self
                     .compiler
@@ -1105,13 +1105,13 @@ impl AstCompiler<'_> {
                 // Get builtin function pointers
                 let push_handler_fn = self
                     .compiler
-                    .find_function("beagle.builtin/push_exception_handler")
+                    .find_function("beagle.builtin/push-exception-handler")
                     .expect("push_exception_handler builtin not found");
                 let push_handler_fn_ptr = usize::from(push_handler_fn.pointer);
 
                 let pop_handler_fn = self
                     .compiler
-                    .find_function("beagle.builtin/pop_exception_handler")
+                    .find_function("beagle.builtin/pop-exception-handler")
                     .expect("pop_exception_handler builtin not found");
                 let pop_handler_fn_ptr = usize::from(pop_handler_fn.pointer);
 
@@ -1181,7 +1181,7 @@ impl AstCompiler<'_> {
                 };
                 let throw_fn = self
                     .compiler
-                    .find_function("beagle.builtin/throw_exception")
+                    .find_function("beagle.builtin/throw-exception")
                     .expect("throw_exception builtin not found");
                 let throw_fn_ptr = usize::from(throw_fn.pointer);
                 self.ir.throw_value(exception_value, throw_fn_ptr);
@@ -1254,7 +1254,7 @@ impl AstCompiler<'_> {
 
                 // No pattern matched - throw error
                 self.ir.write_label(no_match_label);
-                self.call_builtin("beagle.builtin/throw_error", vec![]);
+                self.call_builtin("beagle.builtin/throw-error", vec![]);
 
                 self.ir.write_label(end_label);
                 result_reg.into()
@@ -1419,7 +1419,7 @@ impl AstCompiler<'_> {
                     args,
                     rest_param,
                     body: vec![Ast::Call {
-                        name: "beagle.builtin/throw_error".to_string(),
+                        name: "beagle.builtin/throw-error".to_string(),
                         args: vec![],
                         token_range,
                     }],
@@ -1476,7 +1476,7 @@ impl AstCompiler<'_> {
                         let function_pointer = self.ir.assign_new(function_pointer);
                         // self.ir.breakpoint();
                         self.call_builtin(
-                            "beagle.builtin/register_extension",
+                            "beagle.builtin/register-extension",
                             vec![
                                 target_type.into(),
                                 protocol.into(),
@@ -1558,9 +1558,10 @@ impl AstCompiler<'_> {
                 let stack_pointer = self.ir.get_stack_pointer_imm(0);
                 let frame_pointer = self.ir.get_frame_pointer();
 
-                let struct_ptr = self
-                    .ir
-                    .call_builtin(allocate.into(), vec![stack_pointer, frame_pointer, size_reg.into()]);
+                let struct_ptr = self.ir.call_builtin(
+                    allocate.into(),
+                    vec![stack_pointer, frame_pointer, size_reg.into()],
+                );
 
                 let struct_pointer = self.ir.untag(struct_ptr);
                 self.ir.write_struct_id(struct_pointer, struct_id);
@@ -1602,12 +1603,12 @@ impl AstCompiler<'_> {
 
                         // Call create_error builtin (stack_pointer is added automatically by call_builtin)
                         let error = self.call_builtin(
-                            "beagle.builtin/create_error",
+                            "beagle.builtin/create-error",
                             vec![kind_str, message_str, null_reg.into()],
                         );
 
                         // Throw the exception (this doesn't return)
-                        self.call_builtin("beagle.builtin/throw_exception", vec![error]);
+                        self.call_builtin("beagle.builtin/throw-exception", vec![error]);
 
                         // Return null (unreachable but needed for type checking)
                         return Value::Null;
@@ -1640,9 +1641,10 @@ impl AstCompiler<'_> {
                 let stack_pointer = self.ir.get_stack_pointer_imm(0);
                 let frame_pointer = self.ir.get_frame_pointer();
 
-                let struct_ptr = self
-                    .ir
-                    .call_builtin(allocate.into(), vec![stack_pointer, frame_pointer, size_reg.into()]);
+                let struct_ptr = self.ir.call_builtin(
+                    allocate.into(),
+                    vec![stack_pointer, frame_pointer, size_reg.into()],
+                );
 
                 let struct_pointer = self.ir.untag(struct_ptr);
                 self.ir.write_struct_id(struct_pointer, struct_id);
@@ -1666,9 +1668,9 @@ impl AstCompiler<'_> {
                     self.ir.push_to_stack(reg.into());
                 }
 
-                let vector_pointer = self.call("persistent_vector/vec", vec![]);
+                let vector_pointer = self.call("persistent-vector/vec", vec![]);
 
-                let push = self.get_function("persistent_vector/push");
+                let push = self.get_function("persistent-vector/push");
                 let vector_register = self.ir.assign_new(vector_pointer);
                 // the elements are on the stack in reverse, so I need to grab them by index in reverse
                 // and then shift the stack pointer
@@ -1689,7 +1691,7 @@ impl AstCompiler<'_> {
             Ast::MapLiteral { pairs, .. } => {
                 // Special case: empty map
                 if pairs.is_empty() {
-                    return self.call("persistent_map/map", vec![]);
+                    return self.call("persistent-map/map", vec![]);
                 }
 
                 // Check for duplicate literal keys at compile time
@@ -1733,11 +1735,11 @@ impl AstCompiler<'_> {
                 }
 
                 // Create empty map
-                let map_pointer = self.call("persistent_map/map", vec![]);
+                let map_pointer = self.call("persistent-map/map", vec![]);
                 let map_register = self.ir.assign_new(map_pointer);
 
                 // Get assoc function
-                let assoc = self.get_function("persistent_map/assoc");
+                let assoc = self.get_function("persistent-map/assoc");
 
                 // Load pairs from stack and assoc them
                 let stack_pointer = self.ir.get_current_stack_position();
@@ -1770,7 +1772,7 @@ impl AstCompiler<'_> {
                 let namespace_id = Value::RawValue(namespace_id);
                 let namespace_id = self.ir.assign_new(namespace_id);
                 self.call_builtin(
-                    "beagle.builtin/set_current_namespace",
+                    "beagle.builtin/set-current-namespace",
                     vec![namespace_id.into()],
                 )
             }
@@ -1822,7 +1824,7 @@ impl AstCompiler<'_> {
                 let constant_ptr = self.string_constant(property.clone());
                 let constant_ptr = self.ir.assign_new(constant_ptr);
                 let call_result = self.call_builtin(
-                    "beagle.builtin/property_access",
+                    "beagle.builtin/property-access",
                     vec![object.into(), constant_ptr.into(), property_location.into()],
                 );
 
@@ -2078,7 +2080,7 @@ impl AstCompiler<'_> {
                 // Sadly I have to do this to avoid loss of percision
                 let allocate = self
                     .compiler
-                    .find_function("beagle.builtin/allocate_float")
+                    .find_function("beagle.builtin/allocate-float")
                     .unwrap();
                 let allocate = self.compiler.get_function_pointer(allocate).unwrap();
                 let allocate = self.ir.assign_new(allocate);
@@ -2087,9 +2089,10 @@ impl AstCompiler<'_> {
                 let stack_pointer = self.ir.get_stack_pointer_imm(0);
                 let frame_pointer = self.ir.get_frame_pointer();
 
-                let float_pointer = self
-                    .ir
-                    .call_builtin(allocate.into(), vec![stack_pointer, frame_pointer, size_reg.into()]);
+                let float_pointer = self.ir.call_builtin(
+                    allocate.into(),
+                    vec![stack_pointer, frame_pointer, size_reg.into()],
+                );
 
                 let float_pointer = self.ir.untag(float_pointer);
                 self.ir.write_small_object_header(float_pointer);
@@ -2201,7 +2204,7 @@ impl AstCompiler<'_> {
                         let local = self.ir.load_local(local_index);
                         // I thought I needed a write barrier, but I believe that isn't the case
                         // because these are only heap allocated if captured.
-                        // self.call_builtin("beagle.builtin/gc_add_root", vec![local]);
+                        // self.call_builtin("beagle.builtin/gc-add-root", vec![local]);
                         let local = self.ir.untag(local);
                         self.ir.write_field(local, 0, value.into());
                     }
@@ -2222,7 +2225,7 @@ impl AstCompiler<'_> {
                         let slot = self.ir.read_field(arg0, index.into());
                         // I thought I needed a write barrier, but I believe that isn't the case
                         // because these are only heap allocated if captured.
-                        // self.call_builtin("beagle.builtin/gc_add_root", vec![slot]);
+                        // self.call_builtin("beagle.builtin/gc-add-root", vec![slot]);
                         let slot = self.ir.untag(slot);
                         self.ir.write_field(slot, 0, value.into());
                     }
@@ -2235,7 +2238,7 @@ impl AstCompiler<'_> {
                         let arg0: VirtualRegister = self.ir.assign_new(arg0);
                         // I thought I needed a write barrier, but I believe that isn't the case
                         // because these are only heap allocated if captured.
-                        // self.call_builtin("beagle.builtin/gc_add_root", vec![arg0.into()]);
+                        // self.call_builtin("beagle.builtin/gc-add-root", vec![arg0.into()]);
                         let arg0 = self.ir.untag(arg0.into());
                         self.ir.write_field(arg0, index + 3, value.into());
                     }
@@ -2265,7 +2268,7 @@ impl AstCompiler<'_> {
                 let constant_ptr = self.keyword_constant(keyword_text);
                 let constant_ptr = self.ir.assign_new(constant_ptr);
                 self.call_builtin(
-                    "beagle.builtin/load_keyword_constant_runtime",
+                    "beagle.builtin/load-keyword-constant-runtime",
                     vec![constant_ptr.into()],
                 )
             }
@@ -2388,7 +2391,7 @@ impl AstCompiler<'_> {
 
                 // Call protocol_dispatch(first_arg, cache_location, dispatch_table_ptr) -> fn_ptr
                 let slow_fn_ptr = self.call_builtin(
-                    "beagle.builtin/protocol_dispatch",
+                    "beagle.builtin/protocol-dispatch",
                     vec![
                         arg0_reg.into(),
                         cache_ptr_reg.into(),
@@ -2438,8 +2441,8 @@ impl AstCompiler<'_> {
         let min_args = function.min_args;
 
         // Arity check - for functions that need stack/frame pointer, number_of_args includes them
-        let implicit_args = (if needs_stack_pointer { 1 } else { 0 })
-            + (if needs_frame_pointer { 1 } else { 0 });
+        let implicit_args =
+            (if needs_stack_pointer { 1 } else { 0 }) + (if needs_frame_pointer { 1 } else { 0 });
         let expected_user_args = function.number_of_args.saturating_sub(implicit_args);
 
         if is_variadic {
@@ -2506,9 +2509,10 @@ impl AstCompiler<'_> {
         let stack_pointer = self.ir.get_stack_pointer_imm(0);
         let frame_pointer = self.ir.get_frame_pointer();
 
-        let array_ptr = self
-            .ir
-            .call_builtin(allocate.into(), vec![stack_pointer, frame_pointer, size_reg.into()]);
+        let array_ptr = self.ir.call_builtin(
+            allocate.into(),
+            vec![stack_pointer, frame_pointer, size_reg.into()],
+        );
 
         let array_pointer = self.ir.untag(array_ptr);
         let type_id_value = Value::RawValue(1);
@@ -2546,9 +2550,10 @@ impl AstCompiler<'_> {
         let stack_pointer = self.ir.get_stack_pointer_imm(0);
         let frame_pointer = self.ir.get_frame_pointer();
 
-        let array_ptr = self
-            .ir
-            .call_builtin(allocate.into(), vec![stack_pointer, frame_pointer, size_reg.into()]);
+        let array_ptr = self.ir.call_builtin(
+            allocate.into(),
+            vec![stack_pointer, frame_pointer, size_reg.into()],
+        );
 
         let array_pointer = self.ir.untag(array_ptr);
 
@@ -2602,7 +2607,7 @@ impl AstCompiler<'_> {
 
         // Single call to trampoline - fixed 4 args (stack_pointer added automatically)
         let result = self.call_builtin(
-            "beagle.builtin/call_variadic_function_value",
+            "beagle.builtin/call-variadic-function-value",
             vec![
                 function_value,
                 args_array,
@@ -2640,9 +2645,10 @@ impl AstCompiler<'_> {
         let stack_pointer = self.ir.get_stack_pointer_imm(0);
         let frame_pointer = self.ir.get_frame_pointer();
 
-        let array_ptr = self
-            .ir
-            .call_builtin(allocate.into(), vec![stack_pointer, frame_pointer, size_reg.into()]);
+        let array_ptr = self.ir.call_builtin(
+            allocate.into(),
+            vec![stack_pointer, frame_pointer, size_reg.into()],
+        );
 
         let array_pointer = self.ir.untag(array_ptr);
 
@@ -2746,13 +2752,13 @@ impl AstCompiler<'_> {
             .ir
             .assign_new(Value::TaggedConstant(args.len() as isize));
         self.call(
-            "beagle.builtin/check_arity",
+            "beagle.builtin/check-arity",
             vec![function_register.into(), expected_count.into()],
         );
 
         // Check if function is variadic and pack args if needed
         let is_variadic = self.call_builtin(
-            "beagle.builtin/is_function_variadic",
+            "beagle.builtin/is-function-variadic",
             vec![function_register.into()],
         );
         let is_variadic_reg = self.ir.assign_new(is_variadic);
@@ -2775,7 +2781,7 @@ impl AstCompiler<'_> {
         // Variadic: use dispatch table to handle min_args correctly
         self.ir.write_label(call_variadic);
         let min_args = self.call_builtin(
-            "beagle.builtin/get_function_min_args",
+            "beagle.builtin/get-function-min-args",
             vec![function_register.into()],
         );
         let min_args_reg = self.ir.assign_new(min_args);
@@ -2810,13 +2816,13 @@ impl AstCompiler<'_> {
             .ir
             .assign_new(Value::TaggedConstant(args.len() as isize));
         self.call(
-            "beagle.builtin/check_arity",
+            "beagle.builtin/check-arity",
             vec![function_pointer, expected_count.into()],
         );
 
         // Check if closure's function is variadic
         let is_variadic = self.call_builtin(
-            "beagle.builtin/is_function_variadic",
+            "beagle.builtin/is-function-variadic",
             vec![function_pointer],
         );
         let is_variadic_reg = self.ir.assign_new(is_variadic);
@@ -2841,7 +2847,7 @@ impl AstCompiler<'_> {
         // Variadic closure: use dispatch table to handle min_args correctly
         self.ir.write_label(call_variadic_closure);
         let min_args = self.call_builtin(
-            "beagle.builtin/get_function_min_args",
+            "beagle.builtin/get-function-min-args",
             vec![function_pointer],
         );
         let min_args_reg = self.ir.assign_new(min_args);
@@ -2917,7 +2923,7 @@ impl AstCompiler<'_> {
         // Call make_closure
         let make_closure = self
             .compiler
-            .find_function("beagle.builtin/make_closure")
+            .find_function("beagle.builtin/make-closure")
             .unwrap();
         let make_closure = self.compiler.get_function_pointer(make_closure).unwrap();
         let make_closure_reg = self.ir.volatile_register();
@@ -3242,7 +3248,7 @@ impl AstCompiler<'_> {
     fn store_namespaced_variable(&mut self, slot: Value, reg: VirtualRegister) {
         let slot: VirtualRegister = self.ir.assign_new(slot);
         self.call_builtin(
-            "beagle.builtin/update_binding",
+            "beagle.builtin/update-binding",
             vec![slot.into(), reg.into()],
         );
     }
@@ -3290,7 +3296,7 @@ impl AstCompiler<'_> {
                 let slot = self.ir.assign_new(*slot);
                 let namespace = self.ir.assign_new(*namespace);
                 Ok(self.call_builtin(
-                    "beagle.builtin/get_binding",
+                    "beagle.builtin/get-binding",
                     vec![namespace.into(), slot.into()],
                 ))
             }

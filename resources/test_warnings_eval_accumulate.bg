@@ -1,6 +1,6 @@
 namespace test_warnings_eval_accumulate
 
-import "persistent_vector" as vec
+import "persistent-vector" as vec
 
 enum Color {
     Red,

@@ -1,7 +1,7 @@
 namespace test
 
 import "beagle.core" as core
-import "persistent_vector" as pv
+import "persistent-vector" as pv
 
 enum Color {
     Red,
@@ -29,7 +29,7 @@ fn main() {
         println("Kind:")
         println(w.kind)
         println("File:")
-        println(w.file_name)
+        println(w.file-name)
         println("Line:")
         println(w.line)
         println("Column:")
@@ -37,13 +37,13 @@ fn main() {
         println("Message:")
         println(w.message)
 
-        if w.enum_name != null {
+        if w.enum-name != null {
             println("Enum:")
-            println(w.enum_name)
+            println(w.enum-name)
             println("Missing variants count:")
-            println(pv/count(w.missing_variants))
+            println(pv/count(w.missing-variants))
             println("First missing variant:")
-            println(pv/get(w.missing_variants, 0))
+            println(pv/get(w.missing-variants, 0))
         }
     }
 }

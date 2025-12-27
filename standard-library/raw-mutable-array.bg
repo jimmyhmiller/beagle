@@ -1,0 +1,200 @@
+namespace raw-mutable-array
+import "beagle.builtin" as builtin
+import "beagle.primitive" as primitive
+
+
+fn allocate-array-unsafe(size) {
+    let array = builtin/allocate(size)
+    builtin/fill-object-fields(array, null)
+}
+
+fn read-field-unsafe(array, index) {
+    primitive/read-field(array, index)
+}
+
+fn write-field-unsafe(array, index, value) {
+    primitive/write-field(array, index, value)
+}
+
+fn is-array(array) {
+    primitive/is-object(array) && primitive/read-type-id(array) == 1
+}
+
+fn panic-if-not-array(message, array) {
+    if is-array(array) == false {
+        println(message)
+        println(array)
+        primitive/panic("Not an array")
+    }
+}
+
+fn write-field(array, index, value) {
+    panic-if-not-array("write", array)
+    if index < 0 || index >= primitive/size(array) {
+        null
+    } else {
+        write-field-unsafe(array, index, value)
+    }
+}
+
+fn read-field(array, index) {
+    panic-if-not-array("read", array)
+    if index < 0 || index >= primitive/size(array)  {
+        null
+    } else {
+        read-field-unsafe(array, index)
+    }
+}
+
+fn new-array(size) {
+    if size < 0 {
+        primitive/panic("Negative size")
+    }
+    let array = allocate-array-unsafe(size)
+    primitive/write-type-id(array, 1)
+    array
+}
+
+
+struct ExampleStruct {
+    value
+}
+
+fn copy-array(array) {
+    panic-if-not-array("copy", array)
+    if array == null {
+        primitive/panic("Array is null")
+    }
+    let new-array = builtin/copy-object(array)
+    new-array
+}
+
+
+fn unsafe-copy-from-array-to(from, to) {
+    builtin/copy-from-to-object(from, to)
+}
+
+fn copy-from-array-to(from, to) {
+    panic-if-not-array("copy from", from)
+    panic-if-not-array("copy to", to)
+    if primitive/size(from) > primitive/size(to) {
+        primitive/panic("Array from size must be less than or equal to array to size")
+    }
+    unsafe-copy-from-array-to(from, to)
+}
+
+fn copy-range(from, to, start, count) {
+    panic-if-not-array("copy-range from", from)
+    panic-if-not-array("copy-range to", to)
+    builtin/copy-array-range(from, to, start, count)
+}
+
+
+fn allocate-array-and-return() {
+    let example-struct = ExampleStruct {
+        value: "Example Struct Value2"
+    }
+    let array = new-array(1)
+    write-field(array, 0, example-struct)
+    array
+}
+
+fn count(array) {
+    if array == null {
+        0
+    } else {
+        panic-if-not-array("count", array)
+        primitive/size(array)
+    }
+}
+
+fn mod(a, b) {
+    a - (a / b) * b
+}
+
+fn main() {
+    let array = new-array(10)
+    primitive/write-type-id(array, 1)
+    primitive/write-field(array, 0, 1)
+    primitive/write-field(array, 1, 2)
+    primitive/write-field(array, 2, 3)
+    primitive/write-field(array, 3, 4)
+    primitive/write-field(array, 4, 5)
+    primitive/write-field(array, 5, 6)
+    primitive/write-field(array, 6, 7)
+    primitive/write-field(array, 7, 8)
+    primitive/write-field(array, 8, 9)
+    primitive/write-field(array, 9, 10)
+
+    println(is-array(array))
+
+
+    println(count(array))
+    println(count(null))
+
+    let copied-array = copy-array(array)
+    write-field(copied-array, 0, 42);
+    gc()
+    gc()
+    gc()
+    println(array)
+    println(copied-array)
+
+
+
+    let my-array = allocate-array-and-return()
+    println(primitive/read-field(array, 0))
+    println(array)
+    println(primitive/size(array))
+
+    let example-struct = ExampleStruct {
+        value: "Example Struct Value"
+    }
+    println(is-array(example-struct))
+
+    let array = builtin/allocate(1)
+    primitive/write-type-id(array, 1)
+    primitive/write-field(array, 0, example-struct)
+    println(primitive/read-field(array, 0).value)
+    println(array)
+    gc()
+    gc()
+    gc()
+    println(array)
+    println(my-array)
+
+
+    let my-small-array = new-array(1);
+    write-field(my-small-array, 0, 42)
+
+    let my-larger-array = new-array(2);
+    write-field(my-larger-array, 0, 1)
+
+    copy-from-array-to(my-small-array, my-larger-array)
+    write-field(my-larger-array, 1, 44)
+    write-field(my-small-array, 0, 43)
+    println(my-small-array)
+    println(my-larger-array)
+
+    read-field(array, 0)
+
+    "done"
+}
+
+// Expect
+// true
+// 10
+// 0
+// [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
+// [ 42, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
+// 1
+// [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
+// 10
+// false
+// Example Struct Value
+// [ ExampleStruct { value: "Example Struct Value" } ]
+// [ ExampleStruct { value: "Example Struct Value" } ]
+// [ ExampleStruct { value: "Example Struct Value2" } ]
+// [ 43 ]
+// [ 42, 44 ]
+// done

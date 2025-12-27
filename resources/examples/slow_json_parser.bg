@@ -1,8 +1,8 @@
 namespace slow_json_parser
 
 import "beagle.primitive" as primitive
-import "persistent_map" as pm
-import "persistent_vector" as pv
+import "persistent-map" as pm
+import "persistent-vector" as pv
 
 struct Tokenizer {
     input

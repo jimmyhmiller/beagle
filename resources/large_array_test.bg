@@ -1,38 +1,38 @@
 namespace large_array_test
 
-import "raw_mutable_array" as arr
+import "raw-mutable-array" as arr
 
 fn main() {
     let capacity = 125000
-    let a = arr/new_array(capacity)
+    let a = arr/new-array(capacity)
 
     // Write to various slots
-    arr/write_field(a, 32005, "A")
-    arr/write_field(a, 50000, "G")
-    arr/write_field(a, 30000, "C")
-    arr/write_field(a, 70000, "T")
+    arr/write-field(a, 32005, "A")
+    arr/write-field(a, 50000, "G")
+    arr/write-field(a, 30000, "C")
+    arr/write-field(a, 70000, "T")
 
     // Read back
     println("Slot 32005:")
-    println(arr/read_field(a, 32005))
+    println(arr/read-field(a, 32005))
 
     println("Slot 50000:")
-    println(arr/read_field(a, 50000))
+    println(arr/read-field(a, 50000))
 
     println("Slot 30000:")
-    println(arr/read_field(a, 30000))
+    println(arr/read-field(a, 30000))
 
     println("Slot 70000:")
-    println(arr/read_field(a, 70000))
+    println(arr/read-field(a, 70000))
 
     // Check empty slot
     println("Slot 0:")
-    println(arr/read_field(a, 0))
+    println(arr/read-field(a, 0))
 
     // Write again to same slot
-    arr/write_field(a, 32005, "NEW_A")
+    arr/write-field(a, 32005, "NEW_A")
     println("Slot 32005 after overwrite:")
-    println(arr/read_field(a, 32005))
+    println(arr/read-field(a, 32005))
 
     ""
 }

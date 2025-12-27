@@ -1,24 +1,24 @@
-namespace extra_map_test
-import "persistent_map" as pm
+namespace extra-map-test
+import "persistent-map" as pm
 import "beagle.builtin" as builtin
 import "beagle.primitive" as primitive
-import "raw_mutable_array" as array
+import "raw-mutable-array" as array
 
-fn test_assoc_node_bitmap() {
+fn test-assoc-node-bitmap() {
     let pm = pm/assoc(pm/map(), "key1", "value1")
-    let added_leaf_box = array/new_array(1)
-    array/write_field(added_leaf_box, 0, 0)
+    let added-leaf-box = array/new-array(1)
+    array/write-field(added-leaf-box, 0, 0)
     let h = builtin/hash("key2")
-    let result = pm/assoc_node(pm.root, 0, h, "key2", "value2", added_leaf_box)
+    let result = pm/assoc-node(pm.root, 0, h, "key2", "value2", added-leaf-box)
     println(result)
-    println(array/read_field(added_leaf_box, 0))
+    println(array/read-field(added-leaf-box, 0))
 }
 
 
 fn main() {
-    test_assoc_node_bitmap()
+    test-assoc-node-bitmap()
 }
 
 // Expect
-// BitmapIndexedNode { bit_map: 134219776, children: [ BitmapIndexedNode { bit_map: 2048, children: [ PairNode { key: "key2", val: "value2" } ] }, PairNode { key: "key1", val: "value1" } ] }
+// BitmapIndexedNode { bit-map: 134219776, children: [ BitmapIndexedNode { bit-map: 2048, children: [ PairNode { key: "key2", val: "value2" } ] }, PairNode { key: "key1", val: "value1" } ] }
 // 1

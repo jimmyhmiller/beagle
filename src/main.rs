@@ -344,8 +344,8 @@ fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Erro
     let resource_files: [&str; 0] = [];
     let stdlib_files = [
         "std.bg",
-        "persistent_vector.bg",
-        "persistent_map.bg",
+        "persistent-vector.bg",
+        "persistent-map.bg",
         "beagle.ffi.bg",
         "beagle.io.bg",
     ];
