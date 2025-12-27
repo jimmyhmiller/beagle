@@ -48,11 +48,11 @@ enum Type {
 // TODO: I could make a function that maps between a type an integer
 // but I don't actually have equality defined for structures
 
-fn __create_ffi_function(ffi_info) {
+fn __create_ffi_function(ffi-info) {
     // Wrapper takes exactly 6 args - callers must pass all 6
     fn(a1, a2, a3, a4, a5, a6) {
         builtin/__register_c_call();
-        let result = call_ffi_info(ffi_info, a1, a2, a3, a4, a5, a6)
+        let result = call-ffi-info(ffi-info, a1, a2, a3, a4, a5, a6)
         builtin/__unregister_c_call()
         result
     }
@@ -61,14 +61,14 @@ fn __create_ffi_function(ffi_info) {
 // These functions are implemented as builtins in Rust:
 // - allocate(size) -> Buffer
 // - deallocate(buffer) -> null
-// - get_u8(buffer, offset) -> byte
-// - set_u8(buffer, offset, value) -> null
-// - get_i32(buffer, offset) -> i32
-// - set_i32(buffer, offset, value) -> null
-// - get_u32(buffer, offset) -> u32
-// - set_i16(buffer, offset, value) -> null
-// - get_string(buffer, offset, len) -> string
-// - copy_bytes(src, src_off, dst, dst_off, len) -> null  (memcpy)
-// - realloc(buffer, new_size) -> new_buffer
-// - buffer_size(buffer) -> size
-// - write_buffer_offset(fd, buffer, offset, len) -> bytes_written
+// - get-u8(buffer, offset) -> byte
+// - set-u8(buffer, offset, value) -> null
+// - get-i32(buffer, offset) -> i32
+// - set-i32(buffer, offset, value) -> null
+// - get-u32(buffer, offset) -> u32
+// - set-i16(buffer, offset, value) -> null
+// - get-string(buffer, offset, len) -> string
+// - copy-bytes(src, src-off, dst, dst-off, len) -> null  (memcpy)
+// - realloc(buffer, new-size) -> new-buffer
+// - buffer-size(buffer) -> size
+// - write-buffer-offset(fd, buffer, offset, len) -> bytes-written

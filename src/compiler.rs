@@ -298,13 +298,13 @@ impl Compiler {
         if ast.has_top_level() {
             let backend = Backend::new();
             let error_fn = self
-                .find_function("beagle.builtin/throw_error")
+                .find_function("beagle.builtin/throw-error")
                 .ok_or_else(|| CompileError::FunctionNotFound {
-                    function_name: "beagle.builtin/throw_error".to_string(),
+                    function_name: "beagle.builtin/throw-error".to_string(),
                 })?;
             let error_fn_pointer = self.get_function_pointer(error_fn).ok_or_else(|| {
                 CompileError::InvalidFunctionPointer {
-                    function_name: "beagle.builtin/throw_error".to_string(),
+                    function_name: "beagle.builtin/throw-error".to_string(),
                 }
             })?;
 
@@ -751,7 +751,7 @@ impl Compiler {
                 };
             }
             return Ast::Call {
-                name: "beagle.builtin/throw_error".to_string(),
+                name: "beagle.builtin/throw-error".to_string(),
                 args: vec![],
                 token_range: TokenRange::new(0, 0),
             };
@@ -765,7 +765,7 @@ impl Compiler {
             .map(|f| f.name.clone())
             .unwrap_or_else(|| {
                 // Fall back to error function if we can't find the method
-                "beagle.builtin/throw_error".to_string()
+                "beagle.builtin/throw-error".to_string()
             });
 
         // Use instance_of for type checking
@@ -773,7 +773,7 @@ impl Compiler {
         // with proper guard for heap objects
         Ast::If {
             condition: Box::new(Ast::Call {
-                name: "beagle.core/instance_of".to_string(),
+                name: "beagle.core/instance-of".to_string(),
                 args: vec![
                     Ast::Identifier(args[0].to_string(), 0),
                     Ast::Identifier(first_method._type.to_string(), 0),

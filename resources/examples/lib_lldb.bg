@@ -2,7 +2,7 @@ namespace lib_lldb
 
 import "beagle.ffi" as ffi
 import "beagle.primitive" as primitive
-import "persistent_vector" as vector
+import "persistent-vector" as vector
 
 
 let _lldb = ffi/load_library("/Users/jimmyhmiller/Documents/Code/open-source/lldb-sys.rs/src/liblldb_bindings.dylib")

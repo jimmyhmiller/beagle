@@ -4,7 +4,7 @@ import "beagle.ffi" as ffi
 import "beagle.builtin" as builtin
 
 // Load libc (platform-specific path)
-fn get_libc_path() {
+fn get-libc-path() {
     let os = get-os()
     if os == "macos" {
         "/usr/lib/libSystem.dylib"
@@ -16,7 +16,7 @@ fn get_libc_path() {
     }
 }
 
-let libc = ffi/load_library(get_libc_path())
+let libc = ffi/load-library(get-libc-path())
 
 // Result type for error handling
 enum Result {
@@ -47,27 +47,27 @@ fn unwrap(result) {
 }
 
 // FFI function bindings for FILE* operations
-let _fopen = ffi/get_function(libc, "fopen",
+let _fopen = ffi/get-function(libc, "fopen",
     [ffi/Type.String, ffi/Type.String], ffi/Type.Pointer)
-let _fclose = ffi/get_function(libc, "fclose",
+let _fclose = ffi/get-function(libc, "fclose",
     [ffi/Type.Pointer], ffi/Type.I32)
-let _fread = ffi/get_function(libc, "fread",
+let _fread = ffi/get-function(libc, "fread",
     [ffi/Type.Pointer, ffi/Type.U64, ffi/Type.U64, ffi/Type.Pointer], ffi/Type.U64)
-let _fwrite = ffi/get_function(libc, "fwrite",
+let _fwrite = ffi/get-function(libc, "fwrite",
     [ffi/Type.Pointer, ffi/Type.U64, ffi/Type.U64, ffi/Type.Pointer], ffi/Type.U64)
-let _fgetc = ffi/get_function(libc, "fgetc",
+let _fgetc = ffi/get-function(libc, "fgetc",
     [ffi/Type.Pointer], ffi/Type.I32)
-let _fputc = ffi/get_function(libc, "fputc",
+let _fputc = ffi/get-function(libc, "fputc",
     [ffi/Type.I32, ffi/Type.Pointer], ffi/Type.I32)
-let _fflush = ffi/get_function(libc, "fflush",
+let _fflush = ffi/get-function(libc, "fflush",
     [ffi/Type.Pointer], ffi/Type.I32)
-let _feof = ffi/get_function(libc, "feof",
+let _feof = ffi/get-function(libc, "feof",
     [ffi/Type.Pointer], ffi/Type.I32)
 
 // FFI bindings for fd-based operations (stdin/stdout/stderr)
-let _read = ffi/get_function(libc, "read",
+let _read = ffi/get-function(libc, "read",
     [ffi/Type.I32, ffi/Type.Pointer, ffi/Type.U64], ffi/Type.I32)
-let _write = ffi/get_function(libc, "write",
+let _write = ffi/get-function(libc, "write",
     [ffi/Type.I32, ffi/Type.Pointer, ffi/Type.U64], ffi/Type.I32)
 
 // File struct wrapper
@@ -77,25 +77,25 @@ struct File { handle }
 struct BufferResult { buffer, length }
 
 // Standard file descriptors
-let STDIN_FD = 0
-let STDOUT_FD = 1
-let STDERR_FD = 2
+let STDIN-FD = 0
+let STDOUT-FD = 1
+let STDERR-FD = 2
 
 // Helper: check if a pointer is null
-fn is_null(pointer) {
+fn is-null(pointer) {
     pointer.ptr == 0
 }
 
 // Helper: copy string bytes to a buffer
 // Returns a buffer containing the string bytes
-fn string_to_buffer(s) {
+fn string-to-buffer(s) {
     let len = length(s)
     let buf = ffi/allocate(len)
     let mut i = 0
     while i < len {
         let char = get(s, i)
-        let byte = builtin/char_code(char)
-        ffi/set_u8(buf, i, byte)
+        let byte = builtin/char-code(char)
+        ffi/set-u8(buf, i, byte)
         i = i + 1
     }
     buf
@@ -105,7 +105,7 @@ fn string_to_buffer(s) {
 
 fn open(path, mode) {
     let handle = _fopen(path, mode, 0, 0, 0, 0)
-    if is_null(handle) {
+    if is-null(handle) {
         err(-1, "Failed to open file")
     } else {
         ok(File { handle: handle })
@@ -121,13 +121,13 @@ fn close(file) {
     }
 }
 
-fn read_bytes(file, n) {
+fn read-bytes(file, n) {
     let buf = ffi/allocate(n)
-    let bytes_read = _fread(buf, 1, n, file.handle, 0, 0)
-    ok(BufferResult { buffer: buf, length: bytes_read })
+    let bytes-read = _fread(buf, 1, n, file.handle, 0, 0)
+    ok(BufferResult { buffer: buf, length: bytes-read })
 }
 
-fn read_char(file) {
+fn read-char(file) {
     let c = _fgetc(file.handle, 0, 0, 0, 0, 0)
     if c == -1 {
         err(-1, "EOF or error")
@@ -136,14 +136,14 @@ fn read_char(file) {
     }
 }
 
-fn write_bytes(file, buf, len) {
+fn write-bytes(file, buf, len) {
     let written = _fwrite(buf, 1, len, file.handle, 0, 0)
     ok(written)
 }
 
-fn write_string(file, s) {
+fn write-string(file, s) {
     let len = length(s)
-    let buf = string_to_buffer(s)
+    let buf = string-to-buffer(s)
     let written = _fwrite(buf, 1, len, file.handle, 0, 0)
     ffi/deallocate(buf)
     ok(written)
@@ -162,23 +162,23 @@ fn eof?(file) {
     _feof(file.handle, 0, 0, 0, 0, 0) != 0
 }
 
-// Read a line from a file (up to newline or max_len bytes)
-fn read_line(file, max_len) {
-    let buf = ffi/allocate(max_len)
+// Read a line from a file (up to newline or max-len bytes)
+fn read-line(file, max-len) {
+    let buf = ffi/allocate(max-len)
     let mut i = 0
     let mut done = false
     // Use done == false instead of !done for while condition
-    while i < max_len && done == false {
+    while i < max-len && done == false {
         let c = _fgetc(file.handle, 0, 0, 0, 0, 0)
         if c == -1 {
             done = true
         } else if c == 10 {
             // newline character
-            ffi/set_u8(buf, i, c)
+            ffi/set-u8(buf, i, c)
             i = i + 1
             done = true
         } else {
-            ffi/set_u8(buf, i, c)
+            ffi/set-u8(buf, i, c)
             i = i + 1
         }
     }
@@ -186,7 +186,7 @@ fn read_line(file, max_len) {
         ffi/deallocate(buf)
         err(-1, "EOF")
     } else {
-        let s = ffi/get_string(buf, 0, i)
+        let s = ffi/get-string(buf, 0, i)
         ffi/deallocate(buf)
         ok(s)
     }
@@ -194,22 +194,22 @@ fn read_line(file, max_len) {
 
 // === FD-based operations (for stdin/stdout/stderr) ===
 
-fn read_stdin(n) {
+fn read-stdin(n) {
     let buf = ffi/allocate(n)
-    let bytes_read = _read(STDIN_FD, buf, n, 0, 0, 0)
-    if bytes_read < 0 {
+    let bytes-read = _read(STDIN-FD, buf, n, 0, 0, 0)
+    if bytes-read < 0 {
         ffi/deallocate(buf)
-        err(bytes_read, "Read error")
+        err(bytes-read, "Read error")
     } else {
-        ok(BufferResult { buffer: buf, length: bytes_read })
+        ok(BufferResult { buffer: buf, length: bytes-read })
     }
 }
 
-fn read_stdin_string(n) {
-    let result = read_stdin(n)
+fn read-stdin-string(n) {
+    let result = read-stdin(n)
     match result {
         Result.Ok { value } => {
-            let s = ffi/get_string(value.buffer, 0, value.length)
+            let s = ffi/get-string(value.buffer, 0, value.length)
             ffi/deallocate(value.buffer)
             ok(s)
         },
@@ -217,10 +217,10 @@ fn read_stdin_string(n) {
     }
 }
 
-fn write_stdout(s) {
+fn write-stdout(s) {
     let len = length(s)
-    let buf = string_to_buffer(s)
-    let written = _write(STDOUT_FD, buf, len, 0, 0, 0)
+    let buf = string-to-buffer(s)
+    let written = _write(STDOUT-FD, buf, len, 0, 0, 0)
     ffi/deallocate(buf)
     if written < 0 {
         err(written, "Write error")
@@ -230,8 +230,8 @@ fn write_stdout(s) {
 }
 
 // Write raw buffer to stdout - no string conversion overhead
-fn write_stdout_buffer(buf, len) {
-    let written = _write(STDOUT_FD, buf, len, 0, 0, 0)
+fn write-stdout-buffer(buf, len) {
+    let written = _write(STDOUT-FD, buf, len, 0, 0, 0)
     if written < 0 {
         err(written, "Write error")
     } else {
@@ -239,10 +239,10 @@ fn write_stdout_buffer(buf, len) {
     }
 }
 
-fn write_stderr(s) {
+fn write-stderr(s) {
     let len = length(s)
-    let buf = string_to_buffer(s)
-    let written = _write(STDERR_FD, buf, len, 0, 0, 0)
+    let buf = string-to-buffer(s)
+    let written = _write(STDERR-FD, buf, len, 0, 0, 0)
     ffi/deallocate(buf)
     if written < 0 {
         err(written, "Write error")
@@ -252,8 +252,8 @@ fn write_stderr(s) {
 }
 
 // Write from buffer at offset to stdout - for efficient partial buffer writes
-fn write_stdout_buffer_offset(buf, offset, len) {
-    let written = ffi/write_buffer_offset(STDOUT_FD, buf, offset, len)
+fn write-stdout-buffer-offset(buf, offset, len) {
+    let written = ffi/write-buffer-offset(STDOUT-FD, buf, offset, len)
     if written < 0 {
         err(written, "Write error")
     } else {
@@ -261,22 +261,22 @@ fn write_stdout_buffer_offset(buf, offset, len) {
     }
 }
 
-// Read a line from stdin (up to max_len bytes)
-fn read_stdin_line(max_len) {
-    let buf = ffi/allocate(max_len)
-    let one_byte_buf = ffi/allocate(1)
+// Read a line from stdin (up to max-len bytes)
+fn read-stdin-line(max-len) {
+    let buf = ffi/allocate(max-len)
+    let one-byte-buf = ffi/allocate(1)
     let mut i = 0
     let mut done = false
     // Use done == false instead of !done for while condition
-    while i < max_len && done == false {
-        let bytes_read = _read(STDIN_FD, one_byte_buf, 1, 0, 0, 0)
-        if bytes_read <= 0 {
+    while i < max-len && done == false {
+        let bytes-read = _read(STDIN-FD, one-byte-buf, 1, 0, 0, 0)
+        if bytes-read <= 0 {
             done = true
         } else {
             // Read the byte we just got and copy to main buffer
-            let char_str = ffi/get_string(one_byte_buf, 0, 1)
-            let c = builtin/char_code(char_str)
-            ffi/set_u8(buf, i, c)
+            let char-str = ffi/get-string(one-byte-buf, 0, 1)
+            let c = builtin/char-code(char-str)
+            ffi/set-u8(buf, i, c)
             if c == 10 {
                 // newline
                 i = i + 1
@@ -286,12 +286,12 @@ fn read_stdin_line(max_len) {
             }
         }
     }
-    ffi/deallocate(one_byte_buf)
+    ffi/deallocate(one-byte-buf)
     if i == 0 {
         ffi/deallocate(buf)
         err(-1, "EOF")
     } else {
-        let s = ffi/get_string(buf, 0, i)
+        let s = ffi/get-string(buf, 0, i)
         ffi/deallocate(buf)
         ok(s)
     }

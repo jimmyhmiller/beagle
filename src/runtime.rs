@@ -1604,13 +1604,15 @@ impl Runtime {
             // so there is no need to lock anything
             // Collect all frame pointers with their return addresses
             // The tuple is (stack_base, frame_pointer, gc_return_addr)
-            let mut all_stack_pointers = vec![(self.get_stack_base(), frame_pointer, gc_return_addr)];
+            let mut all_stack_pointers =
+                vec![(self.get_stack_base(), frame_pointer, gc_return_addr)];
             // For saved stack segments, we don't have a gc_return_addr, so use 0
             // (the stack walker will fall back to FP+8 lookup)
             all_stack_pointers.extend(
-                self.stack_segments.get_all_stack_pointers()
+                self.stack_segments
+                    .get_all_stack_pointers()
                     .into_iter()
-                    .map(|(base, fp)| (base, fp, 0usize))
+                    .map(|(base, fp)| (base, fp, 0usize)),
             );
 
             self.memory
@@ -1720,9 +1722,10 @@ impl Runtime {
         stack_pointers.push((self.get_stack_base(), frame_pointer, gc_return_addr));
         // Add saved stack segments to the GC scan (no gc_return_addr)
         stack_pointers.extend(
-            self.stack_segments.get_all_stack_pointers()
+            self.stack_segments
+                .get_all_stack_pointers()
                 .into_iter()
-                .map(|(base, fp)| (base, fp, 0usize))
+                .map(|(base, fp)| (base, fp, 0usize)),
         );
 
         drop(thread_state);
@@ -2772,7 +2775,13 @@ impl Runtime {
         } else {
             number_of_args
         };
-        self.add_builtin_function_with_fp(name, function, needs_stack_pointer, needs_stack_pointer, adjusted_args)
+        self.add_builtin_function_with_fp(
+            name,
+            function,
+            needs_stack_pointer,
+            needs_stack_pointer,
+            adjusted_args,
+        )
     }
 
     pub fn add_builtin_function_with_fp(

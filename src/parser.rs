@@ -2612,7 +2612,7 @@ impl Parser {
                 }
             }
             Token::Concat => Ast::Call {
-                name: "beagle.core/string_concat".to_string(),
+                name: "beagle.core/string-concat".to_string(),
                 args: vec![lhs, rhs],
                 token_range,
             },

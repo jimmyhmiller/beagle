@@ -8,7 +8,7 @@ namespace fasta
 import "beagle.ffi" as ffi
 import "beagle.io" as io
 import "beagle.builtin" as builtin
-import "raw_mutable_array" as arr
+import "raw-mutable-array" as arr
 
 let LINE_WIDTH = 60
 let IM = 139968
@@ -49,32 +49,32 @@ fn make_codes_buffer(codes) {
 
 // IUB cumulative probabilities (scaled to IM)
 fn make_iub_probs() {
-    let probs = arr/new_array(15)
-    arr/write_field(probs, 0, 37792)
-    arr/write_field(probs, 1, 54588)
-    arr/write_field(probs, 2, 71384)
-    arr/write_field(probs, 3, 109176)
-    arr/write_field(probs, 4, 111975)
-    arr/write_field(probs, 5, 114774)
-    arr/write_field(probs, 6, 117574)
-    arr/write_field(probs, 7, 120373)
-    arr/write_field(probs, 8, 123172)
-    arr/write_field(probs, 9, 125972)
-    arr/write_field(probs, 10, 128771)
-    arr/write_field(probs, 11, 131570)
-    arr/write_field(probs, 12, 134370)
-    arr/write_field(probs, 13, 137169)
-    arr/write_field(probs, 14, 139969)
+    let probs = arr/new-array(15)
+    arr/write-field(probs, 0, 37792)
+    arr/write-field(probs, 1, 54588)
+    arr/write-field(probs, 2, 71384)
+    arr/write-field(probs, 3, 109176)
+    arr/write-field(probs, 4, 111975)
+    arr/write-field(probs, 5, 114774)
+    arr/write-field(probs, 6, 117574)
+    arr/write-field(probs, 7, 120373)
+    arr/write-field(probs, 8, 123172)
+    arr/write-field(probs, 9, 125972)
+    arr/write-field(probs, 10, 128771)
+    arr/write-field(probs, 11, 131570)
+    arr/write-field(probs, 12, 134370)
+    arr/write-field(probs, 13, 137169)
+    arr/write-field(probs, 14, 139969)
     probs
 }
 
 // Homo sapiens cumulative probabilities (scaled to IM)
 fn make_homo_probs() {
-    let probs = arr/new_array(4)
-    arr/write_field(probs, 0, 42404)
-    arr/write_field(probs, 1, 70117)
-    arr/write_field(probs, 2, 97767)
-    arr/write_field(probs, 3, 139968)
+    let probs = arr/new-array(4)
+    arr/write-field(probs, 0, 42404)
+    arr/write-field(probs, 1, 70117)
+    arr/write-field(probs, 2, 97767)
+    arr/write-field(probs, 3, 139968)
     probs
 }
 
@@ -83,7 +83,7 @@ fn find_code_index(probs, probs_len, r) {
     let mut i = 0
     let mut found = false
     while i < probs_len && found == false {
-        let p = arr/read_field(probs, i)
+        let p = arr/read-field(probs, i)
         if p > r {
             found = true
         } else {
@@ -105,7 +105,7 @@ fn write_header(s) {
         i = i + 1
     }
     ffi/set_u8(buf, len, 10)  // newline
-    io/write_stdout_buffer(buf, len + 1)
+    io/write-stdout-buffer(buf, len + 1)
     ffi/deallocate(buf)
     null
 }
@@ -122,7 +122,7 @@ fn write_repeat_fasta(alu_buf, alu_len, size) {
 
         // Check if we need to flush
         if out_pos + line_len + 1 > OUT_BUF_SIZE {
-            io/write_stdout_buffer(out_buf, out_pos)
+            io/write-stdout-buffer(out_buf, out_pos)
             out_pos = 0
         }
 
@@ -148,7 +148,7 @@ fn write_repeat_fasta(alu_buf, alu_len, size) {
 
     // Flush remaining
     if out_pos > 0 {
-        io/write_stdout_buffer(out_buf, out_pos)
+        io/write-stdout-buffer(out_buf, out_pos)
     }
 
     ffi/deallocate(out_buf)
@@ -168,7 +168,7 @@ fn write_random_fasta(codes_buf, probs, probs_len, size, seed, add_final_newline
 
         // Check if we need to flush
         if out_pos + line_len + 1 > OUT_BUF_SIZE {
-            io/write_stdout_buffer(out_buf, out_pos)
+            io/write-stdout-buffer(out_buf, out_pos)
             out_pos = 0
         }
 
@@ -194,7 +194,7 @@ fn write_random_fasta(codes_buf, probs, probs_len, size, seed, add_final_newline
 
     // Flush remaining
     if out_pos > 0 {
-        io/write_stdout_buffer(out_buf, out_pos)
+        io/write-stdout-buffer(out_buf, out_pos)
     }
 
     ffi/deallocate(out_buf)

@@ -1,7 +1,7 @@
 namespace bounds_checking_test
 
-import "persistent_map" as pm
-import "raw_mutable_array" as raw
+import "persistent-map" as pm
+import "raw-mutable-array" as raw
 
 struct Point {
     x
@@ -117,33 +117,33 @@ fn test_map_length() {
 
 fn test_raw_array_bounds() {
     println("=== Testing raw array bounds ===")
-    let arr = raw/new_array(3)
-    raw/write_field(arr, 0, 10)
-    raw/write_field(arr, 1, 20)
-    raw/write_field(arr, 2, 30)
-    println(raw/read_field(arr, 0))
-    println(raw/read_field(arr, 2))
+    let arr = raw/new-array(3)
+    raw/write-field(arr, 0, 10)
+    raw/write-field(arr, 1, 20)
+    raw/write-field(arr, 2, 30)
+    println(raw/read-field(arr, 0))
+    println(raw/read-field(arr, 2))
     println("Trying to read index 3...")
-    let result = raw/read_field(arr, 3)
+    let result = raw/read-field(arr, 3)
     println(result)
 }
 
 fn test_raw_array_negative_index() {
     println("=== Testing raw array negative index ===")
-    let arr = raw/new_array(3)
-    raw/write_field(arr, 0, 100)
+    let arr = raw/new-array(3)
+    raw/write-field(arr, 0, 100)
     println("Trying to read index -1...")
-    let result = raw/read_field(arr, -1)
+    let result = raw/read-field(arr, -1)
     println(result)
 }
 
 fn test_raw_array_write_bounds() {
     println("=== Testing raw array write bounds ===")
-    let arr = raw/new_array(2)
-    raw/write_field(arr, 0, 1)
-    raw/write_field(arr, 1, 2)
+    let arr = raw/new-array(2)
+    raw/write-field(arr, 0, 1)
+    raw/write-field(arr, 1, 2)
     println("Trying to write to index 2...")
-    let result = raw/write_field(arr, 2, 999)
+    let result = raw/write-field(arr, 2, 999)
     println(result)
     println("Array unchanged:")
     println(arr)

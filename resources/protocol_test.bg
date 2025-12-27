@@ -1,6 +1,6 @@
-namespace protocol_test
+namespace protocol-test
 
-import "persistent_vector" as vector
+import "persistent-vector" as vector
 import "beagle.builtin" as builtin
 import "beagle.primitive" as primitive
 
@@ -16,27 +16,27 @@ struct Size {
 }
 
 protocol Axis {
-    fn get_x(self)
-    fn get_y(self)
+    fn get-x(self)
+    fn get-y(self)
 }
 
 
 extend Point with Axis {
-    fn get_x(self) {
+    fn get-x(self) {
         self.x
     }
 
-    fn get_y(self) {
+    fn get-y(self) {
         self.y
     }
 }
 
 extend Size with Axis {
-    fn get_x(self) {
+    fn get-x(self) {
         self.width
     }
 
-    fn get_y(self) {
+    fn get-y(self) {
         self.height
     }
 }
@@ -60,9 +60,9 @@ fn main() {
     println(Indexed)
     let x = [2];
     println(x[0])
-    println(primitive/read_struct_id(x) == vector/PersistentVector.id)
-    println(instance_of(x, vector/PersistentVector))
-    println(instance_of(2, vector/PersistentVector))
+    println(primitive/read-struct-id(x) == vector/PersistentVector.id)
+    println(instance-of(x, vector/PersistentVector))
+    println(instance-of(2, vector/PersistentVector))
 
 
     let point = Point {
@@ -75,17 +75,17 @@ fn main() {
         height: 4
     }
 
-    println(get_x(point))
-    println(get_y(point))
-    println(get_x(size))
-    println(get_y(size))
+    println(get-x(point))
+    println(get-y(point))
+    println(get-x(size))
+    println(get-y(size))
     println(format("test"))
     println(format(2))
     "done"
 }
 
 // Expect
-// persistent_vector/PersistentVector
+// persistent-vector/PersistentVector
 // Protocol { name: "beagle.core/Indexed" }
 // 2
 // true

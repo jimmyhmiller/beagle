@@ -1,6 +1,6 @@
 namespace map_manual_test
 
-import "persistent_map" as pm
+import "persistent-map" as pm
 
 fn main() {
     // Simulate what the map literal {42 100} should compile to

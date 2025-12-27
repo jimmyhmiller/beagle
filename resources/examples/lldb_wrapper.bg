@@ -4,7 +4,7 @@ import "beagle.builtin" as builtin
 import "lib_lldb" as lldb
 import "slow_json_parser" as json
 import "beagle.ffi" as ffi
-import "persistent_map" as map
+import "persistent-map" as map
 
 // TODO: Thist code fails in lib_lldb with an update binding
 // unsure of the cause right now

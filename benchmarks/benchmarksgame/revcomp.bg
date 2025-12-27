@@ -8,7 +8,7 @@ namespace revcomp
 
 import "beagle.ffi" as ffi
 import "beagle.io" as io
-import "raw_mutable_array" as arr
+import "raw-mutable-array" as arr
 
 let LINE_WIDTH = 60
 let READ_CHUNK = 65536
@@ -77,18 +77,18 @@ fn make_complement_table() {
 
 // Ensure sequence buffer has enough capacity
 fn ensure_capacity(state, needed) {
-    let seq_len = arr/read_field(state, STATE_SEQ_LEN)
-    let current_cap = arr/read_field(state, STATE_SEQ_CAP)
+    let seq_len = arr/read-field(state, STATE_SEQ_LEN)
+    let current_cap = arr/read-field(state, STATE_SEQ_CAP)
 
     if seq_len + needed > current_cap {
-        let seq_buf = arr/read_field(state, STATE_SEQ_BUF)
+        let seq_buf = arr/read-field(state, STATE_SEQ_BUF)
         let mut new_cap = current_cap * 2
         while new_cap < seq_len + needed {
             new_cap = new_cap * 2
         }
         let new_buf = ffi/realloc(seq_buf, new_cap)
-        arr/write_field(state, STATE_SEQ_BUF, new_buf)
-        arr/write_field(state, STATE_SEQ_CAP, new_cap)
+        arr/write-field(state, STATE_SEQ_BUF, new_buf)
+        arr/write-field(state, STATE_SEQ_CAP, new_cap)
     }
     null
 }
@@ -107,7 +107,7 @@ fn output_sequence_wrapped(seq_buf, seq_len) {
 
         // Check if we need to flush
         if out_pos + line_len + 1 > out_buf_size {
-            io/write_stdout_buffer(out_buf, out_pos)
+            io/write-stdout-buffer(out_buf, out_pos)
             out_pos = 0
         }
 
@@ -122,7 +122,7 @@ fn output_sequence_wrapped(seq_buf, seq_len) {
 
     // Flush remaining
     if out_pos > 0 {
-        io/write_stdout_buffer(out_buf, out_pos)
+        io/write-stdout-buffer(out_buf, out_pos)
     }
 
     ffi/deallocate(out_buf)
@@ -131,25 +131,25 @@ fn output_sequence_wrapped(seq_buf, seq_len) {
 
 // Process and output current sequence (reverse complement)
 fn flush_sequence(state) {
-    let seq_len = arr/read_field(state, STATE_SEQ_LEN)
+    let seq_len = arr/read-field(state, STATE_SEQ_LEN)
     if seq_len > 0 {
-        let seq_buf = arr/read_field(state, STATE_SEQ_BUF)
-        let tbl = arr/read_field(state, STATE_TBL)
+        let seq_buf = arr/read-field(state, STATE_SEQ_BUF)
+        let tbl = arr/read-field(state, STATE_TBL)
         // Bulk translate + reverse
         ffi/translate_bytes(seq_buf, 0, seq_len, tbl)
         ffi/reverse_bytes(seq_buf, 0, seq_len)
         output_sequence_wrapped(seq_buf, seq_len)
     }
-    arr/write_field(state, STATE_SEQ_LEN, 0)
+    arr/write-field(state, STATE_SEQ_LEN, 0)
     null
 }
 
 fn new_state(tbl) {
-    let state = arr/new_array(4)
-    arr/write_field(state, STATE_SEQ_BUF, ffi/allocate(INITIAL_SEQ_SIZE))
-    arr/write_field(state, STATE_SEQ_LEN, 0)
-    arr/write_field(state, STATE_SEQ_CAP, INITIAL_SEQ_SIZE)
-    arr/write_field(state, STATE_TBL, tbl)
+    let state = arr/new-array(4)
+    arr/write-field(state, STATE_SEQ_BUF, ffi/allocate(INITIAL_SEQ_SIZE))
+    arr/write-field(state, STATE_SEQ_LEN, 0)
+    arr/write-field(state, STATE_SEQ_CAP, INITIAL_SEQ_SIZE)
+    arr/write-field(state, STATE_TBL, tbl)
     state
 }
 
@@ -159,7 +159,7 @@ fn output_header_range(buf, start, end_pos) {
     let header_buf = ffi/allocate(len + 1)
     ffi/copy_bytes(buf, start, header_buf, 0, len)
     ffi/set_u8(header_buf, len, 10)
-    io/write_stdout_buffer(header_buf, len + 1)
+    io/write-stdout-buffer(header_buf, len + 1)
     ffi/deallocate(header_buf)
     null
 }
@@ -176,20 +176,20 @@ fn process_chunk(state, input_buf, chunk_len) {
             // No '>' found - rest is sequence data
             // Copy to seq_buf, filtering out newlines
             ensure_capacity(state, chunk_len - pos)
-            let seq_buf = arr/read_field(state, STATE_SEQ_BUF)
-            let seq_len = arr/read_field(state, STATE_SEQ_LEN)
+            let seq_buf = arr/read-field(state, STATE_SEQ_BUF)
+            let seq_len = arr/read-field(state, STATE_SEQ_LEN)
             let written = ffi/copy_bytes_filter(input_buf, pos, seq_buf, seq_len, chunk_len - pos, 10)
-            arr/write_field(state, STATE_SEQ_LEN, seq_len + written)
+            arr/write-field(state, STATE_SEQ_LEN, seq_len + written)
             pos = chunk_len
         } else {
             // Found '>' at marker_pos
             // First, copy any sequence data before the marker
             if marker_pos > pos {
                 ensure_capacity(state, marker_pos - pos)
-                let seq_buf = arr/read_field(state, STATE_SEQ_BUF)
-                let seq_len = arr/read_field(state, STATE_SEQ_LEN)
+                let seq_buf = arr/read-field(state, STATE_SEQ_BUF)
+                let seq_len = arr/read-field(state, STATE_SEQ_LEN)
                 let written = ffi/copy_bytes_filter(input_buf, pos, seq_buf, seq_len, marker_pos - pos, 10)
-                arr/write_field(state, STATE_SEQ_LEN, seq_len + written)
+                arr/write-field(state, STATE_SEQ_LEN, seq_len + written)
             }
 
             // Flush previous sequence
@@ -219,7 +219,7 @@ fn main() {
 
     let mut done = false
     while done == false {
-        let result = io/read_stdin(READ_CHUNK)
+        let result = io/read-stdin(READ_CHUNK)
         match result {
             io/Result.Ok { value } => {
                 if value.length == 0 {
@@ -239,7 +239,7 @@ fn main() {
     flush_sequence(state)
 
     // Cleanup
-    let seq_buf = arr/read_field(state, STATE_SEQ_BUF)
+    let seq_buf = arr/read-field(state, STATE_SEQ_BUF)
     ffi/deallocate(seq_buf)
     ffi/deallocate(tbl)
 

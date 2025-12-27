@@ -1,0 +1,372 @@
+namespace persistent-vector
+import "raw-mutable-array" as array
+import "beagle.primitive" as primitive
+import "beagle.builtin" as builtin
+
+
+struct PersistentVector {
+    count
+    shift
+    root
+    tail
+}
+
+let EMPTY = PersistentVector {
+    count: 0
+    shift: 5
+    root: array/new-array(0)
+    tail: array/new-array(0)
+}
+
+fn tail-offset(vec) {
+    if vec.count < 32 {
+        0
+    } else {
+        ((vec.count - 1) >>> 5) << 5
+    }
+}
+
+fn get-node-for-level(node, level, index) {
+    // So I'm guessing my parsing code is parsing
+    // this incorrectly if I don't assign a variable...
+    if level == 0 {
+        node
+    } else {
+        let new-node = array/read-field(node, (index >>> level) & 31)
+        get-node-for-level(new-node, level - 5, index)
+    }
+}
+
+fn get(vec, index) {
+    if index < 0 || index >= vec.count {
+        null
+    } else if index >= tail-offset(vec) {
+        array/read-field(vec.tail, index & 31)
+    } else {
+        let node = get-node-for-level(vec.root, vec.shift, index)
+        array/read-field(node, index & 31)
+    }
+}
+
+fn push(vec, value) {
+    let tail-length = array/count(vec.tail)
+    if tail-length < 32 {
+        // Tail has space, create a new tail array with one extra slot
+        let new-tail-size = tail-length + 1
+        let new-tail = array/new-array(new-tail-size)
+        // Copy existing tail into new tail
+        array/copy-from-array-to(vec.tail, new-tail)
+        // Add the new value
+        array/write-field(new-tail, tail-length, value)
+        // Return a new PersistentVector with the updated tail
+        PersistentVector {
+            count: vec.count + 1
+            shift: vec.shift
+            root: vec.root
+            tail: new-tail
+        }
+    } else {
+        // Tail is full, need to push into the tree
+        let tail-node = vec.tail
+        // Start a new tail with the new value
+        let new-tail = array/new-array(1)
+        array/write-field(new-tail, 0, value)
+        let cnt-shifted = vec.count >>> 5
+        let shifted-one = 1 << vec.shift
+
+        if cnt-shifted > shifted-one {
+
+            // Need to create a new root and increase shift
+            let new-root-array = array/new-array(32)
+            array/write-field(new-root-array, 0, vec.root)
+            let new-path-node = new-path(vec, vec.shift, tail-node)
+            array/write-field(new-root-array, 1, new-path-node)
+            let new-root = new-root-array
+            // Return a new PersistentVector with the increased shift and new root
+            PersistentVector {
+                count: vec.count + 1
+                shift: vec.shift + 5
+                root: new-root
+                tail: new-tail
+            }
+        } else {
+            // Insert into existing tree
+
+            let new-root = push-tail(vec, vec.shift, vec.root, tail-node)
+            // Return a new PersistentVector with the same shift and the new root
+            PersistentVector {
+                count: vec.count + 1
+                shift: vec.shift
+                root: new-root
+                tail: new-tail
+            }
+        }
+    }
+}
+
+fn new-path(vec, level, node) {
+    if level == 0 {
+        node
+    } else {
+        let path = array/new-array(32)
+        array/write-field(path, 0, new-path(vec, level - 5, node))
+        path
+    }
+}
+
+
+fn push-tail(vec, level, parent, tail-node) {
+    let new-array = array/new-array(32)
+    if array/is-array(parent) == false {
+        primitive/panic("Parent is not an array")
+    }
+    let new-parent = array/copy-from-array-to(parent, new-array)
+    let sub-index = ((vec.count - 1) >>> level) & 31
+
+    let updated-node = if level == 5 {
+        // Level is 5, insert the tail node here
+        array/write-field(new-parent, sub-index, tail-node)
+        new-parent
+    } else {
+        let child = array/read-field(parent, sub-index)
+        let new-child = if child != null {
+            push-tail(vec, level - 5, child, tail-node)
+        } else {
+            new-path(vec, level - 5, tail-node)
+        }
+        array/write-field(new-parent, sub-index, new-child)
+        new-parent
+    }
+    updated-node
+}
+
+fn assoc(vec, index, value) {
+    if index < 0 || index >= vec.count {
+        primitive/panic("Index out of bounds")
+    }
+
+    if index >= tail-offset(vec) {
+        // Update the tail
+        let new-tail = array/copy-array(vec.tail)
+        array/write-field(new-tail, index & 31, value)
+        PersistentVector {
+            count: vec.count
+            shift: vec.shift
+            root: vec.root
+            tail: new-tail
+        }
+    } else {
+        // Update the tree
+        let new-root = do-assoc(vec, vec.shift, vec.root, index, value)
+        PersistentVector {
+            count: vec.count
+            shift: vec.shift
+            root: new-root
+            tail: vec.tail
+        }
+    }
+}
+
+fn do-assoc(vec, level, node, index, value) {
+    let new-node = array/copy-array(node)
+    if level == 0 {
+        array/write-field(new-node, index & 31, value)
+        new-node
+    } else {
+        let sub-index = (index >>> level) & 31
+        let child = array/read-field(node, sub-index)
+        let new-child = do-assoc(vec, level - 5, child, index, value)
+        array/write-field(new-node, sub-index, new-child)
+        new-node
+    }
+}
+
+
+fn fill-vec-n-helper(vec, i, n) {
+    if i == n {
+        vec
+    } else {
+        let new-vec = push(vec, i)
+        fill-vec-n-helper(new-vec, i + 1, n)
+    }
+}
+
+fn fill-vec-n(n) {
+    fill-vec-n-helper(EMPTY, 0, n)
+}
+
+fn get-and-verify(vec, index) {
+    let value = get(vec, index)
+    if value != index {
+        println("Error: Expected ")
+        println(index)
+        println(" but got ")
+        println(value)
+        primitive/panic("Value mismatch")
+    }
+    if index != vec.count - 1 {
+        get-and-verify(vec, index + 1)
+    } else {
+        "done"
+    }
+}
+
+fn make-vec-of-every-size-and-verify(n) {
+    if n == 0 {
+        "worked!"
+    } else {
+        let vec = fill-vec-n(n)
+        get-and-verify(vec, 0)
+        make-vec-of-every-size-and-verify(n - 1)
+    }
+}
+
+fn count(vec) {
+    vec.count
+}
+
+
+// TODO: I have a problem with arguments being passed properly.
+// If you swap arr and vec here, I overwrite x2.
+// I need to preserve that value, but I don't feel like doing that right now
+// so I'm just going to move them for the moment.
+fn to-array-helper(arr, i, vec) {
+    if i == count(vec) {
+        arr
+    } else {
+        array/write-field(arr, i, get(vec, i))
+        to-array-helper(arr, i + 1, vec)
+    }
+}
+
+fn to-array(vec) {
+    let arr = array/new-array(count(vec))
+    to-array-helper(arr, 0, vec)
+}
+
+fn vec() {
+    EMPTY
+}
+
+fn from-array(arr) {
+    from-array-helper(vec(), arr, 0, array/count(arr))
+}
+
+fn from-array-helper(v, arr, i, n) {
+    if i == n {
+        v
+    } else {
+        let new-vec = push(v, array/read-field(arr, i))
+        from-array-helper(new-vec, arr, i + 1, n)
+    }
+}
+
+
+
+extend PersistentVector with Indexed {
+    fn get(vec, index) {
+        get(vec, index)
+    }
+}
+
+extend PersistentVector with Push {
+    fn push(vec, value) {
+        push(vec, value)
+    }
+}
+
+extend PersistentVector with Format {
+    fn format(vec, depth) {
+        if vec.count == 0 {
+            "[]"
+        } else {
+            format-vector(vec, 0, "[")
+        }
+    }
+}
+
+fn format-vector(vec, idx, acc) {
+    if idx >= vec.count {
+        acc ++ "]"
+    } else {
+        let val = get(vec, idx)
+        let val-str = format(val, 1)
+
+        let new-acc = if idx == 0 {
+            acc ++ val-str
+        } else {
+            acc ++ ", " ++ val-str
+        }
+
+        format-vector(vec, idx + 1, new-acc)
+    }
+}
+
+extend PersistentVector with Length {
+    fn length(vec) {
+        count(vec)
+    }
+}
+
+
+extend PersistentVector with Associable {
+    fn assoc(vec, index, value) {
+        assoc(vec, index, value)
+    }
+}
+
+// Vector sequence for iteration
+struct VectorSeq {
+    vec
+    index
+}
+
+extend PersistentVector with Seqable {
+    fn seq(vec) {
+        if vec.count == 0 {
+            null
+        } else {
+            VectorSeq { vec: vec, index: 0 }
+        }
+    }
+}
+
+extend VectorSeq with Seq {
+    fn first(seq) {
+        get(seq.vec, seq.index)
+    }
+
+    fn next(seq) {
+        let next-index = seq.index + 1
+        if next-index >= seq.vec.count {
+            null
+        } else {
+            VectorSeq { vec: seq.vec, index: next-index }
+        }
+    }
+}
+
+
+fn main() {
+    let vec1 = vec()
+    println(vec1)
+    gc()
+    println(vec1)
+    println(make-vec-of-every-size-and-verify(1000))
+    gc()
+    gc()
+    println(make-vec-of-every-size-and-verify(1000))
+    let vec2 = fill-vec-n(10);
+    let array2 = to-array(vec2)
+    println(array2)
+    "done"
+}
+
+
+// Expect
+// []
+// []
+// worked!
+// worked!
+// [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 ]
+// done

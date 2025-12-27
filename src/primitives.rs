@@ -10,18 +10,18 @@ pub fn get_inline_primitive_arity(name: &str) -> usize {
     match name {
         "beagle.primitive/deref" => 1,
         "beagle.primitive/reset!" => 2,
-        "beagle.primitive/compare_and_swap!" => 3,
+        "beagle.primitive/compare-and-swap!" => 3,
         "beagle.primitive/breakpoint!" => 0,
-        "beagle.primitive/write_type_id" => 2,
-        "beagle.primitive/read_type_id" => 1,
-        "beagle.primitive/read_struct_id" => 1,
-        "beagle.primitive/write_field" => 3,
-        "beagle.primitive/read_field" => 2,
+        "beagle.primitive/write-type-id" => 2,
+        "beagle.primitive/read-type-id" => 1,
+        "beagle.primitive/read-struct-id" => 1,
+        "beagle.primitive/write-field" => 3,
+        "beagle.primitive/read-field" => 2,
         "beagle.primitive/breakpoint" => 0,
         "beagle.primitive/size" => 1,
         "beagle.primitive/panic" => 1,
-        "beagle.primitive/is_object" => 1,
-        "beagle.primitive/is_string_constant" => 1,
+        "beagle.primitive/is-object" => 1,
+        "beagle.primitive/is-string-constant" => 1,
         "beagle.primitive/set!" => 2,
         _ => panic!("Unknown inline primitive: {}", name),
     }
@@ -46,11 +46,11 @@ impl AstCompiler<'_> {
                 // TODO: I need a raw add that doesn't check for tags
                 let offset = self.ir.add_int(untagged, Value::RawValue(8));
                 let value = args[1];
-                self.call_builtin("beagle.builtin/gc_add_root", vec![pointer]);
+                self.call_builtin("beagle.builtin/gc-add-root", vec![pointer]);
                 self.ir.atomic_store(offset, value);
                 args[1]
             }
-            "beagle.primitive/compare_and_swap!" => {
+            "beagle.primitive/compare-and-swap!" => {
                 // self.ir.breakpoint();
                 let pointer = args[0];
                 let untagged = self.ir.untag(pointer);
@@ -73,7 +73,7 @@ impl AstCompiler<'_> {
                 self.ir.breakpoint();
                 Value::Null
             }
-            "beagle.primitive/write_type_id" => {
+            "beagle.primitive/write-type-id" => {
                 let pointer = args[0];
                 let pointer = self.ir.untag(pointer);
                 let type_id = args[1];
@@ -81,7 +81,7 @@ impl AstCompiler<'_> {
                 self.ir.write_type_id(pointer, untagged_type_id);
                 Value::Null
             }
-            "beagle.primitive/read_type_id" => {
+            "beagle.primitive/read-type-id" => {
                 let pointer = args[0];
                 let pointer = self.ir.untag(pointer);
                 let header = self.ir.load_from_heap(pointer, 0);
@@ -94,12 +94,12 @@ impl AstCompiler<'_> {
                 let value = self.ir.and_imm(value, 0x0000_0000_0000_FFFF);
                 self.ir.tag(value, BuiltInTypes::Int.get_tag())
             }
-            "beagle.primitive/read_struct_id" => {
+            "beagle.primitive/read-struct-id" => {
                 let pointer = args[0];
                 let pointer = self.ir.untag(pointer);
                 self.ir.read_struct_id(pointer)
             }
-            "beagle.primitive/write_field" => {
+            "beagle.primitive/write-field" => {
                 let pointer = args[0];
                 let untagged = self.ir.untag(pointer);
                 let field = args[1];
@@ -135,10 +135,10 @@ impl AstCompiler<'_> {
                 let value = args[2];
                 self.ir
                     .heap_store_with_reg_offset(untagged, value, offset_reg.into());
-                self.call_builtin("beagle.builtin/gc_add_root", vec![pointer]);
+                self.call_builtin("beagle.builtin/gc-add-root", vec![pointer]);
                 Value::Null
             }
-            "beagle.primitive/read_field" => {
+            "beagle.primitive/read-field" => {
                 let pointer = args[0];
                 let untagged = self.ir.untag(pointer);
                 let field = args[1];
@@ -218,10 +218,10 @@ impl AstCompiler<'_> {
                 let message = args[0];
                 // print the message then call throw_error
                 self.call_builtin("beagle.core/_println", vec![message]);
-                self.call_builtin("beagle.builtin/throw_error", vec![]);
+                self.call_builtin("beagle.builtin/throw-error", vec![]);
                 Value::Null
             }
-            "beagle.primitive/is_object" => {
+            "beagle.primitive/is-object" => {
                 let pointer = args[0];
                 // check the tag of the pointer
                 let tag = self.ir.get_tag(pointer);
@@ -231,7 +231,7 @@ impl AstCompiler<'_> {
                 self.ir
                     .compare(tag, heap_object_tag.into(), Condition::Equal)
             }
-            "beagle.primitive/is_string_constant" => {
+            "beagle.primitive/is-string-constant" => {
                 let pointer = args[0];
                 // check the tag of the pointer
                 let tag = self.ir.get_tag(pointer);
@@ -296,7 +296,7 @@ impl AstCompiler<'_> {
         let value = self.call_compile(&args[1]);
 
         let object = self.ir.assign_new(object);
-        self.call_builtin("beagle.builtin/gc_add_root", vec![object.into()]);
+        self.call_builtin("beagle.builtin/gc-add-root", vec![object.into()]);
         let untagged_object = self.ir.untag(object.into());
         // self.ir.breakpoint();
         let struct_id = self.ir.read_struct_id(untagged_object);

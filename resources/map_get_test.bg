@@ -1,6 +1,6 @@
 namespace map_get_test
 
-import "persistent_map" as pm
+import "persistent-map" as pm
 
 fn main() {
     // Manual creation

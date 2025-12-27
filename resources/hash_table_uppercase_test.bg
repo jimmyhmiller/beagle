@@ -1,7 +1,7 @@
 namespace hash_table_uppercase_test
 
 import "beagle.builtin" as builtin
-import "raw_mutable_array" as arr
+import "raw-mutable-array" as arr
 
 let HT_KEYS = 0
 let HT_COUNTS = 1
@@ -9,11 +9,11 @@ let HT_SIZE = 2
 let HT_CAPACITY = 3
 
 fn new_hash_table(capacity) {
-    let ht = arr/new_array(4)
-    arr/write_field(ht, HT_KEYS, arr/new_array(capacity))
-    arr/write_field(ht, HT_COUNTS, arr/new_array(capacity))
-    arr/write_field(ht, HT_SIZE, 0)
-    arr/write_field(ht, HT_CAPACITY, capacity)
+    let ht = arr/new-array(4)
+    arr/write-field(ht, HT_KEYS, arr/new-array(capacity))
+    arr/write-field(ht, HT_COUNTS, arr/new-array(capacity))
+    arr/write-field(ht, HT_SIZE, 0)
+    arr/write-field(ht, HT_CAPACITY, capacity)
     ht
 }
 
@@ -24,9 +24,9 @@ fn hash_string(s, capacity) {
 }
 
 fn ht_increment(ht, key) {
-    let keys = arr/read_field(ht, HT_KEYS)
-    let counts = arr/read_field(ht, HT_COUNTS)
-    let capacity = arr/read_field(ht, HT_CAPACITY)
+    let keys = arr/read-field(ht, HT_KEYS)
+    let counts = arr/read-field(ht, HT_COUNTS)
+    let capacity = arr/read-field(ht, HT_CAPACITY)
     let idx = hash_string(key, capacity)
     ht_probe_and_increment(ht, keys, counts, capacity, key, idx, 0)
 }
@@ -35,17 +35,17 @@ fn ht_probe_and_increment(ht, keys, counts, capacity, key, idx, probes) {
     if probes >= capacity {
         null
     } else {
-        let existing_key = arr/read_field(keys, idx)
+        let existing_key = arr/read-field(keys, idx)
         if existing_key == null {
-            arr/write_field(keys, idx, key)
-            arr/write_field(counts, idx, 1)
-            let size = arr/read_field(ht, HT_SIZE)
-            arr/write_field(ht, HT_SIZE, size + 1)
+            arr/write-field(keys, idx, key)
+            arr/write-field(counts, idx, 1)
+            let size = arr/read-field(ht, HT_SIZE)
+            arr/write-field(ht, HT_SIZE, size + 1)
             null
         } else {
             if existing_key == key {
-                let count = arr/read_field(counts, idx)
-                arr/write_field(counts, idx, count + 1)
+                let count = arr/read-field(counts, idx)
+                arr/write-field(counts, idx, count + 1)
                 null
             } else {
                 let next_idx = idx + 1
@@ -79,7 +79,7 @@ fn main() {
         i = i + 1
     }
 
-    let size = arr/read_field(ht, HT_SIZE)
+    let size = arr/read-field(ht, HT_SIZE)
     println("Hash table size (should be 4):")
     println(size)
 

@@ -1,11 +1,11 @@
 namespace array_size_overflow_bug
 
-import "raw_mutable_array" as arr
+import "raw-mutable-array" as arr
 import "beagle.primitive" as primitive
 
 fn main() {
     // Request an array of 125000 elements
-    let a = arr/new_array(125000)
+    let a = arr/new-array(125000)
 
     // Check what size we actually got
     println("Requested size: 125000")

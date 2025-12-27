@@ -402,7 +402,11 @@ impl GenerationalGC {
         self.old.gc(stack_map, stack_pointers);
     }
 
-    fn process_stack_roots(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
+    fn process_stack_roots(
+        &mut self,
+        stack_map: &StackMap,
+        stack_pointers: &[(usize, usize, usize)],
+    ) {
         for (stack_base, frame_pointer, gc_return_addr) in stack_pointers.iter() {
             let roots = self.gather_roots(*stack_base, stack_map, *frame_pointer, *gc_return_addr);
             let new_roots: Vec<usize> = roots.iter().map(|x| x.1).collect();
@@ -433,12 +437,18 @@ impl GenerationalGC {
     ) -> Vec<(usize, usize)> {
         let mut roots: Vec<(usize, usize)> = Vec::with_capacity(36);
 
-        StackWalker::walk_stack_roots_with_return_addr(stack_base, frame_pointer, gc_return_addr, stack_map, |offset, pointer| {
-            let untagged = BuiltInTypes::untag(pointer);
-            if self.young.contains(untagged as *const u8) {
-                roots.push((offset, pointer));
-            }
-        });
+        StackWalker::walk_stack_roots_with_return_addr(
+            stack_base,
+            frame_pointer,
+            gc_return_addr,
+            stack_map,
+            |offset, pointer| {
+                let untagged = BuiltInTypes::untag(pointer);
+                if self.young.contains(untagged as *const u8) {
+                    roots.push((offset, pointer));
+                }
+            },
+        );
 
         roots
     }

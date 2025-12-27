@@ -1,31 +1,31 @@
 namespace array_narrow_test
 
-import "raw_mutable_array" as arr
+import "raw-mutable-array" as arr
 
 fn main() {
-    let a = arr/new_array(125000)
+    let a = arr/new-array(125000)
 
     println("Testing indices around 32K:")
 
-    arr/write_field(a, 32000, "32000")
+    arr/write-field(a, 32000, "32000")
     println("32000:")
-    println(arr/read_field(a, 32000))
+    println(arr/read-field(a, 32000))
 
-    arr/write_field(a, 32767, "32767")
+    arr/write-field(a, 32767, "32767")
     println("32767:")
-    println(arr/read_field(a, 32767))
+    println(arr/read-field(a, 32767))
 
-    arr/write_field(a, 32768, "32768")
+    arr/write-field(a, 32768, "32768")
     println("32768:")
-    println(arr/read_field(a, 32768))
+    println(arr/read-field(a, 32768))
 
-    arr/write_field(a, 40000, "40000")
+    arr/write-field(a, 40000, "40000")
     println("40000:")
-    println(arr/read_field(a, 40000))
+    println(arr/read-field(a, 40000))
 
-    arr/write_field(a, 50000, "50000")
+    arr/write-field(a, 50000, "50000")
     println("50000:")
-    println(arr/read_field(a, 50000))
+    println(arr/read-field(a, 50000))
 
     ""
 }

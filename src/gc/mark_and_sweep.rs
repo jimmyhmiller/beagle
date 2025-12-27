@@ -292,7 +292,13 @@ impl MarkAndSweep {
         }
     }
 
-    fn mark(&self, stack_base: usize, stack_map: &super::StackMap, frame_pointer: usize, gc_return_addr: usize) {
+    fn mark(
+        &self,
+        stack_base: usize,
+        stack_map: &super::StackMap,
+        frame_pointer: usize,
+        gc_return_addr: usize,
+    ) {
         let mut to_mark: Vec<HeapObject> = Vec::with_capacity(128);
 
         for (_, root) in self.namespace_roots.iter() {
@@ -319,9 +325,15 @@ impl MarkAndSweep {
         }
 
         // Use the stack walker with explicit return address
-        StackWalker::walk_stack_roots_with_return_addr(stack_base, frame_pointer, gc_return_addr, stack_map, |_, pointer| {
-            to_mark.push(HeapObject::from_tagged(pointer));
-        });
+        StackWalker::walk_stack_roots_with_return_addr(
+            stack_base,
+            frame_pointer,
+            gc_return_addr,
+            stack_map,
+            |_, pointer| {
+                to_mark.push(HeapObject::from_tagged(pointer));
+            },
+        );
 
         while let Some(object) = to_mark.pop() {
             if object.marked() {

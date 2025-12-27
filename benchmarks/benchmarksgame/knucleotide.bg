@@ -8,7 +8,7 @@ namespace knucleotide
 import "beagle.ffi" as ffi
 import "beagle.io" as io
 import "beagle.builtin" as builtin
-import "raw_mutable_array" as arr
+import "raw-mutable-array" as arr
 
 let READ_CHUNK = 65536
 let INITIAL_SEQ_SIZE = 1048576
@@ -21,11 +21,11 @@ let HT_CAPACITY = 3
 
 // Create a new hash table
 fn new_hash_table(capacity) {
-    let ht = arr/new_array(4)
-    arr/write_field(ht, HT_KEYS, arr/new_array(capacity))
-    arr/write_field(ht, HT_COUNTS, arr/new_array(capacity))
-    arr/write_field(ht, HT_SIZE, 0)
-    arr/write_field(ht, HT_CAPACITY, capacity)
+    let ht = arr/new-array(4)
+    arr/write-field(ht, HT_KEYS, arr/new-array(capacity))
+    arr/write-field(ht, HT_COUNTS, arr/new-array(capacity))
+    arr/write-field(ht, HT_SIZE, 0)
+    arr/write-field(ht, HT_CAPACITY, capacity)
     ht
 }
 
@@ -39,9 +39,9 @@ fn hash_string(s, capacity) {
 
 // Find or insert a key, increment count
 fn ht_increment(ht, key) {
-    let keys = arr/read_field(ht, HT_KEYS)
-    let counts = arr/read_field(ht, HT_COUNTS)
-    let capacity = arr/read_field(ht, HT_CAPACITY)
+    let keys = arr/read-field(ht, HT_KEYS)
+    let counts = arr/read-field(ht, HT_COUNTS)
+    let capacity = arr/read-field(ht, HT_CAPACITY)
 
     let idx = hash_string(key, capacity)
     ht_probe_and_increment(ht, keys, counts, capacity, key, idx, 0)
@@ -53,18 +53,18 @@ fn ht_probe_and_increment(ht, keys, counts, capacity, key, idx, probes) {
     if probes >= capacity {
         null
     } else {
-        let existing_key = arr/read_field(keys, idx)
+        let existing_key = arr/read-field(keys, idx)
         if existing_key == null {
-            arr/write_field(keys, idx, key)
-            arr/write_field(counts, idx, 1)
-            let size = arr/read_field(ht, HT_SIZE)
-            arr/write_field(ht, HT_SIZE, size + 1)
+            arr/write-field(keys, idx, key)
+            arr/write-field(counts, idx, 1)
+            let size = arr/read-field(ht, HT_SIZE)
+            arr/write-field(ht, HT_SIZE, size + 1)
             null
         } else {
             let are_equal = existing_key == key
             // Debug FAILED comparison
             if are_equal == false {
-                let size = arr/read_field(ht, HT_SIZE)
+                let size = arr/read-field(ht, HT_SIZE)
                 if size < 20 {
                     println("MISMATCH at size:")
                     println(size)
@@ -77,8 +77,8 @@ fn ht_probe_and_increment(ht, keys, counts, capacity, key, idx, probes) {
                 }
             }
             if are_equal {
-                let count = arr/read_field(counts, idx)
-                arr/write_field(counts, idx, count + 1)
+                let count = arr/read-field(counts, idx)
+                arr/write-field(counts, idx, count + 1)
                 null
             } else {
                 let next_idx = idx + 1
@@ -91,9 +91,9 @@ fn ht_probe_and_increment(ht, keys, counts, capacity, key, idx, probes) {
 
 // Get count for a key
 fn ht_get(ht, key) {
-    let keys = arr/read_field(ht, HT_KEYS)
-    let counts = arr/read_field(ht, HT_COUNTS)
-    let capacity = arr/read_field(ht, HT_CAPACITY)
+    let keys = arr/read-field(ht, HT_KEYS)
+    let counts = arr/read-field(ht, HT_COUNTS)
+    let capacity = arr/read-field(ht, HT_CAPACITY)
 
     let idx = hash_string(key, capacity)
     ht_probe_get(keys, counts, capacity, key, idx, 0)
@@ -103,12 +103,12 @@ fn ht_probe_get(keys, counts, capacity, key, idx, probes) {
     if probes >= capacity {
         0
     } else {
-        let existing_key = arr/read_field(keys, idx)
+        let existing_key = arr/read-field(keys, idx)
         if existing_key == null {
             0
         } else {
             if existing_key == key {
-                arr/read_field(counts, idx)
+                arr/read-field(counts, idx)
             } else {
                 let next_idx = idx + 1
                 let wrapped_idx = if next_idx >= capacity { 0 } else { next_idx }
@@ -120,10 +120,10 @@ fn ht_probe_get(keys, counts, capacity, key, idx, probes) {
 
 // Collect all key-count pairs from hash table
 fn ht_entries(ht) {
-    let keys = arr/read_field(ht, HT_KEYS)
-    let counts = arr/read_field(ht, HT_COUNTS)
-    let capacity = arr/read_field(ht, HT_CAPACITY)
-    let size = arr/read_field(ht, HT_SIZE)
+    let keys = arr/read-field(ht, HT_KEYS)
+    let counts = arr/read-field(ht, HT_COUNTS)
+    let capacity = arr/read-field(ht, HT_CAPACITY)
+    let size = arr/read-field(ht, HT_SIZE)
 
     println("ht_entries: capacity=")
     println(capacity)
@@ -131,7 +131,7 @@ fn ht_entries(ht) {
     println(size)
 
     // Create result array: each entry is [key, count]
-    let result = arr/new_array(size)
+    let result = arr/new-array(size)
     ht_collect_entries(keys, counts, capacity, result, 0, 0)
     result
 }
@@ -140,15 +140,15 @@ fn ht_collect_entries(keys, counts, capacity, result, src_idx, dest_idx) {
     if src_idx >= capacity {
         null
     } else {
-        let key = arr/read_field(keys, src_idx)
+        let key = arr/read-field(keys, src_idx)
         if key == null {
             ht_collect_entries(keys, counts, capacity, result, src_idx + 1, dest_idx)
         } else {
-            let count = arr/read_field(counts, src_idx)
-            let pair = arr/new_array(2)
-            arr/write_field(pair, 0, key)
-            arr/write_field(pair, 1, count)
-            arr/write_field(result, dest_idx, pair)
+            let count = arr/read-field(counts, src_idx)
+            let pair = arr/new-array(2)
+            arr/write-field(pair, 0, key)
+            arr/write-field(pair, 1, count)
+            arr/write-field(result, dest_idx, pair)
             ht_collect_entries(keys, counts, capacity, result, src_idx + 1, dest_idx + 1)
         }
     }
@@ -177,12 +177,12 @@ fn bubble_sort_inner(entries, limit, j) {
     if j >= limit {
         null
     } else {
-        let p1 = arr/read_field(entries, j)
-        let p2 = arr/read_field(entries, j + 1)
-        let k1 = arr/read_field(p1, 0)
-        let k2 = arr/read_field(p2, 0)
-        let c1 = arr/read_field(p1, 1)
-        let c2 = arr/read_field(p2, 1)
+        let p1 = arr/read-field(entries, j)
+        let p2 = arr/read-field(entries, j + 1)
+        let k1 = arr/read-field(p1, 0)
+        let k2 = arr/read-field(p2, 0)
+        let c1 = arr/read-field(p1, 1)
+        let c2 = arr/read-field(p2, 1)
 
         let should_swap = if c1 < c2 {
             true
@@ -196,8 +196,8 @@ fn bubble_sort_inner(entries, limit, j) {
         }
 
         if should_swap {
-            arr/write_field(entries, j, p2)
-            arr/write_field(entries, j + 1, p1)
+            arr/write-field(entries, j, p2)
+            arr/write-field(entries, j + 1, p1)
         }
         bubble_sort_inner(entries, limit, j + 1)
     }
@@ -208,9 +208,9 @@ let STATE_SEQ = 0
 let STATE_READING = 1
 
 fn new_read_state() {
-    let state = arr/new_array(2)
-    arr/write_field(state, STATE_SEQ, "")
-    arr/write_field(state, STATE_READING, false)
+    let state = arr/new-array(2)
+    arr/write-field(state, STATE_SEQ, "")
+    arr/write-field(state, STATE_READING, false)
     state
 }
 
@@ -224,14 +224,14 @@ fn process_chunk(state, chunk) {
 fn split_lines(s) {
     let len = length(s)
     if len == 0 {
-        arr/new_array(0)
+        arr/new-array(0)
     } else {
         // Count newlines to determine number of lines
         let newline_count = count_newlines(s, 0, len, 0)
         // If string doesn't end with newline, there's one more line
         let last_char = get(s, len - 1)
         let line_count = if last_char == "\n" { newline_count } else { newline_count + 1 }
-        let result = arr/new_array(line_count)
+        let result = arr/new-array(line_count)
         split_lines_into(s, 0, len, result, 0)
         result
     }
@@ -256,7 +256,7 @@ fn split_lines_into(s, start, len, result, line_idx) {
     } else {
         let end = find_newline(s, start, len)
         let line = substring(s, start, end - start)
-        arr/write_field(result, line_idx, line)
+        arr/write-field(result, line_idx, line)
         split_lines_into(s, end + 1, len, result, line_idx + 1)
     }
 }
@@ -278,8 +278,8 @@ fn process_lines(state, lines, i, num_lines) {
     if i >= num_lines {
         null
     } else {
-        let line = arr/read_field(lines, i)
-        let reading = arr/read_field(state, STATE_READING)
+        let line = arr/read-field(lines, i)
+        let reading = arr/read-field(state, STATE_READING)
 
         if reading {
             let line_len = length(line)
@@ -290,9 +290,9 @@ fn process_lines(state, lines, i, num_lines) {
                     null
                 } else {
                     // Append uppercase line to sequence
-                    let seq = arr/read_field(state, STATE_SEQ)
+                    let seq = arr/read-field(state, STATE_SEQ)
                     let upper_line = uppercase(line)
-                    arr/write_field(state, STATE_SEQ, seq ++ upper_line)
+                    arr/write-field(state, STATE_SEQ, seq ++ upper_line)
                     process_lines(state, lines, i + 1, num_lines)
                 }
             } else {
@@ -304,7 +304,7 @@ fn process_lines(state, lines, i, num_lines) {
             if line_len >= 6 {
                 let prefix = substring(line, 0, 6)
                 if prefix == ">THREE" {
-                    arr/write_field(state, STATE_READING, true)
+                    arr/write-field(state, STATE_READING, true)
                 }
             }
             process_lines(state, lines, i + 1, num_lines)
@@ -316,11 +316,11 @@ fn process_lines(state, lines, i, num_lines) {
 fn read_sequence() {
     let state = new_read_state()
     read_loop(state)
-    arr/read_field(state, STATE_SEQ)
+    arr/read-field(state, STATE_SEQ)
 }
 
 fn read_loop(state) {
-    let result = io/read_stdin_string(READ_CHUNK)
+    let result = io/read-stdin-string(READ_CHUNK)
     match result {
         io/Result.Ok { value } => {
             if length(value) == 0 {
@@ -328,7 +328,7 @@ fn read_loop(state) {
             } else {
                 process_chunk(state, value)
                 // Check if we're done (found a > after >THREE)
-                let reading = arr/read_field(state, STATE_READING)
+                let reading = arr/read-field(state, STATE_READING)
                 if reading {
                     read_loop(state)
                 } else {
@@ -399,9 +399,9 @@ fn print_freq_loop(entries, total, i, len) {
     if i >= len {
         null
     } else {
-        let pair = arr/read_field(entries, i)
-        let key = arr/read_field(pair, 0)
-        let count = arr/read_field(pair, 1)
+        let pair = arr/read-field(entries, i)
+        let key = arr/read-field(pair, 0)
+        let count = arr/read-field(pair, 1)
         print(key)
         print(" ")
         print_percent(count, total)

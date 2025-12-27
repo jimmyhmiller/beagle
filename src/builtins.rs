@@ -152,7 +152,11 @@ pub unsafe extern "C" fn println_value(value: usize) -> usize {
     0b111
 }
 
-pub unsafe extern "C" fn to_string(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
+pub unsafe extern "C" fn to_string(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
     save_frame_pointer(frame_pointer);
     let runtime = get_runtime().get_mut();
     let result = runtime.get_repr(value, 0);
@@ -167,7 +171,11 @@ pub unsafe extern "C" fn to_string(stack_pointer: usize, frame_pointer: usize, v
         .into()
 }
 
-pub unsafe extern "C" fn to_number(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
+pub unsafe extern "C" fn to_number(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
     save_frame_pointer(frame_pointer);
     let runtime = get_runtime().get_mut();
     let string = runtime.get_string(stack_pointer, value);
@@ -227,7 +235,12 @@ extern "C" fn allocate_float(stack_pointer: usize, frame_pointer: usize, size: u
     result
 }
 
-extern "C" fn get_string_index(stack_pointer: usize, frame_pointer: usize, string: usize, index: usize) -> usize {
+extern "C" fn get_string_index(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    string: usize,
+    index: usize,
+) -> usize {
     save_frame_pointer(frame_pointer);
     print_call_builtin(get_runtime().get(), "get_string_index");
     let runtime = get_runtime().get_mut();
@@ -276,7 +289,12 @@ extern "C" fn get_string_length(string: usize) -> usize {
     }
 }
 
-extern "C" fn string_concat(stack_pointer: usize, frame_pointer: usize, a: usize, b: usize) -> usize {
+extern "C" fn string_concat(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    a: usize,
+    b: usize,
+) -> usize {
     save_frame_pointer(frame_pointer);
     print_call_builtin(get_runtime().get(), "string_concat");
     let runtime = get_runtime().get_mut();
@@ -289,7 +307,13 @@ extern "C" fn string_concat(stack_pointer: usize, frame_pointer: usize, a: usize
         .into()
 }
 
-extern "C" fn substring(stack_pointer: usize, frame_pointer: usize, string: usize, start: usize, length: usize) -> usize {
+extern "C" fn substring(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    string: usize,
+    start: usize,
+    length: usize,
+) -> usize {
     save_frame_pointer(frame_pointer);
     print_call_builtin(get_runtime().get(), "substring");
     let runtime = get_runtime().get_mut();
@@ -973,7 +997,10 @@ pub unsafe extern "C" fn gc(stack_pointer: usize, frame_pointer: usize) -> usize
     let gc_return_addr = unsafe { *((stack_pointer - 8) as *const usize) };
     #[cfg(feature = "debug-gc")]
     {
-        eprintln!("DEBUG gc: stack_pointer={:#x}, frame_pointer={:#x}, gc_return_addr={:#x}", stack_pointer, frame_pointer, gc_return_addr);
+        eprintln!(
+            "DEBUG gc: stack_pointer={:#x}, frame_pointer={:#x}, gc_return_addr={:#x}",
+            stack_pointer, frame_pointer, gc_return_addr
+        );
     }
     let runtime = get_runtime().get_mut();
     runtime.gc_impl(stack_pointer, frame_pointer, gc_return_addr);
@@ -988,7 +1015,11 @@ pub unsafe extern "C" fn gc_add_root(old: usize) -> usize {
 
 /// sqrt builtin - computes square root of a float
 /// Takes a tagged float pointer, returns a new tagged float pointer with the result
-pub unsafe extern "C" fn sqrt_builtin(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
+pub unsafe extern "C" fn sqrt_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
     save_frame_pointer(frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
@@ -1016,7 +1047,11 @@ pub unsafe extern "C" fn sqrt_builtin(stack_pointer: usize, frame_pointer: usize
 }
 
 /// floor builtin - computes floor of a float
-pub unsafe extern "C" fn floor_builtin(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
+pub unsafe extern "C" fn floor_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
     save_frame_pointer(frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
@@ -1040,7 +1075,11 @@ pub unsafe extern "C" fn floor_builtin(stack_pointer: usize, frame_pointer: usiz
 }
 
 /// ceil builtin - computes ceiling of a float
-pub unsafe extern "C" fn ceil_builtin(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
+pub unsafe extern "C" fn ceil_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
     save_frame_pointer(frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
@@ -1064,7 +1103,11 @@ pub unsafe extern "C" fn ceil_builtin(stack_pointer: usize, frame_pointer: usize
 }
 
 /// abs builtin - computes absolute value of a float
-pub unsafe extern "C" fn abs_builtin(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
+pub unsafe extern "C" fn abs_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
     save_frame_pointer(frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
@@ -1088,7 +1131,11 @@ pub unsafe extern "C" fn abs_builtin(stack_pointer: usize, frame_pointer: usize,
 }
 
 /// sin builtin - computes sine of a float (in radians)
-pub unsafe extern "C" fn sin_builtin(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
+pub unsafe extern "C" fn sin_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
     save_frame_pointer(frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
@@ -1112,7 +1159,11 @@ pub unsafe extern "C" fn sin_builtin(stack_pointer: usize, frame_pointer: usize,
 }
 
 /// cos builtin - computes cosine of a float (in radians)
-pub unsafe extern "C" fn cos_builtin(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
+pub unsafe extern "C" fn cos_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
     save_frame_pointer(frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
@@ -1136,7 +1187,11 @@ pub unsafe extern "C" fn cos_builtin(stack_pointer: usize, frame_pointer: usize,
 }
 
 /// to_float builtin - converts an integer to a float
-pub unsafe extern "C" fn to_float_builtin(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
+pub unsafe extern "C" fn to_float_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
     save_frame_pointer(frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
@@ -1161,7 +1216,11 @@ pub unsafe extern "C" fn to_float_builtin(stack_pointer: usize, frame_pointer: u
 }
 
 #[allow(unused)]
-pub unsafe extern "C" fn new_thread(stack_pointer: usize, frame_pointer: usize, function: usize) -> usize {
+pub unsafe extern "C" fn new_thread(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    function: usize,
+) -> usize {
     save_frame_pointer(frame_pointer);
     #[cfg(feature = "thread-safe")]
     {
@@ -1508,7 +1567,7 @@ fn persistent_vector_to_array(_runtime: &Runtime, vector: usize) -> HeapObject {
     // I also am not sure I can from one of these runtime
     // functions end up in another runtime function
     // Because then I have multiple mutable references it runtime.
-    let tagged = unsafe { call_fn_1(_runtime, "persistent_vector/to_array", vector) };
+    let tagged = unsafe { call_fn_1(_runtime, "persistent-vector/to-array", vector) };
     HeapObject::from_tagged(tagged)
 }
 
@@ -1854,7 +1913,11 @@ pub unsafe extern "C" fn call_ffi_info(
     }
 }
 
-pub unsafe extern "C" fn copy_object(stack_pointer: usize, frame_pointer: usize, object_pointer: usize) -> usize {
+pub unsafe extern "C" fn copy_object(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    object_pointer: usize,
+) -> usize {
     save_frame_pointer(frame_pointer);
     let runtime = get_runtime().get_mut();
     let object_pointer_id = runtime.register_temporary_root(object_pointer);
@@ -2356,7 +2419,11 @@ extern "C" fn read_line(stack_pointer: usize, frame_pointer: usize) -> usize {
     }
 }
 
-extern "C" fn read_full_file(stack_pointer: usize, frame_pointer: usize, file_name: usize) -> usize {
+extern "C" fn read_full_file(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    file_name: usize,
+) -> usize {
     save_frame_pointer(frame_pointer);
     let runtime = get_runtime().get_mut();
     let file_name = runtime.get_string(stack_pointer, file_name);
@@ -2513,7 +2580,11 @@ pub extern "C" fn is_keyword(value: usize) -> usize {
     BuiltInTypes::construct_boolean(is_kw) as usize
 }
 
-pub extern "C" fn keyword_to_string(stack_pointer: usize, frame_pointer: usize, keyword: usize) -> usize {
+pub extern "C" fn keyword_to_string(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    keyword: usize,
+) -> usize {
     save_frame_pointer(frame_pointer);
     let runtime = get_runtime().get_mut();
 
@@ -2550,7 +2621,11 @@ pub extern "C" fn keyword_to_string(stack_pointer: usize, frame_pointer: usize, 
         .into()
 }
 
-pub extern "C" fn string_to_keyword(stack_pointer: usize, frame_pointer: usize, string_value: usize) -> usize {
+pub extern "C" fn string_to_keyword(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    string_value: usize,
+) -> usize {
     save_frame_pointer(frame_pointer);
     let runtime = get_runtime().get_mut();
     let keyword_text = runtime.get_string(stack_pointer, string_value);
@@ -2559,7 +2634,11 @@ pub extern "C" fn string_to_keyword(stack_pointer: usize, frame_pointer: usize, 
     runtime.intern_keyword(stack_pointer, keyword_text).unwrap()
 }
 
-pub extern "C" fn load_keyword_constant_runtime(stack_pointer: usize, frame_pointer: usize, index: usize) -> usize {
+pub extern "C" fn load_keyword_constant_runtime(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    index: usize,
+) -> usize {
     save_frame_pointer(frame_pointer);
     let runtime = get_runtime().get_mut();
 
@@ -2653,7 +2732,11 @@ pub unsafe extern "C" fn pop_exception_handler_runtime() -> usize {
     BuiltInTypes::null_value() as usize
 }
 
-pub unsafe extern "C" fn throw_exception(stack_pointer: usize, frame_pointer: usize, value: usize) -> ! {
+pub unsafe extern "C" fn throw_exception(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> ! {
     save_frame_pointer(frame_pointer);
     print_call_builtin(get_runtime().get(), "throw_exception");
 
@@ -2769,9 +2852,9 @@ pub unsafe extern "C" fn set_default_exception_handler(handler_fn: usize) {
 pub unsafe extern "C" fn create_error(
     stack_pointer: usize,
     _frame_pointer: usize, // Frame pointer for GC stack walking (needed since create_struct can allocate)
-    kind_str: usize,       // Tagged string specifying the error variant (e.g., "StructError", "TypeError")
-    message_str: usize,    // Tagged string
-    location_str: usize,   // Tagged string or null
+    kind_str: usize, // Tagged string specifying the error variant (e.g., "StructError", "TypeError")
+    message_str: usize, // Tagged string
+    location_str: usize, // Tagged string or null
 ) -> usize {
     print_call_builtin(get_runtime().get(), "create_error");
 
@@ -2818,7 +2901,13 @@ pub unsafe fn throw_runtime_error(stack_pointer: usize, kind: &str, message: Str
 
     // Create the Error struct and throw it
     unsafe {
-        let error = create_error(stack_pointer, frame_pointer, kind_str, message_str, null_location);
+        let error = create_error(
+            stack_pointer,
+            frame_pointer,
+            kind_str,
+            message_str,
+            null_location,
+        );
         throw_exception(stack_pointer, frame_pointer, error);
     }
 }
@@ -2840,16 +2929,34 @@ impl Runtime {
         self.add_builtin_function("beagle.core/_print", print_value as *const u8, false, 1)?;
 
         // to_string now takes (stack_pointer, frame_pointer, value)
-        self.add_builtin_function_with_fp("beagle.core/to_string", to_string as *const u8, true, true, 3)?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/to-string",
+            to_string as *const u8,
+            true,
+            true,
+            3,
+        )?;
         // to_number now takes (stack_pointer, frame_pointer, value)
-        self.add_builtin_function_with_fp("beagle.core/to_number", to_number as *const u8, true, true, 3)?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/to-number",
+            to_number as *const u8,
+            true,
+            true,
+            3,
+        )?;
 
         // allocate now takes (stack_pointer, frame_pointer, size)
-        self.add_builtin_function_with_fp("beagle.builtin/allocate", allocate as *const u8, true, true, 3)?;
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/allocate",
+            allocate as *const u8,
+            true,
+            true,
+            3,
+        )?;
 
         // allocate_float now takes (stack_pointer, frame_pointer, size)
         self.add_builtin_function_with_fp(
-            "beagle.builtin/allocate_float",
+            "beagle.builtin/allocate-float",
             allocate_float as *const u8,
             true,
             true,
@@ -2857,7 +2964,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_function(
-            "beagle.builtin/fill_object_fields",
+            "beagle.builtin/fill-object-fields",
             fill_object_fields as *const u8,
             false,
             2,
@@ -2865,7 +2972,7 @@ impl Runtime {
 
         // copy_object now takes (stack_pointer, frame_pointer, object_pointer)
         self.add_builtin_function_with_fp(
-            "beagle.builtin/copy_object",
+            "beagle.builtin/copy-object",
             copy_object as *const u8,
             true,
             true,
@@ -2873,14 +2980,14 @@ impl Runtime {
         )?;
 
         self.add_builtin_function(
-            "beagle.builtin/copy_from_to_object",
+            "beagle.builtin/copy-from-to-object",
             copy_from_to_object as *const u8,
             false,
             2,
         )?;
 
         self.add_builtin_function(
-            "beagle.builtin/copy_array_range",
+            "beagle.builtin/copy-array-range",
             copy_array_range as *const u8,
             false,
             4,
@@ -2888,7 +2995,7 @@ impl Runtime {
 
         // make_closure now takes (stack_pointer, frame_pointer, function, num_free, free_variable_pointer)
         self.add_builtin_function_with_fp(
-            "beagle.builtin/make_closure",
+            "beagle.builtin/make-closure",
             make_closure as *const u8,
             true,
             true,
@@ -2896,30 +3003,42 @@ impl Runtime {
         )?;
 
         self.add_builtin_function(
-            "beagle.builtin/property_access",
+            "beagle.builtin/property-access",
             property_access as *const u8,
             false,
             3,
         )?;
 
         self.add_builtin_function(
-            "beagle.builtin/protocol_dispatch",
+            "beagle.builtin/protocol-dispatch",
             protocol_dispatch as *const u8,
             false,
             3, // first_arg, cache_location, dispatch_table_ptr
         )?;
 
         // type_of now takes (stack_pointer, frame_pointer, value)
-        self.add_builtin_function_with_fp("beagle.core/type-of", type_of as *const u8, true, true, 3)?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/type-of",
+            type_of as *const u8,
+            true,
+            true,
+            3,
+        )?;
 
         // get_os now takes (stack_pointer, frame_pointer)
-        self.add_builtin_function_with_fp("beagle.core/get-os", get_os as *const u8, true, true, 2)?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/get-os",
+            get_os as *const u8,
+            true,
+            true,
+            2,
+        )?;
 
         self.add_builtin_function("beagle.core/equal", equal as *const u8, false, 2)?;
 
         // write_field now takes (stack_pointer, frame_pointer, struct_pointer, str_constant_ptr, property_cache_location, value)
         self.add_builtin_function_with_fp(
-            "beagle.builtin/write_field",
+            "beagle.builtin/write-field",
             write_field as *const u8,
             true,
             true,
@@ -2928,7 +3047,7 @@ impl Runtime {
 
         // throw_error now takes (stack_pointer, frame_pointer)
         self.add_builtin_function_with_fp(
-            "beagle.builtin/throw_error",
+            "beagle.builtin/throw-error",
             throw_error as *const u8,
             true,
             true,
@@ -2937,7 +3056,7 @@ impl Runtime {
 
         // check_arity now takes (stack_pointer, frame_pointer, function_pointer, expected_args)
         self.add_builtin_function_with_fp(
-            "beagle.builtin/check_arity",
+            "beagle.builtin/check-arity",
             check_arity as *const u8,
             true,
             true,
@@ -2945,14 +3064,14 @@ impl Runtime {
         )?;
 
         self.add_builtin_function(
-            "beagle.builtin/is_function_variadic",
+            "beagle.builtin/is-function-variadic",
             is_function_variadic as *const u8,
             false,
             1, // function_pointer
         )?;
 
         self.add_builtin_function(
-            "beagle.builtin/get_function_min_args",
+            "beagle.builtin/get-function-min-args",
             get_function_min_args as *const u8,
             false,
             1, // function_pointer
@@ -2960,7 +3079,7 @@ impl Runtime {
 
         // pack_variadic_args_from_stack now takes (stack_pointer, frame_pointer, args_base, total_args, min_args)
         self.add_builtin_function_with_fp(
-            "beagle.builtin/pack_variadic_args_from_stack",
+            "beagle.builtin/pack-variadic-args-from-stack",
             pack_variadic_args_from_stack as *const u8,
             true,
             true,
@@ -2969,7 +3088,7 @@ impl Runtime {
 
         // call_variadic_function_value now takes (stack_pointer, frame_pointer, function_ptr, args_array, is_closure, closure_ptr)
         self.add_builtin_function_with_fp(
-            "beagle.builtin/call_variadic_function_value",
+            "beagle.builtin/call-variadic-function-value",
             call_variadic_function_value as *const u8,
             true,
             true,
@@ -2977,14 +3096,14 @@ impl Runtime {
         )?;
 
         self.add_builtin_function(
-            "beagle.builtin/push_exception_handler",
+            "beagle.builtin/push-exception-handler",
             push_exception_handler_runtime as *const u8,
             false,
             5, // handler_address, result_local, link_register, stack_pointer, frame_pointer
         )?;
 
         self.add_builtin_function(
-            "beagle.builtin/pop_exception_handler",
+            "beagle.builtin/pop-exception-handler",
             pop_exception_handler_runtime as *const u8,
             false,
             0,
@@ -2992,7 +3111,7 @@ impl Runtime {
 
         // throw_exception now takes (stack_pointer, frame_pointer, value)
         self.add_builtin_function_with_fp(
-            "beagle.builtin/throw_exception",
+            "beagle.builtin/throw-exception",
             throw_exception as *const u8,
             true,
             true,
@@ -3014,7 +3133,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_function(
-            "beagle.builtin/create_error",
+            "beagle.builtin/create-error",
             create_error as *const u8,
             true,
             4, // stack_pointer, kind_str, message_str, location_str
@@ -3027,28 +3146,64 @@ impl Runtime {
         self.add_builtin_function_with_fp("beagle.core/gc", gc as *const u8, true, true, 2)?;
 
         self.add_builtin_function(
-            "beagle.debug/stack_segments",
+            "beagle.debug/stack-segments",
             debug_stack_segments as *const u8,
             false,
             0,
         )?;
 
         self.add_builtin_function(
-            "beagle.builtin/gc_add_root",
+            "beagle.builtin/gc-add-root",
             gc_add_root as *const u8,
             false,
             1,
         )?;
 
         // Math builtins - all now take (stack_pointer, frame_pointer, value)
-        self.add_builtin_function_with_fp("beagle.core/sqrt", sqrt_builtin as *const u8, true, true, 3)?;
-        self.add_builtin_function_with_fp("beagle.core/floor", floor_builtin as *const u8, true, true, 3)?;
-        self.add_builtin_function_with_fp("beagle.core/ceil", ceil_builtin as *const u8, true, true, 3)?;
-        self.add_builtin_function_with_fp("beagle.core/abs", abs_builtin as *const u8, true, true, 3)?;
-        self.add_builtin_function_with_fp("beagle.core/sin", sin_builtin as *const u8, true, true, 3)?;
-        self.add_builtin_function_with_fp("beagle.core/cos", cos_builtin as *const u8, true, true, 3)?;
         self.add_builtin_function_with_fp(
-            "beagle.core/to_float",
+            "beagle.core/sqrt",
+            sqrt_builtin as *const u8,
+            true,
+            true,
+            3,
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/floor",
+            floor_builtin as *const u8,
+            true,
+            true,
+            3,
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/ceil",
+            ceil_builtin as *const u8,
+            true,
+            true,
+            3,
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/abs",
+            abs_builtin as *const u8,
+            true,
+            true,
+            3,
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/sin",
+            sin_builtin as *const u8,
+            true,
+            true,
+            3,
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/cos",
+            cos_builtin as *const u8,
+            true,
+            true,
+            3,
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/to-float",
             to_float_builtin as *const u8,
             true,
             true,
@@ -3056,10 +3211,16 @@ impl Runtime {
         )?;
 
         // new_thread now takes (stack_pointer, frame_pointer, function)
-        self.add_builtin_function_with_fp("beagle.core/thread", new_thread as *const u8, true, true, 3)?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/thread",
+            new_thread as *const u8,
+            true,
+            true,
+            3,
+        )?;
 
         self.add_builtin_function(
-            "beagle.ffi/load_library",
+            "beagle.ffi/load-library",
             load_library as *const u8,
             false,
             1,
@@ -3067,7 +3228,7 @@ impl Runtime {
 
         // get_function now takes (stack_pointer, frame_pointer, library_struct, function_name, types, return_type)
         self.add_builtin_function_with_fp(
-            "beagle.ffi/get_function",
+            "beagle.ffi/get-function",
             get_function as *const u8,
             true,
             true,
@@ -3075,7 +3236,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_function(
-            "beagle.ffi/call_ffi_info",
+            "beagle.ffi/call-ffi-info",
             call_ffi_info as *const u8,
             true,
             8,
@@ -3089,34 +3250,34 @@ impl Runtime {
             1,
         )?;
 
-        self.add_builtin_function("beagle.ffi/get_u32", ffi_get_u32 as *const u8, false, 2)?;
+        self.add_builtin_function("beagle.ffi/get-u32", ffi_get_u32 as *const u8, false, 2)?;
 
-        self.add_builtin_function("beagle.ffi/set_i16", ffi_set_i16 as *const u8, false, 3)?;
+        self.add_builtin_function("beagle.ffi/set-i16", ffi_set_i16 as *const u8, false, 3)?;
 
-        self.add_builtin_function("beagle.ffi/set_i32", ffi_set_i32 as *const u8, false, 3)?;
+        self.add_builtin_function("beagle.ffi/set-i32", ffi_set_i32 as *const u8, false, 3)?;
 
-        self.add_builtin_function("beagle.ffi/set_u8", ffi_set_u8 as *const u8, false, 3)?;
+        self.add_builtin_function("beagle.ffi/set-u8", ffi_set_u8 as *const u8, false, 3)?;
 
-        self.add_builtin_function("beagle.ffi/get_u8", ffi_get_u8 as *const u8, false, 2)?;
+        self.add_builtin_function("beagle.ffi/get-u8", ffi_get_u8 as *const u8, false, 2)?;
 
-        self.add_builtin_function("beagle.ffi/get_i32", ffi_get_i32 as *const u8, false, 2)?;
+        self.add_builtin_function("beagle.ffi/get-i32", ffi_get_i32 as *const u8, false, 2)?;
 
         self.add_builtin_function(
-            "beagle.ffi/get_string",
+            "beagle.ffi/get-string",
             ffi_get_string as *const u8,
             true,
             4,
         )?;
 
         self.add_builtin_function(
-            "beagle.ffi/create_array",
+            "beagle.ffi/create-array",
             ffi_create_array as *const u8,
             true,
             3,
         )?;
 
         self.add_builtin_function(
-            "beagle.ffi/copy_bytes",
+            "beagle.ffi/copy-bytes",
             ffi_copy_bytes as *const u8,
             false,
             5,
@@ -3125,44 +3286,50 @@ impl Runtime {
         self.add_builtin_function("beagle.ffi/realloc", ffi_realloc as *const u8, false, 2)?;
 
         self.add_builtin_function(
-            "beagle.ffi/buffer_size",
+            "beagle.ffi/buffer-size",
             ffi_buffer_size as *const u8,
             false,
             1,
         )?;
 
         self.add_builtin_function(
-            "beagle.ffi/write_buffer_offset",
+            "beagle.ffi/write-buffer-offset",
             ffi_write_buffer_offset as *const u8,
             false,
             4,
         )?;
 
         self.add_builtin_function(
-            "beagle.ffi/translate_bytes",
+            "beagle.ffi/translate-bytes",
             ffi_translate_bytes as *const u8,
             false,
             4,
         )?;
 
         self.add_builtin_function(
-            "beagle.ffi/reverse_bytes",
+            "beagle.ffi/reverse-bytes",
             ffi_reverse_bytes as *const u8,
             false,
             3,
         )?;
 
-        self.add_builtin_function("beagle.ffi/find_byte", ffi_find_byte as *const u8, false, 4)?;
+        self.add_builtin_function("beagle.ffi/find-byte", ffi_find_byte as *const u8, false, 4)?;
 
         self.add_builtin_function(
-            "beagle.ffi/copy_bytes_filter",
+            "beagle.ffi/copy-bytes_filter",
             ffi_copy_bytes_filter as *const u8,
             false,
             6,
         )?;
 
         // __pause needs both stack_pointer and frame_pointer for FP-chain walking
-        self.add_builtin_function_with_fp("beagle.builtin/__pause", __pause as *const u8, true, true, 2)?;
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/__pause",
+            __pause as *const u8,
+            true,
+            true,
+            2,
+        )?;
 
         // register_c_call needs both stack_pointer and frame_pointer for FP-chain walking
         self.add_builtin_function_with_fp(
@@ -3195,21 +3362,21 @@ impl Runtime {
         )?;
 
         self.add_builtin_function(
-            "beagle.builtin/update_binding",
+            "beagle.builtin/update-binding",
             update_binding as *const u8,
             false,
             2,
         )?;
 
         self.add_builtin_function(
-            "beagle.builtin/get_binding",
+            "beagle.builtin/get-binding",
             get_binding as *const u8,
             false,
             2,
         )?;
 
         self.add_builtin_function(
-            "beagle.builtin/set_current_namespace",
+            "beagle.builtin/set-current-namespace",
             set_current_namespace as *const u8,
             false,
             1,
@@ -3217,7 +3384,7 @@ impl Runtime {
 
         // wait_for_input now takes (stack_pointer, frame_pointer)
         self.add_builtin_function_with_fp(
-            "beagle.builtin/wait_for_input",
+            "beagle.builtin/wait-for-input",
             wait_for_input as *const u8,
             true,
             true,
@@ -3225,21 +3392,33 @@ impl Runtime {
         )?;
 
         // read_line now takes (stack_pointer, frame_pointer)
-        self.add_builtin_function_with_fp("beagle.builtin/read_line", read_line as *const u8, true, true, 2)?;
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/read-line",
+            read_line as *const u8,
+            true,
+            true,
+            2,
+        )?;
 
         self.add_builtin_function(
-            "beagle.builtin/print_byte",
+            "beagle.builtin/print-byte",
             print_byte as *const u8,
             false,
             1,
         )?;
 
         // char_code now takes (stack_pointer, frame_pointer, string)
-        self.add_builtin_function_with_fp("beagle.builtin/char_code", char_code as *const u8, true, true, 3)?;
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/char-code",
+            char_code as *const u8,
+            true,
+            true,
+            3,
+        )?;
 
         // char_from_code now takes (stack_pointer, frame_pointer, code)
         self.add_builtin_function_with_fp(
-            "beagle.builtin/char_from_code",
+            "beagle.builtin/char-from-code",
             char_from_code as *const u8,
             true,
             true,
@@ -3251,10 +3430,10 @@ impl Runtime {
 
         self.add_builtin_function("beagle.core/sleep", sleep as *const u8, false, 1)?;
 
-        self.add_builtin_function("beagle.core/time_now", time_now as *const u8, false, 0)?;
+        self.add_builtin_function("beagle.core/time-now", time_now as *const u8, false, 0)?;
 
         self.add_builtin_function(
-            "beagle.builtin/register_extension",
+            "beagle.builtin/register-extension",
             register_extension as *const u8,
             false,
             4,
@@ -3262,7 +3441,7 @@ impl Runtime {
 
         // get_string_index now takes (stack_pointer, frame_pointer, string, index)
         self.add_builtin_function_with_fp(
-            "beagle.builtin/get_string_index",
+            "beagle.builtin/get-string-index",
             get_string_index as *const u8,
             true,
             true,
@@ -3270,7 +3449,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_function(
-            "beagle.builtin/get_string_length",
+            "beagle.builtin/get-string-length",
             get_string_length as *const u8,
             false,
             1,
@@ -3278,7 +3457,7 @@ impl Runtime {
 
         // string_concat now takes (stack_pointer, frame_pointer, a, b)
         self.add_builtin_function_with_fp(
-            "beagle.core/string_concat",
+            "beagle.core/string-concat",
             string_concat as *const u8,
             true,
             true,
@@ -3286,15 +3465,27 @@ impl Runtime {
         )?;
 
         // substring now takes (stack_pointer, frame_pointer, string, start, length)
-        self.add_builtin_function_with_fp("beagle.core/substring", substring as *const u8, true, true, 5)?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/substring",
+            substring as *const u8,
+            true,
+            true,
+            5,
+        )?;
         // uppercase now takes (stack_pointer, frame_pointer, string)
-        self.add_builtin_function_with_fp("beagle.core/uppercase", uppercase as *const u8, true, true, 3)?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/uppercase",
+            uppercase as *const u8,
+            true,
+            true,
+            3,
+        )?;
 
         // hash now takes (stack_pointer, frame_pointer, value)
         self.add_builtin_function_with_fp("beagle.builtin/hash", hash as *const u8, true, true, 3)?;
 
         self.add_builtin_function(
-            "beagle.builtin/is_keyword",
+            "beagle.builtin/is-keyword",
             is_keyword as *const u8,
             false,
             1,
@@ -3302,7 +3493,7 @@ impl Runtime {
 
         // keyword_to_string now takes (stack_pointer, frame_pointer, keyword)
         self.add_builtin_function_with_fp(
-            "beagle.builtin/keyword_to_string",
+            "beagle.builtin/keyword-to-string",
             keyword_to_string as *const u8,
             true,
             true,
@@ -3311,7 +3502,7 @@ impl Runtime {
 
         // string_to_keyword now takes (stack_pointer, frame_pointer, string_value)
         self.add_builtin_function_with_fp(
-            "beagle.builtin/string_to_keyword",
+            "beagle.builtin/string-to-keyword",
             string_to_keyword as *const u8,
             true,
             true,
@@ -3320,7 +3511,7 @@ impl Runtime {
 
         // load_keyword_constant_runtime now takes (stack_pointer, frame_pointer, index)
         self.add_builtin_function_with_fp(
-            "beagle.builtin/load_keyword_constant_runtime",
+            "beagle.builtin/load-keyword-constant-runtime",
             load_keyword_constant_runtime as *const u8,
             true,
             true,
@@ -3328,11 +3519,17 @@ impl Runtime {
         )?;
 
         // pop_count now takes (stack_pointer, frame_pointer, value)
-        self.add_builtin_function_with_fp("beagle.builtin/pop_count", pop_count as *const u8, true, true, 3)?;
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/pop-count",
+            pop_count as *const u8,
+            true,
+            true,
+            3,
+        )?;
 
         // read_full_file now takes (stack_pointer, frame_pointer, file_name)
         self.add_builtin_function_with_fp(
-            "beagle.core/read_full_file",
+            "beagle.core/read-full-file",
             read_full_file as *const u8,
             true,
             true,
@@ -3507,7 +3704,7 @@ unsafe fn warning_to_struct_impl(
             );
 
             // Build persistent vector of variant strings
-            let empty_vec = unsafe { call_fn_1(runtime, "persistent_vector/vec", 0) };
+            let empty_vec = unsafe { call_fn_1(runtime, "persistent-vector/vec", 0) };
             let mut vec = empty_vec;
             let mut vec_root_id = runtime.register_temporary_root(vec);
             // Track vec_root_id immediately so it gets cleaned up on early return
@@ -3520,7 +3717,7 @@ unsafe fn warning_to_struct_impl(
                     .map_err(|e| format!("Failed to create variant string: {}", e))?
                     .into();
                 let variant_root_id = runtime.register_temporary_root(variant_str);
-                vec = unsafe { call_fn_2(runtime, "persistent_vector/push", vec, variant_str) };
+                vec = unsafe { call_fn_2(runtime, "persistent-vector/push", vec, variant_str) };
                 runtime.unregister_temporary_root(variant_root_id);
                 // Update vec root to point to new vec
                 runtime.unregister_temporary_root(vec_root_id);
@@ -3572,7 +3769,7 @@ pub unsafe extern "C" fn compiler_warnings(stack_pointer: usize, frame_pointer: 
     };
 
     // Start with empty persistent vector
-    let mut vec = unsafe { call_fn_1(runtime, "persistent_vector/vec", 0) };
+    let mut vec = unsafe { call_fn_1(runtime, "persistent-vector/vec", 0) };
 
     // Register vec as a temporary root to protect it from GC during the loop
     let mut vec_root_id = runtime.register_temporary_root(vec);
@@ -3582,7 +3779,7 @@ pub unsafe extern "C" fn compiler_warnings(stack_pointer: usize, frame_pointer: 
         match unsafe { warning_to_struct(runtime, stack_pointer, warning) } {
             Ok(warning_struct) => {
                 let warning_root_id = runtime.register_temporary_root(warning_struct);
-                vec = unsafe { call_fn_2(runtime, "persistent_vector/push", vec, warning_struct) };
+                vec = unsafe { call_fn_2(runtime, "persistent-vector/push", vec, warning_struct) };
                 runtime.unregister_temporary_root(warning_root_id);
                 // Update the root to point to the new vec
                 runtime.unregister_temporary_root(vec_root_id);
