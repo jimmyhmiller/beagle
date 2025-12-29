@@ -1636,10 +1636,21 @@ impl Runtime {
     }
 
     /// GC entry point called when allocation fails or gc_always is set.
-    /// Computes gc_return_addr from stack_pointer.
+    /// Reads gc_return_addr from our saved frame [FP + 8].
     fn run_gc(&mut self, stack_pointer: usize, frame_pointer: usize) {
-        // The gc() call's return address is at [stack_pointer - 8]
-        let gc_return_addr = unsafe { *((stack_pointer - 8) as *const usize) };
+        // Read our return address from our own saved frame.
+        // Rust's prologue saves the return address at [FP + 8].
+        // This works on both ARM64 and x86-64 (with frame pointers enabled).
+        let gc_return_addr: usize;
+        cfg_if::cfg_if! {
+            if #[cfg(target_arch = "x86_64")] {
+                unsafe { core::arch::asm!("mov {}, [rbp + 8]", out(reg) gc_return_addr) };
+            } else if #[cfg(target_arch = "aarch64")] {
+                unsafe { core::arch::asm!("ldr {}, [x29, #8]", out(reg) gc_return_addr) };
+            } else {
+                compile_error!("Unsupported architecture");
+            }
+        }
         self.gc_impl(stack_pointer, frame_pointer, gc_return_addr);
     }
 

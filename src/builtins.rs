@@ -986,13 +986,20 @@ fn print_stack(_stack_pointer: usize) {
 
 pub unsafe extern "C" fn gc(stack_pointer: usize, frame_pointer: usize) -> usize {
     save_frame_pointer(frame_pointer);
-    // The gc() call's return address is at [stack_pointer - 8]
-    // (stack_pointer was RSP before the CALL instruction)
-    // This return address is needed because:
-    // - frame_pointer is main's RBP (good for scanning locals)
-    // - But [frame_pointer + 8] is main's return address to the TRAMPOLINE (not in stack map)
-    // - The gc() call's return address IS in the stack map (it's a call site in main)
-    let gc_return_addr = unsafe { *((stack_pointer - 8) as *const usize) };
+    // Read our return address from our own saved frame.
+    // Rust's prologue saves the return address at [FP + 8], so we can read it directly.
+    // This works on both ARM64 and x86-64 (with frame pointers enabled).
+    // The return address is the safepoint in the caller where gc() was invoked.
+    let gc_return_addr: usize;
+    cfg_if::cfg_if! {
+        if #[cfg(target_arch = "x86_64")] {
+            unsafe { core::arch::asm!("mov {}, [rbp + 8]", out(reg) gc_return_addr) };
+        } else if #[cfg(target_arch = "aarch64")] {
+            unsafe { core::arch::asm!("ldr {}, [x29, #8]", out(reg) gc_return_addr) };
+        } else {
+            compile_error!("Unsupported architecture");
+        }
+    }
     #[cfg(feature = "debug-gc")]
     {
         eprintln!(
