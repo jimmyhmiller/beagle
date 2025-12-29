@@ -1,0 +1,68 @@
+namespace thread_map_gc_debug
+
+import "persistent-map" as pm
+
+fn build_map(n, m) {
+    if n <= 0 {
+        m
+    } else {
+        let new_m = pm/assoc(m, n, n * 2)
+        build_map(n - 1, new_m)
+    }
+}
+
+fn main() {
+    println("Starting test")
+    let done = atom(0)
+
+    // Two threads building maps
+    println("Spawning thread 1")
+    thread(fn() {
+        println("Thread 1 starting")
+        let m = build_map(5, pm/map())
+        println("Thread 1 done with map")
+        swap!(done, fn(x) { x + length(m) })
+        println("Thread 1 done")
+    })
+
+    println("Spawning thread 2")
+    thread(fn() {
+        println("Thread 2 starting")
+        let m = build_map(5, pm/map())
+        println("Thread 2 done with map")
+        swap!(done, fn(x) { x + length(m) })
+        println("Thread 2 done")
+    })
+
+    println("Main calling gc")
+    gc()
+    println("GC 1 done")
+    gc()
+    println("GC 2 done")
+
+    // Wait for both threads
+    wait(done, 10, 0)
+    println("Wait done")
+    println(deref(done))
+    "done"
+}
+
+fn wait(done_atom, target, attempts) {
+    let val = deref(done_atom)
+    if val >= target {
+        true
+    } else {
+        if attempts > 10000000 {
+            false
+        } else {
+            wait(done_atom, target, attempts + 1)
+        }
+    }
+}
+
+// thread-safe
+// DISABLED
+// Starting test
+// Spawning thread 1
+// Spawning thread 2
+// Main calling gc

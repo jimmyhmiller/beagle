@@ -1,0 +1,53 @@
+namespace thread_map_gc
+
+import "persistent-map" as pm
+
+fn build_map(n, m) {
+    if n <= 0 {
+        m
+    } else {
+        let new_m = pm/assoc(m, n, n * 2)
+        build_map(n - 1, new_m)
+    }
+}
+
+fn main() {
+    let done = atom(0)
+
+    // Two threads building maps
+    thread(fn() {
+        let m = build_map(20, pm/map())
+        swap!(done, fn(x) { x + length(m) })
+    })
+
+    thread(fn() {
+        let m = build_map(20, pm/map())
+        swap!(done, fn(x) { x + length(m) })
+    })
+
+    // Main thread forces GC while threads are running
+    gc()
+    gc()
+    gc()
+
+    // Wait for both threads
+    wait(done, 40, 0)
+    println(deref(done))
+    "done"
+}
+
+fn wait(done_atom, target, attempts) {
+    let val = deref(done_atom)
+    if val >= target {
+        true
+    } else {
+        if attempts > 10000000 {
+            false
+        } else {
+            wait(done_atom, target, attempts + 1)
+        }
+    }
+}
+
+// thread-safe
+// KNOWN BUG: Beagle persistent-map has GC race condition (see line 343 of persistent-map.bg)

@@ -1668,16 +1668,19 @@ impl AstCompiler<'_> {
                     self.ir.push_to_stack(reg.into());
                 }
 
-                let vector_pointer = self.call("persistent-vector/vec", vec![]);
+                let vector_pointer = self.call("beagle.collections/vec", vec![]);
 
-                let push = self.get_function("persistent-vector/push");
                 let vector_register = self.ir.assign_new(vector_pointer);
                 // the elements are on the stack in reverse, so I need to grab them by index in reverse
                 // and then shift the stack pointer
                 let stack_pointer = self.ir.get_current_stack_position();
                 for i in (0..elements.len()).rev() {
                     let value = self.ir.load_from_memory(stack_pointer, (i as i32) + 1);
-                    let push_result = self.ir.call(push, vec![vector_register.into(), value]);
+                    // Use self.call() to properly handle sp/fp for the builtin
+                    let push_result = self.call(
+                        "beagle.collections/vec-push",
+                        vec![vector_register.into(), value],
+                    );
                     self.ir.assign(vector_register, push_result);
                 }
                 for _ in 0..elements.len() {
@@ -1691,7 +1694,7 @@ impl AstCompiler<'_> {
             Ast::MapLiteral { pairs, .. } => {
                 // Special case: empty map
                 if pairs.is_empty() {
-                    return self.call("persistent-map/map", vec![]);
+                    return self.call("beagle.collections/map", vec![]);
                 }
 
                 // Check for duplicate literal keys at compile time
@@ -1735,11 +1738,8 @@ impl AstCompiler<'_> {
                 }
 
                 // Create empty map
-                let map_pointer = self.call("persistent-map/map", vec![]);
+                let map_pointer = self.call("beagle.collections/map", vec![]);
                 let map_register = self.ir.assign_new(map_pointer);
-
-                // Get assoc function
-                let assoc = self.get_function("persistent-map/assoc");
 
                 // Load pairs from stack and assoc them
                 let stack_pointer = self.ir.get_current_stack_position();
@@ -1756,7 +1756,11 @@ impl AstCompiler<'_> {
                     let key = self.ir.load_from_memory(stack_pointer, val_offset);
                     let value = self.ir.load_from_memory(stack_pointer, key_offset);
 
-                    let assoc_result = self.ir.call(assoc, vec![map_register.into(), key, value]);
+                    // Use self.call() to properly handle sp/fp for the builtin
+                    let assoc_result = self.call(
+                        "beagle.collections/map-assoc",
+                        vec![map_register.into(), key, value],
+                    );
                     self.ir.assign(map_register, assoc_result);
                 }
 

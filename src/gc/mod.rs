@@ -5,6 +5,8 @@ use nanoserde::SerJson;
 
 use crate::{CommandLineArguments, types::BuiltInTypes};
 
+use crate::collections::{HandleArenaPtr, RootSetPtr};
+
 // Re-export get_page_size from mmap_utils for backward compatibility
 pub use crate::mmap_utils::get_page_size;
 
@@ -117,6 +119,22 @@ pub trait Allocator {
     /// safepoint in the stack map describing the caller's frame.
     /// If gc_return_addr is 0, the stack walker falls back to [FP+8] lookup.
     fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]);
+
+    /// Register a RootSet to be processed during GC.
+    /// Returns an ID to unregister later.
+    fn register_root_set(&mut self, roots: RootSetPtr) -> usize;
+
+    /// Unregister a previously registered RootSet.
+    fn unregister_root_set(&mut self, id: usize);
+
+    /// Register a thread-local HandleArena to be processed during GC.
+    /// The thread_id is used to unregister the arena when the thread exits.
+    /// Returns an ID (unused for now).
+    fn register_handle_arena(&mut self, arena: HandleArenaPtr, thread_id: ThreadId) -> usize;
+
+    /// Unregister the HandleArena for a thread that is exiting.
+    /// This must be called before the thread's stack is destroyed.
+    fn unregister_handle_arena_for_thread(&mut self, thread_id: ThreadId);
 
     fn grow(&mut self);
     fn gc_add_root(&mut self, old: usize);

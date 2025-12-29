@@ -1,0 +1,37 @@
+namespace thread_map_minimal
+
+import "persistent-map" as pm
+
+fn main() {
+    let done = atom(0)
+
+    thread(fn() {
+        // Just create one map in a thread
+        let m = pm/map()
+        let m = pm/assoc(m, 1, 2)
+        swap!(done, fn(x) { length(m) })
+    })
+
+    // Wait for thread
+    wait(done, 0)
+    println(deref(done))
+    "done"
+}
+
+fn wait(done_atom, attempts) {
+    let val = deref(done_atom)
+    if val > 0 {
+        true
+    } else {
+        if attempts > 10000000 {
+            false
+        } else {
+            wait(done_atom, attempts + 1)
+        }
+    }
+}
+
+// thread-safe
+// DISABLED
+// 1
+// done

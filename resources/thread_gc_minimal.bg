@@ -1,0 +1,47 @@
+namespace thread_gc_minimal
+
+fn count_up(n, acc) {
+    if n <= 0 {
+        acc
+    } else {
+        count_up(n - 1, acc + 1)
+    }
+}
+
+fn main() {
+    println("Starting")
+    let done = atom(0)
+
+    thread(fn() {
+        println("Thread starting")
+        let result = count_up(100, 0)
+        println("Thread counted")
+        swap!(done, fn(x) { result })
+    })
+
+    println("Main calling gc")
+    gc()
+    println("GC 1 done")
+    gc()
+    println("GC 2 done")
+
+    // Wait for thread
+    wait(done, 100, 0)
+    println(deref(done))
+    "done"
+}
+
+fn wait(done_atom, target, attempts) {
+    let val = deref(done_atom)
+    if val >= target {
+        true
+    } else {
+        if attempts > 10000000 {
+            false
+        } else {
+            wait(done_atom, target, attempts + 1)
+        }
+    }
+}
+
+// thread-safe

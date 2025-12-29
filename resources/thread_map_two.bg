@@ -1,0 +1,47 @@
+namespace thread_map_two
+
+import "persistent-map" as pm
+
+fn main() {
+    let done = atom(0)
+
+    // Two threads
+    thread(fn() {
+        let m = pm/map()
+        let m = pm/assoc(m, 1, 2)
+        let m = pm/assoc(m, 2, 3)
+        let m = pm/assoc(m, 3, 4)
+        swap!(done, fn(x) { x + length(m) })
+    })
+
+    thread(fn() {
+        let m = pm/map()
+        let m = pm/assoc(m, 1, 2)
+        let m = pm/assoc(m, 2, 3)
+        let m = pm/assoc(m, 3, 4)
+        swap!(done, fn(x) { x + length(m) })
+    })
+
+    // Wait for both threads
+    wait(done, 6, 0)
+    println(deref(done))
+    "done"
+}
+
+fn wait(done_atom, target, attempts) {
+    let val = deref(done_atom)
+    if val >= target {
+        true
+    } else {
+        if attempts > 10000000 {
+            false
+        } else {
+            wait(done_atom, target, attempts + 1)
+        }
+    }
+}
+
+// thread-safe
+// DISABLED
+// 6
+// done

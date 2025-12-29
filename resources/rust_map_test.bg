@@ -1,0 +1,60 @@
+namespace rust-map-test
+import "beagle.collections" as rmap
+
+fn main() {
+    // Test empty map
+    let m = rmap/map()
+    println(rmap/map-count(m))
+
+    // Test assoc and get
+    let m2 = rmap/map-assoc(m, "key1", "value1")
+    println(rmap/map-count(m2))
+    println(rmap/map-get(m2, "key1"))
+
+    // Test persistence (original unchanged)
+    println(rmap/map-count(m))
+    println(rmap/map-get(m, "key1"))
+
+    // Test multiple keys
+    let m3 = rmap/map-assoc(m2, "key2", "value2")
+    println(rmap/map-count(m3))
+    println(rmap/map-get(m3, "key1"))
+    println(rmap/map-get(m3, "key2"))
+
+    // Test update existing key
+    let m4 = rmap/map-assoc(m3, "key1", "updated")
+    println(rmap/map-count(m4))
+    println(rmap/map-get(m4, "key1"))
+    println(rmap/map-get(m3, "key1"))
+
+    // Test with integer keys
+    let m5 = rmap/map-assoc(rmap/map(), 1, 100)
+    let m6 = rmap/map-assoc(m5, 2, 200)
+    println(rmap/map-get(m6, 1))
+    println(rmap/map-get(m6, 2))
+
+    // GC test
+    gc()
+    println(rmap/map-get(m6, 1))
+    println(rmap/map-get(m6, 2))
+
+    println("done")
+}
+
+// Expect
+// 0
+// 1
+// value1
+// 0
+// null
+// 2
+// value1
+// value2
+// 2
+// updated
+// value1
+// 100
+// 200
+// 100
+// 200
+// done

@@ -3,6 +3,7 @@ namespace protocol-test
 import "persistent-vector" as vector
 import "beagle.builtin" as builtin
 import "beagle.primitive" as primitive
+import "beagle.core" as core
 
 
 struct Point {
@@ -60,9 +61,11 @@ fn main() {
     println(Indexed)
     let x = [2];
     println(x[0])
-    println(primitive/read-struct-id(x) == vector/PersistentVector.id)
-    println(instance-of(x, vector/PersistentVector))
-    println(instance-of(2, vector/PersistentVector))
+    // Vector literals now create Rust-backed PersistentVector (type_id=20)
+    // Use beagle.core/PersistentVector for instance checking
+    println(instance-of(x, core/PersistentVector))
+    println(instance-of(x, core/PersistentVector))
+    println(instance-of(2, core/PersistentVector))
 
 
     let point = Point {

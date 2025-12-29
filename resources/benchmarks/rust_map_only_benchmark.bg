@@ -1,0 +1,51 @@
+namespace rust-map-only-benchmark
+import "beagle.core" as core
+import "beagle.collections" as rust
+
+fn elapsed-ms(start, end) {
+    (end - start) / 1000000
+}
+
+fn rust-map-assoc-loop(m, i, n) {
+    if i >= n {
+        m
+    } else {
+        rust-map-assoc-loop(rust/map-assoc(m, i, i * 10), i + 1, n)
+    }
+}
+
+fn rust-map-get-loop(m, count, i, iterations) {
+    if i >= iterations {
+        null
+    } else {
+        let key = i % count
+        let unused = rust/map-get(m, key)
+        rust-map-get-loop(m, count, i + 1, iterations)
+    }
+}
+
+fn main() {
+    println("Rust Map Only Benchmark")
+    println("=======================")
+
+    // Warmup
+    let warmup = rust-map-assoc-loop(rust/map(), 0, 1000)
+    rust-map-get-loop(warmup, 1000, 0, 10000)
+    gc()
+
+    // Map assoc benchmark
+    let map-size = 100000
+    let start = core/time-now()
+    let m = rust-map-assoc-loop(rust/map(), 0, map-size)
+    let end = core/time-now()
+    println("Map Assoc (100k entries): " ++ to-string(elapsed-ms(start, end)) ++ " ms")
+
+    // Map get benchmark
+    let get-iterations = 1000000
+    let start2 = core/time-now()
+    rust-map-get-loop(m, map-size, 0, get-iterations)
+    let end2 = core/time-now()
+    println("Map Get (1M lookups): " ++ to-string(elapsed-ms(start2, end2)) ++ " ms")
+
+    println("Done")
+}

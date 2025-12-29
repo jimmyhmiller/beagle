@@ -1,0 +1,369 @@
+namespace clojure-comparison
+import "beagle.core" as core
+import "beagle.collections" as coll
+
+// ============================================================================
+// Utility functions
+// ============================================================================
+
+fn elapsed-ms(start, end) {
+    (end - start) / 1000000
+}
+
+// Modulo function (a % b) since Beagle doesn't have % operator
+fn mod(a, b) {
+    a - (a / b) * b
+}
+
+fn run-bench(name, f) {
+    let start = core/time-now()
+    let result = f()
+    let end = core/time-now()
+    let ms = elapsed-ms(start, end)
+    println(name ++ ": " ++ to-string(ms) ++ " ms")
+    result
+}
+
+// ============================================================================
+// VECTOR BENCHMARKS
+// ============================================================================
+
+// 1. Build vector by pushing
+fn vec-push-loop(v, i, n) {
+    if i >= n {
+        v
+    } else {
+        vec-push-loop(push(v, i), i + 1, n)
+    }
+}
+
+fn bench-vec-push(n) {
+    vec-push-loop([], 0, n)
+}
+
+// 2. Random access reads
+fn vec-get-loop(v, count, i, iterations, acc) {
+    if i >= iterations {
+        acc
+    } else {
+        let idx = mod(i, count)
+        let val = v[idx]
+        vec-get-loop(v, count, i + 1, iterations, acc + val)
+    }
+}
+
+fn bench-vec-get(v, iterations) {
+    let count = length(v)
+    vec-get-loop(v, count, 0, iterations, 0)
+}
+
+// 3. Sum all elements
+fn vec-sum-loop(v, i, acc) {
+    if i >= length(v) {
+        acc
+    } else {
+        vec-sum-loop(v, i + 1, acc + v[i])
+    }
+}
+
+fn bench-vec-sum(v) {
+    vec-sum-loop(v, 0, 0)
+}
+
+// 4. Filter elements (keep evens)
+fn vec-filter-loop(v, i, result) {
+    if i >= length(v) {
+        result
+    } else {
+        let val = v[i]
+        if mod(val, 2) == 0 {
+            vec-filter-loop(v, i + 1, push(result, val))
+        } else {
+            vec-filter-loop(v, i + 1, result)
+        }
+    }
+}
+
+fn bench-vec-filter(v) {
+    vec-filter-loop(v, 0, [])
+}
+
+// 5. Map over elements (double each)
+fn vec-map-loop(v, i, result) {
+    if i >= length(v) {
+        result
+    } else {
+        let val = v[i]
+        vec-map-loop(v, i + 1, push(result, val * 2))
+    }
+}
+
+fn bench-vec-map(v) {
+    vec-map-loop(v, 0, [])
+}
+
+// 6. Concatenate vectors
+fn vec-concat-loop(vs, i, result) {
+    if i >= length(vs) {
+        result
+    } else {
+        let v = vs[i]
+        let appended = vec-append-all(result, v, 0)
+        vec-concat-loop(vs, i + 1, appended)
+    }
+}
+
+fn vec-append-all(result, v, i) {
+    if i >= length(v) {
+        result
+    } else {
+        vec-append-all(push(result, v[i]), v, i + 1)
+    }
+}
+
+fn bench-vec-concat(n, chunk-size) {
+    // Build n vectors of chunk-size each, then concat
+    let chunks = build-chunks([], 0, n, chunk-size)
+    vec-concat-loop(chunks, 0, [])
+}
+
+fn build-chunks(result, i, n, size) {
+    if i >= n {
+        result
+    } else {
+        let chunk = vec-push-loop([], 0, size)
+        build-chunks(push(result, chunk), i + 1, n, size)
+    }
+}
+
+// ============================================================================
+// MAP BENCHMARKS
+// ============================================================================
+
+// 1. Build map with integer keys
+fn map-assoc-loop(m, i, n) {
+    if i >= n {
+        m
+    } else {
+        map-assoc-loop(assoc(m, i, i * 10), i + 1, n)
+    }
+}
+
+fn bench-map-assoc(n) {
+    map-assoc-loop({}, 0, n)
+}
+
+// 2. Random access lookups
+fn map-get-loop(m, count, i, iterations, acc) {
+    if i >= iterations {
+        acc
+    } else {
+        let key = mod(i, count)
+        let val = m[key]
+        if val != null {
+            map-get-loop(m, count, i + 1, iterations, acc + val)
+        } else {
+            map-get-loop(m, count, i + 1, iterations, acc)
+        }
+    }
+}
+
+fn bench-map-get(m, count, iterations) {
+    map-get-loop(m, count, 0, iterations, 0)
+}
+
+// 3. Build map with string keys
+fn map-string-assoc-loop(m, i, n) {
+    if i >= n {
+        m
+    } else {
+        let key = "key-" ++ to-string(i)
+        map-string-assoc-loop(assoc(m, key, i), i + 1, n)
+    }
+}
+
+fn bench-map-string-assoc(n) {
+    map-string-assoc-loop({}, 0, n)
+}
+
+// 4. Update existing keys
+fn map-update-loop(m, count, i, iterations) {
+    if i >= iterations {
+        m
+    } else {
+        let key = mod(i, count)
+        let old-val = m[key]
+        let new-val = if old-val != null { old-val + 1 } else { 0 }
+        map-update-loop(assoc(m, key, new-val), count, i + 1, iterations)
+    }
+}
+
+fn bench-map-update(m, count, iterations) {
+    map-update-loop(m, count, 0, iterations)
+}
+
+// ============================================================================
+// REAL-WORLD WORKLOADS
+// ============================================================================
+
+// 1. Word frequency counting
+fn count-words-loop(words, i, counts) {
+    if i >= length(words) {
+        counts
+    } else {
+        let word = words[i]
+        let current = counts[word]
+        let new-count = if current != null { current + 1 } else { 1 }
+        count-words-loop(words, i + 1, assoc(counts, word, new-count))
+    }
+}
+
+fn build-word-list(words, i, n) {
+    if i >= n {
+        words
+    } else {
+        // Cycle through a set of words
+        let word-idx = mod(i, 100)
+        let word = "word" ++ to-string(word-idx)
+        build-word-list(push(words, word), i + 1, n)
+    }
+}
+
+fn bench-word-count(n) {
+    let words = build-word-list([], 0, n)
+    count-words-loop(words, 0, {})
+}
+
+// 2. Group by key
+fn group-by-loop(items, i, groups) {
+    if i >= length(items) {
+        groups
+    } else {
+        let item = items[i]
+        let key = mod(item, 10)  // Group by last digit
+        let existing = groups[key]
+        let new-group = if existing != null {
+            push(existing, item)
+        } else {
+            [item]
+        }
+        group-by-loop(items, i + 1, assoc(groups, key, new-group))
+    }
+}
+
+fn bench-group-by(v) {
+    group-by-loop(v, 0, {})
+}
+
+// 3. Nested data structure traversal
+fn build-nested(depth, breadth, current-depth) {
+    if current-depth >= depth {
+        current-depth  // Leaf value
+    } else {
+        build-nested-children({}, 0, breadth, depth, current-depth)
+    }
+}
+
+fn build-nested-children(m, i, breadth, depth, current-depth) {
+    if i >= breadth {
+        m
+    } else {
+        let child = build-nested(depth, breadth, current-depth + 1)
+        let key = "child" ++ to-string(i)
+        build-nested-children(assoc(m, key, child), i + 1, breadth, depth, current-depth)
+    }
+}
+
+fn bench-nested-build(depth, breadth) {
+    build-nested(depth, breadth, 0)
+}
+
+// 5. Merge maps
+fn merge-maps(m1, m2, keys, i) {
+    if i >= length(keys) {
+        m1
+    } else {
+        let key = keys[i]
+        let val = m2[key]
+        if val != null {
+            merge-maps(assoc(m1, key, val), m2, keys, i + 1)
+        } else {
+            merge-maps(m1, m2, keys, i + 1)
+        }
+    }
+}
+
+fn build-key-list(result, i, n) {
+    if i >= n {
+        result
+    } else {
+        build-key-list(push(result, i), i + 1, n)
+    }
+}
+
+fn bench-map-merge(n) {
+    let m1 = map-assoc-loop({}, 0, n)
+    let m2 = map-assoc-loop({}, n / 2, n + n / 2)
+    let keys = build-key-list([], 0, n + n / 2)
+    merge-maps(m1, m2, keys, 0)
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn warmup() {
+    println("Warming up...")
+    bench-vec-push(1000)
+    bench-map-assoc(1000)
+    println("Warmup complete.")
+    println("")
+}
+
+fn main() {
+    println("==============================================")
+    println("Beagle Collections Benchmark")
+    println("(For comparison with Clojure)")
+    println("==============================================")
+    println("")
+
+    warmup()
+
+    // Vector benchmarks
+    println("--- VECTOR OPERATIONS ---")
+    println("")
+
+    run-bench("Vec push (100k)", fn() { bench-vec-push(100000) })
+
+    let test-vec = bench-vec-push(100000)
+    run-bench("Vec get (1M lookups)", fn() { bench-vec-get(test-vec, 1000000) })
+    run-bench("Vec sum (100k elements)", fn() { bench-vec-sum(test-vec) })
+    run-bench("Vec filter (100k elements)", fn() { bench-vec-filter(test-vec) })
+    run-bench("Vec map (100k elements)", fn() { bench-vec-map(test-vec) })
+    run-bench("Vec concat (100 x 1k)", fn() { bench-vec-concat(100, 1000) })
+
+    println("")
+    println("--- MAP OPERATIONS ---")
+    println("")
+
+    run-bench("Map assoc int keys (100k)", fn() { bench-map-assoc(100000) })
+
+    let test-map = bench-map-assoc(100000)
+    run-bench("Map get (1M lookups)", fn() { bench-map-get(test-map, 100000, 1000000) })
+    run-bench("Map assoc string keys (50k)", fn() { bench-map-string-assoc(50000) })
+    run-bench("Map update (100k updates)", fn() { bench-map-update(test-map, 100000, 100000) })
+
+    println("")
+    println("--- REAL-WORLD WORKLOADS ---")
+    println("")
+
+    run-bench("Word count (100k words)", fn() { bench-word-count(100000) })
+    run-bench("Group by (100k items)", fn() { bench-group-by(test-vec) })
+    run-bench("Nested structure (depth=6, breadth=10)", fn() { bench-nested-build(6, 10) })
+    run-bench("Map merge (50k + 50k)", fn() { bench-map-merge(50000) })
+
+    println("")
+    println("==============================================")
+    println("Benchmark complete")
+    println("==============================================")
+}

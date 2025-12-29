@@ -31,6 +31,8 @@ use crate::{
     types::{BuiltInTypes, Header, HeapObject, Tagged},
 };
 
+use crate::collections::{GcHandle, PersistentMap, PersistentVec, RootSetPtr};
+
 use std::cell::RefCell;
 
 #[derive(Debug, Clone)]
@@ -474,6 +476,8 @@ impl Memory {
                 self.threads.retain(|t| t.id() != thread_id);
                 self.join_handles.remove(*index);
                 self.heap.remove_thread(thread_id);
+                // Unregister the thread's HandleArena to prevent dangling pointer access
+                self.heap.unregister_handle_arena_for_thread(thread_id);
             } else {
                 println!("Inconsistent join_handles state {:?}", self.join_handles);
             }
@@ -662,6 +666,26 @@ impl Allocator for Memory {
 
     fn get_thread_root(&self, thread_id: std::thread::ThreadId) -> Option<usize> {
         self.heap.get_thread_root(thread_id)
+    }
+
+    fn register_root_set(&mut self, roots: RootSetPtr) -> usize {
+        self.heap.register_root_set(roots)
+    }
+
+    fn unregister_root_set(&mut self, id: usize) {
+        self.heap.unregister_root_set(id)
+    }
+
+    fn register_handle_arena(
+        &mut self,
+        arena: crate::collections::HandleArenaPtr,
+        thread_id: std::thread::ThreadId,
+    ) -> usize {
+        self.heap.register_handle_arena(arena, thread_id)
+    }
+
+    fn unregister_handle_arena_for_thread(&mut self, thread_id: std::thread::ThreadId) {
+        self.heap.unregister_handle_arena_for_thread(thread_id)
     }
 }
 
@@ -1116,7 +1140,10 @@ impl Runtime {
     }
 
     pub fn is_paused(&self) -> bool {
-        self.is_paused.load(std::sync::atomic::Ordering::Relaxed) == 1
+        // Use Acquire ordering to synchronize-with the Release store in gc_impl.
+        // This ensures that when a thread sees is_paused = 1, it also sees all
+        // GC setup writes that happened before the store.
+        self.is_paused.load(std::sync::atomic::Ordering::Acquire) == 1
     }
 
     pub fn pause_atom_ptr(&self) -> usize {
@@ -1285,6 +1312,34 @@ impl Runtime {
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// Register a RootSet with the GC so its contents are updated during collection.
+    /// Returns an ID to unregister later.
+    pub fn register_root_set(&mut self, roots: RootSetPtr) -> usize {
+        self.memory.heap.register_root_set(roots)
+    }
+
+    /// Unregister a previously registered RootSet.
+    pub fn unregister_root_set(&mut self, id: usize) {
+        self.memory.heap.unregister_root_set(id)
+    }
+
+    /// Register a thread-local HandleArena with the GC.
+    /// The arena's slots will be scanned and updated during collection.
+    pub fn register_handle_arena(
+        &mut self,
+        arena: crate::collections::HandleArenaPtr,
+        thread_id: std::thread::ThreadId,
+    ) -> usize {
+        self.memory.heap.register_handle_arena(arena, thread_id)
+    }
+
+    /// Unregister the HandleArena for a thread that is exiting.
+    pub fn unregister_handle_arena_for_thread(&mut self, thread_id: std::thread::ThreadId) {
+        self.memory
+            .heap
+            .unregister_handle_arena_for_thread(thread_id)
     }
 
     /// Create a Beagle struct or enum from Rust code
@@ -1685,10 +1740,13 @@ impl Runtime {
 
             return;
         }
+        // Use Release ordering when setting is_paused = 1 to ensure all prior
+        // GC setup writes are visible to threads that see is_paused = 1.
+        // Threads read with Acquire ordering, creating a synchronizes-with relationship.
         let result = self.is_paused.compare_exchange(
             0,
             1,
-            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Release,
             std::sync::atomic::Ordering::Relaxed,
         );
         if result != Ok(0) {
@@ -1776,6 +1834,9 @@ impl Runtime {
                 }
             }
         }
+
+        // Memory barrier to ensure all GC writes are visible before continuing
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
 
         self.is_paused
             .store(0, std::sync::atomic::Ordering::Release);
@@ -1911,7 +1972,7 @@ impl Runtime {
         }))
     }
 
-    pub fn new_thread(&mut self, f: usize) {
+    pub fn new_thread(&mut self, f: usize, stack_pointer: usize) {
         let trampoline = self.get_trampoline();
         let trampoline: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline) };
 
@@ -1933,15 +1994,19 @@ impl Runtime {
 
         // Create Thread struct containing the closure
         // This may trigger GC, but the closure is protected by the temp root
-        // We pass 0 for stack_pointer since we're not in Beagle code
+        // Pass the actual stack_pointer so GC can scan the Beagle stack properly
         let thread_obj = self
-            .create_struct("beagle.core/Thread", None, &[f], 0)
+            .create_struct("beagle.core/Thread", None, &[f], stack_pointer)
             .expect("Failed to create Thread struct");
 
         // Get the possibly-relocated closure from temp root and update Thread struct
         let relocated_closure = self.memory.heap.peek_temporary_root(closure_temp_id);
         if relocated_closure != f {
             // Closure was moved by GC during allocation, update Thread struct
+            eprintln!(
+                "DEBUG: Closure relocated during new_thread: {:x} -> {:x}",
+                f, relocated_closure
+            );
             let mut heap_obj = HeapObject::from_tagged(thread_obj);
             heap_obj.get_fields_mut()[0] = relocated_closure;
         }
@@ -1961,6 +2026,11 @@ impl Runtime {
         use std::sync::Barrier;
         let barrier = Arc::new(Barrier::new(2));
         let barrier_clone = barrier.clone();
+
+        // Hold gc_lock during spawn and until child is registered.
+        // This prevents GC from running during the critical startup window.
+        // The child will acquire gc_lock in run_thread before transitioning to Beagle code.
+        let gc_lock = self.gc_lock.lock().unwrap();
 
         let thread = thread::spawn(move || {
             // Wait for main thread to finish registering us
@@ -2012,6 +2082,9 @@ impl Runtime {
         // Signal the spawned thread that registration is complete.
         // The thread was waiting on this barrier before starting execution.
         barrier.wait();
+
+        // Release gc_lock - child will acquire it in run_thread before transitioning
+        drop(gc_lock);
     }
 
     pub fn wait_for_other_threads(&mut self) {
@@ -2339,6 +2412,43 @@ impl Runtime {
                         let keyword_text = unsafe { std::str::from_utf8_unchecked(bytes) };
                         Some(format!(":{}", keyword_text))
                     }
+                    20 => {
+                        // PersistentVector
+                        let vec_handle = GcHandle::from_tagged(value);
+                        let count = PersistentVec::count(vec_handle);
+                        let mut repr = "[".to_string();
+                        for i in 0..count {
+                            if i > 0 {
+                                repr.push_str(", ");
+                            }
+                            let elem = PersistentVec::get(vec_handle, i);
+                            repr.push_str(&self.get_repr(elem, depth + 1)?);
+                        }
+                        repr.push(']');
+                        Some(repr)
+                    }
+                    22 => {
+                        // PersistentMap - iterate over all entries
+                        let map_handle = GcHandle::from_tagged(value);
+                        let count = PersistentMap::count(map_handle);
+                        if count == 0 {
+                            Some("{}".to_string())
+                        } else {
+                            // Collect all entries by traversing the map structure
+                            let entries = self.collect_map_entries(map_handle);
+                            let mut repr = "{".to_string();
+                            for (i, (k, v)) in entries.iter().enumerate() {
+                                if i > 0 {
+                                    repr.push_str(", ");
+                                }
+                                repr.push_str(&self.get_repr(*k, depth + 1)?);
+                                repr.push_str(": ");
+                                repr.push_str(&self.get_repr(*v, depth + 1)?);
+                            }
+                            repr.push('}');
+                            Some(repr)
+                        }
+                    }
                     _ => {
                         // This is an unknown object. Meaning it is invalid.
                         // We are going to print everything we can to debug this
@@ -2349,6 +2459,88 @@ impl Runtime {
                         Some("ErrorUnknown".to_string())
                     }
                 }
+            }
+        }
+    }
+
+    /// Collect all key-value entries from a PersistentMap for formatting.
+    /// Traverses the HAMT structure recursively.
+    fn collect_map_entries(&self, map: GcHandle) -> Vec<(usize, usize)> {
+        use crate::collections::{TYPE_ID_ARRAY_NODE, TYPE_ID_BITMAP_NODE, TYPE_ID_COLLISION_NODE};
+
+        let mut entries = Vec::new();
+        let root_ptr = map.get_field(1); // FIELD_ROOT = 1
+        let null_val = BuiltInTypes::null_value() as usize;
+
+        if root_ptr == null_val {
+            return entries;
+        }
+
+        let root = GcHandle::from_tagged(root_ptr);
+        self.collect_node_entries(root, &mut entries, null_val);
+        entries
+    }
+
+    fn collect_node_entries(
+        &self,
+        node: GcHandle,
+        entries: &mut Vec<(usize, usize)>,
+        null_val: usize,
+    ) {
+        use crate::collections::{TYPE_ID_ARRAY_NODE, TYPE_ID_BITMAP_NODE, TYPE_ID_COLLISION_NODE};
+
+        let type_id = node.get_type_id();
+
+        if type_id == TYPE_ID_BITMAP_NODE {
+            // BitmapNode: children array has interleaved key/value pairs
+            let children_ptr = node.get_field(1); // BN_FIELD_CHILDREN = 1
+            let children = GcHandle::from_tagged(children_ptr);
+            let children_len = children.field_count();
+
+            let mut i = 0;
+            while i < children_len {
+                let key = children.get_field(i);
+                let value = children.get_field(i + 1);
+
+                if value != null_val {
+                    // It's a leaf entry (key, value)
+                    entries.push((key, value));
+                } else if BuiltInTypes::is_heap_pointer(key) {
+                    // Value is null and key is a pointer - check if it's a sub-node
+                    let child = GcHandle::from_tagged(key);
+                    let child_type = child.get_type_id();
+                    if child_type == TYPE_ID_BITMAP_NODE
+                        || child_type == TYPE_ID_ARRAY_NODE
+                        || child_type == TYPE_ID_COLLISION_NODE
+                    {
+                        self.collect_node_entries(child, entries, null_val);
+                    }
+                }
+                // If value is null and key is not a node pointer, it's a leaf with null value
+                i += 2;
+            }
+        } else if type_id == TYPE_ID_ARRAY_NODE {
+            // ArrayNode: 32 slots, each slot is either null or a child node
+            let children_ptr = node.get_field(1); // AN_FIELD_CHILDREN = 1
+            let children = GcHandle::from_tagged(children_ptr);
+
+            for i in 0..32 {
+                let child_ptr = children.get_field(i);
+                if child_ptr != null_val {
+                    let child = GcHandle::from_tagged(child_ptr);
+                    self.collect_node_entries(child, entries, null_val);
+                }
+            }
+        } else if type_id == TYPE_ID_COLLISION_NODE {
+            // CollisionNode: kv_array has alternating keys/values
+            let count = BuiltInTypes::untag(node.get_field(1)); // CN_FIELD_COUNT = 1
+            let kv_array_ptr = node.get_field(2); // CN_FIELD_KV_ARRAY = 2
+            let kv_array = GcHandle::from_tagged(kv_array_ptr);
+
+            for i in 0..count {
+                let key = kv_array.get_field(i * 2);
+                let value = kv_array.get_field(i * 2 + 1);
+                entries.push((key, value));
             }
         }
     }
@@ -2406,9 +2598,11 @@ impl Runtime {
                 let heap_object = HeapObject::from_tagged(value);
                 let type_id = heap_object.get_type_id();
                 match type_id {
-                    1 => "Array",   // Raw mutable array (type_id == 1)
-                    2 => "String",  // HeapObject string (type_id == 2)
-                    3 => "Keyword", // Keyword type (type_id == 3)
+                    1 => "Array",             // Raw mutable array (type_id == 1)
+                    2 => "String",            // HeapObject string (type_id == 2)
+                    3 => "Keyword",           // Keyword type (type_id == 3)
+                    20 => "PersistentVector", // Rust-backed persistent vector
+                    22 => "PersistentMap",    // Rust-backed persistent map
                     _ => {
                         // Custom struct (type_id == 0 or other) - use struct_id
                         let struct_type_id = heap_object.get_struct_id();
@@ -2606,6 +2800,56 @@ impl Runtime {
     pub fn get_str_literal(&self, value: usize) -> &str {
         let value = BuiltInTypes::untag(value);
         &self.string_constants[value].str
+    }
+
+    /// Hash a Beagle value. Returns raw hash (not tagged).
+    pub fn hash_value(&self, value: usize) -> usize {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let tag = BuiltInTypes::get_kind(value);
+        match tag {
+            BuiltInTypes::Int => {
+                let mut s = DefaultHasher::new();
+                value.hash(&mut s);
+                s.finish() as usize
+            }
+            BuiltInTypes::HeapObject => {
+                let heap_object = HeapObject::from_tagged(value);
+                let type_id = heap_object.get_header().type_id;
+                if type_id == 2 {
+                    // String
+                    let bytes = heap_object.get_string_bytes();
+                    let string = unsafe { std::str::from_utf8_unchecked(bytes) };
+                    let mut s = DefaultHasher::new();
+                    string.hash(&mut s);
+                    s.finish() as usize
+                } else if type_id == 3 {
+                    // Keyword - use cached hash
+                    heap_object.get_keyword_hash() as usize
+                } else {
+                    // Generic struct - hash all fields
+                    let fields = heap_object.get_fields();
+                    let mut s = DefaultHasher::new();
+                    for field in fields {
+                        field.hash(&mut s);
+                    }
+                    s.finish() as usize
+                }
+            }
+            BuiltInTypes::String => {
+                let string = self.get_string_literal(value);
+                let mut s = DefaultHasher::new();
+                string.hash(&mut s);
+                s.finish() as usize
+            }
+            _ => {
+                // For other types, just hash the raw value
+                let mut s = DefaultHasher::new();
+                value.hash(&mut s);
+                s.finish() as usize
+            }
+        }
     }
 
     pub fn get_string(&self, stack_pointer: usize, value: usize) -> String {
@@ -3301,12 +3545,14 @@ impl Runtime {
         // Built-in heap types use primitive dispatch with their type_id
         // Tagged primitives use primitive dispatch with tag + 16
         let builtin_primitive_id = match struct_name {
-            "beagle.core/Array" => Some(1),   // type_id for Array
-            "beagle.core/String" => Some(2),  // type_id for String
-            "beagle.core/Keyword" => Some(3), // type_id for Keyword
-            "beagle.core/Int" => Some(16),    // tag 0 + 16
-            "beagle.core/Float" => Some(17),  // tag 1 + 16
-            "beagle.core/Bool" => Some(19),   // tag 3 + 16
+            "beagle.core/Array" => Some(1),             // type_id for Array
+            "beagle.core/String" => Some(2),            // type_id for String
+            "beagle.core/Keyword" => Some(3),           // type_id for Keyword
+            "beagle.core/Int" => Some(16),              // tag 0 + 16
+            "beagle.core/Float" => Some(17),            // tag 1 + 16
+            "beagle.core/Bool" => Some(19),             // tag 3 + 16
+            "beagle.core/PersistentVector" => Some(20), // TYPE_ID_PERSISTENT_VEC
+            "beagle.core/PersistentMap" => Some(22),    // TYPE_ID_PERSISTENT_MAP
             _ => None,
         };
 
