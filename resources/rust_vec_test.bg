@@ -1,0 +1,104 @@
+namespace rust-vec-test
+import "beagle.collections" as rvec
+import "beagle.primitive" as primitive
+
+fn fill-vec-helper(v, i, n) {
+    if i == n {
+        v
+    } else {
+        let new-v = rvec/vec-push(v, i)
+        fill-vec-helper(new-v, i + 1, n)
+    }
+}
+
+fn fill-vec(n) {
+    fill-vec-helper(rvec/vec(), 0, n)
+}
+
+fn verify-all(v, i) {
+    if i >= rvec/vec-count(v) {
+        "ok"
+    } else {
+        let val = rvec/vec-get(v, i)
+        if val != i {
+            println("Error at index")
+            println(i)
+            println("Expected")
+            println(i)
+            println("Got")
+            println(val)
+            primitive/panic("Value mismatch")
+        }
+        verify-all(v, i + 1)
+    }
+}
+
+fn main() {
+    // Test empty vector
+    let v = rvec/vec()
+    println(rvec/vec-count(v))
+
+    // Test push
+    let v2 = rvec/vec-push(v, 42)
+    println(rvec/vec-count(v2))
+    println(rvec/vec-get(v2, 0))
+
+    // Test persistence (original unchanged)
+    let v3 = rvec/vec-push(v2, 100)
+    println(rvec/vec-get(v2, 0))
+    println(rvec/vec-get(v3, 1))
+
+    // Test with more elements
+    let v4 = fill-vec(10)
+    println(rvec/vec-count(v4))
+    verify-all(v4, 0)
+    println("small passed")
+
+    // Test with larger vectors (triggers tree structure)
+    let v5 = fill-vec(100)
+    println(rvec/vec-count(v5))
+    verify-all(v5, 0)
+    println("medium passed")
+
+    // GC stress test
+    gc()
+    verify-all(v5, 0)
+    println("gc survived")
+
+    // Test assoc
+    let v6 = rvec/vec-assoc(v5, 50, 999)
+    println(rvec/vec-get(v6, 50))
+    println(rvec/vec-get(v5, 50))
+
+    // Large vector test (triggers tree growth)
+    let v7 = fill-vec(1000)
+    println(rvec/vec-count(v7))
+    verify-all(v7, 0)
+    println("large passed")
+
+    // GC with large vector
+    gc()
+    gc()
+    verify-all(v7, 0)
+    println("large gc passed")
+
+    println("done")
+}
+
+// Expect
+// 0
+// 1
+// 42
+// 42
+// 100
+// 10
+// small passed
+// 100
+// medium passed
+// gc survived
+// 999
+// 50
+// 1000
+// large passed
+// large gc passed
+// done

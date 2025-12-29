@@ -2,6 +2,8 @@ use std::{error::Error, sync::Mutex, thread::ThreadId};
 
 use crate::types::BuiltInTypes;
 
+use crate::collections::{HandleArenaPtr, RootSetPtr};
+
 use super::{AllocateAction, Allocator, AllocatorOptions, StackMap};
 
 pub struct MutexAllocator<Alloc: Allocator> {
@@ -155,5 +157,43 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         // Note: This is potentially racy if used concurrently, but
         // typically thread roots are accessed by their own thread
         self.alloc.get_thread_root(thread_id)
+    }
+
+    fn register_root_set(&mut self, roots: RootSetPtr) -> usize {
+        if self.registered_threads == 0 {
+            return self.alloc.register_root_set(roots);
+        }
+        let lock = self.mutex.lock().unwrap();
+        let result = self.alloc.register_root_set(roots);
+        drop(lock);
+        result
+    }
+
+    fn unregister_root_set(&mut self, id: usize) {
+        if self.registered_threads == 0 {
+            return self.alloc.unregister_root_set(id);
+        }
+        let lock = self.mutex.lock().unwrap();
+        self.alloc.unregister_root_set(id);
+        drop(lock)
+    }
+
+    fn register_handle_arena(&mut self, arena: HandleArenaPtr, thread_id: ThreadId) -> usize {
+        if self.registered_threads == 0 {
+            return self.alloc.register_handle_arena(arena, thread_id);
+        }
+        let lock = self.mutex.lock().unwrap();
+        let result = self.alloc.register_handle_arena(arena, thread_id);
+        drop(lock);
+        result
+    }
+
+    fn unregister_handle_arena_for_thread(&mut self, thread_id: ThreadId) {
+        if self.registered_threads == 0 {
+            return self.alloc.unregister_handle_arena_for_thread(thread_id);
+        }
+        let lock = self.mutex.lock().unwrap();
+        self.alloc.unregister_handle_arena_for_thread(thread_id);
+        drop(lock);
     }
 }

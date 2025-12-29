@@ -1,0 +1,77 @@
+namespace rust-map-stress-test
+import "beagle.collections" as rmap
+
+// Helper to build map with many integer keys
+fn build-map(n, m) {
+    if n <= 0 {
+        m
+    } else {
+        let m2 = rmap/map-assoc(m, n, n * 10)
+        build-map(n - 1, m2)
+    }
+}
+
+// Helper to verify all keys are present
+fn verify-keys(n, m) {
+    if n <= 0 {
+        true
+    } else {
+        let v = rmap/map-get(m, n)
+        if v == n * 10 {
+            verify-keys(n - 1, m)
+        } else {
+            println("FAILED: key")
+            println(n)
+            println("expected")
+            println(n * 10)
+            println("got")
+            println(v)
+            false
+        }
+    }
+}
+
+fn main() {
+    // Build map with 50 integer keys
+    let m = build-map(50, rmap/map())
+    println(rmap/map-count(m))
+
+    // Verify all keys present
+    if verify-keys(50, m) {
+        println("all keys verified")
+    } else {
+        println("verification failed")
+    }
+
+    // Test with string keys to exercise different hash paths
+    let m2 = rmap/map()
+    let m2 = rmap/map-assoc(m2, "a", 1)
+    let m2 = rmap/map-assoc(m2, "b", 2)
+    let m2 = rmap/map-assoc(m2, "c", 3)
+    let m2 = rmap/map-assoc(m2, "d", 4)
+    let m2 = rmap/map-assoc(m2, "e", 5)
+    let m2 = rmap/map-assoc(m2, "f", 6)
+    let m2 = rmap/map-assoc(m2, "g", 7)
+    let m2 = rmap/map-assoc(m2, "h", 8)
+    let m2 = rmap/map-assoc(m2, "i", 9)
+    let m2 = rmap/map-assoc(m2, "j", 10)
+
+    println(rmap/map-count(m2))
+    println(rmap/map-get(m2, "e"))
+
+    // GC test
+    gc()
+    println(rmap/map-get(m, 25))
+    println(rmap/map-get(m2, "j"))
+
+    println("done")
+}
+
+// Expect
+// 50
+// all keys verified
+// 10
+// 5
+// 250
+// 10
+// done

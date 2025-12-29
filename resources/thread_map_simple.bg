@@ -1,0 +1,33 @@
+namespace thread_map_simple
+
+fn main() {
+    println("Starting test")
+
+    // Just one thread
+    println("Spawning thread")
+    thread(fn() {
+        println("Thread starting")
+        // Try just creating a simple map, no build_map recursion
+        let m = {}
+        println("Created empty map")
+        let m2 = assoc(m, 1, 2)
+        println("Associated once")
+        let m3 = assoc(m2, 2, 4)
+        println("Associated twice")
+        println("Thread done with map")
+        let len = length(m3)
+        println(len)
+        println("Thread done")
+    })
+
+    println("Main calling gc")
+    gc()
+    println("GC done")
+    gc()
+    println("GC 2 done")
+    gc()
+    println("GC 3 done")
+    "done"
+}
+
+// thread-safe

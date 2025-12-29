@@ -23,6 +23,7 @@ pub fn get_inline_primitive_arity(name: &str) -> usize {
         "beagle.primitive/is-object" => 1,
         "beagle.primitive/is-string-constant" => 1,
         "beagle.primitive/set!" => 2,
+        "beagle.primitive/__get-my-thread-obj" => 0,
         _ => panic!("Unknown inline primitive: {}", name),
     }
 }
@@ -246,6 +247,10 @@ impl AstCompiler<'_> {
                 let value = args[1];
                 self.ir.heap_store(pointer, value);
                 Value::Null
+            }
+            "beagle.primitive/__get-my-thread-obj" => {
+                // Call the builtin that reads from thread_roots
+                self.call_builtin("beagle.builtin/__get_my_thread_obj", vec![])
             }
             _ => panic!("Unknown inline primitive function {}", name),
         }

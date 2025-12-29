@@ -6,6 +6,8 @@ use super::get_page_size;
 
 use crate::types::{BuiltInTypes, Header, HeapObject, Word};
 
+use crate::collections::{HandleArenaPtr, RootSetPtr};
+
 use super::{AllocateAction, Allocator, AllocatorOptions, StackMap, stack_walker::StackWalker};
 
 const DEFAULT_PAGE_COUNT: usize = 1024;
@@ -219,6 +221,9 @@ pub struct MarkAndSweep {
     thread_roots: HashMap<ThreadId, usize>,
     options: AllocatorOptions,
     temporary_roots: Vec<Option<usize>>,
+    root_sets: Vec<Option<RootSetPtr>>,
+    handle_arenas: Vec<Option<HandleArenaPtr>>,
+    handle_arena_threads: HashMap<ThreadId, usize>,
 }
 
 // TODO: I got an issue with my freelist
@@ -324,6 +329,30 @@ impl MarkAndSweep {
             }
         }
 
+        // Mark roots from registered RootSets (used by AllocationContext)
+        for slot in self.root_sets.iter() {
+            if let Some(roots_ptr) = slot {
+                let roots = unsafe { &*roots_ptr.0 };
+                for root in roots.roots() {
+                    if BuiltInTypes::is_heap_pointer(*root) {
+                        to_mark.push(HeapObject::from_tagged(*root));
+                    }
+                }
+            }
+        }
+
+        // Mark roots from registered HandleArenas (thread-local handle storage)
+        for slot in self.handle_arenas.iter() {
+            if let Some(arena_ptr) = slot {
+                let arena = unsafe { &*arena_ptr.0 };
+                for root in arena.roots() {
+                    if BuiltInTypes::is_heap_pointer(*root) {
+                        to_mark.push(HeapObject::from_tagged(*root));
+                    }
+                }
+            }
+        }
+
         // Use the stack walker with explicit return address
         StackWalker::walk_stack_roots_with_return_addr(
             stack_base,
@@ -401,6 +430,9 @@ impl MarkAndSweep {
             thread_roots: HashMap::new(),
             options,
             temporary_roots: vec![],
+            root_sets: vec![],
+            handle_arenas: vec![],
+            handle_arena_threads: HashMap::new(),
         }
     }
 }
@@ -467,7 +499,11 @@ impl Allocator for MarkAndSweep {
     }
 
     fn register_temporary_root(&mut self, root: usize) -> usize {
-        debug_assert!(self.temporary_roots.len() < 10, "Too many temporary roots");
+        debug_assert!(
+            self.temporary_roots.len() < 1024,
+            "Too many temporary roots {}",
+            self.temporary_roots.len()
+        );
         for (i, temp_root) in self.temporary_roots.iter_mut().enumerate() {
             if temp_root.is_none() {
                 *temp_root = Some(root);
@@ -486,6 +522,45 @@ impl Allocator for MarkAndSweep {
 
     fn peek_temporary_root(&self, id: usize) -> usize {
         self.temporary_roots[id].unwrap()
+    }
+
+    fn register_root_set(&mut self, roots: RootSetPtr) -> usize {
+        for (i, slot) in self.root_sets.iter_mut().enumerate() {
+            if slot.is_none() {
+                *slot = Some(roots);
+                return i;
+            }
+        }
+        self.root_sets.push(Some(roots));
+        self.root_sets.len() - 1
+    }
+
+    fn unregister_root_set(&mut self, id: usize) {
+        if id < self.root_sets.len() {
+            self.root_sets[id] = None;
+        }
+    }
+
+    fn register_handle_arena(&mut self, arena: HandleArenaPtr, thread_id: ThreadId) -> usize {
+        for (i, slot) in self.handle_arenas.iter_mut().enumerate() {
+            if slot.is_none() {
+                *slot = Some(arena);
+                self.handle_arena_threads.insert(thread_id, i);
+                return i;
+            }
+        }
+        let idx = self.handle_arenas.len();
+        self.handle_arenas.push(Some(arena));
+        self.handle_arena_threads.insert(thread_id, idx);
+        idx
+    }
+
+    fn unregister_handle_arena_for_thread(&mut self, thread_id: ThreadId) {
+        if let Some(idx) = self.handle_arena_threads.remove(&thread_id) {
+            if idx < self.handle_arenas.len() {
+                self.handle_arenas[idx] = None;
+            }
+        }
     }
 
     fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)> {

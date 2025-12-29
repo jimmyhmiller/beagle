@@ -6,6 +6,8 @@ use super::get_page_size;
 
 use crate::types::{BuiltInTypes, Header, HeapObject, Word};
 
+use crate::collections::{HandleArenaPtr, RootSetPtr};
+
 use super::{
     AllocateAction, Allocator, AllocatorOptions, StackMap, mark_and_sweep::MarkAndSweep,
     stack_walker::StackWalker,
@@ -154,6 +156,9 @@ pub struct GenerationalGC {
     namespace_roots: Vec<(usize, usize)>,
     relocated_namespace_roots: Vec<(usize, Vec<(usize, usize)>)>,
     temporary_roots: Vec<Option<usize>>,
+    root_sets: Vec<Option<RootSetPtr>>,
+    handle_arenas: Vec<Option<HandleArenaPtr>>,
+    handle_arena_threads: HashMap<ThreadId, usize>,
     thread_roots: HashMap<ThreadId, usize>,
     atomic_pause: [u8; 8],
     options: AllocatorOptions,
@@ -173,6 +178,9 @@ impl Allocator for GenerationalGC {
             namespace_roots: vec![],
             relocated_namespace_roots: vec![],
             temporary_roots: vec![],
+            root_sets: vec![],
+            handle_arenas: vec![],
+            handle_arena_threads: HashMap::new(),
             thread_roots: HashMap::new(),
             atomic_pause: [0; 8],
             options,
@@ -200,6 +208,46 @@ impl Allocator for GenerationalGC {
             self.minor_gc(stack_map, stack_pointers);
         }
         self.gc_count += 1;
+    }
+
+    fn register_root_set(&mut self, roots: RootSetPtr) -> usize {
+        // Find an empty slot or push a new one
+        for (i, slot) in self.root_sets.iter_mut().enumerate() {
+            if slot.is_none() {
+                *slot = Some(roots);
+                return i;
+            }
+        }
+        self.root_sets.push(Some(roots));
+        self.root_sets.len() - 1
+    }
+
+    fn unregister_root_set(&mut self, id: usize) {
+        if id < self.root_sets.len() {
+            self.root_sets[id] = None;
+        }
+    }
+
+    fn register_handle_arena(&mut self, arena: HandleArenaPtr, thread_id: ThreadId) -> usize {
+        for (i, slot) in self.handle_arenas.iter_mut().enumerate() {
+            if slot.is_none() {
+                *slot = Some(arena);
+                self.handle_arena_threads.insert(thread_id, i);
+                return i;
+            }
+        }
+        let idx = self.handle_arenas.len();
+        self.handle_arenas.push(Some(arena));
+        self.handle_arena_threads.insert(thread_id, idx);
+        idx
+    }
+
+    fn unregister_handle_arena_for_thread(&mut self, thread_id: ThreadId) {
+        if let Some(idx) = self.handle_arena_threads.remove(&thread_id) {
+            if idx < self.handle_arenas.len() {
+                self.handle_arenas[idx] = None;
+            }
+        }
     }
 
     fn grow(&mut self) {
@@ -293,6 +341,8 @@ impl GenerationalGC {
         let start = std::time::Instant::now();
 
         self.process_temporary_roots();
+        self.process_root_sets();
+        self.process_handle_arenas();
         self.process_additional_roots();
         self.process_namespace_roots();
         self.process_thread_roots();
@@ -316,8 +366,47 @@ impl GenerationalGC {
             .collect();
 
         for (index, root) in roots_to_copy {
-            let new_root = unsafe { self.copy(root) };
-            self.temporary_roots[index] = Some(new_root);
+            // Only copy heap pointers - skip tagged integers and other non-heap values
+            if BuiltInTypes::is_heap_pointer(root) {
+                let new_root = unsafe { self.copy(root) };
+                self.temporary_roots[index] = Some(new_root);
+            }
+        }
+        self.copy_remaining();
+    }
+
+    /// Process all registered RootSets - update roots in-place if they point to moved objects.
+    fn process_root_sets(&mut self) {
+        // Collect pointers first to avoid borrowing self while iterating
+        let root_set_ptrs: Vec<RootSetPtr> =
+            self.root_sets.iter().filter_map(|slot| *slot).collect();
+
+        for roots_ptr in root_set_ptrs {
+            // Safety: The caller guarantees the RootSet is valid while registered
+            let roots = unsafe { &mut *roots_ptr.0 };
+            for root in roots.roots_mut() {
+                if BuiltInTypes::is_heap_pointer(*root) {
+                    *root = unsafe { self.copy(*root) };
+                }
+            }
+        }
+        self.copy_remaining();
+    }
+
+    /// Process all registered HandleArenas - update roots in-place if they point to moved objects.
+    fn process_handle_arenas(&mut self) {
+        // Collect pointers first to avoid borrowing self while iterating
+        let arena_ptrs: Vec<HandleArenaPtr> =
+            self.handle_arenas.iter().filter_map(|slot| *slot).collect();
+
+        for arena_ptr in arena_ptrs {
+            // Safety: The caller guarantees the HandleArena is valid while registered
+            let arena = unsafe { &mut *arena_ptr.0 };
+            for root in arena.roots_mut() {
+                if BuiltInTypes::is_heap_pointer(*root) {
+                    *root = unsafe { self.copy(*root) };
+                }
+            }
         }
         self.copy_remaining();
     }

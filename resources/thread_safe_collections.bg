@@ -1,0 +1,93 @@
+namespace thread_safe_collections
+
+import "persistent-map" as pm
+
+// Test concurrent map operations with multiple threads.
+// Each thread builds a large map while GC may run at any time.
+// This tests that:
+// 1. HandleArena is correctly scanned during GC
+// 2. Threads properly pause when another thread triggers GC
+// 3. No data corruption occurs
+
+fn build_map(n, m) {
+    if n <= 0 {
+        m
+    } else {
+        let new_m = pm/assoc(m, n, n * 2)
+        build_map(n - 1, new_m)
+    }
+}
+
+fn thread_work(done_atom, thread_id, iterations) {
+    let m = pm/map()
+    let m = build_map(iterations, m)
+    // Verify map is correct
+    let size = length(m)
+    // Signal done with the size we computed
+    swap!(done_atom, fn(results) {
+        pm/assoc(results, thread_id, size)
+    })
+}
+
+fn run_test() {
+    let done = atom(pm/map())
+    let iterations = 10
+
+    // Spawn 4 threads doing map operations
+    thread(fn() { thread_work(done, 1, iterations) })
+    thread(fn() { thread_work(done, 2, iterations) })
+    thread(fn() { thread_work(done, 3, iterations) })
+    thread(fn() { thread_work(done, 4, iterations) })
+
+    // Main thread also does work and forces GC
+    let m = pm/map()
+    let m = build_map(iterations, m)
+    gc()
+    let m2 = build_map(iterations, pm/map())
+    gc()
+    let m3 = build_map(iterations, pm/map())
+
+    // Wait for all threads to finish
+    wait_for_all(done, 4, 0)
+
+    // Verify results
+    let results = deref(done)
+    println(get(results, 1))
+    println(get(results, 2))
+    println(get(results, 3))
+    println(get(results, 4))
+    println(length(m))
+    println(length(m2))
+    println(length(m3))
+}
+
+fn wait_for_all(done_atom, expected_count, attempts) {
+    let results = deref(done_atom)
+    if length(results) >= expected_count {
+        true
+    } else {
+        if attempts > 10000000 {
+            println("Timeout waiting for threads")
+            false
+        } else {
+            // Spin wait - in a real language we'd have proper synchronization
+            wait_for_all(done_atom, expected_count, attempts + 1)
+        }
+    }
+}
+
+fn main() {
+    run_test()
+    "done"
+}
+
+// thread-safe
+// DISABLED
+// 10
+// 10
+// 10
+// 10
+// 10
+// 10
+// 10
+// done

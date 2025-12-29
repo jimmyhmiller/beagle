@@ -4,7 +4,6 @@ use std::{
     cell::Cell,
     error::Error,
     ffi::{CStr, c_void},
-    hash::{DefaultHasher, Hasher},
     mem::{self, transmute},
     slice::{from_raw_parts, from_raw_parts_mut},
     thread,
@@ -23,7 +22,6 @@ use crate::{
     types::{BuiltInTypes, HeapObject},
 };
 
-use std::hash::Hash;
 use std::hint::black_box;
 
 // Thread-local storage for the frame pointer at builtin entry.
@@ -1225,7 +1223,7 @@ pub unsafe extern "C" fn new_thread(
     #[cfg(feature = "thread-safe")]
     {
         let runtime = get_runtime().get_mut();
-        runtime.new_thread(function);
+        runtime.new_thread(function, stack_pointer);
         BuiltInTypes::null_value() as usize
     }
     #[cfg(not(feature = "thread-safe"))]
@@ -1273,6 +1271,9 @@ pub unsafe extern "C" fn __pause(_stack_pointer: usize, frame_pointer: usize) ->
     // Use frame_pointer passed from Beagle code for FP-chain stack walking
     pause_current_thread(frame_pointer, runtime);
 
+    // Memory barrier to ensure all writes are visible before parking
+    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+
     while runtime.is_paused() {
         // Park can unpark itself even if I haven't called unpark
         thread::park();
@@ -1281,6 +1282,9 @@ pub unsafe extern "C" fn __pause(_stack_pointer: usize, frame_pointer: usize) ->
     // Apparently, I can't count on this not unparking
     // I need some other mechanism to know that things are ready
     unpause_current_thread(runtime);
+
+    // Memory barrier to ensure all GC updates are visible before continuing
+    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
 
     BuiltInTypes::null_value() as usize
 }
@@ -1347,64 +1351,93 @@ pub extern "C" fn get_and_unregister_temp_root(temporary_root_id: usize) -> usiz
     runtime.unregister_temporary_root(root_id)
 }
 
-/// Run a thread by getting its Thread object from the thread root and calling the closure.
-/// The Thread object was registered as a root by new_thread() before this thread started.
+/// Run a thread by calling the no-argument __run_thread_start function.
+/// The Thread object is accessed via the get_my_thread_obj builtin inside Beagle code,
+/// ensuring GC can update stack slots properly.
 pub extern "C" fn run_thread(_unused: usize) -> usize {
     // We enter this function while registered as C-calling.
-    // We need to:
-    // 1. Unregister from C-call and properly pause if GC is in progress
-    // 2. Get Thread object from thread root (possibly relocated by GC)
-    // 3. Call __run_thread_closure to extract and run the closure
-    // 4. Remove thread root when done
+    // We DON'T read thread_obj here - we call a Beagle function that reads it.
+    // This avoids the race between reading and entering Beagle code.
 
     let runtime = get_runtime().get_mut();
-    let thread_state = runtime.thread_state.clone();
     let my_thread_id = thread::current().id();
 
-    // Unregister from C-call. We use the same pattern as __pause to properly
-    // participate in GC coordination.
-    let stack_base = runtime.get_stack_base();
-
-    {
-        let (lock, condvar) = &*thread_state;
-        let mut state = lock.lock().unwrap();
-        state.unregister_c_call();
-
-        // If GC is in progress (is_paused), we need to register as paused so GC can proceed
-        if runtime.is_paused() {
-            // Register as paused with our current stack position
-            state.pause((stack_base, stack_base));
-            condvar.notify_one();
-            drop(state);
-
-            // Wait until GC is done
-            while runtime.is_paused() {
-                thread::park();
-            }
-
-            // Unregister from paused state
-            let (lock, condvar) = &*thread_state;
-            let mut state = lock.lock().unwrap();
-            state.unpause();
-            condvar.notify_one();
-        } else {
-            condvar.notify_one();
-        }
+    // Wait for any in-progress GC while we're still c_calling.
+    // We can safely yield because we're c_calling, so GC will proceed without us.
+    while runtime.is_paused() {
+        thread::yield_now();
     }
 
-    // Get the Thread object from thread root - this gets the current (possibly relocated) pointer
-    let thread_obj = runtime
-        .memory
-        .get_thread_root(my_thread_id)
-        .expect("Thread root not found - this is a fatal error");
+    // CRITICAL: Unregister from c_calling and check if GC started atomically.
+    // If GC started after we unregistered, we must participate by pausing.
+    // Otherwise GC will deadlock waiting for us.
+    let need_to_pause = {
+        let (lock, condvar) = &*runtime.thread_state.clone();
+        let mut state = lock.lock().unwrap();
+        state.unregister_c_call();
+        condvar.notify_one();
+        // Check while holding lock - if is_paused is set, GC is waiting for us
+        runtime.is_paused()
+    };
 
-    // Call the Beagle function that extracts the closure from Thread and runs it
-    let result = unsafe { call_fn_1(runtime, "beagle.core/__run_thread_closure", thread_obj) };
+    if need_to_pause {
+        // GC is running after we unregistered - we must pause to participate.
+        // We don't have a real Beagle frame, but we need to be counted.
+        // Use (0, 0) as placeholder - we have no stack roots to scan anyway.
+        pause_current_thread(0, runtime);
+
+        // Wait for GC to complete
+        while runtime.is_paused() {
+            thread::park();
+        }
+
+        // Unpause when GC is done
+        unpause_current_thread(runtime);
+    }
+
+    // Call __run_thread_start which takes no arguments and reads thread_obj via builtin
+    let result = unsafe { call_fn_0(runtime, "beagle.core/__run_thread_start") };
+
+    // Re-register as c_calling for cleanup
+    {
+        let (lock, condvar) = &*runtime.thread_state.clone();
+        let mut state = lock.lock().unwrap();
+        state.register_c_call((0, 0));
+        condvar.notify_one();
+    }
 
     // Remove thread root - thread is finishing
     runtime.memory.remove_thread_root(my_thread_id);
 
     result
+}
+
+/// Get the current thread's Thread object from thread_roots.
+/// Called from Beagle code in __run_thread_start.
+pub extern "C" fn get_my_thread_obj() -> usize {
+    let runtime = get_runtime().get_mut();
+    let thread_id = thread::current().id();
+    runtime
+        .memory
+        .get_thread_root(thread_id)
+        .expect("Thread root not found in get_my_thread_obj")
+}
+
+pub unsafe fn call_fn_0(runtime: &Runtime, function_name: &str) -> usize {
+    print_call_builtin(
+        runtime,
+        format!("{} {}", "call_fn_0", function_name).as_str(),
+    );
+    let save_volatile_registers = runtime
+        .get_function_by_name("beagle.builtin/save_volatile_registers0")
+        .unwrap();
+    let save_volatile_registers = runtime.get_pointer(save_volatile_registers).unwrap();
+    let save_volatile_registers: fn(usize) -> usize =
+        unsafe { std::mem::transmute(save_volatile_registers) };
+
+    let function = runtime.get_function_by_name(function_name).unwrap();
+    let function = runtime.get_pointer(function).unwrap();
+    save_volatile_registers(function as usize)
 }
 
 pub unsafe fn call_fn_1(runtime: &Runtime, function_name: &str, arg1: usize) -> usize {
@@ -1518,7 +1551,7 @@ pub fn map_ffi_type(runtime: &Runtime, value: usize) -> Result<Type, String> {
         "Type.Void" => Ok(Type::void()),
         "Type.Structure" => {
             let types = heap_object.get_field(0);
-            let types = array_to_vec(persistent_vector_to_array(runtime, types));
+            let types = persistent_vector_to_vec(types);
             let fields: Result<Vec<Type>, String> =
                 types.iter().map(|t| map_ffi_type(runtime, *t)).collect();
             Ok(Type::structure(fields?))
@@ -1550,7 +1583,7 @@ pub fn map_beagle_type_to_ffi_type(runtime: &Runtime, value: usize) -> Result<FF
         "Type.Void" => Ok(FFIType::Void),
         "Type.Structure" => {
             let types = heap_object.get_field(0);
-            let types = array_to_vec(persistent_vector_to_array(runtime, types));
+            let types = persistent_vector_to_vec(types);
             let fields: Result<Vec<FFIType>, String> = types
                 .iter()
                 .map(|t| map_beagle_type_to_ffi_type(runtime, *t))
@@ -1561,18 +1594,15 @@ pub fn map_beagle_type_to_ffi_type(runtime: &Runtime, value: usize) -> Result<FF
     }
 }
 
-fn persistent_vector_to_array(_runtime: &Runtime, vector: usize) -> HeapObject {
-    // TODO: This isn't actually a safe thing to do. It allocates
-    // which means that any pointers I had now could have moved.
-    // I also am not sure I can from one of these runtime
-    // functions end up in another runtime function
-    // Because then I have multiple mutable references it runtime.
-    let tagged = unsafe { call_fn_1(_runtime, "persistent-vector/to-array", vector) };
-    HeapObject::from_tagged(tagged)
-}
-
-fn array_to_vec(object: HeapObject) -> Vec<usize> {
-    object.get_fields().to_vec()
+fn persistent_vector_to_vec(vector: usize) -> Vec<usize> {
+    use crate::collections::{GcHandle, PersistentVec};
+    let vec_handle = GcHandle::from_tagged(vector);
+    let count = PersistentVec::count(vec_handle);
+    let mut result = Vec::with_capacity(count);
+    for i in 0..count {
+        result.push(PersistentVec::get(vec_handle, i));
+    }
+    result
 }
 
 // TODO:
@@ -1609,7 +1639,7 @@ pub extern "C" fn get_function(
     //     unsafe { CodePtr(func_ptr.try_as_raw_ptr().unwrap()) }
     // };
 
-    let types: Vec<usize> = array_to_vec(persistent_vector_to_array(runtime, types));
+    let types: Vec<usize> = persistent_vector_to_vec(types);
 
     let lib_ffi_types: Result<Vec<Type>, String> =
         types.iter().map(|t| map_ffi_type(runtime, *t)).collect();
@@ -2523,51 +2553,12 @@ pub extern "C" fn register_extension(
     BuiltInTypes::null_value() as usize
 }
 
-extern "C" fn hash(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
+extern "C" fn hash(_stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
     save_frame_pointer(frame_pointer);
     print_call_builtin(get_runtime().get(), "hash");
-    let tag = BuiltInTypes::get_kind(value);
-    match tag {
-        BuiltInTypes::Int => {
-            let mut s = DefaultHasher::new();
-            value.hash(&mut s);
-            BuiltInTypes::Int.tag(s.finish() as isize) as usize
-        }
-        BuiltInTypes::HeapObject => {
-            let heap_object = HeapObject::from_tagged(value);
-            if heap_object.get_header().type_id == 2 {
-                let bytes = heap_object.get_string_bytes();
-                let string = unsafe { std::str::from_utf8_unchecked(bytes) };
-                let mut s = DefaultHasher::new();
-                string.hash(&mut s);
-                return BuiltInTypes::Int.tag(s.finish() as isize) as usize;
-            } else if heap_object.get_header().type_id == 3 {
-                // Keywords: return cached hash (stable across GC)
-                let hash = heap_object.get_keyword_hash();
-                return BuiltInTypes::Int.tag(hash as isize) as usize;
-            }
-            let fields = heap_object.get_fields();
-            let mut s = DefaultHasher::new();
-            for field in fields {
-                field.hash(&mut s);
-            }
-            BuiltInTypes::Int.tag(s.finish() as isize) as usize
-        }
-        BuiltInTypes::String => {
-            let runtime = get_runtime().get_mut();
-            let string = runtime.get_string_literal(value);
-            let mut s = DefaultHasher::new();
-            string.hash(&mut s);
-            BuiltInTypes::Int.tag(s.finish() as isize) as usize
-        }
-        _ => unsafe {
-            throw_runtime_error(
-                stack_pointer,
-                "TypeError",
-                format!("Expected int or heap object for hash, got {:?}", tag),
-            );
-        },
-    }
+    let runtime = get_runtime().get();
+    let raw_hash = runtime.hash_value(value);
+    BuiltInTypes::Int.tag(raw_hash as isize) as usize
 }
 
 pub extern "C" fn is_keyword(value: usize) -> usize {
@@ -3355,6 +3346,13 @@ impl Runtime {
         )?;
 
         self.add_builtin_function(
+            "beagle.builtin/__get_my_thread_obj",
+            get_my_thread_obj as *const u8,
+            false,
+            0,
+        )?;
+
+        self.add_builtin_function(
             "beagle.builtin/__get_and_unregister_temp_root",
             get_and_unregister_temp_root as *const u8,
             false,
@@ -3545,6 +3543,8 @@ impl Runtime {
             2,
         )?;
 
+        self.install_rust_collection_builtins()?;
+
         Ok(())
     }
 }
@@ -3703,9 +3703,8 @@ unsafe fn warning_to_struct_impl(
                     .into()
             );
 
-            // Build persistent vector of variant strings
-            let empty_vec = unsafe { call_fn_1(runtime, "persistent-vector/vec", 0) };
-            let mut vec = empty_vec;
+            // Build persistent vector of variant strings (using Beagle implementation)
+            let mut vec = unsafe { call_fn_1(runtime, "persistent-vector/vec", 0) };
             let mut vec_root_id = runtime.register_temporary_root(vec);
             // Track vec_root_id immediately so it gets cleaned up on early return
             temp_roots.push(vec_root_id);
@@ -3768,7 +3767,7 @@ pub unsafe extern "C" fn compiler_warnings(stack_pointer: usize, frame_pointer: 
         warnings_guard.clone()
     };
 
-    // Start with empty persistent vector
+    // Start with empty persistent vector (using Beagle implementation for compatibility)
     let mut vec = unsafe { call_fn_1(runtime, "persistent-vector/vec", 0) };
 
     // Register vec as a temporary root to protect it from GC during the loop
@@ -3796,4 +3795,264 @@ pub unsafe extern "C" fn compiler_warnings(stack_pointer: usize, frame_pointer: 
     runtime.unregister_temporary_root(vec_root_id);
 
     vec
+}
+
+// ============================================================================
+// Rust Collections Builtins
+// ============================================================================
+
+mod rust_collections {
+    use super::*;
+    use crate::collections::{GcHandle, PersistentMap, PersistentVec};
+
+    /// Create an empty persistent vector
+    /// Signature: (stack_pointer, frame_pointer) -> tagged_ptr
+    pub unsafe extern "C" fn rust_vec_empty(stack_pointer: usize, frame_pointer: usize) -> usize {
+        save_frame_pointer(frame_pointer);
+        let runtime = get_runtime().get_mut();
+
+        match PersistentVec::empty(runtime, stack_pointer) {
+            Ok(handle) => handle.as_tagged(),
+            Err(e) => {
+                eprintln!("rust_vec_empty error: {}", e);
+                BuiltInTypes::null_value() as usize
+            }
+        }
+    }
+
+    /// Get the count of a persistent vector
+    /// Signature: (vec_ptr) -> tagged_int
+    pub unsafe extern "C" fn rust_vec_count(vec_ptr: usize) -> usize {
+        if !BuiltInTypes::is_heap_pointer(vec_ptr) {
+            return BuiltInTypes::construct_int(0) as usize;
+        }
+        let vec = GcHandle::from_tagged(vec_ptr);
+        let count = PersistentVec::count(vec);
+        BuiltInTypes::construct_int(count as isize) as usize
+    }
+
+    /// Get a value from a persistent vector by index
+    /// Signature: (vec_ptr, index) -> tagged_value
+    pub unsafe extern "C" fn rust_vec_get(vec_ptr: usize, index: usize) -> usize {
+        if !BuiltInTypes::is_heap_pointer(vec_ptr) {
+            return BuiltInTypes::null_value() as usize;
+        }
+        let vec = GcHandle::from_tagged(vec_ptr);
+        let idx = BuiltInTypes::untag(index);
+        PersistentVec::get(vec, idx)
+    }
+
+    /// Push a value onto a persistent vector
+    /// Signature: (stack_pointer, frame_pointer, vec_ptr, value) -> tagged_ptr
+    pub unsafe extern "C" fn rust_vec_push(
+        stack_pointer: usize,
+        frame_pointer: usize,
+        vec_ptr: usize,
+        value: usize,
+    ) -> usize {
+        save_frame_pointer(frame_pointer);
+        let runtime = get_runtime().get_mut();
+
+        if !BuiltInTypes::is_heap_pointer(vec_ptr) {
+            return BuiltInTypes::null_value() as usize;
+        }
+
+        let vec = GcHandle::from_tagged(vec_ptr);
+
+        match PersistentVec::push(runtime, stack_pointer, vec, value) {
+            Ok(handle) => handle.as_tagged(),
+            Err(e) => {
+                eprintln!("rust_vec_push error: {}", e);
+                BuiltInTypes::null_value() as usize
+            }
+        }
+    }
+
+    /// Update a value at an index in a persistent vector
+    /// Signature: (stack_pointer, frame_pointer, vec_ptr, index, value) -> tagged_ptr
+    pub unsafe extern "C" fn rust_vec_assoc(
+        stack_pointer: usize,
+        frame_pointer: usize,
+        vec_ptr: usize,
+        index: usize,
+        value: usize,
+    ) -> usize {
+        save_frame_pointer(frame_pointer);
+        let runtime = get_runtime().get_mut();
+
+        if !BuiltInTypes::is_heap_pointer(vec_ptr) {
+            return BuiltInTypes::null_value() as usize;
+        }
+
+        let vec = GcHandle::from_tagged(vec_ptr);
+        let idx = BuiltInTypes::untag(index);
+
+        match PersistentVec::assoc(runtime, stack_pointer, vec, idx, value) {
+            Ok(handle) => handle.as_tagged(),
+            Err(e) => {
+                eprintln!("rust_vec_assoc error: {}", e);
+                BuiltInTypes::null_value() as usize
+            }
+        }
+    }
+
+    // ========== Map builtins ==========
+
+    /// Create an empty persistent map
+    /// Signature: (stack_pointer, frame_pointer) -> tagged_ptr
+    pub unsafe extern "C" fn rust_map_empty(stack_pointer: usize, frame_pointer: usize) -> usize {
+        save_frame_pointer(frame_pointer);
+        let runtime = get_runtime().get_mut();
+
+        // Stay c_calling - HandleScope::allocate checks is_paused and participates in GC
+        let result = match PersistentMap::empty(runtime, stack_pointer) {
+            Ok(handle) => handle.as_tagged(),
+            Err(e) => {
+                eprintln!("rust_map_empty error: {}", e);
+                BuiltInTypes::null_value() as usize
+            }
+        };
+
+        result
+    }
+
+    /// Get the count of a persistent map
+    /// Signature: (map_ptr) -> tagged_int
+    pub unsafe extern "C" fn rust_map_count(map_ptr: usize) -> usize {
+        if !BuiltInTypes::is_heap_pointer(map_ptr) {
+            return BuiltInTypes::construct_int(0) as usize;
+        }
+        let map = GcHandle::from_tagged(map_ptr);
+        let count = PersistentMap::count(map);
+        BuiltInTypes::construct_int(count as isize) as usize
+    }
+
+    /// Get a value from a persistent map by key
+    /// Signature: (map_ptr, key) -> tagged_value
+    pub unsafe extern "C" fn rust_map_get(map_ptr: usize, key: usize) -> usize {
+        if !BuiltInTypes::is_heap_pointer(map_ptr) {
+            return BuiltInTypes::null_value() as usize;
+        }
+        let runtime = get_runtime().get();
+        let map = GcHandle::from_tagged(map_ptr);
+        PersistentMap::get(runtime, map, key)
+    }
+
+    /// Associate a key-value pair in a persistent map
+    /// Signature: (stack_pointer, frame_pointer, map_ptr, key, value) -> tagged_ptr
+    pub unsafe extern "C" fn rust_map_assoc(
+        stack_pointer: usize,
+        frame_pointer: usize,
+        map_ptr: usize,
+        key: usize,
+        value: usize,
+    ) -> usize {
+        save_frame_pointer(frame_pointer);
+        let runtime = get_runtime().get_mut();
+
+        if !BuiltInTypes::is_heap_pointer(map_ptr) {
+            return BuiltInTypes::null_value() as usize;
+        }
+
+        // Stay c_calling - HandleScope::allocate checks is_paused and participates in GC
+        let result = match PersistentMap::assoc(runtime, stack_pointer, map_ptr, key, value) {
+            Ok(handle) => handle.as_tagged(),
+            Err(e) => {
+                eprintln!("rust_map_assoc error: {}", e);
+                BuiltInTypes::null_value() as usize
+            }
+        };
+
+        result
+    }
+}
+
+impl Runtime {
+    pub fn install_rust_collection_builtins(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        use rust_collections::*;
+
+        // Register the namespace so it can be imported
+        self.reserve_namespace("beagle.collections".to_string());
+
+        // rust-vec: Create empty vector (needs sp/fp for allocation)
+        self.add_builtin_function_with_fp(
+            "beagle.collections/vec",
+            rust_vec_empty as *const u8,
+            true,
+            true,
+            2, // sp, fp (implicit to caller)
+        )?;
+
+        // rust-vec-count: Get count (no allocation needed)
+        self.add_builtin_function(
+            "beagle.collections/vec-count",
+            rust_vec_count as *const u8,
+            false,
+            1, // vec
+        )?;
+
+        // rust-vec-get: Get by index (no allocation needed)
+        self.add_builtin_function(
+            "beagle.collections/vec-get",
+            rust_vec_get as *const u8,
+            false,
+            2, // vec, index
+        )?;
+
+        // rust-vec-push: Push value (needs sp/fp for allocation)
+        self.add_builtin_function_with_fp(
+            "beagle.collections/vec-push",
+            rust_vec_push as *const u8,
+            true,
+            true,
+            4, // sp, fp, vec, value
+        )?;
+
+        // rust-vec-assoc: Update at index (needs sp/fp for allocation)
+        self.add_builtin_function_with_fp(
+            "beagle.collections/vec-assoc",
+            rust_vec_assoc as *const u8,
+            true,
+            true,
+            5, // sp, fp, vec, index, value
+        )?;
+
+        // ========== Map builtins ==========
+
+        // rust-map: Create empty map (needs sp/fp for allocation)
+        self.add_builtin_function_with_fp(
+            "beagle.collections/map",
+            rust_map_empty as *const u8,
+            true,
+            true,
+            2, // sp, fp
+        )?;
+
+        // rust-map-count: Get count (no allocation needed)
+        self.add_builtin_function(
+            "beagle.collections/map-count",
+            rust_map_count as *const u8,
+            false,
+            1, // map
+        )?;
+
+        // rust-map-get: Get by key (no allocation needed)
+        self.add_builtin_function(
+            "beagle.collections/map-get",
+            rust_map_get as *const u8,
+            false,
+            2, // map, key
+        )?;
+
+        // rust-map-assoc: Associate key-value (needs sp/fp for allocation)
+        self.add_builtin_function_with_fp(
+            "beagle.collections/map-assoc",
+            rust_map_assoc as *const u8,
+            true,
+            true,
+            5, // sp, fp, map, key, value
+        )?;
+
+        Ok(())
+    }
 }

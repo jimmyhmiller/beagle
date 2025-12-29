@@ -1,0 +1,33 @@
+namespace thread_safe_nothread
+
+import "persistent-map" as pm
+
+// Test just map operations with GC, no threading
+
+fn build_map(n, m) {
+    if n <= 0 {
+        m
+    } else {
+        let new_m = pm/assoc(m, n, n * 2)
+        build_map(n - 1, new_m)
+    }
+}
+
+fn main() {
+    let m1 = build_map(10, pm/map())
+    println(length(m1))
+    gc()
+    let m2 = build_map(10, pm/map())
+    println(length(m2))
+    gc()
+    let m3 = build_map(10, pm/map())
+    println(length(m3))
+    "done"
+}
+
+// thread-safe
+// DISABLED
+// 10
+// 10
+// 10
+// done

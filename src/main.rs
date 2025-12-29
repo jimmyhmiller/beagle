@@ -55,6 +55,8 @@ mod types;
 ))]
 mod x86;
 
+pub mod collections;
+
 #[derive(Debug, Encode, Decode, Clone, SerJson)]
 pub struct Message {
     kind: String,
@@ -510,7 +512,7 @@ fn run_repl(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             let max_wrapper_args = 6; // Uses arg0-5 for data, arg6 for fn ptr (ARM supports 8 args)
         }
     }
-    for i in 1..=max_wrapper_args {
+    for i in 0..=max_wrapper_args {
         compile_save_volatile_registers_for(runtime, i);
     }
 
@@ -674,7 +676,7 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             let max_wrapper_args = 6; // Uses arg0-5 for data, arg6 for fn ptr (ARM supports 8 args)
         }
     }
-    for i in 1..=max_wrapper_args {
+    for i in 0..=max_wrapper_args {
         compile_save_volatile_registers_for(runtime, i);
     }
 

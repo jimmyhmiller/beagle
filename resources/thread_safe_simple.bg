@@ -1,0 +1,63 @@
+namespace thread_safe_simple
+
+import "persistent-map" as pm
+
+// Minimal test - just one thread with map operations
+
+fn build_map(n, m) {
+    if n <= 0 {
+        m
+    } else {
+        let new_m = pm/assoc(m, n, n * 2)
+        build_map(n - 1, new_m)
+    }
+}
+
+fn thread_work() {
+    let m = pm/map()
+    let m = build_map(10, m)
+    length(m)
+}
+
+fn main() {
+    // Just spawn one thread
+    let done = atom(0)
+
+    thread(fn() {
+        let result = thread_work()
+        swap!(done, fn(x) { result })
+    })
+
+    // Main thread also does some work
+    let m = build_map(10, pm/map())
+    gc()
+    let m2 = build_map(10, pm/map())
+
+    // Wait for thread
+    wait_for_done(done, 0)
+
+    println(deref(done))
+    println(length(m))
+    println(length(m2))
+    "done"
+}
+
+fn wait_for_done(done_atom, attempts) {
+    let val = deref(done_atom)
+    if val > 0 {
+        true
+    } else {
+        if attempts > 1000000 {
+            false
+        } else {
+            wait_for_done(done_atom, attempts + 1)
+        }
+    }
+}
+
+// thread-safe
+// DISABLED
+// 10
+// 10
+// 10
+// done

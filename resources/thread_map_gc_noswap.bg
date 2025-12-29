@@ -1,0 +1,38 @@
+namespace thread_map_gc_noswap
+
+import "persistent-map" as pm
+
+fn build_map(n, m) {
+    if n <= 0 {
+        m
+    } else {
+        let new_m = pm/assoc(m, n, n * 2)
+        build_map(n - 1, new_m)
+    }
+}
+
+fn main() {
+    println("Starting test")
+
+    // Just one thread
+    println("Spawning thread")
+    thread(fn() {
+        println("Thread starting")
+        let m = build_map(3, pm/map())
+        println("Thread done with map")
+        let len = length(m)
+        println(len)
+        println("Thread done")
+    })
+
+    println("Main calling gc")
+    gc()
+    println("GC done")
+    gc()
+    println("GC 2 done")
+    gc()
+    println("GC 3 done")
+    "done"
+}
+
+// thread-safe

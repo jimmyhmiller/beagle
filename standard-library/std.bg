@@ -1,6 +1,7 @@
 namespace beagle.core;
 import "beagle.primitive" as primitive
 import "beagle.builtin" as builtin
+import "beagle.collections" as rust-coll
 // TODO: I need to figure out how I deal with the circular nature
 // of having persistent vector not be in this namespace
 // One answer is to have dynamic imports
@@ -77,6 +78,18 @@ let Keyword = Struct {
     id: -9
 }
 
+// Persistent collection types (Rust-backed HAMT implementations)
+// These use negative IDs that map to the runtime type IDs
+let PersistentVector = Struct {
+    name: "PersistentVector",
+    id: -20
+}
+
+let PersistentMap = Struct {
+    name: "PersistentMap",
+    id: -22
+}
+
 struct Protocol {
     name
 }
@@ -140,9 +153,16 @@ struct Thread {
     closure
 }
 
-// Called by the runtime to get the closure from a Thread object and execute it.
-// The Thread object is registered as a GC root, so the closure it contains
-// is protected from collection and properly relocated if GC moves it.
+// Called by the runtime to start a thread. This function takes no arguments
+// and reads the Thread object via a builtin. This ensures GC can properly
+// update the stack slot containing the Thread object.
+fn __run_thread_start() {
+    let thread-obj = primitive/__get-my-thread-obj();
+    let f = thread-obj.closure;
+    f()
+}
+
+// Legacy function - kept for compatibility but no longer used.
 fn __run_thread_closure(thread-obj) {
     let f = thread-obj.closure;
     f()
@@ -228,6 +248,96 @@ extend Array with Length {
     }
 }
 
+// PersistentVector protocol extensions (Rust-backed vector from literals)
+extend PersistentVector with Length {
+    fn length(vec) {
+        rust-coll/vec-count(vec)
+    }
+}
+
+extend PersistentVector with Indexed {
+    fn get(vec, i) {
+        rust-coll/vec-get(vec, i)
+    }
+}
+
+extend PersistentVector with Push {
+    fn push(vec, value) {
+        rust-coll/vec-push(vec, value)
+    }
+}
+
+extend PersistentVector with Seqable {
+    fn seq(vec) {
+        if rust-coll/vec-count(vec) == 0 {
+            null
+        } else {
+            PersistentVectorSeq { vec: vec, index: 0 }
+        }
+    }
+}
+
+// PersistentMap protocol extensions (Rust-backed map from literals)
+extend PersistentMap with Length {
+    fn length(m) {
+        rust-coll/map-count(m)
+    }
+}
+
+extend PersistentMap with Indexed {
+    fn get(m, key) {
+        rust-coll/map-get(m, key)
+    }
+}
+
+extend PersistentMap with Associable {
+    fn assoc(m, key, value) {
+        rust-coll/map-assoc(m, key, value)
+    }
+}
+
+// Sequence type for iterating over PersistentVector
+struct PersistentVectorSeq {
+    vec
+    index
+}
+
+extend PersistentVectorSeq with Seq {
+    fn first(seq) {
+        rust-coll/vec-get(seq.vec, seq.index)
+    }
+
+    fn next(seq) {
+        let next-index = seq.index + 1
+        if next-index >= rust-coll/vec-count(seq.vec) {
+            null
+        } else {
+            PersistentVectorSeq { vec: seq.vec, index: next-index }
+        }
+    }
+}
+
+// Helper for formatting PersistentVector
+fn format-persistent-vector-helper(vec, idx, acc, depth) {
+    if idx >= rust-coll/vec-count(vec) {
+        acc
+    } else {
+        let elem = rust-coll/vec-get(vec, idx)
+        let elem-str = format(elem, depth + 1)
+        let new-acc = if idx == 0 {
+            acc ++ elem-str
+        } else {
+            acc ++ ", " ++ elem-str
+        }
+        format-persistent-vector-helper(vec, idx + 1, new-acc, depth)
+    }
+}
+
+extend PersistentVector with Format {
+    fn format(self, depth) {
+        "[" ++ format-persistent-vector-helper(self, 0, "", depth) ++ "]"
+    }
+}
 
 // // TODO: Need a way to re-export rather than wrap
 // fn get(coll, i) {
