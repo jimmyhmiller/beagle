@@ -75,66 +75,66 @@ impl StackWalker {
             );
 
             // Use pending_return_addr to scan the CURRENT frame (fp)
-            if pending_return_addr != 0 {
-                if let Some(details) = stack_map.find_stack_data(pending_return_addr) {
+            if pending_return_addr != 0
+                && let Some(details) = stack_map.find_stack_data(pending_return_addr)
+            {
+                #[cfg(feature = "debug-gc")]
+                eprintln!(
+                    "[GC DEBUG] Scanning frame at FP={:#x}: fn={:?}, locals={}, max_stack={}, cur_stack={}",
+                    fp,
+                    details.function_name,
+                    details.number_of_locals,
+                    details.max_stack_size,
+                    details.current_stack_size
+                );
+
+                let active_slots = details.number_of_locals + details.current_stack_size;
+
+                for i in 0..active_slots {
+                    // Locals are at [fp-8], [fp-16], etc.
+                    let slot_addr = fp - 8 - (i * 8);
+                    let slot_value = unsafe { *(slot_addr as *const usize) };
+
                     #[cfg(feature = "debug-gc")]
-                    eprintln!(
-                        "[GC DEBUG] Scanning frame at FP={:#x}: fn={:?}, locals={}, max_stack={}, cur_stack={}",
-                        fp,
-                        details.function_name,
-                        details.number_of_locals,
-                        details.max_stack_size,
-                        details.current_stack_size
-                    );
+                    {
+                        let tag = slot_value & 0x7;
+                        let untagged = slot_value >> 3;
+                        let tag_name = match tag {
+                            0 => "Int",
+                            1 => "Float",
+                            2 => "String",
+                            3 => "Bool",
+                            4 => "Function",
+                            5 => "Closure",
+                            6 => "HeapObject",
+                            7 => "Null",
+                            _ => "Unknown",
+                        };
+                        eprintln!(
+                            "[GC DEBUG]   slot[{}] @ {:#x} = {:#x} (tag={} [{}], untagged={:#x}), is_heap_ptr={}",
+                            i,
+                            slot_addr,
+                            slot_value,
+                            tag,
+                            tag_name,
+                            untagged,
+                            BuiltInTypes::is_heap_pointer(slot_value)
+                        );
+                    }
 
-                    let active_slots = details.number_of_locals + details.current_stack_size;
-
-                    for i in 0..active_slots {
-                        // Locals are at [fp-8], [fp-16], etc.
-                        let slot_addr = fp - 8 - (i * 8);
-                        let slot_value = unsafe { *(slot_addr as *const usize) };
-
-                        #[cfg(feature = "debug-gc")]
-                        {
-                            let tag = slot_value & 0x7;
-                            let untagged = slot_value >> 3;
-                            let tag_name = match tag {
-                                0 => "Int",
-                                1 => "Float",
-                                2 => "String",
-                                3 => "Bool",
-                                4 => "Function",
-                                5 => "Closure",
-                                6 => "HeapObject",
-                                7 => "Null",
-                                _ => "Unknown",
-                            };
+                    if BuiltInTypes::is_heap_pointer(slot_value) {
+                        let untagged = BuiltInTypes::untag(slot_value);
+                        // Skip unaligned pointers - these are likely stale/garbage values
+                        // that happen to match heap pointer tag patterns
+                        if untagged % 8 != 0 {
+                            #[cfg(feature = "debug-gc")]
                             eprintln!(
-                                "[GC DEBUG]   slot[{}] @ {:#x} = {:#x} (tag={} [{}], untagged={:#x}), is_heap_ptr={}",
-                                i,
-                                slot_addr,
-                                slot_value,
-                                tag,
-                                tag_name,
-                                untagged,
-                                BuiltInTypes::is_heap_pointer(slot_value)
+                                "[GC DEBUG]   SKIPPING unaligned pointer: slot[{}] @ {:#x} = {:#x}",
+                                i, slot_addr, slot_value
                             );
+                            continue;
                         }
-
-                        if BuiltInTypes::is_heap_pointer(slot_value) {
-                            let untagged = BuiltInTypes::untag(slot_value);
-                            // Skip unaligned pointers - these are likely stale/garbage values
-                            // that happen to match heap pointer tag patterns
-                            if untagged % 8 != 0 {
-                                #[cfg(feature = "debug-gc")]
-                                eprintln!(
-                                    "[GC DEBUG]   SKIPPING unaligned pointer: slot[{}] @ {:#x} = {:#x}",
-                                    i, slot_addr, slot_value
-                                );
-                                continue;
-                            }
-                            callback(slot_addr, slot_value);
-                        }
+                        callback(slot_addr, slot_value);
                     }
                 }
             }

@@ -292,6 +292,14 @@ impl MarkAndSweep {
         if let AllocateAction::Allocated(pointer) = pointer {
             pointer
         } else {
+            #[cfg(feature = "debug-gc")]
+            eprintln!(
+                "[GC DEBUG] copy_data_to_offset: allocation failed, data.len={}, header_size={}, space.page_count={}, space.byte_count={}",
+                data.len(),
+                header_size,
+                self.space.page_count,
+                self.space.byte_count()
+            );
             self.grow();
             self.copy_data_to_offset(data)
         }
@@ -315,10 +323,10 @@ impl MarkAndSweep {
 
         // Mark temporary roots (used by builtins to protect values during allocation)
         for temp_root in self.temporary_roots.iter() {
-            if let Some(root) = temp_root {
-                if BuiltInTypes::is_heap_pointer(*root) {
-                    to_mark.push(HeapObject::from_tagged(*root));
-                }
+            if let Some(root) = temp_root
+                && BuiltInTypes::is_heap_pointer(*root)
+            {
+                to_mark.push(HeapObject::from_tagged(*root));
             }
         }
 
@@ -330,25 +338,21 @@ impl MarkAndSweep {
         }
 
         // Mark roots from registered RootSets (used by AllocationContext)
-        for slot in self.root_sets.iter() {
-            if let Some(roots_ptr) = slot {
-                let roots = unsafe { &*roots_ptr.0 };
-                for root in roots.roots() {
-                    if BuiltInTypes::is_heap_pointer(*root) {
-                        to_mark.push(HeapObject::from_tagged(*root));
-                    }
+        for roots_ptr in self.root_sets.iter().flatten() {
+            let roots = unsafe { &*roots_ptr.0 };
+            for root in roots.roots() {
+                if BuiltInTypes::is_heap_pointer(*root) {
+                    to_mark.push(HeapObject::from_tagged(*root));
                 }
             }
         }
 
         // Mark roots from registered HandleArenas (thread-local handle storage)
-        for slot in self.handle_arenas.iter() {
-            if let Some(arena_ptr) = slot {
-                let arena = unsafe { &*arena_ptr.0 };
-                for root in arena.roots() {
-                    if BuiltInTypes::is_heap_pointer(*root) {
-                        to_mark.push(HeapObject::from_tagged(*root));
-                    }
+        for arena_ptr in self.handle_arenas.iter().flatten() {
+            let arena = unsafe { &*arena_ptr.0 };
+            for root in arena.roots() {
+                if BuiltInTypes::is_heap_pointer(*root) {
+                    to_mark.push(HeapObject::from_tagged(*root));
                 }
             }
         }
@@ -433,6 +437,29 @@ impl MarkAndSweep {
             root_sets: vec![],
             handle_arenas: vec![],
             handle_arena_threads: HashMap::new(),
+        }
+    }
+
+    /// Walk all live objects in the heap, calling the provided function for each one.
+    #[cfg(feature = "debug-gc")]
+    #[allow(unused)]
+    pub fn walk_objects<F>(&self, mut f: F)
+    where
+        F: FnMut(&HeapObject),
+    {
+        let mut offset = 0;
+        loop {
+            if offset > self.space.highmark {
+                break;
+            }
+            if let Some(entry) = self.free_list.find_entry_contains(offset) {
+                offset = entry.end();
+                continue;
+            }
+            let heap_object = HeapObject::from_untagged(unsafe { self.space.start.add(offset) });
+            f(&heap_object);
+            offset += heap_object.full_size();
+            offset = (offset + 7) & !7;
         }
     }
 }
@@ -556,10 +583,10 @@ impl Allocator for MarkAndSweep {
     }
 
     fn unregister_handle_arena_for_thread(&mut self, thread_id: ThreadId) {
-        if let Some(idx) = self.handle_arena_threads.remove(&thread_id) {
-            if idx < self.handle_arenas.len() {
-                self.handle_arenas[idx] = None;
-            }
+        if let Some(idx) = self.handle_arena_threads.remove(&thread_id)
+            && idx < self.handle_arenas.len()
+        {
+            self.handle_arenas[idx] = None;
         }
     }
 
@@ -583,5 +610,117 @@ impl Allocator for MarkAndSweep {
 
     fn get_thread_root(&self, thread_id: ThreadId) -> Option<usize> {
         self.thread_roots.get(&thread_id).copied()
+    }
+}
+
+// Helper methods for heap dump
+impl MarkAndSweep {
+    pub fn space_start(&self) -> usize {
+        self.space.start as usize
+    }
+
+    pub fn space_byte_count(&self) -> usize {
+        self.space.byte_count()
+    }
+
+    pub fn highmark(&self) -> usize {
+        self.space.highmark
+    }
+
+    /// Collect all objects for heap dump
+    #[cfg(feature = "heap-dump")]
+    pub fn collect_objects_for_dump(
+        &self,
+        classifier: &super::heap_dump::PointerClassifier,
+    ) -> Vec<super::heap_dump::ObjectSnapshot> {
+        use super::heap_dump::*;
+        use crate::types::{BuiltInTypes, Header, HeapObject};
+
+        let mut objects = Vec::new();
+        let mut offset = 0;
+
+        loop {
+            if offset > self.space.highmark {
+                break;
+            }
+
+            // Check if this offset is in the free list
+            if let Some(entry) = self.free_list.find_entry_contains(offset) {
+                offset = entry.end();
+                continue;
+            }
+
+            let ptr = unsafe { self.space.start.add(offset) };
+            let header_raw = unsafe { *(ptr as *const usize) };
+            let header = Header::from_usize(header_raw);
+
+            let header_size = if header.large { 16 } else { 8 };
+            let fields_size = if header.large {
+                let size_ptr = unsafe { (ptr as *const usize).add(1) };
+                unsafe { *size_ptr * 8 }
+            } else {
+                header.size as usize * 8
+            };
+            let full_size = header_size + fields_size;
+
+            if full_size == 0 {
+                offset += 8;
+                continue;
+            }
+
+            let heap_obj = HeapObject::from_untagged(ptr);
+
+            let mut field_snapshots = Vec::new();
+            if !header.opaque {
+                let fields = heap_obj.get_fields();
+                for (i, &field_value) in fields.iter().enumerate() {
+                    field_snapshots.push(FieldSnapshot {
+                        index: i,
+                        value: format!("{:#x}", field_value),
+                        tag: tag_name_local(field_value),
+                        is_heap_ptr: BuiltInTypes::is_heap_pointer(field_value),
+                        points_to: classifier.classify(field_value),
+                    });
+                }
+            }
+
+            objects.push(ObjectSnapshot {
+                tagged_ptr: format!("{:#x}", BuiltInTypes::HeapObject.tag(ptr as isize)),
+                address: format!("{:#x}", ptr as usize),
+                offset,
+                tag_type: "HeapObject".to_string(),
+                header_raw: format!("{:#x}", header_raw),
+                header: HeaderSnapshot {
+                    type_id: header.type_id,
+                    type_data: header.type_data,
+                    size: header.size,
+                    opaque: header.opaque,
+                    marked: header.marked,
+                    large: header.large,
+                },
+                full_size,
+                fields: field_snapshots,
+            });
+
+            offset += full_size;
+            offset = (offset + 7) & !7;
+        }
+
+        objects
+    }
+}
+
+#[cfg(feature = "heap-dump")]
+fn tag_name_local(value: usize) -> String {
+    use crate::types::BuiltInTypes;
+    match BuiltInTypes::get_kind(value) {
+        BuiltInTypes::Int => "Int".to_string(),
+        BuiltInTypes::Float => "Float".to_string(),
+        BuiltInTypes::String => "String".to_string(),
+        BuiltInTypes::Bool => "Bool".to_string(),
+        BuiltInTypes::Function => "Function".to_string(),
+        BuiltInTypes::Closure => "Closure".to_string(),
+        BuiltInTypes::HeapObject => "HeapObject".to_string(),
+        BuiltInTypes::Null => "Null".to_string(),
     }
 }

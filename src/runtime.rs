@@ -181,14 +181,15 @@ pub struct FFIInfo {
 
 pub struct ThreadState {
     pub paused_threads: usize,
-    pub stack_pointers: Vec<(usize, usize)>,
+    /// (stack_base, frame_pointer, gc_return_addr) for each paused thread
+    pub stack_pointers: Vec<(usize, usize, usize)>,
     // TODO: I probably don't want to do this here. This requires taking a mutex
     // not really ideal for c calls.
-    pub c_calling_stack_pointers: HashMap<ThreadId, (usize, usize)>,
+    pub c_calling_stack_pointers: HashMap<ThreadId, (usize, usize, usize)>,
 }
 
 impl ThreadState {
-    pub fn pause(&mut self, stack_pointer: (usize, usize)) {
+    pub fn pause(&mut self, stack_pointer: (usize, usize, usize)) {
         self.paused_threads += 1;
         self.stack_pointers.push(stack_pointer);
     }
@@ -197,7 +198,7 @@ impl ThreadState {
         self.paused_threads -= 1;
     }
 
-    pub fn register_c_call(&mut self, stack_pointer: (usize, usize)) {
+    pub fn register_c_call(&mut self, stack_pointer: (usize, usize, usize)) {
         let thread_id = thread::current().id();
         self.c_calling_stack_pointers
             .insert(thread_id, stack_pointer);
@@ -1636,44 +1637,29 @@ impl Runtime {
     }
 
     /// GC entry point called when allocation fails or gc_always is set.
-    /// Reads gc_return_addr from our saved frame [FP + 8].
-    fn run_gc(&mut self, stack_pointer: usize, frame_pointer: usize) {
-        // Read our return address from our own saved frame.
-        // Rust's prologue saves the return address at [FP + 8].
-        // This works on both ARM64 and x86-64 (with frame pointers enabled).
-        let gc_return_addr: usize;
-        cfg_if::cfg_if! {
-            if #[cfg(target_arch = "x86_64")] {
-                unsafe { core::arch::asm!("mov {}, [rbp + 8]", out(reg) gc_return_addr) };
-            } else if #[cfg(target_arch = "aarch64")] {
-                unsafe { core::arch::asm!("ldr {}, [x29, #8]", out(reg) gc_return_addr) };
-            } else {
-                compile_error!("Unsupported architecture");
-            }
-        }
-        self.gc_impl(stack_pointer, frame_pointer, gc_return_addr);
+    /// With frame pointers enabled, we just read the current FP and walk from there.
+    fn run_gc(&mut self, stack_pointer: usize, _frame_pointer: usize) {
+        let rust_fp = crate::builtins::get_current_rust_frame_pointer();
+        self.gc_impl(stack_pointer, rust_fp);
     }
 
-    pub fn gc_impl(&mut self, stack_pointer: usize, frame_pointer: usize, gc_return_addr: usize) {
+    pub fn gc_impl(&mut self, stack_pointer: usize, rust_fp: usize) {
         let _ = stack_pointer; // Available if needed for __pause calls
-        // Use frame_pointer passed from Beagle code for FP-chain based stack walking.
-        // We can't read RBP from inside this Rust function because Rust may not
-        // preserve RBP as a frame pointer. Instead, Beagle code passes its RBP
-        // which is valid at the call site.
-        //
-        // gc_return_addr is the return address of the gc() call - this is the
-        // safepoint address in the stack map that describes the caller's frame.
+        // With frame pointers enabled everywhere (via -C force-frame-pointers=yes),
+        // we just start walking from the current Rust function's FP.
+        // The stack walker checks each [FP+8] against the stack map:
+        // - If in stack map, it's a Beagle frame → scan it
+        // - If not in stack map, it's a Rust frame → skip it
+        // This naturally handles the mixed Rust/Beagle call stack.
 
         if self.memory.threads.len() == 1 {
             // If there is only one thread, that is us
             // that means nothing else could spin up a thread in the mean time
             // so there is no need to lock anything
-            // Collect all frame pointers with their return addresses
             // The tuple is (stack_base, frame_pointer, gc_return_addr)
-            let mut all_stack_pointers =
-                vec![(self.get_stack_base(), frame_pointer, gc_return_addr)];
-            // For saved stack segments, we don't have a gc_return_addr, so use 0
-            // (the stack walker will fall back to FP+8 lookup)
+            // We pass 0 for gc_return_addr - the walker will use [FP+8] to discover Beagle frames
+            let mut all_stack_pointers = vec![(self.get_stack_base(), rust_fp, 0usize)];
+            // Saved stack segments also use the FP-chain walking approach
             all_stack_pointers.extend(
                 self.stack_segments
                     .get_all_stack_pointers()
@@ -1738,14 +1724,14 @@ impl Runtime {
             match e {
                 TryLockError::WouldBlock => {
                     drop(locked);
-                    unsafe { __pause(stack_pointer, frame_pointer) };
+                    unsafe { __pause(stack_pointer, rust_fp) };
                 }
                 TryLockError::Poisoned(e) => {
                     eprintln!("Warning: Poisoned lock in GC: {:?}", e);
                     // Try to recover by using the poisoned data anyway
                     // The lock is poisoned but the data might still be usable
                     drop(locked);
-                    unsafe { __pause(stack_pointer, frame_pointer) };
+                    unsafe { __pause(stack_pointer, rust_fp) };
                 }
             }
 
@@ -1762,7 +1748,7 @@ impl Runtime {
         );
         if result != Ok(0) {
             drop(locked);
-            unsafe { __pause(stack_pointer, frame_pointer) };
+            unsafe { __pause(stack_pointer, rust_fp) };
             return;
         }
 
@@ -1780,16 +1766,13 @@ impl Runtime {
                 .expect("Failed waiting on condition variable - this is a fatal error");
         }
 
-        // Convert paused threads' (base, fp) pairs to (base, fp, 0) triples
-        // The 0 gc_return_addr tells the stack walker to use FP+8 lookup instead
-        let mut stack_pointers: Vec<(usize, usize, usize)> = thread_state
-            .stack_pointers
-            .iter()
-            .map(|(base, fp)| (*base, *fp, 0usize))
-            .collect();
-        // Main thread uses its actual gc_return_addr for accurate first-frame scanning
-        stack_pointers.push((self.get_stack_base(), frame_pointer, gc_return_addr));
-        // Add saved stack segments to the GC scan (no gc_return_addr)
+        // Paused threads already have (base, fp, gc_return_addr) triples
+        let mut stack_pointers: Vec<(usize, usize, usize)> = thread_state.stack_pointers.clone();
+        // Also include threads that are in C calls (FFI) - their stacks must be scanned too!
+        stack_pointers.extend(thread_state.c_calling_stack_pointers.values().copied());
+        // Main thread also uses FP-chain walking
+        stack_pointers.push((self.get_stack_base(), rust_fp, 0usize));
+        // Add saved stack segments to the GC scan
         stack_pointers.extend(
             self.stack_segments
                 .get_all_stack_pointers()
@@ -2056,7 +2039,8 @@ impl Runtime {
                 {
                     let (lock, condvar) = &*thread_state_for_c_call;
                     let mut state = lock.lock().unwrap();
-                    state.register_c_call((stack_pointer, stack_pointer));
+                    // No Beagle frame yet, use 0 for gc_return_addr
+                    state.register_c_call((stack_pointer, stack_pointer, 0));
                     condvar.notify_one();
                 }
 
@@ -2477,8 +2461,6 @@ impl Runtime {
     /// Collect all key-value entries from a PersistentMap for formatting.
     /// Traverses the HAMT structure recursively.
     fn collect_map_entries(&self, map: GcHandle) -> Vec<(usize, usize)> {
-        use crate::collections::{TYPE_ID_ARRAY_NODE, TYPE_ID_BITMAP_NODE, TYPE_ID_COLLISION_NODE};
-
         let mut entries = Vec::new();
         let root_ptr = map.get_field(1); // FIELD_ROOT = 1
         let null_val = BuiltInTypes::null_value() as usize;
