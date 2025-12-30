@@ -258,12 +258,11 @@ impl<'a> HandleScope<'a> {
         // (allocation might succeed even while another thread is doing GC)
         if self.runtime.is_paused() {
             // Trigger gc_impl which will call __pause
-            // gc_return_addr = 0 tells stack walker to use FP+8 lookup
-            // (not that it matters - our roots are in HandleArena, not on Beagle stack)
+            // We use the current Rust FP - the stack walker will discover Beagle frames
+            // by checking return addresses against the stack map
             self.runtime.gc_impl(
                 self.stack_pointer,
-                crate::builtins::get_saved_frame_pointer(),
-                0,
+                crate::builtins::get_current_rust_frame_pointer(),
             );
         }
 

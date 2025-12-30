@@ -12,6 +12,8 @@ pub use crate::mmap_utils::get_page_size;
 
 pub mod compacting;
 pub mod generational;
+#[cfg(feature = "heap-dump")]
+pub mod heap_dump;
 pub mod mark_and_sweep;
 pub mod mutex_allocator;
 pub mod stack_segments;
@@ -79,6 +81,21 @@ impl StackMap {
 
     pub fn extend(&mut self, translated_stack_map: Vec<(usize, StackMapDetails)>) {
         self.details.extend(translated_stack_map);
+    }
+
+    /// Find stack data without debug output (for heap dump)
+    pub fn find_stack_data_no_debug(&self, pointer: usize) -> Option<&StackMapDetails> {
+        for (key, value) in self.details.iter() {
+            if *key == pointer {
+                return Some(value);
+            }
+        }
+        None
+    }
+
+    /// Get all stack map details (for heap dump)
+    pub fn details(&self) -> &[(usize, StackMapDetails)] {
+        &self.details
     }
 }
 

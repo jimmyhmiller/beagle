@@ -532,10 +532,10 @@ impl Allocator for CompactingHeap {
     }
 
     fn unregister_handle_arena_for_thread(&mut self, thread_id: ThreadId) {
-        if let Some(idx) = self.handle_arena_threads.remove(&thread_id) {
-            if idx < self.handle_arenas.len() {
-                self.handle_arenas[idx] = None;
-            }
+        if let Some(idx) = self.handle_arena_threads.remove(&thread_id)
+            && idx < self.handle_arenas.len()
+        {
+            self.handle_arenas[idx] = None;
         }
     }
 

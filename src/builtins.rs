@@ -43,6 +43,24 @@ pub fn get_saved_frame_pointer() -> usize {
     SAVED_FRAME_POINTER.with(|cell| cell.get())
 }
 
+/// Read the current frame pointer register.
+/// Used by GC to walk the stack starting from the current Rust function's frame.
+/// MUST be inlined so we read the caller's frame pointer, not this function's.
+#[inline(always)]
+pub fn get_current_rust_frame_pointer() -> usize {
+    let fp: usize;
+    cfg_if::cfg_if! {
+        if #[cfg(target_arch = "x86_64")] {
+            unsafe { core::arch::asm!("mov {}, rbp", out(reg) fp) };
+        } else if #[cfg(target_arch = "aarch64")] {
+            unsafe { core::arch::asm!("mov {}, x29", out(reg) fp) };
+        } else {
+            compile_error!("Unsupported architecture");
+        }
+    }
+    fp
+}
+
 pub unsafe extern "C" fn debug_stack_segments() -> usize {
     let runtime = get_runtime().get();
 
@@ -498,7 +516,7 @@ extern "C" fn protocol_dispatch(
     let dispatch_table = unsafe { &*(dispatch_table_ptr as *const DispatchTable) };
     let fn_ptr = if type_id & 0x8000_0000_0000_0000 != 0 {
         // Primitive/built-in type
-        let primitive_index = (type_id & 0x7FFF_FFFF_FFFF_FFFF) as usize;
+        let primitive_index = type_id & 0x7FFF_FFFF_FFFF_FFFF;
         dispatch_table.lookup_primitive(primitive_index)
     } else {
         // Struct type - struct_id is tagged in header, need to untag
@@ -984,31 +1002,19 @@ fn print_stack(_stack_pointer: usize) {
     }
 }
 
-pub unsafe extern "C" fn gc(stack_pointer: usize, frame_pointer: usize) -> usize {
-    save_frame_pointer(frame_pointer);
-    // Read our return address from our own saved frame.
-    // Rust's prologue saves the return address at [FP + 8], so we can read it directly.
-    // This works on both ARM64 and x86-64 (with frame pointers enabled).
-    // The return address is the safepoint in the caller where gc() was invoked.
-    let gc_return_addr: usize;
-    cfg_if::cfg_if! {
-        if #[cfg(target_arch = "x86_64")] {
-            unsafe { core::arch::asm!("mov {}, [rbp + 8]", out(reg) gc_return_addr) };
-        } else if #[cfg(target_arch = "aarch64")] {
-            unsafe { core::arch::asm!("ldr {}, [x29, #8]", out(reg) gc_return_addr) };
-        } else {
-            compile_error!("Unsupported architecture");
-        }
-    }
+pub unsafe extern "C" fn gc(stack_pointer: usize, _frame_pointer: usize) -> usize {
+    // With frame pointers enabled everywhere, we just read our own FP and walk from there.
+    // The stack walker will check each return address against the stack map to find Beagle frames.
+    let rust_fp = get_current_rust_frame_pointer();
     #[cfg(feature = "debug-gc")]
     {
         eprintln!(
-            "DEBUG gc: stack_pointer={:#x}, frame_pointer={:#x}, gc_return_addr={:#x}",
-            stack_pointer, frame_pointer, gc_return_addr
+            "DEBUG gc: stack_pointer={:#x}, rust_fp={:#x}",
+            stack_pointer, rust_fp
         );
     }
     let runtime = get_runtime().get_mut();
-    runtime.gc_impl(stack_pointer, frame_pointer, gc_return_addr);
+    runtime.gc_impl(stack_pointer, rust_fp);
     BuiltInTypes::null_value() as usize
 }
 
@@ -1273,10 +1279,14 @@ pub unsafe extern "C" fn set_current_namespace(namespace: usize) -> usize {
 }
 
 pub unsafe extern "C" fn __pause(_stack_pointer: usize, frame_pointer: usize) -> usize {
+    // Capture our return address - this is the safepoint in Beagle code
+    let gc_return_addr = get_current_rust_frame_pointer();
+    let gc_return_addr = unsafe { *((gc_return_addr + 8) as *const usize) };
+
     let runtime = get_runtime().get_mut();
 
     // Use frame_pointer passed from Beagle code for FP-chain stack walking
-    pause_current_thread(frame_pointer, runtime);
+    pause_current_thread(frame_pointer, gc_return_addr, runtime);
 
     // Memory barrier to ensure all writes are visible before parking
     std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
@@ -1296,13 +1306,13 @@ pub unsafe extern "C" fn __pause(_stack_pointer: usize, frame_pointer: usize) ->
     BuiltInTypes::null_value() as usize
 }
 
-fn pause_current_thread(frame_pointer: usize, runtime: &mut Runtime) {
+fn pause_current_thread(frame_pointer: usize, gc_return_addr: usize, runtime: &mut Runtime) {
     let thread_state = runtime.thread_state.clone();
     let (lock, condvar) = &*thread_state;
     let mut state = lock.lock().unwrap();
     let stack_base = runtime.get_stack_base();
-    // Store (stack_base, frame_pointer) for FP-chain based stack walking
-    state.pause((stack_base, frame_pointer));
+    // Store (stack_base, frame_pointer, gc_return_addr) for stack walking
+    state.pause((stack_base, frame_pointer, gc_return_addr));
     condvar.notify_one();
     drop(state);
 }
@@ -1316,13 +1326,17 @@ fn unpause_current_thread(runtime: &mut Runtime) {
 }
 
 pub extern "C" fn register_c_call(_stack_pointer: usize, frame_pointer: usize) -> usize {
+    // Capture our return address - this is the safepoint in Beagle code
+    let gc_return_addr = get_current_rust_frame_pointer();
+    let gc_return_addr = unsafe { *((gc_return_addr + 8) as *const usize) };
+
     // Use frame_pointer passed from Beagle code for FP-chain stack walking
     let runtime = get_runtime().get_mut();
     let thread_state = runtime.thread_state.clone();
     let (lock, condvar) = &*thread_state;
     let mut state = lock.lock().unwrap();
     let stack_base = runtime.get_stack_base();
-    state.register_c_call((stack_base, frame_pointer));
+    state.register_c_call((stack_base, frame_pointer, gc_return_addr));
     condvar.notify_one();
     BuiltInTypes::null_value() as usize
 }
@@ -1390,8 +1404,8 @@ pub extern "C" fn run_thread(_unused: usize) -> usize {
     if need_to_pause {
         // GC is running after we unregistered - we must pause to participate.
         // We don't have a real Beagle frame, but we need to be counted.
-        // Use (0, 0) as placeholder - we have no stack roots to scan anyway.
-        pause_current_thread(0, runtime);
+        // Use (0, 0, 0) as placeholder - we have no stack roots to scan anyway.
+        pause_current_thread(0, 0, runtime);
 
         // Wait for GC to complete
         while runtime.is_paused() {
@@ -1409,7 +1423,7 @@ pub extern "C" fn run_thread(_unused: usize) -> usize {
     {
         let (lock, condvar) = &*runtime.thread_state.clone();
         let mut state = lock.lock().unwrap();
-        state.register_c_call((0, 0));
+        state.register_c_call((0, 0, 0));
         condvar.notify_one();
     }
 
@@ -2003,8 +2017,8 @@ pub unsafe extern "C" fn copy_array_range(
     let from_fields = from_obj.get_fields();
     let to_fields = to_obj.get_fields_mut();
 
-    let start_idx = BuiltInTypes::untag(start) as usize;
-    let count_val = BuiltInTypes::untag(count) as usize;
+    let start_idx = BuiltInTypes::untag(start);
+    let count_val = BuiltInTypes::untag(count);
 
     // Use ptr::copy_nonoverlapping for fast memcpy
     unsafe {
@@ -3912,15 +3926,14 @@ mod rust_collections {
         let runtime = get_runtime().get_mut();
 
         // Stay c_calling - HandleScope::allocate checks is_paused and participates in GC
-        let result = match PersistentMap::empty(runtime, stack_pointer) {
+
+        match PersistentMap::empty(runtime, stack_pointer) {
             Ok(handle) => handle.as_tagged(),
             Err(e) => {
                 eprintln!("rust_map_empty error: {}", e);
                 BuiltInTypes::null_value() as usize
             }
-        };
-
-        result
+        }
     }
 
     /// Get the count of a persistent map
@@ -3962,15 +3975,14 @@ mod rust_collections {
         }
 
         // Stay c_calling - HandleScope::allocate checks is_paused and participates in GC
-        let result = match PersistentMap::assoc(runtime, stack_pointer, map_ptr, key, value) {
+
+        match PersistentMap::assoc(runtime, stack_pointer, map_ptr, key, value) {
             Ok(handle) => handle.as_tagged(),
             Err(e) => {
                 eprintln!("rust_map_assoc error: {}", e);
                 BuiltInTypes::null_value() as usize
             }
-        };
-
-        result
+        }
     }
 }
 

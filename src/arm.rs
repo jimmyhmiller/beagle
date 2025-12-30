@@ -1533,6 +1533,22 @@ impl LowLevelArm {
     }
 
     pub fn set_all_locals_to_null(&mut self, null_register: Register) {
+        // Debug: verify we're nulling all locals
+        if std::env::var("DEBUG_NULL_LOCALS").is_ok() {
+            eprintln!(
+                "[COMPILE] set_all_locals_to_null: max_locals={}, will null slots 0..{}",
+                self.max_locals, self.max_locals
+            );
+            for local_offset in 0..self.max_locals {
+                // store_local stores at -(offset + 1), which is [FP - (offset+1)*8]
+                let stack_offset = -(local_offset + 1);
+                let byte_offset = stack_offset * 8;
+                eprintln!(
+                    "[COMPILE]   local[{}] -> store at [FP + {}] = [FP - {}]",
+                    local_offset, byte_offset, -byte_offset
+                );
+            }
+        }
         for local_offset in 0..self.max_locals {
             self.store_local(null_register, local_offset)
         }
