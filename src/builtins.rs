@@ -29,6 +29,7 @@ use std::hint::black_box;
 // Used by gc() when triggered internally (e.g., during allocation).
 thread_local! {
     static SAVED_FRAME_POINTER: Cell<usize> = const { Cell::new(0) };
+    static SAVED_GC_RETURN_ADDR: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Save the frame pointer for later use by gc().
@@ -41,6 +42,44 @@ pub fn save_frame_pointer(fp: usize) {
 /// Returns 0 if none has been saved (shouldn't happen in normal operation).
 pub fn get_saved_frame_pointer() -> usize {
     SAVED_FRAME_POINTER.with(|cell| cell.get())
+}
+
+/// Save the GC return address for later use by run_gc().
+/// This is the return address pointing back into Beagle code.
+/// Called by builtins at entry using inline assembly.
+pub fn save_gc_return_addr(addr: usize) {
+    SAVED_GC_RETURN_ADDR.with(|cell| cell.set(addr));
+}
+
+/// Get the saved GC return address.
+/// Returns 0 if none has been saved.
+pub fn get_saved_gc_return_addr() -> usize {
+    SAVED_GC_RETURN_ADDR.with(|cell| cell.get())
+}
+
+/// Capture the GC context at builtin entry and save it.
+///
+/// The gc_return_addr is the return address pushed by the CALL instruction
+/// when Beagle called this builtin. It's located at [stack_pointer - 8] because
+/// stack_pointer is RSP before the CALL, and CALL pushes the return address.
+///
+/// This return address is a safepoint in the stack map and describes the state
+/// of the calling frame at the call site.
+#[macro_export]
+macro_rules! save_gc_context {
+    ($stack_pointer:expr, $frame_pointer:expr) => {{
+        $crate::builtins::save_frame_pointer($frame_pointer);
+        // The return address is at [stack_pointer - 8]
+        // stack_pointer is RSP before the CALL instruction
+        // CALL pushes the return address, so it's now at RSP (= stack_pointer - 8)
+        let gc_return_addr = unsafe { *(($stack_pointer - 8) as *const usize) };
+        $crate::builtins::save_gc_return_addr(gc_return_addr);
+    }};
+    // Fallback for builtins without stack_pointer - use 0 as gc_return_addr
+    ($frame_pointer:expr) => {{
+        $crate::builtins::save_frame_pointer($frame_pointer);
+        $crate::builtins::save_gc_return_addr(0);
+    }};
 }
 
 pub unsafe extern "C" fn debug_stack_segments() -> usize {
@@ -155,7 +194,7 @@ pub unsafe extern "C" fn to_string(
     frame_pointer: usize,
     value: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let result = runtime.get_repr(value, 0);
     if result.is_none() {
@@ -174,7 +213,7 @@ pub unsafe extern "C" fn to_number(
     frame_pointer: usize,
     value: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let string = runtime.get_string(stack_pointer, value);
     if string.contains(".") {
@@ -206,7 +245,7 @@ pub extern "C" fn print_byte(value: usize) -> usize {
 }
 
 extern "C" fn allocate(stack_pointer: usize, frame_pointer: usize, size: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let size = BuiltInTypes::untag(size);
     let runtime = get_runtime().get_mut();
 
@@ -220,7 +259,7 @@ extern "C" fn allocate(stack_pointer: usize, frame_pointer: usize, size: usize) 
 }
 
 extern "C" fn allocate_float(stack_pointer: usize, frame_pointer: usize, size: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let value = BuiltInTypes::untag(size);
 
@@ -239,7 +278,7 @@ extern "C" fn get_string_index(
     string: usize,
     index: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "get_string_index");
     let runtime = get_runtime().get_mut();
     if BuiltInTypes::get_kind(string) == BuiltInTypes::String {
@@ -293,7 +332,7 @@ extern "C" fn string_concat(
     a: usize,
     b: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "string_concat");
     let runtime = get_runtime().get_mut();
     let a = runtime.get_string(stack_pointer, a);
@@ -312,7 +351,7 @@ extern "C" fn substring(
     start: usize,
     length: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "substring");
     let runtime = get_runtime().get_mut();
     let string_pointer = runtime.register_temporary_root(string);
@@ -326,7 +365,7 @@ extern "C" fn substring(
 }
 
 extern "C" fn uppercase(stack_pointer: usize, frame_pointer: usize, string: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "uppercase");
     let runtime = get_runtime().get_mut();
     let string_value = runtime.get_string(stack_pointer, string);
@@ -352,7 +391,7 @@ extern "C" fn make_closure(
     num_free: usize,
     free_variable_pointer: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "make_closure");
     let runtime = get_runtime().get_mut();
     if BuiltInTypes::get_kind(function) != BuiltInTypes::Function {
@@ -522,14 +561,14 @@ extern "C" fn protocol_dispatch(
 }
 
 extern "C" fn type_of(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "type_of");
     let runtime = get_runtime().get_mut();
     runtime.type_of(stack_pointer, value).unwrap()
 }
 
 extern "C" fn get_os(stack_pointer: usize, frame_pointer: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "get_os");
     let runtime = get_runtime().get_mut();
     let os_name = if cfg!(target_os = "macos") {
@@ -565,7 +604,7 @@ extern "C" fn write_field(
     property_cache_location: usize,
     value: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let index = runtime.write_field(stack_pointer, struct_pointer, str_constant_ptr, value);
     let type_id = HeapObject::from_tagged(struct_pointer).get_struct_id();
@@ -576,7 +615,7 @@ extern "C" fn write_field(
 }
 
 pub unsafe extern "C" fn throw_error(stack_pointer: usize, frame_pointer: usize) -> ! {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     print_stack(stack_pointer);
     panic!("Error!");
 }
@@ -587,7 +626,7 @@ pub unsafe extern "C" fn check_arity(
     function_pointer: usize,
     expected_args: isize,
 ) -> isize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get();
 
     // Function pointer is tagged, need to untag
@@ -670,7 +709,7 @@ pub unsafe extern "C" fn pack_variadic_args_from_stack(
     total_args: usize,
     min_args: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
 
     let total = BuiltInTypes::untag(total_args);
@@ -728,7 +767,7 @@ pub unsafe extern "C" fn call_variadic_function_value(
     is_closure: usize,
     closure_ptr: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get();
 
     // Get function metadata
@@ -985,21 +1024,9 @@ fn print_stack(_stack_pointer: usize) {
 }
 
 pub unsafe extern "C" fn gc(stack_pointer: usize, frame_pointer: usize) -> usize {
-    save_frame_pointer(frame_pointer);
-    // Read our return address from our own saved frame.
-    // Rust's prologue saves the return address at [FP + 8], so we can read it directly.
-    // This works on both ARM64 and x86-64 (with frame pointers enabled).
-    // The return address is the safepoint in the caller where gc() was invoked.
-    let gc_return_addr: usize;
-    cfg_if::cfg_if! {
-        if #[cfg(target_arch = "x86_64")] {
-            unsafe { core::arch::asm!("mov {}, [rbp + 8]", out(reg) gc_return_addr) };
-        } else if #[cfg(target_arch = "aarch64")] {
-            unsafe { core::arch::asm!("ldr {}, [x29, #8]", out(reg) gc_return_addr) };
-        } else {
-            compile_error!("Unsupported architecture");
-        }
-    }
+    save_gc_context!(stack_pointer, frame_pointer);
+    // gc_return_addr was captured by save_gc_context!
+    let gc_return_addr = get_saved_gc_return_addr();
     #[cfg(feature = "debug-gc")]
     {
         eprintln!(
@@ -1025,7 +1052,7 @@ pub unsafe extern "C" fn sqrt_builtin(
     frame_pointer: usize,
     value: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
 
@@ -1057,7 +1084,7 @@ pub unsafe extern "C" fn floor_builtin(
     frame_pointer: usize,
     value: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
 
@@ -1085,7 +1112,7 @@ pub unsafe extern "C" fn ceil_builtin(
     frame_pointer: usize,
     value: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
 
@@ -1113,7 +1140,7 @@ pub unsafe extern "C" fn abs_builtin(
     frame_pointer: usize,
     value: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
 
@@ -1141,7 +1168,7 @@ pub unsafe extern "C" fn sin_builtin(
     frame_pointer: usize,
     value: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
 
@@ -1169,7 +1196,7 @@ pub unsafe extern "C" fn cos_builtin(
     frame_pointer: usize,
     value: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
 
@@ -1197,7 +1224,7 @@ pub unsafe extern "C" fn to_float_builtin(
     frame_pointer: usize,
     value: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
 
@@ -1226,7 +1253,7 @@ pub unsafe extern "C" fn new_thread(
     frame_pointer: usize,
     function: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     #[cfg(feature = "thread-safe")]
     {
         let runtime = get_runtime().get_mut();
@@ -1272,11 +1299,15 @@ pub unsafe extern "C" fn set_current_namespace(namespace: usize) -> usize {
     BuiltInTypes::null_value() as usize
 }
 
-pub unsafe extern "C" fn __pause(_stack_pointer: usize, frame_pointer: usize) -> usize {
+pub unsafe extern "C" fn __pause(stack_pointer: usize, frame_pointer: usize) -> usize {
+    // Capture gc_return_addr before doing anything else
+    // This is the return address from the __pause call, at [stack_pointer - 8]
+    let gc_return_addr = unsafe { *((stack_pointer - 8) as *const usize) };
+
     let runtime = get_runtime().get_mut();
 
     // Use frame_pointer passed from Beagle code for FP-chain stack walking
-    pause_current_thread(frame_pointer, runtime);
+    pause_current_thread(frame_pointer, gc_return_addr, runtime);
 
     // Memory barrier to ensure all writes are visible before parking
     std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
@@ -1296,13 +1327,13 @@ pub unsafe extern "C" fn __pause(_stack_pointer: usize, frame_pointer: usize) ->
     BuiltInTypes::null_value() as usize
 }
 
-fn pause_current_thread(frame_pointer: usize, runtime: &mut Runtime) {
+fn pause_current_thread(frame_pointer: usize, gc_return_addr: usize, runtime: &mut Runtime) {
     let thread_state = runtime.thread_state.clone();
     let (lock, condvar) = &*thread_state;
     let mut state = lock.lock().unwrap();
     let stack_base = runtime.get_stack_base();
-    // Store (stack_base, frame_pointer) for FP-chain based stack walking
-    state.pause((stack_base, frame_pointer));
+    // Store (stack_base, frame_pointer, gc_return_addr) for stack walking
+    state.pause((stack_base, frame_pointer, gc_return_addr));
     condvar.notify_one();
     drop(state);
 }
@@ -1315,14 +1346,17 @@ fn unpause_current_thread(runtime: &mut Runtime) {
     condvar.notify_one();
 }
 
-pub extern "C" fn register_c_call(_stack_pointer: usize, frame_pointer: usize) -> usize {
+pub extern "C" fn register_c_call(stack_pointer: usize, frame_pointer: usize) -> usize {
+    // Capture gc_return_addr from the call site
+    let gc_return_addr = unsafe { *((stack_pointer - 8) as *const usize) };
+
     // Use frame_pointer passed from Beagle code for FP-chain stack walking
     let runtime = get_runtime().get_mut();
     let thread_state = runtime.thread_state.clone();
     let (lock, condvar) = &*thread_state;
     let mut state = lock.lock().unwrap();
     let stack_base = runtime.get_stack_base();
-    state.register_c_call((stack_base, frame_pointer));
+    state.register_c_call((stack_base, frame_pointer, gc_return_addr));
     condvar.notify_one();
     BuiltInTypes::null_value() as usize
 }
@@ -1390,8 +1424,8 @@ pub extern "C" fn run_thread(_unused: usize) -> usize {
     if need_to_pause {
         // GC is running after we unregistered - we must pause to participate.
         // We don't have a real Beagle frame, but we need to be counted.
-        // Use (0, 0) as placeholder - we have no stack roots to scan anyway.
-        pause_current_thread(0, runtime);
+        // Use (0, 0, 0) as placeholder - we have no stack roots to scan anyway.
+        pause_current_thread(0, 0, runtime);
 
         // Wait for GC to complete
         while runtime.is_paused() {
@@ -1409,7 +1443,7 @@ pub extern "C" fn run_thread(_unused: usize) -> usize {
     {
         let (lock, condvar) = &*runtime.thread_state.clone();
         let mut state = lock.lock().unwrap();
-        state.register_c_call((0, 0));
+        state.register_c_call((0, 0, 0));
         condvar.notify_one();
     }
 
@@ -1624,7 +1658,7 @@ pub extern "C" fn get_function(
     types: usize,
     return_type: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let library = runtime.get_library(library_struct);
     let function_name = runtime.get_string_literal(function_name);
@@ -1955,7 +1989,7 @@ pub unsafe extern "C" fn copy_object(
     frame_pointer: usize,
     object_pointer: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let object_pointer_id = runtime.register_temporary_root(object_pointer);
     let to_pointer = {
@@ -2394,7 +2428,7 @@ extern "C" fn placeholder() -> usize {
 }
 
 extern "C" fn wait_for_input(stack_pointer: usize, frame_pointer: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).unwrap();
     let runtime = get_runtime().get_mut();
@@ -2404,7 +2438,7 @@ extern "C" fn wait_for_input(stack_pointer: usize, frame_pointer: usize) -> usiz
 
 // Get the ASCII code of the first character of a string
 extern "C" fn char_code(stack_pointer: usize, frame_pointer: usize, string: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let string = runtime.get_string(stack_pointer, string);
     if let Some(ch) = string.chars().next() {
@@ -2417,7 +2451,7 @@ extern "C" fn char_code(stack_pointer: usize, frame_pointer: usize, string: usiz
 
 // Create a single-character string from an ASCII code
 extern "C" fn char_from_code(stack_pointer: usize, frame_pointer: usize, code: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let code = BuiltInTypes::untag(code) as u8;
     let ch = code as char;
     let runtime = get_runtime().get_mut();
@@ -2430,7 +2464,7 @@ extern "C" fn char_from_code(stack_pointer: usize, frame_pointer: usize, code: u
 // Read a line from stdin, stripping the trailing newline
 // Returns null if EOF is reached
 extern "C" fn read_line(stack_pointer: usize, frame_pointer: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let mut input = String::new();
     match std::io::stdin().read_line(&mut input) {
         Ok(0) => {
@@ -2461,7 +2495,7 @@ extern "C" fn read_full_file(
     frame_pointer: usize,
     file_name: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let file_name = runtime.get_string(stack_pointer, file_name);
     let file = std::fs::read_to_string(file_name).unwrap();
@@ -2470,7 +2504,7 @@ extern "C" fn read_full_file(
 }
 
 extern "C" fn eval(stack_pointer: usize, frame_pointer: usize, code: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let code = match BuiltInTypes::get_kind(code) {
         BuiltInTypes::String => runtime.get_string_literal(code),
@@ -2560,8 +2594,8 @@ pub extern "C" fn register_extension(
     BuiltInTypes::null_value() as usize
 }
 
-extern "C" fn hash(_stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+extern "C" fn hash(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "hash");
     let runtime = get_runtime().get();
     let raw_hash = runtime.hash_value(value);
@@ -2583,7 +2617,7 @@ pub extern "C" fn keyword_to_string(
     frame_pointer: usize,
     keyword: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
 
     // Check if it's a HeapObject before calling from_tagged
@@ -2624,7 +2658,7 @@ pub extern "C" fn string_to_keyword(
     frame_pointer: usize,
     string_value: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let keyword_text = runtime.get_string(stack_pointer, string_value);
 
@@ -2637,7 +2671,7 @@ pub extern "C" fn load_keyword_constant_runtime(
     frame_pointer: usize,
     index: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
 
     // Check if we already allocated this keyword
@@ -2679,7 +2713,7 @@ extern "C" fn many_args(
 }
 
 extern "C" fn pop_count(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "pop_count");
     let tag = BuiltInTypes::get_kind(value);
     match tag {
@@ -2735,7 +2769,7 @@ pub unsafe extern "C" fn throw_exception(
     frame_pointer: usize,
     value: usize,
 ) -> ! {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "throw_exception");
 
     // Create exception object
@@ -3765,7 +3799,7 @@ unsafe fn warning_to_struct_impl(
 }
 
 pub unsafe extern "C" fn compiler_warnings(stack_pointer: usize, frame_pointer: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
 
     // Clone warnings to avoid holding the lock while processing
@@ -3815,7 +3849,7 @@ mod rust_collections {
     /// Create an empty persistent vector
     /// Signature: (stack_pointer, frame_pointer) -> tagged_ptr
     pub unsafe extern "C" fn rust_vec_empty(stack_pointer: usize, frame_pointer: usize) -> usize {
-        save_frame_pointer(frame_pointer);
+        save_gc_context!(stack_pointer, frame_pointer);
         let runtime = get_runtime().get_mut();
 
         match PersistentVec::empty(runtime, stack_pointer) {
@@ -3857,7 +3891,7 @@ mod rust_collections {
         vec_ptr: usize,
         value: usize,
     ) -> usize {
-        save_frame_pointer(frame_pointer);
+        save_gc_context!(stack_pointer, frame_pointer);
         let runtime = get_runtime().get_mut();
 
         if !BuiltInTypes::is_heap_pointer(vec_ptr) {
@@ -3884,7 +3918,7 @@ mod rust_collections {
         index: usize,
         value: usize,
     ) -> usize {
-        save_frame_pointer(frame_pointer);
+        save_gc_context!(stack_pointer, frame_pointer);
         let runtime = get_runtime().get_mut();
 
         if !BuiltInTypes::is_heap_pointer(vec_ptr) {
@@ -3908,7 +3942,7 @@ mod rust_collections {
     /// Create an empty persistent map
     /// Signature: (stack_pointer, frame_pointer) -> tagged_ptr
     pub unsafe extern "C" fn rust_map_empty(stack_pointer: usize, frame_pointer: usize) -> usize {
-        save_frame_pointer(frame_pointer);
+        save_gc_context!(stack_pointer, frame_pointer);
         let runtime = get_runtime().get_mut();
 
         // Stay c_calling - HandleScope::allocate checks is_paused and participates in GC
@@ -3954,7 +3988,7 @@ mod rust_collections {
         key: usize,
         value: usize,
     ) -> usize {
-        save_frame_pointer(frame_pointer);
+        save_gc_context!(stack_pointer, frame_pointer);
         let runtime = get_runtime().get_mut();
 
         if !BuiltInTypes::is_heap_pointer(map_ptr) {

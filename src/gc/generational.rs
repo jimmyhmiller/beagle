@@ -497,15 +497,18 @@ impl GenerationalGC {
         stack_pointers: &[(usize, usize, usize)],
     ) {
         for (stack_base, frame_pointer, gc_return_addr) in stack_pointers.iter() {
-            let roots = self.gather_roots(*stack_base, stack_map, *frame_pointer, *gc_return_addr);
-            let new_roots: Vec<usize> = roots.iter().map(|x| x.1).collect();
+            // Gather young roots AND old roots that need their fields updated
+            let (young_roots, old_roots) = self.gather_roots_with_old(*stack_base, stack_map, *frame_pointer, *gc_return_addr);
+
+            // Process young roots - copy them to old generation
+            let new_roots: Vec<usize> = young_roots.iter().map(|x| x.1).collect();
             let new_roots = unsafe { self.copy_all(new_roots) };
 
             self.copy_remaining();
 
             // With FP-chain based walking, roots contain (slot_address, value) pairs
             // Write new roots directly to their addresses
-            for (i, (slot_addr, _)) in roots.iter().enumerate() {
+            for (i, (slot_addr, _)) in young_roots.iter().enumerate() {
                 debug_assert!(
                     BuiltInTypes::untag(new_roots[i]) % 8 == 0,
                     "Pointer is not aligned"
@@ -513,6 +516,11 @@ impl GenerationalGC {
                 unsafe {
                     *(*slot_addr as *mut usize) = new_roots[i];
                 }
+            }
+
+            // Process old roots - update their fields if they point to young objects
+            for old_root in old_roots {
+                self.move_objects_referenced_from_old_to_old(&mut HeapObject::from_tagged(old_root));
             }
         }
     }
@@ -524,7 +532,21 @@ impl GenerationalGC {
         frame_pointer: usize,
         gc_return_addr: usize,
     ) -> Vec<(usize, usize)> {
-        let mut roots: Vec<(usize, usize)> = Vec::with_capacity(36);
+        let (young_roots, _) = self.gather_roots_with_old(stack_base, stack_map, frame_pointer, gc_return_addr);
+        young_roots
+    }
+
+    /// Gather roots from the stack, returning both young roots (that need copying)
+    /// and old roots (that need their fields checked for young pointers).
+    pub fn gather_roots_with_old(
+        &mut self,
+        stack_base: usize,
+        stack_map: &StackMap,
+        frame_pointer: usize,
+        gc_return_addr: usize,
+    ) -> (Vec<(usize, usize)>, Vec<usize>) {
+        let mut young_roots: Vec<(usize, usize)> = Vec::with_capacity(36);
+        let mut old_roots: Vec<usize> = Vec::with_capacity(36);
 
         StackWalker::walk_stack_roots_with_return_addr(
             stack_base,
@@ -534,12 +556,29 @@ impl GenerationalGC {
             |offset, pointer| {
                 let untagged = BuiltInTypes::untag(pointer);
                 if self.young.contains(untagged as *const u8) {
-                    roots.push((offset, pointer));
+                    #[cfg(feature = "debug-gc")]
+                    {
+                        // Check for potentially problematic pointers
+                        let raw_header = unsafe { *(untagged as *const usize) };
+                        if raw_header == 0x7 {
+                            let prev_word = unsafe { *((untagged - 8) as *const usize) };
+                            let tag = pointer & 0x7;
+                            let kind = BuiltInTypes::get_kind(pointer);
+                            eprintln!(
+                                "[GC DEBUG] SUSPICIOUS root: slot_addr={:#x}, tagged={:#x}, untagged={:#x}, tag={}, kind={:?}, raw_header={:#x}, prev_word={:#x}",
+                                offset, pointer, untagged, tag, kind, raw_header, prev_word
+                            );
+                        }
+                    }
+                    young_roots.push((offset, pointer));
+                } else if BuiltInTypes::is_heap_pointer(pointer) {
+                    // Old generation object - we need to check its fields for young pointers
+                    old_roots.push(pointer);
                 }
             },
         );
 
-        roots
+        (young_roots, old_roots)
     }
 
     unsafe fn copy_all(&mut self, roots: Vec<usize>) -> Vec<usize> {
@@ -577,10 +616,35 @@ impl GenerationalGC {
                 return root;
             }
 
+            // Debug: Check for corrupt headers to help diagnose root cause
+            #[cfg(feature = "debug-gc")]
+            {
+                let raw_header = *(heap_object.get_pointer() as *const usize);
+                if raw_header == 0x7 {
+                    let prev_word = *((heap_object.get_pointer() as usize - 8) as *const usize);
+                    eprintln!(
+                        "[GC DEBUG] CORRUPT ROOT DETECTED: root={:#x} ptr={:?}, raw_header={:#x}, prev_word={:#x}",
+                        root, heap_object.get_pointer(), raw_header, prev_word
+                    );
+                    eprintln!("[GC DEBUG] This pointer points to field[0] of an object, not the header!");
+                    // This should no longer happen after the fix for old-to-young pointers
+                }
+            }
+
             // if it is marked we have already copied it
             // We now know that the first field is a pointer
             if heap_object.marked() {
                 let first_field = heap_object.get_field(0);
+                #[cfg(feature = "debug-gc")]
+                if !BuiltInTypes::is_heap_pointer(first_field) {
+                    let raw_header = *(heap_object.get_pointer() as *const usize);
+                    eprintln!(
+                        "[GC DEBUG] COPY ERROR: marked object at {:?} has non-heap first_field={:#x}, raw_header={:#x}",
+                        heap_object.get_pointer(),
+                        first_field,
+                        raw_header
+                    );
+                }
                 assert!(BuiltInTypes::is_heap_pointer(first_field));
                 assert!(
                     !self

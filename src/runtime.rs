@@ -181,26 +181,27 @@ pub struct FFIInfo {
 
 pub struct ThreadState {
     pub paused_threads: usize,
-    pub stack_pointers: Vec<(usize, usize)>,
+    /// Stack info for paused threads: (stack_base, frame_pointer, gc_return_addr)
+    pub stack_pointers: Vec<(usize, usize, usize)>,
     // TODO: I probably don't want to do this here. This requires taking a mutex
     // not really ideal for c calls.
-    pub c_calling_stack_pointers: HashMap<ThreadId, (usize, usize)>,
+    /// Stack info for C-calling threads: (stack_base, frame_pointer, gc_return_addr)
+    pub c_calling_stack_pointers: HashMap<ThreadId, (usize, usize, usize)>,
 }
 
 impl ThreadState {
-    pub fn pause(&mut self, stack_pointer: (usize, usize)) {
+    pub fn pause(&mut self, stack_info: (usize, usize, usize)) {
         self.paused_threads += 1;
-        self.stack_pointers.push(stack_pointer);
+        self.stack_pointers.push(stack_info);
     }
 
     pub fn unpause(&mut self) {
         self.paused_threads -= 1;
     }
 
-    pub fn register_c_call(&mut self, stack_pointer: (usize, usize)) {
+    pub fn register_c_call(&mut self, stack_info: (usize, usize, usize)) {
         let thread_id = thread::current().id();
-        self.c_calling_stack_pointers
-            .insert(thread_id, stack_pointer);
+        self.c_calling_stack_pointers.insert(thread_id, stack_info);
     }
 
     pub fn unregister_c_call(&mut self) {
@@ -1636,21 +1637,12 @@ impl Runtime {
     }
 
     /// GC entry point called when allocation fails or gc_always is set.
-    /// Reads gc_return_addr from our saved frame [FP + 8].
+    /// Uses gc_return_addr saved at builtin entry point.
     fn run_gc(&mut self, stack_pointer: usize, frame_pointer: usize) {
-        // Read our return address from our own saved frame.
-        // Rust's prologue saves the return address at [FP + 8].
-        // This works on both ARM64 and x86-64 (with frame pointers enabled).
-        let gc_return_addr: usize;
-        cfg_if::cfg_if! {
-            if #[cfg(target_arch = "x86_64")] {
-                unsafe { core::arch::asm!("mov {}, [rbp + 8]", out(reg) gc_return_addr) };
-            } else if #[cfg(target_arch = "aarch64")] {
-                unsafe { core::arch::asm!("ldr {}, [x29, #8]", out(reg) gc_return_addr) };
-            } else {
-                compile_error!("Unsupported architecture");
-            }
-        }
+        // Get the gc_return_addr that was saved at builtin entry.
+        // This is the return address pointing back into Beagle code,
+        // which is a safepoint in the stack map.
+        let gc_return_addr = crate::builtins::get_saved_gc_return_addr();
         self.gc_impl(stack_pointer, frame_pointer, gc_return_addr);
     }
 
@@ -1780,13 +1772,11 @@ impl Runtime {
                 .expect("Failed waiting on condition variable - this is a fatal error");
         }
 
-        // Convert paused threads' (base, fp) pairs to (base, fp, 0) triples
-        // The 0 gc_return_addr tells the stack walker to use FP+8 lookup instead
-        let mut stack_pointers: Vec<(usize, usize, usize)> = thread_state
-            .stack_pointers
-            .iter()
-            .map(|(base, fp)| (*base, *fp, 0usize))
-            .collect();
+        // Collect stack pointers from paused threads (already includes gc_return_addr)
+        let mut stack_pointers: Vec<(usize, usize, usize)> =
+            thread_state.stack_pointers.clone();
+        // Add stack pointers from threads that are currently in C/Rust calls
+        stack_pointers.extend(thread_state.c_calling_stack_pointers.values().cloned());
         // Main thread uses its actual gc_return_addr for accurate first-frame scanning
         stack_pointers.push((self.get_stack_base(), frame_pointer, gc_return_addr));
         // Add saved stack segments to the GC scan (no gc_return_addr)
@@ -2056,7 +2046,8 @@ impl Runtime {
                 {
                     let (lock, condvar) = &*thread_state_for_c_call;
                     let mut state = lock.lock().unwrap();
-                    state.register_c_call((stack_pointer, stack_pointer));
+                    // No Beagle code running yet, so gc_return_addr = 0
+                    state.register_c_call((stack_pointer, stack_pointer, 0));
                     condvar.notify_one();
                 }
 
