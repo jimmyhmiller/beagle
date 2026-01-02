@@ -91,19 +91,6 @@ pub enum ThreadStateCode {
     Exiting = 5,
 }
 
-impl From<super::debug_trace::ThreadState> for ThreadStateCode {
-    fn from(state: super::debug_trace::ThreadState) -> Self {
-        match state {
-            super::debug_trace::ThreadState::Running => ThreadStateCode::Running,
-            super::debug_trace::ThreadState::PausedForGc => ThreadStateCode::PausedForGc,
-            super::debug_trace::ThreadState::WaitingOnLock => ThreadStateCode::WaitingOnLock,
-            super::debug_trace::ThreadState::InCCall => ThreadStateCode::InCCall,
-            super::debug_trace::ThreadState::Starting => ThreadStateCode::Starting,
-            super::debug_trace::ThreadState::Exiting => ThreadStateCode::Exiting,
-        }
-    }
-}
-
 /// Get current thread ID as u64 for USDT probes
 #[inline]
 pub fn thread_id_u64() -> u64 {
@@ -157,9 +144,8 @@ pub fn fire_thread_pause_exit(pause_duration_ns: u64) {
 }
 
 #[inline]
-pub fn fire_thread_state(state: super::debug_trace::ThreadState) {
-    let state_code: ThreadStateCode = state.into();
-    probes::thread__state!(|| (thread_id_u64(), state_code as u64, get_thread_count()));
+pub fn fire_thread_state(state: ThreadStateCode) {
+    probes::thread__state!(|| (thread_id_u64(), state as u64, get_thread_count()));
 }
 
 #[inline]

@@ -2,7 +2,6 @@ use std::{collections::HashMap, error::Error, ffi::c_void, io, thread::ThreadId}
 
 use libc::mprotect;
 
-use super::debug_trace::{self, Generation};
 use super::get_page_size;
 use super::usdt_probes;
 
@@ -216,7 +215,7 @@ impl Allocator for GenerationalGC {
             old,
             copied: vec![],
             gc_count: 0,
-            full_gc_frequency: 2,
+            full_gc_frequency: 100,
             namespace_roots: vec![],
             relocated_namespace_roots: vec![],
             temporary_roots: vec![],
@@ -243,7 +242,7 @@ impl Allocator for GenerationalGC {
         if !self.options.gc {
             return;
         }
-        if self.gc_count % self.full_gc_frequency == 0 {
+        if self.gc_count != 0 && self.gc_count % self.full_gc_frequency == 0 {
             self.gc_count = 0;
             self.full_gc(stack_map, stack_pointers);
         } else {
@@ -375,7 +374,6 @@ impl GenerationalGC {
         let size = Word::from_word(words);
         if self.young.can_allocate(size) {
             let ptr = self.young.allocate(size);
-            debug_trace::trace_alloc(ptr as usize, words, Generation::Young);
             Ok(AllocateAction::Allocated(ptr))
         } else {
             Ok(AllocateAction::Gc)
@@ -517,12 +515,6 @@ impl GenerationalGC {
                                 continue;
                             }
 
-                            debug_trace::trace_root_gathered(
-                                slot_addr,
-                                slot_value,
-                                details.function_name.as_deref(),
-                            );
-
                             roots.push((slot_addr, slot_value));
                         } else {
                             // CRITICAL: Verify this is actually in old gen, not just "not young"
@@ -628,6 +620,7 @@ impl GenerationalGC {
     }
 
     fn minor_gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
+        let start = std::time::Instant::now();
         usdt_probes::fire_gc_minor_start(self.gc_count);
 
         self.gc_count += 1;
@@ -670,6 +663,9 @@ impl GenerationalGC {
         self.young.clear();
 
         usdt_probes::fire_gc_minor_end(self.gc_count);
+        if self.options.print_stats {
+            println!("Minor gc took {:?}", start.elapsed());
+        }
     }
 
     fn update_old_generation_namespace_roots(&mut self) {

@@ -626,9 +626,6 @@ cfg_if::cfg_if! {
 }
 
 fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
-    // Initialize GC tracing if enabled
-    gc::debug_trace::init();
-
     // Register USDT probes for DTrace
     if let Err(e) = gc::usdt_probes::register() {
         eprintln!("Warning: Failed to register USDT probes: {}", e);
@@ -828,21 +825,6 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         for thread in threads {
             thread.join().unwrap();
         }
-    }
-
-    // Dump GC trace if enabled
-    if gc::debug_trace::is_enabled() {
-        if let Ok(trace_file) = std::env::var("BEAGLE_GC_TRACE_FILE") {
-            if let Err(e) = gc::debug_trace::dump_to_file(&trace_file) {
-                eprintln!("Failed to dump GC trace: {}", e);
-            }
-        } else {
-            // Default trace file
-            if let Err(e) = gc::debug_trace::dump_to_file("/tmp/beagle_gc_trace.txt") {
-                eprintln!("Failed to dump GC trace: {}", e);
-            }
-        }
-        eprintln!("{}", gc::debug_trace::generate_summary());
     }
 
     Ok(())

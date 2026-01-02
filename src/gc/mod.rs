@@ -11,7 +11,6 @@ use crate::collections::{HandleArenaPtr, RootSetPtr};
 pub use crate::mmap_utils::get_page_size;
 
 pub mod compacting;
-pub mod debug_trace;
 pub mod generational;
 #[cfg(feature = "heap-dump")]
 pub mod heap_dump;
