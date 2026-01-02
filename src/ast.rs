@@ -2496,7 +2496,7 @@ impl AstCompiler<'_> {
     fn create_empty_array(&mut self) -> Value {
         let allocate = self
             .compiler
-            .find_function("beagle.builtin/allocate")
+            .find_function("beagle.builtin/allocate-zeroed")
             .unwrap();
         let allocate = self.compiler.get_function_pointer(allocate).unwrap();
         let allocate = self.ir.assign_new(allocate);
@@ -2534,10 +2534,10 @@ impl AstCompiler<'_> {
             self.ir.push_to_stack(reg.into());
         }
 
-        // Allocate array
+        // Allocate array (zeroed for arrays)
         let allocate = self
             .compiler
-            .find_function("beagle.builtin/allocate")
+            .find_function("beagle.builtin/allocate-zeroed")
             .unwrap();
         let allocate = self.compiler.get_function_pointer(allocate).unwrap();
         let allocate = self.ir.assign_new(allocate);
@@ -2628,11 +2628,11 @@ impl AstCompiler<'_> {
             self.ir.push_to_stack(reg.into());
         }
 
-        // Allocate a raw array with type_id = 1
+        // Allocate a raw array with type_id = 1 (zeroed for arrays)
         // This uses the same pattern as struct allocation but with type_id instead of struct_id
         let allocate = self
             .compiler
-            .find_function("beagle.builtin/allocate")
+            .find_function("beagle.builtin/allocate-zeroed")
             .unwrap();
         let allocate = self.compiler.get_function_pointer(allocate).unwrap();
         let allocate = self.ir.assign_new(allocate);

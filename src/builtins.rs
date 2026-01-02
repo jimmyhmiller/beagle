@@ -230,6 +230,21 @@ extern "C" fn allocate(stack_pointer: usize, frame_pointer: usize, size: usize) 
     result
 }
 
+/// Allocate with zeroed memory (for arrays that don't initialize all fields)
+extern "C" fn allocate_zeroed(stack_pointer: usize, frame_pointer: usize, size: usize) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let size = BuiltInTypes::untag(size);
+    let runtime = get_runtime().get_mut();
+
+    let result = runtime
+        .allocate_zeroed(size, stack_pointer, BuiltInTypes::HeapObject)
+        .unwrap();
+
+    debug_assert!(BuiltInTypes::is_heap_pointer(result));
+    debug_assert!(BuiltInTypes::untag(result) % 8 == 0);
+    result
+}
+
 extern "C" fn allocate_float(stack_pointer: usize, frame_pointer: usize, size: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
@@ -722,9 +737,9 @@ pub unsafe extern "C" fn pack_variadic_args_from_stack(
     // Number of extra args to pack
     let num_extra = total.saturating_sub(min);
 
-    // Allocate array for extra args
+    // Allocate array for extra args (zeroed)
     let array_ptr = runtime
-        .allocate(num_extra, stack_pointer, BuiltInTypes::HeapObject)
+        .allocate_zeroed(num_extra, stack_pointer, BuiltInTypes::HeapObject)
         .unwrap();
 
     // Set type_id to 1 (raw array)
@@ -793,9 +808,9 @@ pub unsafe extern "C" fn call_variadic_function_value(
     let runtime_mut = get_runtime().get_mut();
     let args_root_id = runtime_mut.register_temporary_root(args_array_ptr);
 
-    // Allocate array for extra args (can trigger GC)
+    // Allocate array for extra args (can trigger GC, zeroed)
     let rest_array = runtime_mut
-        .allocate(num_extra, stack_pointer, BuiltInTypes::HeapObject)
+        .allocate_zeroed(num_extra, stack_pointer, BuiltInTypes::HeapObject)
         .unwrap();
 
     // Unregister args_array root after allocation is complete
@@ -3150,6 +3165,15 @@ impl Runtime {
         self.add_builtin_function_with_fp(
             "beagle.builtin/allocate",
             allocate as *const u8,
+            true,
+            true,
+            3,
+        )?;
+
+        // allocate_zeroed for arrays (zeroes memory)
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/allocate-zeroed",
+            allocate_zeroed as *const u8,
             true,
             true,
             3,

@@ -1208,7 +1208,7 @@ impl Runtime {
         strings: &[String],
     ) -> Result<usize, Box<dyn Error>> {
         let num_elements = strings.len();
-        let array_ptr = self.allocate(num_elements, stack_pointer, BuiltInTypes::HeapObject)?;
+        let array_ptr = self.allocate_zeroed(num_elements, stack_pointer, BuiltInTypes::HeapObject)?;
 
         let mut heap_obj = HeapObject::from_tagged(array_ptr);
         heap_obj.write_type_id(1); // type_id=1 marks raw array
@@ -1313,6 +1313,45 @@ impl Runtime {
                     // TODO: Detect loop here
                     let pointer = self.allocate(words, stack_pointer, kind)?;
                     // If we went down this path, our pointer is already tagged
+                    Ok(pointer)
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Allocate with zeroed memory (for arrays that don't initialize all fields)
+    pub fn allocate_zeroed(
+        &mut self,
+        words: usize,
+        stack_pointer: usize,
+        kind: BuiltInTypes,
+    ) -> Result<usize, Box<dyn Error>> {
+        let options = self.memory.heap.get_allocation_options();
+        let frame_pointer = crate::builtins::get_saved_frame_pointer();
+
+        if options.gc_always {
+            self.run_gc(stack_pointer, frame_pointer);
+        }
+
+        let result = self.memory.heap.try_allocate_zeroed(words, kind);
+
+        match result {
+            Ok(AllocateAction::Allocated(value)) => {
+                assert!(value.is_aligned());
+                let value = kind.tag(value as isize);
+                Ok(value as usize)
+            }
+            Ok(AllocateAction::Gc) => {
+                self.run_gc(stack_pointer, frame_pointer);
+                let result = self.memory.heap.try_allocate_zeroed(words, kind);
+                if let Ok(AllocateAction::Allocated(result)) = result {
+                    assert!(result.is_aligned());
+                    let result = kind.tag(result as isize);
+                    Ok(result as usize)
+                } else {
+                    self.memory.heap.grow();
+                    let pointer = self.allocate_zeroed(words, stack_pointer, kind)?;
                     Ok(pointer)
                 }
             }
