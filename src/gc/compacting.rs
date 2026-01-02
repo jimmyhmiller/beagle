@@ -59,6 +59,19 @@ impl Space {
         let mut heap_object = HeapObject::from_untagged(unsafe { self.start.add(offset) });
 
         assert!(self.contains(heap_object.get_pointer()));
+
+        // Zero the full object memory (header + fields) to prevent stale pointers
+        // from previous GC cycles being seen as valid heap pointers
+        let header_size = if size.to_words() > Header::MAX_INLINE_SIZE {
+            16
+        } else {
+            8
+        };
+        let full_size = size.to_bytes() + header_size;
+        unsafe {
+            std::ptr::write_bytes(self.start.add(offset) as *mut u8, 0, full_size);
+        }
+
         heap_object.write_header(size);
 
         heap_object.get_pointer()

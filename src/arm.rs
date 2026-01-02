@@ -1342,7 +1342,50 @@ impl LowLevelArm {
 
         if let Some(index) = sub_index {
             // Replace single SUB with sequence of instructions for stack allocation
-            let alloc_instructions = Self::generate_stack_allocation(stack_bytes);
+            let mut alloc_instructions = Self::generate_stack_allocation(stack_bytes);
+
+            // CRITICAL FIX: Zero out local slots to prevent GC from seeing garbage.
+            // When GC runs during allocation (before a local is assigned), uninitialized
+            // local slots could contain interior pointers or other garbage from previous
+            // stack usage. Initialize all local slots to null (0x7, which is tagged null).
+            //
+            // NOTE: STUR has a 9-bit signed immediate (-256 to 255), so for large stack
+            // frames we need a different approach. We use X10 as a pointer that we decrement.
+            let null_value = crate::types::BuiltInTypes::null_value() as i32;
+
+            if self.max_locals > 0 {
+                // Load null value into X9
+                alloc_instructions.push(ArmAsm::Movz {
+                    rd: X9,
+                    imm16: null_value,
+                    hw: 0,
+                    sf: 1,
+                });
+
+                // X10 = X29 - 8 (point to first local slot)
+                alloc_instructions.push(ArmAsm::SubAddsubImm {
+                    sf: 1,
+                    rn: X29,
+                    rd: X10,
+                    imm12: 8,
+                    sh: 0,
+                });
+
+                // Store null to each local slot, decrementing X10 after each store
+                for _ in 0..self.max_locals {
+                    // Store X9 to [X10], then X10 = X10 - 8 (post-decrement)
+                    // Use STR with post-index: str x9, [x10], #-8
+                    alloc_instructions.push(ArmAsm::StrImmGen {
+                        rt: X9,
+                        rn: X10,
+                        imm9: -8,
+                        imm12: 0,   // Not used for post-index
+                        size: 0b11, // 64-bit
+                        class_selector: StrImmGenSelector::PostIndex,
+                    });
+                }
+            }
+
             let delta = alloc_instructions.len() as isize - 1;
             self.instructions.splice(index..=index, alloc_instructions);
 

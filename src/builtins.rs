@@ -24,11 +24,12 @@ use crate::{
 
 use std::hint::black_box;
 
-// Thread-local storage for the frame pointer at builtin entry.
+// Thread-local storage for the frame pointer and gc return address at builtin entry.
 // This is set by builtins that receive frame_pointer from Beagle code.
 // Used by gc() when triggered internally (e.g., during allocation).
 thread_local! {
     static SAVED_FRAME_POINTER: Cell<usize> = const { Cell::new(0) };
+    static SAVED_GC_RETURN_ADDR: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Save the frame pointer for later use by gc().
@@ -41,6 +42,37 @@ pub fn save_frame_pointer(fp: usize) {
 /// Returns 0 if none has been saved (shouldn't happen in normal operation).
 pub fn get_saved_frame_pointer() -> usize {
     SAVED_FRAME_POINTER.with(|cell| cell.get())
+}
+
+/// Save the gc return address for later use by gc().
+/// Called by builtins that receive frame_pointer/stack_pointer from Beagle.
+pub fn save_gc_return_addr(addr: usize) {
+    SAVED_GC_RETURN_ADDR.with(|cell| cell.set(addr));
+}
+
+/// Get the saved gc return address.
+/// Returns 0 if none has been saved.
+pub fn get_saved_gc_return_addr() -> usize {
+    SAVED_GC_RETURN_ADDR.with(|cell| cell.get())
+}
+
+/// Macro to save frame pointer and gc return address for GC stack walking.
+/// The gc_return_addr is the return address from the Beagle code that called
+/// this builtin. On ARM64, this was in LR and is now saved at [Rust_FP + 8]
+/// by Rust's prologue. On x86-64, it's also at [Rust_FP + 8].
+///
+/// The saved frame_pointer (Beagle FP) is used by __pause to check if the
+/// saved gc_return_addr is still valid for the current call.
+#[macro_export]
+macro_rules! save_gc_context {
+    ($stack_pointer:expr, $frame_pointer:expr) => {{
+        $crate::builtins::save_frame_pointer($frame_pointer);
+        // Get the return address from where Rust's prologue saved it
+        // This is the address in Beagle code right after the builtin call
+        let rust_fp = $crate::builtins::get_current_rust_frame_pointer();
+        let gc_return_addr = unsafe { *((rust_fp + 8) as *const usize) };
+        $crate::builtins::save_gc_return_addr(gc_return_addr);
+    }};
 }
 
 /// Read the current frame pointer register.
@@ -59,45 +91,6 @@ pub fn get_current_rust_frame_pointer() -> usize {
         }
     }
     fp
-}
-
-pub unsafe extern "C" fn debug_stack_segments() -> usize {
-    let runtime = get_runtime().get();
-
-    println!("=== Stack Segments Debug ===");
-    println!("Segment count: {}", runtime.get_stack_segment_count());
-
-    for i in 0..runtime.get_stack_segment_count() {
-        if let Some(segment) = runtime.get_stack_segment(i) {
-            println!("Segment {}: {} bytes", i, segment.data.len());
-
-            // Show raw bytes in hex format
-            print!("Raw bytes: ");
-            for (j, byte) in segment.data.iter().enumerate() {
-                if j > 0 && j % 8 == 0 {
-                    print!(" ");
-                }
-                if j > 0 && j % 32 == 0 {
-                    println!();
-                    print!("           ");
-                }
-                print!("{:02x}", byte);
-            }
-            println!();
-
-            // Try to interpret as usize values (8-byte chunks)
-            if segment.data.len() >= 8 {
-                println!("As usize values:");
-                for chunk in segment.data.chunks_exact(8) {
-                    let value = u64::from_le_bytes(chunk.try_into().unwrap()) as usize;
-                    println!("  0x{:016x} ({})", value, value);
-                }
-            }
-            println!();
-        }
-    }
-
-    0b111 // Return success
 }
 
 #[allow(unused)]
@@ -173,7 +166,7 @@ pub unsafe extern "C" fn to_string(
     frame_pointer: usize,
     value: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let result = runtime.get_repr(value, 0);
     if result.is_none() {
@@ -192,7 +185,7 @@ pub unsafe extern "C" fn to_number(
     frame_pointer: usize,
     value: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let string = runtime.get_string(stack_pointer, value);
     if string.contains(".") {
@@ -224,7 +217,7 @@ pub extern "C" fn print_byte(value: usize) -> usize {
 }
 
 extern "C" fn allocate(stack_pointer: usize, frame_pointer: usize, size: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let size = BuiltInTypes::untag(size);
     let runtime = get_runtime().get_mut();
 
@@ -238,7 +231,7 @@ extern "C" fn allocate(stack_pointer: usize, frame_pointer: usize, size: usize) 
 }
 
 extern "C" fn allocate_float(stack_pointer: usize, frame_pointer: usize, size: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let value = BuiltInTypes::untag(size);
 
@@ -257,7 +250,7 @@ extern "C" fn get_string_index(
     string: usize,
     index: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "get_string_index");
     let runtime = get_runtime().get_mut();
     if BuiltInTypes::get_kind(string) == BuiltInTypes::String {
@@ -311,7 +304,7 @@ extern "C" fn string_concat(
     a: usize,
     b: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "string_concat");
     let runtime = get_runtime().get_mut();
     let a = runtime.get_string(stack_pointer, a);
@@ -330,7 +323,7 @@ extern "C" fn substring(
     start: usize,
     length: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "substring");
     let runtime = get_runtime().get_mut();
     let string_pointer = runtime.register_temporary_root(string);
@@ -344,7 +337,7 @@ extern "C" fn substring(
 }
 
 extern "C" fn uppercase(stack_pointer: usize, frame_pointer: usize, string: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "uppercase");
     let runtime = get_runtime().get_mut();
     let string_value = runtime.get_string(stack_pointer, string);
@@ -370,7 +363,7 @@ extern "C" fn make_closure(
     num_free: usize,
     free_variable_pointer: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "make_closure");
     let runtime = get_runtime().get_mut();
     if BuiltInTypes::get_kind(function) != BuiltInTypes::Function {
@@ -540,14 +533,14 @@ extern "C" fn protocol_dispatch(
 }
 
 extern "C" fn type_of(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "type_of");
     let runtime = get_runtime().get_mut();
     runtime.type_of(stack_pointer, value).unwrap()
 }
 
 extern "C" fn get_os(stack_pointer: usize, frame_pointer: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "get_os");
     let runtime = get_runtime().get_mut();
     let os_name = if cfg!(target_os = "macos") {
@@ -583,7 +576,7 @@ extern "C" fn write_field(
     property_cache_location: usize,
     value: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let index = runtime.write_field(stack_pointer, struct_pointer, str_constant_ptr, value);
     let type_id = HeapObject::from_tagged(struct_pointer).get_struct_id();
@@ -594,9 +587,41 @@ extern "C" fn write_field(
 }
 
 pub unsafe extern "C" fn throw_error(stack_pointer: usize, frame_pointer: usize) -> ! {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     print_stack(stack_pointer);
     panic!("Error!");
+}
+
+pub unsafe extern "C" fn throw_type_error(stack_pointer: usize, frame_pointer: usize) -> ! {
+    save_gc_context!(stack_pointer, frame_pointer);
+
+    let (kind_str, message_str) = {
+        let runtime = get_runtime().get_mut();
+        let kind = runtime
+            .allocate_string(stack_pointer, "TypeError".to_string())
+            .expect("Failed to allocate kind string")
+            .into();
+        let msg = runtime
+            .allocate_string(
+                stack_pointer,
+                "Type mismatch in arithmetic operation".to_string(),
+            )
+            .expect("Failed to allocate message string")
+            .into();
+        (kind, msg)
+    };
+
+    let null_location = BuiltInTypes::Null.tag(0) as usize;
+    unsafe {
+        let error = create_error(
+            stack_pointer,
+            frame_pointer,
+            kind_str,
+            message_str,
+            null_location,
+        );
+        throw_exception(stack_pointer, frame_pointer, error);
+    }
 }
 
 pub unsafe extern "C" fn check_arity(
@@ -605,7 +630,7 @@ pub unsafe extern "C" fn check_arity(
     function_pointer: usize,
     expected_args: isize,
 ) -> isize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get();
 
     // Function pointer is tagged, need to untag
@@ -688,7 +713,7 @@ pub unsafe extern "C" fn pack_variadic_args_from_stack(
     total_args: usize,
     min_args: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
 
     let total = BuiltInTypes::untag(total_args);
@@ -746,7 +771,7 @@ pub unsafe extern "C" fn call_variadic_function_value(
     is_closure: usize,
     closure_ptr: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get();
 
     // Get function metadata
@@ -1002,19 +1027,19 @@ fn print_stack(_stack_pointer: usize) {
     }
 }
 
-pub unsafe extern "C" fn gc(stack_pointer: usize, _frame_pointer: usize) -> usize {
-    // With frame pointers enabled everywhere, we just read our own FP and walk from there.
-    // The stack walker will check each return address against the stack map to find Beagle frames.
-    let rust_fp = get_current_rust_frame_pointer();
+pub unsafe extern "C" fn gc(stack_pointer: usize, frame_pointer: usize) -> usize {
+    // Save the GC context including the return address
+    save_gc_context!(stack_pointer, frame_pointer);
+    let gc_return_addr = get_saved_gc_return_addr();
     #[cfg(feature = "debug-gc")]
     {
         eprintln!(
-            "DEBUG gc: stack_pointer={:#x}, rust_fp={:#x}",
-            stack_pointer, rust_fp
+            "DEBUG gc: stack_pointer={:#x}, frame_pointer={:#x}, gc_return_addr={:#x}",
+            stack_pointer, frame_pointer, gc_return_addr
         );
     }
     let runtime = get_runtime().get_mut();
-    runtime.gc_impl(stack_pointer, rust_fp);
+    runtime.gc_impl(stack_pointer, frame_pointer, gc_return_addr);
     BuiltInTypes::null_value() as usize
 }
 
@@ -1031,7 +1056,7 @@ pub unsafe extern "C" fn sqrt_builtin(
     frame_pointer: usize,
     value: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
 
@@ -1063,7 +1088,7 @@ pub unsafe extern "C" fn floor_builtin(
     frame_pointer: usize,
     value: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
 
@@ -1091,7 +1116,7 @@ pub unsafe extern "C" fn ceil_builtin(
     frame_pointer: usize,
     value: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
 
@@ -1119,7 +1144,7 @@ pub unsafe extern "C" fn abs_builtin(
     frame_pointer: usize,
     value: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
 
@@ -1147,7 +1172,7 @@ pub unsafe extern "C" fn sin_builtin(
     frame_pointer: usize,
     value: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
 
@@ -1175,7 +1200,7 @@ pub unsafe extern "C" fn cos_builtin(
     frame_pointer: usize,
     value: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
 
@@ -1203,7 +1228,7 @@ pub unsafe extern "C" fn to_float_builtin(
     frame_pointer: usize,
     value: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
 
@@ -1232,11 +1257,11 @@ pub unsafe extern "C" fn new_thread(
     frame_pointer: usize,
     function: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     #[cfg(feature = "thread-safe")]
     {
         let runtime = get_runtime().get_mut();
-        runtime.new_thread(function, stack_pointer);
+        runtime.new_thread(function, stack_pointer, frame_pointer);
         BuiltInTypes::null_value() as usize
     }
     #[cfg(not(feature = "thread-safe"))]
@@ -1279,11 +1304,49 @@ pub unsafe extern "C" fn set_current_namespace(namespace: usize) -> usize {
 }
 
 pub unsafe extern "C" fn __pause(_stack_pointer: usize, frame_pointer: usize) -> usize {
-    // Capture our return address - this is the safepoint in Beagle code
-    let gc_return_addr = get_current_rust_frame_pointer();
-    let gc_return_addr = unsafe { *((gc_return_addr + 8) as *const usize) };
+    use crate::gc::debug_trace::{self, ThreadState};
+    use crate::gc::usdt_probes;
+
+    // Get the gc_return_addr. When called from Rust code (get_my_thread_obj, gc_impl),
+    // save_gc_context! was already called with the correct Beagle return address.
+    // When called directly from Beagle (via primitive/__pause), we capture it ourselves.
+    //
+    // To distinguish these cases, we compare the Beagle frame_pointer we received
+    // with the saved frame_pointer from save_gc_context!. If they match, we're in
+    // the same Beagle call chain and the saved gc_return_addr is valid.
+    let saved_beagle_fp = get_saved_frame_pointer();
+    let my_rust_fp = get_current_rust_frame_pointer();
+    let captured_addr = unsafe { *((my_rust_fp + 8) as *const usize) };
+    let saved_addr = get_saved_gc_return_addr();
+
+    let gc_return_addr = if saved_beagle_fp != 0 && saved_beagle_fp == frame_pointer {
+        // Same Beagle frame as when save_gc_context! was called - use saved addr
+        if std::env::var("BEAGLE_PAUSE_DEBUG").is_ok() {
+            eprintln!(
+                "[PAUSE_DEBUG] Using saved gc_return_addr={:#x} (saved_fp={:#x} == frame_pointer={:#x})",
+                saved_addr, saved_beagle_fp, frame_pointer
+            );
+        }
+        saved_addr
+    } else {
+        // Called directly from Beagle with a different/no saved frame - capture our own
+        if std::env::var("BEAGLE_PAUSE_DEBUG").is_ok() {
+            eprintln!(
+                "[PAUSE_DEBUG] Using captured gc_return_addr={:#x} (saved_fp={:#x} != frame_pointer={:#x})",
+                captured_addr, saved_beagle_fp, frame_pointer
+            );
+        }
+        captured_addr
+    };
 
     let runtime = get_runtime().get_mut();
+
+    // Fire USDT probe and trace thread state change
+    usdt_probes::fire_thread_pause_enter();
+    usdt_probes::fire_thread_state(ThreadState::PausedForGc);
+    debug_trace::trace_thread_state(ThreadState::PausedForGc, "entering __pause");
+
+    let pause_start = std::time::Instant::now();
 
     // Use frame_pointer passed from Beagle code for FP-chain stack walking
     pause_current_thread(frame_pointer, gc_return_addr, runtime);
@@ -1299,6 +1362,13 @@ pub unsafe extern "C" fn __pause(_stack_pointer: usize, frame_pointer: usize) ->
     // Apparently, I can't count on this not unparking
     // I need some other mechanism to know that things are ready
     unpause_current_thread(runtime);
+
+    let pause_duration_ns = pause_start.elapsed().as_nanos() as u64;
+
+    // Fire USDT probe and trace thread resuming
+    usdt_probes::fire_thread_pause_exit(pause_duration_ns);
+    usdt_probes::fire_thread_state(ThreadState::Running);
+    debug_trace::trace_thread_state(ThreadState::Running, "exiting __pause");
 
     // Memory barrier to ensure all GC updates are visible before continuing
     std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
@@ -1375,73 +1445,194 @@ pub extern "C" fn get_and_unregister_temp_root(temporary_root_id: usize) -> usiz
 /// Run a thread by calling the no-argument __run_thread_start function.
 /// The Thread object is accessed via the get_my_thread_obj builtin inside Beagle code,
 /// ensuring GC can update stack slots properly.
+///
+/// Key invariant: We are NOT counted in registered_thread_count until we hold gc_lock
+/// and increment it. This prevents GC from waiting for us before we're ready.
+///
+/// Flow:
+/// 1. Acquire gc_lock (GC can't start while we hold it)
+/// 2. Increment registered_thread_count (now GC will count us)
+/// 3. Release gc_lock
+/// 4. Run Beagle code (first instruction is __pause, handles any pending GC)
+/// 5. On cleanup: acquire gc_lock, decrement count, remove thread root, release
 pub extern "C" fn run_thread(_unused: usize) -> usize {
-    // We enter this function while registered as C-calling.
-    // We DON'T read thread_obj here - we call a Beagle function that reads it.
-    // This avoids the race between reading and entering Beagle code.
-
     let runtime = get_runtime().get_mut();
     let my_thread_id = thread::current().id();
 
-    // Wait for any in-progress GC while we're still c_calling.
-    // We can safely yield because we're c_calling, so GC will proceed without us.
-    while runtime.is_paused() {
-        thread::yield_now();
+    // === STARTUP ===
+    // Acquire gc_lock and register ourselves.
+    // We use blocking lock() here because we are NOT yet counted in registered_thread_count,
+    // so GC won't wait for us - no deadlock possible.
+    {
+        let _guard = runtime.gc_lock.lock().unwrap();
+        // Now register ourselves - GC will count us from this point on
+        let new_count = runtime
+            .registered_thread_count
+            .fetch_add(1, std::sync::atomic::Ordering::Release)
+            + 1;
+        // Fire USDT probes for thread start and registration
+        crate::gc::usdt_probes::fire_thread_register(new_count);
+        crate::gc::usdt_probes::fire_thread_start();
+        // Lock released here - GC can now start, and it will count us
     }
 
-    // CRITICAL: Unregister from c_calling and check if GC started atomically.
-    // If GC started after we unregistered, we must participate by pausing.
-    // Otherwise GC will deadlock waiting for us.
-    let need_to_pause = {
-        let (lock, condvar) = &*runtime.thread_state.clone();
-        let mut state = lock.lock().unwrap();
-        state.unregister_c_call();
-        condvar.notify_one();
-        // Check while holding lock - if is_paused is set, GC is waiting for us
-        runtime.is_paused()
-    };
-
-    if need_to_pause {
-        // GC is running after we unregistered - we must pause to participate.
-        // We don't have a real Beagle frame, but we need to be counted.
-        // Use (0, 0, 0) as placeholder - we have no stack roots to scan anyway.
-        pause_current_thread(0, 0, runtime);
-
-        // Wait for GC to complete
-        while runtime.is_paused() {
-            thread::park();
-        }
-
-        // Unpause when GC is done
-        unpause_current_thread(runtime);
-    }
-
-    // Call __run_thread_start which takes no arguments and reads thread_obj via builtin
+    // Enter Beagle code - __run_thread_start calls __pause as first instruction!
+    // If GC started right after we released gc_lock, __pause will handle it.
     let result = unsafe { call_fn_0(runtime, "beagle.core/__run_thread_start") };
 
-    // Re-register as c_calling for cleanup
+    // === CLEANUP ===
+    // We're still registered but we're in C code now, not Beagle code.
+    // If GC starts, it will wait for us to pause, but we can't pause from C.
+    // Solution: register as c_calling so GC counts us and proceeds.
     {
         let (lock, condvar) = &*runtime.thread_state.clone();
         let mut state = lock.lock().unwrap();
-        state.register_c_call((0, 0, 0));
+        state.register_c_call((0, 0, 0)); // No stack to scan
         condvar.notify_one();
     }
 
-    // Remove thread root - thread is finishing
-    runtime.memory.remove_thread_root(my_thread_id);
+    // Now any GC will count us as c_calling and proceed.
+    // Wait for any in-progress GC to finish, then unregister everything.
+    loop {
+        while runtime.is_paused() {
+            thread::yield_now();
+        }
+
+        match runtime.gc_lock.try_lock() {
+            Ok(_guard) => {
+                // While holding lock: unregister from c_calling, decrement count, remove root
+                {
+                    let (lock, condvar) = &*runtime.thread_state.clone();
+                    let mut state = lock.lock().unwrap();
+                    state.unregister_c_call();
+                    condvar.notify_one();
+                }
+                let new_count = runtime
+                    .registered_thread_count
+                    .fetch_sub(1, std::sync::atomic::Ordering::Release)
+                    - 1;
+                runtime.memory.remove_thread_root(my_thread_id);
+                // Fire USDT probes for thread unregistration and exit
+                crate::gc::usdt_probes::fire_thread_unregister(new_count);
+                crate::gc::usdt_probes::fire_thread_exit();
+                break;
+            }
+            Err(_) => {
+                thread::yield_now();
+            }
+        }
+    }
 
     result
 }
 
 /// Get the current thread's Thread object from thread_roots.
 /// Called from Beagle code in __run_thread_start.
-pub extern "C" fn get_my_thread_obj() -> usize {
+/// Takes stack_pointer and frame_pointer so we can call __pause if needed.
+///
+/// CRITICAL: This function must return a pointer that won't become stale before
+/// the caller can use it. We check is_paused() after releasing the lock to ensure
+/// that if GC is about to run, we pause and get the updated pointer.
+pub extern "C" fn get_my_thread_obj(stack_pointer: usize, frame_pointer: usize) -> usize {
+    // CRITICAL: Save the gc context here so that if we call __pause,
+    // the GC will have the correct return address pointing to Beagle code.
+    // Without this, __pause would capture a return address pointing to this
+    // Rust function, and the GC would skip the first Beagle frame!
+    save_gc_context!(stack_pointer, frame_pointer);
+
     let runtime = get_runtime().get_mut();
     let thread_id = thread::current().id();
-    runtime
-        .memory
-        .get_thread_root(thread_id)
-        .expect("Thread root not found in get_my_thread_obj")
+
+    // We need to get the thread object while holding gc_lock.
+    // But we're a registered thread, so if GC starts we must pause.
+    // Use try_lock to avoid blocking - if we can't get the lock, pause and retry.
+    //
+    // CRITICAL: After reading from thread_roots, we must ensure no GC can run
+    // between us returning and the caller using the value. We do this by:
+    // 1. Reading the value under gc_lock
+    // 2. After releasing the lock, checking if GC is pending
+    // 3. If GC runs (we pause), we MUST re-read because the pointer may have moved
+    let thread_obj = loop {
+        // Check if GC needs us to pause first
+        if runtime.is_paused() {
+            unsafe { __pause(stack_pointer, frame_pointer) };
+            // After pause, is_paused is false but GC ran - we need to start fresh
+            continue;
+        }
+
+        // Try to get the lock
+        let obj = match runtime.gc_lock.try_lock() {
+            Ok(_guard) => {
+                let obj = runtime
+                    .memory
+                    .get_thread_root(thread_id)
+                    .expect("Thread root not found in get_my_thread_obj");
+                obj
+                // _guard dropped here - lock released
+            }
+            Err(_) => {
+                // Couldn't get lock - GC might be starting
+                thread::yield_now();
+                continue;
+            }
+        };
+
+        // CRITICAL: After releasing the lock, check if GC is pending.
+        // If is_paused is true, GC is about to run (or another thread is waiting
+        // for us to pause). We must pause and then re-read, because GC will move
+        // objects and our pointer will be stale.
+        if runtime.is_paused() {
+            unsafe { __pause(stack_pointer, frame_pointer) };
+            // GC ran - pointer is stale. Re-read.
+            continue;
+        }
+
+        // No GC pending. The pointer is valid.
+        // However, there's still a tiny window between checking is_paused() and
+        // returning where another thread could trigger GC. But for GC to complete,
+        // that thread must wait for US to pause. Since we're about to return to
+        // Beagle code and access the Thread object immediately, GC cannot complete
+        // until after we've used the pointer. The pointer remains valid.
+        break obj;
+    };
+
+    if std::env::var("BEAGLE_THREAD_DEBUG").is_ok() {
+        eprintln!(
+            "[THREAD_DEBUG] get_my_thread_obj: thread_id={:?} thread_obj={:#x}",
+            thread_id, thread_obj
+        );
+        if BuiltInTypes::is_heap_pointer(thread_obj) {
+            let heap_obj = HeapObject::from_tagged(thread_obj);
+            let closure_field = heap_obj.get_field(0);
+            eprintln!(
+                "[THREAD_DEBUG]   closure_field={:#x} is_heap_ptr={}",
+                closure_field,
+                BuiltInTypes::is_heap_pointer(closure_field)
+            );
+            if BuiltInTypes::is_heap_pointer(closure_field) {
+                let closure_tag = BuiltInTypes::get_kind(closure_field);
+                eprintln!("[THREAD_DEBUG]   closure_tag={:?}", closure_tag);
+                if matches!(closure_tag, BuiltInTypes::Closure) {
+                    let closure_obj = HeapObject::from_tagged(closure_field);
+                    let fn_ptr = closure_obj.get_field(0);
+                    let fn_ptr_untagged = BuiltInTypes::untag(fn_ptr);
+                    if let Some(function) =
+                        runtime.get_function_by_pointer(fn_ptr_untagged as *const u8)
+                    {
+                        eprintln!(
+                            "[THREAD_DEBUG]   closure fn={} args={}",
+                            function.name, function.number_of_args
+                        );
+                    } else {
+                        eprintln!("[THREAD_DEBUG]   closure fn ptr not found: {:#x}", fn_ptr);
+                        panic!("Closure function pointer not found in runtime");
+                    }
+                }
+            }
+        }
+    }
+
+    thread_obj
 }
 
 pub unsafe fn call_fn_0(runtime: &Runtime, function_name: &str) -> usize {
@@ -1638,7 +1829,7 @@ pub extern "C" fn get_function(
     types: usize,
     return_type: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let library = runtime.get_library(library_struct);
     let function_name = runtime.get_string_literal(function_name);
@@ -1969,7 +2160,7 @@ pub unsafe extern "C" fn copy_object(
     frame_pointer: usize,
     object_pointer: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let object_pointer_id = runtime.register_temporary_root(object_pointer);
     let to_pointer = {
@@ -2408,7 +2599,7 @@ extern "C" fn placeholder() -> usize {
 }
 
 extern "C" fn wait_for_input(stack_pointer: usize, frame_pointer: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).unwrap();
     let runtime = get_runtime().get_mut();
@@ -2418,7 +2609,7 @@ extern "C" fn wait_for_input(stack_pointer: usize, frame_pointer: usize) -> usiz
 
 // Get the ASCII code of the first character of a string
 extern "C" fn char_code(stack_pointer: usize, frame_pointer: usize, string: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let string = runtime.get_string(stack_pointer, string);
     if let Some(ch) = string.chars().next() {
@@ -2431,7 +2622,7 @@ extern "C" fn char_code(stack_pointer: usize, frame_pointer: usize, string: usiz
 
 // Create a single-character string from an ASCII code
 extern "C" fn char_from_code(stack_pointer: usize, frame_pointer: usize, code: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let code = BuiltInTypes::untag(code) as u8;
     let ch = code as char;
     let runtime = get_runtime().get_mut();
@@ -2444,7 +2635,7 @@ extern "C" fn char_from_code(stack_pointer: usize, frame_pointer: usize, code: u
 // Read a line from stdin, stripping the trailing newline
 // Returns null if EOF is reached
 extern "C" fn read_line(stack_pointer: usize, frame_pointer: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let mut input = String::new();
     match std::io::stdin().read_line(&mut input) {
         Ok(0) => {
@@ -2475,7 +2666,7 @@ extern "C" fn read_full_file(
     frame_pointer: usize,
     file_name: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let file_name = runtime.get_string(stack_pointer, file_name);
     let file = std::fs::read_to_string(file_name).unwrap();
@@ -2484,7 +2675,7 @@ extern "C" fn read_full_file(
 }
 
 extern "C" fn eval(stack_pointer: usize, frame_pointer: usize, code: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let code = match BuiltInTypes::get_kind(code) {
         BuiltInTypes::String => runtime.get_string_literal(code),
@@ -2574,8 +2765,9 @@ pub extern "C" fn register_extension(
     BuiltInTypes::null_value() as usize
 }
 
-extern "C" fn hash(_stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+extern "C" fn hash(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let _ = stack_pointer; // Used by save_gc_context!
     print_call_builtin(get_runtime().get(), "hash");
     let runtime = get_runtime().get();
     let raw_hash = runtime.hash_value(value);
@@ -2597,7 +2789,7 @@ pub extern "C" fn keyword_to_string(
     frame_pointer: usize,
     keyword: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
 
     // Check if it's a HeapObject before calling from_tagged
@@ -2638,7 +2830,7 @@ pub extern "C" fn string_to_keyword(
     frame_pointer: usize,
     string_value: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let keyword_text = runtime.get_string(stack_pointer, string_value);
 
@@ -2651,7 +2843,7 @@ pub extern "C" fn load_keyword_constant_runtime(
     frame_pointer: usize,
     index: usize,
 ) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
 
     // Check if we already allocated this keyword
@@ -2693,7 +2885,7 @@ extern "C" fn many_args(
 }
 
 extern "C" fn pop_count(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "pop_count");
     let tag = BuiltInTypes::get_kind(value);
     match tag {
@@ -2749,7 +2941,7 @@ pub unsafe extern "C" fn throw_exception(
     frame_pointer: usize,
     value: usize,
 ) -> ! {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "throw_exception");
 
     // Create exception object
@@ -3066,6 +3258,15 @@ impl Runtime {
             2,
         )?;
 
+        // throw_type_error takes (stack_pointer, frame_pointer) and throws catchable TypeError
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/throw-type-error",
+            throw_type_error as *const u8,
+            true,
+            true,
+            2,
+        )?;
+
         // check_arity now takes (stack_pointer, frame_pointer, function_pointer, expected_args)
         self.add_builtin_function_with_fp(
             "beagle.builtin/check-arity",
@@ -3156,13 +3357,6 @@ impl Runtime {
         // gc needs both stack_pointer and frame_pointer
         // stack_pointer is arg 0, frame_pointer is arg 1
         self.add_builtin_function_with_fp("beagle.core/gc", gc as *const u8, true, true, 2)?;
-
-        self.add_builtin_function(
-            "beagle.debug/stack-segments",
-            debug_stack_segments as *const u8,
-            false,
-            0,
-        )?;
 
         self.add_builtin_function(
             "beagle.builtin/gc-add-root",
@@ -3366,11 +3560,13 @@ impl Runtime {
             1,
         )?;
 
-        self.add_builtin_function(
+        // __get_my_thread_obj needs stack_pointer and frame_pointer to call __pause
+        self.add_builtin_function_with_fp(
             "beagle.builtin/__get_my_thread_obj",
             get_my_thread_obj as *const u8,
-            false,
-            0,
+            true,
+            true,
+            2,
         )?;
 
         self.add_builtin_function(
@@ -3779,7 +3975,7 @@ unsafe fn warning_to_struct_impl(
 }
 
 pub unsafe extern "C" fn compiler_warnings(stack_pointer: usize, frame_pointer: usize) -> usize {
-    save_frame_pointer(frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
 
     // Clone warnings to avoid holding the lock while processing
@@ -3829,7 +4025,7 @@ mod rust_collections {
     /// Create an empty persistent vector
     /// Signature: (stack_pointer, frame_pointer) -> tagged_ptr
     pub unsafe extern "C" fn rust_vec_empty(stack_pointer: usize, frame_pointer: usize) -> usize {
-        save_frame_pointer(frame_pointer);
+        save_gc_context!(stack_pointer, frame_pointer);
         let runtime = get_runtime().get_mut();
 
         match PersistentVec::empty(runtime, stack_pointer) {
@@ -3871,7 +4067,7 @@ mod rust_collections {
         vec_ptr: usize,
         value: usize,
     ) -> usize {
-        save_frame_pointer(frame_pointer);
+        save_gc_context!(stack_pointer, frame_pointer);
         let runtime = get_runtime().get_mut();
 
         if !BuiltInTypes::is_heap_pointer(vec_ptr) {
@@ -3898,7 +4094,7 @@ mod rust_collections {
         index: usize,
         value: usize,
     ) -> usize {
-        save_frame_pointer(frame_pointer);
+        save_gc_context!(stack_pointer, frame_pointer);
         let runtime = get_runtime().get_mut();
 
         if !BuiltInTypes::is_heap_pointer(vec_ptr) {
@@ -3922,7 +4118,7 @@ mod rust_collections {
     /// Create an empty persistent map
     /// Signature: (stack_pointer, frame_pointer) -> tagged_ptr
     pub unsafe extern "C" fn rust_map_empty(stack_pointer: usize, frame_pointer: usize) -> usize {
-        save_frame_pointer(frame_pointer);
+        save_gc_context!(stack_pointer, frame_pointer);
         let runtime = get_runtime().get_mut();
 
         // Stay c_calling - HandleScope::allocate checks is_paused and participates in GC
@@ -3967,7 +4163,7 @@ mod rust_collections {
         key: usize,
         value: usize,
     ) -> usize {
-        save_frame_pointer(frame_pointer);
+        save_gc_context!(stack_pointer, frame_pointer);
         let runtime = get_runtime().get_mut();
 
         if !BuiltInTypes::is_heap_pointer(map_ptr) {

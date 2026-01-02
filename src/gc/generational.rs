@@ -2,13 +2,43 @@ use std::{collections::HashMap, error::Error, ffi::c_void, io, thread::ThreadId}
 
 use libc::mprotect;
 
+use super::debug_trace::{self, Generation};
 use super::get_page_size;
+use super::usdt_probes;
 
 use crate::types::{BuiltInTypes, Header, HeapObject, Word};
 
 use crate::collections::{HandleArenaPtr, RootSetPtr};
 
 use super::{AllocateAction, Allocator, AllocatorOptions, StackMap, mark_and_sweep::MarkAndSweep};
+
+/// Represents a reference to a GC root that needs updating after collection.
+/// Each variant knows how to read its current value and write back the new value.
+enum RootRef {
+    /// Points to a mutable slot holding the root value (stack, RootSet, HandleArena)
+    Slot(*mut usize),
+
+    /// Temporary root with index for later update
+    Temporary { index: usize, value: usize },
+
+    /// Namespace root that needs relocation tracking
+    Namespace { namespace_id: usize, value: usize },
+
+    /// Thread root that needs relocation tracking
+    Thread { thread_id: ThreadId, value: usize },
+}
+
+impl RootRef {
+    /// Get the current value of this root
+    fn value(&self) -> usize {
+        match self {
+            RootRef::Slot(ptr) => unsafe { **ptr },
+            RootRef::Temporary { value, .. } => *value,
+            RootRef::Namespace { value, .. } => *value,
+            RootRef::Thread { value, .. } => *value,
+        }
+    }
+}
 
 const DEFAULT_PAGE_COUNT: usize = 1024;
 // Aribtary number that should be changed when I have
@@ -68,6 +98,19 @@ impl Space {
         let mut heap_object = HeapObject::from_untagged(unsafe { self.start.add(offset) });
 
         assert!(self.contains(heap_object.get_pointer()));
+
+        // Zero the full object memory (header + fields) to prevent stale pointers
+        // from previous GC cycles being seen as valid heap pointers
+        let header_size = if size.to_words() > Header::MAX_INLINE_SIZE {
+            16
+        } else {
+            8
+        };
+        let full_size = size.to_bytes() + header_size;
+        unsafe {
+            std::ptr::write_bytes(self.start.add(offset) as *mut u8, 0, full_size);
+        }
+
         heap_object.write_header(size);
 
         heap_object.get_pointer()
@@ -153,12 +196,6 @@ pub struct GenerationalGC {
     copied: Vec<HeapObject>,
     gc_count: usize,
     full_gc_frequency: usize,
-    // TODO: This may not be the most efficient way
-    // but given the way I'm dealing with mutability
-    // right now it should work fine.
-    // There should be very few atoms
-    // But I will probably want to revist this
-    additional_roots: Vec<usize>,
     namespace_roots: Vec<(usize, usize)>,
     relocated_namespace_roots: Vec<(usize, Vec<(usize, usize)>)>,
     temporary_roots: Vec<Option<usize>>,
@@ -179,8 +216,7 @@ impl Allocator for GenerationalGC {
             old,
             copied: vec![],
             gc_count: 0,
-            full_gc_frequency: 100,
-            additional_roots: vec![],
+            full_gc_frequency: 2,
             namespace_roots: vec![],
             relocated_namespace_roots: vec![],
             temporary_roots: vec![],
@@ -260,8 +296,9 @@ impl Allocator for GenerationalGC {
         self.old.grow();
     }
 
-    fn gc_add_root(&mut self, old: usize) {
-        self.additional_roots.push(old);
+    fn gc_add_root(&mut self, _old: usize) {
+        // No-op: All old-gen roots are now handled uniformly during GC.
+        // This function is kept for trait compatibility.
     }
 
     #[allow(unused)]
@@ -337,286 +374,110 @@ impl GenerationalGC {
     ) -> Result<AllocateAction, Box<dyn Error>> {
         let size = Word::from_word(words);
         if self.young.can_allocate(size) {
-            Ok(AllocateAction::Allocated(self.young.allocate(size)))
+            let ptr = self.young.allocate(size);
+            debug_trace::trace_alloc(ptr as usize, words, Generation::Young);
+            Ok(AllocateAction::Allocated(ptr))
         } else {
             Ok(AllocateAction::Gc)
         }
     }
 
-    fn minor_gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
-        let start = std::time::Instant::now();
+    // ==================== GATHER FUNCTIONS ====================
 
-        // Heap dump before GC
-        #[cfg(feature = "heap-dump")]
-        {
-            static GC_COUNT: std::sync::atomic::AtomicUsize =
-                std::sync::atomic::AtomicUsize::new(0);
-            let count = GC_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-
-            if let Ok(dump_dir) = std::env::var("BEAGLE_HEAP_DUMP_DIR") {
-                // Check if we should dump this GC (BEAGLE_HEAP_DUMP_GC=N means dump GC #N)
-                let should_dump = std::env::var("BEAGLE_HEAP_DUMP_GC")
-                    .ok()
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .is_some_and(|n| n == count);
-
-                // Or dump all GCs (BEAGLE_HEAP_DUMP_ALL=1)
-                let dump_all = std::env::var("BEAGLE_HEAP_DUMP_ALL").is_ok();
-
-                if should_dump || dump_all {
-                    let label = format!("gc_{}_before", count);
-                    self.dump_before_after_gc(&label, stack_map, stack_pointers, &dump_dir);
-                }
-            }
-        }
-
-        self.process_temporary_roots();
-        self.process_root_sets();
-        self.process_handle_arenas();
-        self.process_additional_roots();
-        self.process_namespace_roots();
-        self.process_thread_roots();
-        self.update_old_generation_namespace_roots();
-        self.update_old_generation_thread_roots();
-        self.process_stack_roots(stack_map, stack_pointers);
-
-        // Verify no stale pointers BEFORE clearing young generation
-        #[cfg(feature = "debug-gc")]
-        self.verify_no_young_pointers(stack_map, stack_pointers);
-
-        // Heap dump after GC (before clearing young)
-        #[cfg(feature = "heap-dump")]
-        {
-            static GC_COUNT_AFTER: std::sync::atomic::AtomicUsize =
-                std::sync::atomic::AtomicUsize::new(0);
-            let count = GC_COUNT_AFTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-
-            if let Ok(dump_dir) = std::env::var("BEAGLE_HEAP_DUMP_DIR") {
-                let should_dump = std::env::var("BEAGLE_HEAP_DUMP_GC")
-                    .ok()
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .is_some_and(|n| n == count);
-                let dump_all = std::env::var("BEAGLE_HEAP_DUMP_ALL").is_ok();
-
-                if should_dump || dump_all {
-                    let label = format!("gc_{}_after", count);
-                    self.dump_before_after_gc(&label, stack_map, stack_pointers, &dump_dir);
-                }
-            }
-        }
-
-        self.young.clear();
-
-        if self.options.print_stats {
-            println!("Minor GC took {:?}", start.elapsed());
-        }
-    }
-
-    fn process_temporary_roots(&mut self) {
-        let roots_to_copy: Vec<(usize, usize)> = self
-            .temporary_roots
+    /// Gather temporary roots as RootRefs
+    fn gather_temporary_root_refs(&self) -> Vec<RootRef> {
+        self.temporary_roots
             .iter()
             .enumerate()
-            .filter_map(|(i, root)| root.map(|r| (i, r)))
-            .collect();
-
-        for (index, root) in roots_to_copy {
-            // Only copy heap pointers - skip tagged integers and other non-heap values
-            if BuiltInTypes::is_heap_pointer(root) {
-                let new_root = unsafe { self.copy(root) };
-                self.temporary_roots[index] = Some(new_root);
-            }
-        }
-        self.copy_remaining();
+            .filter_map(|(i, opt)| opt.map(|value| RootRef::Temporary { index: i, value }))
+            .collect()
     }
 
-    /// Process all registered RootSets - update roots in-place if they point to moved objects.
-    fn process_root_sets(&mut self) {
-        // Collect pointers first to avoid borrowing self while iterating
-        let root_set_ptrs: Vec<RootSetPtr> =
-            self.root_sets.iter().filter_map(|slot| *slot).collect();
+    /// Gather roots from RootSets and HandleArenas as Slot refs
+    fn gather_slot_refs(&self) -> Vec<RootRef> {
+        let mut slots = Vec::new();
 
-        for roots_ptr in root_set_ptrs {
-            // Safety: The caller guarantees the RootSet is valid while registered
-            let roots = unsafe { &mut *roots_ptr.0 };
+        // Gather from RootSets
+        for root_set_ptr in self.root_sets.iter().filter_map(|slot| *slot) {
+            let roots = unsafe { &mut *root_set_ptr.0 };
             for root in roots.roots_mut() {
-                if BuiltInTypes::is_heap_pointer(*root) {
-                    *root = unsafe { self.copy(*root) };
-                }
+                slots.push(RootRef::Slot(root as *mut usize));
             }
         }
-        self.copy_remaining();
-    }
 
-    /// Process all registered HandleArenas - update roots in-place if they point to moved objects.
-    fn process_handle_arenas(&mut self) {
-        // Collect pointers first to avoid borrowing self while iterating
-        let arena_ptrs: Vec<HandleArenaPtr> =
-            self.handle_arenas.iter().filter_map(|slot| *slot).collect();
-
-        for arena_ptr in arena_ptrs {
-            // Safety: The caller guarantees the HandleArena is valid while registered
+        // Gather from HandleArenas
+        for arena_ptr in self.handle_arenas.iter().filter_map(|slot| *slot) {
             let arena = unsafe { &mut *arena_ptr.0 };
             for root in arena.roots_mut() {
-                if BuiltInTypes::is_heap_pointer(*root) {
-                    *root = unsafe { self.copy(*root) };
-                }
+                slots.push(RootRef::Slot(root as *mut usize));
             }
         }
-        self.copy_remaining();
+
+        slots
     }
 
-    fn process_additional_roots(&mut self) {
-        let additional_roots = std::mem::take(&mut self.additional_roots);
-        for old in additional_roots.into_iter() {
-            self.move_objects_referenced_from_old_to_old(&mut HeapObject::from_tagged(old));
-        }
+    /// Gather namespace roots, taking ownership of the current list
+    fn gather_namespace_root_refs(&mut self) -> Vec<RootRef> {
+        std::mem::take(&mut self.namespace_roots)
+            .into_iter()
+            .map(|(ns_id, val)| RootRef::Namespace {
+                namespace_id: ns_id,
+                value: val,
+            })
+            .collect()
     }
 
-    fn process_namespace_roots(&mut self) {
-        let namespace_roots = std::mem::take(&mut self.namespace_roots);
-        // There has to be a better answer than this. But it does seem to work.
-        for (namespace_id, root) in namespace_roots.into_iter() {
-            if !BuiltInTypes::is_heap_pointer(root) {
-                continue;
-            }
-            let mut heap_object = HeapObject::from_tagged(root);
-            if self.young.contains(heap_object.get_pointer()) && heap_object.marked() {
-                // We have already copied this object, so the first field points to the new location
-                let new_pointer = heap_object.get_field(0);
-                self.namespace_roots.push((namespace_id, new_pointer));
-                self.relocated_namespace_roots
-                    .push((namespace_id, vec![(root, new_pointer)]));
-            } else if self.young.contains(heap_object.get_pointer()) {
-                let new_pointer = unsafe { self.copy(root) };
-                self.relocated_namespace_roots
-                    .push((namespace_id, vec![(root, new_pointer)]));
-                self.namespace_roots.push((namespace_id, new_pointer));
-                self.move_objects_referenced_from_old_to_old(&mut HeapObject::from_tagged(
-                    new_pointer,
-                ));
-            } else {
-                self.namespace_roots.push((namespace_id, root));
-                self.move_objects_referenced_from_old_to_old(&mut heap_object);
-            }
-        }
+    /// Gather thread roots, draining the current map
+    fn gather_thread_root_refs(&mut self) -> Vec<RootRef> {
+        self.thread_roots
+            .drain()
+            .map(|(tid, val)| RootRef::Thread {
+                thread_id: tid,
+                value: val,
+            })
+            .collect()
     }
 
-    fn update_old_generation_namespace_roots(&mut self) {
-        self.old.clear_namespace_roots();
-        for (namespace_id, root) in self.namespace_roots.iter() {
-            self.old.add_namespace_root(*namespace_id, *root);
-        }
-    }
-
-    fn process_thread_roots(&mut self) {
-        let thread_roots: Vec<(ThreadId, usize)> = self.thread_roots.drain().collect();
-        for (thread_id, root) in thread_roots.into_iter() {
-            if !BuiltInTypes::is_heap_pointer(root) {
-                self.thread_roots.insert(thread_id, root);
-                continue;
-            }
-            let mut heap_object = HeapObject::from_tagged(root);
-            if self.young.contains(heap_object.get_pointer()) && heap_object.marked() {
-                // Already copied, first field points to new location
-                let new_pointer = heap_object.get_field(0);
-                self.thread_roots.insert(thread_id, new_pointer);
-            } else if self.young.contains(heap_object.get_pointer()) {
-                let new_pointer = unsafe { self.copy(root) };
-                self.thread_roots.insert(thread_id, new_pointer);
-                self.move_objects_referenced_from_old_to_old(&mut HeapObject::from_tagged(
-                    new_pointer,
-                ));
-            } else {
-                self.thread_roots.insert(thread_id, root);
-                self.move_objects_referenced_from_old_to_old(&mut heap_object);
-            }
-        }
-    }
-
-    fn update_old_generation_thread_roots(&mut self) {
-        self.old.clear_thread_roots();
-        for (thread_id, root) in self.thread_roots.iter() {
-            self.old.add_thread_root(*thread_id, *root);
-        }
-    }
-
-    fn full_gc(&mut self, stack_map: &super::StackMap, stack_pointers: &[(usize, usize, usize)]) {
-        self.minor_gc(stack_map, stack_pointers);
-        self.old.gc(stack_map, stack_pointers);
-    }
-
-    fn process_stack_roots(
-        &mut self,
+    /// Gather stack roots as Slot refs.
+    /// Returns (slot_refs, old_gen_values) - old gen values need field updates.
+    fn gather_stack_root_refs(
+        &self,
         stack_map: &StackMap,
         stack_pointers: &[(usize, usize, usize)],
-    ) {
-        #[cfg(feature = "debug-gc")]
-        eprintln!("[GC] process_stack_roots: {} stacks", stack_pointers.len());
+    ) -> (Vec<RootRef>, Vec<usize>) {
+        let mut slots = Vec::new();
+        let mut old_gen_values = Vec::new();
 
-        for (_idx, (stack_base, frame_pointer, gc_return_addr)) in stack_pointers.iter().enumerate()
-        {
-            let roots = self.gather_roots(*stack_base, stack_map, *frame_pointer, *gc_return_addr);
+        for (stack_base, frame_pointer, gc_return_addr) in stack_pointers {
+            let (young_roots, old_roots) = self.gather_stack_roots_inner(
+                *stack_base,
+                stack_map,
+                *frame_pointer,
+                *gc_return_addr,
+            );
 
-            #[cfg(feature = "debug-gc")]
-            {
-                eprintln!(
-                    "[GC] Stack[{}]: gathered {} roots from FP={:#x}",
-                    _idx,
-                    roots.len(),
-                    frame_pointer
-                );
-                for (slot_addr, val) in roots.iter() {
-                    eprintln!("[GC]   root: slot={:#x} val={:#x}", slot_addr, val);
-                }
+            // Convert (slot_addr, value) pairs to RootRef::Slot
+            for (slot_addr, _value) in young_roots {
+                slots.push(RootRef::Slot(slot_addr as *mut usize));
             }
 
-            let new_roots: Vec<usize> = roots.iter().map(|x| x.1).collect();
-            let new_roots = unsafe { self.copy_all(new_roots) };
-
-            self.copy_remaining();
-
-            // With FP-chain based walking, roots contain (slot_address, value) pairs
-            // Write new roots directly to their addresses
-            for (i, (slot_addr, _old_val)) in roots.iter().enumerate() {
-                debug_assert!(
-                    BuiltInTypes::untag(new_roots[i]) % 8 == 0,
-                    "Pointer is not aligned"
-                );
-
-                #[cfg(feature = "debug-gc")]
-                {
-                    let still_young = self
-                        .young
-                        .contains(BuiltInTypes::untag(new_roots[i]) as *const u8);
-                    if still_young {
-                        eprintln!(
-                            "[GC] WARNING: copy returned young ptr! slot={:#x} old={:#x} new={:#x}",
-                            slot_addr, _old_val, new_roots[i]
-                        );
-                    }
-                }
-
-                unsafe {
-                    *(*slot_addr as *mut usize) = new_roots[i];
-                }
-            }
+            old_gen_values.extend(old_roots);
         }
+
+        (slots, old_gen_values)
     }
 
-    /// Gather young roots from the stack, and also trace into old gen objects
-    /// to find young children that need to be copied.
-    pub fn gather_roots(
-        &mut self,
+    /// Inner function to gather roots from a single stack
+    fn gather_stack_roots_inner(
+        &self,
         stack_base: usize,
         stack_map: &StackMap,
         frame_pointer: usize,
         gc_return_addr: usize,
-    ) -> Vec<(usize, usize)> {
+    ) -> (Vec<(usize, usize)>, Vec<usize>) {
         let mut roots: Vec<(usize, usize)> = Vec::with_capacity(36);
-        let mut old_gen_objects: Vec<HeapObject> = Vec::with_capacity(16);
+        let mut old_gen_objects: Vec<usize> = Vec::with_capacity(16);
 
-        // Custom stack walk with detailed slot tracking for debugging
         let mut fp = frame_pointer;
         let mut pending_return_addr = gc_return_addr;
 
@@ -636,89 +497,49 @@ impl GenerationalGC {
                     if BuiltInTypes::is_heap_pointer(slot_value) {
                         let untagged = BuiltInTypes::untag(slot_value);
 
-                        // Skip unaligned pointers
                         if untagged % 8 != 0 {
                             continue;
                         }
 
                         if self.young.contains(untagged as *const u8) {
-                            // Validate the pointer BEFORE adding to roots
-                            let is_local = i < details.number_of_locals;
-                            let slot_type = if is_local { "LOCAL" } else { "STACK_SPILL" };
-                            let slot_index_in_type = if is_local {
-                                i
-                            } else {
-                                i - details.number_of_locals
-                            };
-
-                            // Check if pointer is within allocated portion
                             if !self.young.contains_allocated(untagged as *const u8) {
-                                eprintln!(
-                                    "[GC BUG] {} slot contains pointer beyond allocation_offset!",
-                                    slot_type
-                                );
-                                eprintln!("  function: {:?}", details.function_name);
-                                eprintln!("  slot[{}] = {}[{}]", i, slot_type, slot_index_in_type);
-                                eprintln!(
-                                    "  number_of_locals={}, current_stack_size={}",
-                                    details.number_of_locals, details.current_stack_size
-                                );
-                                eprintln!("  slot_addr={:#x}, value={:#x}", slot_addr, slot_value);
-                                eprintln!(
-                                    "  young_start={:#x}, allocation_offset={:#x}",
-                                    self.young.start as usize, self.young.allocation_offset
-                                );
-                                eprintln!(
-                                    "  pointer offset: {:#x}",
-                                    untagged - self.young.start as usize
-                                );
-                                panic!(
-                                    "Stack slot contains pointer beyond young gen allocation_offset"
-                                );
+                                continue;
                             }
 
-                            // Parse header and check for suspicious states
                             let heap_object = HeapObject::from_tagged(slot_value);
                             let header = heap_object.get_header();
                             let tag = BuiltInTypes::get_kind(slot_value);
 
-                            // Note: marked=true is valid here. By the time we process stack roots,
-                            // earlier root processing steps (additional_roots, namespace_roots, etc.)
-                            // may have already copied this object and marked the original.
-                            // The copy() function handles this correctly by following the forwarding pointer.
-                            let _ = (header, tag); // silence unused warnings
-
-                            // Closures should never have large flag set
-                            if matches!(tag, BuiltInTypes::Closure) && header.large {
-                                let header_raw = unsafe { *(untagged as *const usize) };
-                                eprintln!(
-                                    "[GC BUG] {} slot contains Closure with large=true!",
-                                    slot_type
-                                );
-                                eprintln!("  function: {:?}", details.function_name);
-                                eprintln!("  slot[{}] = {}[{}]", i, slot_type, slot_index_in_type);
-                                eprintln!(
-                                    "  number_of_locals={}, current_stack_size={}",
-                                    details.number_of_locals, details.current_stack_size
-                                );
-                                eprintln!("  slot_addr={:#x}, value={:#x}", slot_addr, slot_value);
-                                eprintln!(
-                                    "  header_raw={:#x}, header: type_id={}, size={}, large={}, marked={}",
-                                    header_raw,
-                                    header.type_id,
-                                    header.size,
-                                    header.large,
-                                    header.marked
-                                );
-                                panic!("Stack slot contains Closure with impossible large flag");
+                            if matches!(tag, BuiltInTypes::Closure)
+                                && header.large
+                                && !header.marked
+                            {
+                                continue;
                             }
+
+                            debug_trace::trace_root_gathered(
+                                slot_addr,
+                                slot_value,
+                                details.function_name.as_deref(),
+                            );
 
                             roots.push((slot_addr, slot_value));
-                        } else if BuiltInTypes::is_heap_pointer(slot_value) {
-                            // Old gen object on stack - need to trace into it for young children
-                            if let Some(heap_obj) = HeapObject::try_from_tagged(slot_value) {
-                                old_gen_objects.push(heap_obj);
+                        } else {
+                            // CRITICAL: Verify this is actually in old gen, not just "not young"
+                            // A heap pointer that's neither in young nor old is invalid (e.g., stack address)
+                            if !self.old.contains(untagged as *const u8) {
+                                continue;
                             }
+
+                            let heap_object = HeapObject::from_tagged(slot_value);
+                            let header = heap_object.get_header();
+
+                            // Skip values that look like interior pointers (corrupted headers)
+                            if header.size > 100 {
+                                continue;
+                            }
+
+                            old_gen_objects.push(slot_value);
                         }
                     }
                 }
@@ -732,612 +553,230 @@ impl GenerationalGC {
             pending_return_addr = return_addr_for_caller;
         }
 
-        // Trace into old gen objects to find young children
-        for mut obj in old_gen_objects {
-            self.move_objects_referenced_from_old_to_old(&mut obj);
-        }
-
-        roots
+        (roots, old_gen_objects)
     }
 
-    unsafe fn copy_all(&mut self, roots: Vec<usize>) -> Vec<usize> {
-        unsafe {
-            let mut new_roots = vec![];
-            for root in roots.iter() {
-                new_roots.push(self.copy(*root));
+    // ==================== UNIFIED ROOT PROCESSING ====================
+
+    /// Re-insert a root that doesn't need updating (for namespace/thread roots)
+    fn reinsert_root(&mut self, root: &RootRef, value: usize) {
+        match root {
+            RootRef::Namespace { namespace_id, .. } => {
+                self.namespace_roots.push((*namespace_id, value));
+            }
+            RootRef::Thread { thread_id, .. } => {
+                self.thread_roots.insert(*thread_id, value);
+            }
+            _ => {} // Slot/Temporary don't need reinsertion
+        }
+    }
+
+    /// Update a root with its new value after GC processing
+    fn update_root(&mut self, root: &RootRef, old_value: usize, new_value: usize) {
+        match root {
+            RootRef::Slot(ptr) => unsafe {
+                **ptr = new_value;
+            },
+            RootRef::Temporary { index, .. } => {
+                self.temporary_roots[*index] = Some(new_value);
+            }
+            RootRef::Namespace { namespace_id, .. } => {
+                self.namespace_roots.push((*namespace_id, new_value));
+                // Track the relocation so runtime can update its namespace variables
+                if old_value != new_value {
+                    // Find or create the entry for this namespace
+                    if let Some(entry) = self
+                        .relocated_namespace_roots
+                        .iter_mut()
+                        .find(|(ns, _)| *ns == *namespace_id)
+                    {
+                        entry.1.push((old_value, new_value));
+                    } else {
+                        self.relocated_namespace_roots
+                            .push((*namespace_id, vec![(old_value, new_value)]));
+                    }
+                }
+            }
+            RootRef::Thread { thread_id, .. } => {
+                self.thread_roots.insert(*thread_id, new_value);
+            }
+        }
+    }
+
+    /// Process all roots uniformly - copy young gen objects to old gen
+    fn process_all_roots(&mut self, roots: Vec<RootRef>) {
+        for root_ref in roots {
+            let old_value = root_ref.value();
+
+            if !BuiltInTypes::is_heap_pointer(old_value) {
+                self.reinsert_root(&root_ref, old_value);
+                continue;
             }
 
-            self.copy_remaining();
+            let heap_object = HeapObject::from_tagged(old_value);
 
-            new_roots
+            // Skip if not in young gen
+            if !self.young.contains(heap_object.get_pointer()) {
+                self.reinsert_root(&root_ref, old_value);
+                continue;
+            }
+
+            // Copy to old gen
+            let new_value = self.copy(old_value);
+            self.update_root(&root_ref, old_value, new_value);
         }
+    }
+
+    fn minor_gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
+        usdt_probes::fire_gc_minor_start(self.gc_count);
+
+        self.gc_count += 1;
+
+        // 1. GATHER all roots
+        let mut all_roots = Vec::new();
+        all_roots.extend(self.gather_temporary_root_refs());
+        all_roots.extend(self.gather_slot_refs());
+        all_roots.extend(self.gather_namespace_root_refs());
+        all_roots.extend(self.gather_thread_root_refs());
+
+        // Stack roots are handled separately because they return old-gen values too
+        let (stack_roots, stack_old_gen) = self.gather_stack_root_refs(stack_map, stack_pointers);
+        all_roots.extend(stack_roots);
+
+        // 2. PROCESS all roots uniformly
+        self.process_all_roots(all_roots);
+
+        // 3. Update fields of old-gen objects found on the stack
+        for old_root in stack_old_gen {
+            let heap_obj = HeapObject::from_tagged(old_root);
+            let header = heap_obj.get_header();
+            if header.size > 100 {
+                continue;
+            }
+            self.move_objects_referenced_from_old_to_old(&mut HeapObject::from_tagged(old_root));
+        }
+        self.copy_remaining();
+
+        // 4. SYNC to old generation GC
+        // These syncs are CRITICAL for old.gc() to mark all live objects.
+        // Without them, objects protected by these roots could be swept!
+        self.update_old_generation_namespace_roots();
+        self.update_old_generation_thread_roots();
+        self.old.sync_temporary_roots(&self.temporary_roots);
+        self.old.sync_root_sets(&self.root_sets);
+        self.old.sync_handle_arenas(&self.handle_arenas);
+
+        // Reset young gen for new allocations
+        self.young.clear();
+
+        usdt_probes::fire_gc_minor_end(self.gc_count);
+    }
+
+    fn update_old_generation_namespace_roots(&mut self) {
+        for (namespace_id, root) in &self.namespace_roots {
+            self.old.add_namespace_root(*namespace_id, *root);
+        }
+    }
+
+    fn update_old_generation_thread_roots(&mut self) {
+        for (thread_id, root) in self.thread_roots.iter() {
+            self.old.add_thread_root(*thread_id, *root);
+        }
+    }
+
+    // ==================== COPY LOGIC ====================
+
+    fn copy(&mut self, root: usize) -> usize {
+        if !BuiltInTypes::is_heap_pointer(root) {
+            return root;
+        }
+
+        let heap_object = HeapObject::from_tagged(root);
+        let tag = BuiltInTypes::get_kind(root);
+
+        // Skip if not in young gen
+        if !self.young.contains(heap_object.get_pointer()) {
+            return root;
+        }
+
+        // Check if already forwarded (forwarding bit set in header)
+        let untagged = heap_object.untagged();
+        let pointer = untagged as *mut usize;
+        let header_data = unsafe { *pointer };
+        if Header::is_forwarding_bit_set(header_data) {
+            // The header contains the forwarding pointer with forwarding bit set
+            return Header::clear_forwarding_bit(header_data);
+        }
+
+        let header = heap_object.get_header();
+
+        // Skip objects with invalid size
+        if header.size > 100 {
+            return root;
+        }
+
+        // Copy object data to old generation
+        let data = heap_object.get_full_object_data();
+        let new_pointer = self.old.copy_data_to_offset(data);
+
+        // Get the new object and add to processing queue
+        let new_object = HeapObject::from_untagged(new_pointer);
+        self.copied.push(new_object);
+
+        // Store forwarding pointer in header for all objects (works even for 0-field objects)
+        let tagged_new = tag.tag(new_pointer as isize) as usize;
+        unsafe { *pointer = Header::set_forwarding_bit(tagged_new) };
+
+        tagged_new
     }
 
     fn copy_remaining(&mut self) {
         while let Some(mut object) = self.copied.pop() {
-            if object.marked() {
-                panic!("We are copying to this space, nothing should be marked");
-            }
-
-            for datum in object.get_fields_mut() {
-                if BuiltInTypes::is_heap_pointer(*datum) {
-                    *datum = unsafe { self.copy(*datum) };
+            for field in object.get_fields_mut().iter_mut() {
+                if BuiltInTypes::is_heap_pointer(*field) {
+                    let heap_obj = HeapObject::from_tagged(*field);
+                    if self.young.contains(heap_obj.get_pointer()) {
+                        *field = self.copy(*field);
+                    }
                 }
             }
-        }
-    }
-
-    unsafe fn copy(&mut self, root: usize) -> usize {
-        unsafe {
-            let heap_object = HeapObject::from_tagged(root);
-
-            if !self.young.contains(heap_object.get_pointer()) {
-                return root;
-            }
-
-            // Check if the address is within the ALLOCATED portion of young gen.
-            // If not, this is a stale pointer to unallocated memory.
-            if !self.young.contains_allocated(heap_object.get_pointer()) {
-                #[cfg(feature = "debug-gc")]
-                eprintln!(
-                    "[GC] STALE: root={:#x} in young but NOT allocated (offset > {:#x})",
-                    root, self.young.allocation_offset
-                );
-                return root;
-            }
-
-            // Closures (tag 5) should never be large objects.
-            // If the header says large=true for a Closure, something is wrong.
-            let tag = BuiltInTypes::get_kind(root);
-            let header = heap_object.get_header();
-            if matches!(tag, BuiltInTypes::Closure) && header.large {
-                let offset_in_young = heap_object.untagged() - self.young.start as usize;
-                let header_raw = *(heap_object.untagged() as *const usize);
-                eprintln!("[GC BUG] Closure with large=true!");
-                eprintln!("  root={:#x} (tag=5=Closure)", root);
-                eprintln!("  untagged={:#x}", heap_object.untagged());
-                eprintln!(
-                    "  young_start={:#x}, young_end={:#x}",
-                    self.young.start as usize,
-                    self.young.start as usize + self.young.allocation_offset
-                );
-                eprintln!(
-                    "  offset_in_young={:#x} (alloc_offset={:#x})",
-                    offset_in_young, self.young.allocation_offset
-                );
-                eprintln!("  header_raw={:#x}", header_raw);
-                eprintln!(
-                    "  header_raw looks like heap ptr: {}",
-                    BuiltInTypes::is_heap_pointer(header_raw)
-                );
-                eprintln!(
-                    "  header parsed: type_id={}, size={}, large={}, marked={}",
-                    header.type_id, header.size, header.large, header.marked
-                );
-                panic!("Closure with large=true - this should be impossible");
-            }
-
-            #[cfg(feature = "debug-gc")]
-            {
-                // Dump raw memory at this address to understand what we're looking at
-                let ptr = heap_object.untagged() as *const usize;
-                let header_raw = *ptr;
-                let word1 = *ptr.add(1);
-                let word2 = *ptr.add(2);
-                let header = heap_object.get_header();
-
-                // Only log if this looks problematic
-                if header.marked || header.large {
-                    eprintln!(
-                        "[GC COPY] Examining root={:#x}: header_raw={:#x}, word1={:#x}, word2={:#x}",
-                        root, header_raw, word1, word2
-                    );
-                    eprintln!(
-                        "[GC COPY]   header: marked={}, large={}, size={}, type_id={}",
-                        header.marked, header.large, header.size, header.type_id
-                    );
-                }
-            }
-
-            // if it is marked we have already copied it
-            // The first field contains the forwarding pointer to old gen
-            if heap_object.marked() {
-                let first_field = heap_object.get_field(0);
-                if !BuiltInTypes::is_heap_pointer(first_field) {
-                    // Invalid forwarding pointer - skip
-                    #[cfg(feature = "debug-gc")]
-                    eprintln!(
-                        "[GC] marked but invalid fwd: root={:#x}, first_field={:#x}",
-                        root, first_field
-                    );
-                    return root;
-                }
-                // Forwarding pointer should point to old generation
-                if self
-                    .young
-                    .contains(BuiltInTypes::untag(first_field) as *const u8)
-                {
-                    #[cfg(feature = "debug-gc")]
-                    eprintln!(
-                        "[GC] marked but fwd still young: root={:#x}, first_field={:#x}",
-                        root, first_field
-                    );
-                    return root;
-                }
-                #[cfg(feature = "debug-gc")]
-                eprintln!(
-                    "[GC] already marked: root={:#x} -> fwd={:#x}",
-                    root, first_field
-                );
-                return first_field;
-            }
-
-            // Verify large objects have reasonable extended size
-            let header = heap_object.get_header();
-            if header.large {
-                let untagged = heap_object.untagged();
-                let size_ptr = (untagged as *const usize).add(1);
-                let extended_size = *size_ptr;
-                // If extended_size looks like a tagged pointer, this isn't valid
-                if BuiltInTypes::is_heap_pointer(extended_size) || extended_size > 1_000_000 {
-                    #[cfg(feature = "debug-gc")]
-                    eprintln!(
-                        "[GC] invalid large obj: root={:#x}, extended_size={:#x}",
-                        root, extended_size
-                    );
-                    return root;
-                }
-            }
-
-            let data = heap_object.get_full_object_data();
-            #[cfg(feature = "debug-gc")]
-            {
-                if data.len() > 1024 * 1024 {
-                    let young_start = self.young.start as usize;
-                    let young_end = young_start + self.young.byte_count();
-                    let ptr = heap_object.get_pointer() as *const usize;
-                    let raw_words: Vec<usize> = (0..4).map(|i| *ptr.add(i)).collect();
-                    eprintln!(
-                        "[GC DEBUG] copy: HUGE object! root={:#x}, ptr={:?}, data.len={}, header={:?}",
-                        root,
-                        heap_object.get_pointer(),
-                        data.len(),
-                        heap_object.get_header()
-                    );
-                    eprintln!(
-                        "[GC DEBUG] young range: {:#x} - {:#x}, ptr in range: {}",
-                        young_start,
-                        young_end,
-                        self.young.contains(heap_object.get_pointer())
-                    );
-                    eprintln!(
-                        "[GC DEBUG] raw memory at ptr: [{:#x}, {:#x}, {:#x}, {:#x}]",
-                        raw_words[0], raw_words[1], raw_words[2], raw_words[3]
-                    );
-                }
-            }
-            let new_pointer = self.old.copy_data_to_offset(data);
-            debug_assert!(new_pointer as usize % 8 == 0, "Pointer is not aligned");
-            // update header of original object to now be the forwarding pointer
-            let tagged_new = BuiltInTypes::get_kind(root).tag(new_pointer as isize) as usize;
-
-            if heap_object.is_zero_size() {
-                // Zero-size objects don't have space for forwarding pointer
-                return tagged_new;
-            }
-
-            // Save the first field BEFORE we overwrite it with the forwarding pointer
-            let first_field = if !heap_object.is_opaque_object() {
-                Some(heap_object.get_field(0))
-            } else {
-                None
-            };
-
-            // CRITICAL: Mark the object and write forwarding pointer BEFORE
-            // recursively copying children. This prevents infinite loops with
-            // cyclic references (A -> B -> A would otherwise copy A twice).
-            heap_object.write_field(0, tagged_new);
-            heap_object.mark();
-
-            #[cfg(feature = "debug-gc")]
-            {
-                // Verify the write actually happened
-                let verify = heap_object.get_field(0);
-                if verify != tagged_new {
-                    eprintln!(
-                        "[GC COPY] BUG! write_field failed: wrote {:#x} but read back {:#x}",
-                        tagged_new, verify
-                    );
-                }
-            }
-
-            self.copied.push(HeapObject::from_untagged(new_pointer));
-
-            // Now safe to recursively copy children - if we encounter this
-            // object again, it will be marked and we'll return the forwarding pointer
-            if let Some(first_field) = first_field
-                && let Some(child) = HeapObject::try_from_tagged(first_field)
-                && self.young.contains(child.get_pointer())
-            {
-                self.copy(first_field);
-            }
-
-            tagged_new
         }
     }
 
     fn move_objects_referenced_from_old_to_old(&mut self, old_object: &mut HeapObject) {
-        if self.young.contains(old_object.get_pointer()) {
+        let object_ptr = old_object.get_pointer();
+
+        // Skip if in young gen
+        if self.young.contains(object_ptr) {
             return;
         }
+
+        let header = old_object.get_header();
+
+        // Skip objects with invalid size
+        if header.size > 100 {
+            return;
+        }
+
         let data = old_object.get_fields_mut();
-        for datum in data.iter_mut() {
-            if BuiltInTypes::is_heap_pointer(*datum) {
-                let untagged = BuiltInTypes::untag(*datum);
-                if !self.young.contains(untagged as *const u8) {
-                    continue;
+
+        for field in data.iter_mut() {
+            if BuiltInTypes::is_heap_pointer(*field) {
+                let heap_obj = HeapObject::from_tagged(*field);
+
+                // Only copy if in young gen
+                if self.young.contains(heap_obj.get_pointer()) {
+                    let new_value = self.copy(*field);
+                    *field = new_value;
                 }
-                let new_pointer = unsafe { self.copy(*datum) };
-                *datum = new_pointer;
             }
         }
     }
 
-    /// Verify no stale young pointers remain after GC processing.
-    /// This is a debug function to help identify where stale pointers come from.
-    #[cfg(feature = "debug-gc")]
-    fn verify_no_young_pointers(
-        &self,
-        stack_map: &StackMap,
-        stack_pointers: &[(usize, usize, usize)],
-    ) {
-        let mut errors = Vec::new();
-
-        // Check stacks
-        for (i, (stack_base, frame_pointer, gc_return_addr)) in stack_pointers.iter().enumerate() {
-            StackWalker::walk_stack_roots_with_return_addr(
-                *stack_base,
-                *frame_pointer,
-                *gc_return_addr,
-                stack_map,
-                |slot_addr, pointer| {
-                    if BuiltInTypes::is_heap_pointer(pointer) {
-                        let untagged = BuiltInTypes::untag(pointer);
-                        if self.young.contains(untagged as *const u8) {
-                            errors.push(format!(
-                                "STACK[{}]: slot={:#x} still points to young={:#x}",
-                                i, slot_addr, pointer
-                            ));
-                        }
-                    }
-                },
-            );
-        }
-
-        // Check temporary roots
-        for (i, root) in self.temporary_roots.iter().enumerate() {
-            if let Some(ptr) = root {
-                if BuiltInTypes::is_heap_pointer(*ptr) {
-                    let untagged = BuiltInTypes::untag(*ptr);
-                    if self.young.contains(untagged as *const u8) {
-                        errors.push(format!(
-                            "TEMP_ROOT[{}]: still points to young={:#x}",
-                            i, ptr
-                        ));
-                    }
-                }
-            }
-        }
-
-        // Check root sets
-        for (i, slot) in self.root_sets.iter().enumerate() {
-            if let Some(roots_ptr) = slot {
-                let roots = unsafe { &*roots_ptr.0 };
-                for (j, root) in roots.roots().iter().enumerate() {
-                    if BuiltInTypes::is_heap_pointer(*root) {
-                        let untagged = BuiltInTypes::untag(*root);
-                        if self.young.contains(untagged as *const u8) {
-                            errors.push(format!(
-                                "ROOT_SET[{}][{}]: still points to young={:#x}",
-                                i, j, root
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-
-        // Check handle arenas
-        for (i, slot) in self.handle_arenas.iter().enumerate() {
-            if let Some(arena_ptr) = slot {
-                let arena = unsafe { &*arena_ptr.0 };
-                for (j, root) in arena.roots().iter().enumerate() {
-                    if BuiltInTypes::is_heap_pointer(*root) {
-                        let untagged = BuiltInTypes::untag(*root);
-                        if self.young.contains(untagged as *const u8) {
-                            errors.push(format!(
-                                "HANDLE_ARENA[{}][{}]: still points to young={:#x}",
-                                i, j, root
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-
-        // Check namespace roots
-        for (ns_id, root) in self.namespace_roots.iter() {
-            if BuiltInTypes::is_heap_pointer(*root) {
-                let untagged = BuiltInTypes::untag(*root);
-                if self.young.contains(untagged as *const u8) {
-                    errors.push(format!(
-                        "NAMESPACE_ROOT[{}]: still points to young={:#x}",
-                        ns_id, root
-                    ));
-                }
-            }
-        }
-
-        // Check thread roots
-        for (tid, root) in self.thread_roots.iter() {
-            if BuiltInTypes::is_heap_pointer(*root) {
-                let untagged = BuiltInTypes::untag(*root);
-                if self.young.contains(untagged as *const u8) {
-                    errors.push(format!(
-                        "THREAD_ROOT[{:?}]: still points to young={:#x}",
-                        tid, root
-                    ));
-                }
-            }
-        }
-
-        // Check the old generation heap for references to young
-        // Walk all objects in old gen and check their fields
-        let young = &self.young;
-        self.old.walk_objects(|heap_object| {
-            for field in heap_object.get_fields() {
-                if BuiltInTypes::is_heap_pointer(*field) {
-                    let untagged = BuiltInTypes::untag(*field);
-                    if young.contains(untagged as *const u8) {
-                        errors.push(format!(
-                            "OLD_HEAP[{:?}]: field points to young={:#x}",
-                            heap_object.get_pointer(),
-                            field
-                        ));
-                    }
-                }
-            }
-        });
-
-        if !errors.is_empty() {
-            eprintln!("\n=== POST-GC VERIFICATION FAILED ===");
-            eprintln!(
-                "Young generation: {:#x} - {:#x}",
-                self.young.start as usize,
-                self.young.start as usize + self.young.byte_count()
-            );
-            for err in &errors {
-                eprintln!("  {}", err);
-            }
-            eprintln!("Total stale pointers: {}", errors.len());
-            eprintln!("===================================\n");
-        }
-    }
-
-    /// Create a heap dump for debugging
-    #[cfg(feature = "heap-dump")]
-    pub fn create_heap_dump(
-        &self,
-        label: &str,
-        stack_map: &StackMap,
-        stack_pointers: &[(usize, usize, usize)],
-    ) -> super::heap_dump::HeapDump {
-        use super::heap_dump::*;
-        use std::time::SystemTime;
-
-        let classifier = PointerClassifier::new(
-            self.young.start as usize,
-            self.young.byte_count(),
-            self.young.allocation_offset,
-            self.old.space_start(),
-            self.old.space_byte_count(),
-        );
-
-        // Snapshot young gen
-        let young_objects =
-            walk_space_objects(self.young.start, self.young.allocation_offset, &classifier);
-
-        let young_gen = SpaceSnapshot {
-            name: "young".to_string(),
-            start: format!("{:#x}", self.young.start as usize),
-            byte_count: self.young.byte_count(),
-            allocation_offset: self.young.allocation_offset,
-            objects: young_objects,
-        };
-
-        // Snapshot old gen
-        let old_objects = self.old.collect_objects_for_dump(&classifier);
-
-        let old_gen = SpaceSnapshot {
-            name: "old".to_string(),
-            start: format!("{:#x}", self.old.space_start()),
-            byte_count: self.old.space_byte_count(),
-            allocation_offset: 0, // Mark and sweep doesn't track this the same way
-            objects: old_objects,
-        };
-
-        // Snapshot stacks
-        let mut stacks = Vec::new();
-        for (idx, (stack_base, frame_pointer, gc_return_addr)) in stack_pointers.iter().enumerate()
-        {
-            stacks.push(snapshot_stack(
-                idx,
-                *stack_base,
-                *frame_pointer,
-                *gc_return_addr,
-                stack_map,
-                &classifier,
-            ));
-        }
-
-        // Snapshot roots
-        let mut temporary_roots = Vec::new();
-        for (i, root) in self.temporary_roots.iter().enumerate() {
-            if let Some(ptr) = root {
-                temporary_roots.push(RootSnapshot {
-                    source: "temporary".to_string(),
-                    index: format!("{}", i),
-                    value: format!("{:#x}", ptr),
-                    tag: tag_name(*ptr),
-                    is_heap_ptr: BuiltInTypes::is_heap_pointer(*ptr),
-                    points_to: classifier.classify(*ptr),
-                });
-            }
-        }
-
-        let mut namespace_roots = Vec::new();
-        for (ns_id, root) in self.namespace_roots.iter() {
-            namespace_roots.push(RootSnapshot {
-                source: "namespace".to_string(),
-                index: format!("{}", ns_id),
-                value: format!("{:#x}", root),
-                tag: tag_name(*root),
-                is_heap_ptr: BuiltInTypes::is_heap_pointer(*root),
-                points_to: classifier.classify(*root),
-            });
-        }
-
-        let mut thread_roots = Vec::new();
-        for (tid, root) in self.thread_roots.iter() {
-            thread_roots.push(RootSnapshot {
-                source: "thread".to_string(),
-                index: format!("{:?}", tid),
-                value: format!("{:#x}", root),
-                tag: tag_name(*root),
-                is_heap_ptr: BuiltInTypes::is_heap_pointer(*root),
-                points_to: classifier.classify(*root),
-            });
-        }
-
-        let mut additional_roots = Vec::new();
-        for (i, root) in self.additional_roots.iter().enumerate() {
-            additional_roots.push(RootSnapshot {
-                source: "additional".to_string(),
-                index: format!("{}", i),
-                value: format!("{:#x}", root),
-                tag: tag_name(*root),
-                is_heap_ptr: BuiltInTypes::is_heap_pointer(*root),
-                points_to: classifier.classify(*root),
-            });
-        }
-
-        HeapDump {
-            timestamp: format!("{:?}", SystemTime::now()),
-            label: label.to_string(),
-            young_gen,
-            old_gen,
-            stacks,
-            roots: RootsSnapshot {
-                temporary_roots,
-                namespace_roots,
-                thread_roots,
-                additional_roots,
-            },
-        }
-    }
-
-    /// Dump heap before and after GC for debugging
-    #[cfg(feature = "heap-dump")]
-    pub fn dump_before_after_gc(
-        &self,
-        label: &str,
-        stack_map: &StackMap,
-        stack_pointers: &[(usize, usize, usize)],
-        dump_dir: &str,
-    ) {
-        use std::fs;
-        fs::create_dir_all(dump_dir).ok();
-
-        // Save JSON dump
-        let dump = self.create_heap_dump(label, stack_map, stack_pointers);
-        let path = format!("{}/{}.json", dump_dir, label.replace(" ", "_"));
-        if let Err(e) = dump.save(&path) {
-            eprintln!("Failed to save heap dump to {}: {}", path, e);
-        } else {
-            eprintln!("Saved heap dump to {}", path);
-        }
-
-        // Save binary dumps
-        let binary_dump = self.create_binary_dump(stack_pointers);
-        if let Err(e) = binary_dump.save_all(dump_dir, label) {
-            eprintln!("Failed to save binary dump: {}", e);
-        } else {
-            eprintln!("Saved binary dumps to {}/", dump_dir);
-        }
-    }
-
-    /// Create raw binary dumps of memory regions
-    #[cfg(feature = "heap-dump")]
-    pub fn create_binary_dump(
-        &self,
-        stack_pointers: &[(usize, usize, usize)],
-    ) -> super::heap_dump::BinaryDumpSet {
-        use super::heap_dump::{BinaryDumpSet, RawMemoryDump};
-
-        // Dump young generation (only allocated portion)
-        let young_data =
-            unsafe { std::slice::from_raw_parts(self.young.start, self.young.allocation_offset) };
-        let young_gen = RawMemoryDump {
-            label: "young".to_string(),
-            start_addr: self.young.start as usize,
-            data: young_data.to_vec(),
-        };
-
-        // Dump old generation (up to highmark)
-        let old_data = unsafe {
-            let start = self.old.space_start() as *const u8;
-            let len = self.old.highmark();
-            std::slice::from_raw_parts(start, len)
-        };
-        let old_gen = RawMemoryDump {
-            label: "old".to_string(),
-            start_addr: self.old.space_start(),
-            data: old_data.to_vec(),
-        };
-
-        // Dump stacks (from frame pointer to stack base)
-        let mut stacks = Vec::new();
-        for (i, (stack_base, frame_pointer, _gc_return_addr)) in stack_pointers.iter().enumerate() {
-            if *frame_pointer < *stack_base {
-                let len = stack_base - frame_pointer;
-                let stack_data =
-                    unsafe { std::slice::from_raw_parts(*frame_pointer as *const u8, len) };
-                stacks.push(RawMemoryDump {
-                    label: format!("stack_{}", i),
-                    start_addr: *frame_pointer,
-                    data: stack_data.to_vec(),
-                });
-            }
-        }
-
-        BinaryDumpSet {
-            young_gen,
-            old_gen,
-            stacks,
-        }
-    }
-}
-
-#[cfg(feature = "heap-dump")]
-fn tag_name(value: usize) -> String {
-    match BuiltInTypes::get_kind(value) {
-        BuiltInTypes::Int => "Int".to_string(),
-        BuiltInTypes::Float => "Float".to_string(),
-        BuiltInTypes::String => "String".to_string(),
-        BuiltInTypes::Bool => "Bool".to_string(),
-        BuiltInTypes::Function => "Function".to_string(),
-        BuiltInTypes::Closure => "Closure".to_string(),
-        BuiltInTypes::HeapObject => "HeapObject".to_string(),
-        BuiltInTypes::Null => "Null".to_string(),
+    fn full_gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
+        usdt_probes::fire_gc_full_start(self.gc_count);
+        self.minor_gc(stack_map, stack_pointers);
+        self.old.gc(stack_map, stack_pointers);
+        usdt_probes::fire_gc_full_end(self.gc_count);
     }
 }

@@ -55,9 +55,6 @@ const AN_FIELD_CHILDREN: usize = 1;
 /// Threshold for promoting BitmapNode to ArrayNode
 const BITMAP_TO_ARRAY_THRESHOLD: usize = 16;
 
-/// Threshold for demoting ArrayNode back to BitmapNode
-const ARRAY_TO_BITMAP_THRESHOLD: usize = 8;
-
 /// Rust-native persistent map living on Beagle's heap.
 pub struct PersistentMap;
 
