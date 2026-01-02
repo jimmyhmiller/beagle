@@ -2096,7 +2096,6 @@ impl Runtime {
         let relocated_closure = self.memory.heap.peek_temporary_root(closure_temp_id);
         if relocated_closure != f {
             // Closure was moved by GC during allocation, update Thread struct
-            crate::gc::debug_trace::trace_closure_relocated(f, relocated_closure);
             // Get current Thread location (may have moved)
             let current_thread_obj = self.memory.heap.peek_temporary_root(thread_temp_id);
             let mut heap_obj = HeapObject::from_tagged(current_thread_obj);

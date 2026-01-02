@@ -1304,8 +1304,7 @@ pub unsafe extern "C" fn set_current_namespace(namespace: usize) -> usize {
 }
 
 pub unsafe extern "C" fn __pause(_stack_pointer: usize, frame_pointer: usize) -> usize {
-    use crate::gc::debug_trace::{self, ThreadState};
-    use crate::gc::usdt_probes;
+    use crate::gc::usdt_probes::{self, ThreadStateCode};
 
     // Get the gc_return_addr. When called from Rust code (get_my_thread_obj, gc_impl),
     // save_gc_context! was already called with the correct Beagle return address.
@@ -1341,10 +1340,9 @@ pub unsafe extern "C" fn __pause(_stack_pointer: usize, frame_pointer: usize) ->
 
     let runtime = get_runtime().get_mut();
 
-    // Fire USDT probe and trace thread state change
+    // Fire USDT probe for thread state change
     usdt_probes::fire_thread_pause_enter();
-    usdt_probes::fire_thread_state(ThreadState::PausedForGc);
-    debug_trace::trace_thread_state(ThreadState::PausedForGc, "entering __pause");
+    usdt_probes::fire_thread_state(ThreadStateCode::PausedForGc);
 
     let pause_start = std::time::Instant::now();
 
@@ -1365,10 +1363,9 @@ pub unsafe extern "C" fn __pause(_stack_pointer: usize, frame_pointer: usize) ->
 
     let pause_duration_ns = pause_start.elapsed().as_nanos() as u64;
 
-    // Fire USDT probe and trace thread resuming
+    // Fire USDT probe for thread resuming
     usdt_probes::fire_thread_pause_exit(pause_duration_ns);
-    usdt_probes::fire_thread_state(ThreadState::Running);
-    debug_trace::trace_thread_state(ThreadState::Running, "exiting __pause");
+    usdt_probes::fire_thread_state(ThreadStateCode::Running);
 
     // Memory barrier to ensure all GC updates are visible before continuing
     std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
