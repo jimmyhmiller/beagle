@@ -996,23 +996,36 @@ impl PrettyPrint for ArmAsm {
                 imm12,
                 class_selector,
             } => {
-                // size: 0b11,
-                // imm9: 0, // not used
-                // class_selector: StrImmGenSelector::UnsignedOffset,
-                if *size != 0b11
-                    || *class_selector != StrImmGenSelector::UnsignedOffset
-                    || *imm9 != 0
-                {
-                    panic!(
-                        "Need to deal with size and class_selector and imm9 since I'm using it now"
-                    );
+                let size_suffix = if *size == 0b11 { "x" } else { "w" };
+                match class_selector {
+                    StrImmGenSelector::UnsignedOffset => {
+                        format!(
+                            "str {}{}, [{}, #{}]",
+                            size_suffix,
+                            rt.index,
+                            rn.pretty_print(),
+                            imm12
+                        )
+                    }
+                    StrImmGenSelector::PostIndex => {
+                        format!(
+                            "str {}{}, [{}], #{}",
+                            size_suffix,
+                            rt.index,
+                            rn.pretty_print(),
+                            imm9
+                        )
+                    }
+                    StrImmGenSelector::PreIndex => {
+                        format!(
+                            "str {}{}, [{}, #{}]!",
+                            size_suffix,
+                            rt.index,
+                            rn.pretty_print(),
+                            imm9
+                        )
+                    }
                 }
-                format!(
-                    "str {}, [{} #{}], ",
-                    rt.pretty_print(),
-                    rn.pretty_print(),
-                    imm12
-                )
             }
             ArmAsm::StrRegGen {
                 size,

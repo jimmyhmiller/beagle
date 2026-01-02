@@ -747,7 +747,7 @@ impl AstCompiler<'_> {
 
                 let error_fn_pointer = self
                     .compiler
-                    .find_function("beagle.builtin/throw-error")
+                    .find_function("beagle.builtin/throw-type-error")
                     .unwrap();
                 let error_fn_pointer = self
                     .compiler
@@ -2416,13 +2416,6 @@ impl AstCompiler<'_> {
             Ast::False(_) => Value::False,
             Ast::Null(_) => Value::Null,
         }
-    }
-
-    fn get_function(&mut self, function_name: &str) -> Value {
-        let f = self.compiler.find_function(function_name).unwrap();
-        let f = self.compiler.get_function_pointer(f).unwrap();
-        let f = self.ir.assign_new(f);
-        f.into()
     }
 
     fn call(&mut self, name: &str, mut args: Vec<Value>) -> Value {

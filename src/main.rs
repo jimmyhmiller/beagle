@@ -626,6 +626,14 @@ cfg_if::cfg_if! {
 }
 
 fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
+    // Initialize GC tracing if enabled
+    gc::debug_trace::init();
+
+    // Register USDT probes for DTrace
+    if let Err(e) = gc::usdt_probes::register() {
+        eprintln!("Warning: Failed to register USDT probes: {}", e);
+    }
+
     if args.program.is_none() {
         println!("No program provided. Use --repl for interactive mode.");
         return Ok(());
@@ -721,6 +729,17 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     // Check if main exists and how many arguments it takes
     if let Some(arity) = runtime.get_function_arity(&fully_qualified_main) {
+        // Register main thread so child-triggered GC waits for us.
+        // This mirrors what run_thread does for child threads.
+        {
+            let _guard = runtime.gc_lock.lock().unwrap();
+            let new_count = runtime
+                .registered_thread_count
+                .fetch_add(1, std::sync::atomic::Ordering::Release)
+                + 1;
+            gc::usdt_probes::fire_thread_register(new_count);
+        }
+
         let result = if arity == 0 {
             // main() - call with no arguments
             let f = runtime.get_function0(&fully_qualified_main).unwrap();
@@ -736,6 +755,47 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         } else {
             panic!("main() must take 0 or 1 arguments, got {}", arity);
         };
+
+        // Unregister main thread after Beagle code completes.
+        // We're still registered but we're in Rust code now, not Beagle code.
+        // If GC starts, it will wait for us to pause, but we can't pause from Rust.
+        // Solution: register as c_calling so GC counts us and proceeds.
+        {
+            let (lock, condvar) = &*runtime.thread_state.clone();
+            let mut state = lock.lock().unwrap();
+            state.register_c_call((0, 0, 0)); // No stack to scan
+            condvar.notify_one();
+        }
+
+        // Now any GC will count us as c_calling and proceed.
+        // Wait for any in-progress GC to finish, then unregister everything.
+        loop {
+            while runtime.is_paused() {
+                std::thread::yield_now();
+            }
+
+            match runtime.gc_lock.try_lock() {
+                Ok(_guard) => {
+                    // While holding lock: unregister from c_calling, decrement count
+                    {
+                        let (lock, condvar) = &*runtime.thread_state.clone();
+                        let mut state = lock.lock().unwrap();
+                        state.unregister_c_call();
+                        condvar.notify_one();
+                    }
+                    let new_count = runtime
+                        .registered_thread_count
+                        .fetch_sub(1, std::sync::atomic::Ordering::Release)
+                        - 1;
+                    gc::usdt_probes::fire_thread_unregister(new_count);
+                    break;
+                }
+                Err(_) => {
+                    std::thread::yield_now();
+                }
+            }
+        }
+
         let _ = result; // Silence unused variable warning
     } else if args.debug {
         println!("No main function");
@@ -768,6 +828,21 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         for thread in threads {
             thread.join().unwrap();
         }
+    }
+
+    // Dump GC trace if enabled
+    if gc::debug_trace::is_enabled() {
+        if let Ok(trace_file) = std::env::var("BEAGLE_GC_TRACE_FILE") {
+            if let Err(e) = gc::debug_trace::dump_to_file(&trace_file) {
+                eprintln!("Failed to dump GC trace: {}", e);
+            }
+        } else {
+            // Default trace file
+            if let Err(e) = gc::debug_trace::dump_to_file("/tmp/beagle_gc_trace.txt") {
+                eprintln!("Failed to dump GC trace: {}", e);
+            }
+        }
+        eprintln!("{}", gc::debug_trace::generate_summary());
     }
 
     Ok(())

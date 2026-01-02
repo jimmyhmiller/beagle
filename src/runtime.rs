@@ -25,7 +25,7 @@ use crate::{
     },
     gc::{
         AllocateAction, Allocator, AllocatorOptions, STACK_SIZE, StackMap, StackMapDetails,
-        stack_segments::StackSegmentAllocator,
+        usdt_probes,
     },
     ir::StringValue,
     types::{BuiltInTypes, Header, HeapObject, Tagged},
@@ -67,8 +67,7 @@ impl StructManager {
     }
 
     pub fn insert(&mut self, name: String, s: Struct) {
-        let id = self.structs.len();
-        self.name_to_id.insert(name.clone(), id);
+        self.name_to_id.insert(name.clone(), self.structs.len());
         self.structs.push(s);
     }
 
@@ -196,6 +195,7 @@ impl ThreadState {
 
     pub fn unpause(&mut self) {
         self.paused_threads -= 1;
+        self.stack_pointers.pop();
     }
 
     pub fn register_c_call(&mut self, stack_pointer: (usize, usize, usize)) {
@@ -442,7 +442,7 @@ thread_local! {
 
 pub struct Memory {
     heap: Alloc,
-    stacks: Vec<(ThreadId, MmapMut)>,
+    stacks: Mutex<Vec<(ThreadId, MmapMut)>>,
     pub join_handles: Vec<JoinHandle<u64>>,
     pub threads: Vec<Thread>,
     pub stack_map: StackMap,
@@ -454,7 +454,8 @@ impl Memory {
     fn reset(&mut self) {
         let options = self.heap.get_allocation_options();
         self.heap = Alloc::new(options);
-        self.stacks = vec![(
+        let mut stacks = self.stacks.lock().unwrap();
+        *stacks = vec![(
             std::thread::current().id(),
             create_stack_with_protected_page_after(STACK_SIZE),
         )];
@@ -473,7 +474,8 @@ impl Memory {
         for index in completed_threads.iter().rev() {
             if let Some(thread) = self.join_handles.get(*index) {
                 let thread_id = thread.thread().id();
-                self.stacks.retain(|(id, _)| *id != thread_id);
+                let mut stacks = self.stacks.lock().unwrap();
+                stacks.retain(|(id, _)| *id != thread_id);
                 self.threads.retain(|t| t.id() != thread_id);
                 self.join_handles.remove(*index);
                 self.heap.remove_thread(thread_id);
@@ -942,6 +944,11 @@ pub struct Runtime {
     // TODO: I don't have any code that looks at u8, just always u64
     // so that's why I need usize
     pub is_paused: AtomicUsize,
+    /// Count of threads that are registered and ready to respond to GC.
+    /// Threads increment this while holding gc_lock when starting,
+    /// and decrement it while holding gc_lock when exiting.
+    /// GC uses this instead of join_handles.len() to know how many threads to wait for.
+    pub registered_thread_count: AtomicUsize,
     pub thread_state: Arc<(Mutex<ThreadState>, Condvar)>,
     pub gc_lock: Mutex<()>,
     pub ffi_function_info: Vec<FFIInfo>,
@@ -965,7 +972,6 @@ pub struct Runtime {
     /// Dispatch tables for O(1) protocol method lookup
     /// Key = "protocol_name/method_name"
     dispatch_tables: HashMap<String, DispatchTable>,
-    stack_segments: StackSegmentAllocator,
     stacks_for_continuation_swapping: Vec<ContinuationStack>,
     // Per-thread try-catch handler stacks
     pub exception_handlers: HashMap<ThreadId, Vec<ExceptionHandler>>,
@@ -1021,10 +1027,10 @@ impl Runtime {
             command_line_arguments: command_line_arguments.clone(),
             memory: Memory {
                 heap: allocator,
-                stacks: vec![(
+                stacks: Mutex::new(vec![(
                     std::thread::current().id(),
                     create_stack_with_protected_page_after(STACK_SIZE),
-                )],
+                )]),
                 join_handles: vec![],
                 threads: vec![std::thread::current()],
                 command_line_arguments,
@@ -1032,6 +1038,7 @@ impl Runtime {
             },
             libraries: vec![],
             is_paused: AtomicUsize::new(0),
+            registered_thread_count: AtomicUsize::new(0),
             gc_lock: Mutex::new(()),
             thread_state: Arc::new((
                 Mutex::new(ThreadState {
@@ -1061,7 +1068,6 @@ impl Runtime {
             compiler_thread: None,
             protocol_info: HashMap::new(),
             dispatch_tables: HashMap::new(),
-            stack_segments: StackSegmentAllocator::new(),
             compiler_warnings: Arc::new(Mutex::new(Vec::new())),
             stacks_for_continuation_swapping: vec![ContinuationStack {
                 is_used: AtomicBool::new(false),
@@ -1100,7 +1106,6 @@ impl Runtime {
         self.printer.reset();
         self.ffi_function_info.clear();
         self.ffi_info_by_name.clear();
-        self.stack_segments.clear_all_segments();
         self.compiler_channel
             .as_mut()
             .expect("Compiler channel not initialized - this is a fatal error")
@@ -1459,33 +1464,6 @@ impl Runtime {
         stack_frames
     }
 
-    /// Save a stack segment for later restoration (for yield functionality)
-    pub fn save_stack_segment(&mut self, stack_data: &[u8]) -> Result<usize, Box<dyn Error>> {
-        self.stack_segments.add_segment(stack_data)
-    }
-
-    /// Restore a stack segment to the given pointer location
-    pub fn restore_stack_segment(
-        &self,
-        id: usize,
-        target_ptr: *mut u8,
-    ) -> Result<usize, Box<dyn Error>> {
-        self.stack_segments.restore_segment(id, target_ptr)
-    }
-
-    /// Remove a stack segment when it's no longer needed
-    pub fn remove_stack_segment(&mut self, id: usize) -> Result<(), Box<dyn Error>> {
-        self.stack_segments.remove_segment(id)
-    }
-
-    pub fn get_stack_segment_count(&self) -> usize {
-        self.stack_segments.segment_count()
-    }
-
-    pub fn get_stack_segment(&self, id: usize) -> Option<&crate::gc::stack_segments::StackSegment> {
-        self.stack_segments.get_segment(id)
-    }
-
     // Exception handling methods
     pub fn push_exception_handler(&mut self, handler: ExceptionHandler) {
         let thread_id = std::thread::current().id();
@@ -1638,13 +1616,18 @@ impl Runtime {
 
     /// GC entry point called when allocation fails or gc_always is set.
     /// With frame pointers enabled, we just read the current FP and walk from there.
-    fn run_gc(&mut self, stack_pointer: usize, _frame_pointer: usize) {
-        let rust_fp = crate::builtins::get_current_rust_frame_pointer();
-        self.gc_impl(stack_pointer, rust_fp);
+    fn run_gc(&mut self, stack_pointer: usize, frame_pointer: usize) {
+        let gc_return_addr = crate::builtins::get_saved_gc_return_addr();
+        self.gc_impl(stack_pointer, frame_pointer, gc_return_addr);
     }
 
-    pub fn gc_impl(&mut self, stack_pointer: usize, rust_fp: usize) {
-        let _ = stack_pointer; // Available if needed for __pause calls
+    pub fn gc_impl(&mut self, stack_pointer: usize, frame_pointer: usize, gc_return_addr: usize) {
+        // Save the gc context so that any nested __pause calls use the correct address.
+        // This is critical: if we call __pause from within gc_impl, __pause must use
+        // the gc_return_addr we received (which points to Beagle code), not its own
+        // return address (which would point to gc_impl, Rust code).
+        crate::builtins::save_gc_return_addr(gc_return_addr);
+        crate::builtins::save_frame_pointer(frame_pointer);
         // With frame pointers enabled everywhere (via -C force-frame-pointers=yes),
         // we just start walking from the current Rust function's FP.
         // The stack walker checks each [FP+8] against the stack map:
@@ -1657,15 +1640,8 @@ impl Runtime {
             // that means nothing else could spin up a thread in the mean time
             // so there is no need to lock anything
             // The tuple is (stack_base, frame_pointer, gc_return_addr)
-            // We pass 0 for gc_return_addr - the walker will use [FP+8] to discover Beagle frames
-            let mut all_stack_pointers = vec![(self.get_stack_base(), rust_fp, 0usize)];
-            // Saved stack segments also use the FP-chain walking approach
-            all_stack_pointers.extend(
-                self.stack_segments
-                    .get_all_stack_pointers()
-                    .into_iter()
-                    .map(|(base, fp)| (base, fp, 0usize)),
-            );
+            // We pass the saved gc_return_addr to ensure the first Beagle frame is scanned
+            let all_stack_pointers = vec![(self.get_stack_base(), frame_pointer, gc_return_addr)];
 
             self.memory
                 .heap
@@ -1724,14 +1700,14 @@ impl Runtime {
             match e {
                 TryLockError::WouldBlock => {
                     drop(locked);
-                    unsafe { __pause(stack_pointer, rust_fp) };
+                    unsafe { __pause(stack_pointer, frame_pointer) };
                 }
                 TryLockError::Poisoned(e) => {
                     eprintln!("Warning: Poisoned lock in GC: {:?}", e);
                     // Try to recover by using the poisoned data anyway
                     // The lock is poisoned but the data might still be usable
                     drop(locked);
-                    unsafe { __pause(stack_pointer, rust_fp) };
+                    unsafe { __pause(stack_pointer, frame_pointer) };
                 }
             }
 
@@ -1748,9 +1724,12 @@ impl Runtime {
         );
         if result != Ok(0) {
             drop(locked);
-            unsafe { __pause(stack_pointer, rust_fp) };
+            unsafe { __pause(stack_pointer, frame_pointer) };
             return;
         }
+
+        // Fire USDT probe - we're initiating stop-the-world
+        usdt_probes::fire_stw_begin();
 
         let locked = locked.expect("Failed to lock GC - this is a fatal error");
 
@@ -1758,27 +1737,66 @@ impl Runtime {
         let mut thread_state = lock
             .lock()
             .expect("Failed to lock thread state - this is a fatal error");
+
+        // Count threads we need to wait for.
+        // Use registered_thread_count which tracks threads that are actually ready to respond to GC.
+        // Both main thread and child threads are registered, so we always subtract 1 because
+        // the current thread (doing GC) is implicitly "paused" since it's doing GC.
+        let registered_count = self
+            .registered_thread_count
+            .load(std::sync::atomic::Ordering::Acquire);
+        let mut threads_to_wait_for = registered_count.saturating_sub(1);
+
         while thread_state.paused_threads + thread_state.c_calling_stack_pointers.len()
-            < self.memory.active_threads()
+            < threads_to_wait_for
         {
-            thread_state = cvar
-                .wait(thread_state)
+            // Use wait_timeout to avoid infinite blocking
+            let result = cvar
+                .wait_timeout(thread_state, std::time::Duration::from_millis(10))
                 .expect("Failed waiting on condition variable - this is a fatal error");
+            thread_state = result.0;
+
+            // Recalculate in case new threads registered
+            let registered_count = self
+                .registered_thread_count
+                .load(std::sync::atomic::Ordering::Acquire);
+            threads_to_wait_for = registered_count.saturating_sub(1);
         }
 
+        // Fire USDT probe - all threads are now paused
+        let num_paused = thread_state.paused_threads + thread_state.c_calling_stack_pointers.len();
+        let total_threads = self
+            .registered_thread_count
+            .load(std::sync::atomic::Ordering::Acquire)
+            + thread_state.c_calling_stack_pointers.len();
+        usdt_probes::fire_stw_all_paused(num_paused, total_threads);
+
         // Paused threads already have (base, fp, gc_return_addr) triples
-        let mut stack_pointers: Vec<(usize, usize, usize)> = thread_state.stack_pointers.clone();
+        // Filter out null stacks - threads that pause with (0, 0, 0) are exiting
+        // and don't have a valid stack to scan.
+        let mut stack_pointers: Vec<(usize, usize, usize)> = thread_state
+            .stack_pointers
+            .iter()
+            .copied()
+            .filter(|(base, _fp, _gc_ret)| *base != 0)
+            .collect();
         // Also include threads that are in C calls (FFI) - their stacks must be scanned too!
-        stack_pointers.extend(thread_state.c_calling_stack_pointers.values().copied());
-        // Main thread also uses FP-chain walking
-        stack_pointers.push((self.get_stack_base(), rust_fp, 0usize));
-        // Add saved stack segments to the GC scan
+        // Filter out null stacks - threads that are exiting may register with (0, 0, 0)
+        // to maintain thread count, but we can't scan a null stack.
+        let c_calling_stacks: Vec<_> = thread_state
+            .c_calling_stack_pointers
+            .iter()
+            .map(|(tid, s)| (*tid, *s))
+            .collect();
+
         stack_pointers.extend(
-            self.stack_segments
-                .get_all_stack_pointers()
-                .into_iter()
-                .map(|(base, fp)| (base, fp, 0usize)),
+            c_calling_stacks
+                .iter()
+                .map(|(_, s)| *s)
+                .filter(|(base, _fp, _gc_ret)| *base != 0),
         );
+        // Main thread uses the saved frame_pointer and gc_return_addr
+        stack_pointers.push((self.get_stack_base(), frame_pointer, gc_return_addr));
 
         drop(thread_state);
 
@@ -1831,6 +1849,9 @@ impl Runtime {
 
         // Memory barrier to ensure all GC writes are visible before continuing
         std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+
+        // Fire USDT probe - stop-the-world is ending
+        usdt_probes::fire_stw_end();
 
         self.is_paused
             .store(0, std::sync::atomic::Ordering::Release);
@@ -1890,8 +1911,8 @@ impl Runtime {
 
     pub fn get_stack_base(&self) -> usize {
         let current_thread = std::thread::current().id();
-        self.memory
-            .stacks
+        let stacks = self.memory.stacks.lock().unwrap();
+        stacks
             .iter()
             .find(|(thread_id, _)| *thread_id == current_thread)
             .map(|(_, stack)| stack.as_ptr() as usize + STACK_SIZE)
@@ -1925,6 +1946,24 @@ impl Runtime {
         for (index, value) in free_variables.iter().enumerate() {
             heap_object.write_field((index + 3) as i32, *value);
         }
+
+        // Debug: Verify closure was created correctly
+        if std::env::var("BEAGLE_CLOSURE_DEBUG").is_ok() {
+            let verify_fn_ptr = heap_object.get_field(0);
+            if verify_fn_ptr != function {
+                eprintln!(
+                    "[CLOSURE_DEBUG] make_closure: MISMATCH! wrote fn={:#x} but read back {:#x}",
+                    function, verify_fn_ptr
+                );
+            }
+            if verify_fn_ptr == 0x7 {
+                eprintln!(
+                    "[CLOSURE_DEBUG] make_closure: CREATED WITH NULL fn_ptr! closure={:#x}",
+                    heap_pointer
+                );
+            }
+        }
+
         Ok(heap_pointer)
     }
 
@@ -1966,7 +2005,7 @@ impl Runtime {
         }))
     }
 
-    pub fn new_thread(&mut self, f: usize, stack_pointer: usize) {
+    pub fn new_thread(&mut self, f: usize, stack_pointer: usize, frame_pointer: usize) {
         let trampoline = self.get_trampoline();
         let trampoline: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline) };
 
@@ -1986,33 +2025,123 @@ impl Runtime {
         // Temporarily protect the closure while we allocate the Thread struct
         let closure_temp_id = self.memory.heap.register_temporary_root(f);
 
-        // Create Thread struct containing the closure
-        // This may trigger GC, but the closure is protected by the temp root
-        // Pass the actual stack_pointer so GC can scan the Beagle stack properly
-        let thread_obj = self
-            .create_struct("beagle.core/Thread", None, &[f], stack_pointer)
-            .expect("Failed to create Thread struct");
+        // Create Thread struct containing the closure.
+        // In thread-safe mode, allocate + initialize + register temp root while holding
+        // the allocator lock to prevent a GC between these steps.
+        let (_thread_obj, thread_temp_id) = {
+            #[cfg(feature = "thread-safe")]
+            {
+                let actual_struct_id = self
+                    .get_struct("beagle.core/Thread")
+                    .expect("Struct 'beagle.core/Thread' not found")
+                    .0;
+                let options = self.memory.heap.get_allocation_options();
+                let frame_pointer = crate::builtins::get_saved_frame_pointer();
+
+                if options.gc_always {
+                    self.run_gc(stack_pointer, frame_pointer);
+                }
+
+                loop {
+                    let result = self
+                        .memory
+                        .heap
+                        .with_locked_alloc(|alloc| {
+                            match alloc.try_allocate(1, BuiltInTypes::HeapObject) {
+                                Ok(AllocateAction::Allocated(ptr)) => {
+                                    let tagged =
+                                        BuiltInTypes::HeapObject.tag(ptr as isize) as usize;
+                                    let heap_obj = HeapObject::from_tagged(tagged);
+
+                                    // Write struct_id to header using Header API.
+                                    let untagged = heap_obj.untagged();
+                                    let header_ptr = untagged as *mut usize;
+                                    unsafe {
+                                        let mut header = Header::from_usize(*header_ptr);
+                                        let tagged_struct_id = BuiltInTypes::Int
+                                            .tag(actual_struct_id as isize)
+                                            as usize;
+                                        header.type_data = tagged_struct_id as u32;
+                                        *header_ptr = header.to_usize();
+                                    }
+
+                                    heap_obj.write_field(0, f);
+                                    let temp_id = alloc.register_temporary_root(tagged);
+                                    Ok(Some((tagged, temp_id)))
+                                }
+                                Ok(AllocateAction::Gc) => Ok(None),
+                                Err(err) => Err(err),
+                            }
+                        })
+                        .expect("Failed to allocate Thread struct");
+
+                    if let Some(value) = result {
+                        break value;
+                    }
+
+                    self.run_gc(stack_pointer, frame_pointer);
+                }
+            }
+            #[cfg(not(feature = "thread-safe"))]
+            {
+                let thread_obj = self
+                    .create_struct("beagle.core/Thread", None, &[f], stack_pointer)
+                    .expect("Failed to create Thread struct");
+                let thread_temp_id = self.memory.heap.register_temporary_root(thread_obj);
+                (thread_obj, thread_temp_id)
+            }
+        };
 
         // Get the possibly-relocated closure from temp root and update Thread struct
         let relocated_closure = self.memory.heap.peek_temporary_root(closure_temp_id);
         if relocated_closure != f {
             // Closure was moved by GC during allocation, update Thread struct
-            eprintln!(
-                "DEBUG: Closure relocated during new_thread: {:x} -> {:x}",
-                f, relocated_closure
-            );
-            let mut heap_obj = HeapObject::from_tagged(thread_obj);
+            crate::gc::debug_trace::trace_closure_relocated(f, relocated_closure);
+            // Get current Thread location (may have moved)
+            let current_thread_obj = self.memory.heap.peek_temporary_root(thread_temp_id);
+            let mut heap_obj = HeapObject::from_tagged(current_thread_obj);
             heap_obj.get_fields_mut()[0] = relocated_closure;
         }
 
-        // Unregister temp root - Thread struct now holds the closure
+        // Unregister closure temp root - Thread struct now holds the closure
         self.memory.heap.unregister_temporary_root(closure_temp_id);
+
+        if std::env::var("BEAGLE_THREAD_DEBUG").is_ok() {
+            let current_thread_obj = self.memory.heap.peek_temporary_root(thread_temp_id);
+            let heap_obj = HeapObject::from_tagged(current_thread_obj);
+            let closure_field = heap_obj.get_field(0);
+            eprintln!(
+                "[THREAD_DEBUG] new_thread: thread_obj={:#x} closure_field={:#x}",
+                current_thread_obj, closure_field
+            );
+            if BuiltInTypes::is_heap_pointer(closure_field)
+                && matches!(BuiltInTypes::get_kind(closure_field), BuiltInTypes::Closure)
+            {
+                let closure_obj = HeapObject::from_tagged(closure_field);
+                let fn_ptr = closure_obj.get_field(0);
+                let fn_ptr_untagged = BuiltInTypes::untag(fn_ptr);
+                if let Some(function) = self.get_function_by_pointer(fn_ptr_untagged as *const u8) {
+                    eprintln!(
+                        "[THREAD_DEBUG] new_thread: closure fn={} args={}",
+                        function.name, function.number_of_args
+                    );
+                } else {
+                    eprintln!(
+                        "[THREAD_DEBUG] new_thread: closure fn ptr not found: {:#x}",
+                        fn_ptr
+                    );
+                }
+            }
+        }
 
         let new_stack = MmapOptions::new(STACK_SIZE)
             .expect("Failed to create mmap for thread stack - out of memory")
             .map_mut()
             .expect("Failed to map thread stack memory - this is a fatal error");
-        let stack_pointer = new_stack.as_ptr() as usize + STACK_SIZE;
+        // IMPORTANT: Use a different name to avoid shadowing the function parameter.
+        // The function's stack_pointer is the CURRENT thread's stack, which is what
+        // __pause needs when the main thread pauses during thread creation.
+        let new_thread_stack_pointer = new_stack.as_ptr() as usize + STACK_SIZE;
         let thread_state = self.thread_state.clone();
 
         // Create a barrier to ensure the spawned thread waits until it's fully registered.
@@ -2024,49 +2153,68 @@ impl Runtime {
         // Hold gc_lock during spawn and until child is registered.
         // This prevents GC from running during the critical startup window.
         // The child will acquire gc_lock in run_thread before transitioning to Beagle code.
-        let gc_lock = self.gc_lock.lock().unwrap();
+        // We use try_lock because if another thread is doing GC, it holds gc_lock and
+        // is waiting for us to pause. Blocking would deadlock.
+        let gc_lock = loop {
+            // Check if GC needs us to pause
+            if self.is_paused() {
+                unsafe { __pause(stack_pointer, frame_pointer) };
+            }
+
+            match self.gc_lock.try_lock() {
+                Ok(guard) => break guard,
+                Err(_) => {
+                    // Couldn't get lock - GC might be starting
+                    if self.is_paused() {
+                        unsafe { __pause(stack_pointer, frame_pointer) };
+                    }
+                    std::thread::yield_now();
+                }
+            }
+        };
 
         let thread = thread::spawn(move || {
             // Wait for main thread to finish registering us
             barrier_clone.wait();
 
-            // Register as C-calling immediately. This ensures that if any GC runs
-            // before we call the builtin, we're counted as "ready" and the thread
-            // root protects our Thread object and closure.
-            {
-                let runtime = crate::get_runtime().get_mut();
-                let thread_state_for_c_call = runtime.thread_state.clone();
-                {
-                    let (lock, condvar) = &*thread_state_for_c_call;
-                    let mut state = lock.lock().unwrap();
-                    // No Beagle frame yet, use 0 for gc_return_addr
-                    state.register_c_call((stack_pointer, stack_pointer, 0));
-                    condvar.notify_one();
-                }
+            // No c_calling registration here - run_thread handles GC coordination
+            // by waiting for GC, acquiring gc_lock, and calling __pause as first instruction
 
-                // Call trampoline. The builtin __run_thread will:
-                // 1. Unregister from C-call (so we can participate in GC)
-                // 2. Get Thread object from thread root (possibly relocated)
-                // 3. Call __run_thread_closure to run the closure
-                // 4. Remove thread root when done
-                // The second argument (0) is unused - the builtin uses current thread ID
-                let result = trampoline(stack_pointer as u64, function_pointer as u64, 0);
+            // Call trampoline. The builtin run_thread will:
+            // 1. Wait for any ongoing GC
+            // 2. Acquire gc_lock briefly to prevent new GC during transition
+            // 3. Enter Beagle code where __pause is the first instruction
+            // 4. On cleanup: wait for GC, acquire gc_lock, remove thread root
+            let result = trampoline(new_thread_stack_pointer as u64, function_pointer as u64, 0);
 
-                // If we end while another thread is waiting for us to pause
-                // we need to notify that waiter so they can see we are dead.
-                let (_lock, cvar) = &*thread_state;
-                cvar.notify_one();
-                result
-            }
+            // If we end while another thread is waiting for us to pause
+            // we need to notify that waiter so they can see we are dead.
+            let (_lock, cvar) = &*thread_state;
+            cvar.notify_one();
+            result
         });
 
-        self.memory.stacks.push((thread.thread().id(), new_stack));
+        // Fire USDT probe - OS thread now exists but not yet registered
+        usdt_probes::fire_thread_spawn();
+
+        {
+            let mut stacks = self.memory.stacks.lock().unwrap();
+            stacks.push((thread.thread().id(), new_stack));
+        }
         self.memory.heap.register_thread(thread.thread().id());
 
         // Register Thread object as a root for this thread
         // This keeps the Thread (and its closure) alive while the thread runs
+        // CRITICAL: Get the current Thread location from temp root - it may have
+        // been relocated by GC since we allocated it.
         let thread_id = thread.thread().id();
-        self.memory.heap.add_thread_root(thread_id, thread_obj);
+        let current_thread_obj = self.memory.heap.peek_temporary_root(thread_temp_id);
+        self.memory
+            .heap
+            .add_thread_root(thread_id, current_thread_obj);
+
+        // Now we can unregister the temp root - thread_roots will keep it alive
+        self.memory.heap.unregister_temporary_root(thread_temp_id);
 
         // Initialize exception handler stack for new thread
         self.exception_handlers.insert(thread_id, Vec::new());
@@ -3707,60 +3855,5 @@ impl Runtime {
         if let Some(stack) = self.stacks_for_continuation_swapping.get(index) {
             stack.is_used.store(false, Ordering::SeqCst);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::gc::get_allocate_options;
-
-    #[test]
-    fn test_stack_segment_integration() {
-        let args = CommandLineArguments {
-            program: None,
-            program_args: vec![],
-            show_times: false,
-            show_gc_times: false,
-            print_ast: false,
-            no_gc: false,
-            gc_always: false,
-            all_tests: false,
-            test: false,
-            debug: false,
-            verbose: false,
-            no_std: false,
-            print_parse: false,
-            print_builtin_calls: false,
-            repl: false,
-        };
-        let allocator_options = get_allocate_options(&args);
-        let allocator = crate::Alloc::new(allocator_options);
-        let printer = Box::new(crate::runtime::DefaultPrinter);
-        let mut runtime = Runtime::new(args, allocator, printer);
-
-        // Test saving a stack segment
-        let test_data = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
-        let segment_id = runtime
-            .save_stack_segment(&test_data)
-            .expect("Test failed: could not save stack segment");
-
-        // Test restoring the segment
-        let mut restore_buffer = vec![0u8; 10];
-        let bytes_copied = runtime
-            .restore_stack_segment(segment_id, restore_buffer.as_mut_ptr())
-            .expect("Test failed: could not restore stack segment");
-
-        assert_eq!(bytes_copied, 8);
-        assert_eq!(&restore_buffer[0..8], &test_data[..]);
-
-        // Test removing the segment
-        runtime
-            .remove_stack_segment(segment_id)
-            .expect("Test failed: could not remove stack segment");
-
-        // Verify it's removed by trying to restore again (should fail)
-        let result = runtime.restore_stack_segment(segment_id, restore_buffer.as_mut_ptr());
-        assert!(result.is_err());
     }
 }

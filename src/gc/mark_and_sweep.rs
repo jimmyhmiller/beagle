@@ -56,6 +56,19 @@ impl Space {
         let mut heap_object = HeapObject::from_untagged(unsafe { self.start.add(offset) });
 
         assert!(self.contains(heap_object.get_pointer()));
+
+        // Zero the full object memory (header + fields) to prevent stale pointers
+        // from previous GC cycles being seen as valid heap pointers
+        let header_size = if size.to_words() > Header::MAX_INLINE_SIZE {
+            16
+        } else {
+            8
+        };
+        let full_size = size.to_bytes() + header_size;
+        unsafe {
+            std::ptr::write_bytes(self.start.add(offset) as *mut u8, 0, full_size);
+        }
+
         heap_object.write_header(size);
 
         heap_object.get_pointer()
@@ -163,6 +176,50 @@ impl FreeList {
     }
 
     fn insert(&mut self, range: FreeListEntry) {
+        // Check if this range overlaps with any known thread root
+        // This would indicate a bug where we're freeing an allocated thread object
+        if std::env::var("BEAGLE_FREELIST_DEBUG").is_ok() {
+            eprintln!(
+                "[FREELIST_INSERT] Adding range: offset={:#x} size={} end={:#x}",
+                range.offset,
+                range.size,
+                range.end()
+            );
+        }
+
+        // Validate no overlaps before insertion
+        for existing in &self.ranges {
+            let range_end = range.offset + range.size;
+            let existing_end = existing.end();
+            // Check if ranges overlap (not just adjacent)
+            if range.offset < existing_end && existing.offset < range_end {
+                // They overlap if: new.start < existing.end AND existing.start < new.end
+                // But adjacent is OK (new.end == existing.start or existing.end == new.start)
+                if range.offset != existing_end && existing.offset != range_end {
+                    eprintln!(
+                        "[FREELIST] Overlapping range detected! new: offset={:#x} size={} end={:#x}, existing: offset={:#x} size={} end={:#x}",
+                        range.offset,
+                        range.size,
+                        range_end,
+                        existing.offset,
+                        existing.size,
+                        existing_end
+                    );
+                    eprintln!("[FREELIST] All existing ranges:");
+                    for (i, r) in self.ranges.iter().enumerate() {
+                        eprintln!(
+                            "  [{:3}] offset={:#x} size={} end={:#x}",
+                            i,
+                            r.offset,
+                            r.size,
+                            r.end()
+                        );
+                    }
+                    panic!("FreeList overlap detected");
+                }
+            }
+        }
+
         let mut i = match self
             .ranges
             .binary_search_by_key(&range.offset, |r| r.offset)
@@ -192,8 +249,24 @@ impl FreeList {
                 if addr % 8 != 0 {
                     panic!("Heap offset is not aligned");
                 }
+
+                // Debug: Log allocation details
+                if std::env::var("BEAGLE_FREELIST_DEBUG").is_ok() {
+                    eprintln!(
+                        "[FREELIST_ALLOC] Allocating {} bytes from range[{}]: before offset={:#x} size={}, returning offset={:#x}",
+                        size, i, r.offset, r.size, addr
+                    );
+                }
+
                 r.offset += size;
                 r.size -= size;
+
+                if std::env::var("BEAGLE_FREELIST_DEBUG").is_ok() {
+                    eprintln!(
+                        "[FREELIST_ALLOC] After: offset={:#x} size={} (remaining)",
+                        r.offset, r.size
+                    );
+                }
 
                 if r.size == 0 {
                     self.ranges.remove(i);
@@ -228,6 +301,39 @@ pub struct MarkAndSweep {
 
 // TODO: I got an issue with my freelist
 impl MarkAndSweep {
+    /// Check if a pointer is within this allocator's space
+    pub fn contains(&self, pointer: *const u8) -> bool {
+        self.space.contains(pointer)
+    }
+
+    /// Walk all objects in the heap and validate their headers
+    pub fn validate_heap_headers(&self, phase: &str) {
+        let mut offset = 0;
+        while offset <= self.space.highmark {
+            // Skip free list entries
+            if let Some(entry) = self.free_list.find_entry_contains(offset) {
+                offset = entry.end();
+                continue;
+            }
+
+            let heap_object = HeapObject::from_untagged(unsafe { self.space.start.add(offset) });
+            let header = heap_object.get_header();
+            let full_size = heap_object.full_size();
+
+            // Validate header
+            if full_size == 0 || full_size > 100000 {
+                let abs_addr = self.space.start as usize + offset;
+                panic!(
+                    "[VALIDATE {}] Corrupted header at offset={:#x} abs={:#x}: full_size={} header={:?}",
+                    phase, offset, abs_addr, full_size, header
+                );
+            }
+
+            offset += full_size;
+            offset = (offset + 7) & !7;
+        }
+    }
+
     fn can_allocate(&self, words: usize) -> bool {
         let words = Word::from_word(words);
         // Large objects need 16-byte header, small objects need 8-byte header
@@ -260,6 +366,39 @@ impl MarkAndSweep {
 
         let offset = self.free_list.allocate(size_bytes);
         if let Some(offset) = offset {
+            let abs_addr = self.space.start as usize + offset;
+
+            if std::env::var("BEAGLE_ALLOC_DEBUG").is_ok() {
+                eprintln!(
+                    "[OLD_ALLOC] offset={:#x} abs={:#x} size={} words={}",
+                    offset,
+                    abs_addr,
+                    size_bytes,
+                    words.to_words()
+                );
+            }
+
+            // Check if this allocation overlaps with any existing thread root
+            if std::env::var("BEAGLE_THREAD_DEBUG").is_ok() {
+                let alloc_end = abs_addr + size_bytes;
+                for (tid, root) in self.thread_roots.iter() {
+                    if crate::types::BuiltInTypes::is_heap_pointer(*root) {
+                        let root_ptr = crate::types::BuiltInTypes::untag(*root);
+                        // Thread objects are 16 bytes (8-byte header + 8-byte field)
+                        let root_end = root_ptr + 16;
+                        // Check for overlap
+                        if abs_addr < root_end && root_ptr < alloc_end {
+                            eprintln!(
+                                "[OLD_ALLOC] !!! ALLOCATION OVERLAPS THREAD ROOT !!!\n  \
+                                allocation: {:#x}..{:#x} ({} bytes)\n  \
+                                thread root tid={:?}: {:#x}..{:#x}",
+                                abs_addr, alloc_end, size_bytes, tid, root_ptr, root_end
+                            );
+                        }
+                    }
+                }
+            }
+
             self.space.update_highmark(offset);
             let pointer = self.space.write_object(offset, words);
             if let Some(data) = data {
@@ -284,6 +423,15 @@ impl MarkAndSweep {
         } else {
             8
         };
+
+        // Validate the source data before copying
+        let source_size = data.len();
+        if source_size == 0 || source_size > 100000 {
+            panic!(
+                "[COPY] Suspicious source data size: {} bytes, header_value={:#x}",
+                source_size, header_value
+            );
+        }
 
         let pointer = self
             .allocate_inner(Word::from_bytes(data.len() - header_size), Some(data))
@@ -331,9 +479,25 @@ impl MarkAndSweep {
         }
 
         // Mark thread roots (Thread objects for running threads)
-        for (_, root) in self.thread_roots.iter() {
+        for (tid, root) in self.thread_roots.iter() {
             if BuiltInTypes::is_heap_pointer(*root) {
-                to_mark.push(HeapObject::from_tagged(*root));
+                let obj = HeapObject::from_tagged(*root);
+                if std::env::var("BEAGLE_MARK_DEBUG").is_ok() {
+                    let untagged = BuiltInTypes::untag(*root);
+                    let offset = if untagged >= self.space.start as usize {
+                        untagged - self.space.start as usize
+                    } else {
+                        0
+                    };
+                    eprintln!(
+                        "[MARK_DEBUG] marking thread root tid={:?} root={:#x} offset={:#x} header={:?}",
+                        tid,
+                        root,
+                        offset,
+                        obj.get_header()
+                    );
+                }
+                to_mark.push(obj);
             }
         }
 
@@ -382,6 +546,11 @@ impl MarkAndSweep {
 
     fn sweep(&mut self) {
         let mut offset = 0;
+        let sweep_debug = std::env::var("BEAGLE_SWEEP_DEBUG").is_ok();
+
+        if sweep_debug {
+            eprintln!("[SWEEP] starting, highmark={:#x}", self.space.highmark);
+        }
 
         loop {
             if offset > self.space.highmark {
@@ -392,15 +561,71 @@ impl MarkAndSweep {
                 continue;
             }
             let heap_object = HeapObject::from_untagged(unsafe { self.space.start.add(offset) });
+            let header = heap_object.get_header();
+
+            // Validate header - catch corruption early
+            let full_size = heap_object.full_size();
+            if full_size == 0 || full_size > 10000 {
+                let abs_addr = self.space.start as usize + offset;
+                panic!(
+                    "[SWEEP] Suspicious header at offset={:#x} abs={:#x}: full_size={} header={:?}",
+                    offset, abs_addr, full_size, header
+                );
+            }
 
             if heap_object.marked() {
+                if sweep_debug {
+                    let abs_addr = self.space.start as usize + offset;
+                    eprintln!(
+                        "[SWEEP] KEPT offset={:#x} abs={:#x} size={} header={:?}",
+                        offset, abs_addr, full_size, header
+                    );
+                }
                 heap_object.unmark();
-                offset += heap_object.full_size();
+                offset += full_size;
                 offset = (offset + 7) & !7;
                 continue;
             }
-            let size = heap_object.full_size();
+            let size = full_size;
+            // Always log FREED entries since this is where overlap comes from
+            let abs_addr = self.space.start as usize + offset;
+
+            // CRITICAL CHECK: Are we about to free a thread root?
+            // This would be a bug - thread roots should be marked and not freed
+            for (tid, root) in self.thread_roots.iter() {
+                if BuiltInTypes::is_heap_pointer(*root) {
+                    let root_ptr = BuiltInTypes::untag(*root);
+                    if root_ptr == abs_addr {
+                        eprintln!(
+                            "[SWEEP] !!! BUG: About to free thread root tid={:?} at {:#x} !!!\n  \
+                            header={:?} marked={}\n  \
+                            This object should have been marked!",
+                            tid,
+                            abs_addr,
+                            header,
+                            heap_object.marked()
+                        );
+                    }
+                }
+            }
+
+            if sweep_debug {
+                eprintln!(
+                    "[SWEEP] FREED offset={:#x} abs={:#x} size={} header={:?}",
+                    offset, abs_addr, size, header
+                );
+            }
             let entry = FreeListEntry { offset, size };
+            // Add context for overlap detection
+            if std::env::var("BEAGLE_FREELIST_DEBUG").is_ok() {
+                eprintln!(
+                    "[FREELIST_INSERT] offset={:#x} size={} end={:#x} header={:?}",
+                    offset,
+                    size,
+                    offset + size,
+                    header
+                );
+            }
             self.free_list.insert(entry);
             offset += size;
             offset = (offset + 7) & !7;
@@ -422,6 +647,25 @@ impl MarkAndSweep {
     #[allow(unused)]
     pub fn clear_thread_roots(&mut self) {
         self.thread_roots.clear();
+    }
+
+    /// Sync temporary_roots from generational gc to old allocator.
+    /// This is critical for old.gc() to mark objects protected by temp roots.
+    pub fn sync_temporary_roots(&mut self, roots: &[Option<usize>]) {
+        self.temporary_roots.clear();
+        self.temporary_roots.extend(roots.iter().cloned());
+    }
+
+    /// Sync root_sets from generational gc to old allocator.
+    pub fn sync_root_sets(&mut self, roots: &[Option<RootSetPtr>]) {
+        self.root_sets.clear();
+        self.root_sets.extend(roots.iter().cloned());
+    }
+
+    /// Sync handle_arenas from generational gc to old allocator.
+    pub fn sync_handle_arenas(&mut self, arenas: &[Option<HandleArenaPtr>]) {
+        self.handle_arenas.clear();
+        self.handle_arenas.extend(arenas.iter().cloned());
     }
 
     pub fn new_with_page_count(page_count: usize, options: AllocatorOptions) -> Self {
@@ -483,6 +727,30 @@ impl Allocator for MarkAndSweep {
     }
 
     fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
+        static OLD_GC_COUNTER: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        let old_gc_cycle = OLD_GC_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+        if std::env::var("BEAGLE_MARK_DEBUG").is_ok() {
+            eprintln!(
+                "[OLD_GC] === OLD GC CYCLE {} START === thread_roots.len={}",
+                old_gc_cycle,
+                self.thread_roots.len()
+            );
+            for (tid, root) in self.thread_roots.iter() {
+                let untagged = BuiltInTypes::untag(*root);
+                let offset = if untagged >= self.space.start as usize {
+                    untagged - self.space.start as usize
+                } else {
+                    0
+                };
+                eprintln!(
+                    "[OLD_GC] cycle={} thread_root: tid={:?} offset={:#x}",
+                    old_gc_cycle, tid, offset
+                );
+            }
+        }
+
         if !self.options.gc {
             return;
         }
@@ -490,10 +758,15 @@ impl Allocator for MarkAndSweep {
         for (stack_base, frame_pointer, gc_return_addr) in stack_pointers {
             self.mark(*stack_base, stack_map, *frame_pointer, *gc_return_addr);
         }
+
+        // Skip heavy validation to maintain original timing
+        self.validate_heap_headers("before_sweep");
+
         self.sweep();
         if self.options.print_stats {
             println!("Mark and sweep took {:?}", start.elapsed());
         }
+        self.validate_heap_headers("after_sweep");
     }
 
     fn grow(&mut self) {
@@ -615,18 +888,6 @@ impl Allocator for MarkAndSweep {
 
 // Helper methods for heap dump
 impl MarkAndSweep {
-    pub fn space_start(&self) -> usize {
-        self.space.start as usize
-    }
-
-    pub fn space_byte_count(&self) -> usize {
-        self.space.byte_count()
-    }
-
-    pub fn highmark(&self) -> usize {
-        self.space.highmark
-    }
-
     /// Collect all objects for heap dump
     #[cfg(feature = "heap-dump")]
     pub fn collect_objects_for_dump(

@@ -1,0 +1,96 @@
+namespace gc_stress
+
+struct TreeNode {
+    left
+    right
+}
+
+struct Thing {
+    x
+}
+
+fn testGc(n) {
+    if n > 10 {
+        0
+    } else {
+        let x = TreeNode {
+            left: null
+            right: null
+        }
+        1 + testGc(n + 1)
+
+        let y = TreeNode {
+            left: x,
+            right: x
+        }
+
+        1 + testGc(n + 1)
+
+        let z = TreeNode {
+            left: y,
+            right: y,
+        }
+        0
+    }
+}
+
+fn call_function() {
+    let x = Thing { x: 42 };
+    testGc(0)
+    testGc(0)
+    testGc(0)
+    testGc(0)
+}
+
+fn swap_counter(counter, n) {
+    if n > 0 {
+        swap!(counter, fn(x) { x + 1 })
+        swap_counter(counter, n - 1)
+    }
+}
+
+fn main() {
+    let counter = atom(0);
+
+    // Similar pattern to thread.bg but single-threaded
+    swap_counter(counter, 10)
+    call_function()
+    swap!(counter, fn(x) { x + 1 })
+    call_function()
+    swap!(counter, fn(x) { x + 1 })
+    call_function()
+    swap!(counter, fn(x) { x + 1 })
+    call_function()
+    swap!(counter, fn(x) { x + 1 })
+    call_function()
+    swap!(counter, fn(x) { x + 1 })
+    call_function()
+    swap!(counter, fn(x) { x + 1 })
+    call_function()
+    swap!(counter, fn(x) { x + 1 })
+    call_function()
+    swap!(counter, fn(x) { x + 1 })
+    call_function()
+    swap!(counter, fn(x) { x + 1 })
+    call_function()
+    swap!(counter, fn(x) { x + 1 })
+    call_function()
+    swap!(counter, fn(x) { x + 1 })
+    testGc(0)
+    gc()
+    testGc(0)
+    gc()
+    testGc(0)
+    gc()
+    testGc(0)
+    gc()
+    testGc(0)
+    testGc(0)
+    swap!(counter, fn(x) { x + 1 })
+    println(deref(counter))
+
+    "done"
+}
+
+// Expect
+// 22

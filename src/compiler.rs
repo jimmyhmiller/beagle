@@ -298,13 +298,13 @@ impl Compiler {
         if ast.has_top_level() {
             let backend = Backend::new();
             let error_fn = self
-                .find_function("beagle.builtin/throw-error")
+                .find_function("beagle.builtin/throw-type-error")
                 .ok_or_else(|| CompileError::FunctionNotFound {
-                    function_name: "beagle.builtin/throw-error".to_string(),
+                    function_name: "beagle.builtin/throw-type-error".to_string(),
                 })?;
             let error_fn_pointer = self.get_function_pointer(error_fn).ok_or_else(|| {
                 CompileError::InvalidFunctionPointer {
-                    function_name: "beagle.builtin/throw-error".to_string(),
+                    function_name: "beagle.builtin/throw-type-error".to_string(),
                 }
             })?;
 

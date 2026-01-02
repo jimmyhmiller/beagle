@@ -24,7 +24,7 @@ fn panic-if-not-array(message, array) {
     if is-array(array) == false {
         println(message)
         println(array)
-        primitive/panic("Not an array")
+        throw("Not an array")
     }
 }
 
@@ -48,7 +48,7 @@ fn read-field(array, index) {
 
 fn new-array(size) {
     if size < 0 {
-        primitive/panic("Negative size")
+        throw("Negative size")
     }
     let array = allocate-array-unsafe(size)
     primitive/write-type-id(array, 1)
@@ -63,7 +63,7 @@ struct ExampleStruct {
 fn copy-array(array) {
     panic-if-not-array("copy", array)
     if array == null {
-        primitive/panic("Array is null")
+        throw("Array is null")
     }
     let new-array = builtin/copy-object(array)
     new-array
@@ -78,7 +78,7 @@ fn copy-from-array-to(from, to) {
     panic-if-not-array("copy from", from)
     panic-if-not-array("copy to", to)
     if primitive/size(from) > primitive/size(to) {
-        primitive/panic("Array from size must be less than or equal to array to size")
+        throw("Array from size must be less than or equal to array to size")
     }
     unsafe-copy-from-array-to(from, to)
 }

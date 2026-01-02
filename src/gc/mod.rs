@@ -11,13 +11,14 @@ use crate::collections::{HandleArenaPtr, RootSetPtr};
 pub use crate::mmap_utils::get_page_size;
 
 pub mod compacting;
+pub mod debug_trace;
 pub mod generational;
 #[cfg(feature = "heap-dump")]
 pub mod heap_dump;
 pub mod mark_and_sweep;
 pub mod mutex_allocator;
-pub mod stack_segments;
 pub mod stack_walker;
+pub mod usdt_probes;
 
 #[derive(Debug, Encode, Decode, SerJson, Clone)]
 pub struct StackMapDetails {
@@ -48,29 +49,6 @@ impl StackMap {
     pub fn find_stack_data(&self, pointer: usize) -> Option<&StackMapDetails> {
         // Stack map now stores the exact return address (recorded after the call instruction)
         // No adjustment needed - just match the pointer directly
-        #[cfg(feature = "debug-gc")]
-        {
-            eprintln!("[GC DEBUG] find_stack_data: looking for {:#x}", pointer);
-            eprintln!("[GC DEBUG] Stack map has {} entries", self.details.len());
-            // Show entries around the target address
-            let close_entries: Vec<_> = self
-                .details
-                .iter()
-                .filter(|(k, _)| (*k as isize - pointer as isize).abs() < 0x10000)
-                .take(5)
-                .collect();
-            if !close_entries.is_empty() {
-                eprintln!("[GC DEBUG] Close entries:");
-                for (key, details) in close_entries {
-                    eprintln!("[GC DEBUG]   {:#x} ({:?})", key, details.function_name);
-                }
-            } else {
-                eprintln!("[GC DEBUG] No close entries found! Sample entries:");
-                for (key, details) in self.details.iter().take(5) {
-                    eprintln!("[GC DEBUG]   {:#x} ({:?})", key, details.function_name);
-                }
-            }
-        }
         for (key, value) in self.details.iter() {
             if *key == pointer {
                 return Some(value);

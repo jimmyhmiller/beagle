@@ -24,6 +24,7 @@ pub fn get_inline_primitive_arity(name: &str) -> usize {
         "beagle.primitive/is-string-constant" => 1,
         "beagle.primitive/set!" => 2,
         "beagle.primitive/__get-my-thread-obj" => 0,
+        "beagle.primitive/__pause" => 0,
         _ => panic!("Unknown inline primitive: {}", name),
     }
 }
@@ -250,7 +251,34 @@ impl AstCompiler<'_> {
             }
             "beagle.primitive/__get-my-thread-obj" => {
                 // Call the builtin that reads from thread_roots
-                self.call_builtin("beagle.builtin/__get_my_thread_obj", vec![])
+                // Pass stack_pointer and frame_pointer so it can call __pause if needed
+                let stack_pointer = self.ir.get_stack_pointer_imm(0);
+                let frame_pointer = self.ir.get_frame_pointer();
+                let func = self
+                    .compiler
+                    .get_function_by_name("beagle.builtin/__get_my_thread_obj")
+                    .unwrap();
+                let func_ptr = self.compiler.get_function_pointer(func.clone()).unwrap();
+                let func_ptr = self.ir.assign_new(func_ptr);
+                self.ir
+                    .call_builtin(func_ptr.into(), vec![stack_pointer, frame_pointer])
+            }
+            "beagle.primitive/__pause" => {
+                // Call __pause with stack_pointer and frame_pointer
+                let stack_pointer = self.ir.get_stack_pointer_imm(0);
+                let frame_pointer = self.ir.get_frame_pointer();
+                let pause_function = self
+                    .compiler
+                    .get_function_by_name("beagle.builtin/__pause")
+                    .unwrap();
+                let pause_function = self
+                    .compiler
+                    .get_function_pointer(pause_function.clone())
+                    .unwrap();
+                let pause_function = self.ir.assign_new(pause_function);
+                self.ir
+                    .call_builtin(pause_function.into(), vec![stack_pointer, frame_pointer]);
+                Value::Null
             }
             _ => panic!("Unknown inline primitive function {}", name),
         }
