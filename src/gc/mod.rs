@@ -107,6 +107,16 @@ pub trait Allocator {
         kind: BuiltInTypes,
     ) -> Result<AllocateAction, Box<dyn Error>>;
 
+    /// Allocate with zeroed memory (for arrays that don't initialize all fields)
+    fn try_allocate_zeroed(
+        &mut self,
+        words: usize,
+        kind: BuiltInTypes,
+    ) -> Result<AllocateAction, Box<dyn Error>> {
+        // Default: just use regular allocation
+        self.try_allocate(words, kind)
+    }
+
     /// GC with explicit return address for the first frame.
     /// The tuple is (stack_base, frame_pointer, gc_return_addr).
     /// gc_return_addr is the return address of the gc() call, which is the

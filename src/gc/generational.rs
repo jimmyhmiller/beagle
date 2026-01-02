@@ -95,11 +95,17 @@ impl Space {
 
     fn write_object(&mut self, offset: usize, size: Word) -> *const u8 {
         let mut heap_object = HeapObject::from_untagged(unsafe { self.start.add(offset) });
+        assert!(self.contains(heap_object.get_pointer()));
+        heap_object.write_header(size);
+        heap_object.get_pointer()
+    }
 
+    fn write_object_zeroed(&mut self, offset: usize, size: Word) -> *const u8 {
+        let mut heap_object = HeapObject::from_untagged(unsafe { self.start.add(offset) });
         assert!(self.contains(heap_object.get_pointer()));
 
-        // Zero the full object memory (header + fields) to prevent stale pointers
-        // from previous GC cycles being seen as valid heap pointers
+        // Zero the full object memory (header + fields)
+        // Used for arrays which don't initialize all fields
         let header_size = if size.to_words() > Header::MAX_INLINE_SIZE {
             16
         } else {
@@ -111,7 +117,6 @@ impl Space {
         }
 
         heap_object.write_header(size);
-
         heap_object.get_pointer()
     }
 
@@ -125,6 +130,19 @@ impl Space {
         };
         let full_size = size.to_bytes() + header_size;
         let pointer = self.write_object(offset, size);
+        self.increment_current_offset(full_size);
+        pointer
+    }
+
+    fn allocate_zeroed(&mut self, size: Word) -> *const u8 {
+        let offset = self.allocation_offset;
+        let header_size = if size.to_words() > Header::MAX_INLINE_SIZE {
+            16
+        } else {
+            8
+        };
+        let full_size = size.to_bytes() + header_size;
+        let pointer = self.write_object_zeroed(offset, size);
         self.increment_current_offset(full_size);
         pointer
     }
@@ -234,6 +252,15 @@ impl Allocator for GenerationalGC {
         kind: BuiltInTypes,
     ) -> Result<AllocateAction, Box<dyn Error>> {
         let pointer = self.allocate_inner(words, kind)?;
+        Ok(pointer)
+    }
+
+    fn try_allocate_zeroed(
+        &mut self,
+        words: usize,
+        kind: BuiltInTypes,
+    ) -> Result<AllocateAction, Box<dyn Error>> {
+        let pointer = self.allocate_inner_zeroed(words, kind)?;
         Ok(pointer)
     }
 
@@ -380,6 +407,20 @@ impl GenerationalGC {
         }
     }
 
+    fn allocate_inner_zeroed(
+        &mut self,
+        words: usize,
+        _kind: BuiltInTypes,
+    ) -> Result<AllocateAction, Box<dyn Error>> {
+        let size = Word::from_word(words);
+        if self.young.can_allocate(size) {
+            let ptr = self.young.allocate_zeroed(size);
+            Ok(AllocateAction::Allocated(ptr))
+        } else {
+            Ok(AllocateAction::Gc)
+        }
+    }
+
     // ==================== GATHER FUNCTIONS ====================
 
     /// Gather temporary roots as RootRefs
@@ -500,36 +541,28 @@ impl GenerationalGC {
                         }
 
                         if self.young.contains(untagged as *const u8) {
-                            if !self.young.contains_allocated(untagged as *const u8) {
-                                continue;
-                            }
-
-                            let heap_object = HeapObject::from_tagged(slot_value);
-                            let header = heap_object.get_header();
-                            let tag = BuiltInTypes::get_kind(slot_value);
-
-                            if matches!(tag, BuiltInTypes::Closure)
-                                && header.large
-                                && !header.marked
-                            {
-                                continue;
-                            }
-
+                            assert!(
+                                self.young.contains_allocated(untagged as *const u8),
+                                "Young gen pointer {:#x} not in allocated region",
+                                untagged
+                            );
                             roots.push((slot_addr, slot_value));
                         } else {
-                            // CRITICAL: Verify this is actually in old gen, not just "not young"
-                            // A heap pointer that's neither in young nor old is invalid (e.g., stack address)
-                            if !self.old.contains(untagged as *const u8) {
-                                continue;
-                            }
+                            assert!(
+                                self.old.contains(untagged as *const u8),
+                                "Heap pointer {:#x} neither in young nor old gen",
+                                untagged
+                            );
 
                             let heap_object = HeapObject::from_tagged(slot_value);
                             let header = heap_object.get_header();
 
-                            // Skip values that look like interior pointers (corrupted headers)
-                            if header.size > 100 {
-                                continue;
-                            }
+                            assert!(
+                                header.size <= 100,
+                                "Corrupted header at {:#x}: size {} > 100",
+                                untagged,
+                                header.size
+                            );
 
                             old_gen_objects.push(slot_value);
                         }
