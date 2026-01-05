@@ -5,8 +5,6 @@ use nanoserde::SerJson;
 
 use crate::{CommandLineArguments, types::BuiltInTypes};
 
-use crate::collections::{HandleArenaPtr, RootSetPtr};
-
 // Re-export get_page_size from mmap_utils for backward compatibility
 pub use crate::mmap_utils::get_page_size;
 
@@ -117,6 +115,20 @@ pub trait Allocator {
         self.try_allocate(words, kind)
     }
 
+    /// Allocate a long-lived heap object for runtime infrastructure.
+    /// For generational GC: allocates directly in old generation.
+    /// For other GCs: same as try_allocate.
+    /// Returns tagged pointer or error if allocation failed.
+    fn allocate_for_runtime(&mut self, words: usize) -> Result<usize, Box<dyn Error>> {
+        // Default: use regular allocation
+        match self.try_allocate(words, BuiltInTypes::HeapObject)? {
+            AllocateAction::Allocated(ptr) => {
+                Ok(BuiltInTypes::HeapObject.tag(ptr as isize) as usize)
+            }
+            AllocateAction::Gc => Err("Need GC to allocate runtime object".into()),
+        }
+    }
+
     /// GC with explicit return address for the first frame.
     /// The tuple is (stack_base, frame_pointer, gc_return_addr).
     /// gc_return_addr is the return address of the gc() call, which is the
@@ -124,41 +136,7 @@ pub trait Allocator {
     /// If gc_return_addr is 0, the stack walker falls back to [FP+8] lookup.
     fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]);
 
-    /// Register a RootSet to be processed during GC.
-    /// Returns an ID to unregister later.
-    fn register_root_set(&mut self, roots: RootSetPtr) -> usize;
-
-    /// Unregister a previously registered RootSet.
-    fn unregister_root_set(&mut self, id: usize);
-
-    /// Register a thread-local HandleArena to be processed during GC.
-    /// The thread_id is used to unregister the arena when the thread exits.
-    /// Returns an ID (unused for now).
-    fn register_handle_arena(&mut self, arena: HandleArenaPtr, thread_id: ThreadId) -> usize;
-
-    /// Unregister the HandleArena for a thread that is exiting.
-    /// This must be called before the thread's stack is destroyed.
-    fn unregister_handle_arena_for_thread(&mut self, thread_id: ThreadId);
-
     fn grow(&mut self);
-    fn gc_add_root(&mut self, old: usize);
-    fn register_temporary_root(&mut self, root: usize) -> usize;
-    fn unregister_temporary_root(&mut self, id: usize) -> usize;
-    fn peek_temporary_root(&self, id: usize) -> usize;
-    fn add_namespace_root(&mut self, namespace_id: usize, root: usize);
-    fn remove_namespace_root(&mut self, namespace_id: usize, root: usize) -> bool;
-    // TODO: Get rid of allocation
-    fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)>;
-
-    /// Register a Thread object as a root for a running thread.
-    /// The thread_object is a tagged pointer to the Thread struct.
-    fn add_thread_root(&mut self, thread_id: ThreadId, thread_object: usize);
-
-    /// Remove a thread root when the thread finishes.
-    fn remove_thread_root(&mut self, thread_id: ThreadId);
-
-    /// Get the current Thread object pointer (may have been relocated by GC).
-    fn get_thread_root(&self, thread_id: ThreadId) -> Option<usize>;
 
     #[allow(unused)]
     fn get_pause_pointer(&self) -> usize {
@@ -172,4 +150,40 @@ pub trait Allocator {
     fn register_parked_thread(&mut self, _thread_id: ThreadId, _stack_pointer: usize) {}
 
     fn get_allocation_options(&self) -> AllocatorOptions;
+
+    /// Write barrier for generational GC.
+    ///
+    /// Called after writing a pointer value into a heap object's field.
+    /// For generational GC, this records old-to-young pointers in a remembered set
+    /// so they can be traced during minor GC.
+    ///
+    /// Parameters:
+    /// - `object_ptr`: Tagged pointer to the object being written to
+    /// - `new_value`: The value being written (may or may not be a heap pointer)
+    ///
+    /// Default implementation does nothing (for non-generational GCs).
+    fn write_barrier(&mut self, _object_ptr: usize, _new_value: usize) {
+        // Default: no-op for non-generational GCs
+    }
+
+    /// Get the card table biased pointer for generated code write barriers.
+    ///
+    /// For generational GC, returns a biased pointer such that:
+    /// `biased_ptr[addr >> 9] = 1` marks the card containing `addr` as dirty.
+    ///
+    /// For non-generational GCs, returns null (no card marking needed).
+    fn get_card_table_biased_ptr(&self) -> *mut u8 {
+        std::ptr::null_mut()
+    }
+
+    /// Mark the card for an object unconditionally if it's in old gen.
+    /// Used by generated code write barriers where we don't know the value being written.
+    ///
+    /// This is conservative - we mark the card even if the written value is not a young gen pointer.
+    /// The GC will scan the object and find no young gen references, which is fine.
+    ///
+    /// For non-generational GCs, this is a no-op.
+    fn mark_card_unconditional(&mut self, _object_ptr: usize) {
+        // Default: no-op for non-generational GCs
+    }
 }

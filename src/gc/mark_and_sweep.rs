@@ -1,12 +1,10 @@
-use std::{collections::HashMap, error::Error, ffi::c_void, io, thread::ThreadId};
+use std::{error::Error, ffi::c_void, io};
 
 use libc::mprotect;
 
 use super::get_page_size;
 
-use crate::types::{BuiltInTypes, Header, HeapObject, Word};
-
-use crate::collections::{HandleArenaPtr, RootSetPtr};
+use crate::types::{Header, HeapObject, Word};
 
 use super::{AllocateAction, Allocator, AllocatorOptions, StackMap, stack_walker::StackWalker};
 
@@ -218,13 +216,7 @@ impl FreeList {
 pub struct MarkAndSweep {
     space: Space,
     free_list: FreeList,
-    namespace_roots: Vec<(usize, usize)>,
-    thread_roots: HashMap<ThreadId, usize>,
     options: AllocatorOptions,
-    temporary_roots: Vec<Option<usize>>,
-    root_sets: Vec<Option<RootSetPtr>>,
-    handle_arenas: Vec<Option<HandleArenaPtr>>,
-    handle_arena_threads: HashMap<ThreadId, usize>,
 }
 
 // TODO: I got an issue with my freelist
@@ -232,6 +224,16 @@ impl MarkAndSweep {
     /// Check if a pointer is within this allocator's space
     pub fn contains(&self, pointer: *const u8) -> bool {
         self.space.contains(pointer)
+    }
+
+    /// Get the start address of this heap space
+    pub fn heap_start(&self) -> usize {
+        self.space.start as usize
+    }
+
+    /// Get the size of this heap space in bytes
+    pub fn heap_size(&self) -> usize {
+        self.space.byte_count()
     }
 
     fn can_allocate(&self, words: usize) -> bool {
@@ -320,49 +322,13 @@ impl MarkAndSweep {
     ) {
         let mut to_mark: Vec<HeapObject> = Vec::with_capacity(128);
 
-        for (_, root) in self.namespace_roots.iter() {
-            if !BuiltInTypes::is_heap_pointer(*root) {
-                continue;
-            }
-            to_mark.push(HeapObject::from_tagged(*root));
-        }
+        // Note: namespace_roots removed - bindings now stored in heap-based PersistentMap
+        // which is traced automatically via GlobalObject roots
 
-        // Mark temporary roots (used by builtins to protect values during allocation)
-        for temp_root in self.temporary_roots.iter() {
-            if let Some(root) = temp_root
-                && BuiltInTypes::is_heap_pointer(*root)
-            {
-                to_mark.push(HeapObject::from_tagged(*root));
-            }
-        }
-
-        // Mark thread roots (Thread objects for running threads)
-        for (_tid, root) in self.thread_roots.iter() {
-            if BuiltInTypes::is_heap_pointer(*root) {
-                let obj = HeapObject::from_tagged(*root);
-                to_mark.push(obj);
-            }
-        }
-
-        // Mark roots from registered RootSets (used by AllocationContext)
-        for roots_ptr in self.root_sets.iter().flatten() {
-            let roots = unsafe { &*roots_ptr.0 };
-            for root in roots.roots() {
-                if BuiltInTypes::is_heap_pointer(*root) {
-                    to_mark.push(HeapObject::from_tagged(*root));
-                }
-            }
-        }
-
-        // Mark roots from registered HandleArenas (thread-local handle storage)
-        for arena_ptr in self.handle_arenas.iter().flatten() {
-            let arena = unsafe { &*arena_ptr.0 };
-            for root in arena.roots() {
-                if BuiltInTypes::is_heap_pointer(*root) {
-                    to_mark.push(HeapObject::from_tagged(*root));
-                }
-            }
-        }
+        // Temporary roots (including Thread objects) are now in GlobalObjectBlocks
+        // which are traced via the stack walker.
+        // GlobalObject blocks are found via stack walking - no special handling needed.
+        // The block pointer is stored on the stack at a known location.
 
         // Use the stack walker with explicit return address
         StackWalker::walk_stack_roots_with_return_addr(
@@ -424,47 +390,36 @@ impl MarkAndSweep {
     }
 
     #[allow(unused)]
-    pub fn clear_namespace_roots(&mut self) {
-        self.namespace_roots.clear();
-    }
-
-    #[allow(unused)]
-    pub fn clear_thread_roots(&mut self) {
-        self.thread_roots.clear();
-    }
-
-    /// Sync temporary_roots from generational gc to old allocator.
-    /// This is critical for old.gc() to mark objects protected by temp roots.
-    pub fn sync_temporary_roots(&mut self, roots: &[Option<usize>]) {
-        self.temporary_roots.clear();
-        self.temporary_roots.extend(roots.iter().cloned());
-    }
-
-    /// Sync root_sets from generational gc to old allocator.
-    pub fn sync_root_sets(&mut self, roots: &[Option<RootSetPtr>]) {
-        self.root_sets.clear();
-        self.root_sets.extend(roots.iter().cloned());
-    }
-
-    /// Sync handle_arenas from generational gc to old allocator.
-    pub fn sync_handle_arenas(&mut self, arenas: &[Option<HandleArenaPtr>]) {
-        self.handle_arenas.clear();
-        self.handle_arenas.extend(arenas.iter().cloned());
-    }
-
     pub fn new_with_page_count(page_count: usize, options: AllocatorOptions) -> Self {
         let space = Space::new(page_count);
         let size = space.byte_count();
         Self {
             space,
             free_list: FreeList::new(FreeListEntry { offset: 0, size }),
-            namespace_roots: vec![],
-            thread_roots: HashMap::new(),
             options,
-            temporary_roots: vec![],
-            root_sets: vec![],
-            handle_arenas: vec![],
-            handle_arena_threads: HashMap::new(),
+        }
+    }
+
+    /// Walk all live objects in the heap, calling the provided function for each one.
+    /// Returns the object's address and a mutable HeapObject reference.
+    pub fn walk_objects_mut<F>(&mut self, mut f: F)
+    where
+        F: FnMut(usize, &mut HeapObject),
+    {
+        let mut offset = 0;
+        loop {
+            if offset > self.space.highmark {
+                break;
+            }
+            if let Some(entry) = self.free_list.find_entry_contains(offset) {
+                offset = entry.end();
+                continue;
+            }
+            let ptr = unsafe { self.space.start.add(offset) };
+            let mut heap_object = HeapObject::from_untagged(ptr);
+            f(ptr as usize, &mut heap_object);
+            offset += heap_object.full_size();
+            offset = (offset + 7) & !7;
         }
     }
 
@@ -535,110 +490,8 @@ impl Allocator for MarkAndSweep {
         });
     }
 
-    fn gc_add_root(&mut self, _old: usize) {}
-
-    fn add_namespace_root(&mut self, namespace_id: usize, root: usize) {
-        self.namespace_roots.push((namespace_id, root));
-    }
-
-    fn remove_namespace_root(&mut self, namespace_id: usize, root: usize) -> bool {
-        if let Some(pos) = self
-            .namespace_roots
-            .iter()
-            .position(|(ns, r)| *ns == namespace_id && *r == root)
-        {
-            self.namespace_roots.swap_remove(pos);
-            true
-        } else {
-            false
-        }
-    }
-
-    fn register_temporary_root(&mut self, root: usize) -> usize {
-        debug_assert!(
-            self.temporary_roots.len() < 1024,
-            "Too many temporary roots {}",
-            self.temporary_roots.len()
-        );
-        for (i, temp_root) in self.temporary_roots.iter_mut().enumerate() {
-            if temp_root.is_none() {
-                *temp_root = Some(root);
-                return i;
-            }
-        }
-        self.temporary_roots.push(Some(root));
-        self.temporary_roots.len() - 1
-    }
-
-    fn unregister_temporary_root(&mut self, id: usize) -> usize {
-        let value = self.temporary_roots[id];
-        self.temporary_roots[id] = None;
-        value.unwrap()
-    }
-
-    fn peek_temporary_root(&self, id: usize) -> usize {
-        self.temporary_roots[id].unwrap()
-    }
-
-    fn register_root_set(&mut self, roots: RootSetPtr) -> usize {
-        for (i, slot) in self.root_sets.iter_mut().enumerate() {
-            if slot.is_none() {
-                *slot = Some(roots);
-                return i;
-            }
-        }
-        self.root_sets.push(Some(roots));
-        self.root_sets.len() - 1
-    }
-
-    fn unregister_root_set(&mut self, id: usize) {
-        if id < self.root_sets.len() {
-            self.root_sets[id] = None;
-        }
-    }
-
-    fn register_handle_arena(&mut self, arena: HandleArenaPtr, thread_id: ThreadId) -> usize {
-        for (i, slot) in self.handle_arenas.iter_mut().enumerate() {
-            if slot.is_none() {
-                *slot = Some(arena);
-                self.handle_arena_threads.insert(thread_id, i);
-                return i;
-            }
-        }
-        let idx = self.handle_arenas.len();
-        self.handle_arenas.push(Some(arena));
-        self.handle_arena_threads.insert(thread_id, idx);
-        idx
-    }
-
-    fn unregister_handle_arena_for_thread(&mut self, thread_id: ThreadId) {
-        if let Some(idx) = self.handle_arena_threads.remove(&thread_id)
-            && idx < self.handle_arenas.len()
-        {
-            self.handle_arenas[idx] = None;
-        }
-    }
-
-    fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)> {
-        // This mark and sweep doesn't relocate
-        // so we don't have any relocations
-        vec![]
-    }
-
     fn get_allocation_options(&self) -> AllocatorOptions {
         self.options
-    }
-
-    fn add_thread_root(&mut self, thread_id: ThreadId, thread_object: usize) {
-        self.thread_roots.insert(thread_id, thread_object);
-    }
-
-    fn remove_thread_root(&mut self, thread_id: ThreadId) {
-        self.thread_roots.remove(&thread_id);
-    }
-
-    fn get_thread_root(&self, thread_id: ThreadId) -> Option<usize> {
-        self.thread_roots.get(&thread_id).copied()
     }
 }
 

@@ -1,0 +1,340 @@
+namespace card_table_stress_test
+
+// Test that exercises the card table write barrier for generational GC.
+//
+// Strategy:
+// 1. Create atoms (mutable containers) and promote them to old gen via GC
+// 2. Create fresh young gen objects
+// 3. Write young gen objects into old gen atoms (this must mark cards!)
+// 4. Trigger GC - if card marking works, young objects survive
+// 5. Verify the values are still accessible
+
+struct Data {
+    a
+    b
+    c
+}
+
+struct Node {
+    value
+    left
+    right
+}
+
+// Create an atom and force it to old gen by triggering multiple GCs
+fn make_old_atom(initial_value) {
+    let a = atom(initial_value)
+    // Force several GCs to ensure promotion to old gen
+    gc()
+    gc()
+    gc()
+    a
+}
+
+// Create many atoms and promote them all to old gen
+fn create_old_atoms(n) {
+    let mut atoms = []
+    let mut i = 0
+    while i < n {
+        let a = make_old_atom(i)
+        atoms = push(atoms, a)
+        i = i + 1
+    }
+    atoms
+}
+
+// Create a fresh young gen object
+fn make_young_data(x) {
+    Data { a: x, b: x + 1, c: x + 2 }
+}
+
+// Write young objects into old atoms - this is where card marking matters!
+fn write_young_to_old(atoms) {
+    let mut i = 0
+    while i < length(atoms) {
+        let old_atom = atoms[i]
+        // Create a FRESH young gen object
+        let young_data = make_young_data(i * 10)
+        // Write it into the old gen atom - MUST mark the card!
+        reset!(old_atom, young_data)
+        i = i + 1
+    }
+}
+
+// Verify all atoms still have valid data after GC
+fn verify_atoms(atoms) {
+    let mut i = 0
+    let mut all_valid = true
+    while i < length(atoms) {
+        let a = atoms[i]
+        let data = deref(a)
+        let expected_a = i * 10
+        if data.a != expected_a {
+            println("FAIL: data mismatch")
+            all_valid = false
+        }
+        i = i + 1
+    }
+    all_valid
+}
+
+// Build a tree structure in old gen
+fn build_old_tree(depth) {
+    if depth <= 0 {
+        atom(null)
+    } else {
+        let node = Node { value: depth, left: build_old_tree(depth - 1), right: build_old_tree(depth - 1) }
+        let a = atom(node)
+        gc()  // Promote to old gen
+        a
+    }
+}
+
+// Sum all values in tree to verify it's intact after GC
+fn sum_tree(tree_atom) {
+    let node = deref(tree_atom)
+    if node == null {
+        0
+    } else {
+        node.value + sum_tree(node.left) + sum_tree(node.right)
+    }
+}
+
+// Attach fresh young gen nodes to an old gen tree
+fn attach_young_to_tree(tree_atom, value) {
+    let old_node = deref(tree_atom)
+    if old_node == null {
+        0
+    } else {
+        // Create young node and attach to old tree
+        let young_node = Node { value: value, left: atom(null), right: atom(null) }
+        let updated = Node { value: old_node.value + value, left: old_node.left, right: old_node.right }
+        reset!(tree_atom, updated)
+        1
+    }
+}
+
+fn test_basic_old_to_young() {
+    println("=== Test 1: Basic old-to-young writes ===")
+
+    // Create 20 atoms and promote to old gen
+    let atoms = create_old_atoms(20)
+    println("Created 20 old gen atoms")
+
+    // Write fresh young objects into them
+    write_young_to_old(atoms)
+    println("Wrote young objects into old atoms")
+
+    // GC - this is the critical test! Card marking must work.
+    gc()
+    println("GC completed")
+
+    // Verify all data survived
+    if verify_atoms(atoms) {
+        println("PASS: All young objects survived GC")
+    } else {
+        println("FAIL: Some young objects were collected!")
+    }
+}
+
+fn test_repeated_writes() {
+    println("=== Test 2: Repeated writes to same old object ===")
+
+    let a = make_old_atom(0)
+    println("Created old atom")
+
+    // Write many different young objects to the same old atom
+    let mut i = 0
+    let mut gc_counter = 0
+    while i < 50 {
+        let young = Data { a: i, b: i * 2, c: i * 3 }
+        reset!(a, young)
+
+        // Occasional GC to stress test (every 10 iterations)
+        gc_counter = gc_counter + 1
+        if gc_counter >= 10 {
+            gc()
+            gc_counter = 0
+        }
+        i = i + 1
+    }
+
+    // Final GC
+    gc()
+
+    let final_data = deref(a)
+    if final_data.a == 49 {
+        println("PASS: Final value correct after repeated writes")
+    } else {
+        println("FAIL: Expected a=49")
+    }
+}
+
+fn test_tree_structure() {
+    println("=== Test 3: Tree with old-to-young references ===")
+
+    // Build tree and promote to old gen
+    let tree = build_old_tree(4)
+    println("Built old gen tree")
+
+    let sum_before = sum_tree(tree)
+    println(sum_before)
+
+    // Modify tree nodes with fresh values (triggers card marking)
+    attach_young_to_tree(tree, 100)
+    println("Modified tree with young data")
+
+    // GC - young data must survive via card marking
+    gc()
+    gc()
+    println("GC completed")
+
+    let sum_after = sum_tree(tree)
+    println(sum_after)
+
+    // Sum should be larger now due to added values
+    if sum_after > sum_before {
+        println("PASS: Tree structure intact after GC")
+    } else {
+        println("FAIL: Tree structure corrupted!")
+    }
+}
+
+fn test_interleaved_alloc_and_gc() {
+    println("=== Test 4: Interleaved allocation and GC ===")
+
+    let atoms = create_old_atoms(10)
+
+    // Interleave: allocate young, write to old, GC
+    let mut i = 0
+    let mut gc_counter = 0
+    let mut atom_idx = 0
+    while i < 30 {
+        // Create young object
+        let young = Data { a: i, b: i, c: i }
+
+        // Write to current atom (cycling through)
+        reset!(atoms[atom_idx], young)
+
+        // Move to next atom, wrap around
+        atom_idx = atom_idx + 1
+        if atom_idx >= length(atoms) {
+            atom_idx = 0
+        }
+
+        // GC every 3 iterations
+        gc_counter = gc_counter + 1
+        if gc_counter >= 3 {
+            gc()
+            gc_counter = 0
+        }
+
+        i = i + 1
+    }
+
+    // Final verification
+    gc()
+    let mut all_valid = true
+    let mut j = 0
+    while j < length(atoms) {
+        let data = deref(atoms[j])
+        if data == null {
+            all_valid = false
+        }
+        j = j + 1
+    }
+
+    if all_valid {
+        println("PASS: All atoms have valid data after interleaved ops")
+    } else {
+        println("FAIL: Some atoms have null data!")
+    }
+}
+
+fn test_large_scale() {
+    println("=== Test 5: Large scale stress test ===")
+
+    // Create many old gen atoms
+    let atoms = create_old_atoms(100)
+    println("Created 100 old gen atoms")
+
+    // Do many writes with interspersed GCs
+    let mut round = 0
+    while round < 5 {
+        let mut i = 0
+        while i < length(atoms) {
+            let young = Data { a: round * 1000 + i, b: i, c: round }
+            reset!(atoms[i], young)
+            i = i + 1
+        }
+        gc()
+        round = round + 1
+    }
+
+    println("Completed 5 rounds of writes")
+
+    // Verify final state
+    gc()
+    let mut valid_count = 0
+    let mut i = 0
+    while i < length(atoms) {
+        let data = deref(atoms[i])
+        if data != null {
+            if data.c == 4 {
+                valid_count = valid_count + 1
+            }
+        }
+        i = i + 1
+    }
+
+    if valid_count == 100 {
+        println("PASS: All 100 atoms have correct final values")
+    } else {
+        println("FAIL: Not all atoms correct")
+        println(valid_count)
+    }
+}
+
+fn main() {
+    test_basic_old_to_young()
+    println("")
+    test_repeated_writes()
+    println("")
+    test_tree_structure()
+    println("")
+    test_interleaved_alloc_and_gc()
+    println("")
+    test_large_scale()
+    println("")
+    println("All card table stress tests completed!")
+    "done"
+}
+
+// Expect
+// === Test 1: Basic old-to-young writes ===
+// Created 20 old gen atoms
+// Wrote young objects into old atoms
+// GC completed
+// PASS: All young objects survived GC
+//
+// === Test 2: Repeated writes to same old object ===
+// Created old atom
+// PASS: Final value correct after repeated writes
+//
+// === Test 3: Tree with old-to-young references ===
+// Built old gen tree
+// 26
+// Modified tree with young data
+// GC completed
+// 126
+// PASS: Tree structure intact after GC
+//
+// === Test 4: Interleaved allocation and GC ===
+// PASS: All atoms have valid data after interleaved ops
+//
+// === Test 5: Large scale stress test ===
+// Created 100 old gen atoms
+// Completed 5 rounds of writes
+// PASS: All 100 atoms have correct final values
+//
+// All card table stress tests completed!

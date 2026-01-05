@@ -16,12 +16,10 @@ mod gc_handle;
 mod handle_arena;
 mod persistent_map;
 mod persistent_vec;
-mod root_set;
 mod type_ids;
 
 pub use gc_handle::GcHandle;
-pub use handle_arena::{Handle, HandleArena, HandleArenaPtr, HandleScope};
+pub use handle_arena::{Handle, HandleScope};
 pub use persistent_map::PersistentMap;
 pub use persistent_vec::PersistentVec;
-pub use root_set::{RootIdx, RootSet, RootSetPtr};
 pub use type_ids::*;

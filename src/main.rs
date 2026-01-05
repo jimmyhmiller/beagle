@@ -149,8 +149,11 @@ fn compile_trampoline(runtime: &mut Runtime) {
 
             lang.mov_reg(R10, RSP);
             lang.mov_reg(RSP, RDI);
-            lang.instructions.push(X86Asm::Push { reg: R10 });
+            // Skip the GlobalObjectBlock slot at stack_base - 8
+            // (Runtime pre-writes GlobalObjectBlock* there before calling trampoline)
             lang.instructions.push(X86Asm::SubRI { dest: RSP, imm: 8 });
+            lang.instructions.push(X86Asm::Push { reg: R10 });
+            // Stack is now 16-byte aligned (stack_base - 16), no extra sub needed
 
             lang.mov_reg(R10, RSI);
             lang.mov_reg(RDI, RDX);
@@ -159,7 +162,8 @@ fn compile_trampoline(runtime: &mut Runtime) {
 
             lang.call(R10);
 
-            lang.instructions.push(X86Asm::AddRI { dest: RSP, imm: 8 });
+            // Pop old RSP (from stack_base - 16), RSP becomes stack_base - 8
+            // GlobalBlock slot at stack_base - 8 is preserved
             lang.instructions.push(X86Asm::Pop { reg: R10 });
             lang.mov_reg(RSP, R10);
 
@@ -186,6 +190,9 @@ fn compile_trampoline(runtime: &mut Runtime) {
 
             lang.mov_reg(X10, SP);
             lang.mov_reg(SP, X0);
+            // Skip the GlobalObjectBlock slot at stack_base - 8
+            // (Runtime pre-writes GlobalObjectBlock* there before calling trampoline)
+            lang.sub_stack_pointer(8);
             lang.push_to_stack(X10);
 
             lang.mov_reg(X10, X1);
@@ -519,6 +526,12 @@ fn run_repl(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     let pause_atom_ptr = runtime.pause_atom_ptr();
     runtime.set_pause_atom_ptr(pause_atom_ptr);
 
+    // Initialize GlobalObject for main thread before any heap allocations that use roots
+    runtime.initialize_thread_global()?;
+
+    // Initialize the namespaces atom in GlobalObject slot 0
+    runtime.initialize_namespaces()?;
+
     runtime.install_builtins()?;
 
     let mut top_levels = vec![];
@@ -687,6 +700,12 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     let pause_atom_ptr = runtime.pause_atom_ptr();
     runtime.set_pause_atom_ptr(pause_atom_ptr);
+
+    // Initialize GlobalObject for main thread before any heap allocations that use roots
+    runtime.initialize_thread_global()?;
+
+    // Initialize the namespaces atom in GlobalObject slot 0
+    runtime.initialize_namespaces()?;
 
     runtime.install_builtins()?;
     let compile_time = Instant::now();

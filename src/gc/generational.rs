@@ -1,4 +1,4 @@
-use std::{collections::HashMap, error::Error, ffi::c_void, io, thread::ThreadId};
+use std::{error::Error, ffi::c_void, io};
 
 use libc::mprotect;
 
@@ -7,35 +7,19 @@ use super::usdt_probes;
 
 use crate::types::{BuiltInTypes, Header, HeapObject, Word};
 
-use crate::collections::{HandleArenaPtr, RootSetPtr};
-
-use super::{AllocateAction, Allocator, AllocatorOptions, StackMap, mark_and_sweep::MarkAndSweep};
+use super::{
+    AllocateAction, Allocator, AllocatorOptions, StackMap, mark_and_sweep::MarkAndSweep,
+    stack_walker::StackWalker,
+};
 
 /// Represents a reference to a GC root that needs updating after collection.
-/// Each variant knows how to read its current value and write back the new value.
-enum RootRef {
-    /// Points to a mutable slot holding the root value (stack, RootSet, HandleArena)
-    Slot(*mut usize),
-
-    /// Temporary root with index for later update
-    Temporary { index: usize, value: usize },
-
-    /// Namespace root that needs relocation tracking
-    Namespace { namespace_id: usize, value: usize },
-
-    /// Thread root that needs relocation tracking
-    Thread { thread_id: ThreadId, value: usize },
-}
+/// Points to a mutable slot holding the root value (stack slots, GlobalObjectBlock entries).
+struct RootRef(*mut usize);
 
 impl RootRef {
     /// Get the current value of this root
     fn value(&self) -> usize {
-        match self {
-            RootRef::Slot(ptr) => unsafe { **ptr },
-            RootRef::Temporary { value, .. } => *value,
-            RootRef::Namespace { value, .. } => *value,
-            RootRef::Thread { value, .. } => *value,
-        }
+        unsafe { *self.0 }
     }
 }
 
@@ -43,6 +27,124 @@ const DEFAULT_PAGE_COUNT: usize = 1024;
 // Aribtary number that should be changed when I have
 // better options for gc
 const MAX_PAGE_COUNT: usize = 1000000;
+
+/// Card size in bytes (512 = 2^9)
+const CARD_SIZE_LOG2: usize = 9;
+const CARD_SIZE: usize = 1 << CARD_SIZE_LOG2;
+
+/// Card table for write barrier tracking.
+///
+/// Each byte in the table represents one 512-byte "card" of the old generation heap.
+/// When a heap store occurs, the card containing the destination is marked dirty.
+/// During minor GC, only dirty cards need to be scanned for old-to-young references.
+///
+/// Card values: 0 = clean, non-zero = dirty
+pub struct CardTable {
+    /// The card table memory
+    cards: Vec<u8>,
+    /// Start address of the heap region this table covers
+    heap_start: usize,
+    /// Number of cards in the table
+    card_count: usize,
+    /// Biased pointer for fast card marking: cards.as_ptr() - (heap_start >> CARD_SIZE_LOG2)
+    /// This allows codegen to compute: biased_ptr[addr >> 9] = 1
+    biased_ptr: *mut u8,
+    /// Track which cards have been marked dirty (for efficient iteration)
+    dirty_card_indices: Vec<usize>,
+}
+
+unsafe impl Send for CardTable {}
+unsafe impl Sync for CardTable {}
+
+impl CardTable {
+    /// Create a new card table covering the given heap range.
+    fn new(heap_start: usize, heap_size: usize) -> Self {
+        let card_count = heap_size.div_ceil(CARD_SIZE);
+        let mut cards = vec![0u8; card_count];
+        let biased_ptr = unsafe { cards.as_mut_ptr().sub(heap_start >> CARD_SIZE_LOG2) };
+        Self {
+            cards,
+            heap_start,
+            card_count,
+            biased_ptr,
+            dirty_card_indices: Vec::with_capacity(64),
+        }
+    }
+
+    /// Mark the card containing the given address as dirty.
+    /// This is the fast path used by generated code.
+    #[inline]
+    pub fn mark_dirty(&mut self, addr: usize) {
+        let card_index = (addr - self.heap_start) >> CARD_SIZE_LOG2;
+        if card_index < self.card_count {
+            // Only add to dirty list if not already dirty
+            if self.cards[card_index] == 0 {
+                self.cards[card_index] = 1;
+                self.dirty_card_indices.push(card_index);
+            }
+        }
+    }
+
+    /// Resize the card table to cover a larger heap.
+    /// Called when the old generation grows.
+    pub fn resize(&mut self, new_heap_size: usize) {
+        let new_card_count = new_heap_size.div_ceil(CARD_SIZE);
+        if new_card_count > self.card_count {
+            // Extend the card table with clean cards for the new region
+            self.cards.resize(new_card_count, 0);
+            self.card_count = new_card_count;
+            // Recalculate biased pointer (the Vec may have reallocated)
+            self.biased_ptr = unsafe {
+                self.cards
+                    .as_mut_ptr()
+                    .sub(self.heap_start >> CARD_SIZE_LOG2)
+            };
+        }
+    }
+
+    /// Check if a card is dirty.
+    #[inline]
+    #[allow(unused)]
+    pub fn is_dirty(&self, card_index: usize) -> bool {
+        card_index < self.card_count && self.cards[card_index] != 0
+    }
+
+    /// Get the biased pointer for codegen.
+    /// Generated code can do: biased_ptr[addr >> 9] = 1
+    pub fn biased_ptr(&self) -> *mut u8 {
+        self.biased_ptr
+    }
+
+    /// Get the start address of a card.
+    #[allow(unused)]
+    fn card_start(&self, card_index: usize) -> usize {
+        self.heap_start + (card_index << CARD_SIZE_LOG2)
+    }
+
+    /// Get the end address of a card (exclusive).
+    #[allow(unused)]
+    fn card_end(&self, card_index: usize) -> usize {
+        self.card_start(card_index) + CARD_SIZE
+    }
+
+    /// Get the list of dirty card indices (O(1) instead of scanning whole table).
+    pub fn dirty_card_indices(&self) -> &[usize] {
+        &self.dirty_card_indices
+    }
+
+    /// Clear all dirty cards and the tracking list.
+    pub fn clear(&mut self) {
+        for &card_index in &self.dirty_card_indices {
+            self.cards[card_index] = 0;
+        }
+        self.dirty_card_indices.clear();
+    }
+
+    /// Check if there are any dirty cards.
+    pub fn has_dirty_cards(&self) -> bool {
+        !self.dirty_card_indices.is_empty()
+    }
+}
 
 struct Space {
     start: *const u8,
@@ -213,36 +315,33 @@ pub struct GenerationalGC {
     copied: Vec<HeapObject>,
     gc_count: usize,
     full_gc_frequency: usize,
-    namespace_roots: Vec<(usize, usize)>,
-    relocated_namespace_roots: Vec<(usize, Vec<(usize, usize)>)>,
-    temporary_roots: Vec<Option<usize>>,
-    root_sets: Vec<Option<RootSetPtr>>,
-    handle_arenas: Vec<Option<HandleArenaPtr>>,
-    handle_arena_threads: HashMap<ThreadId, usize>,
-    thread_roots: HashMap<ThreadId, usize>,
     atomic_pause: [u8; 8],
     options: AllocatorOptions,
+    /// Remembered set: old gen objects that contain pointers to young gen.
+    /// Each entry is a tagged pointer to an old gen object whose fields need scanning.
+    /// Note: This is used for Rust code write barriers. Card table is used for generated code.
+    remembered_set: Vec<usize>,
+    /// Card table for tracking writes to old generation from generated code.
+    /// Each 512-byte region ("card") of old gen has one byte in this table.
+    card_table: CardTable,
 }
 
 impl Allocator for GenerationalGC {
     fn new(options: AllocatorOptions) -> Self {
         let young = Space::new(DEFAULT_PAGE_COUNT * 10);
         let old = MarkAndSweep::new_with_page_count(DEFAULT_PAGE_COUNT * 100, options);
+        // Create card table covering the old generation
+        let card_table = CardTable::new(old.heap_start(), old.heap_size());
         Self {
             young,
             old,
             copied: vec![],
             gc_count: 0,
             full_gc_frequency: 100,
-            namespace_roots: vec![],
-            relocated_namespace_roots: vec![],
-            temporary_roots: vec![],
-            root_sets: vec![],
-            handle_arenas: vec![],
-            handle_arena_threads: HashMap::new(),
-            thread_roots: HashMap::new(),
             atomic_pause: [0; 8],
             options,
+            remembered_set: Vec::with_capacity(64),
+            card_table,
         }
     }
 
@@ -265,7 +364,6 @@ impl Allocator for GenerationalGC {
     }
 
     fn gc(&mut self, stack_map: &super::StackMap, stack_pointers: &[(usize, usize, usize)]) {
-        // TODO: Need to figure out when to do a Major GC
         if !self.options.gc {
             return;
         }
@@ -278,53 +376,21 @@ impl Allocator for GenerationalGC {
         self.gc_count += 1;
     }
 
-    fn register_root_set(&mut self, roots: RootSetPtr) -> usize {
-        // Find an empty slot or push a new one
-        for (i, slot) in self.root_sets.iter_mut().enumerate() {
-            if slot.is_none() {
-                *slot = Some(roots);
-                return i;
-            }
-        }
-        self.root_sets.push(Some(roots));
-        self.root_sets.len() - 1
-    }
-
-    fn unregister_root_set(&mut self, id: usize) {
-        if id < self.root_sets.len() {
-            self.root_sets[id] = None;
-        }
-    }
-
-    fn register_handle_arena(&mut self, arena: HandleArenaPtr, thread_id: ThreadId) -> usize {
-        for (i, slot) in self.handle_arenas.iter_mut().enumerate() {
-            if slot.is_none() {
-                *slot = Some(arena);
-                self.handle_arena_threads.insert(thread_id, i);
-                return i;
-            }
-        }
-        let idx = self.handle_arenas.len();
-        self.handle_arenas.push(Some(arena));
-        self.handle_arena_threads.insert(thread_id, idx);
-        idx
-    }
-
-    fn unregister_handle_arena_for_thread(&mut self, thread_id: ThreadId) {
-        if let Some(idx) = self.handle_arena_threads.remove(&thread_id)
-            && idx < self.handle_arenas.len()
-        {
-            self.handle_arenas[idx] = None;
-        }
-    }
-
     fn grow(&mut self) {
         self.old.grow();
+        // Resize card table to cover the expanded old generation
+        self.card_table.resize(self.old.heap_size());
     }
 
-    fn gc_add_root(&mut self, _old: usize) {
-        // No-op: All old-gen roots are now handled uniformly during GC.
-        // This function is kept for trait compatibility.
+    /// Allocate a long-lived runtime object directly in old generation.
+    fn allocate_for_runtime(&mut self, words: usize) -> Result<usize, Box<dyn std::error::Error>> {
+        // Allocate in old generation - these objects are long-lived
+        match self.old.try_allocate(words, BuiltInTypes::HeapObject)? {
+            super::AllocateAction::Allocated(ptr) => {
+                Ok(BuiltInTypes::HeapObject.tag(ptr as isize) as usize)
+            }
+            super::AllocateAction::Gc => Err("Need GC to allocate runtime object".into()),
+        }
     }
 
     #[allow(unused)]
@@ -332,63 +398,75 @@ impl Allocator for GenerationalGC {
         self.atomic_pause.as_ptr() as usize
     }
 
-    fn add_namespace_root(&mut self, namespace_id: usize, root: usize) {
-        self.namespace_roots.push((namespace_id, root));
-    }
-
-    fn remove_namespace_root(&mut self, namespace_id: usize, root: usize) -> bool {
-        if let Some(pos) = self
-            .namespace_roots
-            .iter()
-            .position(|(ns, r)| *ns == namespace_id && *r == root)
-        {
-            self.namespace_roots.swap_remove(pos);
-            true
-        } else {
-            false
-        }
-    }
-
-    fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)> {
-        std::mem::take(&mut self.relocated_namespace_roots)
-    }
-
     fn get_allocation_options(&self) -> AllocatorOptions {
         self.options
     }
 
-    fn register_temporary_root(&mut self, root: usize) -> usize {
-        debug_assert!(self.temporary_roots.len() < 10, "Too many temporary roots");
-        for (i, temp_root) in self.temporary_roots.iter_mut().enumerate() {
-            if temp_root.is_none() {
-                *temp_root = Some(root);
-                return i;
-            }
+    /// Write barrier: record old-to-young pointers.
+    ///
+    /// Called after writing a pointer into a heap object. If the object is in
+    /// old gen, we mark its card as dirty so minor GC will scan it.
+    ///
+    /// ## Two Mechanisms
+    ///
+    /// 1. **Remembered set** (precise): Used by Rust code for exact tracking
+    /// 2. **Card table** (fast): Used by generated code for cheap marking
+    ///
+    /// Both are processed during minor GC. The card table is also marked here
+    /// so that Rust code writes are tracked by both mechanisms.
+    fn write_barrier(&mut self, object_ptr: usize, new_value: usize) {
+        // Only care about heap pointer values
+        if !BuiltInTypes::is_heap_pointer(new_value) {
+            return;
         }
-        self.temporary_roots.push(Some(root));
-        self.temporary_roots.len() - 1
+
+        let new_value_untagged = BuiltInTypes::untag(new_value);
+
+        // Only care if the new value is in young gen
+        if !self.young.contains(new_value_untagged as *const u8) {
+            return;
+        }
+
+        // Only care if the object being written to is in old gen
+        if !BuiltInTypes::is_heap_pointer(object_ptr) {
+            return;
+        }
+
+        let object_untagged = BuiltInTypes::untag(object_ptr);
+        if !self.old.contains(object_untagged as *const u8) {
+            return;
+        }
+
+        // Mark the card as dirty (for generated code compatibility)
+        self.card_table.mark_dirty(object_untagged);
+
+        // Also add to remembered set (precise tracking for Rust code)
+        if !self.remembered_set.contains(&object_ptr) {
+            #[cfg(feature = "debug-gc")]
+            eprintln!(
+                "[GC DEBUG] write_barrier: adding old-gen object {:#x} to remembered set (points to young-gen {:#x})",
+                object_ptr, new_value
+            );
+            self.remembered_set.push(object_ptr);
+        }
     }
 
-    fn unregister_temporary_root(&mut self, id: usize) -> usize {
-        let value = self.temporary_roots[id];
-        self.temporary_roots[id] = None;
-        value.unwrap()
+    fn get_card_table_biased_ptr(&self) -> *mut u8 {
+        self.card_table.biased_ptr()
     }
 
-    fn peek_temporary_root(&self, id: usize) -> usize {
-        self.temporary_roots[id].unwrap()
-    }
+    fn mark_card_unconditional(&mut self, object_ptr: usize) {
+        // Only care if the object is a heap pointer
+        if !BuiltInTypes::is_heap_pointer(object_ptr) {
+            return;
+        }
 
-    fn add_thread_root(&mut self, thread_id: ThreadId, thread_object: usize) {
-        self.thread_roots.insert(thread_id, thread_object);
-    }
+        let object_untagged = BuiltInTypes::untag(object_ptr);
 
-    fn remove_thread_root(&mut self, thread_id: ThreadId) {
-        self.thread_roots.remove(&thread_id);
-    }
-
-    fn get_thread_root(&self, thread_id: ThreadId) -> Option<usize> {
-        self.thread_roots.get(&thread_id).copied()
+        // Only mark if the object is in old gen (card table only covers old gen)
+        if self.old.contains(object_untagged as *const u8) {
+            self.card_table.mark_dirty(object_untagged);
+        }
     }
 }
 
@@ -423,61 +501,7 @@ impl GenerationalGC {
 
     // ==================== GATHER FUNCTIONS ====================
 
-    /// Gather temporary roots as RootRefs
-    fn gather_temporary_root_refs(&self) -> Vec<RootRef> {
-        self.temporary_roots
-            .iter()
-            .enumerate()
-            .filter_map(|(i, opt)| opt.map(|value| RootRef::Temporary { index: i, value }))
-            .collect()
-    }
-
-    /// Gather roots from RootSets and HandleArenas as Slot refs
-    fn gather_slot_refs(&self) -> Vec<RootRef> {
-        let mut slots = Vec::new();
-
-        // Gather from RootSets
-        for root_set_ptr in self.root_sets.iter().filter_map(|slot| *slot) {
-            let roots = unsafe { &mut *root_set_ptr.0 };
-            for root in roots.roots_mut() {
-                slots.push(RootRef::Slot(root as *mut usize));
-            }
-        }
-
-        // Gather from HandleArenas
-        for arena_ptr in self.handle_arenas.iter().filter_map(|slot| *slot) {
-            let arena = unsafe { &mut *arena_ptr.0 };
-            for root in arena.roots_mut() {
-                slots.push(RootRef::Slot(root as *mut usize));
-            }
-        }
-
-        slots
-    }
-
-    /// Gather namespace roots, taking ownership of the current list
-    fn gather_namespace_root_refs(&mut self) -> Vec<RootRef> {
-        std::mem::take(&mut self.namespace_roots)
-            .into_iter()
-            .map(|(ns_id, val)| RootRef::Namespace {
-                namespace_id: ns_id,
-                value: val,
-            })
-            .collect()
-    }
-
-    /// Gather thread roots, draining the current map
-    fn gather_thread_root_refs(&mut self) -> Vec<RootRef> {
-        self.thread_roots
-            .drain()
-            .map(|(tid, val)| RootRef::Thread {
-                thread_id: tid,
-                value: val,
-            })
-            .collect()
-    }
-
-    /// Gather stack roots as Slot refs.
+    /// Gather stack roots as RootRefs.
     /// Returns (slot_refs, old_gen_values) - old gen values need field updates.
     fn gather_stack_root_refs(
         &self,
@@ -495,9 +519,8 @@ impl GenerationalGC {
                 *gc_return_addr,
             );
 
-            // Convert (slot_addr, value) pairs to RootRef::Slot
             for (slot_addr, _value) in young_roots {
-                slots.push(RootRef::Slot(slot_addr as *mut usize));
+                slots.push(RootRef(slot_addr as *mut usize));
             }
 
             old_gen_values.extend(old_roots);
@@ -517,124 +540,58 @@ impl GenerationalGC {
         let mut roots: Vec<(usize, usize)> = Vec::with_capacity(36);
         let mut old_gen_objects: Vec<usize> = Vec::with_capacity(16);
 
-        let mut fp = frame_pointer;
-        let mut pending_return_addr = gc_return_addr;
+        StackWalker::walk_stack_roots_with_return_addr(
+            stack_base,
+            frame_pointer,
+            gc_return_addr,
+            stack_map,
+            |slot_addr, slot_value| {
+                let untagged = BuiltInTypes::untag(slot_value);
 
-        while fp != 0 && fp < stack_base {
-            let caller_fp = unsafe { *(fp as *const usize) };
-            let return_addr_for_caller = unsafe { *((fp + 8) as *const usize) };
-
-            if pending_return_addr != 0
-                && let Some(details) = stack_map.find_stack_data(pending_return_addr)
-            {
-                let active_slots = details.number_of_locals + details.current_stack_size;
-
-                for i in 0..active_slots {
-                    let slot_addr = fp - 8 - (i * 8);
-                    let slot_value = unsafe { *(slot_addr as *const usize) };
-
-                    if BuiltInTypes::is_heap_pointer(slot_value) {
-                        let untagged = BuiltInTypes::untag(slot_value);
-
-                        if untagged % 8 != 0 {
-                            continue;
-                        }
-
-                        if self.young.contains(untagged as *const u8) {
-                            assert!(
-                                self.young.contains_allocated(untagged as *const u8),
-                                "Young gen pointer {:#x} not in allocated region",
-                                untagged
-                            );
-                            roots.push((slot_addr, slot_value));
-                        } else {
-                            assert!(
-                                self.old.contains(untagged as *const u8),
-                                "Heap pointer {:#x} neither in young nor old gen",
-                                untagged
-                            );
-
-                            let heap_object = HeapObject::from_tagged(slot_value);
-                            let header = heap_object.get_header();
-
-                            assert!(
-                                header.size <= 100,
-                                "Corrupted header at {:#x}: size {} > 100",
-                                untagged,
-                                header.size
-                            );
-
-                            old_gen_objects.push(slot_value);
-                        }
-                    }
+                // Skip values where the untagged pointer is 0 (e.g., value 0b110 = 6)
+                if untagged == 0 {
+                    return;
                 }
-            }
 
-            if caller_fp != 0 && caller_fp <= fp {
-                break;
-            }
+                if self.young.contains(untagged as *const u8) {
+                    assert!(
+                        self.young.contains_allocated(untagged as *const u8),
+                        "Young gen pointer {:#x} not in allocated region",
+                        untagged
+                    );
+                    roots.push((slot_addr, slot_value));
+                } else {
+                    assert!(
+                        self.old.contains(untagged as *const u8),
+                        "Heap pointer {:#x} (tagged {:#x}) neither in young nor old gen. Stack slot @ {:#x}",
+                        untagged,
+                        slot_value,
+                        slot_addr
+                    );
 
-            fp = caller_fp;
-            pending_return_addr = return_addr_for_caller;
-        }
+                    old_gen_objects.push(slot_value);
+                }
+            },
+        );
 
         (roots, old_gen_objects)
     }
 
     // ==================== UNIFIED ROOT PROCESSING ====================
 
-    /// Re-insert a root that doesn't need updating (for namespace/thread roots)
-    fn reinsert_root(&mut self, root: &RootRef, value: usize) {
-        match root {
-            RootRef::Namespace { namespace_id, .. } => {
-                self.namespace_roots.push((*namespace_id, value));
-            }
-            RootRef::Thread { thread_id, .. } => {
-                self.thread_roots.insert(*thread_id, value);
-            }
-            _ => {} // Slot/Temporary don't need reinsertion
+    /// Update a root slot with its new value after GC processing
+    fn update_root(&self, root: &RootRef, new_value: usize) {
+        unsafe {
+            *root.0 = new_value;
         }
     }
 
-    /// Update a root with its new value after GC processing
-    fn update_root(&mut self, root: &RootRef, old_value: usize, new_value: usize) {
-        match root {
-            RootRef::Slot(ptr) => unsafe {
-                **ptr = new_value;
-            },
-            RootRef::Temporary { index, .. } => {
-                self.temporary_roots[*index] = Some(new_value);
-            }
-            RootRef::Namespace { namespace_id, .. } => {
-                self.namespace_roots.push((*namespace_id, new_value));
-                // Track the relocation so runtime can update its namespace variables
-                if old_value != new_value {
-                    // Find or create the entry for this namespace
-                    if let Some(entry) = self
-                        .relocated_namespace_roots
-                        .iter_mut()
-                        .find(|(ns, _)| *ns == *namespace_id)
-                    {
-                        entry.1.push((old_value, new_value));
-                    } else {
-                        self.relocated_namespace_roots
-                            .push((*namespace_id, vec![(old_value, new_value)]));
-                    }
-                }
-            }
-            RootRef::Thread { thread_id, .. } => {
-                self.thread_roots.insert(*thread_id, new_value);
-            }
-        }
-    }
-
-    /// Process all roots uniformly - copy young gen objects to old gen
+    /// Process all roots - copy young gen objects to old gen
     fn process_all_roots(&mut self, roots: Vec<RootRef>) {
         for root_ref in roots {
             let old_value = root_ref.value();
 
             if !BuiltInTypes::is_heap_pointer(old_value) {
-                self.reinsert_root(&root_ref, old_value);
                 continue;
             }
 
@@ -642,13 +599,12 @@ impl GenerationalGC {
 
             // Skip if not in young gen
             if !self.young.contains(heap_object.get_pointer()) {
-                self.reinsert_root(&root_ref, old_value);
                 continue;
             }
 
             // Copy to old gen
             let new_value = self.copy(old_value);
-            self.update_root(&root_ref, old_value, new_value);
+            self.update_root(&root_ref, new_value);
         }
     }
 
@@ -658,42 +614,42 @@ impl GenerationalGC {
 
         self.gc_count += 1;
 
-        // 1. GATHER all roots
-        let mut all_roots = Vec::new();
-        all_roots.extend(self.gather_temporary_root_refs());
-        all_roots.extend(self.gather_slot_refs());
-        all_roots.extend(self.gather_namespace_root_refs());
-        all_roots.extend(self.gather_thread_root_refs());
-
-        // Stack roots are handled separately because they return old-gen values too
         let (stack_roots, stack_old_gen) = self.gather_stack_root_refs(stack_map, stack_pointers);
-        all_roots.extend(stack_roots);
+        self.process_all_roots(stack_roots);
 
-        // 2. PROCESS all roots uniformly
-        self.process_all_roots(all_roots);
-
-        // 3. Update fields of old-gen objects found on the stack
+        // Process old gen objects found on stack - update their young gen references.
+        // This scans one level deep for old gen objects directly referenced from stack.
         for old_root in stack_old_gen {
-            let heap_obj = HeapObject::from_tagged(old_root);
-            let header = heap_obj.get_header();
-            if header.size > 100 {
-                continue;
-            }
-            self.move_objects_referenced_from_old_to_old(&mut HeapObject::from_tagged(old_root));
+            self.process_old_gen_object(old_root);
         }
+
+        // Process remembered set - old gen objects that were mutated to point to young gen.
+        // The write barrier recorded these when pointers were written.
+        // Take ownership of the remembered set so we can clear it after processing.
+        let remembered = std::mem::take(&mut self.remembered_set);
+        #[cfg(feature = "debug-gc")]
+        if !remembered.is_empty() {
+            eprintln!(
+                "[GC DEBUG] Processing {} remembered set entries",
+                remembered.len()
+            );
+        }
+        for old_object in remembered {
+            #[cfg(feature = "debug-gc")]
+            eprintln!("[GC DEBUG] Processing remembered object {:#x}", old_object);
+            self.process_old_gen_object(old_object);
+        }
+
+        // Process dirty cards - cards marked by generated code write barriers.
+        // We need to scan all objects in dirty cards for young gen references.
+        self.process_dirty_cards();
+
         self.copy_remaining();
 
-        // 4. SYNC to old generation GC
-        // These syncs are CRITICAL for old.gc() to mark all live objects.
-        // Without them, objects protected by these roots could be swept!
-        self.update_old_generation_namespace_roots();
-        self.update_old_generation_thread_roots();
-        self.old.sync_temporary_roots(&self.temporary_roots);
-        self.old.sync_root_sets(&self.root_sets);
-        self.old.sync_handle_arenas(&self.handle_arenas);
-
-        // Reset young gen for new allocations
         self.young.clear();
+
+        // Clear only the dirty cards (much faster than clearing entire table)
+        self.card_table.clear();
 
         usdt_probes::fire_gc_minor_end(self.gc_count);
         if self.options.print_stats {
@@ -701,15 +657,84 @@ impl GenerationalGC {
         }
     }
 
-    fn update_old_generation_namespace_roots(&mut self) {
-        for (namespace_id, root) in &self.namespace_roots {
-            self.old.add_namespace_root(*namespace_id, *root);
+    /// Process dirty cards from the card table.
+    /// Scans all objects in old gen that are in dirty cards for young gen references.
+    fn process_dirty_cards(&mut self) {
+        // Use the tracked dirty card indices (O(1) to get, no scanning)
+        if !self.card_table.has_dirty_cards() {
+            return;
+        }
+
+        // Copy the dirty card indices to a HashSet for O(1) lookup
+        let dirty_cards: std::collections::HashSet<usize> = self
+            .card_table
+            .dirty_card_indices()
+            .iter()
+            .copied()
+            .collect();
+
+        #[cfg(feature = "debug-gc")]
+        eprintln!("[GC DEBUG] Processing {} dirty cards", dirty_cards.len());
+
+        // Collect objects in dirty cards
+        // We need to do this in two passes because we can't borrow old mutably
+        // while also borrowing card_table
+        let old_start = self.old.heap_start();
+        let mut objects_to_process: Vec<usize> = Vec::new();
+
+        self.old.walk_objects_mut(|obj_addr, heap_obj| {
+            let card_index = (obj_addr - old_start) >> CARD_SIZE_LOG2;
+            if dirty_cards.contains(&card_index) {
+                // Tag the object address for processing
+                let tagged = BuiltInTypes::HeapObject.tag(obj_addr as isize) as usize;
+                objects_to_process.push(tagged);
+
+                #[cfg(feature = "debug-gc")]
+                eprintln!(
+                    "[GC DEBUG] Object at {:#x} is in dirty card {}",
+                    obj_addr, card_index
+                );
+                let _ = heap_obj; // suppress unused warning
+            }
+        });
+
+        // Now process each object
+        for old_object in objects_to_process {
+            self.process_old_gen_object(old_object);
         }
     }
 
-    fn update_old_generation_thread_roots(&mut self) {
-        for (thread_id, root) in self.thread_roots.iter() {
-            self.old.add_thread_root(*thread_id, *root);
+    /// Process an old gen object's fields, copying any young gen references to old gen.
+    fn process_old_gen_object(&mut self, old_object: usize) {
+        let mut heap_obj = HeapObject::from_tagged(old_object);
+
+        // Process this old gen object's fields
+        let data = heap_obj.get_fields_mut();
+        #[cfg(feature = "debug-gc")]
+        eprintln!(
+            "[GC DEBUG] process_old_gen_object {:#x}: {} fields",
+            old_object,
+            data.len()
+        );
+        for (i, field) in data.iter_mut().enumerate() {
+            let _ = i; // Suppress unused variable warning when debug-gc is disabled
+            if BuiltInTypes::is_heap_pointer(*field) {
+                let field_obj = HeapObject::from_tagged(*field);
+                let field_ptr = field_obj.get_pointer();
+
+                if self.young.contains(field_ptr) {
+                    #[cfg(feature = "debug-gc")]
+                    eprintln!(
+                        "[GC DEBUG]   field[{}] = {:#x} is in young gen, copying",
+                        i, *field
+                    );
+                    // Young gen reference - copy to old gen and update field
+                    let new_value = self.copy(*field);
+                    *field = new_value;
+                    #[cfg(feature = "debug-gc")]
+                    eprintln!("[GC DEBUG]   -> new value: {:#x}", new_value);
+                }
+            }
         }
     }
 
@@ -737,13 +762,6 @@ impl GenerationalGC {
             return Header::clear_forwarding_bit(header_data);
         }
 
-        let header = heap_object.get_header();
-
-        // Skip objects with invalid size
-        if header.size > 100 {
-            return root;
-        }
-
         // Copy object data to old generation
         let data = heap_object.get_full_object_data();
         let new_pointer = self.old.copy_data_to_offset(data);
@@ -760,46 +778,34 @@ impl GenerationalGC {
     }
 
     fn copy_remaining(&mut self) {
+        #[cfg(feature = "debug-gc")]
+        let mut iterations = 0;
         while let Some(mut object) = self.copied.pop() {
+            #[cfg(feature = "debug-gc")]
+            {
+                iterations += 1;
+                eprintln!(
+                    "[GC DEBUG] copy_remaining iteration {}: processing object at {:#x}",
+                    iterations,
+                    object.untagged()
+                );
+            }
             for field in object.get_fields_mut().iter_mut() {
                 if BuiltInTypes::is_heap_pointer(*field) {
                     let heap_obj = HeapObject::from_tagged(*field);
                     if self.young.contains(heap_obj.get_pointer()) {
+                        #[cfg(feature = "debug-gc")]
+                        eprintln!("[GC DEBUG]   copying young-gen field {:#x}", *field);
                         *field = self.copy(*field);
                     }
                 }
             }
         }
-    }
-
-    fn move_objects_referenced_from_old_to_old(&mut self, old_object: &mut HeapObject) {
-        let object_ptr = old_object.get_pointer();
-
-        // Skip if in young gen
-        if self.young.contains(object_ptr) {
-            return;
-        }
-
-        let header = old_object.get_header();
-
-        // Skip objects with invalid size
-        if header.size > 100 {
-            return;
-        }
-
-        let data = old_object.get_fields_mut();
-
-        for field in data.iter_mut() {
-            if BuiltInTypes::is_heap_pointer(*field) {
-                let heap_obj = HeapObject::from_tagged(*field);
-
-                // Only copy if in young gen
-                if self.young.contains(heap_obj.get_pointer()) {
-                    let new_value = self.copy(*field);
-                    *field = new_value;
-                }
-            }
-        }
+        #[cfg(feature = "debug-gc")]
+        eprintln!(
+            "[GC DEBUG] copy_remaining done after {} iterations",
+            iterations
+        );
     }
 
     fn full_gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {

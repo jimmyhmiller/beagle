@@ -635,6 +635,13 @@ impl HeapObject {
         unsafe { *pointer }
     }
 
+    /// Get a mutable pointer to a field slot (for GC updates)
+    pub fn get_field_ptr(&self, arg: usize) -> *mut usize {
+        let untagged = self.untagged();
+        let pointer = untagged as *mut usize;
+        unsafe { pointer.add(arg + self.header_size() / 8) }
+    }
+
     #[allow(unused)]
     pub fn get_type_id(&self) -> usize {
         let untagged = self.untagged();
