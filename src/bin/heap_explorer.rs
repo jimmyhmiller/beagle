@@ -90,31 +90,12 @@ pub struct SpaceSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RootSnapshot {
-    pub source: String,
-    pub index: String,
-    pub value: String,
-    pub tag: String,
-    pub is_heap_ptr: bool,
-    pub points_to: Option<PointerTarget>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeapDump {
     pub timestamp: String,
     pub label: String,
     pub young_gen: SpaceSnapshot,
     pub old_gen: SpaceSnapshot,
     pub stacks: Vec<ThreadStackSnapshot>,
-    pub roots: RootsSnapshot,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RootsSnapshot {
-    pub temporary_roots: Vec<RootSnapshot>,
-    pub namespace_roots: Vec<RootSnapshot>,
-    pub thread_roots: Vec<RootSnapshot>,
-    pub additional_roots: Vec<RootSnapshot>,
 }
 
 impl HeapDump {
@@ -147,12 +128,6 @@ impl HeapDump {
                 stack.frames.len()
             );
         }
-        eprintln!();
-        eprintln!("Roots:");
-        eprintln!("  Temporary: {}", self.roots.temporary_roots.len());
-        eprintln!("  Namespace: {}", self.roots.namespace_roots.len());
-        eprintln!("  Thread: {}", self.roots.thread_roots.len());
-        eprintln!("  Additional: {}", self.roots.additional_roots.len());
     }
 
     pub fn find_young_pointers(&self) -> Vec<String> {
@@ -186,39 +161,6 @@ impl HeapDump {
                             ));
                         }
                     }
-                }
-            }
-        }
-
-        for root in &self.roots.temporary_roots {
-            if let Some(target) = &root.points_to {
-                if target.in_young {
-                    results.push(format!(
-                        "TEMP_ROOT[{}] = {} -> young",
-                        root.index, root.value
-                    ));
-                }
-            }
-        }
-
-        for root in &self.roots.namespace_roots {
-            if let Some(target) = &root.points_to {
-                if target.in_young {
-                    results.push(format!(
-                        "NAMESPACE_ROOT[{}] = {} -> young",
-                        root.index, root.value
-                    ));
-                }
-            }
-        }
-
-        for root in &self.roots.thread_roots {
-            if let Some(target) = &root.points_to {
-                if target.in_young {
-                    results.push(format!(
-                        "THREAD_ROOT[{}] = {} -> young",
-                        root.index, root.value
-                    ));
                 }
             }
         }
@@ -476,20 +418,6 @@ fn explore_json(path: &str) {
                             frame.slots.len()
                         );
                     }
-                }
-            }
-            "roots" => {
-                println!("Temporary roots:");
-                for r in &dump.roots.temporary_roots {
-                    println!("  [{}] {} ({})", r.index, r.value, r.tag);
-                }
-                println!("Namespace roots:");
-                for r in &dump.roots.namespace_roots {
-                    println!("  [{}] {} ({})", r.index, r.value, r.tag);
-                }
-                println!("Thread roots:");
-                for r in &dump.roots.thread_roots {
-                    println!("  [{}] {} ({})", r.index, r.value, r.tag);
                 }
             }
             "find-young" => {

@@ -1,4 +1,4 @@
-use crate::types::BuiltInTypes;
+use crate::types::{BuiltInTypes, HeapObject};
 
 use super::StackMap;
 
@@ -62,6 +62,64 @@ impl StackWalker {
             "[GC DEBUG] walk_stack_roots_with_return_addr: stack_base={:#x}, frame_pointer={:#x}, gc_return_addr={:#x}",
             stack_base, frame_pointer, gc_return_addr
         );
+
+        // Check the GlobalObjectBlock slot at stack_base - 8
+        // This is where the Runtime stores the GlobalObjectBlock pointer for this thread.
+        // The trampoline skips this slot, so it's preserved throughout execution.
+        // TODO: Ideally this would be a regular stack local tracked by the stack map
+        // at the base frame, removing the need for this special case.
+        //
+        // IMPORTANT: We walk the entire chain of GlobalObjectBlocks here.
+        // Each block has field 0 as next_block pointer. If we only trace the first
+        // block, subsequent blocks' entries won't be found by GC and young gen
+        // pointers in them won't be updated after copying.
+        let global_block_slot_addr = stack_base - 8;
+        let global_block_value = unsafe { *(global_block_slot_addr as *const usize) };
+        if BuiltInTypes::is_heap_pointer(global_block_value) {
+            let untagged = BuiltInTypes::untag(global_block_value);
+            if untagged % 8 == 0 {
+                #[cfg(feature = "debug-gc")]
+                eprintln!(
+                    "[GC DEBUG] GlobalObjectBlock slot @ {:#x} = {:#x}",
+                    global_block_slot_addr, global_block_value
+                );
+                callback(global_block_slot_addr, global_block_value);
+
+                // Walk the chain of GlobalObjectBlocks.
+                // Field 0 of each block is the next_block pointer.
+                // Field 1 is count (tagged int), fields 2..66 are entries.
+                let mut current_block = global_block_value;
+                loop {
+                    let heap_obj = HeapObject::from_tagged(current_block);
+                    let next_block = heap_obj.get_field(0);
+
+                    // Check if next_block is a valid heap pointer (not null/free)
+                    // null_value is 0b111, and free slots also use 0b111
+                    if !BuiltInTypes::is_heap_pointer(next_block) || next_block == 0b111 {
+                        break;
+                    }
+
+                    let next_untagged = BuiltInTypes::untag(next_block);
+                    if next_untagged % 8 != 0 {
+                        break;
+                    }
+
+                    #[cfg(feature = "debug-gc")]
+                    eprintln!(
+                        "[GC DEBUG] GlobalObjectBlock chain: next block @ {:#x}",
+                        next_block
+                    );
+
+                    // The slot address for this block is field 0 of the previous block.
+                    // We need to get the address of field 0 in the heap object.
+                    let prev_heap_obj = HeapObject::from_tagged(current_block);
+                    let slot_addr = prev_heap_obj.get_field_ptr(0) as usize;
+                    callback(slot_addr, next_block);
+
+                    current_block = next_block;
+                }
+            }
+        }
 
         while fp != 0 && fp < stack_base {
             let caller_fp = unsafe { *(fp as *const usize) };

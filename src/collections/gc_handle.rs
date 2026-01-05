@@ -10,6 +10,7 @@
 //! using AllocationContext. After allocation, re-read the handle to get the
 //! potentially-updated pointer.
 
+use crate::runtime::Runtime;
 use crate::types::{BuiltInTypes, HeapObject};
 
 /// A handle to a GC-managed object on Beagle's heap.
@@ -64,8 +65,18 @@ impl GcHandle {
     }
 
     /// Write a value to a field at the given index.
+    /// NOTE: This does NOT call the write barrier. For generational GC safety,
+    /// use set_field_with_barrier() when writing heap pointers.
     pub fn set_field(&self, index: usize, value: usize) {
         self.as_heap_object().write_field(index as i32, value);
+    }
+
+    /// Write a value to a field at the given index with GC write barrier.
+    /// This is required for generational GC to track old-to-young references.
+    /// Use this when writing heap pointers to object fields.
+    pub fn set_field_with_barrier(&self, runtime: &mut Runtime, index: usize, value: usize) {
+        self.as_heap_object().write_field(index as i32, value);
+        runtime.write_barrier(self.tagged_ptr, value);
     }
 
     /// Get the number of fields in this object.

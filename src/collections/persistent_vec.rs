@@ -66,8 +66,9 @@ impl PersistentVec {
         // Initialize fields
         vec.set_field(FIELD_COUNT, BuiltInTypes::construct_int(0) as usize);
         vec.set_field(FIELD_SHIFT, BuiltInTypes::construct_int(5) as usize);
-        vec.set_field(FIELD_ROOT, root.as_tagged());
-        vec.set_field(FIELD_TAIL, tail.as_tagged());
+        // Use write barriers for heap pointer writes
+        vec.set_field_with_barrier(scope.runtime(), FIELD_ROOT, root.as_tagged());
+        vec.set_field_with_barrier(scope.runtime(), FIELD_TAIL, tail.as_tagged());
 
         Ok(vec_h.to_gc_handle())
     }
@@ -172,8 +173,16 @@ impl PersistentVec {
         let old_tail = tail_h.to_gc_handle();
         let new_tail = new_tail_h.to_gc_handle();
         old_tail.copy_fields_to(&new_tail, tail_len);
-        // Add new value
-        new_tail.set_field(tail_len, value_h.get());
+
+        // Call write barriers for all copied heap pointers
+        for i in 0..tail_len {
+            let slot = new_tail.get_field(i);
+            scope.runtime().write_barrier(new_tail.as_tagged(), slot);
+        }
+
+        // Add new value with barrier (value could be a heap pointer)
+        let new_tail = new_tail_h.to_gc_handle();
+        new_tail.set_field_with_barrier(scope.runtime(), tail_len, value_h.get());
 
         // Set up new vector - reuse root from old vector
         let vec = vec_h.to_gc_handle();
@@ -187,8 +196,10 @@ impl PersistentVec {
             FIELD_SHIFT,
             BuiltInTypes::construct_int(shift as isize) as usize,
         );
-        new_vec.set_field(FIELD_ROOT, root);
-        new_vec.set_field(FIELD_TAIL, new_tail_h.to_gc_handle().as_tagged());
+        // Use write barriers for heap pointer writes
+        new_vec.set_field_with_barrier(scope.runtime(), FIELD_ROOT, root);
+        let new_tail = new_tail_h.to_gc_handle();
+        new_vec.set_field_with_barrier(scope.runtime(), FIELD_TAIL, new_tail.as_tagged());
 
         Ok(new_vec_h.to_gc_handle())
     }
@@ -214,7 +225,8 @@ impl PersistentVec {
         let new_tail_h = scope.allocate_typed(1, TYPE_ID_PERSISTENT_VEC_NODE)?;
 
         let new_tail = new_tail_h.to_gc_handle();
-        new_tail.set_field(0, value_h.get());
+        // Use write barrier - value could be a heap pointer
+        new_tail.set_field_with_barrier(scope.runtime(), 0, value_h.get());
 
         // Determine if tree needs to grow
         let cnt_shifted = count >> 5;
@@ -247,8 +259,9 @@ impl PersistentVec {
             FIELD_SHIFT,
             BuiltInTypes::construct_int(new_shift as isize) as usize,
         );
-        result_vec.set_field(FIELD_ROOT, new_root.as_tagged());
-        result_vec.set_field(FIELD_TAIL, new_tail.as_tagged());
+        // Use write barriers for heap pointer writes
+        result_vec.set_field_with_barrier(scope.runtime(), FIELD_ROOT, new_root.as_tagged());
+        result_vec.set_field_with_barrier(scope.runtime(), FIELD_TAIL, new_tail.as_tagged());
 
         Ok(result_vec_h.to_gc_handle())
     }
@@ -277,9 +290,10 @@ impl PersistentVec {
         let new_root = new_root_h.to_gc_handle();
 
         // New root: [old_root, new_path, null, null, ...]
-        new_root.set_field(0, current_root.as_tagged());
-        new_root.set_field(1, new_path.as_tagged());
-        // Fill rest with null
+        // Use write barriers for heap pointer writes
+        new_root.set_field_with_barrier(scope.runtime(), 0, current_root.as_tagged());
+        new_root.set_field_with_barrier(scope.runtime(), 1, new_path.as_tagged());
+        // Fill rest with null (no barrier needed for null)
         for i in 2..BRANCH_FACTOR {
             new_root.set_field(i, BuiltInTypes::null_value() as usize);
         }
@@ -307,8 +321,9 @@ impl PersistentVec {
             let inner = inner_h.to_gc_handle();
             let path_node = path_node_h.to_gc_handle();
 
-            // Only first slot is used
-            path_node.set_field(0, inner.as_tagged());
+            // Only first slot is used - use write barrier for heap pointer
+            path_node.set_field_with_barrier(scope.runtime(), 0, inner.as_tagged());
+            // Fill rest with null (no barrier needed for null)
             for i in 1..BRANCH_FACTOR {
                 path_node.set_field(i, BuiltInTypes::null_value() as usize);
             }
@@ -353,7 +368,17 @@ impl PersistentVec {
         // Bulk copy all fields from old parent
         let parent_len = parent.field_count();
         parent.copy_fields_to(&new_parent, parent_len);
-        // Fill rest with null if parent was smaller
+
+        // Call write barriers for all copied heap pointers
+        for i in 0..parent_len {
+            let slot = new_parent.get_field(i);
+            if slot != BuiltInTypes::null_value() as usize {
+                scope.runtime().write_barrier(new_parent.as_tagged(), slot);
+            }
+        }
+
+        // Fill rest with null if parent was smaller (no barrier needed for null)
+        let new_parent = new_parent_h.to_gc_handle();
         for i in parent_len..BRANCH_FACTOR {
             new_parent.set_field(i, BuiltInTypes::null_value() as usize);
         }
@@ -364,7 +389,8 @@ impl PersistentVec {
             // Bottom level: insert tail directly
             let tail = tail_h.to_gc_handle();
             let new_parent = new_parent_h.to_gc_handle();
-            new_parent.set_field(sub_index, tail.as_tagged());
+            // Use write barrier for heap pointer
+            new_parent.set_field_with_barrier(scope.runtime(), sub_index, tail.as_tagged());
             Ok(new_parent_h)
         } else {
             // Recurse into child
@@ -385,7 +411,8 @@ impl PersistentVec {
             let new_parent = new_parent_h.to_gc_handle();
             let new_child = new_child_h.to_gc_handle();
 
-            new_parent.set_field(sub_index, new_child.as_tagged());
+            // Use write barrier for heap pointer
+            new_parent.set_field_with_barrier(scope.runtime(), sub_index, new_child.as_tagged());
             Ok(new_parent_h)
         }
     }
@@ -471,12 +498,15 @@ impl PersistentVec {
         let new_tail = new_tail_h.to_gc_handle();
         let value = value_h.get();
 
-        // Copy tail and update the target index
+        // Copy tail and update the target index - use barriers for all values
+        // since they could be heap pointers
         for i in 0..tail_len {
             if i == (index & BRANCH_MASK) {
-                new_tail.set_field(i, value);
+                new_tail.set_field_with_barrier(scope.runtime(), i, value);
             } else {
-                new_tail.set_field(i, old_tail.get_field(i));
+                let slot = old_tail.get_field(i);
+                let new_tail = new_tail_h.to_gc_handle();
+                new_tail.set_field_with_barrier(scope.runtime(), i, slot);
             }
         }
 
@@ -491,8 +521,11 @@ impl PersistentVec {
             FIELD_SHIFT,
             BuiltInTypes::construct_int(shift as isize) as usize,
         );
-        new_vec.set_field(FIELD_ROOT, vec.get_field(FIELD_ROOT));
-        new_vec.set_field(FIELD_TAIL, new_tail_h.to_gc_handle().as_tagged());
+        // Use write barriers for heap pointer writes
+        let root = vec.get_field(FIELD_ROOT);
+        new_vec.set_field_with_barrier(scope.runtime(), FIELD_ROOT, root);
+        let new_tail = new_tail_h.to_gc_handle();
+        new_vec.set_field_with_barrier(scope.runtime(), FIELD_TAIL, new_tail.as_tagged());
 
         Ok(new_vec_h.to_gc_handle())
     }
@@ -533,8 +566,10 @@ impl PersistentVec {
             FIELD_SHIFT,
             BuiltInTypes::construct_int(shift as isize) as usize,
         );
-        new_vec.set_field(FIELD_ROOT, new_root.as_tagged());
-        new_vec.set_field(FIELD_TAIL, vec.get_field(FIELD_TAIL));
+        // Use write barriers for heap pointer writes
+        new_vec.set_field_with_barrier(scope.runtime(), FIELD_ROOT, new_root.as_tagged());
+        let tail = vec.get_field(FIELD_TAIL);
+        new_vec.set_field_with_barrier(scope.runtime(), FIELD_TAIL, tail);
 
         Ok(new_vec_h.to_gc_handle())
     }
@@ -559,11 +594,18 @@ impl PersistentVec {
         // Bulk copy all fields
         node.copy_fields_to(&new_node, node_len);
 
+        // Call write barriers for all copied heap pointers
+        for i in 0..node_len {
+            let slot = new_node.get_field(i);
+            scope.runtime().write_barrier(new_node.as_tagged(), slot);
+        }
+
         if level == 0 {
             // Leaf level: update the value directly
             let value = value_h.get();
             let new_node = new_node_h.to_gc_handle();
-            new_node.set_field(index & BRANCH_MASK, value);
+            // Use write barrier - value could be a heap pointer
+            new_node.set_field_with_barrier(scope.runtime(), index & BRANCH_MASK, value);
             Ok(new_node_h)
         } else {
             // Recurse into child
@@ -578,7 +620,8 @@ impl PersistentVec {
             let new_node = new_node_h.to_gc_handle();
             let new_child = new_child_h.to_gc_handle();
 
-            new_node.set_field(sub_index, new_child.as_tagged());
+            // Use write barrier for heap pointer
+            new_node.set_field_with_barrier(scope.runtime(), sub_index, new_child.as_tagged());
             Ok(new_node_h)
         }
     }

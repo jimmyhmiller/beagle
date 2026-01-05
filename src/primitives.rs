@@ -2,6 +2,7 @@ use std::ops::Deref;
 
 use crate::{
     ast::{Ast, AstCompiler},
+    builtins::mark_card,
     ir::{Condition, Value},
     types::{BuiltInTypes, Header},
 };
@@ -48,8 +49,15 @@ impl AstCompiler<'_> {
                 // TODO: I need a raw add that doesn't check for tags
                 let offset = self.ir.add_int(untagged, Value::RawValue(8));
                 let value = args[1];
-                self.call_builtin("beagle.builtin/gc-add-root", vec![pointer]);
                 self.ir.atomic_store(offset, value);
+
+                // Card marking for generational GC write barrier
+                // The function pointer needs to be pre-shifted left because call_builtin
+                // shifts right to "untag" the function pointer
+                let mark_card_fn =
+                    Value::RawValue((mark_card as usize) << BuiltInTypes::tag_size());
+                self.ir.call_builtin(mark_card_fn, vec![untagged]);
+
                 args[1]
             }
             "beagle.primitive/compare-and-swap!" => {
@@ -62,6 +70,13 @@ impl AstCompiler<'_> {
                 let expected_and_result = self.ir.assign_new_force(expected);
                 self.ir
                     .compare_and_swap(expected_and_result.into(), new, offset);
+
+                // Card marking for generational GC write barrier (on success)
+                // Note: We mark the card even if CAS fails - this is safe (just extra work)
+                let mark_card_fn =
+                    Value::RawValue((mark_card as usize) << BuiltInTypes::tag_size());
+                self.ir.call_builtin(mark_card_fn, vec![untagged]);
+
                 // TODO: I should do a conditional move here instead of a jump
                 let label = self.ir.label("compare_and_swap");
                 let result = self.ir.assign_new(Value::True);
@@ -137,7 +152,12 @@ impl AstCompiler<'_> {
                 let value = args[2];
                 self.ir
                     .heap_store_with_reg_offset(untagged, value, offset_reg.into());
-                self.call_builtin("beagle.builtin/gc-add-root", vec![pointer]);
+
+                // Card marking for generational GC write barrier
+                let mark_card_fn =
+                    Value::RawValue((mark_card as usize) << BuiltInTypes::tag_size());
+                self.ir.call_builtin(mark_card_fn, vec![untagged]);
+
                 Value::Null
             }
             "beagle.primitive/read-field" => {
@@ -247,6 +267,13 @@ impl AstCompiler<'_> {
                 let pointer = args[0];
                 let value = args[1];
                 self.ir.heap_store(pointer, value);
+
+                // Card marking for generational GC write barrier
+                let untagged = self.ir.untag(pointer);
+                let mark_card_fn =
+                    Value::RawValue((mark_card as usize) << BuiltInTypes::tag_size());
+                self.ir.call_builtin(mark_card_fn, vec![untagged]);
+
                 Value::Null
             }
             "beagle.primitive/__get-my-thread-obj" => {
@@ -329,7 +356,6 @@ impl AstCompiler<'_> {
         let value = self.call_compile(&args[1]);
 
         let object = self.ir.assign_new(object);
-        self.call_builtin("beagle.builtin/gc-add-root", vec![object.into()]);
         let untagged_object = self.ir.untag(object.into());
         // self.ir.breakpoint();
         let struct_id = self.ir.read_struct_id(untagged_object);

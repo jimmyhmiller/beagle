@@ -194,5 +194,5 @@ pub fn fire_stw_end() {
 
 /// Register all probes. Call this at startup.
 pub fn register() -> Result<(), usdt::Error> {
-    usdt::register_probes().map_err(|e| usdt::Error::from(e))
+    usdt::register_probes()
 }

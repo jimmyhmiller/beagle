@@ -22,6 +22,15 @@ pub const TYPE_ID_BITMAP_NODE: u8 = 23;
 /// Type ID for HAMT collision nodes (3 fields: hash, count, kv_array)
 pub const TYPE_ID_COLLISION_NODE: u8 = 24;
 
-/// Type ID for HAMT array nodes (1 field: children array with 64 slots)
+/// Type ID for HAMT ArrayNode struct (2 fields: count, children_ptr)
 /// Used when BitmapNode density exceeds threshold (16+ entries)
 pub const TYPE_ID_ARRAY_NODE: u8 = 25;
+
+/// Type ID for ArrayNode's 32-slot children array
+/// Separate from TYPE_ID_ARRAY_NODE to catch bugs where children array
+/// is confused with ArrayNode struct (both have same field semantics but different layout)
+pub const TYPE_ID_ARRAY_NODE_CHILDREN: u8 = 27;
+
+/// Type ID for Atom (1 field: value)
+/// Used for atomic reference cells (thread-safe mutable cells)
+pub const TYPE_ID_ATOM: u8 = 26;

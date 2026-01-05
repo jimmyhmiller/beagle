@@ -16,7 +16,7 @@ use libffi::{
 
 use crate::{
     Message, debug_only,
-    gc::{Allocator, STACK_SIZE},
+    gc::STACK_SIZE,
     get_runtime,
     runtime::{DispatchTable, FFIInfo, FFIType, RawPtr, Runtime, SyncWrapper},
     types::{BuiltInTypes, HeapObject},
@@ -54,6 +54,37 @@ pub fn save_gc_return_addr(addr: usize) {
 /// Returns 0 if none has been saved.
 pub fn get_saved_gc_return_addr() -> usize {
     SAVED_GC_RETURN_ADDR.with(|cell| cell.get())
+}
+
+/// Reset the saved frame pointer and gc return address.
+/// Called by Runtime::reset() to clear stale values between test runs.
+pub fn reset_saved_gc_context() {
+    SAVED_FRAME_POINTER.with(|cell| cell.set(0));
+    SAVED_GC_RETURN_ADDR.with(|cell| cell.set(0));
+}
+
+/// Saved GC context - used to save/restore around calls back into Beagle
+pub struct SavedGcContext {
+    pub frame_pointer: usize,
+    pub gc_return_addr: usize,
+}
+
+/// Save the current GC context. Call this BEFORE calling back into Beagle.
+/// The Beagle code may call builtins that update the saved GC context.
+/// After the Beagle code returns, call restore_gc_context to restore it.
+pub fn save_current_gc_context() -> SavedGcContext {
+    SavedGcContext {
+        frame_pointer: get_saved_frame_pointer(),
+        gc_return_addr: get_saved_gc_return_addr(),
+    }
+}
+
+/// Restore a previously saved GC context. Call this AFTER calling back into Beagle.
+/// This ensures that if GC runs after the Beagle call returns, it uses the
+/// correct (non-stale) frame pointer.
+pub fn restore_gc_context(ctx: SavedGcContext) {
+    save_frame_pointer(ctx.frame_pointer);
+    save_gc_return_addr(ctx.gc_return_addr);
 }
 
 /// Macro to save frame pointer and gc return address for GC stack walking.
@@ -214,6 +245,21 @@ pub extern "C" fn print_byte(value: usize) -> usize {
     let runtime = get_runtime().get_mut();
     runtime.printer.print_byte(byte_value);
     0b111
+}
+
+/// Mark the card containing an address as dirty for write barrier.
+/// Called from generated code after heap stores to old gen objects.
+/// Takes the untagged address of the object being written to.
+///
+/// This is a no-op for non-generational GCs (card_table_ptr will be null).
+/// For generational GC, it only marks cards for addresses in old gen.
+pub extern "C" fn mark_card(untagged_addr: usize) -> usize {
+    let runtime = get_runtime().get_mut();
+    // Tag the address as HeapObject for the mark_card_for_object call
+    let tagged_addr = BuiltInTypes::HeapObject.tag(untagged_addr as isize) as usize;
+    // Mark the card if object is in old gen (no-op for non-generational GCs)
+    runtime.mark_card_for_object(tagged_addr);
+    0b111 // Return null
 }
 
 extern "C" fn allocate(stack_pointer: usize, frame_pointer: usize, size: usize) -> usize {
@@ -813,14 +859,15 @@ pub unsafe extern "C" fn call_variadic_function_value(
         .allocate_zeroed(num_extra, stack_pointer, BuiltInTypes::HeapObject)
         .unwrap();
 
-    // Unregister args_array root after allocation is complete
-    runtime_mut.unregister_temporary_root(args_root_id);
+    // Get the updated args_array_ptr from the root (GC may have moved it)
+    // then unregister the root
+    let args_array_ptr = runtime_mut.unregister_temporary_root(args_root_id);
 
     // Set type_id to 1 (raw array)
     let mut rest_heap = HeapObject::from_tagged(rest_array);
     rest_heap.write_type_id(1);
 
-    // Now get the args fields - AFTER allocation to ensure they're still valid
+    // Now get the args fields - using the updated pointer after potential GC
     let args_heap = HeapObject::from_tagged(args_array_ptr);
     let all_args = args_heap.get_fields();
 
@@ -1055,12 +1102,6 @@ pub unsafe extern "C" fn gc(stack_pointer: usize, frame_pointer: usize) -> usize
     }
     let runtime = get_runtime().get_mut();
     runtime.gc_impl(stack_pointer, frame_pointer, gc_return_addr);
-    BuiltInTypes::null_value() as usize
-}
-
-pub unsafe extern "C" fn gc_add_root(old: usize) -> usize {
-    let runtime = get_runtime().get_mut();
-    runtime.gc_add_root(old);
     BuiltInTypes::null_value() as usize
 }
 
@@ -1299,8 +1340,16 @@ pub unsafe extern "C" fn update_binding(namespace_slot: usize, value: usize) -> 
     let runtime = get_runtime().get_mut();
     let namespace_slot = BuiltInTypes::untag(namespace_slot);
     let namespace_id = runtime.current_namespace_id();
-    runtime.memory.add_namespace_root(namespace_id, value);
+
+    // Store binding in heap-based PersistentMap (no namespace_roots tracking needed!)
+    let stack_pointer = get_current_stack_pointer();
+    if let Err(e) = runtime.set_heap_binding(stack_pointer, namespace_id, namespace_slot, value) {
+        eprintln!("Error in update_binding: {}", e);
+    }
+
+    // Also update the Rust-side HashMap for backwards compatibility during migration
     runtime.update_binding(namespace_id, namespace_slot, value);
+
     BuiltInTypes::null_value() as usize
 }
 
@@ -1309,6 +1358,19 @@ pub unsafe extern "C" fn get_binding(namespace: usize, slot: usize) -> usize {
     let runtime = get_runtime().get_mut();
     let namespace = BuiltInTypes::untag(namespace);
     let slot = BuiltInTypes::untag(slot);
+
+    // TODO: Flush pending bindings at a safer point (not during get_binding)
+    // For now, rely on HashMap fallback for bindings added by compiler thread
+    // let stack_pointer = get_current_stack_pointer();
+    // runtime.flush_pending_heap_bindings(stack_pointer);
+
+    // Try heap-based PersistentMap first
+    let result = runtime.get_heap_binding(namespace, slot);
+    if result != BuiltInTypes::null_value() as usize {
+        return result;
+    }
+
+    // Fall back to Rust-side HashMap during migration
     runtime.get_binding(namespace, slot)
 }
 
@@ -1523,7 +1585,9 @@ pub extern "C" fn run_thread(_unused: usize) -> usize {
                     .registered_thread_count
                     .fetch_sub(1, std::sync::atomic::Ordering::Release)
                     - 1;
-                runtime.memory.remove_thread_root(my_thread_id);
+                // Thread object is in our GlobalObjectBlock - cleanup happens
+                // when thread_globals entry is removed
+                runtime.memory.thread_globals.remove(&my_thread_id);
                 // Fire USDT probes for thread unregistration and exit
                 crate::gc::usdt_probes::fire_thread_unregister(new_count);
                 crate::gc::usdt_probes::fire_thread_exit();
@@ -1538,7 +1602,7 @@ pub extern "C" fn run_thread(_unused: usize) -> usize {
     result
 }
 
-/// Get the current thread's Thread object from thread_roots.
+/// Get the current thread's Thread object from its GlobalObjectBlock.
 /// Called from Beagle code in __run_thread_start.
 /// Takes stack_pointer and frame_pointer so we can call __pause if needed.
 ///
@@ -1548,63 +1612,40 @@ pub extern "C" fn run_thread(_unused: usize) -> usize {
 pub extern "C" fn get_my_thread_obj(stack_pointer: usize, frame_pointer: usize) -> usize {
     // CRITICAL: Save the gc context here so that if we call __pause,
     // the GC will have the correct return address pointing to Beagle code.
-    // Without this, __pause would capture a return address pointing to this
-    // Rust function, and the GC would skip the first Beagle frame!
     save_gc_context!(stack_pointer, frame_pointer);
 
     let runtime = get_runtime().get_mut();
     let thread_id = thread::current().id();
 
-    // We need to get the thread object while holding gc_lock.
-    // But we're a registered thread, so if GC starts we must pause.
-    // Use try_lock to avoid blocking - if we can't get the lock, pause and retry.
-    //
-    // CRITICAL: After reading from thread_roots, we must ensure no GC can run
-    // between us returning and the caller using the value. We do this by:
-    // 1. Reading the value under gc_lock
-    // 2. After releasing the lock, checking if GC is pending
-    // 3. If GC runs (we pause), we MUST re-read because the pointer may have moved
+    // Read the Thread object from our GlobalObjectBlock's reserved slot.
+    // We need the gc_lock to ensure the value isn't stale during GC.
     let thread_obj = loop {
         // Check if GC needs us to pause first
         if runtime.is_paused() {
             unsafe { __pause(stack_pointer, frame_pointer) };
-            // After pause, is_paused is false but GC ran - we need to start fresh
             continue;
         }
 
         // Try to get the lock
         let obj = match runtime.gc_lock.try_lock() {
-            Ok(_guard) => {
-                let obj = runtime
-                    .memory
-                    .get_thread_root(thread_id)
-                    .expect("Thread root not found in get_my_thread_obj");
-                obj
-                // _guard dropped here - lock released
-            }
+            Ok(_guard) => runtime
+                .memory
+                .thread_globals
+                .get(&thread_id)
+                .map(|tg| tg.get_thread_object())
+                .expect("ThreadGlobal not found in get_my_thread_obj"),
             Err(_) => {
-                // Couldn't get lock - GC might be starting
                 thread::yield_now();
                 continue;
             }
         };
 
-        // CRITICAL: After releasing the lock, check if GC is pending.
-        // If is_paused is true, GC is about to run (or another thread is waiting
-        // for us to pause). We must pause and then re-read, because GC will move
-        // objects and our pointer will be stale.
+        // After releasing the lock, check if GC is pending.
         if runtime.is_paused() {
             unsafe { __pause(stack_pointer, frame_pointer) };
-            // GC ran - pointer is stale. Re-read.
             continue;
         }
 
-        // No GC pending. The pointer is valid.
-        // However, there's still a tiny window between checking is_paused() and
-        // returning where another thread could trigger GC. But for GC to complete,
-        // that thread must wait for US to pause. Since we're about to return to
-        // Beagle code and access the Thread object immediately, GC cannot complete
-        // until after we've used the pointer. The pointer remains valid.
         break obj;
     };
 
@@ -1652,6 +1693,11 @@ pub unsafe fn call_fn_0(runtime: &Runtime, function_name: &str) -> usize {
         runtime,
         format!("{} {}", "call_fn_0", function_name).as_str(),
     );
+
+    // Save GC context before calling into Beagle - the Beagle code may call builtins
+    // that update the saved GC context, making it point to now-deallocated frames
+    let saved_ctx = save_current_gc_context();
+
     let save_volatile_registers = runtime
         .get_function_by_name("beagle.builtin/save_volatile_registers0")
         .unwrap();
@@ -1661,7 +1707,11 @@ pub unsafe fn call_fn_0(runtime: &Runtime, function_name: &str) -> usize {
 
     let function = runtime.get_function_by_name(function_name).unwrap();
     let function = runtime.get_pointer(function).unwrap();
-    save_volatile_registers(function as usize)
+    let result = save_volatile_registers(function as usize);
+
+    // Restore GC context after Beagle call returns
+    restore_gc_context(saved_ctx);
+    result
 }
 
 pub unsafe fn call_fn_1(runtime: &Runtime, function_name: &str, arg1: usize) -> usize {
@@ -1669,6 +1719,11 @@ pub unsafe fn call_fn_1(runtime: &Runtime, function_name: &str, arg1: usize) -> 
         runtime,
         format!("{} {}", "call_fn_1", function_name).as_str(),
     );
+
+    // Save GC context before calling into Beagle - the Beagle code may call builtins
+    // that update the saved GC context, making it point to now-deallocated frames
+    let saved_ctx = save_current_gc_context();
+
     let save_volatile_registers = runtime
         .get_function_by_name("beagle.builtin/save_volatile_registers1")
         .unwrap();
@@ -1678,7 +1733,11 @@ pub unsafe fn call_fn_1(runtime: &Runtime, function_name: &str, arg1: usize) -> 
 
     let function = runtime.get_function_by_name(function_name).unwrap();
     let function = runtime.get_pointer(function).unwrap();
-    save_volatile_registers(arg1, function as usize)
+    let result = save_volatile_registers(arg1, function as usize);
+
+    // Restore GC context after Beagle call returns
+    restore_gc_context(saved_ctx);
+    result
 }
 
 pub unsafe fn call_fn_2(runtime: &Runtime, function_name: &str, arg1: usize, arg2: usize) -> usize {
@@ -1686,6 +1745,11 @@ pub unsafe fn call_fn_2(runtime: &Runtime, function_name: &str, arg1: usize, arg
         runtime,
         format!("{} {}", "call_fn_2", function_name).as_str(),
     );
+
+    // Save GC context before calling into Beagle - the Beagle code may call builtins
+    // that update the saved GC context, making it point to now-deallocated frames
+    let saved_ctx = save_current_gc_context();
+
     let save_volatile_registers = runtime
         .get_function_by_name("beagle.builtin/save_volatile_registers2")
         .unwrap();
@@ -1695,11 +1759,19 @@ pub unsafe fn call_fn_2(runtime: &Runtime, function_name: &str, arg1: usize, arg
 
     let function = runtime.get_function_by_name(function_name).unwrap();
     let function = runtime.get_pointer(function).unwrap();
-    save_volatile_registers(arg1, arg2, function as usize)
+    let result = save_volatile_registers(arg1, arg2, function as usize);
+
+    // Restore GC context after Beagle call returns
+    restore_gc_context(saved_ctx);
+    result
 }
 
 // Helper to call a Beagle function or closure with one argument
 pub unsafe fn call_beagle_fn_ptr(runtime: &Runtime, fn_or_closure: usize, arg1: usize) {
+    // Save GC context before calling into Beagle - the Beagle code may call builtins
+    // that update the saved GC context, making it point to now-deallocated frames
+    let saved_ctx = save_current_gc_context();
+
     // Check if this is a closure (has closure tag)
     let kind = BuiltInTypes::get_kind(fn_or_closure);
 
@@ -1735,6 +1807,9 @@ pub unsafe fn call_beagle_fn_ptr(runtime: &Runtime, fn_or_closure: usize, arg1: 
 
         save_volatile_registers(arg1, function_pointer);
     }
+
+    // Restore GC context after Beagle call returns
+    restore_gc_context(saved_ctx);
 }
 
 pub unsafe extern "C" fn load_library(name: usize) -> usize {
@@ -2200,8 +2275,6 @@ pub unsafe extern "C" fn copy_from_to_object(from: usize, to: usize) -> usize {
     if from == BuiltInTypes::null_value() as usize {
         return to;
     }
-    // runtime.gc_add_root(from);
-    // runtime.gc_add_root(to);
     let from = HeapObject::from_tagged(from);
     let mut to = HeapObject::from_tagged(to);
     runtime.copy_object_except_header(from, &mut to).unwrap();
@@ -2855,15 +2928,21 @@ pub extern "C" fn load_keyword_constant_runtime(
     frame_pointer: usize,
     index: usize,
 ) -> usize {
+    use crate::types::BuiltInTypes;
+
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
 
-    // Check if we already allocated this keyword
-    if let Some(ptr) = runtime.keyword_heap_ptrs[index] {
-        return ptr;
+    // Check heap-based PersistentMap first (survives GC relocation)
+    let kw_ns = runtime.keyword_namespace_id();
+    if kw_ns != 0 {
+        let heap_ptr = runtime.get_heap_binding(kw_ns, index);
+        if heap_ptr != BuiltInTypes::null_value() as usize {
+            return heap_ptr;
+        }
     }
 
-    // Allocate and register as GC root
+    // Allocate and register in heap-based map
     let keyword_text = runtime.keyword_constants[index].str.clone();
     runtime.intern_keyword(stack_pointer, keyword_text).unwrap()
 }
@@ -3098,17 +3177,25 @@ pub unsafe fn throw_runtime_error(stack_pointer: usize, kind: &str, message: Str
     // Get frame_pointer from thread-local (set by the builtin entry)
     let frame_pointer = get_saved_frame_pointer();
 
-    // Allocate strings and create error in a scoped block to avoid aliasing
+    // Allocate strings with proper GC root protection
+    // kind_str must be rooted before allocating message_str since allocation can trigger GC
     let (kind_str, message_str) = {
         let runtime = get_runtime().get_mut();
-        let kind_str = runtime
+        let kind_str: usize = runtime
             .allocate_string(stack_pointer, kind.to_string())
             .expect("Failed to allocate kind string")
             .into();
-        let message_str = runtime
+
+        // Register kind_str as a root before allocating message_str
+        let kind_root_id = runtime.register_temporary_root(kind_str);
+
+        let message_str: usize = runtime
             .allocate_string(stack_pointer, message)
             .expect("Failed to allocate message string")
             .into();
+
+        // Get the potentially updated kind_str after GC
+        let kind_str = runtime.unregister_temporary_root(kind_root_id);
         (kind_str, message_str)
     };
     // Runtime borrow is dropped here
@@ -3378,13 +3465,6 @@ impl Runtime {
         // gc needs both stack_pointer and frame_pointer
         // stack_pointer is arg 0, frame_pointer is arg 1
         self.add_builtin_function_with_fp("beagle.core/gc", gc as *const u8, true, true, 2)?;
-
-        self.add_builtin_function(
-            "beagle.builtin/gc-add-root",
-            gc_add_root as *const u8,
-            false,
-            1,
-        )?;
 
         // Math builtins - all now take (stack_pointer, frame_pointer, value)
         self.add_builtin_function_with_fp(
@@ -3789,12 +3869,17 @@ impl Runtime {
 
 /// Allocates a Beagle struct from Rust using struct registry lookup.
 ///
+/// WARNING: This function is NOT GC-safe if fields contain heap pointers!
+/// The allocation can trigger GC, making the field values stale.
+/// For GC-safe struct allocation, allocate first, then peek roots, then write fields.
+///
 /// # Arguments
 /// * `struct_name` - Fully qualified name like "beagle.core/CompilerWarning"
 /// * `fields` - Slice of pre-tagged Beagle values (must match struct field count)
 ///
 /// # Returns
 /// Tagged pointer to the allocated struct
+#[allow(dead_code)]
 unsafe fn allocate_struct(
     runtime: &mut Runtime,
     stack_pointer: usize,
@@ -3885,13 +3970,14 @@ unsafe fn warning_to_struct_impl(
     let line = warning.line;
     let column = warning.column;
 
-    // Helper macro to allocate and register as temp root
+    // Helper macro to allocate, register as temp root, and return the root INDEX
+    // We store root IDs and retrieve updated values before use (GC safety)
     macro_rules! alloc_and_root {
         ($expr:expr) => {{
             let val: usize = $expr;
             let root_id = runtime.register_temporary_root(val);
             temp_roots.push(root_id);
-            val
+            temp_roots.len() - 1 // Return the index into temp_roots
         }};
     }
 
@@ -3900,7 +3986,7 @@ unsafe fn warning_to_struct_impl(
         crate::compiler::WarningKind::NonExhaustiveMatch { .. } => "NonExhaustiveMatch",
         crate::compiler::WarningKind::UnreachablePattern => "UnreachablePattern",
     };
-    let kind_tagged = alloc_and_root!(
+    let kind_root_idx = alloc_and_root!(
         runtime
             .allocate_string(stack_pointer, kind_str.to_string())
             .map_err(|e| format!("Failed to create kind string: {}", e))?
@@ -3908,7 +3994,7 @@ unsafe fn warning_to_struct_impl(
     );
 
     // Create file_name string
-    let file_name_tagged = alloc_and_root!(
+    let file_name_root_idx = alloc_and_root!(
         runtime
             .allocate_string(stack_pointer, warning.file_name.clone())
             .map_err(|e| format!("Failed to create file_name string: {}", e))?
@@ -3916,7 +4002,7 @@ unsafe fn warning_to_struct_impl(
     );
 
     // Create message string
-    let message_tagged = alloc_and_root!(
+    let message_root_idx = alloc_and_root!(
         runtime
             .allocate_string(stack_pointer, warning.message.clone())
             .map_err(|e| format!("Failed to create message string: {}", e))?
@@ -3928,13 +4014,13 @@ unsafe fn warning_to_struct_impl(
     let column_tagged = BuiltInTypes::Int.tag(column as isize) as usize;
 
     // Handle optional fields based on warning kind
-    let (enum_name_tagged, missing_variants_tagged) = match &warning.kind {
+    let (enum_name_root_idx, missing_variants_root_idx) = match &warning.kind {
         crate::compiler::WarningKind::NonExhaustiveMatch {
             enum_name,
             missing_variants,
         } => {
             // Create enum_name string
-            let enum_name_str = alloc_and_root!(
+            let enum_name_root_idx = alloc_and_root!(
                 runtime
                     .allocate_string(stack_pointer, enum_name.clone())
                     .map_err(|e| format!("Failed to create enum_name string: {}", e))?
@@ -3954,6 +4040,8 @@ unsafe fn warning_to_struct_impl(
                     .map_err(|e| format!("Failed to create variant string: {}", e))?
                     .into();
                 let variant_root_id = runtime.register_temporary_root(variant_str);
+                // Get updated vec from root before calling push (GC may have moved it)
+                vec = runtime.peek_temporary_root(vec_root_id);
                 vec = unsafe { call_fn_2(runtime, "persistent-vector/push", vec, variant_str) };
                 runtime.unregister_temporary_root(variant_root_id);
                 // Update vec root to point to new vec
@@ -3963,36 +4051,77 @@ unsafe fn warning_to_struct_impl(
                 temp_roots[vec_root_index] = vec_root_id;
             }
 
-            (enum_name_str, vec)
+            (Some(enum_name_root_idx), Some(vec_root_index))
         }
         crate::compiler::WarningKind::UnreachablePattern => {
-            // Use null for both optional fields
-            (
-                BuiltInTypes::null_value() as usize,
-                BuiltInTypes::null_value() as usize,
-            )
+            // Use null for both optional fields (no roots needed)
+            (None, None)
         }
     };
 
-    // Allocate struct with all 7 fields in order
-    let fields = [
-        kind_tagged,
-        file_name_tagged,
-        line_tagged,
-        column_tagged,
-        message_tagged,
-        enum_name_tagged,
-        missing_variants_tagged,
-    ];
+    // Create line and column as tagged ints (no allocation needed)
+    // These are safe since they don't require heap allocation
 
-    unsafe {
-        allocate_struct(
-            runtime,
-            stack_pointer,
-            "beagle.core/CompilerWarning",
-            &fields,
-        )
-    }
+    // Allocate the struct FIRST (this can trigger GC)
+    // Then peek all root values AFTER allocation
+    let struct_ptr = {
+        // Look up struct definition
+        let (struct_id, struct_def) = runtime
+            .get_struct("beagle.core/CompilerWarning")
+            .ok_or_else(|| "Struct beagle.core/CompilerWarning not found".to_string())?;
+
+        if struct_def.fields.len() != 7 {
+            return Err(format!(
+                "Expected 7 fields for CompilerWarning, got {}",
+                struct_def.fields.len()
+            ));
+        }
+
+        let struct_id_tagged = BuiltInTypes::Int.tag(struct_id as isize) as usize;
+
+        // Allocate the struct - this can trigger GC!
+        let obj_ptr = runtime
+            .allocate(7, stack_pointer, BuiltInTypes::HeapObject)
+            .map_err(|e| format!("Allocation failed: {}", e))?;
+
+        // Write struct_id to header
+        let heap_obj = HeapObject::from_tagged(obj_ptr);
+        let untagged = heap_obj.untagged();
+        let header_ptr = untagged as *mut usize;
+        unsafe {
+            let current_header = *header_ptr;
+            let mask = 0x00FFFFFFFF000000;
+            let shifted_type_id = struct_id_tagged << 24;
+            let new_header = (current_header & !mask) | shifted_type_id;
+            *header_ptr = new_header;
+        }
+
+        obj_ptr
+    };
+
+    // NOW peek all values from roots - AFTER allocation/GC
+    // This is critical for GC correctness - we must get updated addresses
+    let kind_tagged = runtime.peek_temporary_root(temp_roots[kind_root_idx]);
+    let file_name_tagged = runtime.peek_temporary_root(temp_roots[file_name_root_idx]);
+    let message_tagged = runtime.peek_temporary_root(temp_roots[message_root_idx]);
+    let enum_name_tagged = enum_name_root_idx
+        .map(|idx| runtime.peek_temporary_root(temp_roots[idx]))
+        .unwrap_or(BuiltInTypes::null_value() as usize);
+    let missing_variants_tagged = missing_variants_root_idx
+        .map(|idx| runtime.peek_temporary_root(temp_roots[idx]))
+        .unwrap_or(BuiltInTypes::null_value() as usize);
+
+    // Write all fields to the struct
+    let heap_obj = HeapObject::from_tagged(struct_ptr);
+    heap_obj.write_field(0, kind_tagged);
+    heap_obj.write_field(1, file_name_tagged);
+    heap_obj.write_field(2, line_tagged);
+    heap_obj.write_field(3, column_tagged);
+    heap_obj.write_field(4, message_tagged);
+    heap_obj.write_field(5, enum_name_tagged);
+    heap_obj.write_field(6, missing_variants_tagged);
+
+    Ok(struct_ptr)
 }
 
 pub unsafe extern "C" fn compiler_warnings(stack_pointer: usize, frame_pointer: usize) -> usize {
@@ -4016,7 +4145,17 @@ pub unsafe extern "C" fn compiler_warnings(stack_pointer: usize, frame_pointer: 
         match unsafe { warning_to_struct(runtime, stack_pointer, warning) } {
             Ok(warning_struct) => {
                 let warning_root_id = runtime.register_temporary_root(warning_struct);
-                vec = unsafe { call_fn_2(runtime, "persistent-vector/push", vec, warning_struct) };
+                // Get updated values from roots before calling push (GC may have moved them)
+                let vec_updated = runtime.peek_temporary_root(vec_root_id);
+                let warning_struct_updated = runtime.peek_temporary_root(warning_root_id);
+                vec = unsafe {
+                    call_fn_2(
+                        runtime,
+                        "persistent-vector/push",
+                        vec_updated,
+                        warning_struct_updated,
+                    )
+                };
                 runtime.unregister_temporary_root(warning_root_id);
                 // Update the root to point to the new vec
                 runtime.unregister_temporary_root(vec_root_id);

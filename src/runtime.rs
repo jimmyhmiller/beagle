@@ -31,9 +31,337 @@ use crate::{
     types::{BuiltInTypes, Header, HeapObject, Tagged},
 };
 
-use crate::collections::{GcHandle, PersistentMap, PersistentVec, RootSetPtr};
+use crate::collections::{GcHandle, HandleScope, PersistentMap, PersistentVec, TYPE_ID_ATOM};
 
 use std::cell::RefCell;
+
+// ============================================================================
+// GlobalObject: Unified GC roots system
+// ============================================================================
+
+/// Number of root entries per GlobalObjectBlock (fixed size)
+pub const GLOBAL_BLOCK_SIZE: usize = 64;
+
+/// Header fields in GlobalObjectBlock: next_block and count
+pub const GLOBAL_BLOCK_HEADER_FIELDS: usize = 2;
+
+/// Total fields per block: header + entries
+pub const GLOBAL_BLOCK_TOTAL_FIELDS: usize = GLOBAL_BLOCK_HEADER_FIELDS + GLOBAL_BLOCK_SIZE;
+
+/// Marker value for free slots in GlobalObjectBlock (null value)
+pub const GLOBAL_BLOCK_FREE_SLOT: usize = 0b111; // Same as BuiltInTypes::null_value()
+
+// ============================================================================
+// Reserved GlobalObject slots for runtime infrastructure
+// ============================================================================
+
+/// Reserved slot index for the namespaces atom.
+/// This slot holds an Atom containing a PersistentMap of namespace bindings.
+pub const GLOBAL_SLOT_NAMESPACES: usize = 0;
+
+/// Reserved slot index for the current thread's Thread object.
+/// Each thread stores its own Thread object here so GC can keep it alive.
+pub const GLOBAL_SLOT_THREAD: usize = 1;
+
+/// Number of reserved slots at the start of the first GlobalObjectBlock.
+/// These slots are not available for general-purpose roots via add_root().
+pub const GLOBAL_RESERVED_SLOTS: usize = 2;
+
+/// Wrapper for accessing a GlobalObjectBlock on the heap.
+///
+/// Layout:
+/// - Field 0: next_block (tagged pointer to next GlobalObjectBlock, or null)
+/// - Field 1: count (tagged integer - number of entries used, NOT including freed slots)
+/// - Fields 2..66: entries (tagged pointers to roots, or GLOBAL_BLOCK_FREE_SLOT if freed)
+#[derive(Clone, Copy)]
+pub struct GlobalObjectBlock {
+    /// Tagged pointer to the heap object
+    ptr: usize,
+}
+
+impl GlobalObjectBlock {
+    /// Create from a tagged pointer (must be a valid heap pointer)
+    #[inline]
+    pub fn from_tagged(ptr: usize) -> Self {
+        debug_assert!(BuiltInTypes::is_heap_pointer(ptr));
+        GlobalObjectBlock { ptr }
+    }
+
+    /// Get the tagged pointer
+    pub fn tagged_ptr(&self) -> usize {
+        self.ptr
+    }
+
+    /// Get the next block in the linked list, if any
+    pub fn next_block(&self) -> Option<GlobalObjectBlock> {
+        let heap_obj = HeapObject::from_tagged(self.ptr);
+        let next = heap_obj.get_field(0);
+        if next == GLOBAL_BLOCK_FREE_SLOT || next == 0 {
+            None
+        } else if BuiltInTypes::is_heap_pointer(next) {
+            Some(GlobalObjectBlock::from_tagged(next))
+        } else {
+            None
+        }
+    }
+
+    /// Set the next block pointer
+    pub fn set_next_block(&self, next: Option<GlobalObjectBlock>) {
+        let heap_obj = HeapObject::from_tagged(self.ptr);
+        let next_ptr = next.map_or(GLOBAL_BLOCK_FREE_SLOT, |b| b.ptr);
+        heap_obj.write_field(0, next_ptr);
+    }
+
+    /// Get the count of active entries (note: doesn't account for freed slots)
+    pub fn count(&self) -> usize {
+        let heap_obj = HeapObject::from_tagged(self.ptr);
+        let count_tagged = heap_obj.get_field(1);
+        BuiltInTypes::untag(count_tagged)
+    }
+
+    /// Set the count of active entries
+    pub fn set_count(&self, count: usize) {
+        let heap_obj = HeapObject::from_tagged(self.ptr);
+        let count_tagged = BuiltInTypes::construct_int(count as isize) as usize;
+        heap_obj.write_field(1, count_tagged);
+    }
+
+    /// Get an entry at a given index (0-based, within this block only)
+    #[inline]
+    pub fn get_entry(&self, index: usize) -> usize {
+        debug_assert!(index < GLOBAL_BLOCK_SIZE);
+        let heap_obj = HeapObject::from_tagged(self.ptr);
+        heap_obj.get_field(GLOBAL_BLOCK_HEADER_FIELDS + index)
+    }
+
+    /// Set an entry at a given index
+    #[inline]
+    pub fn set_entry(&self, index: usize, value: usize) {
+        debug_assert!(index < GLOBAL_BLOCK_SIZE);
+        let heap_obj = HeapObject::from_tagged(self.ptr);
+        heap_obj.write_field((GLOBAL_BLOCK_HEADER_FIELDS + index) as i32, value);
+    }
+
+    /// Check if a slot is free
+    #[inline]
+    pub fn is_entry_free(&self, index: usize) -> bool {
+        self.get_entry(index) == GLOBAL_BLOCK_FREE_SLOT
+    }
+
+    /// Get the HeapObject for this block
+    pub fn as_heap_object(&self) -> HeapObject {
+        HeapObject::from_tagged(self.ptr)
+    }
+
+    /// Initialize all entries to free slots and set count to 0
+    pub fn initialize(&self) {
+        for i in 0..GLOBAL_BLOCK_SIZE {
+            self.set_entry(i, GLOBAL_BLOCK_FREE_SLOT);
+        }
+        self.set_count(0);
+        self.set_next_block(None);
+    }
+}
+
+/// Rust-side anchor for a thread's GlobalObject roots.
+///
+/// This struct lives in Rust memory (NOT heap-allocated), so GC can update
+/// head_block when the GlobalObjectBlock moves during compaction.
+///
+/// This is the key to making temporary roots work with a moving GC:
+/// - Rust code calls add_root/get_root via this struct
+/// - GC updates head_block when it moves the GlobalObjectBlock
+/// - Rust reads via (updated) head_block, so it always gets current values
+pub struct ThreadGlobal {
+    /// Tagged pointer to the first GlobalObjectBlock (GC updates this when block moves!)
+    pub head_block: usize,
+    /// Hint for fast slot allocation (global slot index across all blocks)
+    next_free_slot: usize,
+    /// Thread ID for debugging/validation
+    pub thread_id: ThreadId,
+    /// Stack base address for this thread (to update stack slot when head_block changes)
+    pub stack_base: usize,
+}
+
+impl ThreadGlobal {
+    /// Create a new ThreadGlobal with an already-allocated head block
+    pub fn new(head_block: usize, thread_id: ThreadId, stack_base: usize) -> Self {
+        debug_assert!(BuiltInTypes::is_heap_pointer(head_block));
+        ThreadGlobal {
+            head_block,
+            next_free_slot: 0,
+            thread_id,
+            stack_base,
+        }
+    }
+
+    /// Link a new block at the END of the chain.
+    /// This preserves existing slot indices (unlike prepending which invalidates them).
+    pub fn link_new_block(&mut self, new_block: usize) {
+        debug_assert!(BuiltInTypes::is_heap_pointer(new_block));
+
+        // Find the last block in the chain
+        let mut current = GlobalObjectBlock::from_tagged(self.head_block);
+        let mut block_count = 1;
+        while let Some(next) = current.next_block() {
+            current = next;
+            block_count += 1;
+        }
+
+        // Link the new block at the end
+        let new_block_obj = GlobalObjectBlock::from_tagged(new_block);
+        new_block_obj.set_next_block(None);
+        current.set_next_block(Some(new_block_obj));
+
+        // Update free slot hint to the first slot in the new block
+        self.next_free_slot = block_count * GLOBAL_BLOCK_SIZE;
+    }
+
+    /// Add a root value. Returns a global slot index that can be used with get_root.
+    ///
+    /// If all slots are full, returns None - caller must allocate a new block first.
+    /// Note: Slots 0..GLOBAL_RESERVED_SLOTS in the first block are reserved for
+    /// runtime infrastructure (like the namespaces atom) and are skipped.
+    pub fn add_root(&mut self, value: usize) -> Option<usize> {
+        // Search for a free slot starting from next_free_slot hint
+        let mut block_num = 0;
+        let mut current = Some(GlobalObjectBlock::from_tagged(self.head_block));
+
+        while let Some(block) = current {
+            // In the first block (block_num == 0), skip reserved slots
+            let start_index = if block_num == 0 {
+                GLOBAL_RESERVED_SLOTS
+            } else {
+                0
+            };
+
+            for i in start_index..GLOBAL_BLOCK_SIZE {
+                if block.is_entry_free(i) {
+                    block.set_entry(i, value);
+                    let slot = block_num * GLOBAL_BLOCK_SIZE + i;
+                    self.next_free_slot = slot + 1;
+                    return Some(slot);
+                }
+            }
+            current = block.next_block();
+            block_num += 1;
+        }
+
+        // No free slot found
+        None
+    }
+
+    /// Remove a root by slot index. Returns the value that was in the slot.
+    pub fn remove_root(&mut self, slot: usize) -> usize {
+        let (block, index) = self.find_slot(slot);
+        let value = block.get_entry(index);
+        block.set_entry(index, GLOBAL_BLOCK_FREE_SLOT);
+        // Update hint if this slot is earlier
+        if slot < self.next_free_slot {
+            self.next_free_slot = slot;
+        }
+        value
+    }
+
+    /// Get a root value by slot index.
+    ///
+    /// This is the critical method for temporary roots: it follows head_block
+    /// (which GC updates when the block moves) to read the current value.
+    #[inline]
+    pub fn get_root(&self, slot: usize) -> usize {
+        let (block, index) = self.find_slot(slot);
+        block.get_entry(index)
+    }
+
+    /// Set a root value by slot index.
+    #[inline]
+    pub fn set_root(&self, slot: usize, value: usize) {
+        let (block, index) = self.find_slot(slot);
+        block.set_entry(index, value);
+    }
+
+    /// Get this thread's Thread object from the reserved slot.
+    #[inline]
+    pub fn get_thread_object(&self) -> usize {
+        let block = GlobalObjectBlock::from_tagged(self.head_block);
+        block.get_entry(GLOBAL_SLOT_THREAD)
+    }
+
+    /// Set this thread's Thread object in the reserved slot.
+    #[inline]
+    pub fn set_thread_object(&self, thread_obj: usize) {
+        let block = GlobalObjectBlock::from_tagged(self.head_block);
+        block.set_entry(GLOBAL_SLOT_THREAD, thread_obj);
+    }
+
+    /// Find the block and local index for a global slot index
+    #[inline]
+    fn find_slot(&self, slot: usize) -> (GlobalObjectBlock, usize) {
+        let block_num = slot / GLOBAL_BLOCK_SIZE;
+        let local_index = slot % GLOBAL_BLOCK_SIZE;
+
+        let mut current = GlobalObjectBlock::from_tagged(self.head_block);
+        for _ in 0..block_num {
+            current = current.next_block().expect("slot index out of bounds");
+        }
+
+        (current, local_index)
+    }
+
+    /// Iterate over all blocks in this ThreadGlobal
+    pub fn iter_blocks(&self) -> GlobalBlockIter {
+        GlobalBlockIter {
+            current: Some(GlobalObjectBlock::from_tagged(self.head_block)),
+        }
+    }
+
+    /// Update the head block pointer (called by GC after copying)
+    pub fn update_head_block(&mut self, new_ptr: usize) {
+        debug_assert!(BuiltInTypes::is_heap_pointer(new_ptr));
+        self.head_block = new_ptr;
+    }
+
+    /// Check if the head block is full (all slots used).
+    /// Returns true if we need to allocate a new block before adding a root.
+    pub fn is_head_block_full(&self) -> bool {
+        let block = GlobalObjectBlock::from_tagged(self.head_block);
+        for i in 0..GLOBAL_BLOCK_SIZE {
+            if block.is_entry_free(i) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Get the namespaces atom from slot 0.
+    /// Returns the tagged pointer to the Atom, or null if not initialized.
+    #[inline]
+    pub fn get_namespaces_atom(&self) -> usize {
+        self.get_root(GLOBAL_SLOT_NAMESPACES)
+    }
+
+    /// Set the namespaces atom in slot 0.
+    /// The value should be a tagged pointer to an Atom containing a PersistentMap.
+    #[inline]
+    pub fn set_namespaces_atom(&self, atom_ptr: usize) {
+        self.set_root(GLOBAL_SLOT_NAMESPACES, atom_ptr);
+    }
+}
+
+/// Iterator over GlobalObjectBlocks in a ThreadGlobal
+pub struct GlobalBlockIter {
+    current: Option<GlobalObjectBlock>,
+}
+
+impl Iterator for GlobalBlockIter {
+    type Item = GlobalObjectBlock;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let block = self.current?;
+        self.current = block.next_block();
+        Some(block)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Struct {
@@ -446,6 +774,8 @@ pub struct Memory {
     pub join_handles: Vec<JoinHandle<u64>>,
     pub threads: Vec<Thread>,
     pub stack_map: StackMap,
+    /// Per-thread GlobalObject management (now owned by Memory, not GC)
+    pub thread_globals: HashMap<ThreadId, ThreadGlobal>,
     #[allow(unused)]
     command_line_arguments: CommandLineArguments,
 }
@@ -462,6 +792,7 @@ impl Memory {
         self.join_handles = vec![];
         self.threads = vec![std::thread::current()];
         self.stack_map = StackMap::new();
+        self.thread_globals.clear();
     }
 
     fn active_threads(&mut self) -> usize {
@@ -479,8 +810,6 @@ impl Memory {
                 self.threads.retain(|t| t.id() != thread_id);
                 self.join_handles.remove(*index);
                 self.heap.remove_thread(thread_id);
-                // Unregister the thread's HandleArena to prevent dangling pointer access
-                self.heap.unregister_handle_arena_for_thread(thread_id);
             } else {
                 println!("Inconsistent join_handles state {:?}", self.join_handles);
             }
@@ -604,6 +933,24 @@ impl Memory {
     pub fn clear_native_arguments(&self) {
         NATIVE_ARGUMENTS.with(|memory| memory.borrow_mut().clear());
     }
+
+    /// Convenience method for Runtime to trigger GC using Memory's own stack_map and thread_globals
+    pub fn run_gc(&mut self, stack_pointers: &[(usize, usize, usize)]) {
+        self.heap.gc(&self.stack_map, stack_pointers);
+
+        // Sync ThreadGlobal.head_block from stack slots (updated by GC)
+        for (stack_base, _, _) in stack_pointers.iter() {
+            let global_block_slot = (stack_base - 8) as *const usize;
+            let new_head_block = unsafe { *global_block_slot };
+
+            for tg in self.thread_globals.values_mut() {
+                if tg.stack_base == *stack_base {
+                    tg.head_block = new_head_block;
+                    break;
+                }
+            }
+        }
+    }
 }
 
 impl Allocator for Memory {
@@ -627,68 +974,8 @@ impl Allocator for Memory {
         self.heap.grow()
     }
 
-    fn gc_add_root(&mut self, old: usize) {
-        self.heap.gc_add_root(old)
-    }
-
-    fn register_temporary_root(&mut self, root: usize) -> usize {
-        self.heap.register_temporary_root(root)
-    }
-
-    fn unregister_temporary_root(&mut self, id: usize) -> usize {
-        self.heap.unregister_temporary_root(id)
-    }
-
-    fn peek_temporary_root(&self, id: usize) -> usize {
-        self.heap.peek_temporary_root(id)
-    }
-
-    fn add_namespace_root(&mut self, namespace_id: usize, root: usize) {
-        self.heap.add_namespace_root(namespace_id, root)
-    }
-
-    fn remove_namespace_root(&mut self, namespace_id: usize, root: usize) -> bool {
-        self.heap.remove_namespace_root(namespace_id, root)
-    }
-
-    fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)> {
-        self.heap.get_namespace_relocations()
-    }
-
     fn get_allocation_options(&self) -> AllocatorOptions {
         self.heap.get_allocation_options()
-    }
-
-    fn add_thread_root(&mut self, thread_id: std::thread::ThreadId, thread_object: usize) {
-        self.heap.add_thread_root(thread_id, thread_object)
-    }
-
-    fn remove_thread_root(&mut self, thread_id: std::thread::ThreadId) {
-        self.heap.remove_thread_root(thread_id)
-    }
-
-    fn get_thread_root(&self, thread_id: std::thread::ThreadId) -> Option<usize> {
-        self.heap.get_thread_root(thread_id)
-    }
-
-    fn register_root_set(&mut self, roots: RootSetPtr) -> usize {
-        self.heap.register_root_set(roots)
-    }
-
-    fn unregister_root_set(&mut self, id: usize) {
-        self.heap.unregister_root_set(id)
-    }
-
-    fn register_handle_arena(
-        &mut self,
-        arena: crate::collections::HandleArenaPtr,
-        thread_id: std::thread::ThreadId,
-    ) -> usize {
-        self.heap.register_handle_arena(arena, thread_id)
-    }
-
-    fn unregister_handle_arena_for_thread(&mut self, thread_id: std::thread::ThreadId) {
-        self.heap.unregister_handle_arena_for_thread(thread_id)
     }
 }
 
@@ -979,10 +1266,12 @@ pub struct Runtime {
     pub thread_exception_handler_fns: HashMap<ThreadId, usize>,
     // Global default uncaught exception handler (Beagle function pointer)
     pub default_exception_handler_fn: Option<usize>,
-    // Namespace ID for exception handler GC roots
-    exception_handler_namespace: usize,
     // Namespace ID for keyword GC roots
     keyword_namespace: usize,
+    /// Queue of pending binding updates for PersistentMap.
+    /// Used when bindings are added from threads without a Beagle stack (e.g., compiler thread).
+    /// Format: (namespace_id, slot, value)
+    pending_heap_bindings: Mutex<Vec<(usize, usize, usize)>>,
 }
 
 pub fn create_stack_with_protected_page_after(stack_size: usize) -> MmapMut {
@@ -1035,6 +1324,7 @@ impl Runtime {
                 threads: vec![std::thread::current()],
                 command_line_arguments,
                 stack_map: StackMap::new(),
+                thread_globals: HashMap::new(),
             },
             libraries: vec![],
             is_paused: AtomicUsize::new(0),
@@ -1080,13 +1370,17 @@ impl Runtime {
             },
             thread_exception_handler_fns: HashMap::new(),
             default_exception_handler_fn: None,
-            exception_handler_namespace: 0, // Will be set in bootstrap
-            keyword_namespace: 0,           // Will be set when first keyword is allocated
+            keyword_namespace: 0, // Will be set when first keyword is allocated
+            pending_heap_bindings: Mutex::new(Vec::new()),
         }
     }
 
     pub fn reset(&mut self) {
         self.wait_for_other_threads();
+
+        // Reset saved frame pointer and gc return address to prevent
+        // stale values from being used during gc-always mode
+        crate::builtins::reset_saved_gc_context();
 
         self.memory.reset();
         self.namespaces = NamespaceManager::new();
@@ -1208,7 +1502,8 @@ impl Runtime {
         strings: &[String],
     ) -> Result<usize, Box<dyn Error>> {
         let num_elements = strings.len();
-        let array_ptr = self.allocate_zeroed(num_elements, stack_pointer, BuiltInTypes::HeapObject)?;
+        let array_ptr =
+            self.allocate_zeroed(num_elements, stack_pointer, BuiltInTypes::HeapObject)?;
 
         let mut heap_obj = HeapObject::from_tagged(array_ptr);
         heap_obj.write_type_id(1); // type_id=1 marks raw array
@@ -1257,21 +1552,42 @@ impl Runtime {
             self.keyword_constants.len() - 1
         };
 
-        // Check if we've already allocated a heap object for this keyword
-        if let Some(ptr) = self.keyword_heap_ptrs[index] {
-            return Ok(ptr);
-        }
-
         // Ensure keyword namespace exists
         if self.keyword_namespace == 0 {
             self.keyword_namespace = self.namespaces.add_namespace("beagle.internal.keywords");
         }
 
+        // Check heap-based PersistentMap first (survives GC relocation)
+        let heap_ptr = self.get_heap_binding(self.keyword_namespace, index);
+        if heap_ptr != BuiltInTypes::null_value() as usize {
+            return Ok(heap_ptr);
+        }
+
+        // Check Rust-side cache (may be stale after GC but try it as fallback)
+        if let Some(ptr) = self.keyword_heap_ptrs[index] {
+            // Store in heap-based map for future lookups
+            if let Err(e) = self.set_heap_binding(stack_pointer, self.keyword_namespace, index, ptr)
+            {
+                eprintln!("Warning: failed to set heap binding for keyword: {}", e);
+            }
+            return Ok(ptr);
+        }
+
         // Allocate the keyword
         let ptr = self.allocate_keyword(stack_pointer, keyword_text)?.into();
 
-        // Register as GC root and cache the pointer
-        self.memory.add_namespace_root(self.keyword_namespace, ptr);
+        // Store in heap-based PersistentMap (survives GC)
+        // NOTE: set_heap_binding may trigger GC during PersistentMap::assoc,
+        // which could move the keyword. We must re-read the correct pointer afterward.
+        if let Err(e) = self.set_heap_binding(stack_pointer, self.keyword_namespace, index, ptr) {
+            eprintln!("Warning: failed to set heap binding for keyword: {}", e);
+        }
+
+        // Re-read the keyword pointer from heap binding.
+        // This is critical because GC may have moved the keyword during set_heap_binding.
+        let ptr = self.get_heap_binding(self.keyword_namespace, index);
+
+        // Also cache in Rust-side vec (may become stale but faster first lookup)
         self.keyword_heap_ptrs[index] = Some(ptr);
 
         Ok(ptr)
@@ -1359,32 +1675,53 @@ impl Runtime {
         }
     }
 
-    /// Register a RootSet with the GC so its contents are updated during collection.
-    /// Returns an ID to unregister later.
-    pub fn register_root_set(&mut self, roots: RootSetPtr) -> usize {
-        self.memory.heap.register_root_set(roots)
+    /// Write barrier for generational GC.
+    ///
+    /// Call this after writing a pointer value into a heap object's field.
+    /// For generational GC, this records old-to-young pointers so they can
+    /// be traced during minor GC.
+    ///
+    /// Parameters:
+    /// - `object_ptr`: Tagged pointer to the object being written to
+    /// - `new_value`: The value that was written (may or may not be a heap pointer)
+    #[inline]
+    pub fn write_barrier(&mut self, object_ptr: usize, new_value: usize) {
+        self.memory.heap.write_barrier(object_ptr, new_value);
     }
 
-    /// Unregister a previously registered RootSet.
-    pub fn unregister_root_set(&mut self, id: usize) {
-        self.memory.heap.unregister_root_set(id)
+    /// Get the card table biased pointer for generated code write barriers.
+    ///
+    /// For generational GC, returns a biased pointer such that:
+    /// `biased_ptr[addr >> 9] = 1` marks the card containing `addr` as dirty.
+    ///
+    /// For non-generational GCs, returns null.
+    #[inline]
+    pub fn get_card_table_biased_ptr(&self) -> *mut u8 {
+        self.memory.heap.get_card_table_biased_ptr()
     }
 
-    /// Register a thread-local HandleArena with the GC.
-    /// The arena's slots will be scanned and updated during collection.
-    pub fn register_handle_arena(
-        &mut self,
-        arena: crate::collections::HandleArenaPtr,
-        thread_id: std::thread::ThreadId,
-    ) -> usize {
-        self.memory.heap.register_handle_arena(arena, thread_id)
+    /// Mark the card for an object if it's in old gen.
+    /// This is used by generated code write barriers.
+    /// The object_ptr should be a tagged HeapObject pointer.
+    #[inline]
+    pub fn mark_card_for_object(&mut self, object_ptr: usize) {
+        // For generational GC: mark the card if object is in old gen
+        // This is used by codegen write barriers where we don't know the value being written
+        self.memory.heap.mark_card_unconditional(object_ptr);
     }
 
-    /// Unregister the HandleArena for a thread that is exiting.
-    pub fn unregister_handle_arena_for_thread(&mut self, thread_id: std::thread::ThreadId) {
-        self.memory
-            .heap
-            .unregister_handle_arena_for_thread(thread_id)
+    /// Set a field on a heap object and call the write barrier.
+    /// This is the safe way to write heap pointers to object fields in Rust code.
+    ///
+    /// Parameters:
+    /// - `object_ptr`: Tagged pointer to the object being written to
+    /// - `index`: Field index to write to
+    /// - `value`: The value to write (may be a tagged int or heap pointer)
+    #[inline]
+    pub fn set_field_with_barrier(&mut self, object_ptr: usize, index: usize, value: usize) {
+        let obj = HeapObject::from_tagged(object_ptr);
+        obj.write_field(index as i32, value);
+        self.write_barrier(object_ptr, value);
     }
 
     /// Create a Beagle struct or enum from Rust code
@@ -1518,56 +1855,13 @@ impl Runtime {
     }
 
     pub fn set_thread_exception_handler(&mut self, handler_fn: usize) {
-        // Ensure exception handler namespace exists
-        if self.exception_handler_namespace == 0 {
-            self.exception_handler_namespace = self
-                .namespaces
-                .add_namespace("beagle.internal.exception-handlers");
-        }
-
         let thread_id = std::thread::current().id();
-
-        // Remove old handler from GC roots if it exists
-        if let Some(&old_handler) = self.thread_exception_handler_fns.get(&thread_id)
-            && BuiltInTypes::is_heap_pointer(old_handler)
-        {
-            self.memory
-                .remove_namespace_root(self.exception_handler_namespace, old_handler);
-        }
-
         self.thread_exception_handler_fns
             .insert(thread_id, handler_fn);
-
-        // Register new handler as GC root if it's a heap object
-        if BuiltInTypes::is_heap_pointer(handler_fn) {
-            self.memory
-                .add_namespace_root(self.exception_handler_namespace, handler_fn);
-        }
     }
 
     pub fn set_default_exception_handler(&mut self, handler_fn: usize) {
-        // Ensure exception handler namespace exists
-        if self.exception_handler_namespace == 0 {
-            self.exception_handler_namespace = self
-                .namespaces
-                .add_namespace("beagle.internal.exception-handlers");
-        }
-
-        // Remove old handler from GC roots if it exists
-        if let Some(old_handler) = self.default_exception_handler_fn
-            && BuiltInTypes::is_heap_pointer(old_handler)
-        {
-            self.memory
-                .remove_namespace_root(self.exception_handler_namespace, old_handler);
-        }
-
         self.default_exception_handler_fn = Some(handler_fn);
-
-        // Register new handler as GC root if it's a heap object
-        if BuiltInTypes::is_heap_pointer(handler_fn) {
-            self.memory
-                .add_namespace_root(self.exception_handler_namespace, handler_fn);
-        }
     }
 
     pub fn get_thread_exception_handler(&self) -> Option<usize> {
@@ -1576,39 +1870,8 @@ impl Runtime {
     }
 
     pub fn update_exception_handlers_after_gc(&mut self) {
-        // Get GC relocations for the exception handler namespace
-        let relocations = self.memory.get_namespace_relocations();
-
-        for (namespace_id, relocs) in relocations {
-            if namespace_id == self.exception_handler_namespace {
-                for (old_ptr, new_ptr) in relocs {
-                    // Update thread-specific handlers
-                    for handler_fn in self.thread_exception_handler_fns.values_mut() {
-                        if *handler_fn == old_ptr {
-                            *handler_fn = new_ptr;
-                        }
-                    }
-
-                    // Update default handler
-                    if let Some(ref mut default) = self.default_exception_handler_fn
-                        && *default == old_ptr
-                    {
-                        *default = new_ptr;
-                    }
-                }
-            } else if namespace_id == self.keyword_namespace {
-                // Update keyword cache after GC relocation
-                for (old_ptr, new_ptr) in relocs {
-                    for cached_ptr in self.keyword_heap_ptrs.iter_mut() {
-                        if let Some(ptr) = cached_ptr
-                            && *ptr == old_ptr
-                        {
-                            *ptr = new_ptr;
-                        }
-                    }
-                }
-            }
-        }
+        // No-op: Exception handlers and keywords are now stored in heap-based PersistentMap
+        // which is automatically updated by GC during tracing
     }
 
     pub fn cleanup_finished_thread_handlers(&mut self) {
@@ -1630,14 +1893,6 @@ impl Runtime {
             .collect();
 
         for thread_id in dead_threads {
-            // Remove handler from GC roots before removing from map
-            if let Some(&handler_fn) = self.thread_exception_handler_fns.get(&thread_id)
-                && BuiltInTypes::is_heap_pointer(handler_fn)
-            {
-                self.memory
-                    .remove_namespace_root(self.exception_handler_namespace, handler_fn);
-            }
-
             self.exception_handlers.remove(&thread_id);
             self.thread_exception_handler_fns.remove(&thread_id);
         }
@@ -1682,54 +1937,10 @@ impl Runtime {
             // We pass the saved gc_return_addr to ensure the first Beagle frame is scanned
             let all_stack_pointers = vec![(self.get_stack_base(), frame_pointer, gc_return_addr)];
 
-            self.memory
-                .heap
-                .gc(&self.memory.stack_map, &all_stack_pointers);
+            self.memory.run_gc(&all_stack_pointers);
 
-            // duplicated below
-            // TODO: This whole thing is awful.
-            // I should be passing around the slot so I can just update the binding directly.
-            let relocations = self.memory.get_namespace_relocations();
-            for (namespace, values) in relocations {
-                for (old, new) in values {
-                    // Skip if namespace doesn't exist (e.g., keyword namespace before any keywords created)
-                    if let Some(ns) = self.namespaces.namespaces.get_mut(namespace)
-                        && let Ok(namespace) = ns.get_mut()
-                    {
-                        for (_, value) in namespace.bindings.iter_mut() {
-                            if *value == old {
-                                *value = new;
-                            }
-                        }
-                    }
-
-                    // Update exception handler pointers after GC
-                    if namespace == self.exception_handler_namespace {
-                        for handler_fn in self.thread_exception_handler_fns.values_mut() {
-                            if *handler_fn == old {
-                                *handler_fn = new;
-                            }
-                        }
-
-                        if let Some(ref mut default) = self.default_exception_handler_fn
-                            && *default == old
-                        {
-                            *default = new;
-                        }
-                    }
-
-                    // Update keyword cache after GC relocation
-                    if namespace == self.keyword_namespace {
-                        for cached_ptr in self.keyword_heap_ptrs.iter_mut() {
-                            if let Some(ptr) = cached_ptr
-                                && *ptr == old
-                            {
-                                *ptr = new;
-                            }
-                        }
-                    }
-                }
-            }
+            // Namespace bindings are now stored in heap-based PersistentMap
+            // which is automatically updated by GC during tracing
             return;
         }
 
@@ -1839,52 +2050,10 @@ impl Runtime {
 
         drop(thread_state);
 
-        self.memory.heap.gc(&self.memory.stack_map, &stack_pointers);
+        self.memory.run_gc(&stack_pointers);
 
-        // Duplicated from above becauase I can't borrow self twice
-        // TODO: This whole thing is awful.
-        // I should be passing around the slot so I can just update the binding directly.
-        let relocations = self.memory.get_namespace_relocations();
-        for (namespace, values) in relocations {
-            for (old, new) in values {
-                // Skip if namespace doesn't exist (e.g., keyword namespace before any keywords created)
-                if let Some(ns) = self.namespaces.namespaces.get_mut(namespace)
-                    && let Ok(namespace) = ns.get_mut()
-                {
-                    for (_, value) in namespace.bindings.iter_mut() {
-                        if *value == old {
-                            *value = new;
-                        }
-                    }
-                }
-
-                // Update exception handler pointers after GC
-                if namespace == self.exception_handler_namespace {
-                    for handler_fn in self.thread_exception_handler_fns.values_mut() {
-                        if *handler_fn == old {
-                            *handler_fn = new;
-                        }
-                    }
-
-                    if let Some(ref mut default) = self.default_exception_handler_fn
-                        && *default == old
-                    {
-                        *default = new;
-                    }
-                }
-
-                // Update keyword cache after GC relocation
-                if namespace == self.keyword_namespace {
-                    for cached_ptr in self.keyword_heap_ptrs.iter_mut() {
-                        if let Some(ptr) = cached_ptr
-                            && *ptr == old
-                        {
-                            *ptr = new;
-                        }
-                    }
-                }
-            }
-        }
+        // Namespace bindings are now stored in heap-based PersistentMap
+        // which is automatically updated by GC during tracing
 
         // Memory barrier to ensure all GC writes are visible before continuing
         std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
@@ -1924,22 +2093,330 @@ impl Runtime {
         drop(locked);
     }
 
-    pub fn gc_add_root(&mut self, old: usize) {
-        if BuiltInTypes::is_heap_pointer(old) {
-            self.memory.heap.gc_add_root(old);
-        }
-    }
-
     pub fn register_temporary_root(&mut self, root: usize) -> usize {
-        self.memory.heap.register_temporary_root(root)
+        // Use the handle root mechanism which is backed by Memory.thread_globals
+        self.add_handle_root(root).unwrap_or(0)
     }
 
     pub fn unregister_temporary_root(&mut self, id: usize) -> usize {
-        self.memory.heap.unregister_temporary_root(id)
+        let thread_id = std::thread::current().id();
+        self.memory
+            .thread_globals
+            .get_mut(&thread_id)
+            .map(|tg| tg.remove_root(id))
+            .unwrap_or(0)
     }
 
     pub fn peek_temporary_root(&self, id: usize) -> usize {
-        self.memory.heap.peek_temporary_root(id)
+        self.get_handle_root(id)
+    }
+
+    /// Initialize the GlobalObject for the current thread.
+    /// This allocates a GlobalObjectBlock and creates a ThreadGlobal.
+    /// Should be called once per thread at thread start.
+    pub fn initialize_thread_global(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let thread_id = std::thread::current().id();
+        let stack_base = self.get_stack_base();
+        self.initialize_thread_global_for(thread_id, stack_base)
+    }
+
+    /// Initialize the GlobalObject for a specific thread.
+    /// This allocates a GlobalObjectBlock and creates a ThreadGlobal.
+    /// Can be called by parent thread to initialize child thread's GlobalObject.
+    pub fn initialize_thread_global_for(
+        &mut self,
+        thread_id: std::thread::ThreadId,
+        stack_base: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Skip if already initialized
+        if self.memory.thread_globals.contains_key(&thread_id) {
+            return Ok(());
+        }
+
+        // Allocate GlobalObjectBlock using allocate_for_runtime (long-lived)
+        let head_block = self
+            .memory
+            .heap
+            .allocate_for_runtime(GLOBAL_BLOCK_TOTAL_FIELDS)?;
+
+        // Initialize the block
+        let block = GlobalObjectBlock::from_tagged(head_block);
+        block.initialize();
+
+        // Create and store the ThreadGlobal
+        let thread_global = ThreadGlobal::new(head_block, thread_id, stack_base);
+        self.memory.thread_globals.insert(thread_id, thread_global);
+
+        // Write the GlobalObjectBlock pointer to the stack at stack_base - 8.
+        // This is critical for GC: the stack walker reads from this slot, and after GC,
+        // Memory::run_gc syncs ThreadGlobal.head_block from the updated stack slot.
+        // For the current thread, we write immediately. For child threads, run_thread
+        // writes separately after the child's stack is set up.
+        if thread_id == std::thread::current().id() {
+            unsafe {
+                *((stack_base - 8) as *mut usize) = head_block;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check if the current thread has a GlobalObject initialized.
+    pub fn has_thread_global(&self) -> bool {
+        let thread_id = std::thread::current().id();
+        self.memory.thread_globals.contains_key(&thread_id)
+    }
+
+    /// Initialize the namespaces atom in GlobalObject slot 0.
+    ///
+    /// Creates an Atom containing an empty PersistentMap and stores it in the
+    /// reserved slot. This should be called once during runtime initialization,
+    /// after `initialize_thread_global()`.
+    ///
+    /// The namespaces atom stores: symbol → PersistentMap of bindings
+    /// Each namespace's bindings are: symbol → value
+    pub fn initialize_namespaces(&mut self) -> Result<(), Box<dyn Error>> {
+        let thread_id = std::thread::current().id();
+
+        // Check if already initialized (slot 0 should be null/free initially)
+        let current = self
+            .memory
+            .thread_globals
+            .get(&thread_id)
+            .map(|tg| tg.get_namespaces_atom())
+            .unwrap_or(GLOBAL_BLOCK_FREE_SLOT);
+        if current != GLOBAL_BLOCK_FREE_SLOT && current != BuiltInTypes::null_value() as usize {
+            // Already initialized
+            return Ok(());
+        }
+
+        // Use stack base as stack pointer during initialization
+        // (we're at the top of the stack during init, no Beagle frames yet)
+        let stack_pointer = self.get_stack_base();
+
+        // Create empty PersistentMap for namespace storage
+        let mut scope = HandleScope::new(self, stack_pointer);
+        let empty_map = PersistentMap::empty(scope.runtime(), stack_pointer)?;
+        let empty_map_h = scope.alloc_handle(empty_map);
+
+        // Create Atom with 1 field (the map)
+        let atom = scope.allocate_typed(1, TYPE_ID_ATOM)?;
+        atom.to_gc_handle()
+            .set_field_with_barrier(scope.runtime(), 0, empty_map_h.get());
+
+        // Store atom in GlobalObject slot 0
+        let atom_ptr = atom.get();
+        drop(scope);
+
+        if let Some(tg) = self.memory.thread_globals.get(&thread_id) {
+            tg.set_namespaces_atom(atom_ptr);
+        }
+        Ok(())
+    }
+
+    /// Get the namespaces atom from GlobalObject slot 0.
+    /// Returns the tagged pointer to the Atom, or null if not initialized.
+    pub fn get_namespaces_atom(&self) -> usize {
+        let thread_id = std::thread::current().id();
+        self.memory
+            .thread_globals
+            .get(&thread_id)
+            .map(|tg| tg.get_namespaces_atom())
+            .unwrap_or(GLOBAL_BLOCK_FREE_SLOT)
+    }
+
+    /// Create a composite key for binding lookup.
+    /// Encodes (namespace_id, slot) as a tagged integer.
+    #[inline]
+    fn make_binding_key(namespace_id: usize, slot: usize) -> usize {
+        // Use 20 bits for slot (supports up to 1M bindings per namespace)
+        // and remaining bits for namespace_id
+        let key = (namespace_id << 20) | (slot & 0xFFFFF);
+        BuiltInTypes::construct_int(key as isize) as usize
+    }
+
+    /// Get a binding value from the heap-based PersistentMap.
+    ///
+    /// Returns the value if found, or null if not found.
+    /// This is the core lookup for the new heap-based binding storage.
+    pub fn get_heap_binding(&self, namespace_id: usize, slot: usize) -> usize {
+        let atom_ptr = self.get_namespaces_atom();
+        if !BuiltInTypes::is_heap_pointer(atom_ptr) {
+            return BuiltInTypes::null_value() as usize;
+        }
+
+        // Additional validation: check pointer is properly aligned
+        let untagged = BuiltInTypes::untag(atom_ptr);
+        if untagged % 8 != 0 {
+            // Pointer is corrupted (possibly stale after GC)
+            return BuiltInTypes::null_value() as usize;
+        }
+
+        // Deref atom to get the map
+        let atom = HeapObject::from_tagged(atom_ptr);
+        let map_ptr = atom.get_field(0);
+        if !BuiltInTypes::is_heap_pointer(map_ptr) {
+            return BuiltInTypes::null_value() as usize;
+        }
+
+        // Additional validation for map pointer
+        let map_untagged = BuiltInTypes::untag(map_ptr);
+        if map_untagged % 8 != 0 {
+            return BuiltInTypes::null_value() as usize;
+        }
+
+        let key = Self::make_binding_key(namespace_id, slot);
+        let map = crate::collections::GcHandle::from_tagged(map_ptr);
+        PersistentMap::get(self, map, key)
+    }
+
+    /// Set a binding value in the heap-based PersistentMap.
+    ///
+    /// Creates a new map with the binding added/updated and swaps it into the atom.
+    /// This is the core update for the new heap-based binding storage.
+    pub fn set_heap_binding(
+        &mut self,
+        stack_pointer: usize,
+        namespace_id: usize,
+        slot: usize,
+        value: usize,
+    ) -> Result<(), Box<dyn Error>> {
+        let thread_id = std::thread::current().id();
+        let atom_ptr = self
+            .memory
+            .thread_globals
+            .get(&thread_id)
+            .map(|tg| tg.get_namespaces_atom())
+            .unwrap_or(GLOBAL_BLOCK_FREE_SLOT);
+        if !BuiltInTypes::is_heap_pointer(atom_ptr) {
+            return Err("Namespaces atom not initialized".into());
+        }
+
+        // Validate pointer is properly aligned
+        let untagged = BuiltInTypes::untag(atom_ptr);
+        if untagged % 8 != 0 {
+            return Err(format!(
+                "Namespaces atom pointer is corrupted (misaligned): {:#x}",
+                atom_ptr
+            )
+            .into());
+        }
+
+        // Deref atom to get the current map
+        let atom = HeapObject::from_tagged(atom_ptr);
+        let map_ptr = atom.get_field(0);
+
+        let key = Self::make_binding_key(namespace_id, slot);
+
+        // Create new map with the binding
+        let new_map = PersistentMap::assoc(self, stack_pointer, map_ptr, key, value)?;
+
+        // Write new map to atom (this is atomic at the word level)
+        // CRITICAL: Re-read atom_ptr from GlobalObjectBlock because GC may have moved it
+        // during PersistentMap::assoc(). The GlobalObjectBlock entry is updated by GC's
+        // stack walker, but our local atom_ptr variable is stale.
+        let atom_ptr = self
+            .memory
+            .thread_globals
+            .get(&thread_id)
+            .map(|tg| tg.get_namespaces_atom())
+            .unwrap_or(GLOBAL_BLOCK_FREE_SLOT);
+        let atom = HeapObject::from_tagged(atom_ptr);
+        let new_map_tagged = new_map.as_tagged();
+        atom.write_field(0, new_map_tagged);
+
+        // Write barrier: notify GC that an old gen object (atom) may now point to young gen (new_map)
+        self.write_barrier(atom_ptr, new_map_tagged);
+
+        Ok(())
+    }
+
+    /// Flush any pending heap binding updates.
+    ///
+    /// Called from threads that have a stack (e.g., main thread) to process
+    /// bindings that were queued by threads without a stack (e.g., compiler thread).
+    pub fn flush_pending_heap_bindings(&mut self, stack_pointer: usize) {
+        // Take all pending bindings (swap with empty vec to minimize lock time)
+        let pending = {
+            let mut guard = self
+                .pending_heap_bindings
+                .lock()
+                .expect("Failed to lock pending_heap_bindings");
+            std::mem::take(&mut *guard)
+        };
+
+        // Process each pending binding
+        for (namespace_id, slot, value) in pending {
+            if let Err(e) = self.set_heap_binding(stack_pointer, namespace_id, slot, value) {
+                eprintln!(
+                    "Warning: failed to flush heap binding (ns={}, slot={}): {}",
+                    namespace_id, slot, e
+                );
+            }
+        }
+    }
+
+    /// Get the GlobalObjectBlock pointer for the current thread.
+    /// Returns 0 if no ThreadGlobal is initialized for this thread.
+    pub fn get_global_block_ptr(&self) -> usize {
+        let thread_id = std::thread::current().id();
+        self.memory
+            .thread_globals
+            .get(&thread_id)
+            .map(|tg| tg.head_block)
+            .unwrap_or(0)
+    }
+
+    /// Add a handle root to the current thread's GlobalObject.
+    /// Automatically allocates new GlobalObjectBlocks when needed.
+    /// Returns the slot index, or None if allocation fails.
+    pub fn add_handle_root(&mut self, value: usize) -> Option<usize> {
+        let thread_id = std::thread::current().id();
+
+        // First try to add to existing block
+        if let Some(tg) = self.memory.thread_globals.get_mut(&thread_id) {
+            if let Some(slot) = tg.add_root(value) {
+                return Some(slot);
+            }
+            // Block is full, need to allocate a new one
+        } else {
+            // No ThreadGlobal for this thread
+            return None;
+        }
+
+        // Allocate new block using allocate_for_runtime (long-lived)
+        let new_block = self
+            .memory
+            .heap
+            .allocate_for_runtime(GLOBAL_BLOCK_TOTAL_FIELDS)
+            .ok()?;
+
+        // Initialize the new block
+        let block = GlobalObjectBlock::from_tagged(new_block);
+        block.initialize();
+
+        // Link it and add the root
+        let tg = self.memory.thread_globals.get_mut(&thread_id)?;
+        tg.link_new_block(new_block);
+        tg.add_root(value)
+    }
+
+    /// Remove a handle root from the current thread's GlobalObject.
+    pub fn remove_handle_root(&mut self, slot: usize) {
+        let thread_id = std::thread::current().id();
+        if let Some(tg) = self.memory.thread_globals.get_mut(&thread_id) {
+            tg.remove_root(slot);
+        }
+    }
+
+    /// Get the value of a handle root from the current thread's GlobalObject.
+    pub fn get_handle_root(&self, slot: usize) -> usize {
+        let thread_id = std::thread::current().id();
+        self.memory
+            .thread_globals
+            .get(&thread_id)
+            .map(|tg| tg.get_root(slot))
+            .unwrap_or(0)
     }
 
     pub fn register_parked_thread(&mut self, stack_pointer: usize) {
@@ -1949,13 +2426,20 @@ impl Runtime {
     }
 
     pub fn get_stack_base(&self) -> usize {
+        self.try_get_stack_base()
+            .expect("Current thread stack not found - this is a fatal error")
+    }
+
+    /// Try to get the stack base for the current thread.
+    /// Returns None if the current thread doesn't have a registered stack
+    /// (e.g., compiler thread).
+    pub fn try_get_stack_base(&self) -> Option<usize> {
         let current_thread = std::thread::current().id();
         let stacks = self.memory.stacks.lock().unwrap();
         stacks
             .iter()
             .find(|(thread_id, _)| *thread_id == current_thread)
             .map(|(_, stack)| stack.as_ptr() as usize + STACK_SIZE)
-            .expect("Current thread stack not found - this is a fatal error")
     }
 
     pub fn make_closure(
@@ -2018,7 +2502,15 @@ impl Runtime {
 
     pub fn get_function0(&self, name: &str) -> Option<Box<dyn Fn() -> u64>> {
         let (stack_pointer, start, trampoline) = self.get_function_base(name)?;
-        Some(Box::new(move || trampoline(stack_pointer, start)))
+        let global_block_ptr = self.get_global_block_ptr();
+        Some(Box::new(move || {
+            // Write GlobalObjectBlock pointer to stack_base - 8 before calling trampoline
+            // GC will find this via stack walking and trace it naturally
+            unsafe {
+                *((stack_pointer - 8) as *mut usize) = global_block_ptr;
+            }
+            trampoline(stack_pointer, start)
+        }))
     }
 
     /// Returns the number of arguments a function takes, or None if the function doesn't exist.
@@ -2031,15 +2523,25 @@ impl Runtime {
 
     pub fn get_function1(&self, name: &str) -> Option<Box<dyn Fn(u64) -> u64>> {
         let (stack_pointer, start, trampoline_start) = self.get_function_base(name)?;
+        let global_block_ptr = self.get_global_block_ptr();
         let f: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
-        Some(Box::new(move |arg1| f(stack_pointer, start, arg1)))
+        Some(Box::new(move |arg1| {
+            unsafe {
+                *((stack_pointer - 8) as *mut usize) = global_block_ptr;
+            }
+            f(stack_pointer, start, arg1)
+        }))
     }
 
     #[allow(unused)]
     fn get_function2(&self, name: &str) -> Option<Box<dyn Fn(u64, u64) -> u64>> {
         let (stack_pointer, start, trampoline_start) = self.get_function_base(name)?;
+        let global_block_ptr = self.get_global_block_ptr();
         let f: fn(u64, u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
         Some(Box::new(move |arg1, arg2| {
+            unsafe {
+                *((stack_pointer - 8) as *mut usize) = global_block_ptr;
+            }
             f(stack_pointer, start, arg1, arg2)
         }))
     }
@@ -2062,7 +2564,7 @@ impl Runtime {
             as usize;
 
         // Temporarily protect the closure while we allocate the Thread struct
-        let closure_temp_id = self.memory.heap.register_temporary_root(f);
+        let closure_temp_id = self.register_temporary_root(f);
 
         // Create Thread struct containing the closure.
         // In thread-safe mode, allocate + initialize + register temp root while holding
@@ -2105,8 +2607,9 @@ impl Runtime {
                                     }
 
                                     heap_obj.write_field(0, f);
-                                    let temp_id = alloc.register_temporary_root(tagged);
-                                    Ok(Some((tagged, temp_id)))
+                                    // Return the tagged pointer - we'll register temp root outside
+                                    // the allocator lock but while still holding gc_lock
+                                    Ok(Some(tagged))
                                 }
                                 Ok(AllocateAction::Gc) => Ok(None),
                                 Err(err) => Err(err),
@@ -2114,8 +2617,11 @@ impl Runtime {
                         })
                         .expect("Failed to allocate Thread struct");
 
-                    if let Some(value) = result {
-                        break value;
+                    if let Some(tagged) = result {
+                        // Register temp root outside allocator lock but still holding gc_lock
+                        // This is safe because no GC can happen while we hold gc_lock
+                        let temp_id = self.register_temporary_root(tagged);
+                        break (tagged, temp_id);
                     }
 
                     self.run_gc(stack_pointer, frame_pointer);
@@ -2126,26 +2632,26 @@ impl Runtime {
                 let thread_obj = self
                     .create_struct("beagle.core/Thread", None, &[f], stack_pointer)
                     .expect("Failed to create Thread struct");
-                let thread_temp_id = self.memory.heap.register_temporary_root(thread_obj);
+                let thread_temp_id = self.register_temporary_root(thread_obj);
                 (thread_obj, thread_temp_id)
             }
         };
 
         // Get the possibly-relocated closure from temp root and update Thread struct
-        let relocated_closure = self.memory.heap.peek_temporary_root(closure_temp_id);
+        let relocated_closure = self.peek_temporary_root(closure_temp_id);
         if relocated_closure != f {
             // Closure was moved by GC during allocation, update Thread struct
             // Get current Thread location (may have moved)
-            let current_thread_obj = self.memory.heap.peek_temporary_root(thread_temp_id);
+            let current_thread_obj = self.peek_temporary_root(thread_temp_id);
             let mut heap_obj = HeapObject::from_tagged(current_thread_obj);
             heap_obj.get_fields_mut()[0] = relocated_closure;
         }
 
         // Unregister closure temp root - Thread struct now holds the closure
-        self.memory.heap.unregister_temporary_root(closure_temp_id);
+        self.unregister_temporary_root(closure_temp_id);
 
         if std::env::var("BEAGLE_THREAD_DEBUG").is_ok() {
-            let current_thread_obj = self.memory.heap.peek_temporary_root(thread_temp_id);
+            let current_thread_obj = self.peek_temporary_root(thread_temp_id);
             let heap_obj = HeapObject::from_tagged(current_thread_obj);
             let closure_field = heap_obj.get_field(0);
             eprintln!(
@@ -2180,6 +2686,8 @@ impl Runtime {
         // The function's stack_pointer is the CURRENT thread's stack, which is what
         // __pause needs when the main thread pauses during thread creation.
         let new_thread_stack_pointer = new_stack.as_ptr() as usize + STACK_SIZE;
+        // Save for later use (after spawn, for writing GlobalObjectBlock pointer)
+        let child_stack_base = new_thread_stack_pointer;
         let thread_state = self.thread_state.clone();
 
         // Create a barrier to ensure the spawned thread waits until it's fully registered.
@@ -2241,18 +2749,8 @@ impl Runtime {
         }
         self.memory.heap.register_thread(thread.thread().id());
 
-        // Register Thread object as a root for this thread
-        // This keeps the Thread (and its closure) alive while the thread runs
-        // CRITICAL: Get the current Thread location from temp root - it may have
-        // been relocated by GC since we allocated it.
         let thread_id = thread.thread().id();
-        let current_thread_obj = self.memory.heap.peek_temporary_root(thread_temp_id);
-        self.memory
-            .heap
-            .add_thread_root(thread_id, current_thread_obj);
-
-        // Now we can unregister the temp root - thread_roots will keep it alive
-        self.memory.heap.unregister_temporary_root(thread_temp_id);
+        let main_thread_id = std::thread::current().id();
 
         // Initialize exception handler stack for new thread
         self.exception_handlers.insert(thread_id, Vec::new());
@@ -2260,12 +2758,47 @@ impl Runtime {
         self.memory.threads.push(thread.thread().clone());
         self.memory.join_handles.push(thread);
 
+        // Release gc_lock before allocating GlobalObject
+        drop(gc_lock);
+
+        // Initialize GlobalObject for the new thread
+        // This allocates a GlobalObjectBlock so the child can use temporary roots
+        if let Err(e) = self.initialize_thread_global_for(thread_id, child_stack_base) {
+            eprintln!(
+                "Warning: Failed to initialize ThreadGlobal for new thread: {}",
+                e
+            );
+        }
+
+        // Get the Thread object from main thread's temp root (may have been relocated by GC)
+        // and store it in the child's reserved GLOBAL_SLOT_THREAD
+        let current_thread_obj = self
+            .memory
+            .thread_globals
+            .get(&main_thread_id)
+            .map(|tg| tg.get_root(thread_temp_id))
+            .unwrap_or(0);
+
+        if let Some(child_tg) = self.memory.thread_globals.get(&thread_id) {
+            child_tg.set_thread_object(current_thread_obj);
+        }
+
+        // Now we can unregister the temp root - child's GlobalObjectBlock keeps it alive
+        self.memory
+            .thread_globals
+            .get_mut(&main_thread_id)
+            .map(|tg| tg.remove_root(thread_temp_id));
+
+        // Write the child's GlobalObjectBlock pointer to its stack (at stack_base - 8)
+        if let Some(thread_global) = self.memory.thread_globals.get(&thread_id) {
+            unsafe {
+                *((child_stack_base - 8) as *mut usize) = thread_global.head_block;
+            }
+        }
+
         // Signal the spawned thread that registration is complete.
         // The thread was waiting on this barrier before starting execution.
         barrier.wait();
-
-        // Release gc_lock - child will acquire it in run_thread before transitioning
-        drop(gc_lock);
     }
 
     pub fn wait_for_other_threads(&mut self) {
@@ -2437,6 +2970,10 @@ impl Runtime {
 
     pub fn global_namespace_id(&self) -> usize {
         0
+    }
+
+    pub fn keyword_namespace_id(&self) -> usize {
+        self.keyword_namespace
     }
 
     pub fn current_namespace_name(&self) -> String {
@@ -3582,7 +4119,27 @@ impl Runtime {
     }
 
     fn add_binding(&mut self, name: &str, function_pointer: usize) -> usize {
-        self.namespaces.add_binding(name, function_pointer)
+        // Add to Rust-side namespace first to get the slot
+        let slot = self.namespaces.add_binding(name, function_pointer);
+        let namespace_id = self.namespaces.current_namespace;
+
+        // Store in heap-based PersistentMap if we have a stack,
+        // otherwise queue for later processing
+        if let Some(stack_pointer) = self.try_get_stack_base() {
+            if let Err(e) =
+                self.set_heap_binding(stack_pointer, namespace_id, slot, function_pointer)
+            {
+                eprintln!("Warning: failed to set heap binding for {}: {}", name, e);
+            }
+        } else {
+            // Queue for later - will be flushed when a thread with a stack accesses bindings
+            self.pending_heap_bindings
+                .lock()
+                .expect("Failed to lock pending_heap_bindings")
+                .push((namespace_id, slot, function_pointer));
+        }
+
+        slot
     }
 
     pub fn get_trampoline(&self) -> fn(u64, u64) -> u64 {

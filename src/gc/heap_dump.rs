@@ -109,17 +109,6 @@ pub struct SpaceSnapshot {
     pub objects: Vec<ObjectSnapshot>,
 }
 
-/// A snapshot of a root
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RootSnapshot {
-    pub source: String,
-    pub index: String,
-    pub value: String,
-    pub tag: String,
-    pub is_heap_ptr: bool,
-    pub points_to: Option<PointerTarget>,
-}
-
 /// Complete heap dump
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeapDump {
@@ -128,15 +117,6 @@ pub struct HeapDump {
     pub young_gen: SpaceSnapshot,
     pub old_gen: SpaceSnapshot,
     pub stacks: Vec<ThreadStackSnapshot>,
-    pub roots: RootsSnapshot,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RootsSnapshot {
-    pub temporary_roots: Vec<RootSnapshot>,
-    pub namespace_roots: Vec<RootSnapshot>,
-    pub thread_roots: Vec<RootSnapshot>,
-    pub additional_roots: Vec<RootSnapshot>,
 }
 
 /// Helper to determine where a pointer points
@@ -540,13 +520,6 @@ impl HeapDump {
                 stack.frames.len()
             );
         }
-
-        eprintln!();
-        eprintln!("Roots:");
-        eprintln!("  Temporary: {}", self.roots.temporary_roots.len());
-        eprintln!("  Namespace: {}", self.roots.namespace_roots.len());
-        eprintln!("  Thread: {}", self.roots.thread_roots.len());
-        eprintln!("  Additional: {}", self.roots.additional_roots.len());
     }
 
     /// Find all pointers that point to young gen
@@ -583,40 +556,6 @@ impl HeapDump {
                             ));
                         }
                     }
-                }
-            }
-        }
-
-        // Check roots
-        for root in &self.roots.temporary_roots {
-            if let Some(target) = &root.points_to {
-                if target.in_young {
-                    results.push(format!(
-                        "TEMP_ROOT[{}] = {} -> young",
-                        root.index, root.value
-                    ));
-                }
-            }
-        }
-
-        for root in &self.roots.namespace_roots {
-            if let Some(target) = &root.points_to {
-                if target.in_young {
-                    results.push(format!(
-                        "NAMESPACE_ROOT[{}] = {} -> young",
-                        root.index, root.value
-                    ));
-                }
-            }
-        }
-
-        for root in &self.roots.thread_roots {
-            if let Some(target) = &root.points_to {
-                if target.in_young {
-                    results.push(format!(
-                        "THREAD_ROOT[{}] = {} -> young",
-                        root.index, root.value
-                    ));
                 }
             }
         }

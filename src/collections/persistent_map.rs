@@ -28,7 +28,8 @@ use crate::types::BuiltInTypes;
 use super::gc_handle::GcHandle;
 use super::handle_arena::{Handle, HandleScope};
 use super::type_ids::{
-    TYPE_ID_ARRAY_NODE, TYPE_ID_BITMAP_NODE, TYPE_ID_COLLISION_NODE, TYPE_ID_PERSISTENT_MAP,
+    TYPE_ID_ARRAY_NODE, TYPE_ID_ARRAY_NODE_CHILDREN, TYPE_ID_BITMAP_NODE, TYPE_ID_COLLISION_NODE,
+    TYPE_ID_PERSISTENT_MAP,
 };
 
 /// Field indices for PersistentMap struct
@@ -238,8 +239,17 @@ impl PersistentMap {
             (node, true)
         } else {
             let root = GcHandle::from_tagged(root_ptr);
-            let root_h = scope.alloc_handle(root);
 
+            // Validate root is a valid node type before proceeding
+            let root_type = root.get_type_id();
+            if root_type != TYPE_ID_BITMAP_NODE
+                && root_type != TYPE_ID_ARRAY_NODE
+                && root_type != TYPE_ID_COLLISION_NODE
+            {
+                return Err(format!("Invalid root node type {} in assoc", root_type).into());
+            }
+
+            let root_h = scope.alloc_handle(root);
             Self::assoc_node(&mut scope, root_h, 0, hash, key_h, value_h)?
         };
 
@@ -253,7 +263,10 @@ impl PersistentMap {
             FIELD_COUNT,
             BuiltInTypes::construct_int(new_count as isize) as usize,
         );
-        new_map_gc.set_field(FIELD_ROOT, new_root.get());
+
+        // Store the new root
+        let new_root_ptr = new_root.get();
+        new_map_gc.set_field(FIELD_ROOT, new_root_ptr);
 
         Ok(new_map_gc)
     }
@@ -271,9 +284,13 @@ impl PersistentMap {
         // Create bitmap node
         let node = scope.allocate_typed(2, TYPE_ID_BITMAP_NODE)?;
 
-        // No re-reading needed - handles are stable
-        children.to_gc_handle().set_field(0, key_h.get());
-        children.to_gc_handle().set_field(1, value_h.get());
+        // Use write barriers for heap pointer writes
+        children
+            .to_gc_handle()
+            .set_field_with_barrier(scope.runtime(), 0, key_h.get());
+        children
+            .to_gc_handle()
+            .set_field_with_barrier(scope.runtime(), 1, value_h.get());
 
         // Set bitmap with single bit for hash at level 0
         let bit = 1usize << (hash & BRANCH_MASK);
@@ -281,8 +298,11 @@ impl PersistentMap {
             BN_FIELD_BITMAP,
             BuiltInTypes::construct_int(bit as isize) as usize,
         );
-        node.to_gc_handle()
-            .set_field(BN_FIELD_CHILDREN, children.get());
+        node.to_gc_handle().set_field_with_barrier(
+            scope.runtime(),
+            BN_FIELD_CHILDREN,
+            children.get(),
+        );
 
         Ok(node)
     }
@@ -302,8 +322,12 @@ impl PersistentMap {
         // Create bitmap node
         let node = scope.allocate_typed(2, TYPE_ID_BITMAP_NODE)?;
 
-        children.to_gc_handle().set_field(0, key_h.get());
-        children.to_gc_handle().set_field(1, value_h.get());
+        children
+            .to_gc_handle()
+            .set_field_with_barrier(scope.runtime(), 0, key_h.get());
+        children
+            .to_gc_handle()
+            .set_field_with_barrier(scope.runtime(), 1, value_h.get());
 
         // Set bitmap with single bit for hash at this shift level
         let bit = 1usize << ((hash >> shift) & BRANCH_MASK);
@@ -311,8 +335,11 @@ impl PersistentMap {
             BN_FIELD_BITMAP,
             BuiltInTypes::construct_int(bit as isize) as usize,
         );
-        node.to_gc_handle()
-            .set_field(BN_FIELD_CHILDREN, children.get());
+        node.to_gc_handle().set_field_with_barrier(
+            scope.runtime(),
+            BN_FIELD_CHILDREN,
+            children.get(),
+        );
 
         Ok(node)
     }
@@ -329,21 +356,23 @@ impl PersistentMap {
     ) -> Result<(Handle, bool), Box<dyn Error>> {
         let node = node_h.to_gc_handle();
         let type_id = node.get_type_id();
+        let field_count = node.field_count();
 
         match type_id {
             TYPE_ID_BITMAP_NODE => {
                 Self::assoc_bitmap_node(scope, node_h, shift, hash, key_h, value_h)
             }
             TYPE_ID_ARRAY_NODE => {
+                // Validate: ArrayNode STRUCT has 2 fields, children ARRAY has 32
+                if field_count == 32 {
+                    return Err("assoc_node: got children array instead of ArrayNode struct".into());
+                }
                 Self::assoc_array_node(scope, node_h, shift, hash, key_h, value_h)
             }
             TYPE_ID_COLLISION_NODE => {
                 Self::assoc_collision_node(scope, node_h, shift, hash, key_h, value_h)
             }
-            _ => {
-                // Unknown node type
-                Err("Unknown node type in assoc_node".into())
-            }
+            _ => Err("Unknown node type in assoc_node".into()),
         }
     }
 
@@ -382,8 +411,8 @@ impl PersistentMap {
             let key = key_h.get();
             let value = value_h.get();
             let new_children = new_children_h.to_gc_handle();
-            new_children.set_field(index * 2, key);
-            new_children.set_field(index * 2 + 1, value);
+            new_children.set_field_with_barrier(scope.runtime(), index * 2, key);
+            new_children.set_field_with_barrier(scope.runtime(), index * 2 + 1, value);
 
             // Copy entries after insertion point (bulk memcpy)
             let children = children_h.to_gc_handle();
@@ -395,6 +424,21 @@ impl PersistentMap {
                 old_len - index * 2,
             );
 
+            // Call write barriers for all copied heap pointers
+            let new_children = new_children_h.to_gc_handle();
+            for i in 0..(index * 2) {
+                let slot = new_children.get_field(i);
+                scope
+                    .runtime()
+                    .write_barrier(new_children.as_tagged(), slot);
+            }
+            for i in (index * 2 + 2)..(old_len + 2) {
+                let slot = new_children.get_field(i);
+                scope
+                    .runtime()
+                    .write_barrier(new_children.as_tagged(), slot);
+            }
+
             // Create new bitmap node
             let new_bitmap = bitmap | bit;
             let new_node_h = scope.allocate_typed(2, TYPE_ID_BITMAP_NODE)?;
@@ -405,7 +449,11 @@ impl PersistentMap {
                 BN_FIELD_BITMAP,
                 BuiltInTypes::construct_int(new_bitmap as isize) as usize,
             );
-            new_node.set_field(BN_FIELD_CHILDREN, new_children.as_tagged());
+            new_node.set_field_with_barrier(
+                scope.runtime(),
+                BN_FIELD_CHILDREN,
+                new_children.as_tagged(),
+            );
 
             // Check if we should promote to ArrayNode
             let popcount = new_bitmap.count_ones() as usize;
@@ -445,11 +493,23 @@ impl PersistentMap {
                     let new_children = new_children_h.to_gc_handle();
                     children.copy_fields_to(&new_children, old_len);
 
+                    // Call write barriers for all copied heap pointers
+                    for i in 0..old_len {
+                        let slot = new_children.get_field(i);
+                        scope
+                            .runtime()
+                            .write_barrier(new_children.as_tagged(), slot);
+                    }
+
                     // Update the sub-node reference
                     let new_sub = new_sub_h.to_gc_handle();
                     let new_children = new_children_h.to_gc_handle();
                     // For sub-nodes, we store them directly, not as key-value pairs
-                    new_children.set_field(index * 2, new_sub.as_tagged());
+                    new_children.set_field_with_barrier(
+                        scope.runtime(),
+                        index * 2,
+                        new_sub.as_tagged(),
+                    );
                     new_children.set_field(index * 2 + 1, BuiltInTypes::null_value() as usize);
 
                     // Create new bitmap node
@@ -459,7 +519,11 @@ impl PersistentMap {
                     let new_node = new_node_h.to_gc_handle();
 
                     new_node.set_field(BN_FIELD_BITMAP, node.get_field(BN_FIELD_BITMAP));
-                    new_node.set_field(BN_FIELD_CHILDREN, new_children.as_tagged());
+                    new_node.set_field_with_barrier(
+                        scope.runtime(),
+                        BN_FIELD_CHILDREN,
+                        new_children.as_tagged(),
+                    );
 
                     return Ok((new_node_h, added));
                 }
@@ -485,10 +549,18 @@ impl PersistentMap {
                 let new_children = new_children_h.to_gc_handle();
                 children.copy_fields_to(&new_children, old_len);
 
+                // Call write barriers for all copied heap pointers
+                for i in 0..old_len {
+                    let slot = new_children.get_field(i);
+                    scope
+                        .runtime()
+                        .write_barrier(new_children.as_tagged(), slot);
+                }
+
                 // Update value
                 let value = value_h.get();
                 let new_children = new_children_h.to_gc_handle();
-                new_children.set_field(index * 2 + 1, value);
+                new_children.set_field_with_barrier(scope.runtime(), index * 2 + 1, value);
 
                 // Create new bitmap node
                 let node = node_h.to_gc_handle();
@@ -497,7 +569,11 @@ impl PersistentMap {
                 let new_node = new_node_h.to_gc_handle();
 
                 new_node.set_field(BN_FIELD_BITMAP, node.get_field(BN_FIELD_BITMAP));
-                new_node.set_field(BN_FIELD_CHILDREN, new_children.as_tagged());
+                new_node.set_field_with_barrier(
+                    scope.runtime(),
+                    BN_FIELD_CHILDREN,
+                    new_children.as_tagged(),
+                );
 
                 Ok((new_node_h, false))
             } else {
@@ -528,9 +604,21 @@ impl PersistentMap {
                     let new_children = new_children_h.to_gc_handle();
                     children.copy_fields_to(&new_children, old_len);
 
+                    // Call write barriers for all copied heap pointers
+                    for i in 0..old_len {
+                        let slot = new_children.get_field(i);
+                        scope
+                            .runtime()
+                            .write_barrier(new_children.as_tagged(), slot);
+                    }
+
                     let collision = collision_h.to_gc_handle();
                     let new_children = new_children_h.to_gc_handle();
-                    new_children.set_field(index * 2, collision.as_tagged());
+                    new_children.set_field_with_barrier(
+                        scope.runtime(),
+                        index * 2,
+                        collision.as_tagged(),
+                    );
                     new_children.set_field(index * 2 + 1, BuiltInTypes::null_value() as usize);
 
                     let node = node_h.to_gc_handle();
@@ -539,7 +627,11 @@ impl PersistentMap {
                     let new_node = new_node_h.to_gc_handle();
 
                     new_node.set_field(BN_FIELD_BITMAP, node.get_field(BN_FIELD_BITMAP));
-                    new_node.set_field(BN_FIELD_CHILDREN, new_children.as_tagged());
+                    new_node.set_field_with_barrier(
+                        scope.runtime(),
+                        BN_FIELD_CHILDREN,
+                        new_children.as_tagged(),
+                    );
 
                     Ok((new_node_h, true))
                 } else {
@@ -565,9 +657,21 @@ impl PersistentMap {
                     let new_children = new_children_h.to_gc_handle();
                     children.copy_fields_to(&new_children, old_len);
 
+                    // Call write barriers for all copied heap pointers
+                    for i in 0..old_len {
+                        let slot = new_children.get_field(i);
+                        scope
+                            .runtime()
+                            .write_barrier(new_children.as_tagged(), slot);
+                    }
+
                     let sub_node = sub_node_h.to_gc_handle();
                     let new_children = new_children_h.to_gc_handle();
-                    new_children.set_field(index * 2, sub_node.as_tagged());
+                    new_children.set_field_with_barrier(
+                        scope.runtime(),
+                        index * 2,
+                        sub_node.as_tagged(),
+                    );
                     new_children.set_field(index * 2 + 1, BuiltInTypes::null_value() as usize);
 
                     let node = node_h.to_gc_handle();
@@ -576,7 +680,11 @@ impl PersistentMap {
                     let new_node = new_node_h.to_gc_handle();
 
                     new_node.set_field(BN_FIELD_BITMAP, node.get_field(BN_FIELD_BITMAP));
-                    new_node.set_field(BN_FIELD_CHILDREN, new_children.as_tagged());
+                    new_node.set_field_with_barrier(
+                        scope.runtime(),
+                        BN_FIELD_CHILDREN,
+                        new_children.as_tagged(),
+                    );
 
                     Ok((new_node_h, true))
                 }
@@ -598,8 +706,19 @@ impl PersistentMap {
         value_h: Handle,
     ) -> Result<(Handle, bool), Box<dyn Error>> {
         let node = node_h.to_gc_handle();
+
+        // Validate: ArrayNode struct should have exactly 2 fields (count, children)
+        let field_count = node.field_count();
+        if field_count != 2 {
+            panic!(
+                "assoc_array_node: wrong node type (expected 2 fields, got {})",
+                field_count
+            );
+        }
+
         let old_count = BuiltInTypes::untag(node.get_field(AN_FIELD_COUNT));
         let children_ptr = node.get_field(AN_FIELD_CHILDREN);
+
         let children = GcHandle::from_tagged(children_ptr);
         let children_h = scope.alloc_handle(children);
 
@@ -612,16 +731,27 @@ impl PersistentMap {
             let singleton_h =
                 Self::create_singleton_bitmap_node(scope, key_h, value_h, hash, shift + 5)?;
 
-            // Create new children array with the singleton
-            let new_children_h = scope.allocate_typed(32, TYPE_ID_ARRAY_NODE)?;
+            // Create new children array with the singleton (zeroed to prevent GC issues)
+            let new_children_h = scope.allocate_typed_zeroed(32, TYPE_ID_ARRAY_NODE_CHILDREN)?;
 
             let children = children_h.to_gc_handle();
             let new_children = new_children_h.to_gc_handle();
             children.copy_fields_to(&new_children, 32);
 
+            // Call write barrier for all copied heap pointers in new_children
+            // since the children array may be in old gen after GC
+            for i in 0..32 {
+                let slot = new_children.get_field(i);
+                if slot != BuiltInTypes::null_value() as usize {
+                    scope
+                        .runtime()
+                        .write_barrier(new_children.as_tagged(), slot);
+                }
+            }
+
             let singleton = singleton_h.to_gc_handle();
             let new_children = new_children_h.to_gc_handle();
-            new_children.set_field(index, singleton.as_tagged());
+            new_children.set_field_with_barrier(scope.runtime(), index, singleton.as_tagged());
 
             // Create new array node with incremented count
             let new_node_h = scope.allocate_typed(2, TYPE_ID_ARRAY_NODE)?;
@@ -631,7 +761,11 @@ impl PersistentMap {
                 AN_FIELD_COUNT,
                 BuiltInTypes::construct_int((old_count + 1) as isize) as usize,
             );
-            new_node.set_field(AN_FIELD_CHILDREN, new_children.as_tagged());
+            new_node.set_field_with_barrier(
+                scope.runtime(),
+                AN_FIELD_CHILDREN,
+                new_children.as_tagged(),
+            );
 
             Ok((new_node_h, true))
         } else {
@@ -641,16 +775,26 @@ impl PersistentMap {
             let (new_sub_h, added) =
                 Self::assoc_node(scope, sub_node_h, shift + 5, hash, key_h, value_h)?;
 
-            // Create new children array with updated child
-            let new_children_h = scope.allocate_typed(32, TYPE_ID_ARRAY_NODE)?;
+            // Create new children array with updated child (zeroed to prevent GC issues)
+            let new_children_h = scope.allocate_typed_zeroed(32, TYPE_ID_ARRAY_NODE_CHILDREN)?;
 
             let children = children_h.to_gc_handle();
             let new_children = new_children_h.to_gc_handle();
             children.copy_fields_to(&new_children, 32);
 
+            // Call write barrier for all copied heap pointers in new_children
+            for i in 0..32 {
+                let slot = new_children.get_field(i);
+                if slot != BuiltInTypes::null_value() as usize {
+                    scope
+                        .runtime()
+                        .write_barrier(new_children.as_tagged(), slot);
+                }
+            }
+
             let new_sub = new_sub_h.to_gc_handle();
             let new_children = new_children_h.to_gc_handle();
-            new_children.set_field(index, new_sub.as_tagged());
+            new_children.set_field_with_barrier(scope.runtime(), index, new_sub.as_tagged());
 
             // Create new array node (count unchanged since we're updating existing child)
             let new_node_h = scope.allocate_typed(2, TYPE_ID_ARRAY_NODE)?;
@@ -660,7 +804,11 @@ impl PersistentMap {
                 AN_FIELD_COUNT,
                 BuiltInTypes::construct_int(old_count as isize) as usize,
             );
-            new_node.set_field(AN_FIELD_CHILDREN, new_children.as_tagged());
+            new_node.set_field_with_barrier(
+                scope.runtime(),
+                AN_FIELD_CHILDREN,
+                new_children.as_tagged(),
+            );
 
             Ok((new_node_h, added))
         }
@@ -683,7 +831,8 @@ impl PersistentMap {
         let old_children_h = scope.alloc_handle(old_children);
 
         // Create new 32-slot children array (node slots only, no key-value pairs)
-        let new_children_h = scope.allocate_typed(32, TYPE_ID_ARRAY_NODE)?;
+        // Zeroed allocation prevents GC from seeing garbage as heap pointers
+        let new_children_h = scope.allocate_typed_zeroed(32, TYPE_ID_ARRAY_NODE_CHILDREN)?;
 
         // Initialize all slots to null
         let new_children = new_children_h.to_gc_handle();
@@ -693,12 +842,14 @@ impl PersistentMap {
 
         // Convert entries from bitmap node to array node
         // Count non-null children as we go
-        let old_children = old_children_h.to_gc_handle();
         let mut src_index = 0;
         let mut child_count = 0usize;
 
         for bit_pos in 0..32 {
             if (bitmap & (1usize << bit_pos)) != 0 {
+                // IMPORTANT: Re-read old_children from Handle at each iteration
+                // because allocations in previous iterations may have triggered GC
+                let old_children = old_children_h.to_gc_handle();
                 let key = old_children.get_field(src_index * 2);
                 let value = old_children.get_field(src_index * 2 + 1);
 
@@ -716,7 +867,7 @@ impl PersistentMap {
                 if is_subnode {
                     // Sub-node: store directly in array slot
                     let new_children = new_children_h.to_gc_handle();
-                    new_children.set_field(bit_pos, key);
+                    new_children.set_field_with_barrier(scope.runtime(), bit_pos, key);
                 } else {
                     // Leaf entry: wrap in singleton BitmapNode at shift + 5
                     let key_h = scope.alloc(key);
@@ -730,7 +881,11 @@ impl PersistentMap {
                         Self::create_singleton_bitmap_node(scope, key_h, value_h, hash, shift + 5)?;
                     let singleton = singleton_h.to_gc_handle();
                     let new_children = new_children_h.to_gc_handle();
-                    new_children.set_field(bit_pos, singleton.as_tagged());
+                    new_children.set_field_with_barrier(
+                        scope.runtime(),
+                        bit_pos,
+                        singleton.as_tagged(),
+                    );
                 }
 
                 child_count += 1;
@@ -746,7 +901,11 @@ impl PersistentMap {
             AN_FIELD_COUNT,
             BuiltInTypes::construct_int(child_count as isize) as usize,
         );
-        array_node.set_field(AN_FIELD_CHILDREN, new_children.as_tagged());
+        array_node.set_field_with_barrier(
+            scope.runtime(),
+            AN_FIELD_CHILDREN,
+            new_children.as_tagged(),
+        );
 
         Ok(array_node_h)
     }

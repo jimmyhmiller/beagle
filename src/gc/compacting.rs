@@ -1,12 +1,10 @@
-use std::{collections::HashMap, ffi::c_void, io::Error, mem, thread::ThreadId};
+use std::{ffi::c_void, io::Error, mem};
 
 use libc::mprotect;
 
 use super::get_page_size;
 
 use crate::types::{BuiltInTypes, Header, HeapObject, Word};
-
-use crate::collections::{HandleArenaPtr, RootSetPtr};
 
 use super::{AllocateAction, Allocator, AllocatorOptions, StackMap, stack_walker::StackWalker};
 
@@ -203,13 +201,6 @@ impl Iterator for ObjectIterator {
 pub struct CompactingHeap {
     to_space: Space,
     from_space: Space,
-    namespace_roots: Vec<(usize, usize)>,
-    thread_roots: HashMap<ThreadId, usize>,
-    temporary_roots: Vec<Option<usize>>,
-    root_sets: Vec<Option<RootSetPtr>>,
-    handle_arenas: Vec<Option<HandleArenaPtr>>,
-    handle_arena_threads: HashMap<ThreadId, usize>,
-    namespace_relocations: Vec<(usize, Vec<(usize, usize)>)>,
     options: AllocatorOptions,
 }
 impl CompactingHeap {
@@ -297,13 +288,6 @@ impl Allocator for CompactingHeap {
         Self {
             to_space,
             from_space,
-            namespace_roots: vec![],
-            thread_roots: HashMap::new(),
-            temporary_roots: vec![],
-            root_sets: vec![],
-            handle_arenas: vec![],
-            handle_arena_threads: HashMap::new(),
-            namespace_relocations: vec![],
             options,
         }
     }
@@ -338,75 +322,7 @@ impl Allocator for CompactingHeap {
             self.to_space.unprotect();
         }
 
-        let start_offset = self.to_space.allocation_offset;
-        let mut temporary_roots_to_update: Vec<(usize, usize)> = vec![];
-        for (i, root) in self.temporary_roots.clone().iter().enumerate() {
-            if let Some(root) = root
-                && BuiltInTypes::is_heap_pointer(*root)
-            {
-                let heap_object = HeapObject::from_tagged(*root);
-                debug_assert!(self.from_space.contains(heap_object.get_pointer()));
-                let new_root = self.copy_using_cheneys_algorithm(heap_object);
-                temporary_roots_to_update.push((i, new_root));
-            }
-        }
-
-        unsafe { self.copy_remaining(start_offset) };
-
-        for (i, new_root) in temporary_roots_to_update.iter() {
-            self.temporary_roots[*i] = Some(*new_root);
-        }
-
-        // Process registered RootSets
-        {
-            let start_offset = self.to_space.allocation_offset;
-
-            // Collect pointers first to avoid borrowing self while iterating
-            let root_set_ptrs: Vec<RootSetPtr> =
-                self.root_sets.iter().filter_map(|slot| *slot).collect();
-
-            for roots_ptr in root_set_ptrs {
-                let roots = unsafe { &mut *roots_ptr.0 };
-                for root in roots.roots_mut() {
-                    if BuiltInTypes::is_heap_pointer(*root) {
-                        let heap_object = HeapObject::from_tagged(*root);
-                        if self.from_space.contains(heap_object.get_pointer()) {
-                            *root = self.copy_using_cheneys_algorithm(heap_object);
-                        }
-                    }
-                }
-            }
-
-            // Process fields of objects copied from root_sets
-            unsafe { self.copy_remaining(start_offset) };
-        }
-
-        // Process registered HandleArenas (thread-local handle storage)
-        {
-            let start_offset = self.to_space.allocation_offset;
-
-            // Collect pointers first to avoid borrowing self while iterating
-            let arena_ptrs: Vec<HandleArenaPtr> =
-                self.handle_arenas.iter().filter_map(|slot| *slot).collect();
-
-            for arena_ptr in arena_ptrs {
-                let arena = unsafe { &mut *arena_ptr.0 };
-                for root in arena.roots_mut() {
-                    if BuiltInTypes::is_heap_pointer(*root) {
-                        let heap_object = HeapObject::from_tagged(*root);
-                        if self.from_space.contains(heap_object.get_pointer()) {
-                            *root = self.copy_using_cheneys_algorithm(heap_object);
-                        }
-                    }
-                }
-            }
-
-            // Process fields of objects copied from handle_arenas
-            unsafe { self.copy_remaining(start_offset) };
-        }
-
         for (stack_base, frame_pointer, gc_return_addr) in stack_pointers.iter() {
-            // Use the explicit gc_return_addr for accurate first-frame scanning
             let roots = StackWalker::collect_stack_roots_with_return_addr(
                 *stack_base,
                 *frame_pointer,
@@ -415,8 +331,6 @@ impl Allocator for CompactingHeap {
             );
             let new_roots = unsafe { self.copy_all(roots.iter().map(|x| x.1).collect()) };
 
-            // With FP-chain based walking, roots contain (slot_address, value) pairs
-            // Write new roots directly to their addresses
             for (i, (slot_addr, _)) in roots.iter().enumerate() {
                 debug_assert!(
                     BuiltInTypes::untag(new_roots[i]) % 8 == 0,
@@ -429,29 +343,6 @@ impl Allocator for CompactingHeap {
         }
 
         let start_offset = self.to_space.allocation_offset;
-        let namespace_roots = std::mem::take(&mut self.namespace_roots);
-        // There has to be a better answer than this. But it does seem to work.
-        for (namespace_id, root) in namespace_roots.into_iter() {
-            if BuiltInTypes::is_heap_pointer(root) {
-                let heap_object = HeapObject::from_tagged(root);
-                let new_pointer = self.copy_using_cheneys_algorithm(heap_object);
-                self.namespace_relocations
-                    .push((namespace_id, vec![(root, new_pointer)]));
-                self.namespace_roots.push((namespace_id, new_pointer));
-            }
-        }
-
-        // Process thread roots (Thread objects for running threads)
-        let thread_roots: Vec<(ThreadId, usize)> = self.thread_roots.drain().collect();
-        for (thread_id, root) in thread_roots.into_iter() {
-            if BuiltInTypes::is_heap_pointer(root) {
-                let heap_object = HeapObject::from_tagged(root);
-                let new_pointer = self.copy_using_cheneys_algorithm(heap_object);
-                self.thread_roots.insert(thread_id, new_pointer);
-            } else {
-                self.thread_roots.insert(thread_id, root);
-            }
-        }
 
         unsafe { self.copy_remaining(start_offset) };
 
@@ -487,105 +378,7 @@ impl Allocator for CompactingHeap {
         }
     }
 
-    fn gc_add_root(&mut self, _old: usize) {
-        // Don't need this because this is a write barrier for generational
-    }
-
-    fn register_temporary_root(&mut self, root: usize) -> usize {
-        debug_assert!(self.temporary_roots.len() < 10, "Too many temporary roots");
-        for (i, temp_root) in self.temporary_roots.iter_mut().enumerate() {
-            if temp_root.is_none() {
-                *temp_root = Some(root);
-                return i;
-            }
-        }
-        self.temporary_roots.push(Some(root));
-        self.temporary_roots.len() - 1
-    }
-
-    fn unregister_temporary_root(&mut self, id: usize) -> usize {
-        let value = self.temporary_roots[id];
-        self.temporary_roots[id] = None;
-        value.unwrap()
-    }
-
-    fn peek_temporary_root(&self, id: usize) -> usize {
-        self.temporary_roots[id].unwrap()
-    }
-
-    fn register_root_set(&mut self, roots: RootSetPtr) -> usize {
-        for (i, slot) in self.root_sets.iter_mut().enumerate() {
-            if slot.is_none() {
-                *slot = Some(roots);
-                return i;
-            }
-        }
-        self.root_sets.push(Some(roots));
-        self.root_sets.len() - 1
-    }
-
-    fn unregister_root_set(&mut self, id: usize) {
-        if id < self.root_sets.len() {
-            self.root_sets[id] = None;
-        }
-    }
-
-    fn register_handle_arena(&mut self, arena: HandleArenaPtr, thread_id: ThreadId) -> usize {
-        for (i, slot) in self.handle_arenas.iter_mut().enumerate() {
-            if slot.is_none() {
-                *slot = Some(arena);
-                self.handle_arena_threads.insert(thread_id, i);
-                return i;
-            }
-        }
-        let idx = self.handle_arenas.len();
-        self.handle_arenas.push(Some(arena));
-        self.handle_arena_threads.insert(thread_id, idx);
-        idx
-    }
-
-    fn unregister_handle_arena_for_thread(&mut self, thread_id: ThreadId) {
-        if let Some(idx) = self.handle_arena_threads.remove(&thread_id)
-            && idx < self.handle_arenas.len()
-        {
-            self.handle_arenas[idx] = None;
-        }
-    }
-
-    fn add_namespace_root(&mut self, namespace_id: usize, root: usize) {
-        self.namespace_roots.push((namespace_id, root));
-    }
-
-    fn remove_namespace_root(&mut self, namespace_id: usize, root: usize) -> bool {
-        if let Some(pos) = self
-            .namespace_roots
-            .iter()
-            .position(|(ns, r)| *ns == namespace_id && *r == root)
-        {
-            self.namespace_roots.swap_remove(pos);
-            true
-        } else {
-            false
-        }
-    }
-
-    fn get_namespace_relocations(&mut self) -> Vec<(usize, Vec<(usize, usize)>)> {
-        self.namespace_relocations.drain(0..).collect()
-    }
-
     fn get_allocation_options(&self) -> AllocatorOptions {
         self.options
-    }
-
-    fn add_thread_root(&mut self, thread_id: ThreadId, thread_object: usize) {
-        self.thread_roots.insert(thread_id, thread_object);
-    }
-
-    fn remove_thread_root(&mut self, thread_id: ThreadId) {
-        self.thread_roots.remove(&thread_id);
-    }
-
-    fn get_thread_root(&self, thread_id: ThreadId) -> Option<usize> {
-        self.thread_roots.get(&thread_id).copied()
     }
 }
