@@ -91,4 +91,15 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         // and the remembered set is only read during GC (which holds the lock).
         self.alloc.write_barrier(object_ptr, new_value);
     }
+
+    fn get_card_table_biased_ptr(&self) -> *mut u8 {
+        // Delegate to inner allocator to get the actual card table pointer
+        self.alloc.get_card_table_biased_ptr()
+    }
+
+    fn mark_card_unconditional(&mut self, object_ptr: usize) {
+        // Delegate to inner allocator to mark the card
+        // No lock needed - card marking is atomic and only read during GC (which holds the lock)
+        self.alloc.mark_card_unconditional(object_ptr);
+    }
 }

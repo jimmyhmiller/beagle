@@ -3279,9 +3279,26 @@ impl Runtime {
         let string = &string_value.str;
         let struct_type_id = heap_object.get_struct_id();
         let struct_type_id = BuiltInTypes::untag(struct_type_id);
-        let struct_value = self
-            .get_struct_by_id(struct_type_id)
-            .expect("Struct not found by ID - this is a fatal error");
+        let struct_value = self.get_struct_by_id(struct_type_id);
+        if struct_value.is_none() {
+            let untagged = heap_object.untagged();
+            let raw_header = unsafe { *(untagged as *const usize) };
+            let is_forwarding = Header::is_forwarding_bit_set(raw_header);
+            eprintln!(
+                "Struct not found! struct_pointer={:#x}, struct_type_id={}, header={:?}, raw_header={:#x}, is_forwarding={}",
+                struct_pointer,
+                struct_type_id,
+                heap_object.get_header(),
+                raw_header,
+                is_forwarding
+            );
+            if is_forwarding {
+                let forwarded_to = Header::clear_forwarding_bit(raw_header);
+                eprintln!("Object was forwarded to {:#x}", forwarded_to);
+            }
+            panic!("Struct not found by ID - this is a fatal error");
+        }
+        let struct_value = struct_value.unwrap();
         let field_index = struct_value
             .fields
             .iter()
