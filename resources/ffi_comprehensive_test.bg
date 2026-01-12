@@ -345,7 +345,7 @@ fn main() {
     println("\n=== All FFI Tests Completed ===")
 }
 
-// DISABLED - investigating macOS failure
+// Expect
 // === FFI Comprehensive Test Suite ===
 //
 // --- Zero Arguments Tests ---
