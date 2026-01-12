@@ -377,7 +377,7 @@ fn main() {
     println("\n=== All FFI Tests Completed ===")
 }
 
-// Expected Output (manual test - skipped in CI due to platform-specific library paths):
+// Sample Output (manual test only - platform-specific library paths):
 // === FFI Comprehensive Test Suite ===
 //
 // --- Zero Arguments Tests ---
