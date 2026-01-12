@@ -1,0 +1,554 @@
+namespace stdlib_exhaustive_test
+
+// Helper functions
+fn mod(a, b) {
+    a - (a / b) * b
+}
+
+fn even?(n) {
+    mod(n, 2) == 0
+}
+
+fn main() {
+    println("=== EXHAUSTIVE STDLIB TESTS ===")
+    println("")
+
+    // ========================================
+    // reduce tests
+    // ========================================
+    println("--- reduce ---")
+    println("sum", reduce([1, 2, 3], 0, fn(a, x) { a + x }))
+    println("empty", reduce([], 100, fn(a, x) { a + x }))
+    println("single", reduce([5], 0, fn(a, x) { a + x }))
+    println("product", reduce([2, 3, 4], 1, fn(a, x) { a * x }))
+
+    // ========================================
+    // map tests
+    // ========================================
+    println("--- map ---")
+    println("double", map([1, 2, 3], fn(x) { x * 2 }))
+    println("empty", map([], fn(x) { x * 2 }))
+    println("single", map([5], fn(x) { x * 2 }))
+    println("strings", map(["a", "b"], fn(x) { x ++ "!" }))
+
+    // ========================================
+    // filter tests
+    // ========================================
+    println("--- filter ---")
+    println("evens", filter([1, 2, 3, 4], fn(x) { even?(x) }))
+    println("none match", filter([1, 3, 5], fn(x) { even?(x) }))
+    println("all match", filter([2, 4, 6], fn(x) { even?(x) }))
+    println("empty", filter([], fn(x) { even?(x) }))
+
+    // ========================================
+    // any? tests
+    // ========================================
+    println("--- any? ---")
+    println("found", any?([1, 2, 3], fn(x) { x > 2 }))
+    println("not found", any?([1, 2, 3], fn(x) { x > 10 }))
+    println("empty", any?([], fn(x) { x > 0 }))
+    println("first matches", any?([5, 1, 1], fn(x) { x > 4 }))
+
+    // ========================================
+    // all? tests
+    // ========================================
+    println("--- all? ---")
+    println("all match", all?([2, 4, 6], fn(x) { even?(x) }))
+    println("one fails", all?([2, 3, 6], fn(x) { even?(x) }))
+    println("empty", all?([], fn(x) { x > 0 }))
+
+    // ========================================
+    // none? tests
+    // ========================================
+    println("--- none? ---")
+    println("none match", none?([1, 3, 5], fn(x) { even?(x) }))
+    println("one matches", none?([1, 2, 5], fn(x) { even?(x) }))
+    println("empty", none?([], fn(x) { x > 0 }))
+
+    // ========================================
+    // find tests
+    // ========================================
+    println("--- find ---")
+    println("found", find([1, 2, 3, 4], fn(x) { x > 2 }))
+    println("not found", find([1, 2, 3], fn(x) { x > 10 }))
+    println("empty", find([], fn(x) { x > 0 }))
+    println("first of many", find([5, 6, 7], fn(x) { x > 4 }))
+
+    // ========================================
+    // find-index tests
+    // ========================================
+    println("--- find-index ---")
+    println("found", find-index([1, 2, 3, 4], fn(x) { x > 2 }))
+    println("not found", find-index([1, 2, 3], fn(x) { x > 10 }))
+    println("empty", find-index([], fn(x) { x > 0 }))
+    println("at start", find-index([5, 1, 1], fn(x) { x > 4 }))
+
+    // ========================================
+    // take tests
+    // ========================================
+    println("--- take ---")
+    println("normal", take([1, 2, 3, 4], 2))
+    println("zero", take([1, 2, 3], 0))
+    println("more than size", take([1, 2], 5))
+    println("empty", take([], 3))
+    println("exact size", take([1, 2, 3], 3))
+
+    // ========================================
+    // drop tests
+    // ========================================
+    println("--- drop ---")
+    println("normal", drop([1, 2, 3, 4], 2))
+    println("zero", drop([1, 2, 3], 0))
+    println("more than size", drop([1, 2], 5))
+    println("empty", drop([], 3))
+    println("exact size", drop([1, 2, 3], 3))
+
+    // ========================================
+    // take-while tests
+    // ========================================
+    println("--- take-while ---")
+    println("normal", take-while([1, 2, 3, 4, 1], fn(x) { x < 3 }))
+    println("all match", take-while([1, 2], fn(x) { x < 10 }))
+    println("none match", take-while([5, 6, 7], fn(x) { x < 3 }))
+    println("empty", take-while([], fn(x) { x < 3 }))
+
+    // ========================================
+    // drop-while tests
+    // ========================================
+    println("--- drop-while ---")
+    println("normal", drop-while([1, 2, 3, 4, 1], fn(x) { x < 3 }))
+    println("all match", drop-while([1, 2], fn(x) { x < 10 }))
+    println("none match", drop-while([5, 6, 7], fn(x) { x < 3 }))
+    println("empty", drop-while([], fn(x) { x < 3 }))
+
+    // ========================================
+    // slice tests
+    // ========================================
+    println("--- slice ---")
+    println("middle", slice([1, 2, 3, 4, 5], 1, 4))
+    println("start", slice([1, 2, 3, 4, 5], 0, 2))
+    println("end", slice([1, 2, 3, 4, 5], 3, 5))
+    println("empty result", slice([1, 2, 3], 2, 2))
+    println("beyond end", slice([1, 2, 3], 1, 10))
+
+    // ========================================
+    // count/empty? tests
+    // ========================================
+    println("--- count/empty? ---")
+    println("count 3", count([1, 2, 3]))
+    let count-zero = count([])
+    println("count 0", count-zero)
+    println("empty true", empty?([]))
+    println("empty false", empty?([1]))
+
+    // ========================================
+    // first-of/last/rest/butlast tests
+    // ========================================
+    println("--- element access ---")
+    println("first-of", first-of([1, 2, 3]))
+    println("first-of empty", first-of([]))
+    println("last", last([1, 2, 3]))
+    println("last single", last([5]))
+    println("last empty", last([]))
+    println("rest", rest([1, 2, 3]))
+    println("rest single", rest([5]))
+    println("rest empty", rest([]))
+    println("butlast", butlast([1, 2, 3]))
+    println("butlast single", butlast([5]))
+    println("butlast empty", butlast([]))
+
+    // ========================================
+    // nth/second/third tests
+    // ========================================
+    println("--- nth/second/third ---")
+    println("nth 0", nth([1, 2, 3], 0))
+    println("nth 2", nth([1, 2, 3], 2))
+    println("nth out of bounds", nth([1, 2], 5))
+    println("second", second([1, 2, 3]))
+    println("second short", second([1]))
+    println("third", third([1, 2, 3, 4]))
+
+    // ========================================
+    // concat tests
+    // ========================================
+    println("--- concat ---")
+    println("normal", concat([1, 2], [3, 4]))
+    println("first empty", concat([], [1, 2]))
+    println("second empty", concat([1, 2], []))
+    println("both empty", concat([], []))
+
+    // ========================================
+    // flatten tests
+    // ========================================
+    println("--- flatten ---")
+    println("normal", flatten([[1, 2], [3, 4]]))
+    println("empty inner", flatten([[], [1], []]))
+    println("single", flatten([[1, 2, 3]]))
+    println("empty", flatten([]))
+
+    // ========================================
+    // flat-map tests
+    // ========================================
+    println("--- flat-map ---")
+    println("normal", flat-map([1, 2], fn(x) { [x, x * 10] }))
+    println("empty result", flat-map([1, 2], fn(x) { [] }))
+    println("empty input", flat-map([], fn(x) { [x, x] }))
+
+    // ========================================
+    // zip tests
+    // ========================================
+    println("--- zip ---")
+    println("equal", zip([1, 2, 3], ["a", "b", "c"]))
+    println("first shorter", zip([1, 2], ["a", "b", "c"]))
+    println("second shorter", zip([1, 2, 3], ["a", "b"]))
+    println("first empty", zip([], [1, 2]))
+    println("second empty", zip([1, 2], []))
+
+    // ========================================
+    // zip-with tests
+    // ========================================
+    println("--- zip-with ---")
+    println("add", zip-with([1, 2, 3], [10, 20, 30], fn(a, b) { a + b }))
+    println("different lengths", zip-with([1, 2], [10, 20, 30], fn(a, b) { a + b }))
+
+    // ========================================
+    // interleave tests
+    // ========================================
+    println("--- interleave ---")
+    println("equal", interleave([1, 2, 3], ["a", "b", "c"]))
+    println("first shorter", interleave([1, 2], ["a", "b", "c"]))
+    println("empty", interleave([], [1, 2]))
+
+    // ========================================
+    // interpose tests
+    // ========================================
+    println("--- interpose ---")
+    println("normal", interpose([1, 2, 3], 0))
+    println("single", interpose([1], 0))
+    println("empty", interpose([], 0))
+
+    // ========================================
+    // reverse tests
+    // ========================================
+    println("--- reverse ---")
+    println("normal", reverse([1, 2, 3]))
+    println("single", reverse([1]))
+    println("empty", reverse([]))
+
+    // ========================================
+    // repeat tests
+    // ========================================
+    println("--- repeat ---")
+    println("normal", repeat("x", 3))
+    println("zero", repeat("x", 0))
+    println("one", repeat("x", 1))
+
+    // ========================================
+    // repeatedly tests
+    // ========================================
+    println("--- repeatedly ---")
+    let counter = atom(0)
+    println("three", repeatedly(fn() { swap!(counter, fn(x) { x + 1 }) }, 3))
+    reset!(counter, 0)
+    println("zero", repeatedly(fn() { swap!(counter, fn(x) { x + 1 }) }, 0))
+
+    // ========================================
+    // iterate tests
+    // ========================================
+    println("--- iterate ---")
+    println("powers", iterate(fn(x) { x * 2 }, 1, 5))
+    println("zero", iterate(fn(x) { x * 2 }, 1, 0))
+    println("one", iterate(fn(x) { x * 2 }, 1, 1))
+
+    // ========================================
+    // partition tests
+    // ========================================
+    println("--- partition ---")
+    println("even", partition([1, 2, 3, 4, 5, 6], 2))
+    println("uneven", partition([1, 2, 3, 4, 5], 2))
+    println("larger than input", partition([1, 2], 5))
+    println("empty", partition([], 2))
+    println("by one", partition([1, 2, 3], 1))
+
+    // ========================================
+    // group-by tests
+    // ========================================
+    println("--- group-by ---")
+    println("by mod", group-by([1, 2, 3, 4, 5, 6], fn(x) { mod(x, 2) }))
+    println("all same", group-by([2, 4, 6], fn(x) { mod(x, 2) }))
+    println("empty", group-by([], fn(x) { mod(x, 2) }))
+
+    // ========================================
+    // frequencies tests
+    // ========================================
+    println("--- frequencies ---")
+    println("normal", frequencies([1, 1, 2, 2, 2, 3]))
+    println("all unique", frequencies([1, 2, 3]))
+    println("all same", frequencies([1, 1, 1]))
+    println("empty", frequencies([]))
+
+    // ========================================
+    // distinct tests
+    // ========================================
+    println("--- distinct ---")
+    println("with dups", distinct([1, 2, 2, 3, 1, 4]))
+    println("no dups", distinct([1, 2, 3]))
+    println("all same", distinct([1, 1, 1]))
+    println("empty", distinct([]))
+
+    // ========================================
+    // sort tests
+    // ========================================
+    println("--- sort ---")
+    println("unsorted", sort([3, 1, 4, 1, 5, 9, 2, 6]))
+    println("already sorted", sort([1, 2, 3]))
+    println("reverse sorted", sort([3, 2, 1]))
+    println("single", sort([5]))
+    println("empty", sort([]))
+
+    // ========================================
+    // sort-by tests
+    // ========================================
+    println("--- sort-by ---")
+    println("by length", sort-by(["bb", "a", "ccc"], fn(s) { length(s) }))
+    println("empty", sort-by([], fn(s) { length(s) }))
+    println("single", sort-by(["hello"], fn(s) { length(s) }))
+
+    // ========================================
+    // identity/constantly tests
+    // ========================================
+    println("--- identity/constantly ---")
+    println("identity num", identity(42))
+    println("identity str", identity("hello"))
+    println("identity null", identity(null))
+    let always-five = constantly(5)
+    println("constantly", always-five(100))
+
+    // ========================================
+    // not/truthy?/falsy? tests
+    // ========================================
+    println("--- boolean utils ---")
+    let not-true-result = not(true)
+    println("not true", not-true-result)
+    let not-false-result = not(false)
+    println("not false", not-false-result)
+    println("truthy? 1", truthy?(1))
+    println("truthy? 0", truthy?(0))
+    println("truthy? null", truthy?(null))
+    println("truthy? false", truthy?(false))
+    println("falsy? null", falsy?(null))
+    println("falsy? false", falsy?(false))
+    println("falsy? 0", falsy?(0))
+
+    // ========================================
+    // nil?/some? tests
+    // ========================================
+    println("--- nil?/some? ---")
+    let nil-null = nil?(null)
+    println("nil? null", nil-null)
+    let nil-zero = nil?(0)
+    println("nil? 0", nil-zero)
+    let nil-false = nil?(false)
+    println("nil? false", nil-false)
+    println("some? 42", some?(42))
+    println("some? null", some?(null))
+    println("some? false", some?(false))
+
+    println("")
+    println("=== ALL TESTS COMPLETE ===")
+    "done"
+}
+
+// Expect
+// === EXHAUSTIVE STDLIB TESTS ===
+//
+// --- reduce ---
+// sum 6
+// empty 100
+// single 5
+// product 24
+// --- map ---
+// double [2, 4, 6]
+// empty []
+// single [10]
+// strings ["a!", "b!"]
+// --- filter ---
+// evens [2, 4]
+// none match []
+// all match [2, 4, 6]
+// empty []
+// --- any? ---
+// found true
+// not found false
+// empty false
+// first matches true
+// --- all? ---
+// all match true
+// one fails false
+// empty true
+// --- none? ---
+// none match true
+// one matches false
+// empty true
+// --- find ---
+// found 3
+// not found null
+// empty null
+// first of many 5
+// --- find-index ---
+// found 2
+// not found -1
+// empty -1
+// at start 0
+// --- take ---
+// normal [1, 2]
+// zero []
+// more than size [1, 2]
+// empty []
+// exact size [1, 2, 3]
+// --- drop ---
+// normal [3, 4]
+// zero [1, 2, 3]
+// more than size []
+// empty []
+// exact size []
+// --- take-while ---
+// normal [1, 2]
+// all match [1, 2]
+// none match []
+// empty []
+// --- drop-while ---
+// normal [3, 4, 1]
+// all match []
+// none match [5, 6, 7]
+// empty []
+// --- slice ---
+// middle [2, 3, 4]
+// start [1, 2]
+// end [4, 5]
+// empty result []
+// beyond end [2, 3]
+// --- count/empty? ---
+// count 3 3
+// count 0 0
+// empty true true
+// empty false false
+// --- element access ---
+// first-of 1
+// first-of empty null
+// last 3
+// last single 5
+// last empty null
+// rest [2, 3]
+// rest single []
+// rest empty []
+// butlast [1, 2]
+// butlast single []
+// butlast empty []
+// --- nth/second/third ---
+// nth 0 1
+// nth 2 3
+// nth out of bounds null
+// second 2
+// second short null
+// third 3
+// --- concat ---
+// normal [1, 2, 3, 4]
+// first empty [1, 2]
+// second empty [1, 2]
+// both empty []
+// --- flatten ---
+// normal [1, 2, 3, 4]
+// empty inner [1]
+// single [1, 2, 3]
+// empty []
+// --- flat-map ---
+// normal [1, 10, 2, 20]
+// empty result []
+// empty input []
+// --- zip ---
+// equal [[1, "a"], [2, "b"], [3, "c"]]
+// first shorter [[1, "a"], [2, "b"]]
+// second shorter [[1, "a"], [2, "b"]]
+// first empty []
+// second empty []
+// --- zip-with ---
+// add [11, 22, 33]
+// different lengths [11, 22]
+// --- interleave ---
+// equal [1, "a", 2, "b", 3, "c"]
+// first shorter [1, "a", 2, "b"]
+// empty []
+// --- interpose ---
+// normal [1, 0, 2, 0, 3]
+// single [1]
+// empty []
+// --- reverse ---
+// normal [3, 2, 1]
+// single [1]
+// empty []
+// --- repeat ---
+// normal ["x", "x", "x"]
+// zero []
+// one ["x"]
+// --- repeatedly ---
+// three [1, 2, 3]
+// zero []
+// --- iterate ---
+// powers [1, 2, 4, 8, 16]
+// zero []
+// one [1]
+// --- partition ---
+// even [[1, 2], [3, 4], [5, 6]]
+// uneven [[1, 2], [3, 4], [5]]
+// larger than input [[1, 2]]
+// empty []
+// by one [[1], [2], [3]]
+// --- group-by ---
+// by mod {0: [2, 4, 6], 1: [1, 3, 5]}
+// all same {0: [2, 4, 6]}
+// empty {}
+// --- frequencies ---
+// normal {2: 3, 1: 2, 3: 1}
+// all unique {2: 1, 1: 1, 3: 1}
+// all same {1: 3}
+// empty {}
+// --- distinct ---
+// with dups [1, 2, 3, 4]
+// no dups [1, 2, 3]
+// all same [1]
+// empty []
+// --- sort ---
+// unsorted [1, 1, 2, 3, 4, 5, 6, 9]
+// already sorted [1, 2, 3]
+// reverse sorted [1, 2, 3]
+// single [5]
+// empty []
+// --- sort-by ---
+// by length ["a", "bb", "ccc"]
+// empty []
+// single ["hello"]
+// --- identity/constantly ---
+// identity num 42
+// identity str hello
+// identity null null
+// constantly 5
+// --- boolean utils ---
+// not true false
+// not false true
+// truthy? 1 true
+// truthy? 0 true
+// truthy? null false
+// truthy? false false
+// falsy? null true
+// falsy? false true
+// falsy? 0 false
+// --- nil?/some? ---
+// nil? null true
+// nil? 0 false
+// nil? false false
+// some? 42 true
+// some? null false
+// some? false true
+//
+// === ALL TESTS COMPLETE ===

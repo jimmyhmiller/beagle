@@ -94,8 +94,7 @@ fn main() {
     println("zip-with:", zip-with([1, 2, 3], [10, 20, 30], fn(a, b) { a + b }))
 
     // Test interleave
-    let interleaved = interleave([1, 2, 3], ["a", "b", "c"])
-    println("interleave", interleaved)
+    println("interleave:", interleave([1, 2, 3], ["a", "b", "c"]))
 
     // Test interpose
     println("interpose:", interpose([1, 2, 3], 0))
@@ -180,7 +179,7 @@ fn main() {
 // flat-map: [1, 10, 2, 20]
 // zip: [[1, "a"], [2, "b"], [3, "c"]]
 // zip-with: [11, 22, 33]
-// interleave [1, "a", 2, "b", 3, "c"]
+// interleave: [1, "a", 2, "b", 3, "c"]
 // interpose: [1, 0, 2, 0, 3]
 // reverse: [3, 2, 1]
 // repeat: ["x", "x", "x"]
