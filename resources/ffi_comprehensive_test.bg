@@ -7,7 +7,8 @@ import "beagle.primitive" as primitive
 fn get_libc_path() {
     let os = get-os()
     if os == "macos" {
-        "/usr/lib/libc.dylib"
+        // On macOS, libc is part of libSystem
+        "/usr/lib/libSystem.B.dylib"
     } else if os == "linux" {
         "/lib/x86_64-linux-gnu/libc.so.6"
     } else {
