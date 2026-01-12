@@ -1811,7 +1811,11 @@ pub unsafe fn call_beagle_fn_ptr(runtime: &Runtime, fn_or_closure: usize, arg1: 
 pub unsafe extern "C" fn load_library(name: usize) -> usize {
     let runtime = get_runtime().get_mut();
     let string = &runtime.get_string_literal(name);
-    let lib = unsafe { libloading::Library::new(string).unwrap() };
+    let lib = unsafe {
+        libloading::Library::new(string).unwrap_or_else(|e| {
+            panic!("Failed to load library '{}': {}", string, e)
+        })
+    };
     let id = runtime.add_library(lib);
 
     unsafe {
