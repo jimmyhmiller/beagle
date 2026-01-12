@@ -423,6 +423,14 @@ impl CodegenBackend for Arm64Backend {
         self.inner.set_all_locals_to_null(null_register);
     }
 
+    fn reset_callee_saved_tracking(&mut self) {
+        self.inner.reset_callee_saved_tracking();
+    }
+
+    fn mark_callee_saved_register_used(&mut self, index: usize) {
+        self.inner.mark_callee_saved_register_used(index);
+    }
+
     // === Stack map for GC ===
 
     fn translate_stack_map(&self, base_pointer: usize) -> Vec<(usize, usize)> {

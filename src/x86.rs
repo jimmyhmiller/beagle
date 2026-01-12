@@ -34,6 +34,9 @@ pub struct LowLevelX86 {
     allocated_temporary_registers: Vec<X86Register>,
     canonical_temporary_registers: Vec<X86Register>,
     current_function_name: Option<String>,
+    /// Tracks which callee-saved registers are actually used in this function.
+    /// This is a bitmask for R12-R15 and RBX (indices 12-16).
+    used_callee_saved_registers: u8,
 }
 
 impl Default for LowLevelX86 {
@@ -84,6 +87,7 @@ impl LowLevelX86 {
             max_locals: 0,
             stack_map: HashMap::new(),
             current_function_name: None,
+            used_callee_saved_registers: 0,
         }
     }
 
@@ -707,9 +711,64 @@ impl LowLevelX86 {
     // === Register allocation ===
 
     pub fn volatile_register(&mut self) -> X86Register {
-        self.free_volatile_registers
+        let reg = self.free_volatile_registers
             .pop()
-            .expect("No free volatile registers")
+            .expect("No free volatile registers");
+        // Track that this callee-saved register is used (for ABI compliance)
+        self.mark_callee_saved_used(reg);
+        reg
+    }
+
+    /// Mark a callee-saved register as used by this function.
+    fn mark_callee_saved_used(&mut self, reg: X86Register) {
+        // R12-R15 and RBX are callee-saved in System V AMD64 ABI
+        // R12=12, R13=13, R14=14, R15=15, RBX has index 3
+        let bit = match reg.index {
+            12 => Some(0), // R12
+            13 => Some(1), // R13
+            14 => Some(2), // R14
+            15 => Some(3), // R15
+            3 => Some(4),  // RBX (index 3)
+            _ => None,
+        };
+        if let Some(b) = bit {
+            self.used_callee_saved_registers |= 1 << b;
+        }
+    }
+
+    /// Reset callee-saved register tracking for a new function.
+    pub fn reset_callee_saved_tracking(&mut self) {
+        self.used_callee_saved_registers = 0;
+    }
+
+    /// Mark a callee-saved register as used by its index.
+    pub fn mark_callee_saved_register_used(&mut self, index: usize) {
+        // R12-R15 use indices 12-15, RBX uses virtual index 16
+        let bit = match index {
+            12 => Some(0),
+            13 => Some(1),
+            14 => Some(2),
+            15 => Some(3),
+            16 => Some(4), // RBX
+            _ => None,
+        };
+        if let Some(b) = bit {
+            self.used_callee_saved_registers |= 1 << b;
+        }
+    }
+
+    /// Get the list of callee-saved registers that are actually used.
+    /// Returns registers in order: R12, R13, R14, R15, RBX (based on bitmask).
+    pub fn get_used_callee_saved_registers(&self) -> Vec<X86Register> {
+        let mut result = Vec::new();
+        // Bit 0 = R12 (index 12), Bit 1 = R13 (index 13), etc.
+        let registers = [R12, R13, R14, R15, RBX];
+        for (i, reg) in registers.iter().enumerate() {
+            if self.used_callee_saved_registers & (1 << i) != 0 {
+                result.push(*reg);
+            }
+        }
+        result
     }
 
     pub fn temporary_register(&mut self) -> X86Register {
@@ -994,10 +1053,10 @@ impl LowLevelX86 {
 
     /// Compile instructions to bytes
     pub fn compile_to_bytes(&mut self) -> Vec<u8> {
-        // First, patch labels
-        self.patch_labels();
-        // Then patch prelude/epilogue stack sizes
+        // First, patch prelude/epilogue (may insert instructions, shifting labels)
         self.patch_prelude_and_epilogue();
+        // Then patch labels (after instruction insertions are done)
+        self.patch_labels();
 
         // Debug: dump instructions before encoding
         if std::env::var("DUMP_X86").is_ok() {
@@ -1108,21 +1167,148 @@ impl LowLevelX86 {
     }
 
     fn patch_prelude_and_epilogue(&mut self) {
-        let mut slots = self.max_locals + self.max_stack_size;
+        // Get callee-saved registers that need to be saved
+        let used_callee_saved = self.get_used_callee_saved_registers();
+        let num_callee_saved = used_callee_saved.len();
+
+        if std::env::var("DEBUG_CALLEE_SAVED").is_ok() {
+            eprintln!(
+                "=== CALLEE-SAVED REGISTERS (x86) ===\n  used_callee_saved_registers bitmask: 0x{:03x}\n  count: {}\n  registers: {:?}",
+                self.used_callee_saved_registers,
+                num_callee_saved,
+                used_callee_saved
+            );
+        }
+
+        // Calculate stack size including space for callee-saved registers
+        let mut slots = self.max_locals + self.max_stack_size + num_callee_saved as i32;
         if slots % 2 != 0 {
             slots += 1;
         }
         let aligned_size = slots * 8;
 
-        for instr in self.instructions.iter_mut() {
-            match instr {
-                X86Asm::SubRI { dest, imm } if *dest == RSP && *imm == 0x1111_1111_u32 as i32 => {
-                    *imm = aligned_size;
+        // Find and replace the SUB instruction, inserting MOV instructions after it
+        let sub_index = self.instructions.iter().position(|instr| {
+            matches!(instr, X86Asm::SubRI { dest, imm } if *dest == RSP && *imm == 0x1111_1111_u32 as i32)
+        });
+
+        if let Some(index) = sub_index {
+            // Replace the SUB with correct size
+            self.instructions[index] = X86Asm::SubRI {
+                dest: RSP,
+                imm: aligned_size,
+            };
+
+            // Calculate byte offset at insertion point (after SUB instruction)
+            let byte_offset_at_insert: usize = self.instructions[..=index]
+                .iter()
+                .map(|i| i.size())
+                .sum();
+
+            // Insert MOV instructions for callee-saved registers right after SUB
+            // We store at increasing offsets from RSP
+            let mut inserted_instructions = Vec::new();
+            for (i, reg) in used_callee_saved.iter().enumerate() {
+                // Store at [RSP + i*8]
+                let instr = X86Asm::MovMR {
+                    base: RSP,
+                    offset: (i * 8) as i32,
+                    src: *reg,
+                };
+                inserted_instructions.push(instr);
+            }
+
+            // Calculate total byte size of inserted instructions
+            let byte_delta: usize = inserted_instructions.iter().map(|i| i.size()).sum();
+
+            // Insert the instructions
+            for (i, instr) in inserted_instructions.into_iter().enumerate() {
+                self.instructions.insert(index + 1 + i, instr);
+            }
+
+            // Shift label locations that come after the insertion point
+            if num_callee_saved > 0 {
+                for location in self.label_locations.values_mut() {
+                    if *location > index {
+                        *location += num_callee_saved;
+                    }
                 }
-                X86Asm::AddRI { dest, imm } if *dest == RSP && *imm == 0x1111_1111_u32 as i32 => {
-                    *imm = aligned_size;
+
+                // Shift stack_map byte offsets that come after the insertion point
+                self.stack_map = self
+                    .stack_map
+                    .drain()
+                    .map(|(k, v)| {
+                        if k >= byte_offset_at_insert {
+                            (k + byte_delta, v)
+                        } else {
+                            (k, v)
+                        }
+                    })
+                    .collect();
+            }
+        }
+
+        // Find and replace the ADD instruction, inserting load instructions before it
+        // Note: After inserting saves above, indices have shifted
+        let add_index = self.instructions.iter().rposition(|instr| {
+            matches!(instr, X86Asm::AddRI { dest, imm } if *dest == RSP && *imm == 0x1111_1111_u32 as i32)
+        });
+
+        if let Some(index) = add_index {
+            // Calculate byte offset at insertion point (before ADD instruction)
+            let byte_offset_at_insert: usize = self.instructions[..index]
+                .iter()
+                .map(|i| i.size())
+                .sum();
+
+            // Create load instructions to restore callee-saved registers
+            let mut inserted_instructions = Vec::new();
+            for (i, reg) in used_callee_saved.iter().enumerate() {
+                // Load from [RSP + i*8]
+                let instr = X86Asm::MovRM {
+                    dest: *reg,
+                    base: RSP,
+                    offset: (i * 8) as i32,
+                };
+                inserted_instructions.push(instr);
+            }
+
+            // Calculate total byte size of inserted instructions
+            let byte_delta: usize = inserted_instructions.iter().map(|i| i.size()).sum();
+
+            // Insert the instructions
+            for (i, instr) in inserted_instructions.into_iter().enumerate() {
+                self.instructions.insert(index + i, instr);
+            }
+
+            // Update the ADD instruction (now at index + num_callee_saved)
+            let new_add_index = index + num_callee_saved;
+            self.instructions[new_add_index] = X86Asm::AddRI {
+                dest: RSP,
+                imm: aligned_size,
+            };
+
+            // Shift label locations that come after the insertion point
+            if num_callee_saved > 0 {
+                for location in self.label_locations.values_mut() {
+                    if *location > index {
+                        *location += num_callee_saved;
+                    }
                 }
-                _ => {}
+
+                // Shift stack_map byte offsets that come after the insertion point
+                self.stack_map = self
+                    .stack_map
+                    .drain()
+                    .map(|(k, v)| {
+                        if k >= byte_offset_at_insert {
+                            (k + byte_delta, v)
+                        } else {
+                            (k, v)
+                        }
+                    })
+                    .collect();
             }
         }
     }
