@@ -504,3 +504,611 @@ extend StringSeq with Seq {
         }
     }
 }
+
+// ============================================================================
+// Higher-Order Collection Functions
+// ============================================================================
+
+// reduce: Fold a collection with an accumulator
+// Works with any Seqable type
+fn reduce(coll, init, f) {
+    let mut s = seq(coll)
+    let mut acc = init
+    while s != null {
+        let elem = first(s)
+        acc = f(acc, elem)
+        s = next(s)
+    }
+    acc
+}
+
+// map: Apply f to each element, return new vector
+fn map(coll, f) {
+    let mut s = seq(coll)
+    let mut acc = []
+    while s != null {
+        let elem = first(s)
+        acc = push(acc, f(elem))
+        s = next(s)
+    }
+    acc
+}
+
+// filter: Keep elements where pred returns true
+fn filter(coll, pred) {
+    let mut s = seq(coll)
+    let mut acc = []
+    while s != null {
+        let elem = first(s)
+        if pred(elem) {
+            acc = push(acc, elem)
+        }
+        s = next(s)
+    }
+    acc
+}
+
+// any?: True if any element matches predicate
+fn any?(coll, pred) {
+    let mut s = seq(coll)
+    let mut found = false
+    while s != null && found == false {
+        if pred(first(s)) {
+            found = true
+        }
+        s = next(s)
+    }
+    found
+}
+
+// all?: True if all elements match predicate
+fn all?(coll, pred) {
+    let mut s = seq(coll)
+    let mut all-match = true
+    while s != null && all-match {
+        if pred(first(s)) == false {
+            all-match = false
+        }
+        s = next(s)
+    }
+    all-match
+}
+
+// none?: True if no elements match predicate
+fn none?(coll, pred) {
+    let mut s = seq(coll)
+    let mut none-match = true
+    while s != null && none-match {
+        if pred(first(s)) {
+            none-match = false
+        }
+        s = next(s)
+    }
+    none-match
+}
+
+// find: Return first element matching predicate, or null
+fn find(coll, pred) {
+    let mut s = seq(coll)
+    let mut result = null
+    let mut found = false
+    while s != null && found == false {
+        let elem = first(s)
+        if pred(elem) {
+            result = elem
+            found = true
+        }
+        s = next(s)
+    }
+    result
+}
+
+// find-index: Return index of first element matching predicate, or -1
+fn find-index(coll, pred) {
+    let mut s = seq(coll)
+    let mut idx = 0
+    let mut result = -1
+    let mut found = false
+    while s != null && found == false {
+        if pred(first(s)) {
+            result = idx
+            found = true
+        }
+        s = next(s)
+        idx = idx + 1
+    }
+    result
+}
+
+// take: Return first n elements
+fn take(coll, n) {
+    let mut s = seq(coll)
+    let mut remaining = n
+    let mut acc = []
+    while s != null && remaining > 0 {
+        acc = push(acc, first(s))
+        s = next(s)
+        remaining = remaining - 1
+    }
+    acc
+}
+
+// drop: Skip first n elements, return rest
+fn drop(coll, n) {
+    let mut s = seq(coll)
+    let mut remaining = n
+    while s != null && remaining > 0 {
+        s = next(s)
+        remaining = remaining - 1
+    }
+    let mut acc = []
+    while s != null {
+        acc = push(acc, first(s))
+        s = next(s)
+    }
+    acc
+}
+
+// take-while: Take elements while predicate is true
+fn take-while(coll, pred) {
+    let mut s = seq(coll)
+    let mut acc = []
+    let mut taking = true
+    while s != null && taking {
+        let elem = first(s)
+        if pred(elem) {
+            acc = push(acc, elem)
+            s = next(s)
+        } else {
+            taking = false
+        }
+    }
+    acc
+}
+
+// drop-while: Drop elements while predicate is true, return rest
+fn drop-while(coll, pred) {
+    let mut s = seq(coll)
+    while s != null && pred(first(s)) {
+        s = next(s)
+    }
+    let mut acc = []
+    while s != null {
+        acc = push(acc, first(s))
+        s = next(s)
+    }
+    acc
+}
+
+// slice: Get sub-collection from start (inclusive) to end (exclusive)
+fn slice(coll, start, end) {
+    take(drop(coll, start), end - start)
+}
+
+// ============================================================================
+// Element Access Functions
+// ============================================================================
+
+// count: Alias for length (more idiomatic for collections)
+fn count(coll) {
+    length(coll)
+}
+
+// empty?: True if collection has no elements
+fn empty?(coll) {
+    length(coll) == 0
+}
+
+// first-of: Get first element of a collection (works with any Seqable)
+// Named differently to avoid conflict with Seq protocol's first
+fn first-of(coll) {
+    let s = seq(coll)
+    if s == null {
+        null
+    } else {
+        first(s)
+    }
+}
+
+// last: Get last element of a collection
+fn last(coll) {
+    let mut s = seq(coll)
+    let mut prev = null
+    while s != null {
+        prev = first(s)
+        s = next(s)
+    }
+    prev
+}
+
+// rest: All elements except the first
+fn rest(coll) {
+    drop(coll, 1)
+}
+
+// butlast: All elements except the last
+fn butlast(coll) {
+    let len = length(coll)
+    if len <= 1 {
+        []
+    } else {
+        take(coll, len - 1)
+    }
+}
+
+// nth: Get element at index with bounds checking (returns null if out of bounds)
+fn nth(coll, n) {
+    get(coll, n)
+}
+
+// second: Get second element
+fn second(coll) {
+    nth(coll, 1)
+}
+
+// third: Get third element
+fn third(coll) {
+    nth(coll, 2)
+}
+
+// ============================================================================
+// Combining Functions
+// ============================================================================
+
+// concat: Combine two collections into one
+fn concat(coll1, coll2) {
+    let mut acc = []
+    let mut s = seq(coll1)
+    while s != null {
+        acc = push(acc, first(s))
+        s = next(s)
+    }
+    s = seq(coll2)
+    while s != null {
+        acc = push(acc, first(s))
+        s = next(s)
+    }
+    acc
+}
+
+// flatten: Flatten one level of nesting
+fn flatten(coll) {
+    let mut s = seq(coll)
+    let mut acc = []
+    while s != null {
+        let elem = first(s)
+        acc = reduce(elem, acc, fn(a, x) { push(a, x) })
+        s = next(s)
+    }
+    acc
+}
+
+// flat-map: Map then flatten
+fn flat-map(coll, f) {
+    flatten(map(coll, f))
+}
+
+// zip: Pair up elements from two collections
+fn zip(coll1, coll2) {
+    let mut s1 = seq(coll1)
+    let mut s2 = seq(coll2)
+    let mut acc = []
+    while s1 != null && s2 != null {
+        acc = push(acc, [first(s1), first(s2)])
+        s1 = next(s1)
+        s2 = next(s2)
+    }
+    acc
+}
+
+// zip-with: Combine elements from two collections using a function
+fn zip-with(coll1, coll2, f) {
+    let mut s1 = seq(coll1)
+    let mut s2 = seq(coll2)
+    let mut acc = []
+    while s1 != null && s2 != null {
+        acc = push(acc, f(first(s1), first(s2)))
+        s1 = next(s1)
+        s2 = next(s2)
+    }
+    acc
+}
+
+// interleave: Alternate elements from two collections
+fn interleave(coll1, coll2) {
+    let mut s1 = seq(coll1)
+    let mut s2 = seq(coll2)
+    let mut acc = []
+    while s1 != null && s2 != null {
+        acc = push(acc, first(s1))
+        acc = push(acc, first(s2))
+        s1 = next(s1)
+        s2 = next(s2)
+    }
+    acc
+}
+
+// interpose: Insert separator between elements
+fn interpose(coll, sep) {
+    let mut s = seq(coll)
+    let mut acc = []
+    let mut is-first = true
+    while s != null {
+        if is-first {
+            acc = push(acc, first(s))
+            is-first = false
+        } else {
+            acc = push(acc, sep)
+            acc = push(acc, first(s))
+        }
+        s = next(s)
+    }
+    acc
+}
+
+// ============================================================================
+// Collection Creation & Transformation
+// ============================================================================
+
+// reverse: Reverse order of elements
+fn reverse(coll) {
+    reduce(coll, [], fn(acc, x) {
+        // Build reversed by prepending - but since we only have push,
+        // we reduce to a list and then build a new vector
+        // Actually, simpler: just collect in reverse order
+        concat([x], acc)
+    })
+}
+
+// repeat: Create a vector with value repeated n times
+fn repeat(value, n) {
+    let mut remaining = n
+    let mut acc = []
+    while remaining > 0 {
+        acc = push(acc, value)
+        remaining = remaining - 1
+    }
+    acc
+}
+
+// repeatedly: Call f n times, collect results
+fn repeatedly(f, n) {
+    let mut remaining = n
+    let mut acc = []
+    while remaining > 0 {
+        acc = push(acc, f())
+        remaining = remaining - 1
+    }
+    acc
+}
+
+// iterate: Repeatedly apply f starting with init, collect n values
+fn iterate(f, init, n) {
+    let mut remaining = n
+    let mut current = init
+    let mut acc = []
+    while remaining > 0 {
+        acc = push(acc, current)
+        current = f(current)
+        remaining = remaining - 1
+    }
+    acc
+}
+
+// partition: Split collection into groups of n elements
+fn partition(coll, n) {
+    let mut remaining = coll
+    let mut acc = []
+    while empty?(remaining) == false {
+        let chunk = take(remaining, n)
+        remaining = drop(remaining, n)
+        acc = push(acc, chunk)
+    }
+    acc
+}
+
+// group-by: Group elements by result of key function
+fn group-by(coll, f) {
+    let mut s = seq(coll)
+    let mut groups = {}
+    while s != null {
+        let elem = first(s)
+        let key = f(elem)
+        let existing = get(groups, key)
+        let updated = if existing == null {
+            [elem]
+        } else {
+            push(existing, elem)
+        }
+        groups = assoc(groups, key, updated)
+        s = next(s)
+    }
+    groups
+}
+
+// frequencies: Count occurrences of each value
+fn frequencies(coll) {
+    let mut s = seq(coll)
+    let mut counts = {}
+    while s != null {
+        let elem = first(s)
+        let current = get(counts, elem)
+        let new-count = if current == null {
+            1
+        } else {
+            current + 1
+        }
+        counts = assoc(counts, elem, new-count)
+        s = next(s)
+    }
+    counts
+}
+
+// distinct: Remove duplicate values (keeps first occurrence)
+fn distinct(coll) {
+    let mut s = seq(coll)
+    let mut seen = {}
+    let mut acc = []
+    while s != null {
+        let elem = first(s)
+        let already-seen = get(seen, elem)
+        if already-seen == null {
+            seen = assoc(seen, elem, true)
+            acc = push(acc, elem)
+        }
+        s = next(s)
+    }
+    acc
+}
+
+// ============================================================================
+// Sorting Functions
+// ============================================================================
+
+// Helper: insert elem into sorted vector at correct position
+fn insert-sorted(sorted, elem) {
+    let mut s = seq(sorted)
+    let mut before = []
+    let mut inserted = false
+    let mut result = []
+
+    while s != null && inserted == false {
+        let current = first(s)
+        if elem < current {
+            // Insert elem here, then add rest
+            result = concat(before, [elem])
+            // Add remaining elements
+            while s != null {
+                result = push(result, first(s))
+                s = next(s)
+            }
+            inserted = true
+        } else {
+            before = push(before, current)
+            s = next(s)
+        }
+    }
+
+    if inserted == false {
+        // elem is largest, append at end
+        result = push(before, elem)
+    }
+
+    result
+}
+
+// sort: Sort collection in ascending order (requires comparable elements)
+// Uses insertion sort for simplicity
+fn sort(coll) {
+    let mut s = seq(coll)
+    let mut sorted = []
+    while s != null {
+        let elem = first(s)
+        sorted = insert-sorted(sorted, elem)
+        s = next(s)
+    }
+    sorted
+}
+
+// Helper: insert elem into sorted vector by key at correct position
+fn insert-sorted-by(sorted, elem, elem-key, key-fn) {
+    let mut s = seq(sorted)
+    let mut before = []
+    let mut inserted = false
+    let mut result = []
+
+    while s != null && inserted == false {
+        let current = first(s)
+        let current-key = key-fn(current)
+        if elem-key < current-key {
+            // Insert elem here, then add rest
+            result = concat(before, [elem])
+            // Add remaining elements
+            while s != null {
+                result = push(result, first(s))
+                s = next(s)
+            }
+            inserted = true
+        } else {
+            before = push(before, current)
+            s = next(s)
+        }
+    }
+
+    if inserted == false {
+        // elem is largest, append at end
+        result = push(before, elem)
+    }
+
+    result
+}
+
+// sort-by: Sort by key function result
+fn sort-by(coll, f) {
+    let mut s = seq(coll)
+    let mut sorted = []
+    while s != null {
+        let elem = first(s)
+        let elem-key = f(elem)
+        sorted = insert-sorted-by(sorted, elem, elem-key, f)
+        s = next(s)
+    }
+    sorted
+}
+
+// ============================================================================
+// Function Utilities
+// ============================================================================
+
+// identity: Return the input unchanged
+fn identity(x) {
+    x
+}
+
+// constantly: Return a function that always returns value
+fn constantly(value) {
+    fn(ignored) { value }
+}
+
+// Note: complement, compose, pipe, partial cannot be implemented as higher-order
+// functions that return closures capturing other functions, due to current
+// runtime limitations with closures capturing closures.
+// These patterns can still be used inline where needed.
+
+// ============================================================================
+// Boolean/Logic Utilities
+// ============================================================================
+
+// not: Boolean negation
+fn not(x) {
+    if x {
+        false
+    } else {
+        true
+    }
+}
+
+// truthy?: Check if value is truthy (not null and not false)
+fn truthy?(x) {
+    x != null && x != false
+}
+
+// falsy?: Check if value is falsy (null or false)
+fn falsy?(x) {
+    x == null || x == false
+}
+
+// ============================================================================
+// Type Checking Predicates
+// ============================================================================
+
+// nil?: Check if value is null
+fn nil?(x) {
+    x == null
+}
+
+// some?: Check if value is not null
+fn some?(x) {
+    x != null
+}
+
