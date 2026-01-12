@@ -3,8 +3,20 @@ namespace ffi_comprehensive_test
 import "beagle.ffi" as ffi
 import "beagle.primitive" as primitive
 
-// Load libc for testing
-let libc = ffi/load-library("/lib/x86_64-linux-gnu/libc.so.6")
+// Load libc based on platform
+fn get_libc_path() {
+    let os = get-os()
+    if os == "macos" {
+        "/usr/lib/libc.dylib"
+    } else if os == "linux" {
+        "/lib/x86_64-linux-gnu/libc.so.6"
+    } else {
+        // Fallback - try common locations
+        "libc.so.6"
+    }
+}
+
+let libc = ffi/load-library(get_libc_path())
 
 // =============================================================================
 // RETURN TYPE TESTS
