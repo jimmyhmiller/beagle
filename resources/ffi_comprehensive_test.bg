@@ -1,0 +1,433 @@
+namespace ffi_comprehensive_test
+
+import "beagle.ffi" as ffi
+import "beagle.primitive" as primitive
+
+// Load libc for testing
+let libc = ffi/load-library("/lib/x86_64-linux-gnu/libc.so.6")
+
+// =============================================================================
+// RETURN TYPE TESTS
+// =============================================================================
+
+// Test 1: Void return - getuid returns uid_t (U32), but we'll use a void-returning function
+// Actually let's use alarm(0) which returns U32 but we can test void with usleep
+let c_usleep = ffi/get-function(libc, "usleep", [ffi/Type.U32], ffi/Type.I32)
+
+// Test 2: I32 return - getpid returns pid_t (I32)
+let c_getpid = ffi/get-function(libc, "getpid", [], ffi/Type.I32)
+
+// Test 3: I32 return with I32 argument - abs
+let c_abs = ffi/get-function(libc, "abs", [ffi/Type.I32], ffi/Type.I32)
+
+// Test 4: U64 return - strlen
+let c_strlen = ffi/get-function(libc, "strlen", [ffi/Type.String], ffi/Type.U64)
+
+// Test 5: Pointer return - memset
+let c_memset = ffi/get-function(
+    libc,
+    "memset",
+    [ffi/Type.Pointer, ffi/Type.I32, ffi/Type.U64],
+    ffi/Type.Pointer
+)
+
+// Test 6: Pointer return - memcpy
+let c_memcpy = ffi/get-function(
+    libc,
+    "memcpy",
+    [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.U64],
+    ffi/Type.Pointer
+)
+
+// Test 7: I32 return - isalpha (checks if character is alphabetic)
+let c_isalpha = ffi/get-function(libc, "isalpha", [ffi/Type.I32], ffi/Type.I32)
+
+// Test 8: I32 return - isdigit
+let c_isdigit = ffi/get-function(libc, "isdigit", [ffi/Type.I32], ffi/Type.I32)
+
+// Test 9: I32 return - toupper
+let c_toupper = ffi/get-function(libc, "toupper", [ffi/Type.I32], ffi/Type.I32)
+
+// Test 10: I32 return - tolower
+let c_tolower = ffi/get-function(libc, "tolower", [ffi/Type.I32], ffi/Type.I32)
+
+// Test 11: U64 return - time(NULL) returns time_t (use U64)
+let c_time = ffi/get-function(libc, "time", [ffi/Type.Pointer], ffi/Type.U64)
+
+// Test 12: I32 return with 2 args - strcmp
+let c_strcmp = ffi/get-function(libc, "strcmp", [ffi/Type.String, ffi/Type.String], ffi/Type.I32)
+
+// Test 13: Pointer return - strchr (find char in string)
+let c_strchr = ffi/get-function(libc, "strchr", [ffi/Type.String, ffi/Type.I32], ffi/Type.Pointer)
+
+// Test 14: I32 return with 3 args - memcmp
+let c_memcmp = ffi/get-function(
+    libc,
+    "memcmp",
+    [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.U64],
+    ffi/Type.I32
+)
+
+// Test 15: snprintf - 4 args (we'll use a simple format)
+let c_snprintf = ffi/get-function(
+    libc,
+    "snprintf",
+    [ffi/Type.Pointer, ffi/Type.U64, ffi/Type.String, ffi/Type.I32],
+    ffi/Type.I32
+)
+
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
+
+fn test_passed(name) {
+    println("PASS: " ++ name)
+}
+
+fn test_failed(name) {
+    println("FAIL: " ++ name)
+}
+
+fn assert_eq(name, expected, actual) {
+    if expected == actual {
+        test_passed(name)
+    } else {
+        test_failed(name)
+    }
+}
+
+fn assert_true(name, condition) {
+    if condition {
+        test_passed(name)
+    } else {
+        test_failed(name)
+    }
+}
+
+fn assert_not_null(name, value) {
+    if value != null {
+        test_passed(name)
+    } else {
+        test_failed(name)
+    }
+}
+
+// =============================================================================
+// TEST FUNCTIONS
+// =============================================================================
+
+fn test_zero_args() {
+    println("\n--- Zero Arguments Tests ---")
+
+    // getpid() - 0 args, returns I32
+    // Note: FFI wrapper always requires 6 args, pass 0 for unused
+    let pid = c_getpid(0, 0, 0, 0, 0, 0)
+    assert_true("getpid returns positive value", pid > 0)
+}
+
+fn test_one_arg_i32() {
+    println("\n--- One Argument (I32) Tests ---")
+
+    // abs(-42) should return 42
+    let result = c_abs(-42, 0, 0, 0, 0, 0)
+    assert_eq("abs(-42) == 42", 42, result)
+
+    // abs(42) should return 42
+    let result2 = c_abs(42, 0, 0, 0, 0, 0)
+    assert_eq("abs(42) == 42", 42, result2)
+
+    // abs(0) should return 0
+    let result3 = c_abs(0, 0, 0, 0, 0, 0)
+    assert_eq("abs(0) == 0", 0, result3)
+
+    // isalpha('A') should return non-zero
+    let alpha_result = c_isalpha(65, 0, 0, 0, 0, 0) // 'A' = 65
+    assert_true("isalpha('A') != 0", alpha_result != 0)
+
+    // isalpha('5') should return 0
+    let not_alpha = c_isalpha(53, 0, 0, 0, 0, 0) // '5' = 53
+    assert_eq("isalpha('5') == 0", 0, not_alpha)
+
+    // isdigit('5') should return non-zero
+    let digit_result = c_isdigit(53, 0, 0, 0, 0, 0) // '5' = 53
+    assert_true("isdigit('5') != 0", digit_result != 0)
+
+    // toupper('a') should return 'A' (65)
+    let upper = c_toupper(97, 0, 0, 0, 0, 0) // 'a' = 97
+    assert_eq("toupper('a') == 65", 65, upper)
+
+    // tolower('A') should return 'a' (97)
+    let lower = c_tolower(65, 0, 0, 0, 0, 0) // 'A' = 65
+    assert_eq("tolower('A') == 97", 97, lower)
+}
+
+fn test_one_arg_string() {
+    println("\n--- One Argument (String) Tests ---")
+
+    // strlen("hello") should return 5
+    let len = c_strlen("hello", 0, 0, 0, 0, 0)
+    assert_eq("strlen('hello') == 5", 5, len)
+
+    // strlen("") should return 0
+    let empty_len = c_strlen("", 0, 0, 0, 0, 0)
+    assert_eq("strlen('') == 0", 0, empty_len)
+
+    // strlen with longer string
+    let long_len = c_strlen("hello world!", 0, 0, 0, 0, 0)
+    assert_eq("strlen('hello world!') == 12", 12, long_len)
+}
+
+fn test_one_arg_pointer_null() {
+    println("\n--- One Argument (Pointer - null) Tests ---")
+
+    // time(NULL) should return current time (non-zero)
+    let current_time = c_time(null, 0, 0, 0, 0, 0)
+    assert_true("time(NULL) returns positive value", current_time > 0)
+}
+
+fn test_two_args() {
+    println("\n--- Two Arguments Tests ---")
+
+    // strcmp("abc", "abc") should return 0
+    let cmp1 = c_strcmp("abc", "abc", 0, 0, 0, 0)
+    assert_eq("strcmp('abc', 'abc') == 0", 0, cmp1)
+
+    // strcmp("abc", "abd") should return negative
+    let cmp2 = c_strcmp("abc", "abd", 0, 0, 0, 0)
+    assert_true("strcmp('abc', 'abd') < 0", cmp2 < 0)
+
+    // strcmp("abd", "abc") should return positive
+    let cmp3 = c_strcmp("abd", "abc", 0, 0, 0, 0)
+    assert_true("strcmp('abd', 'abc') > 0", cmp3 > 0)
+
+    // strchr("hello", 'l') should return non-null pointer
+    let found = c_strchr("hello", 108, 0, 0, 0, 0) // 'l' = 108
+    assert_not_null("strchr('hello', 'l') != null", found)
+}
+
+fn test_three_args_pointer() {
+    println("\n--- Three Arguments (Pointer) Tests ---")
+
+    // Allocate a buffer and use memset
+    let buf = ffi/allocate(16)
+
+    // memset(buf, 0x41, 8) - fill first 8 bytes with 'A'
+    let result = c_memset(buf, 65, 8, 0, 0, 0) // 65 = 'A'
+    assert_not_null("memset returns non-null", result)
+
+    // Verify the bytes were set
+    let byte0 = ffi/get-u8(buf, 0)
+    assert_eq("memset byte 0 == 65", 65, byte0)
+
+    let byte7 = ffi/get-u8(buf, 7)
+    assert_eq("memset byte 7 == 65", 65, byte7)
+
+    // Allocate another buffer for memcpy test
+    let buf2 = ffi/allocate(16)
+    ffi/set-u8(buf2, 0, 1)
+    ffi/set-u8(buf2, 1, 2)
+    ffi/set-u8(buf2, 2, 3)
+    ffi/set-u8(buf2, 3, 4)
+
+    // memcpy to a third buffer
+    let buf3 = ffi/allocate(16)
+    c_memcpy(buf3, buf2, 4, 0, 0, 0)
+
+    // Verify copied bytes
+    assert_eq("memcpy byte 0", 1, ffi/get-u8(buf3, 0))
+    assert_eq("memcpy byte 1", 2, ffi/get-u8(buf3, 1))
+    assert_eq("memcpy byte 2", 3, ffi/get-u8(buf3, 2))
+    assert_eq("memcpy byte 3", 4, ffi/get-u8(buf3, 3))
+
+    // memcmp test
+    let cmp = c_memcmp(buf2, buf3, 4, 0, 0, 0)
+    assert_eq("memcmp equal buffers == 0", 0, cmp)
+
+    // Make buf3 different
+    ffi/set-u8(buf3, 0, 0)
+    let cmp2 = c_memcmp(buf2, buf3, 4, 0, 0, 0)
+    assert_true("memcmp different buffers != 0", cmp2 != 0)
+}
+
+fn test_four_args() {
+    println("\n--- Four Arguments Tests ---")
+
+    // snprintf to format a number
+    let buf = ffi/allocate(64)
+    let written = c_snprintf(buf, 64, "Number: %d", 42, 0, 0)
+    assert_true("snprintf returns positive length", written > 0)
+
+    // Check the formatted string length (should be "Number: 42" = 10 chars)
+    assert_eq("snprintf wrote 10 chars", 10, written)
+}
+
+fn test_buffer_operations() {
+    println("\n--- Buffer Operations Tests ---")
+
+    // Test allocate
+    let buf = ffi/allocate(64)
+    assert_not_null("allocate returns non-null", buf)
+
+    // Test set-u8 and get-u8
+    ffi/set-u8(buf, 0, 255)
+    let u8_val = ffi/get-u8(buf, 0)
+    assert_eq("set/get-u8", 255, u8_val)
+
+    ffi/set-u8(buf, 1, 128)
+    let u8_val2 = ffi/get-u8(buf, 1)
+    assert_eq("set/get-u8 at offset 1", 128, u8_val2)
+
+    // Test set-i32 and get-i32
+    ffi/set-i32(buf, 4, -12345)
+    let i32_val = ffi/get-i32(buf, 4)
+    assert_eq("set/get-i32 negative", -12345, i32_val)
+
+    ffi/set-i32(buf, 8, 999999)
+    let i32_val2 = ffi/get-i32(buf, 8)
+    assert_eq("set/get-i32 positive", 999999, i32_val2)
+
+    // Test get-u32
+    ffi/set-i32(buf, 12, 0)
+    ffi/set-u8(buf, 12, 255)
+    ffi/set-u8(buf, 13, 255)
+    ffi/set-u8(buf, 14, 0)
+    ffi/set-u8(buf, 15, 0)
+    let u32_val = ffi/get-u32(buf, 12)
+    assert_eq("get-u32", 65535, u32_val)
+
+    // Test copy-bytes
+    let src = ffi/allocate(16)
+    let dst = ffi/allocate(16)
+    ffi/set-u8(src, 0, 10)
+    ffi/set-u8(src, 1, 20)
+    ffi/set-u8(src, 2, 30)
+    ffi/set-u8(src, 3, 40)
+
+    ffi/copy-bytes(src, 0, dst, 0, 4)
+    assert_eq("copy-bytes byte 0", 10, ffi/get-u8(dst, 0))
+    assert_eq("copy-bytes byte 1", 20, ffi/get-u8(dst, 1))
+    assert_eq("copy-bytes byte 2", 30, ffi/get-u8(dst, 2))
+    assert_eq("copy-bytes byte 3", 40, ffi/get-u8(dst, 3))
+
+    // Test copy-bytes with offset
+    ffi/copy-bytes(src, 0, dst, 4, 4)
+    assert_eq("copy-bytes with dst offset", 10, ffi/get-u8(dst, 4))
+
+    // Test buffer-size
+    let size = ffi/buffer-size(buf)
+    assert_eq("buffer-size", 64, size)
+
+    // Test realloc
+    let small_buf = ffi/allocate(8)
+    ffi/set-u8(small_buf, 0, 42)
+    let bigger_buf = ffi/realloc(small_buf, 32)
+    assert_not_null("realloc returns non-null", bigger_buf)
+    // Data should be preserved
+    assert_eq("realloc preserves data", 42, ffi/get-u8(bigger_buf, 0))
+    let new_size = ffi/buffer-size(bigger_buf)
+    assert_eq("realloc new size", 32, new_size)
+}
+
+fn test_heap_string_to_ffi() {
+    println("\n--- Heap String to FFI Tests ---")
+
+    // Create a heap-allocated string and pass to FFI
+    let s1 = "hello"
+    let s2 = " world"
+    let combined = s1 ++ s2
+
+    // strlen on heap string
+    let len = c_strlen(combined, 0, 0, 0, 0, 0)
+    assert_eq("strlen on heap string", 11, len)
+
+    // strcmp with heap strings
+    let a = "abc"
+    let b = "def"
+    let ab = a ++ ""  // Force heap allocation
+    let cmp = c_strcmp(ab, "abc", 0, 0, 0, 0)
+    assert_eq("strcmp heap string == literal", 0, cmp)
+}
+
+fn main() {
+    println("=== FFI Comprehensive Test Suite ===")
+
+    test_zero_args()
+    test_one_arg_i32()
+    test_one_arg_string()
+    test_one_arg_pointer_null()
+    test_two_args()
+    test_three_args_pointer()
+    test_four_args()
+    test_buffer_operations()
+    test_heap_string_to_ffi()
+
+    println("\n=== All FFI Tests Completed ===")
+}
+
+// Expect
+// === FFI Comprehensive Test Suite ===
+//
+// --- Zero Arguments Tests ---
+// PASS: getpid returns positive value
+//
+// --- One Argument (I32) Tests ---
+// PASS: abs(-42) == 42
+// PASS: abs(42) == 42
+// PASS: abs(0) == 0
+// PASS: isalpha('A') != 0
+// PASS: isalpha('5') == 0
+// PASS: isdigit('5') != 0
+// PASS: toupper('a') == 65
+// PASS: tolower('A') == 97
+//
+// --- One Argument (String) Tests ---
+// PASS: strlen('hello') == 5
+// PASS: strlen('') == 0
+// PASS: strlen('hello world!') == 12
+//
+// --- One Argument (Pointer - null) Tests ---
+// PASS: time(NULL) returns positive value
+//
+// --- Two Arguments Tests ---
+// PASS: strcmp('abc', 'abc') == 0
+// PASS: strcmp('abc', 'abd') < 0
+// PASS: strcmp('abd', 'abc') > 0
+// PASS: strchr('hello', 'l') != null
+//
+// --- Three Arguments (Pointer) Tests ---
+// PASS: memset returns non-null
+// PASS: memset byte 0 == 65
+// PASS: memset byte 7 == 65
+// PASS: memcpy byte 0
+// PASS: memcpy byte 1
+// PASS: memcpy byte 2
+// PASS: memcpy byte 3
+// PASS: memcmp equal buffers == 0
+// PASS: memcmp different buffers != 0
+//
+// --- Four Arguments Tests ---
+// PASS: snprintf returns positive length
+// PASS: snprintf wrote 10 chars
+//
+// --- Buffer Operations Tests ---
+// PASS: allocate returns non-null
+// PASS: set/get-u8
+// PASS: set/get-u8 at offset 1
+// PASS: set/get-i32 negative
+// PASS: set/get-i32 positive
+// PASS: get-u32
+// PASS: copy-bytes byte 0
+// PASS: copy-bytes byte 1
+// PASS: copy-bytes byte 2
+// PASS: copy-bytes byte 3
+// PASS: copy-bytes with dst offset
+// PASS: buffer-size
+// PASS: realloc returns non-null
+// PASS: realloc preserves data
+// PASS: realloc new size
+//
+// --- Heap String to FFI Tests ---
+// PASS: strlen on heap string
+// PASS: strcmp heap string == literal
+//
+// === All FFI Tests Completed ===
