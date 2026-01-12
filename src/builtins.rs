@@ -1894,7 +1894,11 @@ pub extern "C" fn get_function(
     }
 
     // Get the function pointer from the library
-    let func_ptr = unsafe { library.get::<fn()>(function_name.as_bytes()).unwrap() };
+    let func_ptr = unsafe {
+        library.get::<fn()>(function_name.as_bytes()).unwrap_or_else(|e| {
+            panic!("Failed to get symbol '{}': {}", function_name, e)
+        })
+    };
     let code_ptr = unsafe { func_ptr.try_as_raw_ptr().unwrap() };
 
     // Parse argument types
