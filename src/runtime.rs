@@ -1,8 +1,6 @@
-use libffi::middle::Cif;
 use libloading::Library;
 use mmap_rs::{Mmap, MmapMut, MmapOptions};
 use std::{
-    cell::UnsafeCell,
     collections::HashMap,
     error::Error,
     ffi::{CString, c_void},
@@ -500,7 +498,6 @@ pub enum FFIType {
 pub struct FFIInfo {
     pub name: String,
     pub function: RawPtr<u8>,
-    pub cif: SyncWrapper<Cif>,
     pub number_of_arguments: usize,
     pub argument_types: Vec<FFIType>,
     pub return_type: FFIType,
@@ -593,46 +590,6 @@ impl<T, R> From<RawPtr<T>> for *const R {
         ptr.ptr as *const R
     }
 }
-
-#[derive(Debug)]
-pub struct SyncWrapper<T> {
-    value: UnsafeCell<T>,
-}
-
-impl<T> Clone for SyncWrapper<T>
-where
-    T: Clone,
-{
-    fn clone(&self) -> Self {
-        Self::new(self.get().clone())
-    }
-}
-
-impl<T> SyncWrapper<T> {
-    /// Create a new `SyncWrapper`.
-    pub const fn new(value: T) -> Self {
-        Self {
-            value: UnsafeCell::new(value),
-        }
-    }
-
-    /// Get a reference to the wrapped value.
-    /// Safety: You must ensure proper synchronization when accessing this value.
-    pub fn get(&self) -> &T {
-        unsafe { &*self.value.get() }
-    }
-
-    #[allow(clippy::mut_from_ref)]
-    /// Get a mutable reference to the wrapped value.
-    /// Safety: You must ensure exclusive access when mutating this value.
-    pub fn get_mut(&self) -> &mut T {
-        unsafe { &mut *self.value.get() }
-    }
-}
-
-/// Unsafe implementation of `Sync` because `UnsafeCell` is inherently not `Sync`.
-unsafe impl<T> Sync for SyncWrapper<T> {}
-unsafe impl<T> Send for SyncWrapper<T> {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {

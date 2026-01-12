@@ -9,16 +9,12 @@ use std::{
     thread,
 };
 
-use libffi::{
-    low::CodePtr,
-    middle::{Cif, Type, arg},
-};
 
 use crate::{
     Message, debug_only,
     gc::STACK_SIZE,
     get_runtime,
-    runtime::{DispatchTable, FFIInfo, FFIType, RawPtr, Runtime, SyncWrapper},
+    runtime::{DispatchTable, FFIInfo, FFIType, RawPtr, Runtime},
     types::{BuiltInTypes, HeapObject},
 };
 
@@ -1827,38 +1823,6 @@ pub unsafe extern "C" fn load_library(name: usize) -> usize {
     }
 }
 
-pub fn map_ffi_type(runtime: &Runtime, value: usize) -> Result<Type, String> {
-    let heap_object = HeapObject::from_tagged(value);
-    let struct_id = BuiltInTypes::untag(heap_object.get_struct_id());
-    let struct_info = runtime.get_struct_by_id(struct_id);
-
-    if struct_info.is_none() {
-        return Err(format!("Could not find struct with id {}", struct_id));
-    }
-
-    let struct_info = struct_info.unwrap();
-    let name = struct_info.name.as_str().split_once("/").unwrap().1;
-    match name {
-        "Type.U8" => Ok(Type::u8()),
-        "Type.U16" => Ok(Type::u16()),
-        "Type.U32" => Ok(Type::u32()),
-        "Type.U64" => Ok(Type::u64()),
-        "Type.I32" => Ok(Type::i32()),
-        "Type.Pointer" => Ok(Type::pointer()),
-        "Type.MutablePointer" => Ok(Type::pointer()),
-        "Type.String" => Ok(Type::pointer()),
-        "Type.Void" => Ok(Type::void()),
-        "Type.Structure" => {
-            let types = heap_object.get_field(0);
-            let types = persistent_vector_to_vec(types);
-            let fields: Result<Vec<Type>, String> =
-                types.iter().map(|t| map_ffi_type(runtime, *t)).collect();
-            Ok(Type::structure(fields?))
-        }
-        _ => Err(format!("Unknown type: {}", name)),
-    }
-}
-
 pub fn map_beagle_type_to_ffi_type(runtime: &Runtime, value: usize) -> Result<FFIType, String> {
     let heap_object = HeapObject::from_tagged(value);
     let struct_id = BuiltInTypes::untag(heap_object.get_struct_id());
@@ -1904,10 +1868,8 @@ fn persistent_vector_to_vec(vector: usize) -> Vec<usize> {
     result
 }
 
-// TODO:
-// I need to get the elements of this vector into
-// a rust vector and then map the types
-
+/// Get a function from a dynamically loaded library and register it for FFI calls.
+/// No longer uses libffi - just stores the function pointer and type information.
 pub extern "C" fn get_function(
     stack_pointer: usize,
     frame_pointer: usize,
@@ -1921,34 +1883,18 @@ pub extern "C" fn get_function(
     let library = runtime.get_library(library_struct);
     let function_name = runtime.get_string_literal(function_name);
 
-    // TODO: I should actually cache the closure, but I don't want to do that and mess up gc
+    // Check if we already have this function registered
     if let Some(ffi_info_id) = runtime.find_ffi_info_by_name(&function_name) {
         let ffi_info_id = BuiltInTypes::Int.tag(ffi_info_id as isize) as usize;
         return unsafe { call_fn_1(runtime, "beagle.ffi/__create_ffi_function", ffi_info_id) };
     }
 
+    // Get the function pointer from the library
     let func_ptr = unsafe { library.get::<fn()>(function_name.as_bytes()).unwrap() };
+    let code_ptr = unsafe { func_ptr.try_as_raw_ptr().unwrap() };
 
-    let code_ptr = unsafe { CodePtr(func_ptr.try_as_raw_ptr().unwrap()) };
-
-    // use std::ffi::c_void;
-    // let code_ptr = if function_name == "SBTargetBreakpointCreateByName" {
-    //     CodePtr(create_breakpointer_placeholder as *mut c_void)
-    // } else {
-    //     unsafe { CodePtr(func_ptr.try_as_raw_ptr().unwrap()) }
-    // };
-
+    // Parse argument types
     let types: Vec<usize> = persistent_vector_to_vec(types);
-
-    let lib_ffi_types: Result<Vec<Type>, String> =
-        types.iter().map(|t| map_ffi_type(runtime, *t)).collect();
-    let lib_ffi_types = match lib_ffi_types {
-        Ok(types) => types,
-        Err(e) => unsafe {
-            throw_runtime_error(stack_pointer, "FFIError", e);
-        },
-    };
-    let number_of_arguments = lib_ffi_types.len();
 
     let beagle_ffi_types: Result<Vec<FFIType>, String> = types
         .iter()
@@ -1960,13 +1906,9 @@ pub extern "C" fn get_function(
             throw_runtime_error(stack_pointer, "FFIError", e);
         },
     };
+    let number_of_arguments = beagle_ffi_types.len();
 
-    let lib_ffi_return_type = match map_ffi_type(runtime, return_type) {
-        Ok(t) => t,
-        Err(e) => unsafe {
-            throw_runtime_error(stack_pointer, "FFIError", e);
-        },
-    };
+    // Parse return type
     let ffi_return_type = match map_beagle_type_to_ffi_type(runtime, return_type) {
         Ok(t) => t,
         Err(e) => unsafe {
@@ -1974,12 +1916,10 @@ pub extern "C" fn get_function(
         },
     };
 
-    let cif = Cif::new(lib_ffi_types, lib_ffi_return_type.clone());
-
+    // Register the function info (no Cif needed anymore)
     let ffi_info_id = runtime.add_ffi_function_info(FFIInfo {
         name: function_name.to_string(),
-        function: RawPtr::new(code_ptr.0 as *const u8),
-        cif: SyncWrapper::new(cif),
+        function: RawPtr::new(code_ptr as *const u8),
         number_of_arguments,
         argument_types: beagle_ffi_types,
         return_type: ffi_return_type,
@@ -1990,40 +1930,175 @@ pub extern "C" fn get_function(
     unsafe { call_fn_1(runtime, "beagle.ffi/__create_ffi_function", ffi_info_id) }
 }
 
-// In general, this code doesn't work with release mode... :(
+/// Marshal a Beagle value to a native u64 for FFI call.
+/// This function converts tagged Beagle values to raw C-compatible values.
+unsafe fn marshal_ffi_argument(
+    runtime: &mut Runtime,
+    stack_pointer: usize,
+    argument: usize,
+    ffi_type: &FFIType,
+) -> u64 {
+    let kind = BuiltInTypes::get_kind(argument);
+    match kind {
+        BuiltInTypes::Null => {
+            // Null pointer
+            0u64
+        }
+        BuiltInTypes::String => {
+            // String literal - convert to C string
+            let string = runtime.get_string_literal(argument);
+            let c_string = runtime.memory.write_c_string(string);
+            c_string as u64
+        }
+        BuiltInTypes::Int => {
+            match ffi_type {
+                FFIType::U8 | FFIType::U16 | FFIType::U32 | FFIType::U64 | FFIType::I32 => {
+                    BuiltInTypes::untag(argument) as u64
+                }
+                FFIType::Pointer => {
+                    if BuiltInTypes::untag(argument) == 0 {
+                        0u64
+                    } else {
+                        let heap_object = HeapObject::from_tagged(argument);
+                        let buffer = BuiltInTypes::untag(heap_object.get_field(0));
+                        buffer as u64
+                    }
+                }
+                _ => unsafe {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "FFIError",
+                        format!("Expected integer for FFI type {:?}", ffi_type),
+                    );
+                }
+            }
+        }
+        BuiltInTypes::HeapObject => {
+            match ffi_type {
+                FFIType::Pointer | FFIType::MutablePointer => {
+                    let heap_object = HeapObject::from_tagged(argument);
+                    let buffer = BuiltInTypes::untag(heap_object.get_field(0));
+                    buffer as u64
+                }
+                FFIType::String => {
+                    let string = runtime.get_string(stack_pointer, argument);
+                    let c_string = runtime.memory.write_c_string(string);
+                    c_string as u64
+                }
+                FFIType::Structure(_) => {
+                    let heap_object = HeapObject::from_tagged(argument);
+                    let buffer = BuiltInTypes::untag(heap_object.get_field(0));
+                    buffer as u64
+                }
+                _ => unsafe {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "FFIError",
+                        format!("Got HeapObject but expected matching FFI type, got {:?}", ffi_type),
+                    );
+                }
+            }
+        }
+        _ => unsafe {
+            runtime.print(argument);
+            throw_runtime_error(
+                stack_pointer,
+                "FFIError",
+                format!("Unsupported FFI type: {:?}", kind),
+            );
+        }
+    }
+}
 
-// TODO:
-// thread 'main' panicked at /Users/jimmyhmiller/.cargo/registry/src/index.crates.io-6f17d22bba15001f/libffi-3.2.0/src/middle/types.rs:151:8:
-// misaligned pointer dereference: address must be a multiple of 0x8 but is 0x88263ae042be000d
-// stack backtrace:
-//    0: rust_begin_unwind
-//              at /rustc/3f5fd8dd41153bc5fdca9427e9e05be2c767ba23/library/std/src/panicking.rs:652:5
-//    1: core::panicking::panic_nounwind_fmt::runtime
-//              at /rustc/3f5fd8dd41153bc5fdca9427e9e05be2c767ba23/library/core/src/panicking.rs:110:18
-//    2: core::panicking::panic_nounwind_fmt
-//              at /rustc/3f5fd8dd41153bc5fdca9427e9e05be2c767ba23/library/core/src/panicking.rs:120:5
-//    3: core::panicking::panic_misaligned_pointer_dereference
-//              at /rustc/3f5fd8dd41153bc5fdca9427e9e05be2c767ba23/library/core/src/panicking.rs:287:5
-//    4: libffi::middle::types::ffi_type_clone
-//              at /Users/jimmyhmiller/.cargo/registry/src/index.crates.io-6f17d22bba15001f/libffi-3.2.0/src/middle/types.rs:151:8
-//    5: libffi::middle::types::ffi_type_array_clone
-//              at /Users/jimmyhmiller/.cargo/registry/src/index.crates.io-6f17d22bba15001f/libffi-3.2.0/src/middle/types.rs:143:23
-//    6: <libffi::middle::types::TypeArray as core::clone::Clone>::clone
-//              at /Users/jimmyhmiller/.cargo/registry/src/index.crates.io-6f17d22bba15001f/libffi-3.2.0/src/middle/types.rs:204:40
-//    7: <libffi::middle::Cif as core::clone::Clone>::clone
-//              at /Users/jimmyhmiller/.cargo/registry/src/index.crates.io-6f17d22bba15001f/libffi-3.2.0/src/middle/mod.rs:91:19
-//    8: <main::runtime::FFIInfo as core::clone::Clone>::clone
-//              at ./src/runtime.rs:149:5
-//    9: main::builtins::call_ffi_info
-//              at ./src/builtins.rs:439:20
-// note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
-// thread caused non-unwinding panic. aborting.
+/// Call a native function with the given number of arguments.
+/// Uses transmute to cast the function pointer to the appropriate signature.
+#[inline(never)]
+unsafe fn call_native_function(
+    func_ptr: *const u8,
+    num_args: usize,
+    args: [u64; 6],
+) -> u64 {
+    unsafe {
+        match num_args {
+            0 => {
+                let f: extern "C" fn() -> u64 = transmute(func_ptr);
+                f()
+            }
+            1 => {
+                let f: extern "C" fn(u64) -> u64 = transmute(func_ptr);
+                f(args[0])
+            }
+            2 => {
+                let f: extern "C" fn(u64, u64) -> u64 = transmute(func_ptr);
+                f(args[0], args[1])
+            }
+            3 => {
+                let f: extern "C" fn(u64, u64, u64) -> u64 = transmute(func_ptr);
+                f(args[0], args[1], args[2])
+            }
+            4 => {
+                let f: extern "C" fn(u64, u64, u64, u64) -> u64 = transmute(func_ptr);
+                f(args[0], args[1], args[2], args[3])
+            }
+            5 => {
+                let f: extern "C" fn(u64, u64, u64, u64, u64) -> u64 = transmute(func_ptr);
+                f(args[0], args[1], args[2], args[3], args[4])
+            }
+            6 => {
+                let f: extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64 = transmute(func_ptr);
+                f(args[0], args[1], args[2], args[3], args[4], args[5])
+            }
+            _ => panic!("Too many arguments for FFI call: {}", num_args),
+        }
+    }
+}
 
-// TODO: Fix this to allow multiple arguments
-// instead of hardcoding 0
+/// Convert a native return value to a Beagle value.
+unsafe fn unmarshal_ffi_return(
+    runtime: &mut Runtime,
+    stack_pointer: usize,
+    result: u64,
+    return_type: &FFIType,
+) -> usize {
+    unsafe {
+        match return_type {
+            FFIType::Void => BuiltInTypes::null_value() as usize,
+            FFIType::U8 | FFIType::U16 | FFIType::U32 | FFIType::U64 => {
+                BuiltInTypes::Int.tag(result as isize) as usize
+            }
+            FFIType::I32 => {
+                // Sign-extend I32 to isize properly
+                let signed_result = result as i32 as isize;
+                BuiltInTypes::Int.tag(signed_result) as usize
+            }
+            FFIType::Pointer | FFIType::MutablePointer => {
+                let pointer_value = BuiltInTypes::Int.tag(result as isize) as usize;
+                call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", pointer_value)
+            }
+            FFIType::String => {
+                if result == 0 {
+                    return BuiltInTypes::null_value() as usize;
+                }
+                let c_string = CStr::from_ptr(result as *const i8);
+                let string = c_string.to_str().unwrap();
+                runtime
+                    .allocate_string(stack_pointer, string.to_string())
+                    .unwrap()
+                    .into()
+            }
+            FFIType::Structure(_) => {
+                todo!("Structure return not yet implemented")
+            }
+        }
+    }
+}
+
+/// Call a foreign function through FFI.
+/// This implementation uses direct function pointer calls via transmute,
+/// eliminating the need for libffi.
 pub unsafe extern "C" fn call_ffi_info(
     stack_pointer: usize,
-    _frame_pointer: usize, // Frame pointer for GC stack walking
+    _frame_pointer: usize,
     ffi_info_id: usize,
     a1: usize,
     a2: usize,
@@ -2035,208 +2110,33 @@ pub unsafe extern "C" fn call_ffi_info(
     unsafe {
         let runtime = get_runtime().get_mut();
         let ffi_info_id = BuiltInTypes::untag(ffi_info_id);
-        // Extract only what we need without cloning the Cif (cloning Cif breaks on x86-64 Linux)
-        let (code_ptr, number_of_arguments, argument_types, return_type) = {
+
+        // Extract function info
+        let (func_ptr, number_of_arguments, argument_types, return_type) = {
             let ffi_info = runtime.get_ffi_info(ffi_info_id);
             (
-                ffi_info.function,
+                ffi_info.function.ptr,
                 ffi_info.number_of_arguments,
                 ffi_info.argument_types.clone(),
                 ffi_info.return_type.clone(),
             )
         };
+
         let arguments = [a1, a2, a3, a4, a5, a6];
         let args = &arguments[..number_of_arguments];
-        let mut argument_pointers = vec![];
 
-        for (argument, ffi_type) in args.iter().zip(argument_types.iter()) {
-            let kind = BuiltInTypes::get_kind(*argument);
-            match kind {
-                BuiltInTypes::Null => {
-                    if ffi_type != &FFIType::Pointer {
-                        throw_runtime_error(
-                            stack_pointer,
-                            "FFIError",
-                            format!("Expected pointer type, got {:?}", ffi_type),
-                        );
-                    }
-                    argument_pointers.push(arg(&std::ptr::null_mut::<c_void>()));
-                }
-                BuiltInTypes::String => {
-                    if ffi_type != &FFIType::String {
-                        throw_runtime_error(
-                            stack_pointer,
-                            "FFIError",
-                            format!("Expected string type, got {:?}", ffi_type),
-                        );
-                    }
-                    let string = runtime.get_string_literal(*argument);
-                    let string = runtime.memory.write_c_string(string);
-                    let pointer = runtime.memory.write_pointer(string as usize);
-                    argument_pointers.push(arg(pointer));
-                }
-                BuiltInTypes::Int => match ffi_type {
-                    FFIType::U8 => {
-                        let pointer = runtime
-                            .memory
-                            .write_u8(BuiltInTypes::untag(*argument) as u8);
-                        argument_pointers.push(arg(pointer));
-                    }
-                    FFIType::U16 => {
-                        let pointer = runtime
-                            .memory
-                            .write_u16(BuiltInTypes::untag(*argument) as u16);
-                        argument_pointers.push(arg(pointer));
-                    }
-                    FFIType::U32 => {
-                        let pointer = runtime
-                            .memory
-                            .write_u32(BuiltInTypes::untag(*argument) as u32);
-                        argument_pointers.push(arg(pointer));
-                    }
-                    FFIType::U64 => {
-                        let pointer = runtime
-                            .memory
-                            .write_u64(BuiltInTypes::untag(*argument) as u64);
-                        argument_pointers.push(arg(pointer));
-                    }
-                    FFIType::I32 => {
-                        let pointer = runtime
-                            .memory
-                            .write_i32(BuiltInTypes::untag(*argument) as i32);
-                        argument_pointers.push(arg(pointer));
-                    }
-
-                    FFIType::Pointer => {
-                        if BuiltInTypes::untag(*argument) == 0 {
-                            argument_pointers.push(arg(&std::ptr::null_mut::<c_void>()));
-                        } else {
-                            let heap_object = HeapObject::from_tagged(*argument);
-                            let buffer = BuiltInTypes::untag(heap_object.get_field(0));
-                            let pointer = runtime.memory.write_pointer(buffer);
-                            argument_pointers.push(arg(pointer));
-                        }
-                    }
-
-                    FFIType::MutablePointer
-                    | FFIType::String
-                    | FFIType::Void
-                    | FFIType::Structure(_) => {
-                        throw_runtime_error(
-                            stack_pointer,
-                            "FFIError",
-                            format!("Expected integer for FFI type {:?}", ffi_type),
-                        );
-                    }
-                },
-                BuiltInTypes::HeapObject => {
-                    match ffi_type {
-                        FFIType::Pointer | FFIType::MutablePointer => {
-                            let heap_object = HeapObject::from_tagged(*argument);
-                            let buffer = BuiltInTypes::untag(heap_object.get_field(0));
-                            let pointer = runtime.memory.write_pointer(buffer);
-                            argument_pointers.push(arg(pointer));
-                        }
-                        FFIType::Structure(_types) => {
-                            // We are going to asume for now now that we pass a buffer.
-                            // We are going to write that buffer to our memory and then pass the pointer
-                            // like we would any number
-                            let heap_object = HeapObject::from_tagged(*argument);
-                            let buffer = BuiltInTypes::untag(heap_object.get_field(0));
-                            let size = BuiltInTypes::untag(heap_object.get_field(1));
-                            let pointer = runtime.memory.write_buffer(buffer, size);
-                            argument_pointers.push(arg(pointer));
-                        }
-                        FFIType::String => {
-                            let string = runtime.get_string(stack_pointer, *argument);
-                            let string = runtime.memory.write_c_string(string);
-                            let pointer = runtime.memory.write_pointer(string as usize);
-                            argument_pointers.push(arg(pointer));
-                        }
-                        _ => {
-                            throw_runtime_error(
-                                stack_pointer,
-                                "FFIError",
-                                format!(
-                                    "Got HeapObject but expected matching FFI type, got {:?}",
-                                    ffi_type
-                                ),
-                            );
-                        }
-                    }
-                }
-                _ => {
-                    runtime.print(*argument);
-                    throw_runtime_error(
-                        stack_pointer,
-                        "FFIError",
-                        format!("Unsupported FFI type: {:?}", kind),
-                    );
-                }
-            }
+        // Marshal arguments to native u64 values
+        let mut native_args: [u64; 6] = [0; 6];
+        for (i, (argument, ffi_type)) in args.iter().zip(argument_types.iter()).enumerate() {
+            native_args[i] = marshal_ffi_argument(runtime, stack_pointer, *argument, ffi_type);
         }
 
-        // Get a fresh reference to the Cif without cloning (cloning breaks on x86-64 Linux)
-        let cif = runtime.get_ffi_info(ffi_info_id).cif.get();
-        let return_value = match return_type {
-            FFIType::Void => {
-                cif.call::<()>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
-                BuiltInTypes::null_value() as usize
-            }
-            FFIType::U8 => {
-                let result =
-                    cif.call::<u8>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
-                BuiltInTypes::Int.tag(result as isize) as usize
-            }
-            FFIType::U16 => {
-                let result =
-                    cif.call::<u16>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
-                BuiltInTypes::Int.tag(result as isize) as usize
-            }
-            FFIType::U32 => {
-                let result =
-                    cif.call::<u32>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
-                BuiltInTypes::Int.tag(result as isize) as usize
-            }
-            FFIType::U64 => {
-                let result =
-                    cif.call::<u64>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
-                BuiltInTypes::Int.tag(result as isize) as usize
-            }
-            FFIType::I32 => {
-                let result =
-                    cif.call::<i32>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
-                BuiltInTypes::Int.tag(result as isize) as usize
-            }
-            FFIType::Pointer => {
-                let result =
-                    cif.call::<*mut u8>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
-                let pointer_value = BuiltInTypes::Int.tag(result as isize) as usize;
-                call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", pointer_value)
-            }
-            FFIType::MutablePointer => {
-                let result =
-                    cif.call::<*mut u8>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
-                let pointer_value = BuiltInTypes::Int.tag(result as isize) as usize;
-                call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", pointer_value)
-            }
-            FFIType::String => {
-                let result =
-                    cif.call::<*mut u8>(CodePtr(code_ptr.ptr as *mut c_void), &argument_pointers);
-                if result.is_null() {
-                    return BuiltInTypes::null_value() as usize;
-                }
-                let c_string = CStr::from_ptr(result as *const i8);
-                let string = c_string.to_str().unwrap();
-                runtime
-                    .allocate_string(stack_pointer, string.to_string())
-                    .unwrap()
-                    .into()
-            }
-            FFIType::Structure(_) => {
-                todo!()
-            }
-        };
+        // Call the native function directly using transmute
+        let result = call_native_function(func_ptr, number_of_arguments, native_args);
+
+        // Unmarshal the return value
+        let return_value = unmarshal_ffi_return(runtime, stack_pointer, result, &return_type);
+
         runtime.memory.clear_native_arguments();
         return_value
     }
