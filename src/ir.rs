@@ -1174,6 +1174,16 @@ impl Ir {
         self.num_locals += num_spills;
         backend.set_max_locals(self.num_locals);
 
+        // Inform the backend which callee-saved registers are used.
+        // This allows the backend to save/restore them in prologue/epilogue
+        // per the AAPCS64 / System V AMD64 ABI.
+        backend.reset_callee_saved_tracking();
+        for allocated in linear_scan.allocated_registers.values() {
+            if allocated.is_physical {
+                backend.mark_callee_saved_register_used(allocated.index);
+            }
+        }
+
         // Debug: print IR after register allocation
         if std::env::var("DEBUG_IR").is_ok() {
             eprintln!("\n=== IR AFTER REGISTER ALLOCATION ===");

@@ -231,6 +231,15 @@ pub trait CodegenBackend: Sized {
     fn increment_stack_size(&mut self, size: i32);
     fn set_all_locals_to_null(&mut self, null_register: Self::Register);
 
+    /// Reset the callee-saved register tracking for a new function.
+    /// Called before compiling a new function to clear the used register set.
+    fn reset_callee_saved_tracking(&mut self);
+
+    /// Mark a callee-saved register as used by index.
+    /// This is used by the register allocator to inform the backend which
+    /// callee-saved registers are used and need to be saved in the prologue.
+    fn mark_callee_saved_register_used(&mut self, index: usize);
+
     // === Stack map for GC ===
 
     fn translate_stack_map(&self, base_pointer: usize) -> Vec<(usize, usize)>;

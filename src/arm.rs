@@ -1,8 +1,9 @@
 use crate::{
     builtins::debugger,
     machine_code::arm_codegen::{
-        ArmAsm, LdpGenSelector, Register, SP, Size, StpGenSelector, StrImmGenSelector, X0, X9, X10,
-        X11, X16, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29, X30, ZERO_REGISTER,
+        ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, SP, Size, StpGenSelector,
+        StrImmGenSelector, X0, X9, X10, X11, X16, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28,
+        X29, X30, ZERO_REGISTER,
     },
     types::BuiltInTypes,
 };
@@ -527,6 +528,9 @@ pub struct LowLevelArm {
     free_temporary_registers: Vec<Register>,
     allocated_temporary_registers: Vec<Register>,
     canonical_temporary_registers: Vec<Register>,
+    /// Tracks which callee-saved registers (X19-X28) are actually used in this function.
+    /// This is a bitmask where bit 0 = X19, bit 1 = X20, etc.
+    used_callee_saved_registers: u16,
 }
 
 impl Default for LowLevelArm {
@@ -555,6 +559,7 @@ impl LowLevelArm {
             max_stack_size: 0,
             max_locals: 0,
             stack_map: HashMap::new(),
+            used_callee_saved_registers: 0,
         }
     }
 
@@ -1151,6 +1156,8 @@ impl LowLevelArm {
             .pop()
             .expect("No free registers!");
         self.allocated_volatile_registers.push(next_register);
+        // Track that this callee-saved register is used (for AAPCS64 compliance)
+        self.mark_callee_saved_used(next_register);
         next_register
     }
 
@@ -1187,6 +1194,42 @@ impl LowLevelArm {
         self.free_volatile_registers.push(reg);
         self.allocated_volatile_registers
             .retain(|&allocated| allocated != reg);
+    }
+
+    /// Mark a callee-saved register (X19-X28) as used by this function.
+    /// This is called when the register allocator assigns a physical register.
+    fn mark_callee_saved_used(&mut self, reg: Register) {
+        if reg.index >= 19 && reg.index <= 28 {
+            let bit = reg.index - 19;
+            self.used_callee_saved_registers |= 1 << bit;
+        }
+    }
+
+    /// Get the list of callee-saved registers that are actually used.
+    fn get_used_callee_saved_registers(&self) -> Vec<Register> {
+        let mut result = Vec::new();
+        for i in 0..10u8 {
+            if self.used_callee_saved_registers & (1 << i) != 0 {
+                result.push(Register {
+                    size: Size::S64,
+                    index: 19 + i,
+                });
+            }
+        }
+        result
+    }
+
+    /// Reset callee-saved register tracking for a new function.
+    pub fn reset_callee_saved_tracking(&mut self) {
+        self.used_callee_saved_registers = 0;
+    }
+
+    /// Mark a callee-saved register as used by its index (19-28).
+    pub fn mark_callee_saved_register_used(&mut self, index: usize) {
+        if index >= 19 && index <= 28 {
+            let bit = index - 19;
+            self.used_callee_saved_registers |= 1 << bit;
+        }
     }
 
     pub fn reserve_register(&mut self, reg: Register) {
@@ -1326,7 +1369,21 @@ impl LowLevelArm {
     }
 
     pub fn patch_prelude_and_epilogue(&mut self) {
-        let mut max = self.max_stack_size as u64 + self.max_locals as u64;
+        // Get list of callee-saved registers that need to be saved
+        let used_callee_saved = self.get_used_callee_saved_registers();
+        let num_callee_saved = used_callee_saved.len() as u64;
+
+        if std::env::var("DEBUG_CALLEE_SAVED").is_ok() {
+            eprintln!(
+                "=== CALLEE-SAVED REGISTERS ===\n  used_callee_saved_registers bitmask: 0x{:03x}\n  count: {}\n  registers: {:?}",
+                self.used_callee_saved_registers,
+                num_callee_saved,
+                used_callee_saved
+            );
+        }
+
+        // Calculate total stack size including callee-saved area
+        let mut max = self.max_stack_size as u64 + self.max_locals as u64 + num_callee_saved;
         let remainder = max % 2;
         if remainder != 0 {
             max += 1;
@@ -1343,6 +1400,31 @@ impl LowLevelArm {
         if let Some(index) = sub_index {
             // Replace single SUB with sequence of instructions for stack allocation
             let mut alloc_instructions = Self::generate_stack_allocation(stack_bytes);
+
+            // Save callee-saved registers at the bottom of the stack (near SP).
+            // Stack layout:
+            //   [FP + 8]  -> Saved LR (X30)
+            //   [FP + 0]  -> Saved FP (X29)
+            //   [FP - 8]  -> Local 0
+            //   ...
+            //   [FP - N]  -> Stack slots
+            //   [SP + (num_callee_saved-1)*8] -> First saved callee-saved reg
+            //   ...
+            //   [SP]      -> Last saved callee-saved reg (or padding)
+            //
+            // We save at SP-relative offsets since SP is now at the bottom of our frame.
+            for (i, reg) in used_callee_saved.iter().enumerate() {
+                // Store at [SP + i*8] using STR with unsigned offset
+                // For 64-bit STR, imm12 is scaled by 8, so imm12=i means byte offset i*8
+                alloc_instructions.push(ArmAsm::StrImmGen {
+                    rt: *reg,
+                    rn: SP,
+                    imm9: 0,
+                    imm12: i as i32,
+                    size: 0b11, // 64-bit
+                    class_selector: StrImmGenSelector::UnsignedOffset,
+                });
+            }
 
             // CRITICAL FIX: Zero out local slots to prevent GC from seeing garbage.
             // When GC runs during allocation (before a local is assigned), uninitialized
@@ -1424,8 +1506,27 @@ impl LowLevelArm {
         });
 
         if let Some(index) = add_index {
-            // Replace single ADD with sequence of instructions for stack deallocation
-            let dealloc_instructions = Self::generate_stack_deallocation(stack_bytes);
+            // First restore callee-saved registers from the bottom of the stack,
+            // then deallocate the stack space.
+            let mut dealloc_instructions = Vec::new();
+
+            // Restore callee-saved registers from [SP + i*8]
+            for (i, reg) in used_callee_saved.iter().enumerate() {
+                // Load from [SP + i*8] using LDR with unsigned offset
+                // For 64-bit LDR, imm12 is scaled by 8, so imm12=i means byte offset i*8
+                dealloc_instructions.push(ArmAsm::LdrImmGen {
+                    rt: *reg,
+                    rn: SP,
+                    imm9: 0,
+                    imm12: i as i32,
+                    size: 0b11, // 64-bit
+                    class_selector: LdrImmGenSelector::UnsignedOffset,
+                });
+            }
+
+            // Now add the stack deallocation instructions
+            dealloc_instructions.extend(Self::generate_stack_deallocation(stack_bytes));
+
             let delta = dealloc_instructions.len() as isize - 1;
             self.instructions
                 .splice(index..=index, dealloc_instructions);
