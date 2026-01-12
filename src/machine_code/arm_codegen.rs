@@ -746,9 +746,11 @@ impl ArmAsm {
     pub fn encode(&self) -> u32 {
         match self {
             ArmAsm::Adr { immlo, immhi, rd } => {
+                // Mask immlo to 2 bits and immhi to 19 bits before casting to u32
+                // This prevents sign extension issues when the offset is negative
                 0b0_00_10000_0000000000000000000_00000
-                    | ((*immlo as u32) << 29)
-                    | ((*immhi as u32) << 5)
+                    | (((*immlo as u32) & 0x3) << 29)
+                    | (((*immhi as u32) & 0x7FFFF) << 5)
                     | (rd << 0)
             }
             ArmAsm::AddAddsubImm {
