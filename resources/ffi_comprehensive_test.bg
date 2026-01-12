@@ -23,11 +23,7 @@ let libc = ffi/load-library(get_libc_path())
 // RETURN TYPE TESTS
 // =============================================================================
 
-// Test 1: Void return - getuid returns uid_t (U32), but we'll use a void-returning function
-// Actually let's use alarm(0) which returns U32 but we can test void with usleep
-let c_usleep = ffi/get-function(libc, "usleep", [ffi/Type.U32], ffi/Type.I32)
-
-// Test 2: I32 return - getpid returns pid_t (I32)
+// Test 1: I32 return - getpid returns pid_t (I32)
 let c_getpid = ffi/get-function(libc, "getpid", [], ffi/Type.I32)
 
 // Test 3: I32 return with I32 argument - abs
