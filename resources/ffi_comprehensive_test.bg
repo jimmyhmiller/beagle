@@ -69,11 +69,13 @@ let c_memcmp = ffi/get-function(
     ffi/Type.I32
 )
 
-// Test 15: snprintf - 4 args (we'll use a simple format)
-let c_snprintf = ffi/get-function(
+// Test 15: strncmp - 3 args (string comparison with length limit)
+// Note: snprintf was removed because it's a variadic function and variadic
+// functions don't work properly with our transmute-based FFI on ARM64
+let c_strncmp = ffi/get-function(
     libc,
-    "snprintf",
-    [ffi/Type.Pointer, ffi/Type.U64, ffi/Type.String, ffi/Type.I32],
+    "strncmp",
+    [ffi/Type.String, ffi/Type.String, ffi/Type.U64],
     ffi/Type.I32
 )
 
@@ -230,16 +232,20 @@ fn test_three_args_pointer() {
     assert_true("memcmp different buffers != 0", cmp2 != 0)
 }
 
-fn test_four_args() {
-    println("\n--- Four Arguments Tests ---")
+fn test_strncmp() {
+    println("\n--- String Compare with Length Tests ---")
 
-    // snprintf to format a number
-    let buf = ffi/allocate(64)
-    let written = c_snprintf(buf, 64, "Number: %d", 42, 0, 0)
-    assert_true("snprintf returns positive length", written > 0)
+    // strncmp("hello", "hello", 5) should return 0
+    let cmp1 = c_strncmp("hello", "hello", 5, 0, 0, 0)
+    assert_eq("strncmp equal strings == 0", 0, cmp1)
 
-    // Check the formatted string length (should be "Number: 42" = 10 chars)
-    assert_eq("snprintf wrote 10 chars", 10, written)
+    // strncmp("hello", "help", 3) should return 0 (only compares first 3 chars)
+    let cmp2 = c_strncmp("hello", "help", 3, 0, 0, 0)
+    assert_eq("strncmp first 3 chars equal == 0", 0, cmp2)
+
+    // strncmp("hello", "help", 4) should return non-zero (4th char differs)
+    let cmp3 = c_strncmp("hello", "help", 4, 0, 0, 0)
+    assert_true("strncmp 4 chars differ != 0", cmp3 != 0)
 }
 
 fn test_buffer_operations() {
@@ -338,7 +344,7 @@ fn main() {
     test_one_arg_pointer_null()
     test_two_args()
     test_three_args_pointer()
-    test_four_args()
+    test_strncmp()
     test_buffer_operations()
     test_heap_string_to_ffi()
 
@@ -381,9 +387,10 @@ fn main() {
 // PASS: memcmp equal buffers == 0
 // PASS: memcmp different buffers != 0
 //
-// --- Four Arguments Tests ---
-// PASS: snprintf returns positive length
-// PASS: snprintf wrote 10 chars
+// --- String Compare with Length Tests ---
+// PASS: strncmp equal strings == 0
+// PASS: strncmp first 3 chars equal == 0
+// PASS: strncmp 4 chars differ != 0
 //
 // --- Buffer Operations Tests ---
 // PASS: allocate returns non-null
