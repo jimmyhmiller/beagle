@@ -2015,41 +2015,115 @@ unsafe fn marshal_ffi_argument(
     }
 }
 
-/// Call a native function with the given number of arguments.
+/// Call a native function with the given number of arguments and return type.
 /// Uses transmute to cast the function pointer to the appropriate signature.
+/// Dispatches based on return type to avoid undefined behavior when calling
+/// void functions or functions returning narrower types.
 #[inline(never)]
-unsafe fn call_native_function(func_ptr: *const u8, num_args: usize, args: [u64; 6]) -> u64 {
+unsafe fn call_native_function(
+    func_ptr: *const u8,
+    num_args: usize,
+    args: [u64; 6],
+    return_type: &FFIType,
+) -> u64 {
+    // Macro for non-void return types
+    macro_rules! call_with_args {
+        ($ret_type:ty) => {
+            match num_args {
+                0 => {
+                    let f: extern "C" fn() -> $ret_type = transmute(func_ptr);
+                    f() as u64
+                }
+                1 => {
+                    let f: extern "C" fn(u64) -> $ret_type = transmute(func_ptr);
+                    f(args[0]) as u64
+                }
+                2 => {
+                    let f: extern "C" fn(u64, u64) -> $ret_type = transmute(func_ptr);
+                    f(args[0], args[1]) as u64
+                }
+                3 => {
+                    let f: extern "C" fn(u64, u64, u64) -> $ret_type = transmute(func_ptr);
+                    f(args[0], args[1], args[2]) as u64
+                }
+                4 => {
+                    let f: extern "C" fn(u64, u64, u64, u64) -> $ret_type = transmute(func_ptr);
+                    f(args[0], args[1], args[2], args[3]) as u64
+                }
+                5 => {
+                    let f: extern "C" fn(u64, u64, u64, u64, u64) -> $ret_type =
+                        transmute(func_ptr);
+                    f(args[0], args[1], args[2], args[3], args[4]) as u64
+                }
+                6 => {
+                    let f: extern "C" fn(u64, u64, u64, u64, u64, u64) -> $ret_type =
+                        transmute(func_ptr);
+                    f(args[0], args[1], args[2], args[3], args[4], args[5]) as u64
+                }
+                _ => panic!("Too many arguments for FFI call: {}", num_args),
+            }
+        };
+    }
+
+    // Macro for void return type (returns 0)
+    macro_rules! call_void {
+        () => {
+            match num_args {
+                0 => {
+                    let f: extern "C" fn() = transmute(func_ptr);
+                    f();
+                    0
+                }
+                1 => {
+                    let f: extern "C" fn(u64) = transmute(func_ptr);
+                    f(args[0]);
+                    0
+                }
+                2 => {
+                    let f: extern "C" fn(u64, u64) = transmute(func_ptr);
+                    f(args[0], args[1]);
+                    0
+                }
+                3 => {
+                    let f: extern "C" fn(u64, u64, u64) = transmute(func_ptr);
+                    f(args[0], args[1], args[2]);
+                    0
+                }
+                4 => {
+                    let f: extern "C" fn(u64, u64, u64, u64) = transmute(func_ptr);
+                    f(args[0], args[1], args[2], args[3]);
+                    0
+                }
+                5 => {
+                    let f: extern "C" fn(u64, u64, u64, u64, u64) = transmute(func_ptr);
+                    f(args[0], args[1], args[2], args[3], args[4]);
+                    0
+                }
+                6 => {
+                    let f: extern "C" fn(u64, u64, u64, u64, u64, u64) = transmute(func_ptr);
+                    f(args[0], args[1], args[2], args[3], args[4], args[5]);
+                    0
+                }
+                _ => panic!("Too many arguments for FFI call: {}", num_args),
+            }
+        };
+    }
+
+    // Dispatch based on return type
     unsafe {
-        match num_args {
-            0 => {
-                let f: extern "C" fn() -> u64 = transmute(func_ptr);
-                f()
+        match return_type {
+            FFIType::Void => call_void!(),
+            FFIType::U8 => call_with_args!(u8),
+            FFIType::U16 => call_with_args!(u16),
+            FFIType::U32 => call_with_args!(u32),
+            FFIType::I32 => call_with_args!(i32),
+            FFIType::U64 | FFIType::Pointer | FFIType::MutablePointer | FFIType::String => {
+                call_with_args!(u64)
             }
-            1 => {
-                let f: extern "C" fn(u64) -> u64 = transmute(func_ptr);
-                f(args[0])
+            FFIType::Structure(_) => {
+                // Structure returns not yet implemented, keep existing behavior
+                call_with_args!(u64)
             }
-            2 => {
-                let f: extern "C" fn(u64, u64) -> u64 = transmute(func_ptr);
-                f(args[0], args[1])
-            }
-            3 => {
-                let f: extern "C" fn(u64, u64, u64) -> u64 = transmute(func_ptr);
-                f(args[0], args[1], args[2])
-            }
-            4 => {
-                let f: extern "C" fn(u64, u64, u64, u64) -> u64 = transmute(func_ptr);
-                f(args[0], args[1], args[2], args[3])
-            }
-            5 => {
-                let f: extern "C" fn(u64, u64, u64, u64, u64) -> u64 = transmute(func_ptr);
-                f(args[0], args[1], args[2], args[3], args[4])
-            }
-            6 => {
-                let f: extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64 = transmute(func_ptr);
-                f(args[0], args[1], args[2], args[3], args[4], args[5])
-            }
-            _ => panic!("Too many arguments for FFI call: {}", num_args),
         }
     }
 }
@@ -2133,7 +2207,7 @@ pub unsafe extern "C" fn call_ffi_info(
         }
 
         // Call the native function directly using transmute
-        let result = call_native_function(func_ptr, number_of_arguments, native_args);
+        let result = call_native_function(func_ptr, number_of_arguments, native_args, &return_type);
 
         // Unmarshal the return value
         let return_value = unmarshal_ffi_return(runtime, stack_pointer, result, &return_type);
