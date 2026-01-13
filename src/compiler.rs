@@ -354,7 +354,7 @@ impl Compiler {
 
     pub fn add_string(&mut self, string_value: StringValue) -> Value {
         let runtime = get_runtime().get_mut();
-        let offset = runtime.add_string(string_value);
+        let offset = runtime.add_string(string_value.clone());
         Value::StringConstantPtr(offset)
     }
 

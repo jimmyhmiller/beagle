@@ -16,7 +16,6 @@ cfg_if::cfg_if! {
 }
 
 use crate::common::Label;
-use crate::pretty_print::PrettyPrint;
 use crate::register_allocation::linear_scan::LinearScan;
 use crate::types::BuiltInTypes;
 
@@ -1135,39 +1134,8 @@ impl Ir {
 
         // backend.breakpoint();
 
-        // Debug: print IR before register allocation
-        if std::env::var("DEBUG_IR").is_ok() {
-            eprintln!("=== IR BEFORE REGISTER ALLOCATION ===");
-            for (i, instr) in self.instructions.iter().enumerate() {
-                eprintln!("{:4}: {}", i, instr.pretty_print());
-            }
-        }
-
         let mut linear_scan = LinearScan::new(self.instructions.clone(), self.num_locals);
-
-        // Debug: print lifetimes
-        if std::env::var("DEBUG_IR").is_ok() {
-            eprintln!("\n=== REGISTER LIFETIMES ===");
-            let mut lifetimes: Vec<_> = linear_scan.lifetimes.iter().collect();
-            lifetimes.sort_by_key(|(_, (start, _))| *start);
-            for (reg, (start, end)) in lifetimes {
-                eprintln!("  {:?}: {} - {}", reg, start, end);
-            }
-        }
-
         linear_scan.allocate();
-
-        // Debug: print allocated registers
-        if std::env::var("DEBUG_IR").is_ok() {
-            eprintln!("\n=== ALLOCATED REGISTERS ===");
-            for (virt, phys) in &linear_scan.allocated_registers {
-                eprintln!("  {:?} -> {:?}", virt, phys);
-            }
-            eprintln!("\n=== SPILLED REGISTERS ===");
-            for (virt, slot) in &linear_scan.location {
-                eprintln!("  {:?} -> stack slot {}", virt, slot);
-            }
-        }
 
         self.instructions = linear_scan.instructions.clone();
         let num_spills = linear_scan.location.len();
@@ -1184,24 +1152,14 @@ impl Ir {
             }
         }
 
-        // Debug: print IR after register allocation
-        if std::env::var("DEBUG_IR").is_ok() {
-            eprintln!("\n=== IR AFTER REGISTER ALLOCATION ===");
-            for (i, instr) in self.instructions.iter().enumerate() {
-                eprintln!("{:4}: {}", i, instr.pretty_print());
-            }
-        }
-
         let before_prelude = backend.new_label("before_prelude");
         backend.write_label(before_prelude);
 
         backend.prelude();
 
-        // I believe this is fine because it is volatile and we
-        // are at the beginning of the function
-        let register = backend.get_volatile_register(0);
-        backend.mov_64(register, BuiltInTypes::null_value());
-        backend.set_all_locals_to_null(register);
+        // NOTE: Local initialization is handled by patch_prelude_and_epilogue()
+        // which uses temporary registers X9/X10 (not callee-saved registers).
+        // Previously this code used X19 without saving it, corrupting callers' values.
 
         let after_prelude = backend.new_label("after_prelude");
         backend.write_label(after_prelude);

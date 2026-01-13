@@ -9,7 +9,6 @@ use std::{
     thread,
 };
 
-
 use crate::{
     Message, debug_only,
     gc::STACK_SIZE,
@@ -1812,9 +1811,8 @@ pub unsafe extern "C" fn load_library(name: usize) -> usize {
     let runtime = get_runtime().get_mut();
     let string = &runtime.get_string_literal(name);
     let lib = unsafe {
-        libloading::Library::new(string).unwrap_or_else(|e| {
-            panic!("Failed to load library '{}': {}", string, e)
-        })
+        libloading::Library::new(string)
+            .unwrap_or_else(|e| panic!("Failed to load library '{}': {}", string, e))
     };
     let id = runtime.add_library(lib);
 
@@ -1895,9 +1893,9 @@ pub extern "C" fn get_function(
 
     // Get the function pointer from the library
     let func_ptr = unsafe {
-        library.get::<fn()>(function_name.as_bytes()).unwrap_or_else(|e| {
-            panic!("Failed to get symbol '{}': {}", function_name, e)
-        })
+        library
+            .get::<fn()>(function_name.as_bytes())
+            .unwrap_or_else(|e| panic!("Failed to get symbol '{}': {}", function_name, e))
     };
     let code_ptr = unsafe { func_ptr.try_as_raw_ptr().unwrap() };
 
@@ -1958,55 +1956,54 @@ unsafe fn marshal_ffi_argument(
             let c_string = runtime.memory.write_c_string(string);
             c_string as u64
         }
-        BuiltInTypes::Int => {
-            match ffi_type {
-                FFIType::U8 | FFIType::U16 | FFIType::U32 | FFIType::U64 | FFIType::I32 => {
-                    BuiltInTypes::untag(argument) as u64
-                }
-                FFIType::Pointer => {
-                    if BuiltInTypes::untag(argument) == 0 {
-                        0u64
-                    } else {
-                        let heap_object = HeapObject::from_tagged(argument);
-                        let buffer = BuiltInTypes::untag(heap_object.get_field(0));
-                        buffer as u64
-                    }
-                }
-                _ => unsafe {
-                    throw_runtime_error(
-                        stack_pointer,
-                        "FFIError",
-                        format!("Expected integer for FFI type {:?}", ffi_type),
-                    );
-                }
+        BuiltInTypes::Int => match ffi_type {
+            FFIType::U8 | FFIType::U16 | FFIType::U32 | FFIType::U64 | FFIType::I32 => {
+                BuiltInTypes::untag(argument) as u64
             }
-        }
-        BuiltInTypes::HeapObject => {
-            match ffi_type {
-                FFIType::Pointer | FFIType::MutablePointer => {
+            FFIType::Pointer => {
+                if BuiltInTypes::untag(argument) == 0 {
+                    0u64
+                } else {
                     let heap_object = HeapObject::from_tagged(argument);
                     let buffer = BuiltInTypes::untag(heap_object.get_field(0));
                     buffer as u64
                 }
-                FFIType::String => {
-                    let string = runtime.get_string(stack_pointer, argument);
-                    let c_string = runtime.memory.write_c_string(string);
-                    c_string as u64
-                }
-                FFIType::Structure(_) => {
-                    let heap_object = HeapObject::from_tagged(argument);
-                    let buffer = BuiltInTypes::untag(heap_object.get_field(0));
-                    buffer as u64
-                }
-                _ => unsafe {
-                    throw_runtime_error(
-                        stack_pointer,
-                        "FFIError",
-                        format!("Got HeapObject but expected matching FFI type, got {:?}", ffi_type),
-                    );
-                }
             }
-        }
+            _ => unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "FFIError",
+                    format!("Expected integer for FFI type {:?}", ffi_type),
+                );
+            },
+        },
+        BuiltInTypes::HeapObject => match ffi_type {
+            FFIType::Pointer | FFIType::MutablePointer => {
+                let heap_object = HeapObject::from_tagged(argument);
+                let buffer = BuiltInTypes::untag(heap_object.get_field(0));
+                buffer as u64
+            }
+            FFIType::String => {
+                let string = runtime.get_string(stack_pointer, argument);
+                let c_string = runtime.memory.write_c_string(string);
+                c_string as u64
+            }
+            FFIType::Structure(_) => {
+                let heap_object = HeapObject::from_tagged(argument);
+                let buffer = BuiltInTypes::untag(heap_object.get_field(0));
+                buffer as u64
+            }
+            _ => unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "FFIError",
+                    format!(
+                        "Got HeapObject but expected matching FFI type, got {:?}",
+                        ffi_type
+                    ),
+                );
+            },
+        },
         _ => unsafe {
             runtime.print(argument);
             throw_runtime_error(
@@ -2014,18 +2011,14 @@ unsafe fn marshal_ffi_argument(
                 "FFIError",
                 format!("Unsupported FFI type: {:?}", kind),
             );
-        }
+        },
     }
 }
 
 /// Call a native function with the given number of arguments.
 /// Uses transmute to cast the function pointer to the appropriate signature.
 #[inline(never)]
-unsafe fn call_native_function(
-    func_ptr: *const u8,
-    num_args: usize,
-    args: [u64; 6],
-) -> u64 {
+unsafe fn call_native_function(func_ptr: *const u8, num_args: usize, args: [u64; 6]) -> u64 {
     unsafe {
         match num_args {
             0 => {

@@ -171,10 +171,6 @@ impl LowLevelX86 {
     // === Arithmetic operations ===
 
     pub fn add(&mut self, destination: X86Register, a: X86Register, b: X86Register) {
-        // Debug: print which registers are being used for add
-        if std::env::var("DEBUG_ADD").is_ok() {
-            eprintln!("ADD: dest={:?}, a={:?}, b={:?}", destination, a, b);
-        }
         // x86 ADD is destructive: dest = dest + src
         // We need to handle cases where dest might clobber operands
         if destination == a {
@@ -711,7 +707,8 @@ impl LowLevelX86 {
     // === Register allocation ===
 
     pub fn volatile_register(&mut self) -> X86Register {
-        let reg = self.free_volatile_registers
+        let reg = self
+            .free_volatile_registers
             .pop()
             .expect("No free volatile registers");
         // Track that this callee-saved register is used (for ABI compliance)
@@ -1171,15 +1168,6 @@ impl LowLevelX86 {
         let used_callee_saved = self.get_used_callee_saved_registers();
         let num_callee_saved = used_callee_saved.len();
 
-        if std::env::var("DEBUG_CALLEE_SAVED").is_ok() {
-            eprintln!(
-                "=== CALLEE-SAVED REGISTERS (x86) ===\n  used_callee_saved_registers bitmask: 0x{:03x}\n  count: {}\n  registers: {:?}",
-                self.used_callee_saved_registers,
-                num_callee_saved,
-                used_callee_saved
-            );
-        }
-
         // Calculate stack size including space for callee-saved registers
         let mut slots = self.max_locals + self.max_stack_size + num_callee_saved as i32;
         if slots % 2 != 0 {
@@ -1200,10 +1188,8 @@ impl LowLevelX86 {
             };
 
             // Calculate byte offset at insertion point (after SUB instruction)
-            let byte_offset_at_insert: usize = self.instructions[..=index]
-                .iter()
-                .map(|i| i.size())
-                .sum();
+            let byte_offset_at_insert: usize =
+                self.instructions[..=index].iter().map(|i| i.size()).sum();
 
             // Insert MOV instructions for callee-saved registers right after SUB
             // We store at increasing offsets from RSP
@@ -1257,10 +1243,8 @@ impl LowLevelX86 {
 
         if let Some(index) = add_index {
             // Calculate byte offset at insertion point (before ADD instruction)
-            let byte_offset_at_insert: usize = self.instructions[..index]
-                .iter()
-                .map(|i| i.size())
-                .sum();
+            let byte_offset_at_insert: usize =
+                self.instructions[..index].iter().map(|i| i.size()).sum();
 
             // Create load instructions to restore callee-saved registers
             let mut inserted_instructions = Vec::new();

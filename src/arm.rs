@@ -1226,7 +1226,7 @@ impl LowLevelArm {
 
     /// Mark a callee-saved register as used by its index (19-28).
     pub fn mark_callee_saved_register_used(&mut self, index: usize) {
-        if index >= 19 && index <= 28 {
+        if (19..=28).contains(&index) {
             let bit = index - 19;
             self.used_callee_saved_registers |= 1 << bit;
         }
@@ -1372,15 +1372,6 @@ impl LowLevelArm {
         // Get list of callee-saved registers that need to be saved
         let used_callee_saved = self.get_used_callee_saved_registers();
         let num_callee_saved = used_callee_saved.len() as u64;
-
-        if std::env::var("DEBUG_CALLEE_SAVED").is_ok() {
-            eprintln!(
-                "=== CALLEE-SAVED REGISTERS ===\n  used_callee_saved_registers bitmask: 0x{:03x}\n  count: {}\n  registers: {:?}",
-                self.used_callee_saved_registers,
-                num_callee_saved,
-                used_callee_saved
-            );
-        }
 
         // Calculate total stack size including callee-saved area
         let mut max = self.max_stack_size as u64 + self.max_locals as u64 + num_callee_saved;
@@ -1677,22 +1668,6 @@ impl LowLevelArm {
     }
 
     pub fn set_all_locals_to_null(&mut self, null_register: Register) {
-        // Debug: verify we're nulling all locals
-        if std::env::var("DEBUG_NULL_LOCALS").is_ok() {
-            eprintln!(
-                "[COMPILE] set_all_locals_to_null: max_locals={}, will null slots 0..{}",
-                self.max_locals, self.max_locals
-            );
-            for local_offset in 0..self.max_locals {
-                // store_local stores at -(offset + 1), which is [FP - (offset+1)*8]
-                let stack_offset = -(local_offset + 1);
-                let byte_offset = stack_offset * 8;
-                eprintln!(
-                    "[COMPILE]   local[{}] -> store at [FP + {}] = [FP - {}]",
-                    local_offset, byte_offset, -byte_offset
-                );
-            }
-        }
         for local_offset in 0..self.max_locals {
             self.store_local(null_register, local_offset)
         }
