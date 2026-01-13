@@ -1204,7 +1204,31 @@ impl LowLevelX86 {
                 inserted_instructions.push(instr);
             }
 
+            // CRITICAL FIX: Zero out local slots to prevent GC from seeing garbage.
+            // When GC runs during allocation (before a local is assigned), uninitialized
+            // local slots could contain interior pointers or other garbage from previous
+            // stack usage. Initialize all local slots to null (0x7, which is tagged null).
+            if self.max_locals > 0 {
+                let null_value = BuiltInTypes::null_value() as i32;
+
+                // Load null value into R11 (caller-saved, safe to use)
+                inserted_instructions.push(X86Asm::MovRI32 {
+                    dest: R11,
+                    imm: null_value,
+                });
+
+                // Store null to each local slot at [RBP - (i+1)*8]
+                for i in 0..self.max_locals {
+                    inserted_instructions.push(X86Asm::MovMR {
+                        base: RBP,
+                        offset: -((i + 1) * 8),
+                        src: R11,
+                    });
+                }
+            }
+
             // Calculate total byte size of inserted instructions
+            let num_inserted = inserted_instructions.len();
             let byte_delta: usize = inserted_instructions.iter().map(|i| i.size()).sum();
 
             // Insert the instructions
@@ -1213,10 +1237,10 @@ impl LowLevelX86 {
             }
 
             // Shift label locations that come after the insertion point
-            if num_callee_saved > 0 {
+            if num_inserted > 0 {
                 for location in self.label_locations.values_mut() {
                     if *location > index {
-                        *location += num_callee_saved;
+                        *location += num_inserted;
                     }
                 }
 
