@@ -198,7 +198,6 @@ Currently missing:
 ```
 tan(x), asin(x), acos(x), atan(x), atan2(y, x)
 exp(x), log(x), log10(x), log2(x), pow(base, exp)
-round(x), truncate(x)
 max(a, b), min(a, b), clamp(x, low, high)
 gcd(a, b), lcm(a, b)
 even?(n), odd?(n), positive?(n), negative?(n), zero?(n)
