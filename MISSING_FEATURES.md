@@ -196,7 +196,6 @@ replace(str, from, to)
 replace-first(str, from, to)
 pad-left(str, width, char)
 pad-right(str, width, char)
-lowercase(str)             // uppercase exists
 blank?(str)
 lines(str)
 words(str)
