@@ -582,6 +582,40 @@ extern "C" fn last_index_of(
     }
 }
 
+extern "C" fn replace_string(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    string: usize,
+    from: usize,
+    to: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(get_runtime().get(), "replace");
+    let runtime = get_runtime().get_mut();
+    let string_value = runtime.get_string(stack_pointer, string);
+    let from_value = runtime.get_string(stack_pointer, from);
+    let to_value = runtime.get_string(stack_pointer, to);
+
+    let replaced = string_value.replace(&from_value, &to_value);
+
+    runtime
+        .allocate_string(stack_pointer, replaced)
+        .unwrap()
+        .into()
+}
+
+extern "C" fn blank_string(stack_pointer: usize, frame_pointer: usize, string: usize) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(get_runtime().get(), "blank?");
+    let runtime = get_runtime().get_mut();
+    let string_value = runtime.get_string(stack_pointer, string);
+
+    // A string is blank if it's empty or contains only whitespace
+    let is_blank = string_value.trim().is_empty();
+
+    BuiltInTypes::construct_boolean(is_blank) as usize
+}
+
 extern "C" fn fill_object_fields(object_pointer: usize, value: usize) -> usize {
     print_call_builtin(get_runtime().get(), "fill_object_fields");
     let mut object = HeapObject::from_tagged(object_pointer);
@@ -4348,6 +4382,24 @@ impl Runtime {
             true,
             true,
             4,
+        )?;
+
+        // replace now takes (stack_pointer, frame_pointer, string, from, to)
+        self.add_builtin_function_with_fp(
+            "beagle.core/replace",
+            replace_string as *const u8,
+            true,
+            true,
+            5,
+        )?;
+
+        // blank? now takes (stack_pointer, frame_pointer, string)
+        self.add_builtin_function_with_fp(
+            "beagle.core/blank?",
+            blank_string as *const u8,
+            true,
+            true,
+            3,
         )?;
 
         // hash now takes (stack_pointer, frame_pointer, value)
