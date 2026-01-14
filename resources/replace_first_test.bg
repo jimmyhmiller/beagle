@@ -1,0 +1,97 @@
+namespace replace_first_test
+
+// Test replace-first function
+
+fn main() {
+    // Test replace-first - basic
+    println("replace-first tests:")
+    let s1 = "hello world"
+    let replaced = replace-first(s1, "world", "there")
+    println("replace-first('hello world', 'world', 'there'):")
+    println(replaced)
+    println("Equals 'hello there'?")
+    println(replaced == "hello there")
+
+    // Test replace-first - only first occurrence
+    let s2 = "foo bar foo baz foo"
+    let replaced2 = replace-first(s2, "foo", "qux")
+    println("\nreplace-first('foo bar foo baz foo', 'foo', 'qux'):")
+    println(replaced2)
+    println("Equals 'qux bar foo baz foo'?")
+    println(replaced2 == "qux bar foo baz foo")
+
+    // Test replace-first - no match
+    let s3 = "hello world"
+    let replaced3 = replace-first(s3, "xyz", "abc")
+    println("\nreplace-first with no match:")
+    println(replaced3)
+    println("Equals 'hello world'?")
+    println(replaced3 == "hello world")
+
+    // Test replace-first - empty string
+    let s4 = "hello"
+    let replaced4 = replace-first(s4, "", "x")
+    println("\nreplace-first with empty 'from':")
+    println(replaced4)
+
+    // Test replace-first - replace with empty
+    let s5 = "hello world goodbye"
+    let replaced5 = replace-first(s5, " ", "")
+    println("\nreplace-first(' ', '') - removes first space:")
+    println(replaced5)
+    println("Equals 'helloworld goodbye'?")
+    println(replaced5 == "helloworld goodbye")
+
+    // Test replace-first - at beginning
+    let s6 = "world hello world"
+    let replaced6 = replace-first(s6, "world", "earth")
+    println("\nreplace-first at beginning:")
+    println(replaced6)
+    println("Equals 'earth hello world'?")
+    println(replaced6 == "earth hello world")
+
+    // Test replace-first - at end
+    let s7 = "hello world world"
+    let replaced7 = replace-first(s7, "world", "earth")
+    println("\nreplace-first (first occurrence, not last):")
+    println(replaced7)
+    println("Equals 'hello earth world'?")
+    println(replaced7 == "hello earth world")
+
+    ""
+}
+
+// Expect
+// replace-first tests:
+// replace-first('hello world', 'world', 'there'):
+// hello there
+// Equals 'hello there'?
+// true
+//
+// replace-first('foo bar foo baz foo', 'foo', 'qux'):
+// qux bar foo baz foo
+// Equals 'qux bar foo baz foo'?
+// true
+//
+// replace-first with no match:
+// hello world
+// Equals 'hello world'?
+// true
+//
+// replace-first with empty 'from':
+// xhello
+//
+// replace-first(' ', '') - removes first space:
+// helloworld goodbye
+// Equals 'helloworld goodbye'?
+// true
+//
+// replace-first at beginning:
+// earth hello world
+// Equals 'earth hello world'?
+// true
+//
+// replace-first (first occurrence, not last):
+// hello earth world
+// Equals 'hello earth world'?
+// true

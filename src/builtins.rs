@@ -616,6 +616,28 @@ extern "C" fn blank_string(stack_pointer: usize, frame_pointer: usize, string: u
     BuiltInTypes::construct_boolean(is_blank) as usize
 }
 
+extern "C" fn replace_first_string(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    string: usize,
+    from: usize,
+    to: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(get_runtime().get(), "replace-first");
+    let runtime = get_runtime().get_mut();
+    let string_value = runtime.get_string(stack_pointer, string);
+    let from_value = runtime.get_string(stack_pointer, from);
+    let to_value = runtime.get_string(stack_pointer, to);
+
+    let replaced = string_value.replacen(&from_value, &to_value, 1);
+
+    runtime
+        .allocate_string(stack_pointer, replaced)
+        .unwrap()
+        .into()
+}
+
 extern "C" fn fill_object_fields(object_pointer: usize, value: usize) -> usize {
     print_call_builtin(get_runtime().get(), "fill_object_fields");
     let mut object = HeapObject::from_tagged(object_pointer);
@@ -4400,6 +4422,15 @@ impl Runtime {
             true,
             true,
             3,
+        )?;
+
+        // replace-first now takes (stack_pointer, frame_pointer, string, from, to)
+        self.add_builtin_function_with_fp(
+            "beagle.core/replace-first",
+            replace_first_string as *const u8,
+            true,
+            true,
+            5,
         )?;
 
         // hash now takes (stack_pointer, frame_pointer, value)
