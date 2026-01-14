@@ -1988,6 +1988,151 @@ pub unsafe extern "C" fn atan2_builtin(
     }
 }
 
+/// exp builtin - computes e^x
+pub unsafe extern "C" fn exp_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    unsafe {
+        let runtime = get_runtime().get_mut();
+
+        let untagged = BuiltInTypes::untag(value);
+        let float_ptr = untagged as *const f64;
+        let float_value = *float_ptr.add(1);
+
+        let result = float_value.exp();
+
+        let new_float_ptr = runtime
+            .allocate(1, stack_pointer, BuiltInTypes::Float)
+            .unwrap();
+
+        let untagged_result = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged_result as *mut f64;
+        *result_ptr.add(1) = result;
+
+        new_float_ptr
+    }
+}
+
+/// log builtin - computes natural logarithm (base e)
+pub unsafe extern "C" fn log_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    unsafe {
+        let runtime = get_runtime().get_mut();
+
+        let untagged = BuiltInTypes::untag(value);
+        let float_ptr = untagged as *const f64;
+        let float_value = *float_ptr.add(1);
+
+        let result = float_value.ln();
+
+        let new_float_ptr = runtime
+            .allocate(1, stack_pointer, BuiltInTypes::Float)
+            .unwrap();
+
+        let untagged_result = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged_result as *mut f64;
+        *result_ptr.add(1) = result;
+
+        new_float_ptr
+    }
+}
+
+/// log10 builtin - computes base-10 logarithm
+pub unsafe extern "C" fn log10_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    unsafe {
+        let runtime = get_runtime().get_mut();
+
+        let untagged = BuiltInTypes::untag(value);
+        let float_ptr = untagged as *const f64;
+        let float_value = *float_ptr.add(1);
+
+        let result = float_value.log10();
+
+        let new_float_ptr = runtime
+            .allocate(1, stack_pointer, BuiltInTypes::Float)
+            .unwrap();
+
+        let untagged_result = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged_result as *mut f64;
+        *result_ptr.add(1) = result;
+
+        new_float_ptr
+    }
+}
+
+/// log2 builtin - computes base-2 logarithm
+pub unsafe extern "C" fn log2_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    unsafe {
+        let runtime = get_runtime().get_mut();
+
+        let untagged = BuiltInTypes::untag(value);
+        let float_ptr = untagged as *const f64;
+        let float_value = *float_ptr.add(1);
+
+        let result = float_value.log2();
+
+        let new_float_ptr = runtime
+            .allocate(1, stack_pointer, BuiltInTypes::Float)
+            .unwrap();
+
+        let untagged_result = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged_result as *mut f64;
+        *result_ptr.add(1) = result;
+
+        new_float_ptr
+    }
+}
+
+/// pow builtin - computes base^exponent
+pub unsafe extern "C" fn pow_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    base: usize,
+    exponent: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    unsafe {
+        let runtime = get_runtime().get_mut();
+
+        let base_untagged = BuiltInTypes::untag(base);
+        let base_float_ptr = base_untagged as *const f64;
+        let base_value = *base_float_ptr.add(1);
+
+        let exp_untagged = BuiltInTypes::untag(exponent);
+        let exp_float_ptr = exp_untagged as *const f64;
+        let exp_value = *exp_float_ptr.add(1);
+
+        let result = base_value.powf(exp_value);
+
+        let new_float_ptr = runtime
+            .allocate(1, stack_pointer, BuiltInTypes::Float)
+            .unwrap();
+
+        let untagged_result = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged_result as *mut f64;
+        *result_ptr.add(1) = result;
+
+        new_float_ptr
+    }
+}
+
 /// to_float builtin - converts an integer to a float
 pub unsafe extern "C" fn to_float_builtin(
     stack_pointer: usize,
@@ -4288,6 +4433,41 @@ impl Runtime {
         self.add_builtin_function_with_fp(
             "beagle.core/atan2",
             atan2_builtin as *const u8,
+            true,
+            true,
+            4,
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/exp",
+            exp_builtin as *const u8,
+            true,
+            true,
+            3,
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/log",
+            log_builtin as *const u8,
+            true,
+            true,
+            3,
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/log10",
+            log10_builtin as *const u8,
+            true,
+            true,
+            3,
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/log2",
+            log2_builtin as *const u8,
+            true,
+            true,
+            3,
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/pow",
+            pow_builtin as *const u8,
             true,
             true,
             4,
