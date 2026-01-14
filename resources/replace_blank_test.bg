@@ -1,0 +1,106 @@
+namespace replace_blank_test
+
+// Test replace and blank? functions
+
+fn main() {
+    // Test replace - basic
+    println("replace tests:")
+    let s1 = "hello world"
+    let replaced = replace(s1, "world", "there")
+    println("replace('hello world', 'world', 'there'):")
+    println(replaced)
+    println("Equals 'hello there'?")
+    println(replaced == "hello there")
+
+    // Test replace - multiple occurrences
+    let s2 = "foo bar foo baz foo"
+    let replaced2 = replace(s2, "foo", "qux")
+    println("\nreplace('foo bar foo baz foo', 'foo', 'qux'):")
+    println(replaced2)
+    println("Equals 'qux bar qux baz qux'?")
+    println(replaced2 == "qux bar qux baz qux")
+
+    // Test replace - no match
+    let s3 = "hello world"
+    let replaced3 = replace(s3, "xyz", "abc")
+    println("\nreplace with no match:")
+    println(replaced3)
+    println("Equals 'hello world'?")
+    println(replaced3 == "hello world")
+
+    // Test replace - empty string
+    let s4 = "hello"
+    let replaced4 = replace(s4, "", "x")
+    println("\nreplace with empty 'from':")
+    println(replaced4)
+
+    // Test replace - replace with empty
+    let s5 = "hello world"
+    let replaced5 = replace(s5, " ", "")
+    println("\nreplace(' ', ''):")
+    println(replaced5)
+    println("Equals 'helloworld'?")
+    println(replaced5 == "helloworld")
+
+    // Test blank? - empty string
+    println("\nblank? tests:")
+    println("blank?(''):")
+    println(blank?(""))
+
+    // Test blank? - whitespace only
+    println("blank?('   '):")
+    println(blank?("   "))
+    println("blank?('\\t'):")
+    println(blank?("\t"))
+
+    // Test blank? - non-blank strings
+    println("blank?('hello'):")
+    println(blank?("hello"))
+    println("blank?('  hello  '):")
+    println(blank?("  hello  "))
+
+    // Test blank? - single space
+    println("blank?(' '):")
+    println(blank?(" "))
+
+    ""
+}
+
+// Expect
+// replace tests:
+// replace('hello world', 'world', 'there'):
+// hello there
+// Equals 'hello there'?
+// true
+//
+// replace('foo bar foo baz foo', 'foo', 'qux'):
+// qux bar qux baz qux
+// Equals 'qux bar qux baz qux'?
+// true
+//
+// replace with no match:
+// hello world
+// Equals 'hello world'?
+// true
+//
+// replace with empty 'from':
+// xhxexlxlxox
+//
+// replace(' ', ''):
+// helloworld
+// Equals 'helloworld'?
+// true
+//
+// blank? tests:
+// blank?(''):
+// true
+// blank?('   '):
+// true
+// blank?('\t'):
+// true
+// blank?('hello'):
+// false
+// blank?('  hello  '):
+// false
+// blank?(' '):
+// true
