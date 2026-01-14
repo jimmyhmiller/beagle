@@ -1,0 +1,170 @@
+namespace clamp_gcd_lcm_test
+
+// Test clamp, gcd, and lcm functions
+
+fn main() {
+    // Test clamp with integers
+    println("clamp tests (integers):")
+    println("clamp(5, 0, 10) - should be 5:")
+    println(clamp(5, 0, 10))
+    println("clamp(-5, 0, 10) - should be 0:")
+    println(clamp(-5, 0, 10))
+    println("clamp(15, 0, 10) - should be 10:")
+    println(clamp(15, 0, 10))
+    println("clamp(0, 0, 10) - should be 0:")
+    println(clamp(0, 0, 10))
+    println("clamp(10, 0, 10) - should be 10:")
+    println(clamp(10, 0, 10))
+
+    // Test clamp with floats
+    println("\nclamp tests (floats):")
+    println("clamp(5.5, 0.0, 10.0) - should be 5.5:")
+    println(clamp(5.5, 0.0, 10.0))
+    println("clamp(-2.3, 0.0, 10.0) - should be 0.0:")
+    println(clamp(-2.3, 0.0, 10.0))
+    println("clamp(12.7, 0.0, 10.0) - should be 10.0:")
+    println(clamp(12.7, 0.0, 10.0))
+
+    // Test clamp with mixed int/float
+    println("\nclamp tests (mixed):")
+    println("clamp(5, 0.0, 10.0) - should be 5.0:")
+    println(clamp(5, 0.0, 10.0))
+    println("clamp(15.5, 0, 10) - should be 10.0:")
+    println(clamp(15.5, 0, 10))
+
+    // Test gcd
+    println("\ngcd tests:")
+    println("gcd(12, 8) - should be 4:")
+    println(gcd(12, 8))
+    println("gcd(48, 18) - should be 6:")
+    println(gcd(48, 18))
+    println("gcd(100, 10) - should be 10:")
+    println(gcd(100, 10))
+    println("gcd(7, 13) - should be 1 (coprime):")
+    println(gcd(7, 13))
+    println("gcd(0, 5) - should be 5:")
+    println(gcd(0, 5))
+    println("gcd(5, 0) - should be 5:")
+    println(gcd(5, 0))
+
+    // Test gcd with negative numbers
+    println("\ngcd tests (negative):")
+    println("gcd(-12, 8) - should be 4:")
+    println(gcd(-12, 8))
+    println("gcd(12, -8) - should be 4:")
+    println(gcd(12, -8))
+    println("gcd(-12, -8) - should be 4:")
+    println(gcd(-12, -8))
+
+    // Test lcm
+    println("\nlcm tests:")
+    println("lcm(4, 6) - should be 12:")
+    println(lcm(4, 6))
+    println("lcm(12, 18) - should be 36:")
+    println(lcm(12, 18))
+    println("lcm(5, 7) - should be 35 (coprime):")
+    println(lcm(5, 7))
+    println("lcm(10, 10) - should be 10:")
+    println(lcm(10, 10))
+    println("lcm(0, 5) - should be 0:")
+    println(lcm(0, 5))
+    println("lcm(5, 0) - should be 0:")
+    println(lcm(5, 0))
+
+    // Test lcm with negative numbers
+    println("\nlcm tests (negative):")
+    println("lcm(-4, 6) - should be 12:")
+    println(lcm(-4, 6))
+    println("lcm(4, -6) - should be 12:")
+    println(lcm(4, -6))
+    println("lcm(-4, -6) - should be 12:")
+    println(lcm(-4, -6))
+
+    // Verify GCD/LCM relationship: lcm(a,b) * gcd(a,b) = a * b
+    println("\nGCD/LCM relationship test:")
+    let a = 12
+    let b = 18
+    let gcd_val = gcd(a, b)
+    let lcm_val = lcm(a, b)
+    println("For a=12, b=18:")
+    println("gcd(12, 18) * lcm(12, 18) = a * b?")
+    println(gcd_val * lcm_val == a * b)
+
+    ""
+}
+
+// Expect
+// clamp tests (integers):
+// clamp(5, 0, 10) - should be 5:
+// 5
+// clamp(-5, 0, 10) - should be 0:
+// 0
+// clamp(15, 0, 10) - should be 10:
+// 10
+// clamp(0, 0, 10) - should be 0:
+// 0
+// clamp(10, 0, 10) - should be 10:
+// 10
+//
+// clamp tests (floats):
+// clamp(5.5, 0.0, 10.0) - should be 5.5:
+// 5.5
+// clamp(-2.3, 0.0, 10.0) - should be 0.0:
+// 0.0
+// clamp(12.7, 0.0, 10.0) - should be 10.0:
+// 10.0
+//
+// clamp tests (mixed):
+// clamp(5, 0.0, 10.0) - should be 5.0:
+// 5.0
+// clamp(15.5, 0, 10) - should be 10.0:
+// 10.0
+//
+// gcd tests:
+// gcd(12, 8) - should be 4:
+// 4
+// gcd(48, 18) - should be 6:
+// 6
+// gcd(100, 10) - should be 10:
+// 10
+// gcd(7, 13) - should be 1 (coprime):
+// 1
+// gcd(0, 5) - should be 5:
+// 5
+// gcd(5, 0) - should be 5:
+// 5
+//
+// gcd tests (negative):
+// gcd(-12, 8) - should be 4:
+// 4
+// gcd(12, -8) - should be 4:
+// 4
+// gcd(-12, -8) - should be 4:
+// 4
+//
+// lcm tests:
+// lcm(4, 6) - should be 12:
+// 12
+// lcm(12, 18) - should be 36:
+// 36
+// lcm(5, 7) - should be 35 (coprime):
+// 35
+// lcm(10, 10) - should be 10:
+// 10
+// lcm(0, 5) - should be 0:
+// 0
+// lcm(5, 0) - should be 0:
+// 0
+//
+// lcm tests (negative):
+// lcm(-4, 6) - should be 12:
+// 12
+// lcm(4, -6) - should be 12:
+// 12
+// lcm(-4, -6) - should be 12:
+// 12
+//
+// GCD/LCM relationship test:
+// For a=12, b=18:
+// gcd(12, 18) * lcm(12, 18) = a * b?
+// true
