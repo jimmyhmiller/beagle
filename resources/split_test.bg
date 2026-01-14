@@ -1,0 +1,94 @@
+namespace split_test
+
+// Test split function
+
+fn main() {
+    // Basic split
+    let s = "hello,world,test"
+    let parts = split(s, ",")
+
+    println("Split by comma:")
+    println(parts)
+    println("Length:")
+    println(length(parts))
+    println("First part:")
+    println(get(parts, 0))
+    println("Second part:")
+    println(get(parts, 1))
+    println("Third part:")
+    println(get(parts, 2))
+
+    // Split by space
+    let s2 = "one two three four"
+    let parts2 = split(s2, " ")
+    println("\nSplit by space:")
+    println(parts2)
+    println("Length:")
+    println(length(parts2))
+
+    // Split with multiple character delimiter
+    let s3 = "foo::bar::baz"
+    let parts3 = split(s3, "::")
+    println("\nSplit by '::':")
+    println(parts3)
+    println("Length:")
+    println(length(parts3))
+    println("Parts:")
+    println(get(parts3, 0))
+    println(get(parts3, 1))
+    println(get(parts3, 2))
+
+    // Split single word (no delimiter found)
+    let s4 = "hello"
+    let parts4 = split(s4, ",")
+    println("\nSplit with no delimiter found:")
+    println(parts4)
+    println("Length:")
+    println(length(parts4))
+
+    // Split empty parts
+    let s5 = "a,,b"
+    let parts5 = split(s5, ",")
+    println("\nSplit with empty parts:")
+    println(parts5)
+    println("Length:")
+    println(length(parts5))
+
+    ""
+}
+
+// Expect
+// Split by comma:
+// [ "hello", "world", "test" ]
+// Length:
+// 3
+// First part:
+// hello
+// Second part:
+// world
+// Third part:
+// test
+//
+// Split by space:
+// [ "one", "two", "three", "four" ]
+// Length:
+// 4
+//
+// Split by '::':
+// [ "foo", "bar", "baz" ]
+// Length:
+// 3
+// Parts:
+// foo
+// bar
+// baz
+//
+// Split with no delimiter found:
+// [ "hello" ]
+// Length:
+// 1
+//
+// Split with empty parts:
+// [ "a", "", "b" ]
+// Length:
+// 3
