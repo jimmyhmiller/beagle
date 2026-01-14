@@ -1,0 +1,123 @@
+namespace pad_test
+
+// Test pad-left and pad-right functions
+
+fn main() {
+    // Test pad-left with space - only check length since spaces get trimmed in expected output
+    println("pad-left tests:")
+    let padded1 = pad-left("hello", 10, " ")
+    println("pad-left('hello', 10, ' ') length:")
+    println(length(padded1) == 10)
+
+    // Test pad-left with custom character
+    let padded2 = pad-left("test", 8, "*")
+    println("\npad-left('test', 8, '*'):")
+    println(padded2)
+    println("Equals '****test'?")
+    println(padded2 == "****test")
+
+    // Test pad-left with already wide string
+    let padded3 = pad-left("hello world", 5, " ")
+    println("\npad-left('hello world', 5, ' ') - no padding:")
+    println(padded3)
+    println("Equals 'hello world'?")
+    println(padded3 == "hello world")
+
+    // Test pad-left with zero character
+    let padded4 = pad-left("42", 5, "0")
+    println("\npad-left('42', 5, '0'):")
+    println(padded4)
+    println("Equals '00042'?")
+    println(padded4 == "00042")
+
+    // Test pad-right with space - only check length
+    println("\npad-right tests:")
+    let padded5 = pad-right("hello", 10, " ")
+    println("pad-right('hello', 10, ' ') length:")
+    println(length(padded5) == 10)
+
+    // Test pad-right with custom character
+    let padded6 = pad-right("test", 8, "*")
+    println("\npad-right('test', 8, '*'):")
+    println(padded6)
+    println("Equals 'test****'?")
+    println(padded6 == "test****")
+
+    // Test pad-right with already wide string
+    let padded7 = pad-right("hello world", 5, " ")
+    println("\npad-right('hello world', 5, ' ') - no padding:")
+    println(padded7)
+    println("Equals 'hello world'?")
+    println(padded7 == "hello world")
+
+    // Test pad-right with dash
+    let padded8 = pad-right("Name", 10, "-")
+    println("\npad-right('Name', 10, '-'):")
+    println(padded8)
+    println("Equals 'Name------'?")
+    println(padded8 == "Name------")
+
+    // Test exact width match
+    let padded9 = pad-left("exact", 5, " ")
+    println("\npad-left('exact', 5, ' ') - exact match:")
+    println(padded9)
+    println("Equals 'exact'?")
+    println(padded9 == "exact")
+
+    let padded10 = pad-right("exact", 5, " ")
+    println("\npad-right('exact', 5, ' ') - exact match:")
+    println(padded10)
+    println("Equals 'exact'?")
+    println(padded10 == "exact")
+
+    ""
+}
+
+// Expect
+// pad-left tests:
+// pad-left('hello', 10, ' ') length:
+// true
+//
+// pad-left('test', 8, '*'):
+// ****test
+// Equals '****test'?
+// true
+//
+// pad-left('hello world', 5, ' ') - no padding:
+// hello world
+// Equals 'hello world'?
+// true
+//
+// pad-left('42', 5, '0'):
+// 00042
+// Equals '00042'?
+// true
+//
+// pad-right tests:
+// pad-right('hello', 10, ' ') length:
+// true
+//
+// pad-right('test', 8, '*'):
+// test****
+// Equals 'test****'?
+// true
+//
+// pad-right('hello world', 5, ' ') - no padding:
+// hello world
+// Equals 'hello world'?
+// true
+//
+// pad-right('Name', 10, '-'):
+// Name------
+// Equals 'Name------'?
+// true
+//
+// pad-left('exact', 5, ' ') - exact match:
+// exact
+// Equals 'exact'?
+// true
+//
+// pad-right('exact', 5, ' ') - exact match:
+// exact
+// Equals 'exact'?
+// true

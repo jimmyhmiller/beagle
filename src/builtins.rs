@@ -638,6 +638,70 @@ extern "C" fn replace_first_string(
         .into()
 }
 
+extern "C" fn pad_left_string(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    string: usize,
+    width: usize,
+    pad_char: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(get_runtime().get(), "pad-left");
+    let runtime = get_runtime().get_mut();
+    let string_value = runtime.get_string(stack_pointer, string);
+    let width_value = BuiltInTypes::untag_isize(width as isize) as usize;
+    let pad_char_value = runtime.get_string(stack_pointer, pad_char);
+
+    // Get the first character from the pad string, or use space if empty
+    let pad_ch = pad_char_value.chars().next().unwrap_or(' ');
+
+    let current_len = string_value.chars().count();
+    if current_len >= width_value {
+        // Already at or exceeds desired width, return as-is
+        return string;
+    }
+
+    let padding_needed = width_value - current_len;
+    let padded = format!("{}{}", pad_ch.to_string().repeat(padding_needed), string_value);
+
+    runtime
+        .allocate_string(stack_pointer, padded)
+        .unwrap()
+        .into()
+}
+
+extern "C" fn pad_right_string(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    string: usize,
+    width: usize,
+    pad_char: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(get_runtime().get(), "pad-right");
+    let runtime = get_runtime().get_mut();
+    let string_value = runtime.get_string(stack_pointer, string);
+    let width_value = BuiltInTypes::untag_isize(width as isize) as usize;
+    let pad_char_value = runtime.get_string(stack_pointer, pad_char);
+
+    // Get the first character from the pad string, or use space if empty
+    let pad_ch = pad_char_value.chars().next().unwrap_or(' ');
+
+    let current_len = string_value.chars().count();
+    if current_len >= width_value {
+        // Already at or exceeds desired width, return as-is
+        return string;
+    }
+
+    let padding_needed = width_value - current_len;
+    let padded = format!("{}{}", string_value, pad_ch.to_string().repeat(padding_needed));
+
+    runtime
+        .allocate_string(stack_pointer, padded)
+        .unwrap()
+        .into()
+}
+
 extern "C" fn fill_object_fields(object_pointer: usize, value: usize) -> usize {
     print_call_builtin(get_runtime().get(), "fill_object_fields");
     let mut object = HeapObject::from_tagged(object_pointer);
@@ -4428,6 +4492,24 @@ impl Runtime {
         self.add_builtin_function_with_fp(
             "beagle.core/replace-first",
             replace_first_string as *const u8,
+            true,
+            true,
+            5,
+        )?;
+
+        // pad-left now takes (stack_pointer, frame_pointer, string, width, pad_char)
+        self.add_builtin_function_with_fp(
+            "beagle.core/pad-left",
+            pad_left_string as *const u8,
+            true,
+            true,
+            5,
+        )?;
+
+        // pad-right now takes (stack_pointer, frame_pointer, string, width, pad_char)
+        self.add_builtin_function_with_fp(
+            "beagle.core/pad-right",
+            pad_right_string as *const u8,
             true,
             true,
             5,
