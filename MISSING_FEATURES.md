@@ -182,8 +182,6 @@ if x < 0 {
 Currently missing (per STDLIB_PLAN.md):
 
 ```
-pad-left(str, width, char)
-pad-right(str, width, char)
 lines(str)
 words(str)
 ```
