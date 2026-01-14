@@ -186,11 +186,11 @@ All planned string functions have been implemented.
 Currently missing:
 
 ```
-random(), random-int(max), random-range(min, max)
-
 // Constants
 PI, E, TAU
 ```
+
+Note: All math functions have been implemented except for the constants.
 
 ### Map Utilities
 
