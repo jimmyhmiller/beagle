@@ -182,9 +182,6 @@ if x < 0 {
 Currently missing (per STDLIB_PLAN.md):
 
 ```
-starts-with?(str, prefix)
-ends-with?(str, suffix)
-contains?(str, substr)
 index-of(str, substr)
 last-index-of(str, substr)
 replace(str, from, to)
