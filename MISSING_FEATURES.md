@@ -182,7 +182,6 @@ if x < 0 {
 Currently missing (per STDLIB_PLAN.md):
 
 ```
-join(coll, separator)      // Join with separator
 trim(str)                  // Remove whitespace
 trim-left(str)
 trim-right(str)
