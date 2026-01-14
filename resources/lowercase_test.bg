@@ -1,0 +1,57 @@
+namespace lowercase_test
+
+// Test lowercase function
+
+fn main() {
+    let s = "HELLO"
+    let lower = lowercase(s)
+
+    println("Lowercase result:")
+    println(lower)
+
+    println("Equals hello?")
+    println(lower == "hello")
+
+    // Test substring of lowercase
+    let sub = substring(lower, 0, 1)
+    println("Substring of lowercase:")
+    println(sub)
+    println("Equals h?")
+    println(sub == "h")
+
+    // Test with mixed case
+    let s2 = "HeLLo WoRLd"
+    let lower2 = lowercase(s2)
+    println("Mixed case lowercase:")
+    println(lower2)
+    println("Equals hello world?")
+    println(lower2 == "hello world")
+
+    // Test already lowercase
+    let s3 = "already lowercase"
+    let lower3 = lowercase(s3)
+    println("Already lowercase:")
+    println(lower3)
+    println("Equals already lowercase?")
+    println(lower3 == "already lowercase")
+
+    ""
+}
+
+// Expect
+// Lowercase result:
+// hello
+// Equals hello?
+// true
+// Substring of lowercase:
+// h
+// Equals h?
+// true
+// Mixed case lowercase:
+// hello world
+// Equals hello world?
+// true
+// Already lowercase:
+// already lowercase
+// Equals already lowercase?
+// true
