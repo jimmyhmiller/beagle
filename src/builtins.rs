@@ -18,6 +18,7 @@ use crate::{
 };
 
 use std::hint::black_box;
+use rand::Rng;
 
 // Thread-local storage for the frame pointer and gc return address at builtin entry.
 // This is set by builtins that receive frame_pointer from Beagle code.
@@ -1807,6 +1808,58 @@ extern "C" fn lcm_builtin(a: usize, b: usize) -> usize {
     let lcm = (a_val * b_val) / gcd_val;
 
     BuiltInTypes::construct_int(lcm) as usize
+}
+
+/// random builtin - returns a random float between 0.0 and 1.0
+pub unsafe extern "C" fn random_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    unsafe {
+        let runtime = get_runtime().get_mut();
+        let mut rng = rand::thread_rng();
+        let random_value: f64 = rng.gen_range(0.0..1.0);
+
+        let new_float_ptr = runtime
+            .allocate(1, stack_pointer, BuiltInTypes::Float)
+            .unwrap();
+
+        let untagged_result = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged_result as *mut f64;
+        *result_ptr.add(1) = random_value;
+
+        new_float_ptr
+    }
+}
+
+/// random-int builtin - returns a random integer from 0 to max-1
+extern "C" fn random_int_builtin(max: usize) -> usize {
+    let max_val = BuiltInTypes::untag_isize(max as isize);
+
+    if max_val <= 0 {
+        return BuiltInTypes::construct_int(0) as usize;
+    }
+
+    let mut rng = rand::thread_rng();
+    let random_value: isize = rng.gen_range(0..max_val);
+
+    BuiltInTypes::construct_int(random_value) as usize
+}
+
+/// random-range builtin - returns a random integer from min to max-1
+extern "C" fn random_range_builtin(min: usize, max: usize) -> usize {
+    let min_val = BuiltInTypes::untag_isize(min as isize);
+    let max_val = BuiltInTypes::untag_isize(max as isize);
+
+    if min_val >= max_val {
+        return BuiltInTypes::construct_int(min_val) as usize;
+    }
+
+    let mut rng = rand::thread_rng();
+    let random_value: isize = rng.gen_range(min_val..max_val);
+
+    BuiltInTypes::construct_int(random_value) as usize
 }
 
 /// even? predicate - checks if an integer is even
@@ -4505,6 +4558,25 @@ impl Runtime {
         self.add_builtin_function(
             "beagle.core/lcm",
             lcm_builtin as *const u8,
+            false,
+            2,
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/random",
+            random_builtin as *const u8,
+            true,
+            true,
+            2,
+        )?;
+        self.add_builtin_function(
+            "beagle.core/random-int",
+            random_int_builtin as *const u8,
+            false,
+            1,
+        )?;
+        self.add_builtin_function(
+            "beagle.core/random-range",
+            random_range_builtin as *const u8,
             false,
             2,
         )?;

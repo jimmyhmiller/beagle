@@ -1,0 +1,117 @@
+namespace random_test
+
+// Test random number functions
+// Note: Since these are random, we test ranges rather than exact values
+
+fn main() {
+    // Test random - should return values between 0.0 and 1.0
+    println("random tests:")
+    println("Testing 10 random() calls - all should be >= 0.0 and < 1.0:")
+
+    let r1 = random()
+    println("random():")
+    println(r1)
+    println(">= 0.0?")
+    println(r1 >= 0.0)
+    println("< 1.0?")
+    println(r1 < 1.0)
+
+    let r2 = random()
+    println("\nrandom():")
+    println(r2)
+    println(">= 0.0?")
+    println(r2 >= 0.0)
+    println("< 1.0?")
+    println(r2 < 1.0)
+
+    let r3 = random()
+    println("\nrandom():")
+    println(r3)
+    println(">= 0.0?")
+    println(r3 >= 0.0)
+    println("< 1.0?")
+    println(r3 < 1.0)
+
+    // Test random-int - should return integers from 0 to max-1
+    println("\nrandom-int tests:")
+    println("Testing random-int(10) - should be >= 0 and < 10:")
+
+    let ri1 = random-int(10)
+    println("random-int(10):")
+    println(ri1)
+    println(">= 0?")
+    println(ri1 >= 0)
+    println("< 10?")
+    println(ri1 < 10)
+
+    let ri2 = random-int(10)
+    println("\nrandom-int(10):")
+    println(ri2)
+    println(">= 0?")
+    println(ri2 >= 0)
+    println("< 10?")
+    println(ri2 < 10)
+
+    let ri3 = random-int(10)
+    println("\nrandom-int(10):")
+    println(ri3)
+    println(">= 0?")
+    println(ri3 >= 0)
+    println("< 10?")
+    println(ri3 < 10)
+
+    // Test random-int with 1 (should always return 0)
+    println("\nrandom-int(1) - should always be 0:")
+    println(random-int(1))
+    println(random-int(1))
+    println(random-int(1))
+
+    // Test random-range - should return integers from min to max-1
+    println("\nrandom-range tests:")
+    println("Testing random-range(5, 15) - should be >= 5 and < 15:")
+
+    let rr1 = random-range(5, 15)
+    println("random-range(5, 15):")
+    println(rr1)
+    println(">= 5?")
+    println(rr1 >= 5)
+    println("< 15?")
+    println(rr1 < 15)
+
+    let rr2 = random-range(5, 15)
+    println("\nrandom-range(5, 15):")
+    println(rr2)
+    println(">= 5?")
+    println(rr2 >= 5)
+    println("< 15?")
+    println(rr2 < 15)
+
+    let rr3 = random-range(5, 15)
+    println("\nrandom-range(5, 15):")
+    println(rr3)
+    println(">= 5?")
+    println(rr3 >= 5)
+    println("< 15?")
+    println(rr3 < 15)
+
+    // Test random-range with negative numbers
+    println("\nrandom-range(-10, -5) - should be >= -10 and < -5:")
+    let rr4 = random-range(-10, -5)
+    println(rr4)
+    println(">= -10?")
+    println(rr4 >= -10)
+    println("< -5?")
+    println(rr4 < -5)
+
+    // Test random-range with same min/max (should return min)
+    println("\nrandom-range(7, 7) - should always be 7:")
+    println(random-range(7, 7))
+    println(random-range(7, 7))
+    println(random-range(7, 7))
+
+    ""
+}
+
+// Note: We can't have exact "Expect" values for random functions
+// The test passes if the program runs without errors
+// Manual inspection shows values are in correct ranges

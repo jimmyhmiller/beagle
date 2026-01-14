@@ -24,6 +24,7 @@ libloading = "0.8.5"
 libc = "0.2.169"
 nanoserde = { version = "0.2.0-beta.0", features = ["json", "binary"] }
 usdt = "0.5"
+rand = "0.8"
 
 
 
