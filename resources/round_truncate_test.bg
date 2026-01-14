@@ -1,0 +1,106 @@
+namespace round_truncate_test
+
+// Test round and truncate functions
+
+fn main() {
+    // Test round with positive numbers
+    println("round tests (positive):")
+    println("round(1.4):")
+    println(round(1.4))
+    println("round(1.5):")
+    println(round(1.5))
+    println("round(1.6):")
+    println(round(1.6))
+    println("round(2.5):")
+    println(round(2.5))
+
+    // Test round with negative numbers
+    println("\nround tests (negative):")
+    println("round(-1.4):")
+    println(round(-1.4))
+    println("round(-1.5):")
+    println(round(-1.5))
+    println("round(-1.6):")
+    println(round(-1.6))
+
+    // Test truncate with positive numbers
+    println("\ntruncate tests (positive):")
+    println("truncate(1.4):")
+    println(truncate(1.4))
+    println("truncate(1.9):")
+    println(truncate(1.9))
+    println("truncate(2.0):")
+    println(truncate(2.0))
+
+    // Test truncate with negative numbers
+    println("\ntruncate tests (negative):")
+    println("truncate(-1.4):")
+    println(truncate(-1.4))
+    println("truncate(-1.9):")
+    println(truncate(-1.9))
+    println("truncate(-2.0):")
+    println(truncate(-2.0))
+
+    // Test with zero
+    println("\nTests with zero:")
+    println("round(0.0):")
+    println(round(0.0))
+    println("truncate(0.0):")
+    println(truncate(0.0))
+
+    // Test with integers
+    println("\nTests with integers:")
+    println("round(5.0):")
+    println(round(5.0))
+    println("truncate(5.0):")
+    println(truncate(5.0))
+
+    ""
+}
+
+// Expect
+// round tests (positive):
+// round(1.4):
+// 1.0
+// round(1.5):
+// 2.0
+// round(1.6):
+// 2.0
+// round(2.5):
+// 3.0
+//
+// round tests (negative):
+// round(-1.4):
+// -1.0
+// round(-1.5):
+// -2.0
+// round(-1.6):
+// -2.0
+//
+// truncate tests (positive):
+// truncate(1.4):
+// 1.0
+// truncate(1.9):
+// 1.0
+// truncate(2.0):
+// 2.0
+//
+// truncate tests (negative):
+// truncate(-1.4):
+// -1.0
+// truncate(-1.9):
+// -1.0
+// truncate(-2.0):
+// -2.0
+//
+// Tests with zero:
+// round(0.0):
+// 0.0
+// truncate(0.0):
+// 0.0
+//
+// Tests with integers:
+// round(5.0):
+// 5.0
+// truncate(5.0):
+// 5.0
