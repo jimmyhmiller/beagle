@@ -186,7 +186,6 @@ All planned string functions have been implemented.
 Currently missing:
 
 ```
-exp(x), log(x), log10(x), log2(x), pow(base, exp)
 clamp(x, low, high)
 gcd(a, b), lcm(a, b)
 random(), random-int(max), random-range(min, max)
