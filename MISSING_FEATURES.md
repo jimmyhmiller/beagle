@@ -182,7 +182,6 @@ if x < 0 {
 Currently missing (per STDLIB_PLAN.md):
 
 ```
-replace-first(str, from, to)
 pad-left(str, width, char)
 pad-right(str, width, char)
 lines(str)
