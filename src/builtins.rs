@@ -465,6 +465,42 @@ extern "C" fn join(
         .into()
 }
 
+extern "C" fn trim(stack_pointer: usize, frame_pointer: usize, string: usize) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(get_runtime().get(), "trim");
+    let runtime = get_runtime().get_mut();
+    let string_value = runtime.get_string(stack_pointer, string);
+    let trimmed = string_value.trim();
+    runtime
+        .allocate_string(stack_pointer, trimmed.to_string())
+        .unwrap()
+        .into()
+}
+
+extern "C" fn trim_left(stack_pointer: usize, frame_pointer: usize, string: usize) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(get_runtime().get(), "trim-left");
+    let runtime = get_runtime().get_mut();
+    let string_value = runtime.get_string(stack_pointer, string);
+    let trimmed = string_value.trim_start();
+    runtime
+        .allocate_string(stack_pointer, trimmed.to_string())
+        .unwrap()
+        .into()
+}
+
+extern "C" fn trim_right(stack_pointer: usize, frame_pointer: usize, string: usize) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(get_runtime().get(), "trim-right");
+    let runtime = get_runtime().get_mut();
+    let string_value = runtime.get_string(stack_pointer, string);
+    let trimmed = string_value.trim_end();
+    runtime
+        .allocate_string(stack_pointer, trimmed.to_string())
+        .unwrap()
+        .into()
+}
+
 extern "C" fn fill_object_fields(object_pointer: usize, value: usize) -> usize {
     print_call_builtin(get_runtime().get(), "fill_object_fields");
     let mut object = HeapObject::from_tagged(object_pointer);
@@ -3862,6 +3898,33 @@ impl Runtime {
             true,
             true,
             4,
+        )?;
+
+        // trim now takes (stack_pointer, frame_pointer, string)
+        self.add_builtin_function_with_fp(
+            "beagle.core/trim",
+            trim as *const u8,
+            true,
+            true,
+            3,
+        )?;
+
+        // trim-left now takes (stack_pointer, frame_pointer, string)
+        self.add_builtin_function_with_fp(
+            "beagle.core/trim-left",
+            trim_left as *const u8,
+            true,
+            true,
+            3,
+        )?;
+
+        // trim-right now takes (stack_pointer, frame_pointer, string)
+        self.add_builtin_function_with_fp(
+            "beagle.core/trim-right",
+            trim_right as *const u8,
+            true,
+            true,
+            3,
         )?;
 
         // hash now takes (stack_pointer, frame_pointer, value)

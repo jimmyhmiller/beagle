@@ -1,0 +1,112 @@
+namespace trim_test
+
+// Test trim, trim-left, and trim-right functions
+
+fn main() {
+    // Test basic trim
+    let s1 = "  hello world  "
+    let trimmed = trim(s1)
+    println("Basic trim:")
+    println("'" ++ trimmed ++ "'")
+    println("Equals 'hello world'?")
+    println(trimmed == "hello world")
+
+    // Test trim with only leading whitespace
+    let s2 = "  hello"
+    let trimmed2 = trim(s2)
+    println("\nTrim with leading whitespace:")
+    println("'" ++ trimmed2 ++ "'")
+    println("Equals 'hello'?")
+    println(trimmed2 == "hello")
+
+    // Test trim with only trailing whitespace
+    let s3 = "hello  "
+    let trimmed3 = trim(s3)
+    println("\nTrim with trailing whitespace:")
+    println("'" ++ trimmed3 ++ "'")
+    println("Equals 'hello'?")
+    println(trimmed3 == "hello")
+
+    // Test trim-left
+    let s4 = "  hello world  "
+    let left_trimmed = trim-left(s4)
+    println("\nTrim-left:")
+    println("'" ++ left_trimmed ++ "'")
+    println("Equals 'hello world  '?")
+    println(left_trimmed == "hello world  ")
+
+    // Test trim-right
+    let s5 = "  hello world  "
+    let right_trimmed = trim-right(s5)
+    println("\nTrim-right:")
+    println("'" ++ right_trimmed ++ "'")
+    println("Equals '  hello world'?")
+    println(right_trimmed == "  hello world")
+
+    // Test with tabs and newlines
+    let s6 = "\t\n  hello  \n\t"
+    let trimmed6 = trim(s6)
+    println("\nTrim with tabs and newlines:")
+    println("'" ++ trimmed6 ++ "'")
+    println("Equals 'hello'?")
+    println(trimmed6 == "hello")
+
+    // Test already trimmed string
+    let s7 = "hello"
+    let trimmed7 = trim(s7)
+    println("\nTrim already trimmed string:")
+    println("'" ++ trimmed7 ++ "'")
+    println("Equals 'hello'?")
+    println(trimmed7 == "hello")
+
+    // Test empty string
+    let s8 = "   "
+    let trimmed8 = trim(s8)
+    println("\nTrim whitespace-only string:")
+    println("'" ++ trimmed8 ++ "'")
+    println("Is empty?")
+    println(trimmed8 == "")
+
+    ""
+}
+
+// Expect
+// Basic trim:
+// 'hello world'
+// Equals 'hello world'?
+// true
+//
+// Trim with leading whitespace:
+// 'hello'
+// Equals 'hello'?
+// true
+//
+// Trim with trailing whitespace:
+// 'hello'
+// Equals 'hello'?
+// true
+//
+// Trim-left:
+// 'hello world  '
+// Equals 'hello world  '?
+// true
+//
+// Trim-right:
+// '  hello world'
+// Equals '  hello world'?
+// true
+//
+// Trim with tabs and newlines:
+// 'hello'
+// Equals 'hello'?
+// true
+//
+// Trim already trimmed string:
+// 'hello'
+// Equals 'hello'?
+// true
+//
+// Trim whitespace-only string:
+// ''
+// Is empty?
+// true
