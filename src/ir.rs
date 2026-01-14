@@ -114,6 +114,7 @@ pub enum Instruction {
     AddInt(Value, Value, Value),
     Mul(Value, Value, Value),
     Div(Value, Value, Value),
+    Modulo(Value, Value, Value),
     Assign(Value, Value),
     Recurse(Value, Vec<Value>),
     RecurseWithSaves(Value, Vec<Value>, Vec<Value>),
@@ -288,6 +289,9 @@ impl Instruction {
                 get_registers!(a, b, c)
             }
             Instruction::Div(a, b, c) => {
+                get_registers!(a, b, c)
+            }
+            Instruction::Modulo(a, b, c) => {
                 get_registers!(a, b, c)
             }
             Instruction::ShiftLeft(a, b, c) => {
@@ -527,6 +531,7 @@ impl Instruction {
             | Instruction::AddInt(value, value1, value2)
             | Instruction::Mul(value, value1, value2)
             | Instruction::Div(value, value1, value2)
+            | Instruction::Modulo(value, value1, value2)
             | Instruction::HeapLoadReg(value, value1, value2)
             | Instruction::HeapStoreOffsetReg(value, value1, value2)
             | Instruction::ShiftLeft(value, value1, value2)
@@ -895,6 +900,29 @@ impl Ir {
         B: Into<Value>,
     {
         self.math_any(a, b, Self::div, Self::div_float)
+    }
+
+    pub fn modulo<A, B>(&mut self, a: A, b: B) -> Value
+    where
+        A: Into<Value>,
+        B: Into<Value>,
+    {
+        let register = self.volatile_register();
+        let a = self.assign_new(a.into());
+        let b = self.assign_new(b.into());
+        self.instructions
+            .push(Instruction::Modulo(register.into(), a.into(), b.into()));
+        Value::Register(register)
+    }
+
+    pub fn modulo_any<A, B>(&mut self, a: A, b: B) -> Value
+    where
+        A: Into<Value>,
+        B: Into<Value>,
+    {
+        // For now, only integer modulo is supported
+        // True modulo: ((a % b) + b) % b to handle negative numbers correctly
+        self.modulo(a, b)
     }
 
     pub fn compare(&mut self, a: Value, b: Value, condition: Condition) -> Value {
@@ -1348,6 +1376,32 @@ impl Ir {
                     backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
                     backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
                     backend.div(dest, a, b);
+                    backend.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
+                    // Only re-tag operands if they're different from dest
+                    if a != dest {
+                        backend.shift_left_imm(a, a, BuiltInTypes::tag_size());
+                    }
+                    if b != dest {
+                        backend.shift_left_imm(b, b, BuiltInTypes::tag_size());
+                    }
+                    self.store_spill(dest, dest_spill, backend);
+                }
+                Instruction::Modulo(dest, a, b) => {
+                    let a = self.value_to_register(a, backend);
+                    let b = self.value_to_register(b, backend);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, backend);
+
+                    // Use a temporary register for guard checks
+                    let guard_temp = backend.temporary_register();
+                    backend.guard_integer(guard_temp, a, self.after_return);
+                    backend.guard_integer(guard_temp, b, self.after_return);
+                    backend.free_temporary_register(guard_temp);
+
+                    backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
+                    backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    // True modulo: result is always non-negative when divisor is positive
+                    backend.modulo(dest, a, b);
                     backend.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
                     // Only re-tag operands if they're different from dest
                     if a != dest {

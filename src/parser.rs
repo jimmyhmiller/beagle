@@ -193,6 +193,9 @@ pub enum Token {
     Underscore,
     For,
     In,
+    Pipe,
+    PipeLast,
+    Modulo,
 }
 impl Token {
     fn is_binary_operator(&self) -> bool {
@@ -216,7 +219,10 @@ impl Token {
             | Token::BitWiseXor
             | Token::Or
             | Token::And
-            | Token::Equal => true,
+            | Token::Equal
+            | Token::Pipe
+            | Token::PipeLast
+            | Token::Modulo => true,
             _ => false,
         }
     }
@@ -285,6 +291,9 @@ impl Token {
             Token::Underscore => Ok("_".to_string()),
             Token::For => Ok("for".to_string()),
             Token::In => Ok("in".to_string()),
+            Token::Pipe => Ok("|>".to_string()),
+            Token::PipeLast => Ok("|>>".to_string()),
+            Token::Modulo => Ok("%".to_string()),
             Token::Comment((start, end))
             | Token::Atom((start, end))
             | Token::Keyword((start, end))
@@ -553,11 +562,14 @@ impl Tokenizer {
             b"-" => Token::Minus,
             b"*" => Token::Mul,
             b"/" => Token::Div,
+            b"%" => Token::Modulo,
             b">>" => Token::ShiftRight,
             b">>>" => Token::ShiftRightZero,
             b"<<" => Token::ShiftLeft,
             b"&" => Token::BitWiseAnd,
             b"|" => Token::BitWiseOr,
+            b"|>" => Token::Pipe,
+            b"|>>" => Token::PipeLast,
             b"^" => Token::BitWiseXor,
             b"||" => Token::Or,
             b"&&" => Token::And,
@@ -842,6 +854,8 @@ impl Parser {
 
     fn get_precedence(&self) -> (usize, Associativity) {
         match self.current_token() {
+            // Pipe operators have the lowest precedence.
+            Token::Pipe | Token::PipeLast => (5, Associativity::Left),
             // Logical OR (||) has the lowest precedence among common operators.
             Token::Or => (10, Associativity::Left),
             // Logical AND (&&) comes after OR.
@@ -855,8 +869,8 @@ impl Parser {
             | Token::GreaterThanOrEqual => (30, Associativity::Left),
             // Addition and subtraction.
             Token::Plus | Token::Minus => (40, Associativity::Left),
-            // Multiplication, division, etc.
-            Token::Mul | Token::Div => (50, Associativity::Left),
+            // Multiplication, division, modulo.
+            Token::Mul | Token::Div | Token::Modulo => (50, Associativity::Left),
             // Bitwise operations (lower precedence than arithmetic).
             Token::BitWiseOr => (60, Associativity::Left),
             Token::BitWiseXor => (70, Associativity::Left),
@@ -917,6 +931,21 @@ impl Parser {
         // TODO: This is ugly
         self.skip_spaces();
         loop {
+            // Check if we should look ahead across newlines for a binary operator.
+            // This allows any binary operator to appear at the start of a new line,
+            // enabling multi-line expressions like: 1 + 2 \n + 3
+            if self.is_newline() {
+                let saved_pos = self.position;
+                self.skip_whitespace();
+                if !self.at_end() && self.current_token().is_binary_operator() {
+                    // There's a binary operator - continue with it
+                } else {
+                    // No binary operator - restore position and break
+                    self.position = saved_pos;
+                    break;
+                }
+            }
+
             if self.at_end()
                 || !self.current_token().is_binary_operator()
                 || self.get_precedence().0 < min_precedence
@@ -2576,6 +2605,11 @@ impl Parser {
                 right: Box::new(rhs),
                 token_range,
             },
+            Token::Modulo => Ast::Modulo {
+                left: Box::new(lhs),
+                right: Box::new(rhs),
+                token_range,
+            },
             Token::ShiftLeft => Ast::ShiftLeft {
                 left: Box::new(lhs),
                 right: Box::new(rhs),
@@ -2635,6 +2669,54 @@ impl Parser {
                 name: Box::new(lhs),
                 value: Box::new(rhs),
                 token_range,
+            },
+            // Pipe-first: x |> f becomes f(x), x |> f(y) becomes f(x, y)
+            Token::Pipe => match rhs {
+                Ast::Call { name, args, .. } => {
+                    let mut new_args = vec![lhs];
+                    new_args.extend(args);
+                    Ast::Call {
+                        name,
+                        args: new_args,
+                        token_range,
+                    }
+                }
+                Ast::Identifier(name, _) => Ast::Call {
+                    name,
+                    args: vec![lhs],
+                    token_range,
+                },
+                _ => {
+                    return Err(ParseError::InvalidExpression {
+                        message: "Pipe operator requires a function or function call on the right"
+                            .to_string(),
+                        position: start_position,
+                    });
+                }
+            },
+            // Pipe-last: x |>> f(y) becomes f(y, x)
+            Token::PipeLast => match rhs {
+                Ast::Call { name, mut args, .. } => {
+                    args.push(lhs);
+                    Ast::Call {
+                        name,
+                        args,
+                        token_range,
+                    }
+                }
+                Ast::Identifier(name, _) => Ast::Call {
+                    name,
+                    args: vec![lhs],
+                    token_range,
+                },
+                _ => {
+                    return Err(ParseError::InvalidExpression {
+                        message:
+                            "Pipe-last operator requires a function or function call on the right"
+                                .to_string(),
+                        position: start_position,
+                    });
+                }
             },
             _ => {
                 return Err(ParseError::InvalidExpression {

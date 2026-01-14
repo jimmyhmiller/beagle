@@ -291,6 +291,40 @@ impl LowLevelX86 {
         self.instructions.push(X86Asm::Pop { reg: RDX });
     }
 
+    /// Modulo operation: returns remainder of a / b
+    /// On x86-64, IDIV puts quotient in RAX and remainder in RDX
+    pub fn modulo(&mut self, destination: X86Register, a: X86Register, b: X86Register) {
+        // IDIV uses RDX:RAX / divisor, quotient in RAX, remainder in RDX
+        self.instructions.push(X86Asm::Push { reg: RDX });
+
+        // If divisor is RAX, we need to save it before moving dividend to RAX
+        let actual_divisor = if b == RAX {
+            self.mov_reg(R11, b); // Save divisor before clobbering RAX
+            R11
+        } else if b == RDX {
+            // Divisor is RDX, but we just pushed RDX and will clobber it with CQO
+            self.mov_reg(R11, b); // Save divisor
+            R11
+        } else {
+            b
+        };
+
+        self.mov_reg(RAX, a);
+        self.instructions.push(X86Asm::Cqo); // Sign-extend RAX to RDX:RAX
+        self.instructions.push(X86Asm::Idiv {
+            divisor: actual_divisor,
+        });
+        // Remainder is in RDX - but we need to pop first since we pushed RDX
+        if destination == RDX {
+            // Destination is RDX - get remainder from stack-top, discard old value
+            self.instructions.push(X86Asm::Pop { reg: R11 }); // Discard saved RDX
+        // RDX already has remainder
+        } else {
+            self.mov_reg(destination, RDX); // Get remainder
+            self.instructions.push(X86Asm::Pop { reg: RDX }); // Restore RDX
+        }
+    }
+
     // === Shift operations ===
 
     pub fn shift_right_imm(&mut self, destination: X86Register, a: X86Register, imm: i32) {

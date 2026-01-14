@@ -115,6 +115,11 @@ pub enum Ast {
         right: Box<Ast>,
         token_range: TokenRange,
     },
+    Modulo {
+        left: Box<Ast>,
+        right: Box<Ast>,
+        token_range: TokenRange,
+    },
     Recurse {
         args: Vec<Ast>,
         token_range: TokenRange,
@@ -333,6 +338,7 @@ impl Ast {
             | Ast::Sub { token_range, .. }
             | Ast::Mul { token_range, .. }
             | Ast::Div { token_range, .. }
+            | Ast::Modulo { token_range, .. }
             | Ast::Recurse { token_range, .. }
             | Ast::TailRecurse { token_range, .. }
             | Ast::Call { token_range, .. }
@@ -1938,6 +1944,13 @@ impl AstCompiler<'_> {
                 let right = self.call_compile(&right);
                 self.ir.div_any(left, right)
             }
+            Ast::Modulo { left, right, .. } => {
+                self.not_tail_position();
+                let left = self.call_compile(&left);
+                self.not_tail_position();
+                let right = self.call_compile(&right);
+                self.ir.modulo_any(left, right)
+            }
             Ast::ShiftLeft { left, right, .. } => {
                 self.not_tail_position();
                 let left = self.call_compile(&left);
@@ -3515,6 +3528,7 @@ impl AstCompiler<'_> {
             | Ast::Sub { left, right, .. }
             | Ast::Mul { left, right, .. }
             | Ast::Div { left, right, .. }
+            | Ast::Modulo { left, right, .. }
             | Ast::ShiftLeft { left, right, .. }
             | Ast::ShiftRight { left, right, .. }
             | Ast::ShiftRightZero { left, right, .. }

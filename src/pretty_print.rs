@@ -118,6 +118,14 @@ impl PrettyPrint for Instruction {
                     value2.pretty_print()
                 )
             }
+            Instruction::Modulo(value, value1, value2) => {
+                format!(
+                    "mod {}, {}, {}",
+                    value.pretty_print(),
+                    value1.pretty_print(),
+                    value2.pretty_print()
+                )
+            }
             Instruction::Assign(virtual_register, value) => {
                 format!(
                     "assign {}, {}",
@@ -897,6 +905,21 @@ impl PrettyPrint for ArmAsm {
             } => {
                 format!(
                     "madd {}, {}, {}, {}",
+                    rd.pretty_print(),
+                    rn.pretty_print(),
+                    ra.pretty_print(),
+                    rm.pretty_print()
+                )
+            }
+            ArmAsm::Msub {
+                sf: _,
+                rm,
+                ra,
+                rn,
+                rd,
+            } => {
+                format!(
+                    "msub {}, {}, {}, {}",
                     rd.pretty_print(),
                     rn.pretty_print(),
                     ra.pretty_print(),

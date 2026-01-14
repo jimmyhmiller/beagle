@@ -1,0 +1,92 @@
+namespace pipe_test
+
+fn add_one(x) {
+    x + 1
+}
+
+fn add(x, y) {
+    x + y
+}
+
+fn subtract(x, y) {
+    x - y
+}
+
+fn multiply(x, y, z) {
+    x * y * z
+}
+
+fn main() {
+    // Test basic pipe-first: x |> f becomes f(x)
+    let result1 = 5 |> add_one
+    println(result1)
+
+    // Test pipe-first with args: x |> f(y) becomes f(x, y)
+    let result2 = 10 |> add(5)
+    println(result2)
+
+    // Test chained pipes
+    let result3 = 1 |> add_one |> add_one |> add_one
+    println(result3)
+
+    // Test pipe-last: x |>> f(y) becomes f(y, x)
+    // subtract(10, 3) = 7
+    let result4 = 3 |>> subtract(10)
+    println(result4)
+
+    // Test pipe-first vs pipe-last difference
+    // 20 |> subtract(5) = subtract(20, 5) = 15
+    let result5 = 20 |> subtract(5)
+    println(result5)
+
+    // 20 |>> subtract(5) = subtract(5, 20) = -15
+    let result6 = 20 |>> subtract(5)
+    println(result6)
+
+    // Test with expressions on the left
+    let result7 = (2 + 3) |> add_one
+    println(result7)
+
+    // Test pipe with multiple args function
+    // 2 |> multiply(3, 4) = multiply(2, 3, 4) = 24
+    let result8 = 2 |> multiply(3, 4)
+    println(result8)
+
+    // 5 |>> multiply(2, 3) = multiply(2, 3, 5) = 30
+    let result9 = 5 |>> multiply(2, 3)
+    println(result9)
+
+    // Test with map, filter, reduce
+    // map(coll, f), filter(coll, pred), reduce(coll, init, f) all take collection first
+    // so |> works great for chaining
+
+    let doubled = [1, 2, 3, 4, 5] |> map(fn(x) { x * 2 })
+    println(doubled)
+
+    let evens = [1, 2, 3, 4, 5, 6] |> filter(fn(x) { x % 2 == 0 })
+    println(evens)
+
+    let sum = [1, 2, 3, 4, 5] |> reduce(0, fn(acc, x) { acc + x })
+    println(sum)
+
+    // Chain them together: double all numbers, filter > 4, sum them
+    let chained = [1, 2, 3, 4, 5] |> map(fn(x) { x * 2 }) |> filter(fn(x) { x > 4 }) |> reduce(0, fn(acc, x) { acc + x })
+    println(chained)
+
+    "done"
+}
+
+// Expect
+// 6
+// 15
+// 4
+// 7
+// 15
+// -15
+// 6
+// 24
+// 30
+// [2, 4, 6, 8, 10]
+// [2, 4, 6]
+// 15
+// 24

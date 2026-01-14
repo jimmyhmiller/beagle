@@ -475,6 +475,17 @@ pub enum ArmAsm {
         rn: Register,
         rd: Register,
     },
+    /// MSUB -- A64
+    /// Multiply-Subtract
+    /// MSUB  <Xd>, <Xn>, <Xm>, <Xa>
+    /// rd = ra - rn * rm
+    Msub {
+        sf: i32,
+        rm: Register,
+        ra: Register,
+        rn: Register,
+        rd: Register,
+    },
     /// MOV (to/from SP) -- A64
     /// MOV  <Wd|WSP>, <Wn|WSP>
     /// ADD <Wd|WSP>, <Wn|WSP>, #0
@@ -1042,6 +1053,15 @@ impl ArmAsm {
             }
             ArmAsm::Madd { sf, rm, ra, rn, rd } => {
                 0b0_00_11011_000_00000_0_00000_00000_00000
+                    | ((*sf as u32) << 31)
+                    | (rm << 16)
+                    | (ra << 10)
+                    | (rn << 5)
+                    | (rd << 0)
+            }
+            ArmAsm::Msub { sf, rm, ra, rn, rd } => {
+                // MSUB is same as MADD but with bit 15 = 1
+                0b0_00_11011_000_00000_1_00000_00000_00000
                     | ((*sf as u32) << 31)
                     | (rm << 16)
                     | (ra << 10)

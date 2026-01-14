@@ -112,6 +112,10 @@ impl CodegenBackend for X86_64Backend {
         self.inner.div(dest, a, b);
     }
 
+    fn modulo(&mut self, dest: Self::Register, a: Self::Register, b: Self::Register) {
+        self.inner.modulo(dest, a, b);
+    }
+
     // === Bitwise operations ===
 
     fn and(&mut self, dest: Self::Register, a: Self::Register, b: Self::Register) {
