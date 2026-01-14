@@ -1,0 +1,134 @@
+namespace max_min_test
+
+// Test max and min functions
+
+fn main() {
+    // Test max with integers
+    println("max tests (integers):")
+    println("max(5, 10):")
+    println(max(5, 10))
+    println("max(10, 5):")
+    println(max(10, 5))
+    println("max(-5, -10):")
+    println(max(-5, -10))
+    println("max(0, 0):")
+    println(max(0, 0))
+
+    // Test min with integers
+    println("\nmin tests (integers):")
+    println("min(5, 10):")
+    println(min(5, 10))
+    println("min(10, 5):")
+    println(min(10, 5))
+    println("min(-5, -10):")
+    println(min(-5, -10))
+    println("min(0, 0):")
+    println(min(0, 0))
+
+    // Test max with floats
+    println("\nmax tests (floats):")
+    println("max(5.5, 10.2):")
+    println(max(5.5, 10.2))
+    println("max(10.2, 5.5):")
+    println(max(10.2, 5.5))
+    println("max(-5.5, -10.2):")
+    println(max(-5.5, -10.2))
+
+    // Test min with floats
+    println("\nmin tests (floats):")
+    println("min(5.5, 10.2):")
+    println(min(5.5, 10.2))
+    println("min(10.2, 5.5):")
+    println(min(10.2, 5.5))
+    println("min(-5.5, -10.2):")
+    println(min(-5.5, -10.2))
+
+    // Test mixed int/float
+    println("\nmax tests (mixed):")
+    println("max(5, 10.2):")
+    println(max(5, 10.2))
+    println("max(10, 5.5):")
+    println(max(10, 5.5))
+
+    println("\nmin tests (mixed):")
+    println("min(5, 10.2):")
+    println(min(5, 10.2))
+    println("min(10, 5.5):")
+    println(min(10, 5.5))
+
+    // Test with negative and positive
+    println("\nmax with pos/neg:")
+    println("max(-5, 10):")
+    println(max(-5, 10))
+    println("max(5, -10):")
+    println(max(5, -10))
+
+    println("\nmin with pos/neg:")
+    println("min(-5, 10):")
+    println(min(-5, 10))
+    println("min(5, -10):")
+    println(min(5, -10))
+
+    ""
+}
+
+// Expect
+// max tests (integers):
+// max(5, 10):
+// 10
+// max(10, 5):
+// 10
+// max(-5, -10):
+// -5
+// max(0, 0):
+// 0
+//
+// min tests (integers):
+// min(5, 10):
+// 5
+// min(10, 5):
+// 5
+// min(-5, -10):
+// -10
+// min(0, 0):
+// 0
+//
+// max tests (floats):
+// max(5.5, 10.2):
+// 10.2
+// max(10.2, 5.5):
+// 10.2
+// max(-5.5, -10.2):
+// -5.5
+//
+// min tests (floats):
+// min(5.5, 10.2):
+// 5.5
+// min(10.2, 5.5):
+// 5.5
+// min(-5.5, -10.2):
+// -10.2
+//
+// max tests (mixed):
+// max(5, 10.2):
+// 10.2
+// max(10, 5.5):
+// 10.0
+//
+// min tests (mixed):
+// min(5, 10.2):
+// 5.0
+// min(10, 5.5):
+// 5.5
+//
+// max with pos/neg:
+// max(-5, 10):
+// 10
+// max(5, -10):
+// 5
+//
+// min with pos/neg:
+// min(-5, 10):
+// -5
+// min(5, -10):
+// -10
