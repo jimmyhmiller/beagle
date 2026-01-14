@@ -416,6 +416,28 @@ extern "C" fn lowercase(stack_pointer: usize, frame_pointer: usize, string: usiz
         .into()
 }
 
+extern "C" fn split(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    string: usize,
+    delimiter: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(get_runtime().get(), "split");
+    let runtime = get_runtime().get_mut();
+    let string_value = runtime.get_string(stack_pointer, string);
+    let delimiter_value = runtime.get_string(stack_pointer, delimiter);
+
+    let parts: Vec<String> = string_value
+        .split(&delimiter_value)
+        .map(|s| s.to_string())
+        .collect();
+
+    runtime
+        .create_string_array(stack_pointer, &parts)
+        .unwrap()
+}
+
 extern "C" fn fill_object_fields(object_pointer: usize, value: usize) -> usize {
     print_call_builtin(get_runtime().get(), "fill_object_fields");
     let mut object = HeapObject::from_tagged(object_pointer);
@@ -3795,6 +3817,15 @@ impl Runtime {
             true,
             true,
             3,
+        )?;
+
+        // split now takes (stack_pointer, frame_pointer, string, delimiter)
+        self.add_builtin_function_with_fp(
+            "beagle.core/split",
+            split as *const u8,
+            true,
+            true,
+            4,
         )?;
 
         // hash now takes (stack_pointer, frame_pointer, value)
