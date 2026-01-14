@@ -702,6 +702,35 @@ extern "C" fn pad_right_string(
         .into()
 }
 
+extern "C" fn lines_string(stack_pointer: usize, frame_pointer: usize, string: usize) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(get_runtime().get(), "lines");
+    let runtime = get_runtime().get_mut();
+    let string_value = runtime.get_string(stack_pointer, string);
+
+    let line_vec: Vec<String> = string_value.lines().map(|s| s.to_string()).collect();
+
+    runtime
+        .create_string_array(stack_pointer, &line_vec)
+        .unwrap()
+}
+
+extern "C" fn words_string(stack_pointer: usize, frame_pointer: usize, string: usize) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(get_runtime().get(), "words");
+    let runtime = get_runtime().get_mut();
+    let string_value = runtime.get_string(stack_pointer, string);
+
+    let word_vec: Vec<String> = string_value
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect();
+
+    runtime
+        .create_string_array(stack_pointer, &word_vec)
+        .unwrap()
+}
+
 extern "C" fn fill_object_fields(object_pointer: usize, value: usize) -> usize {
     print_call_builtin(get_runtime().get(), "fill_object_fields");
     let mut object = HeapObject::from_tagged(object_pointer);
@@ -4513,6 +4542,24 @@ impl Runtime {
             true,
             true,
             5,
+        )?;
+
+        // lines now takes (stack_pointer, frame_pointer, string)
+        self.add_builtin_function_with_fp(
+            "beagle.core/lines",
+            lines_string as *const u8,
+            true,
+            true,
+            3,
+        )?;
+
+        // words now takes (stack_pointer, frame_pointer, string)
+        self.add_builtin_function_with_fp(
+            "beagle.core/words",
+            words_string as *const u8,
+            true,
+            true,
+            3,
         )?;
 
         // hash now takes (stack_pointer, frame_pointer, value)

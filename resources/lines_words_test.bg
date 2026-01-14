@@ -1,0 +1,141 @@
+namespace lines_words_test
+
+// Test lines and words functions
+
+fn main() {
+    // Test lines - basic
+    println("lines tests:")
+    let text1 = "hello\nworld\ntest"
+    let line_array = lines(text1)
+    println("lines('hello\\nworld\\ntest'):")
+    println(line_array)
+    println("Length:")
+    println(length(line_array))
+    println("First line:")
+    println(get(line_array, 0))
+    println("Second line:")
+    println(get(line_array, 1))
+
+    // Test lines - single line
+    let text2 = "single line"
+    let line_array2 = lines(text2)
+    println("\nlines('single line'):")
+    println(line_array2)
+    println("Length:")
+    println(length(line_array2))
+
+    // Test lines - empty string
+    let text3 = ""
+    let line_array3 = lines(text3)
+    println("\nlines('') - empty string:")
+    println(line_array3)
+    println("Length:")
+    println(length(line_array3))
+
+    // Test lines - with trailing newline
+    let text4 = "line1\nline2\n"
+    let line_array4 = lines(text4)
+    println("\nlines('line1\\nline2\\n'):")
+    println(line_array4)
+    println("Length:")
+    println(length(line_array4))
+
+    // Test words - basic
+    println("\nwords tests:")
+    let text5 = "hello world test"
+    let word_array = words(text5)
+    println("words('hello world test'):")
+    println(word_array)
+    println("Length:")
+    println(length(word_array))
+    println("First word:")
+    println(get(word_array, 0))
+
+    // Test words - multiple spaces
+    let text6 = "foo  bar   baz"
+    let word_array2 = words(text6)
+    println("\nwords('foo  bar   baz') - multiple spaces:")
+    println(word_array2)
+    println("Length:")
+    println(length(word_array2))
+
+    // Test words - with tabs and newlines
+    let text7 = "hello\tworld\ntest"
+    let word_array3 = words(text7)
+    println("\nwords('hello\\tworld\\ntest') - mixed whitespace:")
+    println(word_array3)
+    println("Length:")
+    println(length(word_array3))
+
+    // Test words - empty string
+    let text8 = ""
+    let word_array4 = words(text8)
+    println("\nwords('') - empty string:")
+    println(word_array4)
+    println("Length:")
+    println(length(word_array4))
+
+    // Test words - only whitespace
+    let text9 = "   \t\n  "
+    let word_array5 = words(text9)
+    println("\nwords('   \\t\\n  ') - only whitespace:")
+    println(word_array5)
+    println("Length:")
+    println(length(word_array5))
+
+    ""
+}
+
+// Expect
+// lines tests:
+// lines('hello\nworld\ntest'):
+// [ "hello", "world", "test" ]
+// Length:
+// 3
+// First line:
+// hello
+// Second line:
+// world
+//
+// lines('single line'):
+// [ "single line" ]
+// Length:
+// 1
+//
+// lines('') - empty string:
+// [  ]
+// Length:
+// 0
+//
+// lines('line1\nline2\n'):
+// [ "line1", "line2" ]
+// Length:
+// 2
+//
+// words tests:
+// words('hello world test'):
+// [ "hello", "world", "test" ]
+// Length:
+// 3
+// First word:
+// hello
+//
+// words('foo  bar   baz') - multiple spaces:
+// [ "foo", "bar", "baz" ]
+// Length:
+// 3
+//
+// words('hello\tworld\ntest') - mixed whitespace:
+// [ "hello", "world", "test" ]
+// Length:
+// 3
+//
+// words('') - empty string:
+// [  ]
+// Length:
+// 0
+//
+// words('   \t\n  ') - only whitespace:
+// [  ]
+// Length:
+// 0
