@@ -179,12 +179,7 @@ if x < 0 {
 
 ### String Functions
 
-Currently missing (per STDLIB_PLAN.md):
-
-```
-lines(str)
-words(str)
-```
+All planned string functions have been implemented.
 
 ### Math Functions
 
