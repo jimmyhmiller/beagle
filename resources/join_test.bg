@@ -1,0 +1,90 @@
+namespace join_test
+
+// Test join function
+
+fn main() {
+    // Basic join with comma - using split to create array
+    let parts = split("hello,world,test", ",")
+    let joined = join(parts, ", ")
+
+    println("Join with comma:")
+    println(joined)
+    println("Equals 'hello, world, test'?")
+    println(joined == "hello, world, test")
+
+    // Join with space
+    let words = split("one two three", " ")
+    let sentence = join(words, " ")
+    println("\nJoin with space:")
+    println(sentence)
+    println("Equals 'one two three'?")
+    println(sentence == "one two three")
+
+    // Join with empty separator
+    let chars = split("a,b,c", ",")
+    let combined = join(chars, "")
+    println("\nJoin with empty separator:")
+    println(combined)
+    println("Equals 'abc'?")
+    println(combined == "abc")
+
+    // Join single element
+    let single = split("alone", ",")
+    let result = join(single, ",")
+    println("\nJoin single element:")
+    println(result)
+    println("Equals 'alone'?")
+    println(result == "alone")
+
+    // Join with multi-character separator
+    let parts2 = split("foo,bar,baz", ",")
+    let joined2 = join(parts2, " :: ")
+    println("\nJoin with multi-char separator:")
+    println(joined2)
+    println("Equals 'foo :: bar :: baz'?")
+    println(joined2 == "foo :: bar :: baz")
+
+    // Test split and join roundtrip
+    let original = "a,b,c,d"
+    let split_parts = split(original, ",")
+    let rejoined = join(split_parts, ",")
+    println("\nSplit-join roundtrip:")
+    println("Original: " ++ original)
+    println("Rejoined: " ++ rejoined)
+    println("Equal?")
+    println(original == rejoined)
+
+    ""
+}
+
+// Expect
+// Join with comma:
+// hello, world, test
+// Equals 'hello, world, test'?
+// true
+//
+// Join with space:
+// one two three
+// Equals 'one two three'?
+// true
+//
+// Join with empty separator:
+// abc
+// Equals 'abc'?
+// true
+//
+// Join single element:
+// alone
+// Equals 'alone'?
+// true
+//
+// Join with multi-char separator:
+// foo :: bar :: baz
+// Equals 'foo :: bar :: baz'?
+// true
+//
+// Split-join roundtrip:
+// Original: a,b,c,d
+// Rejoined: a,b,c,d
+// Equal?
+// true

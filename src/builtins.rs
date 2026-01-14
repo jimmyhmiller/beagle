@@ -438,6 +438,33 @@ extern "C" fn split(
         .unwrap()
 }
 
+extern "C" fn join(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    array: usize,
+    separator: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(get_runtime().get(), "join");
+    let runtime = get_runtime().get_mut();
+    let separator_value = runtime.get_string(stack_pointer, separator);
+
+    let array_obj = HeapObject::from_tagged(array);
+    let fields = array_obj.get_fields();
+
+    let strings: Vec<String> = fields
+        .iter()
+        .map(|&field| runtime.get_string(stack_pointer, field))
+        .collect();
+
+    let joined = strings.join(&separator_value);
+
+    runtime
+        .allocate_string(stack_pointer, joined)
+        .unwrap()
+        .into()
+}
+
 extern "C" fn fill_object_fields(object_pointer: usize, value: usize) -> usize {
     print_call_builtin(get_runtime().get(), "fill_object_fields");
     let mut object = HeapObject::from_tagged(object_pointer);
@@ -3823,6 +3850,15 @@ impl Runtime {
         self.add_builtin_function_with_fp(
             "beagle.core/split",
             split as *const u8,
+            true,
+            true,
+            4,
+        )?;
+
+        // join now takes (stack_pointer, frame_pointer, array, separator)
+        self.add_builtin_function_with_fp(
+            "beagle.core/join",
+            join as *const u8,
             true,
             true,
             4,
