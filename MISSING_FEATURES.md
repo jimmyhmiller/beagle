@@ -194,12 +194,16 @@ Note: All math functions have been implemented except for the constants.
 
 ### Map Utilities
 
-Currently missing:
+Implemented:
+```
+vals(m)                    // Get all values ✓
+dissoc(m, key)             // Remove key ✓
+merge(m1, m2)              // Combine maps ✓
+```
+
+Still missing:
 
 ```
-vals(m)                    // Get all values
-dissoc(m, key)             // Remove key
-merge(m1, m2)              // Combine maps
 merge-with(f, m1, m2)      // Combine with conflict resolver
 select-keys(m, ks)         // Keep only specified keys
 update(m, key, f)          // Update value with function
