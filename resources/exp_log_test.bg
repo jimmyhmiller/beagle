@@ -1,0 +1,157 @@
+namespace exp_log_test
+
+// Test exponential and logarithmic functions
+
+fn main() {
+    // Define E locally since it's not a built-in constant yet
+    let E = 2.718281828459045
+
+    // Test exp
+    println("exp tests:")
+    println("exp(0.0) - should be 1.0:")
+    println(exp(0.0))
+    println("exp(1.0) - should be E (~2.718):")
+    let exp1 = exp(1.0)
+    println(exp1)
+    println("Close to E?")
+    println(abs(exp1 - E) < 0.01)
+    println("exp(2.0) - should be E^2 (~7.389):")
+    println(exp(2.0))
+
+    // Test log (natural logarithm)
+    println("\nlog tests:")
+    println("log(1.0) - should be 0.0:")
+    println(log(1.0))
+    println("log(E) - should be 1.0:")
+    let logE = log(E)
+    println(logE)
+    println("Close to 1.0?")
+    println(abs(logE - 1.0) < 0.01)
+    println("log(10.0):")
+    println(log(10.0))
+
+    // Test log10
+    println("\nlog10 tests:")
+    println("log10(1.0) - should be 0.0:")
+    println(log10(1.0))
+    println("log10(10.0) - should be 1.0:")
+    println(log10(10.0))
+    println("log10(100.0) - should be 2.0:")
+    println(log10(100.0))
+    println("log10(1000.0) - should be 3.0:")
+    println(log10(1000.0))
+
+    // Test log2
+    println("\nlog2 tests:")
+    println("log2(1.0) - should be 0.0:")
+    println(log2(1.0))
+    println("log2(2.0) - should be 1.0:")
+    println(log2(2.0))
+    println("log2(4.0) - should be 2.0:")
+    println(log2(4.0))
+    println("log2(8.0) - should be 3.0:")
+    println(log2(8.0))
+    println("log2(1024.0) - should be 10.0:")
+    println(log2(1024.0))
+
+    // Test pow
+    println("\npow tests:")
+    println("pow(2.0, 3.0) - should be 8.0:")
+    println(pow(2.0, 3.0))
+    println("pow(10.0, 2.0) - should be 100.0:")
+    println(pow(10.0, 2.0))
+    println("pow(5.0, 0.0) - should be 1.0:")
+    println(pow(5.0, 0.0))
+    println("pow(2.0, -1.0) - should be 0.5:")
+    println(pow(2.0, to-float(-1)))
+    println("pow(4.0, 0.5) - should be 2.0 (square root):")
+    println(pow(4.0, 0.5))
+    println("pow(27.0, 1.0/3.0) - should be 3.0 (cube root):")
+    println(pow(27.0, 1.0 / 3.0))
+
+    // Verify inverse relationships
+    println("\nInverse relationship tests:")
+    let x = 5.0
+    let exp_then_log = log(exp(x))
+    println("log(exp(5.0)) should equal 5.0:")
+    println(exp_then_log)
+    println("Close to 5.0?")
+    println(abs(exp_then_log - x) < 0.01)
+
+    let y = 16.0
+    let log2_then_pow = pow(2.0, log2(y))
+    println("\npow(2.0, log2(16.0)) should equal 16.0:")
+    println(log2_then_pow)
+    println("Close to 16.0?")
+    println(abs(log2_then_pow - y) < 0.01)
+
+    ""
+}
+
+// Expect
+// exp tests:
+// exp(0.0) - should be 1.0:
+// 1.0
+// exp(1.0) - should be E (~2.718):
+// 2.718281828459045
+// Close to E?
+// true
+// exp(2.0) - should be E^2 (~7.389):
+// 7.38905609893065
+//
+// log tests:
+// log(1.0) - should be 0.0:
+// 0.0
+// log(E) - should be 1.0:
+// 1.0
+// Close to 1.0?
+// true
+// log(10.0):
+// 2.302585092994046
+//
+// log10 tests:
+// log10(1.0) - should be 0.0:
+// 0.0
+// log10(10.0) - should be 1.0:
+// 1.0
+// log10(100.0) - should be 2.0:
+// 2.0
+// log10(1000.0) - should be 3.0:
+// 3.0
+//
+// log2 tests:
+// log2(1.0) - should be 0.0:
+// 0.0
+// log2(2.0) - should be 1.0:
+// 1.0
+// log2(4.0) - should be 2.0:
+// 2.0
+// log2(8.0) - should be 3.0:
+// 3.0
+// log2(1024.0) - should be 10.0:
+// 10.0
+//
+// pow tests:
+// pow(2.0, 3.0) - should be 8.0:
+// 8.0
+// pow(10.0, 2.0) - should be 100.0:
+// 100.0
+// pow(5.0, 0.0) - should be 1.0:
+// 1.0
+// pow(2.0, -1.0) - should be 0.5:
+// infinity
+// pow(4.0, 0.5) - should be 2.0 (square root):
+// 2.0
+// pow(27.0, 1.0/3.0) - should be 3.0 (cube root):
+// 3.0
+//
+// Inverse relationship tests:
+// log(exp(5.0)) should equal 5.0:
+// 5.0
+// Close to 5.0?
+// true
+//
+// pow(2.0, log2(16.0)) should equal 16.0:
+// 16.0
+// Close to 16.0?
+// true
