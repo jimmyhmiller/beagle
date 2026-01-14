@@ -1455,6 +1455,110 @@ pub unsafe extern "C" fn truncate_builtin(
     }
 }
 
+/// max builtin - returns the maximum of two numbers
+extern "C" fn max_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    a: usize,
+    b: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+
+    let a_kind = BuiltInTypes::get_kind(a);
+    let b_kind = BuiltInTypes::get_kind(b);
+
+    // Both are ints
+    if a_kind == BuiltInTypes::Int && b_kind == BuiltInTypes::Int {
+        let a_val = BuiltInTypes::untag_isize(a as isize);
+        let b_val = BuiltInTypes::untag_isize(b as isize);
+        return BuiltInTypes::construct_int(a_val.max(b_val)) as usize;
+    }
+
+    // At least one is a float - convert both to float and compare
+    unsafe {
+        let a_float = if a_kind == BuiltInTypes::Float {
+            let untagged = BuiltInTypes::untag(a);
+            let float_ptr = untagged as *const f64;
+            *float_ptr.add(1)
+        } else {
+            BuiltInTypes::untag_isize(a as isize) as f64
+        };
+
+        let b_float = if b_kind == BuiltInTypes::Float {
+            let untagged = BuiltInTypes::untag(b);
+            let float_ptr = untagged as *const f64;
+            *float_ptr.add(1)
+        } else {
+            BuiltInTypes::untag_isize(b as isize) as f64
+        };
+
+        let result = a_float.max(b_float);
+
+        let runtime = get_runtime().get_mut();
+        let new_float_ptr = runtime
+            .allocate(1, stack_pointer, BuiltInTypes::Float)
+            .unwrap();
+
+        let untagged_result = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged_result as *mut f64;
+        *result_ptr.add(1) = result;
+
+        new_float_ptr
+    }
+}
+
+/// min builtin - returns the minimum of two numbers
+extern "C" fn min_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    a: usize,
+    b: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+
+    let a_kind = BuiltInTypes::get_kind(a);
+    let b_kind = BuiltInTypes::get_kind(b);
+
+    // Both are ints
+    if a_kind == BuiltInTypes::Int && b_kind == BuiltInTypes::Int {
+        let a_val = BuiltInTypes::untag_isize(a as isize);
+        let b_val = BuiltInTypes::untag_isize(b as isize);
+        return BuiltInTypes::construct_int(a_val.min(b_val)) as usize;
+    }
+
+    // At least one is a float - convert both to float and compare
+    unsafe {
+        let a_float = if a_kind == BuiltInTypes::Float {
+            let untagged = BuiltInTypes::untag(a);
+            let float_ptr = untagged as *const f64;
+            *float_ptr.add(1)
+        } else {
+            BuiltInTypes::untag_isize(a as isize) as f64
+        };
+
+        let b_float = if b_kind == BuiltInTypes::Float {
+            let untagged = BuiltInTypes::untag(b);
+            let float_ptr = untagged as *const f64;
+            *float_ptr.add(1)
+        } else {
+            BuiltInTypes::untag_isize(b as isize) as f64
+        };
+
+        let result = a_float.min(b_float);
+
+        let runtime = get_runtime().get_mut();
+        let new_float_ptr = runtime
+            .allocate(1, stack_pointer, BuiltInTypes::Float)
+            .unwrap();
+
+        let untagged_result = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged_result as *mut f64;
+        *result_ptr.add(1) = result;
+
+        new_float_ptr
+    }
+}
+
 /// sin builtin - computes sine of a float (in radians)
 pub unsafe extern "C" fn sin_builtin(
     stack_pointer: usize,
@@ -3721,6 +3825,20 @@ impl Runtime {
             true,
             true,
             3,
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/max",
+            max_builtin as *const u8,
+            true,
+            true,
+            4,
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/min",
+            min_builtin as *const u8,
+            true,
+            true,
+            4,
         )?;
         self.add_builtin_function_with_fp(
             "beagle.core/sin",
