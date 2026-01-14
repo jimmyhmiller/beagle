@@ -1399,6 +1399,62 @@ pub unsafe extern "C" fn abs_builtin(
     }
 }
 
+/// round builtin - rounds a float to nearest integer
+pub unsafe extern "C" fn round_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    unsafe {
+        let runtime = get_runtime().get_mut();
+
+        let untagged = BuiltInTypes::untag(value);
+        let float_ptr = untagged as *const f64;
+        let float_value = *float_ptr.add(1);
+
+        let result = float_value.round();
+
+        let new_float_ptr = runtime
+            .allocate(1, stack_pointer, BuiltInTypes::Float)
+            .unwrap();
+
+        let untagged_result = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged_result as *mut f64;
+        *result_ptr.add(1) = result;
+
+        new_float_ptr
+    }
+}
+
+/// truncate builtin - truncates a float towards zero
+pub unsafe extern "C" fn truncate_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    unsafe {
+        let runtime = get_runtime().get_mut();
+
+        let untagged = BuiltInTypes::untag(value);
+        let float_ptr = untagged as *const f64;
+        let float_value = *float_ptr.add(1);
+
+        let result = float_value.trunc();
+
+        let new_float_ptr = runtime
+            .allocate(1, stack_pointer, BuiltInTypes::Float)
+            .unwrap();
+
+        let untagged_result = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged_result as *mut f64;
+        *result_ptr.add(1) = result;
+
+        new_float_ptr
+    }
+}
+
 /// sin builtin - computes sine of a float (in radians)
 pub unsafe extern "C" fn sin_builtin(
     stack_pointer: usize,
@@ -3648,6 +3704,20 @@ impl Runtime {
         self.add_builtin_function_with_fp(
             "beagle.core/abs",
             abs_builtin as *const u8,
+            true,
+            true,
+            3,
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/round",
+            round_builtin as *const u8,
+            true,
+            true,
+            3,
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/truncate",
+            truncate_builtin as *const u8,
             true,
             true,
             3,
