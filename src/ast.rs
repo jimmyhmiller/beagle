@@ -47,6 +47,11 @@ pub enum Ast {
         fields: Vec<Ast>,
         token_range: TokenRange,
     },
+    StructField {
+        name: String,
+        mutable: bool,
+        token_range: TokenRange,
+    },
     Enum {
         name: String,
         variants: Vec<Ast>,
@@ -358,7 +363,8 @@ impl Ast {
             | Ast::Try { token_range, .. }
             | Ast::Throw { token_range, .. }
             | Ast::Match { token_range, .. }
-            | Ast::ProtocolDispatch { token_range, .. } => *token_range,
+            | Ast::ProtocolDispatch { token_range, .. }
+            | Ast::StructField { token_range, .. } => *token_range,
             Ast::IntegerLiteral(_, position)
             | Ast::FloatLiteral(_, position)
             | Ast::Identifier(_, position)
@@ -2415,6 +2421,11 @@ impl AstCompiler<'_> {
             Ast::True(_) => Value::True,
             Ast::False(_) => Value::False,
             Ast::Null(_) => Value::Null,
+            Ast::StructField { .. } => {
+                panic!(
+                    "StructField should not be compiled directly - it's only used in struct definitions"
+                )
+            }
         }
     }
 
@@ -3109,18 +3120,26 @@ impl AstCompiler<'_> {
             }
             Ast::Struct { name, fields, .. } => {
                 let (namespace, name) = self.get_namespace_name_and_name(name);
+                let mut field_names = Vec::new();
+                let mut mutable_fields = Vec::new();
+                for field in fields.iter() {
+                    match field {
+                        Ast::StructField { name, mutable, .. } => {
+                            field_names.push(name.clone());
+                            mutable_fields.push(*mutable);
+                        }
+                        Ast::Identifier(name, _) => {
+                            // Backwards compatibility: identifiers are immutable by default
+                            field_names.push(name.clone());
+                            mutable_fields.push(false);
+                        }
+                        _ => panic!("Expected StructField or Identifier, got {:?}", field),
+                    }
+                }
                 self.compiler.add_struct(Struct {
                     name: format!("{}/{}", namespace, name),
-                    fields: fields
-                        .iter()
-                        .map(|field| {
-                            if let Ast::Identifier(name, _) = field {
-                                name.clone()
-                            } else {
-                                panic!("Expected identifier got {:?}", field)
-                            }
-                        })
-                        .collect(),
+                    fields: field_names,
+                    mutable_fields,
                 });
             }
             Ast::Enum { name, variants, .. } => {
@@ -3133,12 +3152,13 @@ impl AstCompiler<'_> {
                             Ast::EnumVariant { name, fields, .. } => {
                                 let fields = fields
                                     .iter()
-                                    .map(|field| {
-                                        if let Ast::Identifier(name, _) = field {
-                                            name.clone()
-                                        } else {
-                                            panic!("Expected identifier got {:?}", field)
-                                        }
+                                    .map(|field| match field {
+                                        Ast::StructField { name, .. } => name.clone(),
+                                        Ast::Identifier(name, _) => name.clone(),
+                                        _ => panic!(
+                                            "Expected StructField or Identifier, got {:?}",
+                                            field
+                                        ),
                                     })
                                     .collect();
                                 EnumVariant::StructVariant {
@@ -3155,18 +3175,21 @@ impl AstCompiler<'_> {
                 };
 
                 let (namespace, name) = self.get_namespace_name_and_name(&name);
+                let variant_names: Vec<String> = variants
+                    .iter()
+                    .map(|variant| match variant {
+                        Ast::EnumVariant {
+                            name, fields: _, ..
+                        } => name.clone(),
+                        Ast::EnumStaticVariant { name, .. } => name.clone(),
+                        _ => panic!("Expected enum variant got {:?}", variant),
+                    })
+                    .collect();
+                let mutable_fields = vec![false; variant_names.len()];
                 self.compiler.add_struct(Struct {
                     name: format!("{}/{}", namespace, name),
-                    fields: variants
-                        .iter()
-                        .map(|variant| match variant {
-                            Ast::EnumVariant {
-                                name, fields: _, ..
-                            } => name.clone(),
-                            Ast::EnumStaticVariant { name, .. } => name.clone(),
-                            _ => panic!("Expected enum variant got {:?}", variant),
-                        })
-                        .collect(),
+                    fields: variant_names,
+                    mutable_fields,
                 });
 
                 self.compiler.add_enum(enum_repr);
@@ -3178,18 +3201,23 @@ impl AstCompiler<'_> {
                             ..
                         } => {
                             let (namespace, name) = self.get_namespace_name_and_name(&name);
+                            let field_names: Vec<String> = fields
+                                .iter()
+                                .map(|field| match field {
+                                    Ast::StructField { name, .. } => name.clone(),
+                                    Ast::Identifier(name, _) => name.clone(),
+                                    _ => panic!(
+                                        "Expected StructField or Identifier, got {:?}",
+                                        field
+                                    ),
+                                })
+                                .collect();
+                            // Enum variant fields are always immutable
+                            let mutable_fields = vec![false; field_names.len()];
                             self.compiler.add_struct(Struct {
                                 name: format!("{}/{}.{}", namespace, name, variant_name),
-                                fields: fields
-                                    .iter()
-                                    .map(|field| {
-                                        if let Ast::Identifier(name, _) = field {
-                                            name.clone()
-                                        } else {
-                                            panic!("Expected identifier got {:?}", field)
-                                        }
-                                    })
-                                    .collect(),
+                                fields: field_names,
+                                mutable_fields,
                             })
                         }
                         Ast::EnumStaticVariant {
@@ -3199,6 +3227,7 @@ impl AstCompiler<'_> {
                             self.compiler.add_struct(Struct {
                                 name: format!("{}/{}.{}", namespace, name, variant_name),
                                 fields: vec![],
+                                mutable_fields: vec![],
                             });
                         }
                         _ => panic!("Expected enum variant got {:?}", variant),
@@ -3436,6 +3465,7 @@ impl AstCompiler<'_> {
             }
 
             Ast::Struct { .. }
+            | Ast::StructField { .. }
             | Ast::Enum { .. }
             | Ast::EnumVariant { .. }
             | Ast::EnumStaticVariant { .. }

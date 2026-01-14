@@ -1684,12 +1684,27 @@ impl Parser {
     }
 
     fn parse_struct_field(&mut self) -> ParseResult<Ast> {
+        let start_position = self.position;
+
+        // Check for 'mut' keyword
+        let mutable = if self.current_token() == Token::Mut {
+            self.consume();
+            self.skip_spaces();
+            true
+        } else {
+            false
+        };
+
         match self.current_token() {
             Token::Atom((start, end)) => {
                 let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
                     .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
-                let position = self.consume();
-                Ok(Ast::Identifier(name, position))
+                let end_position = self.consume();
+                Ok(Ast::StructField {
+                    name,
+                    mutable,
+                    token_range: TokenRange::new(start_position, end_position),
+                })
             }
             _ => Err(ParseError::UnexpectedToken {
                 expected: "field name".to_string(),

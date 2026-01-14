@@ -354,6 +354,8 @@ impl AstCompiler<'_> {
 
         let object = self.call_compile(object);
         let value = self.call_compile(&args[1]);
+        // Value must be in a register for write_field_dynamic and call_builtin
+        let value = self.ir.assign_new(value);
 
         let object = self.ir.assign_new(object);
         let untagged_object = self.ir.untag(object.into());
@@ -366,7 +368,8 @@ impl AstCompiler<'_> {
 
         let exit_property_access = self.ir.label("exit_property_access");
         let slow_property_path = self.ir.label("slow_property_path");
-        // self.ir.jump(slow_property_path);
+
+        // Check if cached struct_id matches
         self.ir.jump_if(
             slow_property_path,
             Condition::NotEqual,
@@ -374,9 +377,16 @@ impl AstCompiler<'_> {
             property_value,
         );
 
+        // Check if field is mutable (cache[2] == 1)
+        // Cache layout: [struct_id, field_offset, is_mutable]
+        let is_mutable = self.ir.load_from_heap(property_location.into(), 2);
+        let one = self.ir.assign_new(Value::RawValue(1));
+        self.ir
+            .jump_if(slow_property_path, Condition::NotEqual, is_mutable, one);
+
         let property_offset = self.ir.load_from_heap(property_location.into(), 1);
         self.ir
-            .write_field_dynamic(untagged_object, property_offset, value);
+            .write_field_dynamic(untagged_object, property_offset, Value::Register(value));
 
         self.ir.jump(exit_property_access);
 
@@ -389,12 +399,12 @@ impl AstCompiler<'_> {
         let constant_ptr = self.string_constant(property);
         let constant_ptr = self.ir.assign_new(constant_ptr);
         let call_result = self.call_builtin(
-            "beagle.builtin/write_field",
+            "beagle.builtin/write-field",
             vec![
                 object.into(),
                 constant_ptr.into(),
                 property_location.into(),
-                value,
+                Value::Register(value),
             ],
         );
 

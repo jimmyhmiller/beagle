@@ -634,11 +634,15 @@ extern "C" fn write_field(
 ) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
+    // write_field checks mutability and throws if not mutable
     let index = runtime.write_field(stack_pointer, struct_pointer, str_constant_ptr, value);
     let type_id = HeapObject::from_tagged(struct_pointer).get_struct_id();
-    let buffer = unsafe { from_raw_parts_mut(property_cache_location as *mut usize, 2) };
+    // Cache layout: [struct_id, field_offset, is_mutable]
+    // We only reach here if field is mutable (otherwise write_field would have thrown)
+    let buffer = unsafe { from_raw_parts_mut(property_cache_location as *mut usize, 3) };
     buffer[0] = type_id;
     buffer[1] = index * 8;
+    buffer[2] = 1; // is_mutable = true
     BuiltInTypes::null_value() as usize
 }
 

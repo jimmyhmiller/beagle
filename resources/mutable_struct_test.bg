@@ -1,0 +1,94 @@
+namespace mutable_struct_test
+
+import "beagle.primitive" as primitive
+
+// Struct with mutable field
+struct Counter {
+    mut count
+    name
+}
+
+// Struct with all immutable fields
+struct Point {
+    x
+    y
+}
+
+// Struct with multiple mutable fields
+struct MutablePair {
+    mut first
+    mut second
+}
+
+fn test_mutable_field() {
+    let c = Counter { count: 0, name: "test" }
+    println("Initial count:")
+    println(c.count)
+
+    // This should work - count is mutable
+    primitive/set!(c.count, 10)
+    println("After mutation:")
+    println(c.count)
+
+    // Update again
+    primitive/set!(c.count, c.count + 5)
+    println("After increment:")
+    println(c.count)
+
+    "mutable field test passed"
+}
+
+fn test_multiple_mutable_fields() {
+    let pair = MutablePair { first: 1, second: 2 }
+    println("Initial pair:")
+    println(pair.first)
+    println(pair.second)
+
+    primitive/set!(pair.first, 100)
+    primitive/set!(pair.second, 200)
+
+    println("After mutations:")
+    println(pair.first)
+    println(pair.second)
+
+    "multiple mutable fields test passed"
+}
+
+fn main() {
+    println("=== Mutable Struct Tests ===")
+    println("")
+
+    println("--- Test 1: Mutable field ---")
+    println(test_mutable_field())
+    println("")
+
+    println("--- Test 2: Multiple mutable fields ---")
+    println(test_multiple_mutable_fields())
+    println("")
+
+    println("All tests passed!")
+    "done"
+}
+
+// Expect
+// === Mutable Struct Tests ===
+//
+// --- Test 1: Mutable field ---
+// Initial count:
+// 0
+// After mutation:
+// 10
+// After increment:
+// 15
+// mutable field test passed
+//
+// --- Test 2: Multiple mutable fields ---
+// Initial pair:
+// 1
+// 2
+// After mutations:
+// 100
+// 200
+// multiple mutable fields test passed
+//
+// All tests passed!

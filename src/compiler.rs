@@ -373,7 +373,8 @@ impl Compiler {
                 .as_ptr()
                 .add(self.property_look_up_cache_offset) as usize
         };
-        self.property_look_up_cache_offset += 2 * 8;
+        // Cache layout: [struct_id (8 bytes), field_offset (8 bytes), is_mutable (8 bytes)]
+        self.property_look_up_cache_offset += 3 * 8;
         Ok(location)
     }
 

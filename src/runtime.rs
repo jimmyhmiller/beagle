@@ -365,11 +365,16 @@ impl Iterator for GlobalBlockIter {
 pub struct Struct {
     pub name: String,
     pub fields: Vec<String>,
+    pub mutable_fields: Vec<bool>,
 }
 
 impl Struct {
     pub fn size(&self) -> usize {
         self.fields.len()
+    }
+
+    pub fn is_field_mutable(&self, index: usize) -> bool {
+        self.mutable_fields.get(index).copied().unwrap_or(false)
     }
 }
 
@@ -3444,8 +3449,20 @@ impl Runtime {
                 format!("Field '{}' not found in struct", string),
             );
         });
-        // Temporary +1 because I was writing size as the first field
-        // and I haven't changed that
+
+        // Check if field is mutable
+        if !struct_value.is_field_mutable(field_index) {
+            unsafe {
+                crate::builtins::throw_runtime_error(
+                    stack_pointer,
+                    "MutabilityError",
+                    format!(
+                        "Cannot mutate immutable field '{}' in struct '{}'",
+                        string, struct_value.name
+                    ),
+                );
+            }
+        }
 
         heap_object.write_field(field_index as i32, value);
         field_index
