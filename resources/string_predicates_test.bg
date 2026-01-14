@@ -1,0 +1,121 @@
+namespace string_predicates_test
+
+// Test starts-with?, ends-with?, and contains? functions
+
+fn main() {
+    // Test starts-with?
+    let s1 = "hello world"
+
+    println("starts-with? tests:")
+    println("'hello world' starts with 'hello'?")
+    println(starts-with?(s1, "hello"))
+    println("'hello world' starts with 'world'?")
+    println(starts-with?(s1, "world"))
+    println("'hello world' starts with 'hello world'?")
+    println(starts-with?(s1, "hello world"))
+    println("'hello world' starts with ''?")
+    println(starts-with?(s1, ""))
+
+    // Test ends-with?
+    println("\nends-with? tests:")
+    println("'hello world' ends with 'world'?")
+    println(ends-with?(s1, "world"))
+    println("'hello world' ends with 'hello'?")
+    println(ends-with?(s1, "hello"))
+    println("'hello world' ends with 'hello world'?")
+    println(ends-with?(s1, "hello world"))
+    println("'hello world' ends with ''?")
+    println(ends-with?(s1, ""))
+
+    // Test contains?
+    println("\ncontains? tests:")
+    println("'hello world' contains 'lo wo'?")
+    println(contains?(s1, "lo wo"))
+    println("'hello world' contains 'hello'?")
+    println(contains?(s1, "hello"))
+    println("'hello world' contains 'world'?")
+    println(contains?(s1, "world"))
+    println("'hello world' contains 'xyz'?")
+    println(contains?(s1, "xyz"))
+    println("'hello world' contains ''?")
+    println(contains?(s1, ""))
+
+    // Test with empty string
+    let s2 = ""
+    println("\nTests with empty string:")
+    println("'' starts with ''?")
+    println(starts-with?(s2, ""))
+    println("'' ends with ''?")
+    println(ends-with?(s2, ""))
+    println("'' contains ''?")
+    println(contains?(s2, ""))
+    println("'' starts with 'x'?")
+    println(starts-with?(s2, "x"))
+
+    // Test case sensitivity
+    let s3 = "Hello World"
+    println("\nCase sensitivity tests:")
+    println("'Hello World' starts with 'hello'?")
+    println(starts-with?(s3, "hello"))
+    println("'Hello World' starts with 'Hello'?")
+    println(starts-with?(s3, "Hello"))
+    println("'Hello World' contains 'world'?")
+    println(contains?(s3, "world"))
+    println("'Hello World' contains 'World'?")
+    println(contains?(s3, "World"))
+
+    ""
+}
+
+// Expect
+// starts-with? tests:
+// 'hello world' starts with 'hello'?
+// true
+// 'hello world' starts with 'world'?
+// false
+// 'hello world' starts with 'hello world'?
+// true
+// 'hello world' starts with ''?
+// true
+//
+// ends-with? tests:
+// 'hello world' ends with 'world'?
+// true
+// 'hello world' ends with 'hello'?
+// false
+// 'hello world' ends with 'hello world'?
+// true
+// 'hello world' ends with ''?
+// true
+//
+// contains? tests:
+// 'hello world' contains 'lo wo'?
+// true
+// 'hello world' contains 'hello'?
+// true
+// 'hello world' contains 'world'?
+// true
+// 'hello world' contains 'xyz'?
+// false
+// 'hello world' contains ''?
+// true
+//
+// Tests with empty string:
+// '' starts with ''?
+// true
+// '' ends with ''?
+// true
+// '' contains ''?
+// true
+// '' starts with 'x'?
+// false
+//
+// Case sensitivity tests:
+// 'Hello World' starts with 'hello'?
+// false
+// 'Hello World' starts with 'Hello'?
+// true
+// 'Hello World' contains 'world'?
+// false
+// 'Hello World' contains 'World'?
+// true

@@ -501,6 +501,51 @@ extern "C" fn trim_right(stack_pointer: usize, frame_pointer: usize, string: usi
         .into()
 }
 
+extern "C" fn starts_with(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    string: usize,
+    prefix: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(get_runtime().get(), "starts-with?");
+    let runtime = get_runtime().get_mut();
+    let string_value = runtime.get_string(stack_pointer, string);
+    let prefix_value = runtime.get_string(stack_pointer, prefix);
+    let result = string_value.starts_with(&prefix_value);
+    BuiltInTypes::construct_boolean(result) as usize
+}
+
+extern "C" fn ends_with(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    string: usize,
+    suffix: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(get_runtime().get(), "ends-with?");
+    let runtime = get_runtime().get_mut();
+    let string_value = runtime.get_string(stack_pointer, string);
+    let suffix_value = runtime.get_string(stack_pointer, suffix);
+    let result = string_value.ends_with(&suffix_value);
+    BuiltInTypes::construct_boolean(result) as usize
+}
+
+extern "C" fn string_contains(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    string: usize,
+    substr: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(get_runtime().get(), "contains?");
+    let runtime = get_runtime().get_mut();
+    let string_value = runtime.get_string(stack_pointer, string);
+    let substr_value = runtime.get_string(stack_pointer, substr);
+    let result = string_value.contains(&substr_value);
+    BuiltInTypes::construct_boolean(result) as usize
+}
+
 extern "C" fn fill_object_fields(object_pointer: usize, value: usize) -> usize {
     print_call_builtin(get_runtime().get(), "fill_object_fields");
     let mut object = HeapObject::from_tagged(object_pointer);
@@ -3925,6 +3970,33 @@ impl Runtime {
             true,
             true,
             3,
+        )?;
+
+        // starts-with? now takes (stack_pointer, frame_pointer, string, prefix)
+        self.add_builtin_function_with_fp(
+            "beagle.core/starts-with?",
+            starts_with as *const u8,
+            true,
+            true,
+            4,
+        )?;
+
+        // ends-with? now takes (stack_pointer, frame_pointer, string, suffix)
+        self.add_builtin_function_with_fp(
+            "beagle.core/ends-with?",
+            ends_with as *const u8,
+            true,
+            true,
+            4,
+        )?;
+
+        // contains? now takes (stack_pointer, frame_pointer, string, substr)
+        self.add_builtin_function_with_fp(
+            "beagle.core/contains?",
+            string_contains as *const u8,
+            true,
+            true,
+            4,
         )?;
 
         // hash now takes (stack_pointer, frame_pointer, value)
