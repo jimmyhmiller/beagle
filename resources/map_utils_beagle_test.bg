@@ -1,0 +1,79 @@
+namespace map_utils_beagle_test
+
+import "persistent-map" as pm
+
+fn main() {
+    println("Testing vals with Beagle PersistentMap:")
+
+    // Create a map using persistent-map
+    let m = pm/map()
+    let m = pm/assoc(m, "a", 1)
+    let m = pm/assoc(m, "b", 2)
+    let m = pm/assoc(m, "c", 3)
+
+    println("Created map:")
+    println(format(m, 0))
+
+    // Test vals
+    println("\nTesting vals:")
+    let vs = vals(m)
+    println("Values count:")
+    let vs-len = length(vs)
+    println(vs-len)
+
+    // Check individual values
+    println("Value at 0:")
+    println(get(vs, 0))
+    println("Value at 1:")
+    println(get(vs, 1))
+    println("Value at 2:")
+    println(get(vs, 2))
+
+    // Test dissoc
+    println("\nTesting dissoc:")
+    let m2 = dissoc(m, "b")
+    println("After dissoc 'b':")
+    println(format(m2, 0))
+    println("Count:")
+    println(length(m2))
+
+    // Test merge
+    println("\nTesting merge:")
+    let m3 = pm/map()
+    let m3 = pm/assoc(m3, "d", 4)
+    let m3 = pm/assoc(m3, "e", 5)
+    let m4 = merge(m2, m3)
+    println("After merge:")
+    println(format(m4, 0))
+    println("Count:")
+    println(length(m4))
+
+    ""
+}
+
+// Expect
+// Testing vals with Beagle PersistentMap:
+// Created map:
+// {"b": 2, "c": 3, "a": 1}
+//
+// Testing vals:
+// Values count:
+// 3
+// Value at 0:
+// 2
+// Value at 1:
+// 3
+// Value at 2:
+// 1
+//
+// Testing dissoc:
+// After dissoc 'b':
+// {"c": 3, "a": 1}
+// Count:
+// 2
+//
+// Testing merge:
+// After merge:
+// {"c": 3, "e": 5, "a": 1, "d": 4}
+// Count:
+// 4

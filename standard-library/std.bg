@@ -1113,3 +1113,27 @@ fn some?(x) {
     x != null
 }
 
+// ============================================================================
+// Map Utilities
+// ============================================================================
+
+// vals: Get all values from a map as a vector
+fn vals(m) {
+    let ks = keys(m)
+    map(ks, fn(k) { get(m, k) })
+}
+
+// dissoc: Remove a key from a map (returns new map without the key)
+// For now, this is implemented by rebuilding the map without the removed key
+fn dissoc(m, key) {
+    let ks = keys(m)
+    let filtered-keys = filter(ks, fn(k) { k != key })
+    reduce(filtered-keys, {}, fn(acc, k) { assoc(acc, k, get(m, k)) })
+}
+
+// merge: Combine two maps (m2's values take precedence for duplicate keys)
+fn merge(m1, m2) {
+    let ks = keys(m2)
+    reduce(ks, m1, fn(acc, k) { assoc(acc, k, get(m2, k)) })
+}
+
