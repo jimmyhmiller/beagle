@@ -1,0 +1,117 @@
+namespace trig_test
+
+// Test trigonometric functions
+
+fn main() {
+    // Define PI locally since it's not a built-in constant yet
+    let PI = 3.141592653589793
+
+    // Test tan
+    println("tan tests:")
+    println("tan(0.0):")
+    println(tan(0.0))
+    println("tan(PI/4) - should be ~1.0:")
+    let tan_pi4 = tan(PI / 4.0)
+    println(tan_pi4)
+    println("Close to 1.0?")
+    println(abs(tan_pi4 - 1.0) < 0.01)
+
+    // Test asin
+    println("\nasin tests:")
+    println("asin(0.0):")
+    println(asin(0.0))
+    println("asin(0.5) - should be ~0.5236 (30 degrees):")
+    let asin_half = asin(0.5)
+    println(asin_half)
+    println("asin(1.0) - should be ~1.5708 (90 degrees, PI/2):")
+    println(asin(1.0))
+
+    // Test acos
+    println("\nacos tests:")
+    println("acos(1.0) - should be 0.0:")
+    println(acos(1.0))
+    println("acos(0.0) - should be ~1.5708 (90 degrees, PI/2):")
+    println(acos(0.0))
+    println("acos(0.5) - should be ~1.0472 (60 degrees):")
+    println(acos(0.5))
+
+    // Test atan
+    println("\natan tests:")
+    println("atan(0.0):")
+    println(atan(0.0))
+    println("atan(1.0) - should be ~0.7854 (45 degrees, PI/4):")
+    println(atan(1.0))
+    println("atan(-1.0) - should be ~-0.7854 (-45 degrees):")
+    println(atan(to-float(-1)))
+
+    // Test atan2
+    println("\natan2 tests:")
+    println("atan2(0.0, 1.0) - should be 0.0:")
+    println(atan2(0.0, 1.0))
+    println("atan2(1.0, 1.0) - should be ~0.7854 (45 degrees, PI/4):")
+    println(atan2(1.0, 1.0))
+    println("atan2(1.0, 0.0) - should be ~1.5708 (90 degrees, PI/2):")
+    println(atan2(1.0, 0.0))
+    println("atan2(-1.0, 0.0) - should be ~-1.5708 (-90 degrees):")
+    println(atan2(to-float(-1), 0.0))
+
+    // Verify inverse relationships
+    println("\nInverse relationship tests:")
+    let x = 0.7
+    let sine_then_asin = asin(sin(x))
+    println("asin(sin(0.7)) should equal 0.7:")
+    println(sine_then_asin)
+    println("Close to 0.7?")
+    println(abs(sine_then_asin - x) < 0.01)
+
+    ""
+}
+
+// Expect
+// tan tests:
+// tan(0.0):
+// 0.0
+// tan(PI/4) - should be ~1.0:
+// 0.9999999999999999
+// Close to 1.0?
+// true
+//
+// asin tests:
+// asin(0.0):
+// 0.0
+// asin(0.5) - should be ~0.5236 (30 degrees):
+// 0.5235987755982989
+// asin(1.0) - should be ~1.5708 (90 degrees, PI/2):
+// 1.5707963267948966
+//
+// acos tests:
+// acos(1.0) - should be 0.0:
+// 0.0
+// acos(0.0) - should be ~1.5708 (90 degrees, PI/2):
+// 1.5707963267948966
+// acos(0.5) - should be ~1.0472 (60 degrees):
+// 1.0471975511965979
+//
+// atan tests:
+// atan(0.0):
+// 0.0
+// atan(1.0) - should be ~0.7854 (45 degrees, PI/4):
+// 0.7853981633974483
+// atan(-1.0) - should be ~-0.7854 (-45 degrees):
+// 1.5707963267948966
+//
+// atan2 tests:
+// atan2(0.0, 1.0) - should be 0.0:
+// 0.0
+// atan2(1.0, 1.0) - should be ~0.7854 (45 degrees, PI/4):
+// 0.7853981633974483
+// atan2(1.0, 0.0) - should be ~1.5708 (90 degrees, PI/2):
+// 1.5707963267948966
+// atan2(-1.0, 0.0) - should be ~-1.5708 (-90 degrees):
+// 1.5707963267948966
+//
+// Inverse relationship tests:
+// asin(sin(0.7)) should equal 0.7:
+// 0.7
+// Close to 0.7?
+// true

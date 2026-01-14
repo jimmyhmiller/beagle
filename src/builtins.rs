@@ -1843,6 +1843,151 @@ pub unsafe extern "C" fn cos_builtin(
     }
 }
 
+/// tan builtin - computes tangent of a float (in radians)
+pub unsafe extern "C" fn tan_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    unsafe {
+        let runtime = get_runtime().get_mut();
+
+        let untagged = BuiltInTypes::untag(value);
+        let float_ptr = untagged as *const f64;
+        let float_value = *float_ptr.add(1);
+
+        let result = float_value.tan();
+
+        let new_float_ptr = runtime
+            .allocate(1, stack_pointer, BuiltInTypes::Float)
+            .unwrap();
+
+        let untagged_result = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged_result as *mut f64;
+        *result_ptr.add(1) = result;
+
+        new_float_ptr
+    }
+}
+
+/// asin builtin - computes arcsine of a float (returns radians)
+pub unsafe extern "C" fn asin_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    unsafe {
+        let runtime = get_runtime().get_mut();
+
+        let untagged = BuiltInTypes::untag(value);
+        let float_ptr = untagged as *const f64;
+        let float_value = *float_ptr.add(1);
+
+        let result = float_value.asin();
+
+        let new_float_ptr = runtime
+            .allocate(1, stack_pointer, BuiltInTypes::Float)
+            .unwrap();
+
+        let untagged_result = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged_result as *mut f64;
+        *result_ptr.add(1) = result;
+
+        new_float_ptr
+    }
+}
+
+/// acos builtin - computes arccosine of a float (returns radians)
+pub unsafe extern "C" fn acos_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    unsafe {
+        let runtime = get_runtime().get_mut();
+
+        let untagged = BuiltInTypes::untag(value);
+        let float_ptr = untagged as *const f64;
+        let float_value = *float_ptr.add(1);
+
+        let result = float_value.acos();
+
+        let new_float_ptr = runtime
+            .allocate(1, stack_pointer, BuiltInTypes::Float)
+            .unwrap();
+
+        let untagged_result = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged_result as *mut f64;
+        *result_ptr.add(1) = result;
+
+        new_float_ptr
+    }
+}
+
+/// atan builtin - computes arctangent of a float (returns radians)
+pub unsafe extern "C" fn atan_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    unsafe {
+        let runtime = get_runtime().get_mut();
+
+        let untagged = BuiltInTypes::untag(value);
+        let float_ptr = untagged as *const f64;
+        let float_value = *float_ptr.add(1);
+
+        let result = float_value.atan();
+
+        let new_float_ptr = runtime
+            .allocate(1, stack_pointer, BuiltInTypes::Float)
+            .unwrap();
+
+        let untagged_result = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged_result as *mut f64;
+        *result_ptr.add(1) = result;
+
+        new_float_ptr
+    }
+}
+
+/// atan2 builtin - computes arctangent of y/x (returns radians)
+pub unsafe extern "C" fn atan2_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    y: usize,
+    x: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    unsafe {
+        let runtime = get_runtime().get_mut();
+
+        let y_untagged = BuiltInTypes::untag(y);
+        let y_float_ptr = y_untagged as *const f64;
+        let y_value = *y_float_ptr.add(1);
+
+        let x_untagged = BuiltInTypes::untag(x);
+        let x_float_ptr = x_untagged as *const f64;
+        let x_value = *x_float_ptr.add(1);
+
+        let result = y_value.atan2(x_value);
+
+        let new_float_ptr = runtime
+            .allocate(1, stack_pointer, BuiltInTypes::Float)
+            .unwrap();
+
+        let untagged_result = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged_result as *mut f64;
+        *result_ptr.add(1) = result;
+
+        new_float_ptr
+    }
+}
+
 /// to_float builtin - converts an integer to a float
 pub unsafe extern "C" fn to_float_builtin(
     stack_pointer: usize,
@@ -4111,6 +4256,41 @@ impl Runtime {
             true,
             true,
             3,
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/tan",
+            tan_builtin as *const u8,
+            true,
+            true,
+            3,
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/asin",
+            asin_builtin as *const u8,
+            true,
+            true,
+            3,
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/acos",
+            acos_builtin as *const u8,
+            true,
+            true,
+            3,
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/atan",
+            atan_builtin as *const u8,
+            true,
+            true,
+            3,
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/atan2",
+            atan2_builtin as *const u8,
+            true,
+            true,
+            4,
         )?;
         self.add_builtin_function_with_fp(
             "beagle.core/to-float",
