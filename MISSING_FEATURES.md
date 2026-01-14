@@ -182,11 +182,9 @@ if x < 0 {
 Currently missing (per STDLIB_PLAN.md):
 
 ```
-replace(str, from, to)
 replace-first(str, from, to)
 pad-left(str, width, char)
 pad-right(str, width, char)
-blank?(str)
 lines(str)
 words(str)
 ```
