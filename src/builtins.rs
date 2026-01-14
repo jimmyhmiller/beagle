@@ -1559,6 +1559,85 @@ extern "C" fn min_builtin(
     }
 }
 
+/// even? predicate - checks if an integer is even
+extern "C" fn is_even(value: usize) -> usize {
+    let value_kind = BuiltInTypes::get_kind(value);
+    if value_kind == BuiltInTypes::Int {
+        let int_val = BuiltInTypes::untag_isize(value as isize);
+        BuiltInTypes::construct_boolean(int_val % 2 == 0) as usize
+    } else {
+        BuiltInTypes::construct_boolean(false) as usize
+    }
+}
+
+/// odd? predicate - checks if an integer is odd
+extern "C" fn is_odd(value: usize) -> usize {
+    let value_kind = BuiltInTypes::get_kind(value);
+    if value_kind == BuiltInTypes::Int {
+        let int_val = BuiltInTypes::untag_isize(value as isize);
+        BuiltInTypes::construct_boolean(int_val % 2 != 0) as usize
+    } else {
+        BuiltInTypes::construct_boolean(false) as usize
+    }
+}
+
+/// positive? predicate - checks if a number is positive
+extern "C" fn is_positive(value: usize) -> usize {
+    let value_kind = BuiltInTypes::get_kind(value);
+
+    if value_kind == BuiltInTypes::Int {
+        let int_val = BuiltInTypes::untag_isize(value as isize);
+        BuiltInTypes::construct_boolean(int_val > 0) as usize
+    } else if value_kind == BuiltInTypes::Float {
+        unsafe {
+            let untagged = BuiltInTypes::untag(value);
+            let float_ptr = untagged as *const f64;
+            let float_value = *float_ptr.add(1);
+            BuiltInTypes::construct_boolean(float_value > 0.0) as usize
+        }
+    } else {
+        BuiltInTypes::construct_boolean(false) as usize
+    }
+}
+
+/// negative? predicate - checks if a number is negative
+extern "C" fn is_negative(value: usize) -> usize {
+    let value_kind = BuiltInTypes::get_kind(value);
+
+    if value_kind == BuiltInTypes::Int {
+        let int_val = BuiltInTypes::untag_isize(value as isize);
+        BuiltInTypes::construct_boolean(int_val < 0) as usize
+    } else if value_kind == BuiltInTypes::Float {
+        unsafe {
+            let untagged = BuiltInTypes::untag(value);
+            let float_ptr = untagged as *const f64;
+            let float_value = *float_ptr.add(1);
+            BuiltInTypes::construct_boolean(float_value < 0.0) as usize
+        }
+    } else {
+        BuiltInTypes::construct_boolean(false) as usize
+    }
+}
+
+/// zero? predicate - checks if a number is zero
+extern "C" fn is_zero(value: usize) -> usize {
+    let value_kind = BuiltInTypes::get_kind(value);
+
+    if value_kind == BuiltInTypes::Int {
+        let int_val = BuiltInTypes::untag_isize(value as isize);
+        BuiltInTypes::construct_boolean(int_val == 0) as usize
+    } else if value_kind == BuiltInTypes::Float {
+        unsafe {
+            let untagged = BuiltInTypes::untag(value);
+            let float_ptr = untagged as *const f64;
+            let float_value = *float_ptr.add(1);
+            BuiltInTypes::construct_boolean(float_value == 0.0) as usize
+        }
+    } else {
+        BuiltInTypes::construct_boolean(false) as usize
+    }
+}
+
 /// sin builtin - computes sine of a float (in radians)
 pub unsafe extern "C" fn sin_builtin(
     stack_pointer: usize,
@@ -3839,6 +3918,36 @@ impl Runtime {
             true,
             true,
             4,
+        )?;
+        self.add_builtin_function(
+            "beagle.core/even?",
+            is_even as *const u8,
+            false,
+            1,
+        )?;
+        self.add_builtin_function(
+            "beagle.core/odd?",
+            is_odd as *const u8,
+            false,
+            1,
+        )?;
+        self.add_builtin_function(
+            "beagle.core/positive?",
+            is_positive as *const u8,
+            false,
+            1,
+        )?;
+        self.add_builtin_function(
+            "beagle.core/negative?",
+            is_negative as *const u8,
+            false,
+            1,
+        )?;
+        self.add_builtin_function(
+            "beagle.core/zero?",
+            is_zero as *const u8,
+            false,
+            1,
         )?;
         self.add_builtin_function_with_fp(
             "beagle.core/sin",
