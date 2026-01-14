@@ -182,8 +182,6 @@ if x < 0 {
 Currently missing (per STDLIB_PLAN.md):
 
 ```
-index-of(str, substr)
-last-index-of(str, substr)
 replace(str, from, to)
 replace-first(str, from, to)
 pad-left(str, width, char)
