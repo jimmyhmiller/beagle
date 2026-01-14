@@ -1,0 +1,127 @@
+namespace index_of_test
+
+// Test index-of and last-index-of functions
+
+fn main() {
+    // Test basic index-of
+    let s1 = "hello world"
+
+    println("index-of tests:")
+    println("index-of 'hello world' for 'world':")
+    println(index-of(s1, "world"))
+    println("index-of 'hello world' for 'hello':")
+    println(index-of(s1, "hello"))
+    println("index-of 'hello world' for 'o':")
+    println(index-of(s1, "o"))
+    println("index-of 'hello world' for 'xyz':")
+    println(index-of(s1, "xyz"))
+    println("index-of 'hello world' for '':")
+    println(index-of(s1, ""))
+
+    // Test last-index-of
+    println("\nlast-index-of tests:")
+    println("last-index-of 'hello world' for 'o':")
+    println(last-index-of(s1, "o"))
+    println("last-index-of 'hello world' for 'l':")
+    println(last-index-of(s1, "l"))
+    println("last-index-of 'hello world' for 'hello':")
+    println(last-index-of(s1, "hello"))
+    println("last-index-of 'hello world' for 'xyz':")
+    println(last-index-of(s1, "xyz"))
+    println("last-index-of 'hello world' for '':")
+    println(last-index-of(s1, ""))
+
+    // Test with repeated substrings
+    let s2 = "abcabcabc"
+    println("\nRepeated substring tests:")
+    println("index-of 'abcabcabc' for 'abc':")
+    println(index-of(s2, "abc"))
+    println("last-index-of 'abcabcabc' for 'abc':")
+    println(last-index-of(s2, "abc"))
+    println("index-of 'abcabcabc' for 'bc':")
+    println(index-of(s2, "bc"))
+    println("last-index-of 'abcabcabc' for 'bc':")
+    println(last-index-of(s2, "bc"))
+
+    // Test with single occurrence
+    let s3 = "unique"
+    println("\nSingle occurrence tests:")
+    println("index-of 'unique' for 'niq':")
+    println(index-of(s3, "niq"))
+    println("last-index-of 'unique' for 'niq':")
+    println(last-index-of(s3, "niq"))
+
+    // Test at boundaries
+    println("\nBoundary tests:")
+    println("index-of 'hello' for 'h':")
+    println(index-of("hello", "h"))
+    println("index-of 'hello' for 'o':")
+    println(index-of("hello", "o"))
+    println("index-of 'hello' for 'hello':")
+    println(index-of("hello", "hello"))
+
+    // Test empty string
+    let s4 = ""
+    println("\nEmpty string tests:")
+    println("index-of '' for '':")
+    println(index-of(s4, ""))
+    println("index-of '' for 'x':")
+    println(index-of(s4, "x"))
+
+    ""
+}
+
+// Expect
+// index-of tests:
+// index-of 'hello world' for 'world':
+// 6
+// index-of 'hello world' for 'hello':
+// 0
+// index-of 'hello world' for 'o':
+// 4
+// index-of 'hello world' for 'xyz':
+// -1
+// index-of 'hello world' for '':
+// 0
+//
+// last-index-of tests:
+// last-index-of 'hello world' for 'o':
+// 7
+// last-index-of 'hello world' for 'l':
+// 9
+// last-index-of 'hello world' for 'hello':
+// 0
+// last-index-of 'hello world' for 'xyz':
+// -1
+// last-index-of 'hello world' for '':
+// 11
+//
+// Repeated substring tests:
+// index-of 'abcabcabc' for 'abc':
+// 0
+// last-index-of 'abcabcabc' for 'abc':
+// 6
+// index-of 'abcabcabc' for 'bc':
+// 1
+// last-index-of 'abcabcabc' for 'bc':
+// 7
+//
+// Single occurrence tests:
+// index-of 'unique' for 'niq':
+// 1
+// last-index-of 'unique' for 'niq':
+// 1
+//
+// Boundary tests:
+// index-of 'hello' for 'h':
+// 0
+// index-of 'hello' for 'o':
+// 4
+// index-of 'hello' for 'hello':
+// 0
+//
+// Empty string tests:
+// index-of '' for '':
+// 0
+// index-of '' for 'x':
+// -1

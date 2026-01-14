@@ -546,6 +546,42 @@ extern "C" fn string_contains(
     BuiltInTypes::construct_boolean(result) as usize
 }
 
+extern "C" fn index_of(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    string: usize,
+    substr: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(get_runtime().get(), "index-of");
+    let runtime = get_runtime().get_mut();
+    let string_value = runtime.get_string(stack_pointer, string);
+    let substr_value = runtime.get_string(stack_pointer, substr);
+
+    match string_value.find(&substr_value) {
+        Some(index) => BuiltInTypes::construct_int(index as isize) as usize,
+        None => BuiltInTypes::construct_int(-1) as usize,
+    }
+}
+
+extern "C" fn last_index_of(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    string: usize,
+    substr: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(get_runtime().get(), "last-index-of");
+    let runtime = get_runtime().get_mut();
+    let string_value = runtime.get_string(stack_pointer, string);
+    let substr_value = runtime.get_string(stack_pointer, substr);
+
+    match string_value.rfind(&substr_value) {
+        Some(index) => BuiltInTypes::construct_int(index as isize) as usize,
+        None => BuiltInTypes::construct_int(-1) as usize,
+    }
+}
+
 extern "C" fn fill_object_fields(object_pointer: usize, value: usize) -> usize {
     print_call_builtin(get_runtime().get(), "fill_object_fields");
     let mut object = HeapObject::from_tagged(object_pointer);
@@ -3994,6 +4030,24 @@ impl Runtime {
         self.add_builtin_function_with_fp(
             "beagle.core/contains?",
             string_contains as *const u8,
+            true,
+            true,
+            4,
+        )?;
+
+        // index-of now takes (stack_pointer, frame_pointer, string, substr)
+        self.add_builtin_function_with_fp(
+            "beagle.core/index-of",
+            index_of as *const u8,
+            true,
+            true,
+            4,
+        )?;
+
+        // last-index-of now takes (stack_pointer, frame_pointer, string, substr)
+        self.add_builtin_function_with_fp(
+            "beagle.core/last-index-of",
+            last_index_of as *const u8,
             true,
             true,
             4,
