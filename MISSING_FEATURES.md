@@ -182,9 +182,6 @@ if x < 0 {
 Currently missing (per STDLIB_PLAN.md):
 
 ```
-trim(str)                  // Remove whitespace
-trim-left(str)
-trim-right(str)
 starts-with?(str, prefix)
 ends-with?(str, suffix)
 contains?(str, substr)
