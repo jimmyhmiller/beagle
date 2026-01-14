@@ -1,0 +1,170 @@
+namespace math_predicates_test
+
+// Test even?, odd?, positive?, negative?, zero? predicates
+
+fn main() {
+    // Test even?
+    println("even? tests:")
+    println("even?(0):")
+    println(even?(0))
+    println("even?(2):")
+    println(even?(2))
+    println("even?(3):")
+    println(even?(3))
+    println("even?(-2):")
+    println(even?(-2))
+    println("even?(-3):")
+    println(even?(-3))
+
+    // Test odd?
+    println("\nodd? tests:")
+    println("odd?(0):")
+    println(odd?(0))
+    println("odd?(2):")
+    println(odd?(2))
+    println("odd?(3):")
+    println(odd?(3))
+    println("odd?(-2):")
+    println(odd?(-2))
+    println("odd?(-3):")
+    println(odd?(-3))
+
+    // Test positive?
+    println("\npositive? tests (integers):")
+    println("positive?(0):")
+    println(positive?(0))
+    println("positive?(5):")
+    println(positive?(5))
+    println("positive?(-5):")
+    println(positive?(-5))
+
+    println("\npositive? tests (floats):")
+    println("positive?(0.0):")
+    println(positive?(0.0))
+    println("positive?(5.5):")
+    println(positive?(5.5))
+    println("positive?(-5.5):")
+    println(positive?(-5.5))
+
+    // Test negative?
+    println("\nnegative? tests (integers):")
+    println("negative?(0):")
+    println(negative?(0))
+    println("negative?(5):")
+    println(negative?(5))
+    println("negative?(-5):")
+    println(negative?(-5))
+
+    println("\nnegative? tests (floats):")
+    println("negative?(0.0):")
+    println(negative?(0.0))
+    println("negative?(5.5):")
+    println(negative?(5.5))
+    println("negative?(-5.5):")
+    println(negative?(-5.5))
+
+    // Test zero?
+    println("\nzero? tests (integers):")
+    println("zero?(0):")
+    println(zero?(0))
+    println("zero?(5):")
+    println(zero?(5))
+    println("zero?(-5):")
+    println(zero?(-5))
+
+    println("\nzero? tests (floats):")
+    println("zero?(0.0):")
+    println(zero?(0.0))
+    println("zero?(5.5):")
+    println(zero?(5.5))
+    println("zero?(-5.5):")
+    println(zero?(-5.5))
+
+    // Test with large numbers
+    println("\nTests with large numbers:")
+    println("even?(100):")
+    println(even?(100))
+    println("odd?(101):")
+    println(odd?(101))
+
+    ""
+}
+
+// Expect
+// even? tests:
+// even?(0):
+// true
+// even?(2):
+// true
+// even?(3):
+// false
+// even?(-2):
+// true
+// even?(-3):
+// false
+//
+// odd? tests:
+// odd?(0):
+// false
+// odd?(2):
+// false
+// odd?(3):
+// true
+// odd?(-2):
+// false
+// odd?(-3):
+// true
+//
+// positive? tests (integers):
+// positive?(0):
+// false
+// positive?(5):
+// true
+// positive?(-5):
+// false
+//
+// positive? tests (floats):
+// positive?(0.0):
+// false
+// positive?(5.5):
+// true
+// positive?(-5.5):
+// false
+//
+// negative? tests (integers):
+// negative?(0):
+// false
+// negative?(5):
+// false
+// negative?(-5):
+// true
+//
+// negative? tests (floats):
+// negative?(0.0):
+// false
+// negative?(5.5):
+// false
+// negative?(-5.5):
+// true
+//
+// zero? tests (integers):
+// zero?(0):
+// true
+// zero?(5):
+// false
+// zero?(-5):
+// false
+//
+// zero? tests (floats):
+// zero?(0.0):
+// true
+// zero?(5.5):
+// false
+// zero?(-5.5):
+// false
+//
+// Tests with large numbers:
+// even?(100):
+// true
+// odd?(101):
+// true
