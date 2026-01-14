@@ -6,7 +6,7 @@ import "persistent-vector" as pv
 
 struct Tokenizer {
     input
-    position
+    mut position
     length
 }
 
@@ -99,7 +99,7 @@ fn parse_number(tokenizer) {
     let start_pos = tokenizer.position
     let end_pos = find_number_end(tokenizer)
     let number_string = substring(tokenizer.input, start_pos, end_pos - start_pos)
-    to_number(number_string)
+    to-number(number_string)
 }
 
 fn find_word_end(tokenizer) {

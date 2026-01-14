@@ -421,6 +421,7 @@ enum SystemError {
     FunctionError { message, location }
     FieldError { message, location }
     IndexError { message, location }
+    MutabilityError { message, location }
 }
 
 // Compiler warning information for programmatic inspection
