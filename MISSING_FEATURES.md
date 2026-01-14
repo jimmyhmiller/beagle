@@ -186,8 +186,6 @@ All planned string functions have been implemented.
 Currently missing:
 
 ```
-clamp(x, low, high)
-gcd(a, b), lcm(a, b)
 random(), random-int(max), random-range(min, max)
 
 // Constants
