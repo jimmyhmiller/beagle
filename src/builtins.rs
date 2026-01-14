@@ -404,6 +404,18 @@ extern "C" fn uppercase(stack_pointer: usize, frame_pointer: usize, string: usiz
         .into()
 }
 
+extern "C" fn lowercase(stack_pointer: usize, frame_pointer: usize, string: usize) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(get_runtime().get(), "lowercase");
+    let runtime = get_runtime().get_mut();
+    let string_value = runtime.get_string(stack_pointer, string);
+    let lowercased = string_value.to_lowercase();
+    runtime
+        .allocate_string(stack_pointer, lowercased)
+        .unwrap()
+        .into()
+}
+
 extern "C" fn fill_object_fields(object_pointer: usize, value: usize) -> usize {
     print_call_builtin(get_runtime().get(), "fill_object_fields");
     let mut object = HeapObject::from_tagged(object_pointer);
@@ -3771,6 +3783,15 @@ impl Runtime {
         self.add_builtin_function_with_fp(
             "beagle.core/uppercase",
             uppercase as *const u8,
+            true,
+            true,
+            3,
+        )?;
+
+        // lowercase now takes (stack_pointer, frame_pointer, string)
+        self.add_builtin_function_with_fp(
+            "beagle.core/lowercase",
+            lowercase as *const u8,
             true,
             true,
             3,
