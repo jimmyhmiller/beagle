@@ -96,6 +96,8 @@ pub trait CodegenBackend: Sized {
     fn sub_imm(&mut self, dest: Self::Register, a: Self::Register, imm: i32);
     fn mul(&mut self, dest: Self::Register, a: Self::Register, b: Self::Register);
     fn div(&mut self, dest: Self::Register, a: Self::Register, b: Self::Register);
+    /// True modulo operation (always non-negative result when divisor is positive)
+    fn modulo(&mut self, dest: Self::Register, a: Self::Register, b: Self::Register);
 
     // === Bitwise operations ===
 
