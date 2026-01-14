@@ -1708,6 +1708,107 @@ extern "C" fn min_builtin(
     }
 }
 
+/// clamp builtin - clamps a value between low and high bounds
+extern "C" fn clamp_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+    low: usize,
+    high: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    unsafe {
+        let runtime = get_runtime().get_mut();
+
+        let value_kind = BuiltInTypes::get_kind(value);
+        let low_kind = BuiltInTypes::get_kind(low);
+        let high_kind = BuiltInTypes::get_kind(high);
+
+        // If all are integers, do integer clamping
+        if value_kind == BuiltInTypes::Int
+            && low_kind == BuiltInTypes::Int
+            && high_kind == BuiltInTypes::Int
+        {
+            let value_int = BuiltInTypes::untag_isize(value as isize);
+            let low_int = BuiltInTypes::untag_isize(low as isize);
+            let high_int = BuiltInTypes::untag_isize(high as isize);
+
+            let clamped = value_int.max(low_int).min(high_int);
+            return BuiltInTypes::construct_int(clamped) as usize;
+        }
+
+        // Otherwise, convert to float and do float clamping
+        let value_float = if value_kind == BuiltInTypes::Int {
+            BuiltInTypes::untag_isize(value as isize) as f64
+        } else {
+            let untagged = BuiltInTypes::untag(value);
+            let float_ptr = untagged as *const f64;
+            *float_ptr.add(1)
+        };
+
+        let low_float = if low_kind == BuiltInTypes::Int {
+            BuiltInTypes::untag_isize(low as isize) as f64
+        } else {
+            let untagged = BuiltInTypes::untag(low);
+            let float_ptr = untagged as *const f64;
+            *float_ptr.add(1)
+        };
+
+        let high_float = if high_kind == BuiltInTypes::Int {
+            BuiltInTypes::untag_isize(high as isize) as f64
+        } else {
+            let untagged = BuiltInTypes::untag(high);
+            let float_ptr = untagged as *const f64;
+            *float_ptr.add(1)
+        };
+
+        let result = value_float.max(low_float).min(high_float);
+
+        let new_float_ptr = runtime
+            .allocate(1, stack_pointer, BuiltInTypes::Float)
+            .unwrap();
+
+        let untagged_result = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged_result as *mut f64;
+        *result_ptr.add(1) = result;
+
+        new_float_ptr
+    }
+}
+
+/// gcd builtin - computes greatest common divisor of two integers
+extern "C" fn gcd_builtin(a: usize, b: usize) -> usize {
+    let mut a_val = BuiltInTypes::untag_isize(a as isize).abs();
+    let mut b_val = BuiltInTypes::untag_isize(b as isize).abs();
+
+    // Euclidean algorithm
+    while b_val != 0 {
+        let temp = b_val;
+        b_val = a_val % b_val;
+        a_val = temp;
+    }
+
+    BuiltInTypes::construct_int(a_val) as usize
+}
+
+/// lcm builtin - computes least common multiple of two integers
+extern "C" fn lcm_builtin(a: usize, b: usize) -> usize {
+    let a_val = BuiltInTypes::untag_isize(a as isize).abs();
+    let b_val = BuiltInTypes::untag_isize(b as isize).abs();
+
+    if a_val == 0 || b_val == 0 {
+        return BuiltInTypes::construct_int(0) as usize;
+    }
+
+    // LCM(a,b) = |a*b| / GCD(a,b)
+    let gcd_result = gcd_builtin(a, b);
+    let gcd_val = BuiltInTypes::untag_isize(gcd_result as isize);
+
+    let lcm = (a_val * b_val) / gcd_val;
+
+    BuiltInTypes::construct_int(lcm) as usize
+}
+
 /// even? predicate - checks if an integer is even
 extern "C" fn is_even(value: usize) -> usize {
     let value_kind = BuiltInTypes::get_kind(value);
@@ -4387,6 +4488,25 @@ impl Runtime {
             is_zero as *const u8,
             false,
             1,
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/clamp",
+            clamp_builtin as *const u8,
+            true,
+            true,
+            5,
+        )?;
+        self.add_builtin_function(
+            "beagle.core/gcd",
+            gcd_builtin as *const u8,
+            false,
+            2,
+        )?;
+        self.add_builtin_function(
+            "beagle.core/lcm",
+            lcm_builtin as *const u8,
+            false,
+            2,
         )?;
         self.add_builtin_function_with_fp(
             "beagle.core/sin",
