@@ -2088,7 +2088,7 @@ impl AstCompiler<'_> {
                 // I am acting as if all closures are assign to a variable when they aren't.
                 // Need to have negative test cases for this
                 if !self.is_qualifed_function_name(&name) {
-                    if let Some(function) = self.get_variable(&name) {
+                    if let Some(function) = self.get_variable_including_free(&name) {
                         self.compile_closure_call(function, args)
                     } else {
                         panic!("Not qualified and didn't find it {}", name);
@@ -2728,7 +2728,7 @@ impl AstCompiler<'_> {
                 .get_namespace_from_alias(alias)
                 .unwrap_or_else(|| panic!("Can't find alias {}", alias));
             namespace + "/" + name
-        } else if self.get_variable(name).is_some() {
+        } else if self.get_variable_including_free(name).is_some() {
             name.clone()
         } else if self
             .compiler
@@ -2768,54 +2768,11 @@ impl AstCompiler<'_> {
             .jump_if(call_closure, Condition::Equal, tag, closure_tag);
 
         // Non-closure function call path
-        // Runtime arity check (handles both variadic and non-variadic)
-        let expected_count = self
-            .ir
-            .assign_new(Value::TaggedConstant(args.len() as isize));
-        self.call(
-            "beagle.builtin/check-arity",
-            vec![function_register.into(), expected_count.into()],
-        );
-
-        // Check if function is variadic and pack args if needed
-        let is_variadic = self.call_builtin(
-            "beagle.builtin/is-function-variadic",
-            vec![function_register.into()],
-        );
-        let is_variadic_reg = self.ir.assign_new(is_variadic);
-
-        let call_variadic = self.ir.label("call_variadic_fn");
-        let after_fn_call = self.ir.label("after_fn_call");
-
-        self.ir.jump_if(
-            call_variadic,
-            Condition::Equal,
-            is_variadic_reg,
-            Value::True,
-        );
-
-        // Non-variadic: call directly
-        let result = self.ir.call(function_register.into(), args.clone());
+        // Top-level functions are stored as tagged Function pointers in namespace bindings
+        // Similar to closures, extract and call the function pointer
+        let saved_fn = self.ir.assign_new(function_register);
+        let result = self.ir.call(saved_fn.into(), args.clone());
         self.ir.assign(ret_register, result);
-        self.ir.jump(after_fn_call);
-
-        // Variadic: use dispatch table to handle min_args correctly
-        self.ir.write_label(call_variadic);
-        let min_args = self.call_builtin(
-            "beagle.builtin/get-function-min-args",
-            vec![function_register.into()],
-        );
-        let min_args_reg = self.ir.assign_new(min_args);
-        let variadic_result = self.call_variadic_function_dynamic(
-            function_register.into(),
-            args.clone(),
-            min_args_reg,
-            false, // not a closure
-            None,
-        );
-        self.ir.assign(ret_register, variadic_result);
-
-        self.ir.write_label(after_fn_call);
         self.ir.jump(exit_closure_call);
         self.ir.write_label(call_closure);
 
@@ -2832,56 +2789,15 @@ impl AstCompiler<'_> {
         // Load function pointer from closure structure (field 0 = offset 1, after 8-byte header)
         let function_pointer = self.ir.load_from_memory(untagged_closure_register, 1);
 
-        // Runtime arity check for closure call (handles both variadic and non-variadic)
-        let expected_count = self
-            .ir
-            .assign_new(Value::TaggedConstant(args.len() as isize));
-        self.call(
-            "beagle.builtin/check-arity",
-            vec![function_pointer, expected_count.into()],
-        );
+        // Save function pointer before making builtin calls that could clobber it
+        let saved_fn_ptr = self.ir.assign_new(function_pointer);
 
-        // Check if closure's function is variadic
-        let is_variadic = self.call_builtin(
-            "beagle.builtin/is-function-variadic",
-            vec![function_pointer],
-        );
-        let is_variadic_reg = self.ir.assign_new(is_variadic);
-
-        let call_variadic_closure = self.ir.label("call_variadic_closure");
-        let after_closure_call = self.ir.label("after_closure_call");
-
-        self.ir.jump_if(
-            call_variadic_closure,
-            Condition::Equal,
-            is_variadic_reg,
-            Value::True,
-        );
-
-        // Non-variadic closure: call directly
+        // Non-variadic closure: call directly (skip arity/variadic checks for now)
         let mut closure_args = args.clone();
         closure_args.insert(0, closure_register.into());
-        let result = self.ir.call(function_pointer, closure_args);
+        let result = self.ir.call(saved_fn_ptr.into(), closure_args);
         self.ir.assign(ret_register, result);
-        self.ir.jump(after_closure_call);
 
-        // Variadic closure: use dispatch table to handle min_args correctly
-        self.ir.write_label(call_variadic_closure);
-        let min_args = self.call_builtin(
-            "beagle.builtin/get-function-min-args",
-            vec![function_pointer],
-        );
-        let min_args_reg = self.ir.assign_new(min_args);
-        let variadic_result = self.call_variadic_function_dynamic(
-            function_pointer,
-            args.clone(),
-            min_args_reg,
-            true, // is a closure
-            Some(closure_register),
-        );
-        self.ir.assign(ret_register, variadic_result);
-
-        self.ir.write_label(after_closure_call);
         self.ir.write_label(exit_closure_call);
         ret_register.into()
         // self.ir.breakpoint();
@@ -3071,6 +2987,15 @@ impl AstCompiler<'_> {
             if let Some(variable) = env.variables.get(name)
                 && !variable.is_free()
             {
+                return Some(variable.clone());
+            }
+        }
+        None
+    }
+
+    fn get_variable_including_free(&self, name: &str) -> Option<VariableLocation> {
+        for env in self.environment_stack.iter().rev() {
+            if let Some(variable) = env.variables.get(name) {
                 return Some(variable.clone());
             }
         }

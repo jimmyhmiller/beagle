@@ -1,0 +1,63 @@
+namespace collection_utils_test
+
+fn main() {
+    println("Testing min-of and max-of:")
+    let numbers = [3, 1, 4, 1, 5, 9, 2, 6]
+    println("Numbers: " ++ format(numbers, 0))
+    println("min-of: " ++ to-string(min-of(numbers)))
+    println("max-of: " ++ to-string(max-of(numbers)))
+
+    println("\nTesting min-by and max-by:")
+    let words = ["cat", "elephant", "dog", "butterfly"]
+    println("Words: " ++ format(words, 0))
+    let shortest = min-by(words, fn(s) { length(s) })
+    let longest = max-by(words, fn(s) { length(s) })
+    println("Shortest word: " ++ shortest)
+    println("Longest word: " ++ longest)
+
+    println("\nTesting reduce-right:")
+    let items = [1, 2, 3, 4]
+    println("Items: " ++ format(items, 0))
+
+    // Regular reduce (left to right): ((((0 - 1) - 2) - 3) - 4) = -10
+    let left = reduce(items, 0, fn(acc, x) { acc - x })
+    println("reduce (left to right): " ++ to-string(left))
+
+    // Reduce-right (right to left): ((((0 - 4) - 3) - 2) - 1) = -10
+    let right = reduce-right(items, 0, fn(acc, x) { acc - x })
+    println("reduce-right (right to left): " ++ to-string(right))
+
+    // Build a list to show order
+    let build-left = reduce(items, [], fn(acc, x) { push(acc, x) })
+    let build-right = reduce-right(items, [], fn(acc, x) { push(acc, x) })
+    println("Build order (left): " ++ format(build-left, 0))
+    println("Build order (right): " ++ format(build-right, 0))
+
+    println("\nTesting edge cases:")
+    println("min-of([]): " ++ to-string(min-of([])))
+    println("max-of([]): " ++ to-string(max-of([])))
+
+    "done"
+}
+
+// Expect
+// Testing min-of and max-of:
+// Numbers: [3, 1, 4, 1, 5, 9, 2, 6]
+// min-of: 1
+// max-of: 9
+//
+// Testing min-by and max-by:
+// Words: ["cat", "elephant", "dog", "butterfly"]
+// Shortest word: cat
+// Longest word: butterfly
+//
+// Testing reduce-right:
+// Items: [1, 2, 3, 4]
+// reduce (left to right): -10
+// reduce-right (right to left): -10
+// Build order (left): [1, 2, 3, 4]
+// Build order (right): [4, 3, 2, 1]
+//
+// Testing edge cases:
+// min-of([]): null
+// max-of([]): null

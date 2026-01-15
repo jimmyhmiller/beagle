@@ -1,11 +1,9 @@
 namespace map_simple_test
 
-import "persistent-map" as pm
-
 fn main() {
     // Test manual map creation
-    let m1 = pm/map()
-    let m2 = pm/assoc(m1, :a, 1)
+    let m1 = {}
+    let m2 = assoc(m1, :a, 1)
     println(get(m2, :a))
 
     // Test map literal

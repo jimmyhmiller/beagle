@@ -1,6 +1,5 @@
 namespace string
 
-import "persistent-vector" as vector
 import "beagle.builtin" as builtin
 
 

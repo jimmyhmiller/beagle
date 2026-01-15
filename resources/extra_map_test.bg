@@ -1,8 +1,11 @@
 namespace extra-map-test
-import "persistent-map" as pm
 import "beagle.builtin" as builtin
 import "beagle.primitive" as primitive
 import "raw-mutable-array" as array
+
+// DISABLED: This test accessed internal HAMT node structures from the old Beagle
+// implementation. With Rust-backed persistent collections, these internals are not exposed.
+// The test is no longer applicable.
 
 fn test-assoc-node-bitmap() {
     let pm = pm/assoc(pm/map(), "key1", "value1")

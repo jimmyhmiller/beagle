@@ -1,6 +1,5 @@
 namespace map_benchmark
 
-import "persistent-map" as pm
 import "beagle.builtin" as builtin
 import "beagle.primitive" as primitive
 
@@ -8,7 +7,7 @@ fn insert_many(m, i, limit) {
     if i == limit {
         m
     } else {
-        insert_many(pm/assoc(m, i, i), i + 1, limit)
+        insert_many(assoc(m, i, i), i + 1, limit)
     }
 }
 
@@ -16,14 +15,14 @@ fn do_gets(m, i, limit) {
     if i == limit {
         0
     } else {
-        let result = pm/_get(m, i)
+        let result = get(m, i)
         do_gets(m, i + 1, limit)
     }
 }
 
 fn main() {
     let size = 100000
-    let empty_map = pm/map()
+    let empty_map = {}
     let big_map = insert_many(empty_map, 0, size)
     do_gets(big_map, 0, size)
     "done"

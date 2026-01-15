@@ -1375,6 +1375,82 @@ impl PersistentMap {
             Ok((new_node_h, true))
         }
     }
+
+    /// Get all keys from the map as a PersistentVec.
+    pub fn keys(
+        runtime: &mut Runtime,
+        stack_pointer: usize,
+        map: GcHandle,
+    ) -> Result<GcHandle, Box<dyn Error>> {
+        use super::persistent_vec::PersistentVec;
+
+        let mut vec = PersistentVec::empty(runtime, stack_pointer)?;
+
+        let root_ptr = map.get_field(FIELD_ROOT);
+        if root_ptr == BuiltInTypes::null_value() as usize {
+            return Ok(vec);
+        }
+
+        let root = GcHandle::from_tagged(root_ptr);
+        Self::collect_keys(runtime, stack_pointer, root, &mut vec)?;
+
+        Ok(vec)
+    }
+
+    /// Recursively collect keys from a node.
+    fn collect_keys(
+        runtime: &mut Runtime,
+        stack_pointer: usize,
+        node: GcHandle,
+        vec: &mut GcHandle,
+    ) -> Result<(), Box<dyn Error>> {
+        use super::persistent_vec::PersistentVec;
+
+        let type_id = node.get_type_id();
+
+        if type_id == TYPE_ID_BITMAP_NODE {
+            let children_ptr = node.get_field(BN_FIELD_CHILDREN);
+            let children = GcHandle::from_tagged(children_ptr);
+            let bitmap = BuiltInTypes::untag(node.get_field(BN_FIELD_BITMAP));
+            let count = bitmap.count_ones() as usize;
+
+            for i in 0..count {
+                let key = children.get_field(i * 2);
+                let value = children.get_field(i * 2 + 1);
+
+                if value != BuiltInTypes::null_value() as usize {
+                    // Leaf entry - add key
+                    *vec = PersistentVec::push(runtime, stack_pointer, *vec, key)?;
+                } else if BuiltInTypes::is_heap_pointer(key) {
+                    // Child node - recurse
+                    let child = GcHandle::from_tagged(key);
+                    Self::collect_keys(runtime, stack_pointer, child, vec)?;
+                }
+            }
+        } else if type_id == TYPE_ID_ARRAY_NODE {
+            let children_ptr = node.get_field(AN_FIELD_CHILDREN);
+            let children = GcHandle::from_tagged(children_ptr);
+
+            for i in 0..32 {
+                let child_ptr = children.get_field(i);
+                if child_ptr != BuiltInTypes::null_value() as usize {
+                    let child = GcHandle::from_tagged(child_ptr);
+                    Self::collect_keys(runtime, stack_pointer, child, vec)?;
+                }
+            }
+        } else if type_id == TYPE_ID_COLLISION_NODE {
+            let count = BuiltInTypes::untag(node.get_field(CN_FIELD_COUNT));
+            let kv_array_ptr = node.get_field(CN_FIELD_KV_ARRAY);
+            let kv_array = GcHandle::from_tagged(kv_array_ptr);
+
+            for i in 0..count {
+                let key = kv_array.get_field(i * 2);
+                *vec = PersistentVec::push(runtime, stack_pointer, *vec, key)?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

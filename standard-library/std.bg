@@ -80,6 +80,7 @@ let Keyword = Struct {
 
 // Persistent collection types (Rust-backed HAMT implementations)
 // These use negative IDs that map to the runtime type IDs
+// (negative ID gets converted to primitive_dispatch index)
 let PersistentVector = Struct {
     name: "PersistentVector",
     id: -20
@@ -89,6 +90,18 @@ let PersistentMap = Struct {
     name: "PersistentMap",
     id: -22
 }
+
+// ============================================================================
+// Math Constants
+// ============================================================================
+
+let PI = 3.141592653589793
+let E = 2.718281828459045
+let TAU = 6.283185307179586
+
+// ============================================================================
+// Protocol Definitions
+// ============================================================================
 
 struct Protocol {
     name
@@ -136,6 +149,114 @@ extend String with Format {
         } else {
             self
         }
+    }
+}
+
+// ============================================================================
+// Rust PersistentVector Protocol Implementations
+// ============================================================================
+
+extend PersistentVector with Indexed {
+    fn get(vec, index) {
+        rust-coll/vec-get(vec, index)
+    }
+}
+
+extend PersistentVector with Length {
+    fn length(vec) {
+        rust-coll/vec-count(vec)
+    }
+}
+
+extend PersistentVector with Push {
+    fn push(vec, value) {
+        rust-coll/vec-push(vec, value)
+    }
+}
+
+extend PersistentVector with Format {
+    fn format(vec, depth) {
+        let len = rust-coll/vec-count(vec)
+        format-rust-vec-helper(vec, 0, len, "[")
+    }
+}
+
+fn format-rust-vec-helper(vec, idx, len, acc) {
+    if idx >= len {
+        acc ++ "]"
+    } else {
+        let elem = rust-coll/vec-get(vec, idx)
+        let elem-str = format(elem, 1)
+        let new-acc = if idx == 0 {
+            acc ++ elem-str
+        } else {
+            acc ++ ", " ++ elem-str
+        }
+        format-rust-vec-helper(vec, idx + 1, len, new-acc)
+    }
+}
+
+extend PersistentVector with Associable {
+    fn assoc(vec, index, value) {
+        rust-coll/vec-assoc(vec, index, value)
+    }
+}
+
+// ============================================================================
+// Rust PersistentMap Protocol Implementations
+// ============================================================================
+
+extend PersistentMap with Indexed {
+    fn get(map, key) {
+        rust-coll/map-get(map, key)
+    }
+}
+
+extend PersistentMap with Length {
+    fn length(map) {
+        rust-coll/map-count(map)
+    }
+}
+
+extend PersistentMap with Associable {
+    fn assoc(map, key, value) {
+        rust-coll/map-assoc(map, key, value)
+    }
+}
+
+extend PersistentMap with Keys {
+    fn keys(map) {
+        rust-coll/map-keys(map)
+    }
+}
+
+extend PersistentMap with Format {
+    fn format(map, depth) {
+        let ks = rust-coll/map-keys(map)
+        let len = rust-coll/vec-count(ks)
+        if len == 0 {
+            "{}"
+        } else {
+            format-rust-map-entries(map, ks, 0, len, "{")
+        }
+    }
+}
+
+fn format-rust-map-entries(map, keys-vec, idx, len, acc) {
+    if idx >= len {
+        acc ++ "}"
+    } else {
+        let key = rust-coll/vec-get(keys-vec, idx)
+        let val = rust-coll/map-get(map, key)
+        let key-str = format(key, 1)
+        let val-str = format(val, 1)
+        let entry = key-str ++ ": " ++ val-str
+        let new-acc = if idx == 0 {
+            acc ++ entry
+        } else {
+            acc ++ ", " ++ entry
+        }
+        format-rust-map-entries(map, keys-vec, idx + 1, len, new-acc)
     }
 }
 
@@ -753,6 +874,110 @@ fn third(coll) {
 }
 
 // ============================================================================
+// Min/Max Functions
+// ============================================================================
+
+// min-of: Return minimum element in collection
+fn min-of(coll) {
+    let mut s = seq(coll)
+    if s == null {
+        null
+    } else {
+        let mut min-val = first(s)
+        s = next(s)
+        while s != null {
+            let elem = first(s)
+            if elem < min-val {
+                min-val = elem
+            }
+            s = next(s)
+        }
+        min-val
+    }
+}
+
+// max-of: Return maximum element in collection
+fn max-of(coll) {
+    let mut s = seq(coll)
+    if s == null {
+        null
+    } else {
+        let mut max-val = first(s)
+        s = next(s)
+        while s != null {
+            let elem = first(s)
+            if elem > max-val {
+                max-val = elem
+            }
+            s = next(s)
+        }
+        max-val
+    }
+}
+
+// min-by: Return element with minimum value of (f elem)
+fn min-by(coll, f) {
+    let mut s = seq(coll)
+    if s == null {
+        null
+    } else {
+        let mut min-elem = first(s)
+        let mut min-val = f(min-elem)
+        s = next(s)
+        while s != null {
+            let elem = first(s)
+            let val = f(elem)
+            if val < min-val {
+                min-elem = elem
+                min-val = val
+            }
+            s = next(s)
+        }
+        min-elem
+    }
+}
+
+// max-by: Return element with maximum value of (f elem)
+fn max-by(coll, f) {
+    let mut s = seq(coll)
+    if s == null {
+        null
+    } else {
+        let mut max-elem = first(s)
+        let mut max-val = f(max-elem)
+        s = next(s)
+        while s != null {
+            let elem = first(s)
+            let val = f(elem)
+            if val > max-val {
+                max-elem = elem
+                max-val = val
+            }
+            s = next(s)
+        }
+        max-elem
+    }
+}
+
+// reduce-right: Reduce from right to left
+fn reduce-right(coll, init, f) {
+    // Convert to vector and iterate backwards
+    let v = if instance-of(coll, PersistentVector) {
+        coll
+    } else {
+        reduce(coll, [], fn(acc, x) { push(acc, x) })
+    }
+    let len = length(v)
+    let mut acc = init
+    let mut i = len - 1
+    while i >= 0 {
+        acc = f(acc, get(v, i))
+        i = i - 1
+    }
+    acc
+}
+
+// ============================================================================
 // Combining Functions
 // ============================================================================
 
@@ -1135,5 +1360,194 @@ fn dissoc(m, key) {
 fn merge(m1, m2) {
     let ks = keys(m2)
     reduce(ks, m1, fn(acc, k) { assoc(acc, k, get(m2, k)) })
+}
+
+// merge-with: Combine two maps using a function to resolve conflicts
+fn merge-with(f, m1, m2) {
+    merge-with-helper(f, m1, m2, keys(m2), 0, m1)
+}
+
+fn merge-with-helper(f, m1, m2, ks, idx, acc) {
+    if idx >= length(ks) {
+        acc
+    } else {
+        let k = get(ks, idx)
+        let v2 = get(m2, k)
+        let v1 = get(m1, k)
+        let new-acc = if v1 == null {
+            assoc(acc, k, v2)
+        } else {
+            assoc(acc, k, f(v1, v2))
+        }
+        merge-with-helper(f, m1, m2, ks, idx + 1, new-acc)
+    }
+}
+
+// select-keys: Keep only the specified keys from a map
+fn select-keys(m, ks) {
+    select-keys-helper(m, ks, 0, {})
+}
+
+fn select-keys-helper(m, ks, idx, acc) {
+    if idx >= length(ks) {
+        acc
+    } else {
+        let k = get(ks, idx)
+        let v = get(m, k)
+        let new-acc = if v == null {
+            acc
+        } else {
+            assoc(acc, k, v)
+        }
+        select-keys-helper(m, ks, idx + 1, new-acc)
+    }
+}
+
+// update: Update a value at key using function f
+fn update(m, key, f) {
+    let old-val = get(m, key)
+    assoc(m, key, f(old-val))
+}
+
+// get-in: Get nested value using path of keys
+fn get-in(m, path) {
+    let mut current = m
+    let mut s = seq(path)
+    while s != null && current != null {
+        let k = first(s)
+        current = get(current, k)
+        s = next(s)
+    }
+    current
+}
+
+// assoc-in: Set nested value using path of keys
+fn assoc-in(m, path, val) {
+    let len = length(path)
+    if len == 0 {
+        m
+    } else {
+        if len == 1 {
+            assoc(m, get(path, 0), val)
+        } else {
+            let k = get(path, 0)
+            let rest-path = rest(path)
+            let nested = get(m, k)
+            let new-nested = if nested == null {
+                assoc-in({}, rest-path, val)
+            } else {
+                assoc-in(nested, rest-path, val)
+            }
+            assoc(m, k, new-nested)
+        }
+    }
+}
+
+// update-in: Update nested value using path of keys and function
+fn update-in(m, path, f) {
+    let len = length(path)
+    if len == 0 {
+        m
+    } else {
+        if len == 1 {
+            update(m, get(path, 0), f)
+        } else {
+            let k = get(path, 0)
+            let rest-path = rest(path)
+            let nested = get(m, k)
+            let new-nested = if nested == null {
+                update-in({}, rest-path, f)
+            } else {
+                update-in(nested, rest-path, f)
+            }
+            assoc(m, k, new-nested)
+        }
+    }
+}
+
+// contains-key?: Check if map contains a key
+fn contains-key?(m, key) {
+    let ks = keys(m)
+    any?(ks, fn(k) { k == key })
+}
+
+// invert: Swap keys and values in a map
+fn invert(m) {
+    let ks = keys(m)
+    reduce(ks, {}, fn(acc, k) {
+        let v = get(m, k)
+        assoc(acc, v, k)
+    })
+}
+
+// map-keys: Apply function to all keys
+fn map-keys(m, f) {
+    map-keys-helper(m, f, keys(m), 0, {})
+}
+
+fn map-keys-helper(m, f, ks, idx, acc) {
+    if idx >= length(ks) {
+        acc
+    } else {
+        let k = get(ks, idx)
+        let v = get(m, k)
+        let new-acc = assoc(acc, f(k), v)
+        map-keys-helper(m, f, ks, idx + 1, new-acc)
+    }
+}
+
+// map-vals: Apply function to all values
+fn map-vals(m, f) {
+    map-vals-helper(m, f, keys(m), 0, {})
+}
+
+fn map-vals-helper(m, f, ks, idx, acc) {
+    if idx >= length(ks) {
+        acc
+    } else {
+        let k = get(ks, idx)
+        let v = get(m, k)
+        let new-acc = assoc(acc, k, f(v))
+        map-vals-helper(m, f, ks, idx + 1, new-acc)
+    }
+}
+
+// filter-keys: Keep only keys where predicate returns true
+fn filter-keys(m, pred) {
+    filter-keys-helper(m, pred, keys(m), 0, {})
+}
+
+fn filter-keys-helper(m, pred, ks, idx, acc) {
+    if idx >= length(ks) {
+        acc
+    } else {
+        let k = get(ks, idx)
+        let new-acc = if pred(k) {
+            assoc(acc, k, get(m, k))
+        } else {
+            acc
+        }
+        filter-keys-helper(m, pred, ks, idx + 1, new-acc)
+    }
+}
+
+// filter-vals: Keep only entries where value predicate returns true
+fn filter-vals(m, pred) {
+    filter-vals-helper(m, pred, keys(m), 0, {})
+}
+
+fn filter-vals-helper(m, pred, ks, idx, acc) {
+    if idx >= length(ks) {
+        acc
+    } else {
+        let k = get(ks, idx)
+        let v = get(m, k)
+        let new-acc = if pred(v) {
+            assoc(acc, k, v)
+        } else {
+            acc
+        }
+        filter-vals-helper(m, pred, ks, idx + 1, new-acc)
+    }
 }
 

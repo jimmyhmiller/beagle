@@ -1,6 +1,6 @@
 namespace bounds_checking_test
 
-import "persistent-map" as pm
+
 import "raw-mutable-array" as raw
 
 struct Point {

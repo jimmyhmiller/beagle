@@ -1,12 +1,12 @@
 namespace thread_map_gc_debug
 
-import "persistent-map" as pm
+
 
 fn build_map(n, m) {
     if n <= 0 {
         m
     } else {
-        let new_m = pm/assoc(m, n, n * 2)
+        let new_m = assoc(m, n, n * 2)
         build_map(n - 1, new_m)
     }
 }
@@ -19,7 +19,7 @@ fn main() {
     println("Spawning thread 1")
     thread(fn() {
         println("Thread 1 starting")
-        let m = build_map(5, pm/map())
+        let m = build_map(5, {})
         println("Thread 1 done with map")
         swap!(done, fn(x) { x + length(m) })
         println("Thread 1 done")
@@ -28,7 +28,7 @@ fn main() {
     println("Spawning thread 2")
     thread(fn() {
         println("Thread 2 starting")
-        let m = build_map(5, pm/map())
+        let m = build_map(5, {})
         println("Thread 2 done with map")
         swap!(done, fn(x) { x + length(m) })
         println("Thread 2 done")

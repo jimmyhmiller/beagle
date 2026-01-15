@@ -1,15 +1,13 @@
 namespace map_utils_beagle_test
 
-import "persistent-map" as pm
-
 fn main() {
-    println("Testing vals with Beagle PersistentMap:")
+    println("Testing vals with Rust PersistentMap:")
 
-    // Create a map using persistent-map
-    let m = pm/map()
-    let m = pm/assoc(m, "a", 1)
-    let m = pm/assoc(m, "b", 2)
-    let m = pm/assoc(m, "c", 3)
+    // Create a map using Rust collections
+    let m = {}
+    let m = assoc(m, "a", 1)
+    let m = assoc(m, "b", 2)
+    let m = assoc(m, "c", 3)
 
     println("Created map:")
     println(format(m, 0))
@@ -39,9 +37,9 @@ fn main() {
 
     // Test merge
     println("\nTesting merge:")
-    let m3 = pm/map()
-    let m3 = pm/assoc(m3, "d", 4)
-    let m3 = pm/assoc(m3, "e", 5)
+    let m3 = {}
+    let m3 = assoc(m3, "d", 4)
+    let m3 = assoc(m3, "e", 5)
     let m4 = merge(m2, m3)
     println("After merge:")
     println(format(m4, 0))
@@ -52,7 +50,7 @@ fn main() {
 }
 
 // Expect
-// Testing vals with Beagle PersistentMap:
+// Testing vals with Rust PersistentMap:
 // Created map:
 // {"b": 2, "c": 3, "a": 1}
 //

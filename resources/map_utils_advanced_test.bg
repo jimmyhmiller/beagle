@@ -1,0 +1,132 @@
+namespace map_utils_advanced_test
+
+fn main() {
+    println("=== Testing merge-with ===")
+    let m1 = assoc(assoc({}, "a", 1), "b", 2)
+    let m2 = assoc(assoc({}, "b", 3), "c", 4)
+    let merged = merge-with(fn(v1, v2) { v1 + v2 }, m1, m2)
+    println("m1: " ++ format(m1, 0))
+    println("m2: " ++ format(m2, 0))
+    println("merge-with(+): " ++ format(merged, 0))
+
+    println("\n=== Testing select-keys ===")
+    let big-map = assoc(assoc(assoc(assoc({}, "a", 1), "b", 2), "c", 3), "d", 4)
+    let selected = select-keys(big-map, ["a", "c"])
+    println("Original: " ++ format(big-map, 0))
+    println("select-keys(['a', 'c']): " ++ format(selected, 0))
+
+    println("\n=== Testing update ===")
+    let m = assoc({}, "count", 5)
+    let updated = update(m, "count", fn(x) { x * 2 })
+    println("Original: " ++ format(m, 0))
+    println("update('count', *2): " ++ format(updated, 0))
+
+    println("\n=== Testing get-in ===")
+    let nested = assoc({}, "user", assoc({}, "profile", assoc({}, "name", "Alice")))
+    let name = get-in(nested, ["user", "profile", "name"])
+    println("Nested map: " ++ format(nested, 0))
+    println("get-in(['user', 'profile', 'name']): " ++ name)
+
+    println("\n=== Testing assoc-in ===")
+    let m = {}
+    let m2 = assoc-in(m, ["a", "b", "c"], 42)
+    println("Empty map assoc-in(['a', 'b', 'c'], 42):")
+    println(format(m2, 0))
+    println("Value at path: " ++ to-string(get-in(m2, ["a", "b", "c"])))
+
+    println("\n=== Testing update-in ===")
+    let m = assoc-in({}, ["data", "count"], 10)
+    let m2 = update-in(m, ["data", "count"], fn(x) { x + 5 })
+    println("Before: " ++ format(m, 0))
+    println("After update-in(['data', 'count'], +5): " ++ format(m2, 0))
+
+    println("\n=== Testing contains-key? ===")
+    let m = assoc(assoc({}, "x", 1), "y", 2)
+    println("Map: " ++ format(m, 0))
+    println("contains-key?('x'): " ++ to-string(contains-key?(m, "x")))
+    println("contains-key?('z'): " ++ to-string(contains-key?(m, "z")))
+
+    println("\n=== Testing invert ===")
+    let m = assoc(assoc(assoc({}, "a", 1), "b", 2), "c", 3)
+    let inv = invert(m)
+    println("Original: " ++ format(m, 0))
+    println("Inverted: " ++ format(inv, 0))
+
+    println("\n=== Testing map-keys ===")
+    let m = assoc(assoc({}, "name", "Alice"), "age", 30)
+    let upper = map-keys(m, fn(k) { k ++ "-upper" })
+    println("Original: " ++ format(m, 0))
+    println("map-keys(k => k+'-upper'): " ++ format(upper, 0))
+
+    println("\n=== Testing map-vals ===")
+    let m = assoc(assoc(assoc({}, "a", 1), "b", 2), "c", 3)
+    let doubled = map-vals(m, fn(v) { v * 2 })
+    println("Original: " ++ format(m, 0))
+    println("map-vals(*2): " ++ format(doubled, 0))
+
+    println("\n=== Testing filter-keys ===")
+    let m = assoc(assoc(assoc({}, "apple", 1), "banana", 2), "apricot", 3)
+    let filtered = filter-keys(m, fn(k) { starts-with?(k, "a") })
+    println("Original: " ++ format(m, 0))
+    println("filter-keys(starts-with 'a'): " ++ format(filtered, 0))
+
+    println("\n=== Testing filter-vals ===")
+    let m = assoc(assoc(assoc(assoc({}, "a", 1), "b", 5), "c", 2), "d", 8)
+    let filtered = filter-vals(m, fn(v) { v > 3 })
+    println("Original: " ++ format(m, 0))
+    println("filter-vals(> 3): " ++ format(filtered, 0))
+
+    "done"
+}
+
+// Expect
+// === Testing merge-with ===
+// m1: {"b": 2, "a": 1}
+// m2: {"c": 4, "b": 3}
+// merge-with(+): {"b": 5, "a": 1, "c": 4}
+//
+// === Testing select-keys ===
+// Original: {"b": 2, "c": 3, "a": 1, "d": 4}
+// select-keys(['a', 'c']): {"c": 3, "a": 1}
+//
+// === Testing update ===
+// Original: {"count": 5}
+// update('count', *2): {"count": 10}
+//
+// === Testing get-in ===
+// Nested map: {"user": {"profile": {"name": "Alice"}}}
+// get-in(['user', 'profile', 'name']): Alice
+//
+// === Testing assoc-in ===
+// Empty map assoc-in(['a', 'b', 'c'], 42):
+// {"a": {"b": {"c": 42}}}
+// Value at path: 42
+//
+// === Testing update-in ===
+// Before: {"data": {"count": 10}}
+// After update-in(['data', 'count'], +5): {"data": {"count": 15}}
+//
+// === Testing contains-key? ===
+// Map: {"y": 2, "x": 1}
+// contains-key?('x'): true
+// contains-key?('z'): false
+//
+// === Testing invert ===
+// Original: {"b": 2, "c": 3, "a": 1}
+// Inverted: {2: "b", 3: "c", 1: "a"}
+//
+// === Testing map-keys ===
+// Original: {"age": 30, "name": "Alice"}
+// map-keys(k => k+'-upper'): {"age-upper": 30, "name-upper": "Alice"}
+//
+// === Testing map-vals ===
+// Original: {"b": 2, "c": 3, "a": 1}
+// map-vals(*2): {"b": 4, "c": 6, "a": 2}
+//
+// === Testing filter-keys ===
+// Original: {"banana": 2, "apricot": 3, "apple": 1}
+// filter-keys(starts-with 'a'): {"apricot": 3, "apple": 1}
+//
+// === Testing filter-vals ===
+// Original: {"b": 5, "c": 2, "a": 1, "d": 8}
+// filter-vals(> 3): {"b": 5, "d": 8}
