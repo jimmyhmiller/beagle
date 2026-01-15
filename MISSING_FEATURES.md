@@ -183,39 +183,44 @@ All planned string functions have been implemented.
 
 ### Math Functions
 
-Currently missing:
+All math functions and constants are now implemented:
 
 ```
-// Constants
+// Constants ✓
 PI, E, TAU
-```
 
-Note: All math functions have been implemented except for the constants.
+// All math functions (sin, cos, tan, exp, log, sqrt, clamp, gcd, lcm, random) ✓
+```
 
 ### Map Utilities
 
-Implemented:
-```
-vals(m)                    // Get all values ✓
-dissoc(m, key)             // Remove key ✓
-merge(m1, m2)              // Combine maps ✓
-```
-
-Still missing:
+All map utilities have been implemented:
 
 ```
+// Basic map operations ✓
+vals(m)                    // Get all values
+dissoc(m, key)             // Remove key
+merge(m1, m2)              // Combine maps
 merge-with(f, m1, m2)      // Combine with conflict resolver
+
+// Key selection and filtering ✓
 select-keys(m, ks)         // Keep only specified keys
+filter-keys(m, pred)       // Filter by key predicate
+filter-vals(m, pred)       // Filter by value predicate
+
+// Transformation ✓
 update(m, key, f)          // Update value with function
-get-in(m, path)            // Nested access: get-in(m, [:a, :b, :c])
+map-keys(m, f)             // Transform all keys
+map-vals(m, f)             // Transform all values
+invert(m)                  // Swap keys and values
+
+// Nested access ✓
+get-in(m, path)            // Nested access: get-in(m, ["a", "b", "c"])
 assoc-in(m, path, val)     // Nested set
 update-in(m, path, f)      // Nested update
-contains-key?(m, key)
-invert(m)                  // Swap keys and values
-map-keys(m, f)
-map-vals(m, f)
-filter-keys(m, pred)
-filter-vals(m, pred)
+
+// Membership testing ✓
+contains-key?(m, key)      // Check if key exists
 ```
 
 ### Option/Result Types
@@ -244,12 +249,12 @@ and-then(result, f), or-else(result, f)
 
 ### Collection Utilities
 
-Missing:
+All collection utilities have been implemented:
 
 ```
-min-of(coll), max-of(coll)
-min-by(coll, f), max-by(coll, f)
-reduce-right(coll, init, f)
+min-of(coll), max-of(coll)         // Find min/max element ✓
+min-by(coll, f), max-by(coll, f)   // Find element with min/max key function ✓
+reduce-right(coll, init, f)        // Reduce from right to left ✓
 ```
 
 ## What Beagle DOES Have
@@ -283,16 +288,17 @@ For reference, these features are already well-implemented:
 
 ### Medium Priority
 
-5. **Add string functions** - split, join, trim, etc.
-6. **Add math functions** - Especially random numbers
-7. **Add map utilities** - get-in, assoc-in, merge, etc.
-8. **Add string interpolation** - Developer experience
-9. **Move Option/Result to core** - Standardize error handling
+5. **~~Add string functions~~** - ✅ Complete (split, join, trim, etc.)
+6. **~~Add math functions~~** - ✅ Complete (all trig, exp/log, random, constants)
+7. **~~Add map utilities~~** - ✅ Complete (get-in, assoc-in, merge-with, etc.)
+8. **~~Add collection utilities~~** - ✅ Complete (min-of, max-of, min-by, max-by, reduce-right)
+9. **Add string interpolation** - Developer experience
+10. **Move Option/Result to core** - Standardize error handling
 
 ### Lower Priority
 
-10. **Add macros** - Powerful but complex to implement
-11. **Add regex** - Can use FFI as workaround
-12. **Add multi-arity functions** - Nice to have
-13. **Add default parameters** - Nice to have
-14. **Add cond expression** - Syntactic sugar
+11. **Add macros** - Powerful but complex to implement
+12. **Add regex** - Can use FFI as workaround
+13. **Add multi-arity functions** - Nice to have
+14. **Add default parameters** - Nice to have
+15. **Add cond expression** - Syntactic sugar

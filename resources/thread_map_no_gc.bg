@@ -1,12 +1,12 @@
 namespace thread_map_no_gc
 
-import "persistent-map" as pm
+
 
 fn build_map(n, m) {
     if n <= 0 {
         m
     } else {
-        let new_m = pm/assoc(m, n, n * 2)
+        let new_m = assoc(m, n, n * 2)
         build_map(n - 1, new_m)
     }
 }
@@ -16,12 +16,12 @@ fn main() {
 
     // Two threads building maps
     thread(fn() {
-        let m = build_map(20, pm/map())
+        let m = build_map(20, {})
         swap!(done, fn(x) { x + length(m) })
     })
 
     thread(fn() {
-        let m = build_map(20, pm/map())
+        let m = build_map(20, {})
         swap!(done, fn(x) { x + length(m) })
     })
 

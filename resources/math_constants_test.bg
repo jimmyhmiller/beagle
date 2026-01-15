@@ -1,0 +1,26 @@
+namespace math_constants_test
+
+fn main() {
+    println("Testing math constants:")
+    println("PI = " ++ to-string(PI))
+    println("E = " ++ to-string(E))
+    println("TAU = " ++ to-string(TAU))
+
+    // Verify TAU = 2 * PI
+    let tau_check = 2.0 * PI
+    println("2*PI = " ++ to-string(tau_check))
+
+    // Test using constants in calculations
+    let circumference = 2.0 * PI * 5.0  // radius = 5
+    println("Circumference of circle (r=5): " ++ to-string(circumference))
+
+    "done"
+}
+
+// Expect
+// Testing math constants:
+// PI = 3.141592653589793
+// E = 2.718281828459045
+// TAU = 6.283185307179586
+// 2*PI = 6.283185307179586
+// Circumference of circle (r=5): 31.41592653589793

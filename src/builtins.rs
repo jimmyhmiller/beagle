@@ -5657,6 +5657,40 @@ mod rust_collections {
             }
         }
     }
+
+    /// Get all keys from a persistent map as a vector
+    // Signature: (stack_pointer, frame_pointer, map_ptr) -> tagged_ptr (vector)
+    pub unsafe extern "C" fn rust_map_keys(
+        stack_pointer: usize,
+        frame_pointer: usize,
+        map_ptr: usize,
+    ) -> usize {
+        save_gc_context!(stack_pointer, frame_pointer);
+        let runtime = get_runtime().get_mut();
+
+        if !BuiltInTypes::is_heap_pointer(map_ptr) {
+            // Empty map or invalid - return empty vector
+            match PersistentVec::empty(runtime, stack_pointer) {
+                Ok(handle) => return handle.as_tagged(),
+                Err(e) => {
+                    eprintln!("rust_map_keys empty vec error: {}", e);
+                    return BuiltInTypes::null_value() as usize;
+                }
+            }
+        }
+
+        let map = GcHandle::from_tagged(map_ptr);
+
+        // Stay c_calling - HandleScope::allocate checks is_paused and participates in GC
+
+        match PersistentMap::keys(runtime, stack_pointer, map) {
+            Ok(handle) => handle.as_tagged(),
+            Err(e) => {
+                eprintln!("rust_map_keys error: {}", e);
+                BuiltInTypes::null_value() as usize
+            }
+        }
+    }
 }
 
 impl Runtime {
@@ -5743,6 +5777,15 @@ impl Runtime {
             true,
             true,
             5, // sp, fp, map, key, value
+        )?;
+
+        // rust-map-keys: Get all keys as vector (needs sp/fp for allocation)
+        self.add_builtin_function_with_fp(
+            "beagle.collections/map-keys",
+            rust_map_keys as *const u8,
+            true,
+            true,
+            3, // sp, fp, map
         )?;
 
         Ok(())

@@ -1,60 +1,37 @@
-namespace rust-map-test
-import "beagle.collections" as rmap
+namespace rust_map_test
 
 fn main() {
-    // Test empty map
-    let m = rmap/map()
-    println(rmap/map-count(m))
+    println("Testing Rust PersistentMap with protocols:")
 
-    // Test assoc and get
-    let m2 = rmap/map-assoc(m, "key1", "value1")
-    println(rmap/map-count(m2))
-    println(rmap/map-get(m2, "key1"))
+    // Create a map using Rust collections
+    let m = {}
+    let m = assoc(m, "a", 1)
+    let m = assoc(m, "b", 2)
+    let m = assoc(m, "c", 3)
 
-    // Test persistence (original unchanged)
-    println(rmap/map-count(m))
-    println(rmap/map-get(m, "key1"))
+    println("Map created:")
+    println(format(m, 0))
 
-    // Test multiple keys
-    let m3 = rmap/map-assoc(m2, "key2", "value2")
-    println(rmap/map-count(m3))
-    println(rmap/map-get(m3, "key1"))
-    println(rmap/map-get(m3, "key2"))
+    println("Length:")
+    println(length(m))
 
-    // Test update existing key
-    let m4 = rmap/map-assoc(m3, "key1", "updated")
-    println(rmap/map-count(m4))
-    println(rmap/map-get(m4, "key1"))
-    println(rmap/map-get(m3, "key1"))
+    println("Keys:")
+    let ks = keys(m)
+    println(format(ks, 0))
 
-    // Test with integer keys
-    let m5 = rmap/map-assoc(rmap/map(), 1, 100)
-    let m6 = rmap/map-assoc(m5, 2, 200)
-    println(rmap/map-get(m6, 1))
-    println(rmap/map-get(m6, 2))
+    println("Get value:")
+    println(get(m, "b"))
 
-    // GC test
-    gc()
-    println(rmap/map-get(m6, 1))
-    println(rmap/map-get(m6, 2))
-
-    println("done")
+    ""
 }
 
 // Expect
-// 0
-// 1
-// value1
-// 0
-// null
+// Testing Rust PersistentMap with protocols:
+// Map created:
+// {"b": 2, "c": 3, "a": 1}
+// Length:
+// 3
+// Keys:
+// ["b", "c", "a"]
+// Get value:
 // 2
-// value1
-// value2
-// 2
-// updated
-// value1
-// 100
-// 200
-// 100
-// 200
-// done

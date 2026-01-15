@@ -4,7 +4,6 @@ import "beagle.builtin" as builtin
 import "lib_lldb" as lldb
 import "slow_json_parser" as json
 import "beagle.ffi" as ffi
-import "persistent-map" as map
 
 // TODO: Thist code fails in lib_lldb with an update binding
 // unsure of the cause right now
@@ -21,8 +20,8 @@ let state = atom(State {
     process: 0,
     target: 0,
     function_names: [],
-    address_to_name: map/map()
-    called_functions: map/map()
+    address_to_name: {}
+    called_functions: {}
 })
 
 fn loop_state() {

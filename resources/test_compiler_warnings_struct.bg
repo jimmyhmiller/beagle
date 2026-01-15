@@ -1,7 +1,6 @@
 namespace test
 
 import "beagle.core" as core
-import "persistent-vector" as pv
 
 enum Color {
     Red,

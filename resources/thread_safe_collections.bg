@@ -1,6 +1,6 @@
 namespace thread_safe_collections
 
-import "persistent-map" as pm
+
 
 // Test concurrent map operations with multiple threads.
 // Each thread builds a large map while GC may run at any time.
@@ -13,24 +13,24 @@ fn build_map(n, m) {
     if n <= 0 {
         m
     } else {
-        let new_m = pm/assoc(m, n, n * 2)
+        let new_m = assoc(m, n, n * 2)
         build_map(n - 1, new_m)
     }
 }
 
 fn thread_work(done_atom, thread_id, iterations) {
-    let m = pm/map()
+    let m = {}
     let m = build_map(iterations, m)
     // Verify map is correct
     let size = length(m)
     // Signal done with the size we computed
     swap!(done_atom, fn(results) {
-        pm/assoc(results, thread_id, size)
+        assoc(results, thread_id, size)
     })
 }
 
 fn run_test() {
-    let done = atom(pm/map())
+    let done = atom({})
     let iterations = 10
 
     // Spawn 4 threads doing map operations
@@ -40,12 +40,12 @@ fn run_test() {
     thread(fn() { thread_work(done, 4, iterations) })
 
     // Main thread also does work and forces GC
-    let m = pm/map()
+    let m = {}
     let m = build_map(iterations, m)
     gc()
-    let m2 = build_map(iterations, pm/map())
+    let m2 = build_map(iterations, {})
     gc()
-    let m3 = build_map(iterations, pm/map())
+    let m3 = build_map(iterations, {})
 
     // Wait for all threads to finish
     wait_for_all(done, 4, 0)

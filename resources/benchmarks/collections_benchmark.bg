@@ -1,8 +1,10 @@
 namespace collections-benchmark
 import "beagle.core" as core
-import "persistent-vector" as pvec
-import "persistent-map" as pmap
 import "beagle.collections" as rust
+
+// NOTE: This benchmark previously compared Beagle-native implementations to Rust-native.
+// Since Beagle implementations have been removed, both "beagle" and "rust" paths now
+// use the same Rust-backed collections, just accessed via different APIs (protocols vs direct).
 
 // Utility: get elapsed time in milliseconds
 fn elapsed-ms(start, end) {
@@ -17,7 +19,7 @@ fn elapsed-ms(start, end) {
 
 fn bench-beagle-vec-push(n) {
     let start = core/time-now()
-    let v = beagle-vec-push-loop(pvec/vec(), 0, n)
+    let v = beagle-vec-push-loop([], 0, n)
     let end = core/time-now()
     elapsed-ms(start, end)
 }
@@ -26,7 +28,7 @@ fn beagle-vec-push-loop(v, i, n) {
     if i >= n {
         v
     } else {
-        beagle-vec-push-loop(pvec/push(v, i), i + 1, n)
+        beagle-vec-push-loop(push(v, i), i + 1, n)
     }
 }
 
@@ -48,7 +50,7 @@ fn rust-vec-push-loop(v, i, n) {
 // --- Get benchmark (random access) ---
 
 fn bench-beagle-vec-get(v, iterations) {
-    let count = pvec/count(v)
+    let count = length(v)
     let start = core/time-now()
     beagle-vec-get-loop(v, count, 0, iterations)
     let end = core/time-now()
@@ -60,7 +62,7 @@ fn beagle-vec-get-loop(v, count, i, iterations) {
         null
     } else {
         let idx = i % count
-        let unused = pvec/get(v, idx)
+        let unused = get(v, idx)
         beagle-vec-get-loop(v, count, i + 1, iterations)
     }
 }
@@ -86,7 +88,7 @@ fn rust-vec-get-loop(v, count, i, iterations) {
 // --- Assoc benchmark (update) ---
 
 fn bench-beagle-vec-assoc(v, iterations) {
-    let count = pvec/count(v)
+    let count = length(v)
     let start = core/time-now()
     beagle-vec-assoc-loop(v, count, 0, iterations)
     let end = core/time-now()
@@ -98,7 +100,7 @@ fn beagle-vec-assoc-loop(v, count, i, iterations) {
         v
     } else {
         let idx = i % count
-        let new-v = pvec/assoc(v, idx, i * 2)
+        let new-v = assoc(v, idx, i * 2)
         beagle-vec-assoc-loop(new-v, count, i + 1, iterations)
     }
 }
@@ -129,7 +131,7 @@ fn rust-vec-assoc-loop(v, count, i, iterations) {
 
 fn bench-beagle-map-assoc(n) {
     let start = core/time-now()
-    let m = beagle-map-assoc-loop(pmap/map(), 0, n)
+    let m = beagle-map-assoc-loop({}, 0, n)
     let end = core/time-now()
     elapsed-ms(start, end)
 }
@@ -138,7 +140,7 @@ fn beagle-map-assoc-loop(m, i, n) {
     if i >= n {
         m
     } else {
-        beagle-map-assoc-loop(pmap/assoc(m, i, i * 10), i + 1, n)
+        beagle-map-assoc-loop(assoc(m, i, i * 10), i + 1, n)
     }
 }
 
@@ -171,7 +173,7 @@ fn beagle-map-get-loop(m, count, i, iterations) {
         null
     } else {
         let key = i % count
-        let unused = pmap/_get(m, key)
+        let unused = get(m, key)
         beagle-map-get-loop(m, count, i + 1, iterations)
     }
 }
@@ -197,7 +199,7 @@ fn rust-map-get-loop(m, count, i, iterations) {
 
 fn bench-beagle-map-string-assoc(n) {
     let start = core/time-now()
-    let m = beagle-map-string-assoc-loop(pmap/map(), 0, n)
+    let m = beagle-map-string-assoc-loop({}, 0, n)
     let end = core/time-now()
     elapsed-ms(start, end)
 }
@@ -207,7 +209,7 @@ fn beagle-map-string-assoc-loop(m, i, n) {
         m
     } else {
         let key = "key" ++ to-string(i)
-        beagle-map-string-assoc-loop(pmap/assoc(m, key, i), i + 1, n)
+        beagle-map-string-assoc-loop(assoc(m, key, i), i + 1, n)
     }
 }
 
@@ -249,13 +251,13 @@ fn warmup() {
     println("Warming up...")
 
     // Vector warmup
-    let wv1 = beagle-vec-push-loop(pvec/vec(), 0, 1000)
+    let wv1 = beagle-vec-push-loop([], 0, 1000)
     let wv2 = rust-vec-push-loop(rust/vec(), 0, 1000)
     beagle-vec-get-loop(wv1, 1000, 0, 10000)
     rust-vec-get-loop(wv2, 1000, 0, 10000)
 
     // Map warmup
-    let wm1 = beagle-map-assoc-loop(pmap/map(), 0, 1000)
+    let wm1 = beagle-map-assoc-loop({}, 0, 1000)
     let wm2 = rust-map-assoc-loop(rust/map(), 0, 1000)
     beagle-map-get-loop(wm1, 1000, 0, 10000)
     rust-map-get-loop(wm2, 1000, 0, 10000)
@@ -288,7 +290,7 @@ fn main() {
     print-result("Vector Push", beagle-push, rust-push)
 
     // Create vectors for get/assoc benchmarks
-    let beagle-v = beagle-vec-push-loop(pvec/vec(), 0, vec-size)
+    let beagle-v = beagle-vec-push-loop([], 0, vec-size)
     let rust-v = rust-vec-push-loop(rust/vec(), 0, vec-size)
 
     println("--- Vector Get (" ++ to-string(get-iterations) ++ " lookups) ---")
@@ -311,7 +313,7 @@ fn main() {
     print-result("Map Assoc (int keys)", beagle-map-insert, rust-map-insert)
 
     // Create maps for get benchmarks
-    let beagle-m = beagle-map-assoc-loop(pmap/map(), 0, map-size)
+    let beagle-m = beagle-map-assoc-loop({}, 0, map-size)
     let rust-m = rust-map-assoc-loop(rust/map(), 0, map-size)
 
     println("--- Map Get (" ++ to-string(map-get-iterations) ++ " lookups) ---")

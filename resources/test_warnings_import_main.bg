@@ -1,7 +1,6 @@
 namespace test_warnings_import_main
 
 import "test_warnings_import_dependency" as dep
-import "persistent-vector" as vec
 
 enum Shape {
     Circle,
@@ -17,10 +16,10 @@ fn main() {
 
     let warnings = compiler-warnings()
     println("Warning count from main + imported file:")
-    println(vec/count(warnings))
+    println(length(warnings))
 
     // Verify we have exactly 2 warnings (1 from dependency, 1 from main)
-    let count = vec/count(warnings)
+    let count = length(warnings)
     if count == 2 {
         println("PASS: Got 2 warnings as expected")
     } else {

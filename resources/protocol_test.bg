@@ -1,6 +1,5 @@
 namespace protocol-test
 
-import "persistent-vector" as vector
 import "beagle.builtin" as builtin
 import "beagle.primitive" as primitive
 import "beagle.core" as core
@@ -57,7 +56,7 @@ extend String with Format {
 
 
 fn main() {
-    println(vector/PersistentVector.name)
+    println(core/PersistentVector.name)
     println(Indexed)
     let x = [2];
     println(x[0])
@@ -88,7 +87,7 @@ fn main() {
 }
 
 // Expect
-// persistent-vector/PersistentVector
+// PersistentVector
 // Protocol { name: "beagle.core/Indexed" }
 // 2
 // true

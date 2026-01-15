@@ -1,0 +1,9 @@
+namespace test
+
+fn add1(x) { x + 1 }
+
+fn main() {
+    let f = add1
+    let result = f(5)
+    println(to-string(result))
+}

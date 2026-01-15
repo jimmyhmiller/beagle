@@ -1,0 +1,39 @@
+namespace closure_bug_test
+
+// This works: closure capturing a value
+fn constantly(value) {
+    fn(ignored) { value }
+}
+
+// This BREAKS: closure capturing a function
+fn complement(pred) {
+    fn(x) { not(pred(x)) }
+}
+
+// This BREAKS: closure capturing multiple functions
+fn compose(f, g) {
+    fn(x) { f(g(x)) }
+}
+
+fn main() {
+    println("=== Test 1: constantly (captures value) ===")
+    let f1 = constantly(42)
+    println("constantly(42)(x) = " ++ to-string(f1("ignored")))
+    println("SUCCESS: Capturing values works")
+
+    println("\n=== Test 2: complement (captures function) ===")
+    let is-positive = fn(x) { x > 0 }
+    // This should crash with closure bug
+    let is-not-positive = complement(is-positive)
+    println("is-not-positive(5) = " ++ to-string(is-not-positive(5)))
+    println("is-not-positive(-3) = " ++ to-string(is-not-positive(-3)))
+}
+
+// Expect (if closures worked):
+// === Test 1: constantly (captures value) ===
+// constantly(42)(x) = 42
+// SUCCESS: Capturing values works
+//
+// === Test 2: complement (captures function) ===
+// is-not-positive(5) = false
+// is-not-positive(-3) = true

@@ -1,6 +1,6 @@
 namespace thread_safe_simple
 
-import "persistent-map" as pm
+
 
 // Minimal test - just one thread with map operations
 
@@ -8,13 +8,13 @@ fn build_map(n, m) {
     if n <= 0 {
         m
     } else {
-        let new_m = pm/assoc(m, n, n * 2)
+        let new_m = assoc(m, n, n * 2)
         build_map(n - 1, new_m)
     }
 }
 
 fn thread_work() {
-    let m = pm/map()
+    let m = {}
     let m = build_map(10, m)
     length(m)
 }
@@ -29,9 +29,9 @@ fn main() {
     })
 
     // Main thread also does some work
-    let m = build_map(10, pm/map())
+    let m = build_map(10, {})
     gc()
-    let m2 = build_map(10, pm/map())
+    let m2 = build_map(10, {})
 
     // Wait for thread
     wait_for_done(done, 0)
