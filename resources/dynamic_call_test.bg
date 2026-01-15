@@ -1,0 +1,13 @@
+namespace dynamic_call_test
+
+fn thing() {
+    2
+}
+
+fn main() {
+    let x = thing
+    println(x())
+}
+
+// Expect
+// 2

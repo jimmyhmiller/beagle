@@ -17,8 +17,8 @@ use crate::{
     types::{BuiltInTypes, HeapObject},
 };
 
-use std::hint::black_box;
 use rand::Rng;
+use std::hint::black_box;
 
 // Thread-local storage for the frame pointer and gc return address at builtin entry.
 // This is set by builtins that receive frame_pointer from Beagle code.
@@ -434,9 +434,7 @@ extern "C" fn split(
         .map(|s| s.to_string())
         .collect();
 
-    runtime
-        .create_string_array(stack_pointer, &parts)
-        .unwrap()
+    runtime.create_string_array(stack_pointer, &parts).unwrap()
 }
 
 extern "C" fn join(
@@ -663,7 +661,11 @@ extern "C" fn pad_left_string(
     }
 
     let padding_needed = width_value - current_len;
-    let padded = format!("{}{}", pad_ch.to_string().repeat(padding_needed), string_value);
+    let padded = format!(
+        "{}{}",
+        pad_ch.to_string().repeat(padding_needed),
+        string_value
+    );
 
     runtime
         .allocate_string(stack_pointer, padded)
@@ -695,7 +697,11 @@ extern "C" fn pad_right_string(
     }
 
     let padding_needed = width_value - current_len;
-    let padded = format!("{}{}", string_value, pad_ch.to_string().repeat(padding_needed));
+    let padded = format!(
+        "{}{}",
+        string_value,
+        pad_ch.to_string().repeat(padding_needed)
+    );
 
     runtime
         .allocate_string(stack_pointer, padded)
@@ -774,6 +780,35 @@ extern "C" fn make_closure(
     let free_variables = unsafe { from_raw_parts(start, num_free) };
     runtime
         .make_closure(stack_pointer, function, free_variables)
+        .unwrap()
+}
+
+/// Create a FunctionObject from a function pointer.
+/// Unlike closures, FunctionObjects have no free variables and don't pass self as arg0.
+extern "C" fn make_function_object(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    function: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(get_runtime().get(), "make_function_object");
+    let runtime = get_runtime().get_mut();
+
+    if BuiltInTypes::get_kind(function) != BuiltInTypes::Function {
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "TypeError",
+                format!(
+                    "make-function-object: Expected function, got {:?}",
+                    BuiltInTypes::get_kind(function)
+                ),
+            );
+        }
+    }
+
+    runtime
+        .make_function_object(stack_pointer, function)
         .unwrap()
 }
 
@@ -1606,12 +1641,7 @@ pub unsafe extern "C" fn truncate_builtin(
 }
 
 /// max builtin - returns the maximum of two numbers
-extern "C" fn max_builtin(
-    stack_pointer: usize,
-    frame_pointer: usize,
-    a: usize,
-    b: usize,
-) -> usize {
+extern "C" fn max_builtin(stack_pointer: usize, frame_pointer: usize, a: usize, b: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
 
     let a_kind = BuiltInTypes::get_kind(a);
@@ -1658,12 +1688,7 @@ extern "C" fn max_builtin(
 }
 
 /// min builtin - returns the minimum of two numbers
-extern "C" fn min_builtin(
-    stack_pointer: usize,
-    frame_pointer: usize,
-    a: usize,
-    b: usize,
-) -> usize {
+extern "C" fn min_builtin(stack_pointer: usize, frame_pointer: usize, a: usize, b: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
 
     let a_kind = BuiltInTypes::get_kind(a);
@@ -1811,10 +1836,7 @@ extern "C" fn lcm_builtin(a: usize, b: usize) -> usize {
 }
 
 /// random builtin - returns a random float between 0.0 and 1.0
-pub unsafe extern "C" fn random_builtin(
-    stack_pointer: usize,
-    frame_pointer: usize,
-) -> usize {
+pub unsafe extern "C" fn random_builtin(stack_pointer: usize, frame_pointer: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     unsafe {
         let runtime = get_runtime().get_mut();
@@ -4303,6 +4325,15 @@ impl Runtime {
             5,
         )?;
 
+        // make_function_object takes (stack_pointer, frame_pointer, function)
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/make-function-object",
+            make_function_object as *const u8,
+            true,
+            true,
+            3,
+        )?;
+
         self.add_builtin_function(
             "beagle.builtin/property-access",
             property_access as *const u8,
@@ -4512,36 +4543,11 @@ impl Runtime {
             true,
             4,
         )?;
-        self.add_builtin_function(
-            "beagle.core/even?",
-            is_even as *const u8,
-            false,
-            1,
-        )?;
-        self.add_builtin_function(
-            "beagle.core/odd?",
-            is_odd as *const u8,
-            false,
-            1,
-        )?;
-        self.add_builtin_function(
-            "beagle.core/positive?",
-            is_positive as *const u8,
-            false,
-            1,
-        )?;
-        self.add_builtin_function(
-            "beagle.core/negative?",
-            is_negative as *const u8,
-            false,
-            1,
-        )?;
-        self.add_builtin_function(
-            "beagle.core/zero?",
-            is_zero as *const u8,
-            false,
-            1,
-        )?;
+        self.add_builtin_function("beagle.core/even?", is_even as *const u8, false, 1)?;
+        self.add_builtin_function("beagle.core/odd?", is_odd as *const u8, false, 1)?;
+        self.add_builtin_function("beagle.core/positive?", is_positive as *const u8, false, 1)?;
+        self.add_builtin_function("beagle.core/negative?", is_negative as *const u8, false, 1)?;
+        self.add_builtin_function("beagle.core/zero?", is_zero as *const u8, false, 1)?;
         self.add_builtin_function_with_fp(
             "beagle.core/clamp",
             clamp_builtin as *const u8,
@@ -4549,18 +4555,8 @@ impl Runtime {
             true,
             5,
         )?;
-        self.add_builtin_function(
-            "beagle.core/gcd",
-            gcd_builtin as *const u8,
-            false,
-            2,
-        )?;
-        self.add_builtin_function(
-            "beagle.core/lcm",
-            lcm_builtin as *const u8,
-            false,
-            2,
-        )?;
+        self.add_builtin_function("beagle.core/gcd", gcd_builtin as *const u8, false, 2)?;
+        self.add_builtin_function("beagle.core/lcm", lcm_builtin as *const u8, false, 2)?;
         self.add_builtin_function_with_fp(
             "beagle.core/random",
             random_builtin as *const u8,
@@ -4962,31 +4958,13 @@ impl Runtime {
         )?;
 
         // split now takes (stack_pointer, frame_pointer, string, delimiter)
-        self.add_builtin_function_with_fp(
-            "beagle.core/split",
-            split as *const u8,
-            true,
-            true,
-            4,
-        )?;
+        self.add_builtin_function_with_fp("beagle.core/split", split as *const u8, true, true, 4)?;
 
         // join now takes (stack_pointer, frame_pointer, array, separator)
-        self.add_builtin_function_with_fp(
-            "beagle.core/join",
-            join as *const u8,
-            true,
-            true,
-            4,
-        )?;
+        self.add_builtin_function_with_fp("beagle.core/join", join as *const u8, true, true, 4)?;
 
         // trim now takes (stack_pointer, frame_pointer, string)
-        self.add_builtin_function_with_fp(
-            "beagle.core/trim",
-            trim as *const u8,
-            true,
-            true,
-            3,
-        )?;
+        self.add_builtin_function_with_fp("beagle.core/trim", trim as *const u8, true, true, 3)?;
 
         // trim-left now takes (stack_pointer, frame_pointer, string)
         self.add_builtin_function_with_fp(
@@ -5283,6 +5261,8 @@ unsafe fn warning_to_struct_impl(
     warning: &crate::compiler::CompilerWarning,
     temp_roots: &mut Vec<usize>,
 ) -> Result<usize, String> {
+    use crate::collections::{GcHandle, PersistentVec};
+
     // Use line and column directly from the warning struct
     let line = warning.line;
     let column = warning.column;
@@ -5344,8 +5324,10 @@ unsafe fn warning_to_struct_impl(
                     .into()
             );
 
-            // Build persistent vector of variant strings (using Beagle implementation)
-            let mut vec = unsafe { call_fn_1(runtime, "persistent-vector/vec", 0) };
+            // Build persistent vector of variant strings using Rust API directly
+            let vec_handle = PersistentVec::empty(runtime, stack_pointer)
+                .map_err(|e| format!("Failed to create empty vector: {}", e))?;
+            let mut vec = vec_handle.as_tagged();
             let mut vec_root_id = runtime.register_temporary_root(vec);
             // Track vec_root_id immediately so it gets cleaned up on early return
             temp_roots.push(vec_root_id);
@@ -5359,7 +5341,10 @@ unsafe fn warning_to_struct_impl(
                 let variant_root_id = runtime.register_temporary_root(variant_str);
                 // Get updated vec from root before calling push (GC may have moved it)
                 vec = runtime.peek_temporary_root(vec_root_id);
-                vec = unsafe { call_fn_2(runtime, "persistent-vector/push", vec, variant_str) };
+                let vec_handle = GcHandle::from_tagged(vec);
+                vec = PersistentVec::push(runtime, stack_pointer, vec_handle, variant_str)
+                    .map_err(|e| format!("Failed to push variant: {}", e))?
+                    .as_tagged();
                 runtime.unregister_temporary_root(variant_root_id);
                 // Update vec root to point to new vec
                 runtime.unregister_temporary_root(vec_root_id);
@@ -5442,6 +5427,8 @@ unsafe fn warning_to_struct_impl(
 }
 
 pub unsafe extern "C" fn compiler_warnings(stack_pointer: usize, frame_pointer: usize) -> usize {
+    use crate::collections::{GcHandle, PersistentVec};
+
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
 
@@ -5451,8 +5438,15 @@ pub unsafe extern "C" fn compiler_warnings(stack_pointer: usize, frame_pointer: 
         warnings_guard.clone()
     };
 
-    // Start with empty persistent vector (using Beagle implementation for compatibility)
-    let mut vec = unsafe { call_fn_1(runtime, "persistent-vector/vec", 0) };
+    // Start with empty persistent vector using Rust API directly
+    let vec_handle = match PersistentVec::empty(runtime, stack_pointer) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("compiler_warnings: Failed to create empty vector: {}", e);
+            return BuiltInTypes::null_value() as usize;
+        }
+    };
+    let mut vec = vec_handle.as_tagged();
 
     // Register vec as a temporary root to protect it from GC during the loop
     let mut vec_root_id = runtime.register_temporary_root(vec);
@@ -5465,14 +5459,23 @@ pub unsafe extern "C" fn compiler_warnings(stack_pointer: usize, frame_pointer: 
                 // Get updated values from roots before calling push (GC may have moved them)
                 let vec_updated = runtime.peek_temporary_root(vec_root_id);
                 let warning_struct_updated = runtime.peek_temporary_root(warning_root_id);
-                vec = unsafe {
-                    call_fn_2(
-                        runtime,
-                        "persistent-vector/push",
-                        vec_updated,
-                        warning_struct_updated,
-                    )
-                };
+
+                // Use Rust API directly for push
+                let vec_handle = GcHandle::from_tagged(vec_updated);
+                match PersistentVec::push(
+                    runtime,
+                    stack_pointer,
+                    vec_handle,
+                    warning_struct_updated,
+                ) {
+                    Ok(new_vec) => {
+                        vec = new_vec.as_tagged();
+                    }
+                    Err(e) => {
+                        eprintln!("compiler_warnings: Failed to push warning: {}", e);
+                    }
+                }
+
                 runtime.unregister_temporary_root(warning_root_id);
                 // Update the root to point to the new vec
                 runtime.unregister_temporary_root(vec_root_id);
