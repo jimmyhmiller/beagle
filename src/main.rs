@@ -351,11 +351,7 @@ pub struct CommandLineArguments {
 
 fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Error>> {
     let resource_files: [&str; 0] = [];
-    let stdlib_files = [
-        "std.bg",
-        "beagle.ffi.bg",
-        "beagle.io.bg",
-    ];
+    let stdlib_files = ["std.bg", "beagle.ffi.bg", "beagle.io.bg"];
     let mut all_top_levels = vec![];
 
     for file_name in resource_files {

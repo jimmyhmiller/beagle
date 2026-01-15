@@ -1,0 +1,11 @@
+namespace simple_test
+
+fn main() {
+    println("hello")
+    println(42)
+    "done"
+}
+
+// Expect
+// hello
+// 42

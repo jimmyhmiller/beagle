@@ -82,8 +82,8 @@ fn main() {
 // Expect
 // === Testing merge-with ===
 // m1: {"b": 2, "a": 1}
-// m2: {"c": 4, "b": 3}
-// merge-with(+): {"b": 5, "a": 1, "c": 4}
+// m2: {"b": 3, "c": 4}
+// merge-with(+): {"b": 5, "c": 4, "a": 1}
 //
 // === Testing select-keys ===
 // Original: {"b": 2, "c": 3, "a": 1, "d": 4}
@@ -107,25 +107,25 @@ fn main() {
 // After update-in(['data', 'count'], +5): {"data": {"count": 15}}
 //
 // === Testing contains-key? ===
-// Map: {"y": 2, "x": 1}
+// Map: {"x": 1, "y": 2}
 // contains-key?('x'): true
 // contains-key?('z'): false
 //
 // === Testing invert ===
 // Original: {"b": 2, "c": 3, "a": 1}
-// Inverted: {2: "b", 3: "c", 1: "a"}
+// Inverted: {2: "b", 1: "a", 3: "c"}
 //
 // === Testing map-keys ===
-// Original: {"age": 30, "name": "Alice"}
-// map-keys(k => k+'-upper'): {"age-upper": 30, "name-upper": "Alice"}
+// Original: {"name": "Alice", "age": 30}
+// map-keys(k => k+'-upper'): {"name-upper": "Alice", "age-upper": 30}
 //
 // === Testing map-vals ===
 // Original: {"b": 2, "c": 3, "a": 1}
 // map-vals(*2): {"b": 4, "c": 6, "a": 2}
 //
 // === Testing filter-keys ===
-// Original: {"banana": 2, "apricot": 3, "apple": 1}
-// filter-keys(starts-with 'a'): {"apricot": 3, "apple": 1}
+// Original: {"banana": 2, "apple": 1, "apricot": 3}
+// filter-keys(starts-with 'a'): {"apple": 1, "apricot": 3}
 //
 // === Testing filter-vals ===
 // Original: {"b": 5, "c": 2, "a": 1, "d": 8}

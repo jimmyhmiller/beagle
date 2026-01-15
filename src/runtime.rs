@@ -29,7 +29,9 @@ use crate::{
     types::{BuiltInTypes, Header, HeapObject, Tagged},
 };
 
-use crate::collections::{GcHandle, HandleScope, PersistentMap, PersistentVec, TYPE_ID_ATOM};
+use crate::collections::{
+    GcHandle, HandleScope, PersistentMap, PersistentVec, TYPE_ID_ATOM, TYPE_ID_FUNCTION_OBJECT,
+};
 
 use std::cell::RefCell;
 
@@ -1220,7 +1222,8 @@ pub struct Runtime {
     protocol_info: HashMap<String, Vec<ProtocolMethodInfo>>,
     /// Dispatch tables for O(1) protocol method lookup
     /// Key = "protocol_name/method_name"
-    dispatch_tables: HashMap<String, DispatchTable>,
+    /// Boxed to keep pointers stable when HashMap reallocates
+    dispatch_tables: HashMap<String, Box<DispatchTable>>,
     stacks_for_continuation_swapping: Vec<ContinuationStack>,
     // Per-thread try-catch handler stacks
     pub exception_handlers: HashMap<ThreadId, Vec<ExceptionHandler>>,
@@ -2448,6 +2451,35 @@ impl Runtime {
                 );
             }
         }
+
+        Ok(heap_pointer)
+    }
+
+    /// Create a FunctionObject - a callable wrapper around a function pointer.
+    ///
+    /// Unlike closures, FunctionObjects:
+    /// - Have no free variables
+    /// - Don't receive `self` as arg0 when called
+    ///
+    /// This allows top-level functions to be passed around as first-class values.
+    ///
+    /// Layout:
+    /// - Header (8 bytes) with type_id = TYPE_ID_FUNCTION_OBJECT
+    /// - Field 0: tagged function pointer
+    pub fn make_function_object(
+        &mut self,
+        stack_pointer: usize,
+        function: usize,
+    ) -> Result<usize, Box<dyn Error>> {
+        // Allocate heap object with 1 field for the function pointer
+        let heap_pointer = self.allocate(1, stack_pointer, BuiltInTypes::HeapObject)?;
+        let mut heap_object = HeapObject::from_tagged(heap_pointer);
+
+        // Set type_id to identify this as a FunctionObject
+        heap_object.write_type_id(TYPE_ID_FUNCTION_OBJECT as usize);
+
+        // Store the tagged function pointer
+        heap_object.write_field(0, function);
 
         Ok(heap_pointer)
     }
@@ -4288,7 +4320,7 @@ impl Runtime {
             let dispatch_table = self
                 .dispatch_tables
                 .entry(dispatch_key)
-                .or_insert_with(|| DispatchTable::new(None));
+                .or_insert_with(|| Box::new(DispatchTable::new(None)));
             // Use negative ID for primitive types (DispatchTable converts to index)
             dispatch_table.register(-(primitive_id as isize + 1), f);
         } else if let Some((struct_id, _)) = self.structs.get(struct_name) {
@@ -4296,7 +4328,7 @@ impl Runtime {
             let dispatch_table = self
                 .dispatch_tables
                 .entry(dispatch_key)
-                .or_insert_with(|| DispatchTable::new(None));
+                .or_insert_with(|| Box::new(DispatchTable::new(None)));
             dispatch_table.register(struct_id as isize, f);
         }
         // Note: silently ignore unknown types for now (could be forward references)
@@ -4311,7 +4343,7 @@ impl Runtime {
 
         self.dispatch_tables
             .get(&dispatch_key)
-            .map(|table| table as *const DispatchTable as usize)
+            .map(|table| &**table as *const DispatchTable as usize)
     }
 
     /// Get a reference to a dispatch table
@@ -4324,7 +4356,7 @@ impl Runtime {
             protocol_name.split_once("/").unwrap_or(("", protocol_name));
         let dispatch_key = format!("{}/{}", protocol_namespace, method_name);
 
-        self.dispatch_tables.get(&dispatch_key)
+        self.dispatch_tables.get(&dispatch_key).map(|b| &**b)
     }
 
     /// Set the default method for a dispatch table
@@ -4381,8 +4413,8 @@ impl Runtime {
                 }
             }
             eprintln!(
-                "Warning: Cannot resolve struct {}, using as-is",
-                struct_name
+                "Warning: Cannot resolve struct '{}', current_ns={}, using as-is",
+                struct_name, current_namespace_name
             );
             return struct_name.to_string();
         }

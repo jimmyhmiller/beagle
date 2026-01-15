@@ -34,3 +34,8 @@ pub const TYPE_ID_ARRAY_NODE_CHILDREN: u8 = 27;
 /// Type ID for Atom (1 field: value)
 /// Used for atomic reference cells (thread-safe mutable cells)
 pub const TYPE_ID_ATOM: u8 = 26;
+
+/// Type ID for FunctionObject (1 field: function_pointer)
+/// A callable heap object wrapping a function pointer.
+/// Unlike closures, FunctionObjects have no free variables and don't receive self as arg0.
+pub const TYPE_ID_FUNCTION_OBJECT: u8 = 10;
