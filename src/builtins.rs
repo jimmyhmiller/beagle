@@ -1123,6 +1123,86 @@ pub unsafe extern "C" fn get_function_min_args(function_pointer: usize) -> usize
     }
 }
 
+/// Build rest array from saved locals.
+/// Used by variadic function prologues to build the rest parameter array
+/// from arguments that were saved to dedicated local slots.
+///
+/// Arguments:
+/// - stack_pointer: for GC
+/// - frame_pointer: used to compute local addresses
+/// - arg_count: number of args passed (tagged int, from X9)
+/// - min_args: minimum args before rest param (tagged int, compile-time constant)
+/// - first_local_index: index of first saved arg local (untagged raw value)
+///
+/// Returns: tagged array pointer containing args[min_args..arg_count]
+pub unsafe extern "C" fn build_rest_array_from_locals(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    arg_count: usize,
+    min_args: usize,
+    first_local_index: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+
+    let total = BuiltInTypes::untag(arg_count);
+    let min = BuiltInTypes::untag(min_args);
+
+    // Number of extra args to pack
+    let num_extra = total.saturating_sub(min);
+
+    if num_extra == 0 {
+        // Return empty array
+        let array_ptr = runtime
+            .allocate_zeroed(0, stack_pointer, BuiltInTypes::HeapObject)
+            .unwrap();
+        let mut heap_obj = HeapObject::from_tagged(array_ptr);
+        heap_obj.write_type_id(1);
+        return array_ptr;
+    }
+
+    // Allocate array for extra args (zeroed)
+    let array_ptr = runtime
+        .allocate_zeroed(num_extra, stack_pointer, BuiltInTypes::HeapObject)
+        .unwrap();
+
+    // Set type_id to 1 (raw array)
+    let mut heap_obj = HeapObject::from_tagged(array_ptr);
+    heap_obj.write_type_id(1);
+
+    let array_data = heap_obj.untagged() as *mut usize;
+
+    // Read args from locals and write to array
+    // Local N is at FP - (N + 1) * 8
+    // We saved args starting at local first_local_index
+    // The saved args are: arg[first_arg_index], arg[first_arg_index+1], ...
+    // We want args[min..total], which are at local indices:
+    //   first_local_index + (min - first_arg_index), first_local_index + (min - first_arg_index) + 1, ...
+    // But since first_arg_index is typically 0 (or 1 for closures), and the saved args
+    // already account for this offset, we can simplify:
+    // Saved local at index i corresponds to arg (first_arg_index + i)
+    // We want arg indices min..total
+    // So we want saved local indices (min - first_arg_index)..(total - first_arg_index)
+    // Since first_arg_index is typically 0 for top-level functions, this simplifies to min..total
+    // But for closures, first_arg_index = 1, so we want (min - 1)..(total - 1)
+
+    // Actually, let's simplify: the caller passes min_args correctly adjusted
+    // So we just read from saved_local[min]..saved_local[total]
+    for i in 0..num_extra {
+        let local_index = first_local_index + min + i;
+        // Local address = FP - (local_index + 1) * 8
+        let local_addr = frame_pointer.wrapping_sub((local_index + 1) * 8);
+        // SAFETY: local_addr points to a valid stack slot that was written by the caller
+        unsafe {
+            let arg = *(local_addr as *const usize);
+            // Write to array field i (offset 1 to skip header)
+            *array_data.add(i + 1) = arg;
+        }
+    }
+
+    array_ptr
+}
+
 /// Pack variadic arguments from stack into an array.
 /// stack_pointer: current stack pointer
 /// args_base: pointer to first arg on stack (args are contiguous)
@@ -4422,6 +4502,15 @@ impl Runtime {
         self.add_builtin_function_with_fp(
             "beagle.builtin/pack-variadic-args-from-stack",
             pack_variadic_args_from_stack as *const u8,
+            true,
+            true,
+            5,
+        )?;
+
+        // build_rest_array_from_locals takes (stack_pointer, frame_pointer, arg_count, min_args, first_local_index)
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/build-rest-array-from-locals",
+            build_rest_array_from_locals as *const u8,
             true,
             true,
             5,

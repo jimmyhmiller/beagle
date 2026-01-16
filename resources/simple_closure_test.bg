@@ -2,6 +2,7 @@ namespace simple_closure_test
 
 // no-std
 
+// Test 1: Closure capturing a value (works)
 fn make_adder(x) {
     fn add(y) {
         x + y
@@ -9,11 +10,23 @@ fn make_adder(x) {
     add
 }
 
+// Test 2: Closure capturing a closure and calling it
+fn wrap_fn(f) {
+    fn() { f(10) }
+}
+
 fn main() {
+    // Test 1
     let add5 = make_adder(5)
     _println(add5(3))
+
+    // Test 2: captures a closure and calls it
+    let double = fn(x) { x * 2 }
+    let wrapped = wrap_fn(double)
+    _println(wrapped())
     "done"
 }
 
 // Expect
 // 8
+// 20

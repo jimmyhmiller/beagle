@@ -490,6 +490,9 @@ impl PrettyPrint for Instruction {
             Instruction::GetFramePointer(dest) => {
                 format!("get_frame_pointer {}", dest.pretty_print())
             }
+            Instruction::ReadArgCount(dest) => {
+                format!("read_arg_count {}", dest.pretty_print())
+            }
         }
     }
 }

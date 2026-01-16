@@ -2,8 +2,8 @@ use crate::{
     builtins::debugger,
     machine_code::arm_codegen::{
         ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, SP, Size, StpGenSelector,
-        StrImmGenSelector, X0, X9, X10, X11, X16, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28,
-        X29, X30, ZERO_REGISTER,
+        StrImmGenSelector, X0, X10, X11, X12, X16, X19, X20, X21, X22, X23, X24, X25, X26, X27,
+        X28, X29, X30, ZERO_REGISTER,
     },
     types::BuiltInTypes,
 };
@@ -543,7 +543,8 @@ impl LowLevelArm {
     pub fn new() -> Self {
         // https://github.com/swiftlang/swift/blob/716cc5cedf0b8638225bebf86bddc6a1295388f4/docs/ABI/CallingConventionSummary.rst#arm64
         let canonical_volatile_registers = vec![X19, X20, X21, X22, X23, X24, X25, X26, X27, X28];
-        let temporary_registers = vec![X9, X10, X11];
+        // X9 is reserved for arg count in variadic calling convention
+        let temporary_registers = vec![X10, X11, X12];
         LowLevelArm {
             instructions: vec![],
             label_locations: HashMap::new(),
@@ -1444,9 +1445,9 @@ impl LowLevelArm {
             let null_value = crate::types::BuiltInTypes::null_value() as i32;
 
             if self.max_locals > 0 {
-                // Load null value into X9
+                // Load null value into X11 (NOT X9 - that's reserved for arg count!)
                 alloc_instructions.push(ArmAsm::Movz {
-                    rd: X9,
+                    rd: X11,
                     imm16: null_value,
                     hw: 0,
                     sf: 1,
@@ -1463,10 +1464,10 @@ impl LowLevelArm {
 
                 // Store null to each local slot, decrementing X10 after each store
                 for _ in 0..self.max_locals {
-                    // Store X9 to [X10], then X10 = X10 - 8 (post-decrement)
-                    // Use STR with post-index: str x9, [x10], #-8
+                    // Store X11 to [X10], then X10 = X10 - 8 (post-decrement)
+                    // Use STR with post-index: str x11, [x10], #-8
                     alloc_instructions.push(ArmAsm::StrImmGen {
-                        rt: X9,
+                        rt: X11,
                         rn: X10,
                         imm9: -8,
                         imm12: 0,   // Not used for post-index

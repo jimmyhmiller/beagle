@@ -66,6 +66,10 @@ impl CodegenBackend for Arm64Backend {
         self.inner.ret_reg()
     }
 
+    fn arg_count_reg(&self) -> Self::Register {
+        crate::machine_code::arm_codegen::X9
+    }
+
     fn volatile_register(&mut self) -> Self::Register {
         self.inner.volatile_register()
     }
