@@ -125,6 +125,7 @@ pub enum Token {
     CloseParen,
     OpenCurly,
     CloseCurly,
+    HashOpenCurly,
     OpenBracket,
     CloseBracket,
     SemiColon,
@@ -233,6 +234,7 @@ impl Token {
             Token::CloseParen => Ok(")".to_string()),
             Token::OpenCurly => Ok("{".to_string()),
             Token::CloseCurly => Ok("}".to_string()),
+            Token::HashOpenCurly => Ok("#{".to_string()),
             Token::OpenBracket => Ok("[".to_string()),
             Token::CloseBracket => Ok("]".to_string()),
             Token::SemiColon => Ok(";".to_string()),
@@ -663,6 +665,13 @@ impl Tokenizer {
                 // This is a standalone colon (struct field separator)
                 Token::Colon
             }
+        } else if self.current_byte(input_bytes) == b'#'
+            && self.position + 1 < input_bytes.len()
+            && input_bytes[self.position + 1] == b'{'
+        {
+            self.consume(input_bytes); // #
+            self.consume(input_bytes); // {
+            Token::HashOpenCurly
         } else if self.is_open_curly(input_bytes) {
             self.consume(input_bytes);
             Token::OpenCurly
@@ -1153,6 +1162,10 @@ impl Parser {
             }
             Token::OpenCurly => {
                 let result = self.parse_map_literal()?;
+                Ok(Some(result))
+            }
+            Token::HashOpenCurly => {
+                let result = self.parse_set_literal()?;
                 Ok(Some(result))
             }
             _ => Err(ParseError::UnexpectedToken {
@@ -2854,6 +2867,54 @@ impl Parser {
 
         Ok(Ast::MapLiteral {
             pairs,
+            token_range: TokenRange::new(start_position, self.position),
+        })
+    }
+
+    fn parse_set_literal(&mut self) -> ParseResult<Ast> {
+        let start_position = self.position;
+        self.consume(); // consume '#{' (already consumed in tokenizer, consume the token)
+        self.skip_whitespace();
+
+        // Empty set case
+        if self.is_close_curly() {
+            self.consume();
+            return Ok(Ast::SetLiteral {
+                elements: vec![],
+                token_range: TokenRange::new(start_position, self.position),
+            });
+        }
+
+        // Parse elements
+        let mut elements = Vec::new();
+        loop {
+            // Parse element (any expression)
+            let element =
+                self.parse_expression(0, true, true)?
+                    .ok_or_else(|| ParseError::UnexpectedEof {
+                        expected: "element expression in set literal".to_string(),
+                    })?;
+
+            elements.push(element);
+
+            self.skip_whitespace();
+
+            // Check if done
+            if self.is_close_curly() {
+                break;
+            }
+
+            // Optional comma between elements
+            if self.is_comma() {
+                self.consume();
+                self.skip_whitespace();
+            }
+        }
+
+        self.expect_close_curly()?;
+
+        Ok(Ast::SetLiteral {
+            elements,
             token_range: TokenRange::new(start_position, self.position),
         })
     }

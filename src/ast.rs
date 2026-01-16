@@ -224,6 +224,10 @@ pub enum Ast {
         pairs: Vec<(Ast, Ast)>,
         token_range: TokenRange,
     },
+    SetLiteral {
+        elements: Vec<Ast>,
+        token_range: TokenRange,
+    },
     IndexOperator {
         array: Box<Ast>,
         index: Box<Ast>,
@@ -357,6 +361,7 @@ impl Ast {
             | Ast::Or { token_range, .. }
             | Ast::Array { token_range, .. }
             | Ast::MapLiteral { token_range, .. }
+            | Ast::SetLiteral { token_range, .. }
             | Ast::IndexOperator { token_range, .. }
             | Ast::Loop { token_range, .. }
             | Ast::While { token_range, .. }
@@ -1864,6 +1869,75 @@ impl AstCompiler<'_> {
                 }
 
                 map_register.into()
+            }
+            Ast::SetLiteral { elements, .. } => {
+                // Special case: empty set
+                if elements.is_empty() {
+                    return self.call("beagle.collections/set", vec![]);
+                }
+
+                // Check for duplicate literal elements at compile time
+                let mut seen_elements: HashMap<String, &Ast> = HashMap::new();
+                for element in elements.iter() {
+                    // Extract a string representation for literal elements
+                    let elem_str = match element {
+                        Ast::String(s, _) => Some(format!("string:{}", s)),
+                        Ast::IntegerLiteral(n, _) => Some(format!("int:{}", n)),
+                        Ast::FloatLiteral(f, _) => Some(format!("float:{}", f)),
+                        Ast::Keyword(k, _) => Some(format!("keyword:{}", k)),
+                        Ast::True(_) => Some("bool:true".to_string()),
+                        Ast::False(_) => Some("bool:false".to_string()),
+                        Ast::Null(_) => Some("null".to_string()),
+                        // For non-literal elements, we can't check at compile time
+                        _ => None,
+                    };
+
+                    if let Some(elem_repr) = elem_str {
+                        if let Some(first_elem) = seen_elements.get(&elem_repr) {
+                            panic!(
+                                "Duplicate element in set literal: {:?}. First occurrence: {:?}, Second occurrence: {:?}",
+                                elem_repr, first_elem, element
+                            );
+                        }
+                        seen_elements.insert(elem_repr, element);
+                    }
+                }
+
+                // Push all elements to stack
+                for element in elements.iter() {
+                    self.not_tail_position();
+                    let elem_val = self.call_compile(element);
+                    let elem_reg = self.ir.assign_new(elem_val);
+                    self.ir.push_to_stack(elem_reg.into());
+                }
+
+                // Create empty set
+                let set_pointer = self.call("beagle.collections/set", vec![]);
+                let set_register = self.ir.assign_new(set_pointer);
+
+                // Load elements from stack and add them
+                let stack_pointer = self.ir.get_current_stack_position();
+                for i in 0..elements.len() {
+                    // Stack layout: [elem0, elem1, elem2, ...]
+                    // Element i is at stack offset (i + 1)
+                    let elem_offset = (i + 1) as i32;
+
+                    let element = self.ir.load_from_memory(stack_pointer, elem_offset);
+
+                    // Use self.call() to properly handle sp/fp for the builtin
+                    let add_result = self.call(
+                        "beagle.collections/set-add",
+                        vec![set_register.into(), element],
+                    );
+                    self.ir.assign(set_register, add_result);
+                }
+
+                // Clean up stack
+                for _ in 0..elements.len() {
+                    self.ir.pop_from_stack();
+                }
+
+                set_register.into()
             }
             Ast::Namespace { name, .. } => {
                 let namespace_id = self.compiler.reserve_namespace(name);
@@ -3451,6 +3525,14 @@ impl AstCompiler<'_> {
                 for (key, value) in pairs.iter() {
                     self.find_mutable_vars_that_need_boxing(key);
                     self.find_mutable_vars_that_need_boxing(value);
+                }
+            }
+            Ast::SetLiteral {
+                elements,
+                token_range: _,
+            } => {
+                for element in elements.iter() {
+                    self.find_mutable_vars_that_need_boxing(element);
                 }
             }
             Ast::IndexOperator {

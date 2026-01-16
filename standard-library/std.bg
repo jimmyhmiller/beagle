@@ -91,6 +91,11 @@ let PersistentMap = Struct {
     id: -22
 }
 
+let PersistentSet = Struct {
+    name: "PersistentSet",
+    id: -28
+}
+
 // ============================================================================
 // Math Constants
 // ============================================================================
@@ -1551,3 +1556,189 @@ fn filter-vals-helper(m, pred, ks, idx, acc) {
     }
 }
 
+// ============================================================================
+// Rust PersistentSet Protocol Implementations
+// ============================================================================
+
+extend PersistentSet with Length {
+    fn length(set) {
+        rust-coll/set-count(set)
+    }
+}
+
+extend PersistentSet with Format {
+    fn format(set, depth) {
+        let elems = rust-coll/set-elements(set)
+        let len = rust-coll/vec-count(elems)
+        if len == 0 {
+            "#{}"
+        } else {
+            format-rust-set-elements(elems, 0, len, "#{")
+        }
+    }
+}
+
+fn format-rust-set-elements(elems-vec, idx, len, acc) {
+    if idx >= len {
+        acc ++ "}"
+    } else {
+        let elem = rust-coll/vec-get(elems-vec, idx)
+        let elem-str = format(elem, 1)
+        let new-acc = if idx == 0 {
+            acc ++ elem-str
+        } else {
+            acc ++ ", " ++ elem-str
+        }
+        format-rust-set-elements(elems-vec, idx + 1, len, new-acc)
+    }
+}
+
+// Sequence type for iterating over PersistentSet
+struct PersistentSetSeq {
+    elements
+    index
+}
+
+extend PersistentSetSeq with Seq {
+    fn first(seq) {
+        rust-coll/vec-get(seq.elements, seq.index)
+    }
+    fn next(seq) {
+        let next-idx = seq.index + 1
+        if next-idx >= rust-coll/vec-count(seq.elements) {
+            null
+        } else {
+            PersistentSetSeq { elements: seq.elements, index: next-idx }
+        }
+    }
+}
+
+extend PersistentSet with Seqable {
+    fn seq(set) {
+        let elems = rust-coll/set-elements(set)
+        if rust-coll/vec-count(elems) == 0 {
+            null
+        } else {
+            PersistentSetSeq { elements: elems, index: 0 }
+        }
+    }
+}
+
+// ============================================================================
+// Set Utility Functions
+// ============================================================================
+
+// set?: Check if a value is a PersistentSet
+fn set?(x) {
+    instance-of(x, PersistentSet)
+}
+
+// set-contains?: Check if an element is in a set
+fn set-contains?(set, elem) {
+    rust-coll/set-contains?(set, elem)
+}
+
+// set-add: Add an element to a set
+fn set-add(set, elem) {
+    rust-coll/set-add(set, elem)
+}
+
+// set-remove: Remove an element from a set (rebuilds the set)
+fn set-remove(set, elem) {
+    let elems = rust-coll/set-elements(set)
+    set-remove-helper(elems, elem, 0, rust-coll/vec-count(elems), #{})
+}
+
+fn set-remove-helper(elems, to-remove, idx, len, acc) {
+    if idx >= len {
+        acc
+    } else {
+        let elem = rust-coll/vec-get(elems, idx)
+        let new-acc = if elem == to-remove {
+            acc
+        } else {
+            rust-coll/set-add(acc, elem)
+        }
+        set-remove-helper(elems, to-remove, idx + 1, len, new-acc)
+    }
+}
+
+// set-union: Return a set containing all elements from both sets
+fn set-union(s1, s2) {
+    let elems2 = rust-coll/set-elements(s2)
+    set-union-helper(s1, elems2, 0, rust-coll/vec-count(elems2))
+}
+
+fn set-union-helper(s1, elems2, idx, len) {
+    if idx >= len {
+        s1
+    } else {
+        let elem = rust-coll/vec-get(elems2, idx)
+        let new-s1 = rust-coll/set-add(s1, elem)
+        set-union-helper(new-s1, elems2, idx + 1, len)
+    }
+}
+
+// set-intersection: Return a set containing only elements in both sets
+fn set-intersection(s1, s2) {
+    let elems1 = rust-coll/set-elements(s1)
+    set-intersection-helper(elems1, s2, 0, rust-coll/vec-count(elems1), #{})
+}
+
+fn set-intersection-helper(elems1, s2, idx, len, acc) {
+    if idx >= len {
+        acc
+    } else {
+        let elem = rust-coll/vec-get(elems1, idx)
+        let new-acc = if rust-coll/set-contains?(s2, elem) {
+            rust-coll/set-add(acc, elem)
+        } else {
+            acc
+        }
+        set-intersection-helper(elems1, s2, idx + 1, len, new-acc)
+    }
+}
+
+// set-difference: Return a set containing elements in s1 but not in s2
+fn set-difference(s1, s2) {
+    let elems1 = rust-coll/set-elements(s1)
+    set-difference-helper(elems1, s2, 0, rust-coll/vec-count(elems1), #{})
+}
+
+fn set-difference-helper(elems1, s2, idx, len, acc) {
+    if idx >= len {
+        acc
+    } else {
+        let elem = rust-coll/vec-get(elems1, idx)
+        let new-acc = if rust-coll/set-contains?(s2, elem) {
+            acc
+        } else {
+            rust-coll/set-add(acc, elem)
+        }
+        set-difference-helper(elems1, s2, idx + 1, len, new-acc)
+    }
+}
+
+// set-subset?: Check if all elements of s1 are in s2
+fn set-subset?(s1, s2) {
+    let elems1 = rust-coll/set-elements(s1)
+    set-subset-helper(elems1, s2, 0, rust-coll/vec-count(elems1))
+}
+
+fn set-subset-helper(elems1, s2, idx, len) {
+    if idx >= len {
+        true
+    } else {
+        let elem = rust-coll/vec-get(elems1, idx)
+        if rust-coll/set-contains?(s2, elem) {
+            set-subset-helper(elems1, s2, idx + 1, len)
+        } else {
+            false
+        }
+    }
+}
+
+// into-set: Convert a collection to a set
+fn into-set(coll) {
+    reduce(coll, #{}, fn(acc, elem) { rust-coll/set-add(acc, elem) })
+}
