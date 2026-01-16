@@ -1,0 +1,51 @@
+namespace to_float_test
+
+// Test to-float function for converting integers to floats
+
+fn main() {
+    // Positive integers
+    println("positive integers:")
+    println(to-float(0))
+    println(to-float(1))
+    println(to-float(5))
+    println(to-float(100))
+
+    // Negative integers
+    println("negative integers:")
+    println(to-float(-1))
+    println(to-float(-5))
+    println(to-float(-100))
+
+    // Use in arithmetic
+    println("arithmetic with converted floats:")
+    println(to-float(-1) + 2.0)
+    println(to-float(3) * 2.5)
+    println(to-float(-2) * to-float(3))
+
+    // Verify signs are correct
+    println("sign checks:")
+    println(to-float(-1) < 0.0)
+    println(to-float(1) > 0.0)
+    println(to-float(-5) + 5.0)
+
+    ""
+}
+
+// Expect
+// positive integers:
+// 0.0
+// 1.0
+// 5.0
+// 100.0
+// negative integers:
+// -1.0
+// -5.0
+// -100.0
+// arithmetic with converted floats:
+// 1.0
+// 7.5
+// -6.0
+// sign checks:
+// true
+// true
+// 0.0
