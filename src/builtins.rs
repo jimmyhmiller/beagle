@@ -2400,7 +2400,8 @@ pub unsafe extern "C" fn to_float_builtin(
         let runtime = get_runtime().get_mut();
 
         // Get the integer value (tagged integers have 0b000 tag)
-        let int_value = BuiltInTypes::untag(value) as i64;
+        // Use signed right shift to preserve negative numbers
+        let int_value = BuiltInTypes::untag_isize(value as isize) as i64;
 
         // Convert to f64
         let float_value = int_value as f64;

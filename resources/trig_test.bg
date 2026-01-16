@@ -43,14 +43,14 @@ fn main() {
     println("atan tests:")
     check("atan(0.0)", atan(0.0), 0.0)
     check("atan(1.0)", atan(1.0), PI_4)
-    check("atan(-1.0)", atan(0.0 - 1.0), 0.0 - PI_4)
+    check("atan(-1.0)", atan(to-float(-1)), 0.0 - PI_4)
 
     // Test atan2
     println("atan2 tests:")
     check("atan2(0.0, 1.0)", atan2(0.0, 1.0), 0.0)
     check("atan2(1.0, 1.0)", atan2(1.0, 1.0), PI_4)
     check("atan2(1.0, 0.0)", atan2(1.0, 0.0), PI_2)
-    check("atan2(-1.0, 0.0)", atan2(0.0 - 1.0, 0.0), 0.0 - PI_2)
+    check("atan2(-1.0, 0.0)", atan2(to-float(-1), 0.0), 0.0 - PI_2)
 
     // Verify inverse relationships
     println("inverse relationship tests:")
