@@ -5590,7 +5590,7 @@ pub unsafe extern "C" fn compiler_warnings(stack_pointer: usize, frame_pointer: 
 
 mod rust_collections {
     use super::*;
-    use crate::collections::{GcHandle, PersistentMap, PersistentVec};
+    use crate::collections::{GcHandle, PersistentMap, PersistentSet, PersistentVec};
 
     /// Create an empty persistent vector
     /// Signature: (stack_pointer, frame_pointer) -> tagged_ptr
@@ -5784,6 +5784,105 @@ mod rust_collections {
             }
         }
     }
+
+    // ========== Set builtins ==========
+
+    /// Create an empty persistent set
+    /// Signature: (stack_pointer, frame_pointer) -> tagged_ptr
+    pub unsafe extern "C" fn rust_set_empty(stack_pointer: usize, frame_pointer: usize) -> usize {
+        save_gc_context!(stack_pointer, frame_pointer);
+        let runtime = get_runtime().get_mut();
+
+        match PersistentSet::empty(runtime, stack_pointer) {
+            Ok(handle) => handle.as_tagged(),
+            Err(e) => {
+                eprintln!("rust_set_empty error: {}", e);
+                BuiltInTypes::null_value() as usize
+            }
+        }
+    }
+
+    /// Get the count of a persistent set
+    /// Signature: (set_ptr) -> tagged_int
+    pub unsafe extern "C" fn rust_set_count(set_ptr: usize) -> usize {
+        if !BuiltInTypes::is_heap_pointer(set_ptr) {
+            return BuiltInTypes::construct_int(0) as usize;
+        }
+        let set = GcHandle::from_tagged(set_ptr);
+        let count = PersistentSet::count(set);
+        BuiltInTypes::construct_int(count as isize) as usize
+    }
+
+    /// Check if an element is in a persistent set
+    /// Signature: (set_ptr, element) -> tagged_bool
+    pub unsafe extern "C" fn rust_set_contains(set_ptr: usize, element: usize) -> usize {
+        if !BuiltInTypes::is_heap_pointer(set_ptr) {
+            return BuiltInTypes::false_value() as usize;
+        }
+        let runtime = get_runtime().get();
+        let set = GcHandle::from_tagged(set_ptr);
+        if PersistentSet::contains(runtime, set, element) {
+            BuiltInTypes::true_value() as usize
+        } else {
+            BuiltInTypes::false_value() as usize
+        }
+    }
+
+    /// Add an element to a persistent set
+    /// Signature: (stack_pointer, frame_pointer, set_ptr, element) -> tagged_ptr
+    pub unsafe extern "C" fn rust_set_add(
+        stack_pointer: usize,
+        frame_pointer: usize,
+        set_ptr: usize,
+        element: usize,
+    ) -> usize {
+        save_gc_context!(stack_pointer, frame_pointer);
+        let runtime = get_runtime().get_mut();
+
+        if !BuiltInTypes::is_heap_pointer(set_ptr) {
+            return BuiltInTypes::null_value() as usize;
+        }
+
+        match PersistentSet::add(runtime, stack_pointer, set_ptr, element) {
+            Ok(handle) => handle.as_tagged(),
+            Err(e) => {
+                eprintln!("rust_set_add error: {}", e);
+                BuiltInTypes::null_value() as usize
+            }
+        }
+    }
+
+    /// Get all elements from a persistent set as a vector
+    /// Signature: (stack_pointer, frame_pointer, set_ptr) -> tagged_ptr (vector)
+    pub unsafe extern "C" fn rust_set_elements(
+        stack_pointer: usize,
+        frame_pointer: usize,
+        set_ptr: usize,
+    ) -> usize {
+        save_gc_context!(stack_pointer, frame_pointer);
+        let runtime = get_runtime().get_mut();
+
+        if !BuiltInTypes::is_heap_pointer(set_ptr) {
+            // Empty set or invalid - return empty vector
+            match PersistentVec::empty(runtime, stack_pointer) {
+                Ok(handle) => return handle.as_tagged(),
+                Err(e) => {
+                    eprintln!("rust_set_elements empty vec error: {}", e);
+                    return BuiltInTypes::null_value() as usize;
+                }
+            }
+        }
+
+        let set = GcHandle::from_tagged(set_ptr);
+
+        match PersistentSet::elements(runtime, stack_pointer, set) {
+            Ok(handle) => handle.as_tagged(),
+            Err(e) => {
+                eprintln!("rust_set_elements error: {}", e);
+                BuiltInTypes::null_value() as usize
+            }
+        }
+    }
 }
 
 impl Runtime {
@@ -5879,6 +5978,51 @@ impl Runtime {
             true,
             true,
             3, // sp, fp, map
+        )?;
+
+        // ========== Set builtins ==========
+
+        // rust-set: Create empty set (needs sp/fp for allocation)
+        self.add_builtin_function_with_fp(
+            "beagle.collections/set",
+            rust_set_empty as *const u8,
+            true,
+            true,
+            2, // sp, fp
+        )?;
+
+        // rust-set-count: Get count (no allocation needed)
+        self.add_builtin_function(
+            "beagle.collections/set-count",
+            rust_set_count as *const u8,
+            false,
+            1, // set
+        )?;
+
+        // rust-set-contains?: Check if element is in set (no allocation needed)
+        self.add_builtin_function(
+            "beagle.collections/set-contains?",
+            rust_set_contains as *const u8,
+            false,
+            2, // set, element
+        )?;
+
+        // rust-set-add: Add element to set (needs sp/fp for allocation)
+        self.add_builtin_function_with_fp(
+            "beagle.collections/set-add",
+            rust_set_add as *const u8,
+            true,
+            true,
+            4, // sp, fp, set, element
+        )?;
+
+        // rust-set-elements: Get all elements as vector (needs sp/fp for allocation)
+        self.add_builtin_function_with_fp(
+            "beagle.collections/set-elements",
+            rust_set_elements as *const u8,
+            true,
+            true,
+            3, // sp, fp, set
         )?;
 
         Ok(())

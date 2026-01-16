@@ -3337,6 +3337,7 @@ impl Runtime {
                     3 => "Keyword",           // Keyword type (type_id == 3)
                     20 => "PersistentVector", // Rust-backed persistent vector
                     22 => "PersistentMap",    // Rust-backed persistent map
+                    28 => "PersistentSet",    // Rust-backed persistent set
                     _ => {
                         // Custom struct (type_id == 0 or other) - use struct_id
                         let struct_type_id = heap_object.get_struct_id();
@@ -4323,6 +4324,7 @@ impl Runtime {
             "beagle.core/Bool" => Some(19),             // tag 3 + 16
             "beagle.core/PersistentVector" => Some(20), // TYPE_ID_PERSISTENT_VEC
             "beagle.core/PersistentMap" => Some(22),    // TYPE_ID_PERSISTENT_MAP
+            "beagle.core/PersistentSet" => Some(28),    // TYPE_ID_PERSISTENT_SET
             _ => None,
         };
 

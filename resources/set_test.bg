@@ -1,0 +1,97 @@
+namespace set_test
+
+fn main() {
+    // Test empty set
+    let empty = #{}
+    println(length(empty))
+
+    // Test set literals with integers
+    let s1 = #{1, 2, 3}
+    println(length(s1))
+
+    // Test set-contains?
+    println(set-contains?(s1, 2))
+    println(set-contains?(s1, 5))
+
+    // Test set-add
+    let s2 = set-add(s1, 4)
+    println(length(s2))
+    println(set-contains?(s2, 4))
+
+    // Test deduplication (adding existing element)
+    let s3 = set-add(s1, 2)
+    println(length(s3))
+
+    // Test set-remove
+    let s4 = set-remove(s1, 2)
+    println(length(s4))
+    println(set-contains?(s4, 2))
+    println(set-contains?(s4, 1))
+    println(set-contains?(s4, 3))
+
+    // Test set operations
+    let a = #{1, 2, 3}
+    let b = #{2, 3, 4}
+
+    // Union
+    let union-result = set-union(a, b)
+    println(length(union-result))
+
+    // Intersection
+    let int-result = set-intersection(a, b)
+    println(length(int-result))
+
+    // Difference (a - b)
+    let diff-result = set-difference(a, b)
+    println(length(diff-result))
+    println(set-contains?(diff-result, 1))
+    println(set-contains?(diff-result, 2))
+
+    // subset?
+    let sub = #{2, 3}
+    println(set-subset?(sub, a))
+    println(set-subset?(a, sub))
+
+    // Test iteration with for-in (using reduce)
+    let sum = reduce(s1, 0, fn(acc, x) { acc + x })
+    println(sum)
+
+    // Test into-set
+    let from-vec = into-set([5, 6, 7, 5, 6])
+    println(length(from-vec))
+
+    // Test set? predicate
+    println(set?(s1))
+    println(set?([1, 2, 3]))
+
+    // Test formatting
+    let formatted = format(#{}, 0)
+    println(formatted)
+
+    "done"
+}
+
+// Expect
+// 0
+// 3
+// true
+// false
+// 4
+// true
+// 3
+// 2
+// false
+// true
+// true
+// 4
+// 2
+// 1
+// true
+// false
+// true
+// false
+// 6
+// 3
+// true
+// false
+// #{}

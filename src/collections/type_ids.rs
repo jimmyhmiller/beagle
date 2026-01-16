@@ -39,3 +39,7 @@ pub const TYPE_ID_ATOM: u8 = 26;
 /// A callable heap object wrapping a function pointer.
 /// Unlike closures, FunctionObjects have no free variables and don't receive self as arg0.
 pub const TYPE_ID_FUNCTION_OBJECT: u8 = 10;
+
+/// Type ID for PersistentSet struct (2 fields: count, root)
+/// Backed by PersistentMap internally (keys are elements, values are true)
+pub const TYPE_ID_PERSISTENT_SET: u8 = 28;
