@@ -177,6 +177,7 @@ pub enum Instruction {
     PushExceptionHandler(Label, Value, usize), // label, result_local, builtin_fn_ptr
     PopExceptionHandler(usize),                // builtin_fn_ptr
     Throw(Value, usize),                       // value, builtin_fn_ptr
+    ReadArgCount(Value), // Read arg count register (X9/R10) for variadic functions
     Label(Label),
 }
 
@@ -513,6 +514,9 @@ impl Instruction {
             Instruction::Throw(value, _) => {
                 get_register!(value)
             }
+            Instruction::ReadArgCount(a) => {
+                get_register!(a)
+            }
         }
     }
 
@@ -586,7 +590,8 @@ impl Instruction {
             | Instruction::GetStackPointerImm(value, _)
             | Instruction::GetFramePointer(value)
             | Instruction::CurrentStackPosition(value)
-            | Instruction::ExtendLifeTime(value) => {
+            | Instruction::ExtendLifeTime(value)
+            | Instruction::ReadArgCount(value) => {
                 replace_register!(value, old_register, new_register);
             }
 
@@ -733,6 +738,15 @@ impl Ir {
         }
         let register = self.next_register(Some(n), true);
         Value::Register(register)
+    }
+
+    /// Read the argument count register (X9 for ARM64, R10 for x86-64).
+    /// Used by variadic functions to determine how many arguments were passed.
+    pub fn read_arg_count(&mut self) -> Value {
+        let dest = self.next_register(None, false);
+        self.instructions
+            .push(Instruction::ReadArgCount(Value::Register(dest)));
+        Value::Register(dest)
     }
 
     pub fn volatile_register(&mut self) -> VirtualRegister {
@@ -1693,6 +1707,11 @@ impl Ir {
                             );
                         }
                     }
+
+                    // Set arg_count for uniform variadic calling convention
+                    let arg_count_tagged = (args.len() << BuiltInTypes::tag_size()) as isize;
+                    backend.mov_64(backend.arg_count_reg(), arg_count_tagged);
+
                     backend.recurse(before_prelude);
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, backend);
@@ -1721,6 +1740,10 @@ impl Ir {
                         }
                     }
 
+                    // Set arg_count for uniform variadic calling convention
+                    let arg_count_tagged = (args.len() << BuiltInTypes::tag_size()) as isize;
+                    backend.mov_64(backend.arg_count_reg(), arg_count_tagged);
+
                     backend.recurse(before_prelude);
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, backend);
@@ -1746,6 +1769,11 @@ impl Ir {
                             );
                         }
                     }
+
+                    // Set arg_count for uniform variadic calling convention
+                    let arg_count_tagged = (args.len() << BuiltInTypes::tag_size()) as isize;
+                    backend.mov_64(backend.arg_count_reg(), arg_count_tagged);
+
                     backend.jump(after_prelude);
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, backend);
@@ -1772,6 +1800,12 @@ impl Ir {
                     // or unmasking or anything. Just straight up calling it
                     let function = self.value_to_register(function, backend);
                     backend.shift_right_imm(function, function, BuiltInTypes::tag_size());
+
+                    // Set arg_count for uniform variadic calling convention
+                    // All calls set this so variadic functions can read it
+                    let arg_count_tagged = (args.len() << BuiltInTypes::tag_size()) as isize;
+                    backend.mov_64(backend.arg_count_reg(), arg_count_tagged);
+
                     if *builtin {
                         backend.call_builtin(function);
                     } else {
@@ -1857,6 +1891,11 @@ impl Ir {
 
                     // Untag function pointer and call
                     backend.shift_right_imm(call_target, call_target, BuiltInTypes::tag_size());
+
+                    // Set arg_count for uniform variadic calling convention
+                    let arg_count_tagged = (args.len() << BuiltInTypes::tag_size()) as isize;
+                    backend.mov_64(backend.arg_count_reg(), arg_count_tagged);
+
                     if *builtin {
                         backend.call_builtin(call_target);
                     } else {
@@ -2091,6 +2130,14 @@ impl Ir {
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, backend);
                     backend.mov_reg(dest, backend.frame_pointer());
+                    self.store_spill(dest, dest_spill, backend);
+                }
+                Instruction::ReadArgCount(dest) => {
+                    // Read the argument count register (X9 for ARM64, R10 for x86-64)
+                    // Used by variadic functions to determine how many arguments were passed
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.mov_reg(dest, backend.arg_count_reg());
                     self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::CurrentStackPosition(dest) => {

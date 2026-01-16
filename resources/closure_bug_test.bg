@@ -29,7 +29,7 @@ fn main() {
     println("is-not-positive(-3) = " ++ to-string(is-not-positive(-3)))
 }
 
-// Expect (if closures worked):
+// Expect
 // === Test 1: constantly (captures value) ===
 // constantly(42)(x) = 42
 // SUCCESS: Capturing values works

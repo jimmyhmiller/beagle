@@ -18,13 +18,13 @@ fn test_match(c) {
 
 fn main() {
     let warnings = compiler-warnings()
-    let count = pv/count(warnings)
+    let count = length(warnings)
 
     println("Warning count:")
     println(count)
 
     if count > 0 {
-        let w = pv/get(warnings, 0)
+        let w = get(warnings, 0)
         println("Kind:")
         println(w.kind)
         println("File:")
@@ -40,9 +40,9 @@ fn main() {
             println("Enum:")
             println(w.enum-name)
             println("Missing variants count:")
-            println(pv/count(w.missing-variants))
+            println(length(w.missing-variants))
             println("First missing variant:")
-            println(pv/get(w.missing-variants, 0))
+            println(get(w.missing-variants, 0))
         }
     }
 }
@@ -55,7 +55,7 @@ fn main() {
 // File:
 // resources/test_compiler_warnings_struct.bg
 // Line:
-// 13
+// 12
 // Column:
 // 10
 // Message:

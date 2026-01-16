@@ -1064,7 +1064,14 @@ impl NamespaceManager {
             .lock()
             .expect("Failed to lock namespace in add_binding - this is a fatal error");
         if namespace.bindings.contains_key(name) {
-            namespace.bindings.insert(name.to_string(), pointer);
+            // Only overwrite if the new value is non-null OR the existing value is null
+            // This prevents reserve_namespace_slot from overwriting real values with null
+            let existing = *namespace.bindings.get(name).unwrap();
+            let is_null = pointer == BuiltInTypes::null_value() as usize;
+            let existing_is_null = existing == BuiltInTypes::null_value() as usize;
+            if !is_null || existing_is_null {
+                namespace.bindings.insert(name.to_string(), pointer);
+            }
             return namespace.ids.iter().position(|n| n == name).expect(
                 "Binding exists in map but not in ids vec - this is a fatal internal error",
             );
@@ -3870,7 +3877,9 @@ impl Runtime {
                     // Update variadic info on existing function
                     self.functions[index].is_variadic = is_variadic;
                     self.functions[index].min_args = min_args;
-                    // self.namespaces.add_binding(name.unwrap(), function_pointer);
+                    // Tag and add the binding for reserved functions that are now being defined
+                    let tagged_fn = BuiltInTypes::Function.tag(function_pointer as isize) as usize;
+                    self.add_binding(n, tagged_fn);
                     already_defined = true;
                     break;
                 }
@@ -3978,7 +3987,9 @@ impl Runtime {
 
         self.functions[index].jump_table_offset = jump_table_offset;
         if let Some(name) = name {
-            self.add_binding(name, function_pointer as usize);
+            // Tag the function pointer so dynamic calls can identify it as a Function
+            let tagged_fn = BuiltInTypes::Function.tag(function_pointer as isize) as usize;
+            self.add_binding(name, tagged_fn);
         }
         Ok(function_pointer as usize)
     }

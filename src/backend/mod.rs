@@ -71,6 +71,10 @@ pub trait CodegenBackend: Sized {
     /// Get the return value register.
     fn ret_reg(&self) -> Self::Register;
 
+    /// Get the argument count register for variadic function calling convention.
+    /// ARM64: X9, x86-64: R10
+    fn arg_count_reg(&self) -> Self::Register;
+
     /// Allocate a callee-saved (volatile) register.
     fn volatile_register(&mut self) -> Self::Register;
 

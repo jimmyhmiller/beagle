@@ -672,6 +672,35 @@ impl AstCompiler<'_> {
                 self.current_function_arity = actual_arity;
                 self.current_function_is_variadic = is_variadic;
                 self.current_function_min_args = min_args;
+
+                // For variadic functions with uniform calling convention:
+                // Save arg_count (X9) and all arg registers to dedicated locals FIRST,
+                // before any other operations that might clobber them.
+                // This allows us to build the rest array from raw arguments.
+                let variadic_saved_args: Option<(usize, Vec<usize>)> = if is_variadic {
+                    // Read and save arg_count from X9 IMMEDIATELY
+                    let arg_count = self.ir.read_arg_count();
+                    let arg_count_local = self.find_or_insert_local("<arg_count>");
+                    self.ir.store_local(arg_count_local, arg_count);
+
+                    // Save all 8 potential arg registers to dedicated locals
+                    // We use locals so we can read them back by index later
+                    let first_arg_index = if is_not_top_level { 1 } else { 0 };
+                    let mut saved_arg_locals = Vec::new();
+                    for i in first_arg_index..8 {
+                        let arg_reg = self.ir.arg(i);
+                        let arg_val = self.ir.assign_new(arg_reg);
+                        let local_name = format!("<saved_arg_{}>", i);
+                        let local = self.find_or_insert_local(&local_name);
+                        self.ir.store_local(local, arg_val.into());
+                        saved_arg_locals.push(local);
+                    }
+
+                    Some((arg_count_local, saved_arg_locals))
+                } else {
+                    None
+                };
+
                 if is_not_top_level {
                     let context_name = "<closure_context>";
                     let reg = self.ir.arg(0);
@@ -696,17 +725,68 @@ impl AstCompiler<'_> {
                     self.insert_variable(arg.clone(), local);
                 }
 
-                // Handle rest parameter - it comes as a PersistentVector
+                // Handle rest parameter - build from raw arguments using uniform calling convention
                 if let Some(rest_name) = rest_param {
-                    let mut rest_index = args.len();
-                    if is_not_top_level {
-                        rest_index += 1;
-                    }
-                    let reg = self.ir.arg(rest_index);
+                    let rest_array = if let Some((arg_count_local, saved_arg_locals)) =
+                        variadic_saved_args
+                    {
+                        // Uniform calling convention: build rest array from saved raw arguments
+                        // using the build_rest_array_from_locals builtin
+
+                        // Get the builtin function
+                        let build_fn = self
+                            .compiler
+                            .find_function("beagle.builtin/build-rest-array-from-locals")
+                            .expect("build-rest-array-from-locals builtin not found");
+                        let build_fn_ptr = self.compiler.get_function_pointer(build_fn).unwrap();
+                        let build_fn_val = self.ir.assign_new(build_fn_ptr);
+
+                        // Get stack and frame pointers for GC and local access
+                        let stack_pointer = self.ir.get_stack_pointer_imm(0);
+                        let frame_pointer = self.ir.get_frame_pointer();
+
+                        // Load saved arg_count (already tagged)
+                        let arg_count_val = self.ir.load_local(arg_count_local);
+
+                        // min_args as tagged int
+                        let min_args_val = Value::TaggedConstant(min_args as isize);
+                        let min_args_reg = self.ir.assign_new(min_args_val);
+
+                        // First local index where args are saved (as raw value)
+                        // The first saved arg local index
+                        let first_local_index = if saved_arg_locals.is_empty() {
+                            0
+                        } else {
+                            saved_arg_locals[0]
+                        };
+                        let first_local_val = Value::RawValue(first_local_index);
+                        let first_local_reg = self.ir.assign_new(first_local_val);
+
+                        // Call the builtin: build_rest_array_from_locals(sp, fp, arg_count, min_args, first_local)
+                        self.ir.call_builtin(
+                            build_fn_val.into(),
+                            vec![
+                                stack_pointer,
+                                frame_pointer,
+                                arg_count_val,
+                                min_args_reg.into(),
+                                first_local_reg.into(),
+                            ],
+                        )
+                    } else {
+                        // Fallback: old behavior - rest array comes pre-packed in arg register
+                        let mut rest_index = args.len();
+                        if is_not_top_level {
+                            rest_index += 1;
+                        }
+                        let reg = self.ir.arg(rest_index);
+                        self.ir.assign_new(reg).into()
+                    };
+
                     let local = self.find_or_insert_local(&rest_name);
-                    let reg = self.ir.assign_new(reg);
-                    self.ir.store_local(local, reg.into());
+                    self.ir.store_local(local, rest_array);
                     let local = VariableLocation::Local(local);
+                    let rest_index = args.len() + if is_not_top_level { 1 } else { 0 };
                     self.register_arg_location(rest_index, local.clone());
                     self.insert_variable(rest_name.clone(), local);
                 }
@@ -856,16 +936,18 @@ impl AstCompiler<'_> {
                 }
 
                 let function = self.ir.function(Value::Function(function_pointer));
-                if let Some(name) = name {
+                if let Some(ref full_name) = full_function_name {
                     let function_reg = self.ir.assign_new(function);
                     let namespace_id = self.current_namespace_id();
-                    let reserved_namespace_slot = self.compiler.reserve_namespace_slot(&name);
+                    // Use the full qualified name for namespace slot reservation
+                    let reserved_namespace_slot = self.compiler.reserve_namespace_slot(full_name);
                     self.store_namespaced_variable(
                         Value::TaggedConstant(reserved_namespace_slot as isize),
                         function_reg,
                     );
+                    // Insert with full qualified name for namespace lookups
                     self.insert_variable(
-                        name.to_string(),
+                        full_name.to_string(),
                         VariableLocation::NamespaceVariable(namespace_id, reserved_namespace_slot),
                     );
                 }
@@ -1994,7 +2076,7 @@ impl AstCompiler<'_> {
                 self.ir.bitwise_xor(left, right)
             }
             Ast::Recurse { args, .. } | Ast::TailRecurse { args, .. } => {
-                let mut compiled_args: Vec<Value> = args
+                let compiled_args: Vec<Value> = args
                     .iter()
                     .map(|arg| {
                         self.not_tail_position();
@@ -2002,11 +2084,8 @@ impl AstCompiler<'_> {
                     })
                     .collect();
 
-                // For variadic recursive calls, pack extra arguments
-                if self.current_function_is_variadic {
-                    compiled_args =
-                        self.pack_variadic_args(compiled_args, self.current_function_min_args);
-                }
+                // Uniform variadic calling convention: callee builds the rest array
+                // No caller-side packing needed
 
                 if matches!(ast, Ast::TailRecurse { .. }) {
                     self.ir.tail_recurse(compiled_args)
@@ -2084,15 +2163,12 @@ impl AstCompiler<'_> {
                     return self.compile_inline_primitive_function(&name, args);
                 }
 
-                // TODO: This isn't they way to handle this
-                // I am acting as if all closures are assign to a variable when they aren't.
-                // Need to have negative test cases for this
+                // If it's not a qualified function name, it might be a closure variable
+                // Use get_variable_alloc_free_variable to properly handle closures that
+                // need to access variables from parent scopes as free variables
                 if !self.is_qualifed_function_name(&name) {
-                    if let Some(function) = self.get_variable_including_free(&name) {
-                        self.compile_closure_call(function, args)
-                    } else {
-                        panic!("Not qualified and didn't find it {}", name);
-                    }
+                    let function = self.get_variable_alloc_free_variable(&name);
+                    self.compile_closure_call(function, args)
                 } else {
                     self.call(&name, args)
                 }
@@ -2467,7 +2543,8 @@ impl AstCompiler<'_> {
         let expected_user_args = function.number_of_args.saturating_sub(implicit_args);
 
         if is_variadic {
-            // For variadic functions, we need at least min_args arguments
+            // Uniform variadic calling convention: callee builds the rest array
+            // Just validate minimum arg count here
             if args.len() < min_args {
                 panic!(
                     "Variadic function '{}' requires at least {} argument(s), but {} were provided",
@@ -2476,8 +2553,7 @@ impl AstCompiler<'_> {
                     args.len()
                 );
             }
-            // Pack extra arguments into a PersistentVector
-            args = self.pack_variadic_args(args, min_args);
+            // No caller-side packing - callee handles rest array construction
         } else if args.len() != expected_user_args {
             panic!(
                 "Function '{}' expects {} argument(s), but {} were provided\n\
@@ -2514,183 +2590,6 @@ impl AstCompiler<'_> {
         } else {
             self.ir.call(function, args)
         }
-    }
-
-    /// Create an empty heap-allocated array (type_id=1, size=0)
-    fn create_empty_array(&mut self) -> Value {
-        let allocate = self
-            .compiler
-            .find_function("beagle.builtin/allocate-zeroed")
-            .unwrap();
-        let allocate = self.compiler.get_function_pointer(allocate).unwrap();
-        let allocate = self.ir.assign_new(allocate);
-
-        let size = Value::TaggedConstant(0);
-        let size_reg = self.ir.assign_new(size);
-        let stack_pointer = self.ir.get_stack_pointer_imm(0);
-        let frame_pointer = self.ir.get_frame_pointer();
-
-        let array_ptr = self.ir.call_builtin(
-            allocate.into(),
-            vec![stack_pointer, frame_pointer, size_reg.into()],
-        );
-
-        let array_pointer = self.ir.untag(array_ptr);
-        let type_id_value = Value::RawValue(1);
-        self.ir.write_type_id(array_pointer, type_id_value);
-
-        self.ir
-            .tag(array_pointer, BuiltInTypes::HeapObject.get_tag())
-    }
-
-    /// Pack a slice of arguments into a heap-allocated array
-    /// The args should already be evaluated Values
-    fn pack_args_into_array(&mut self, args: &[Value]) -> Value {
-        let num_args = args.len();
-
-        if num_args == 0 {
-            return self.create_empty_array();
-        }
-
-        // Push args to stack so they survive GC during allocation
-        for arg in args {
-            let reg = self.ir.assign_new(*arg);
-            self.ir.push_to_stack(reg.into());
-        }
-
-        // Allocate array (zeroed for arrays)
-        let allocate = self
-            .compiler
-            .find_function("beagle.builtin/allocate-zeroed")
-            .unwrap();
-        let allocate = self.compiler.get_function_pointer(allocate).unwrap();
-        let allocate = self.ir.assign_new(allocate);
-
-        let size = Value::TaggedConstant(num_args as isize);
-        let size_reg = self.ir.assign_new(size);
-        let stack_pointer = self.ir.get_stack_pointer_imm(0);
-        let frame_pointer = self.ir.get_frame_pointer();
-
-        let array_ptr = self.ir.call_builtin(
-            allocate.into(),
-            vec![stack_pointer, frame_pointer, size_reg.into()],
-        );
-
-        let array_pointer = self.ir.untag(array_ptr);
-
-        // Set type_id to 1 (raw array type)
-        let type_id_value = Value::RawValue(1);
-        self.ir.write_type_id(array_pointer, type_id_value);
-
-        // Pop args from stack (in reverse order) and write to array
-        for i in (0..num_args).rev() {
-            let value = self.ir.pop_from_stack();
-            let offset = i + 1;
-            self.ir.heap_store_offset(array_pointer, value, offset);
-        }
-
-        // Tag the array pointer
-        self.ir
-            .tag(array_pointer, BuiltInTypes::HeapObject.get_tag())
-    }
-
-    /// Call a variadic function through a function value, handling min_args dynamically.
-    /// This uses a runtime trampoline to avoid complex IR branching that confuses
-    /// the register allocator.
-    ///
-    /// The trampoline (call_variadic_function_value in builtins.rs) handles:
-    /// 1. Reading min_args from function metadata at runtime
-    /// 2. Packing extra args into a rest array
-    /// 3. Dispatching the call with the correct number of arguments
-    ///
-    /// Returns a VirtualRegister containing the call result.
-    fn call_variadic_function_dynamic(
-        &mut self,
-        function_value: Value,
-        args: Vec<Value>,
-        _min_args_reg: VirtualRegister, // No longer used - trampoline reads from function metadata
-        is_closure: bool,
-        closure_reg: Option<VirtualRegister>,
-    ) -> VirtualRegister {
-        // Pack all args into a single array for the trampoline
-        let args_array = self.pack_args_into_array(&args);
-
-        // Build trampoline call arguments - must assign to registers, not pass raw Values
-        let is_closure_val = if is_closure {
-            self.ir.assign_new(Value::True)
-        } else {
-            self.ir.assign_new(Value::False)
-        };
-        let closure_val = match closure_reg {
-            Some(r) => r,
-            None => self.ir.assign_new(Value::Null),
-        };
-
-        // Single call to trampoline - fixed 4 args (stack_pointer added automatically)
-        let result = self.call_builtin(
-            "beagle.builtin/call-variadic-function-value",
-            vec![
-                function_value,
-                args_array,
-                is_closure_val.into(),
-                closure_val.into(),
-            ],
-        );
-        self.ir.assign_new(result)
-    }
-
-    /// Pack variadic arguments into a raw array
-    /// Takes the first min_args as regular arguments, packs the rest into an array
-    fn pack_variadic_args(&mut self, mut args: Vec<Value>, min_args: usize) -> Vec<Value> {
-        // Split args: keep first min_args, pack the rest
-        let extra_args: Vec<Value> = args.drain(min_args..).collect();
-        let num_extra = extra_args.len();
-
-        // Push extra args to stack so they survive GC during allocation
-        for arg in &extra_args {
-            let reg = self.ir.assign_new(*arg);
-            self.ir.push_to_stack(reg.into());
-        }
-
-        // Allocate a raw array with type_id = 1 (zeroed for arrays)
-        // This uses the same pattern as struct allocation but with type_id instead of struct_id
-        let allocate = self
-            .compiler
-            .find_function("beagle.builtin/allocate-zeroed")
-            .unwrap();
-        let allocate = self.compiler.get_function_pointer(allocate).unwrap();
-        let allocate = self.ir.assign_new(allocate);
-
-        let size = Value::TaggedConstant(num_extra as isize);
-        let size_reg = self.ir.assign_new(size);
-        let stack_pointer = self.ir.get_stack_pointer_imm(0);
-        let frame_pointer = self.ir.get_frame_pointer();
-
-        let array_ptr = self.ir.call_builtin(
-            allocate.into(),
-            vec![stack_pointer, frame_pointer, size_reg.into()],
-        );
-
-        let array_pointer = self.ir.untag(array_ptr);
-
-        // Set type_id to 1 (raw array type)
-        let type_id_value = Value::RawValue(1);
-        self.ir.write_type_id(array_pointer, type_id_value);
-
-        // Pop the extra args from stack (in reverse order) and write to array
-        for i in (0..num_extra).rev() {
-            let value = self.ir.pop_from_stack();
-            // Write field at index i (offset in words, +1 to skip header)
-            let offset = i + 1;
-            self.ir.heap_store_offset(array_pointer, value, offset);
-        }
-
-        // Tag the array pointer and append as final argument
-        let tagged_array = self
-            .ir
-            .tag(array_pointer, BuiltInTypes::HeapObject.get_tag());
-        args.push(tagged_array);
-        args
     }
 
     fn create_free_if_closable(&mut self, name: &String) -> Option<VariableLocation> {
@@ -2914,6 +2813,17 @@ impl AstCompiler<'_> {
                 slot,
             ))
         } else {
+            // Try with the full qualified name (namespace/name) for the current namespace
+            let qualified_name = self.compiler.current_namespace_name() + "/" + name;
+            if let Some(slot) = self
+                .compiler
+                .find_binding(self.compiler.current_namespace_id(), &qualified_name)
+            {
+                return Some(VariableLocation::NamespaceVariable(
+                    self.compiler.current_namespace_id(),
+                    slot,
+                ));
+            }
             // TODO: The global vs beagle.core is ugly
             let global_id = self.compiler.global_namespace_id();
             self.compiler
@@ -2921,8 +2831,14 @@ impl AstCompiler<'_> {
                 .map(|slot| (global_id, slot))
                 .or_else(|| {
                     let beagle_core = self.compiler.get_namespace_id("beagle.core")?;
-                    let slot = self.compiler.find_binding(beagle_core, name)?;
-                    Some((beagle_core, slot))
+                    // Try short name first, then qualified name
+                    self.compiler
+                        .find_binding(beagle_core, name)
+                        .or_else(|| {
+                            let qualified = format!("beagle.core/{}", name);
+                            self.compiler.find_binding(beagle_core, &qualified)
+                        })
+                        .map(|slot| (beagle_core, slot))
                 })
                 .map(|(id, slot)| VariableLocation::NamespaceVariable(id, slot))
         }
