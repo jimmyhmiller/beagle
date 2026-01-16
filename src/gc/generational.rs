@@ -187,7 +187,7 @@ impl Space {
             let start = self.start.add(self.allocation_offset);
             let new_pointer = start as isize;
             self.allocation_offset += data.len();
-            if self.allocation_offset % 8 != 0 {
+            if !self.allocation_offset.is_multiple_of(8) {
                 panic!("Heap offset is not aligned");
             }
             std::ptr::copy_nonoverlapping(data.as_ptr(), start as *mut u8, data.len());
@@ -367,7 +367,7 @@ impl Allocator for GenerationalGC {
         if !self.options.gc {
             return;
         }
-        if self.gc_count != 0 && self.gc_count % self.full_gc_frequency == 0 {
+        if self.gc_count != 0 && self.gc_count.is_multiple_of(self.full_gc_frequency) {
             self.gc_count = 0;
             self.full_gc(stack_map, stack_pointers);
         } else {

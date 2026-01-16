@@ -10,7 +10,7 @@ use std::{
 };
 
 use crate::{
-    Message, debug_only,
+    Message,
     gc::STACK_SIZE,
     get_runtime,
     runtime::{DispatchTable, FFIInfo, FFIType, RawPtr, Runtime},
@@ -268,7 +268,7 @@ extern "C" fn allocate(stack_pointer: usize, frame_pointer: usize, size: usize) 
         .unwrap();
 
     debug_assert!(BuiltInTypes::is_heap_pointer(result));
-    debug_assert!(BuiltInTypes::untag(result) % 8 == 0);
+    debug_assert!(BuiltInTypes::untag(result).is_multiple_of(8));
     result
 }
 
@@ -283,7 +283,7 @@ extern "C" fn allocate_zeroed(stack_pointer: usize, frame_pointer: usize, size: 
         .unwrap();
 
     debug_assert!(BuiltInTypes::is_heap_pointer(result));
-    debug_assert!(BuiltInTypes::untag(result) % 8 == 0);
+    debug_assert!(BuiltInTypes::untag(result).is_multiple_of(8));
     result
 }
 
@@ -297,7 +297,7 @@ extern "C" fn allocate_float(stack_pointer: usize, frame_pointer: usize, size: u
         .unwrap();
 
     debug_assert!(BuiltInTypes::get_kind(result) == BuiltInTypes::Float);
-    debug_assert!(BuiltInTypes::untag(result) % 8 == 0);
+    debug_assert!(BuiltInTypes::untag(result).is_multiple_of(8));
     result
 }
 

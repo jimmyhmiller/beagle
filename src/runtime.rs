@@ -2219,7 +2219,7 @@ impl Runtime {
 
         // Additional validation: check pointer is properly aligned
         let untagged = BuiltInTypes::untag(atom_ptr);
-        if untagged % 8 != 0 {
+        if !untagged.is_multiple_of(8) {
             // Pointer is corrupted (possibly stale after GC)
             return BuiltInTypes::null_value() as usize;
         }
@@ -2233,7 +2233,7 @@ impl Runtime {
 
         // Additional validation for map pointer
         let map_untagged = BuiltInTypes::untag(map_ptr);
-        if map_untagged % 8 != 0 {
+        if !map_untagged.is_multiple_of(8) {
             return BuiltInTypes::null_value() as usize;
         }
 
@@ -2266,7 +2266,7 @@ impl Runtime {
 
         // Validate pointer is properly aligned
         let untagged = BuiltInTypes::untag(atom_ptr);
-        if untagged % 8 != 0 {
+        if !untagged.is_multiple_of(8) {
             return Err(format!(
                 "Namespaces atom pointer is corrupted (misaligned): {:#x}",
                 atom_ptr
@@ -3271,7 +3271,7 @@ impl Runtime {
         struct_pointer: usize,
         str_constant_ptr: usize,
     ) -> Result<(usize, usize), Box<dyn Error>> {
-        if BuiltInTypes::untag(struct_pointer) % 8 != 0 {
+        if !BuiltInTypes::untag(struct_pointer).is_multiple_of(8) {
             return Err("Not aligned".into());
         }
         let heap_object = HeapObject::from_tagged(struct_pointer);
@@ -3462,7 +3462,7 @@ impl Runtime {
         str_constant_ptr: usize,
         value: usize,
     ) -> usize {
-        if BuiltInTypes::untag(struct_pointer) % 8 != 0 {
+        if !BuiltInTypes::untag(struct_pointer).is_multiple_of(8) {
             unsafe {
                 crate::builtins::throw_runtime_error(
                     stack_pointer,

@@ -45,7 +45,7 @@ impl Space {
             let start = self.start.add(self.allocation_offset);
             let new_pointer = start as isize;
             self.allocation_offset += data.len();
-            if self.allocation_offset % 8 != 0 {
+            if !self.allocation_offset.is_multiple_of(8) {
                 panic!("Heap offset is not aligned");
             }
             std::ptr::copy_nonoverlapping(data.as_ptr(), start as *mut u8, data.len());
@@ -191,7 +191,7 @@ impl Iterator for ObjectIterator {
         let size = object.full_size();
 
         self.offset += size;
-        if self.offset % 8 != 0 {
+        if !self.offset.is_multiple_of(8) {
             panic!("Heap offset is not aligned");
         }
         Some(object)
@@ -215,7 +215,7 @@ impl CompactingHeap {
 
         // If already in to_space, it's been copied
         if self.to_space.contains(untagged as *const u8) {
-            debug_assert!(untagged % 8 == 0, "Pointer is not aligned");
+            debug_assert!(untagged.is_multiple_of(8), "Pointer is not aligned");
             return heap_object.tagged_pointer();
         }
 
@@ -333,7 +333,7 @@ impl Allocator for CompactingHeap {
 
             for (i, (slot_addr, _)) in roots.iter().enumerate() {
                 debug_assert!(
-                    BuiltInTypes::untag(new_roots[i]) % 8 == 0,
+                    BuiltInTypes::untag(new_roots[i]).is_multiple_of(8),
                     "Pointer is not aligned"
                 );
                 unsafe {

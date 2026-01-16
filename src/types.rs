@@ -395,7 +395,7 @@ pub struct HeapObject {
 impl HeapObject {
     pub fn from_tagged(pointer: usize) -> Self {
         assert!(BuiltInTypes::is_heap_pointer(pointer));
-        assert!(BuiltInTypes::untag(pointer) % 8 == 0);
+        assert!(BuiltInTypes::untag(pointer).is_multiple_of(8));
         HeapObject {
             pointer,
             tagged: true,
@@ -403,7 +403,7 @@ impl HeapObject {
     }
 
     pub fn from_untagged(pointer: *const u8) -> Self {
-        assert!(pointer as usize % 8 == 0);
+        assert!((pointer as usize).is_multiple_of(8));
         HeapObject {
             pointer: pointer as usize,
             tagged: false,
@@ -567,11 +567,11 @@ impl HeapObject {
     }
 
     pub fn write_header(&mut self, field_size: Word) {
-        assert!(field_size.to_bytes() % 8 == 0);
+        assert!(field_size.to_bytes().is_multiple_of(8));
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
 
-        if field_size.to_bytes() % 8 != 0 {
+        if !field_size.to_bytes().is_multiple_of(8) {
             panic!("Size is not aligned");
         }
 

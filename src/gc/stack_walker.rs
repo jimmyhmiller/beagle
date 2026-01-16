@@ -77,7 +77,7 @@ impl StackWalker {
         let global_block_value = unsafe { *(global_block_slot_addr as *const usize) };
         if BuiltInTypes::is_heap_pointer(global_block_value) {
             let untagged = BuiltInTypes::untag(global_block_value);
-            if untagged % 8 == 0 {
+            if untagged.is_multiple_of(8) {
                 #[cfg(feature = "debug-gc")]
                 eprintln!(
                     "[GC DEBUG] GlobalObjectBlock slot @ {:#x} = {:#x}",
@@ -100,7 +100,7 @@ impl StackWalker {
                     }
 
                     let next_untagged = BuiltInTypes::untag(next_block);
-                    if next_untagged % 8 != 0 {
+                    if !next_untagged.is_multiple_of(8) {
                         break;
                     }
 
@@ -184,7 +184,7 @@ impl StackWalker {
                         let untagged = BuiltInTypes::untag(slot_value);
                         // Skip unaligned pointers - these are likely stale/garbage values
                         // that happen to match heap pointer tag patterns
-                        if untagged % 8 != 0 {
+                        if !untagged.is_multiple_of(8) {
                             #[cfg(feature = "debug-gc")]
                             eprintln!(
                                 "[GC DEBUG]   SKIPPING unaligned pointer: slot[{}] @ {:#x} = {:#x}",
