@@ -15,7 +15,7 @@ cfg_if::cfg_if! {
 #[cfg(all(debug_assertions, not(feature = "json")))]
 use bincode::config::standard;
 use bincode::{Decode, Encode};
-use clap::{Parser as ClapParser, command};
+use clap::Parser as ClapParser;
 use gc::{Allocator, StackMapDetails, get_allocate_options};
 #[allow(unused)]
 use gc::{

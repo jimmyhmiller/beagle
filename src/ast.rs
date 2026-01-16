@@ -7,7 +7,7 @@ use crate::{
     backend::{Backend, CodegenBackend},
     builtins::debugger,
     common::Label,
-    compiler::Compiler,
+    compiler::{CompileError, Compiler},
     ir::{self, Condition},
     pretty_print::PrettyPrint,
     runtime::{Enum, EnumVariant, Struct},
@@ -391,10 +391,8 @@ impl Ast {
         compiler: &mut Compiler,
         file_name: &str,
         token_line_column_map: Vec<(usize, usize)>,
-    ) -> (Ir, Vec<(TokenRange, IRRange)>) {
-        let allocate_fn_pointer = compiler
-            .allocate_fn_pointer()
-            .expect("Failed to get allocate function pointer - this is a fatal compiler error");
+    ) -> Result<(Ir, Vec<(TokenRange, IRRange)>), CompileError> {
+        let allocate_fn_pointer = compiler.allocate_fn_pointer()?;
         let mut ast_compiler = AstCompiler {
             ast: self.clone(),
             file_name: file_name.to_string(),
@@ -424,10 +422,10 @@ impl Ast {
         };
 
         // println!("{:#?}", compiler);
-        (
-            ast_compiler.compile(),
+        Ok((
+            ast_compiler.compile()?,
             ast_compiler.ir_range_to_token_range.pop().unwrap(),
-        )
+        ))
     }
 
     pub fn has_top_level(&self) -> bool {
@@ -593,7 +591,7 @@ impl AstCompiler<'_> {
         self.current_context.tail_position
     }
 
-    pub fn call_compile(&mut self, ast: &Ast) -> Value {
+    pub fn call_compile(&mut self, ast: &Ast) -> Result<Value, CompileError> {
         self.context.push(self.current_context.clone());
         self.current_context = self.next_context.clone();
         self.push_current_token(ast.token_range());
@@ -605,34 +603,31 @@ impl AstCompiler<'_> {
         result
     }
 
-    pub fn compile(&mut self) -> Ir {
+    pub fn compile(&mut self) -> Result<Ir, CompileError> {
         // TODO: Get rid of clone
         self.find_mutable_vars_that_need_boxing(&self.ast.clone());
 
         // TODO: Get rid of clone
-        self.first_pass(&self.ast.clone());
+        self.first_pass(&self.ast.clone())?;
 
         self.tail_position();
-        self.call_compile(&Box::new(self.ast.clone()));
+        self.call_compile(&Box::new(self.ast.clone()))?;
 
-        let allocate_fn_pointer = self
-            .compiler
-            .allocate_fn_pointer()
-            .expect("Failed to get allocate function pointer - this is a fatal compiler error");
+        let allocate_fn_pointer = self.compiler.allocate_fn_pointer()?;
         let mut ir = Ir::new(allocate_fn_pointer);
         std::mem::swap(&mut ir, &mut self.ir);
-        ir
+        Ok(ir)
     }
 
-    pub fn compile_to_ir(&mut self, ast: &Ast) -> Value {
+    pub fn compile_to_ir(&mut self, ast: &Ast) -> Result<Value, CompileError> {
         match ast.clone() {
             Ast::Program { elements, .. } => {
                 let mut last = Value::TaggedConstant(0);
                 for ast in elements.iter() {
                     self.tail_position();
-                    last = self.call_compile(ast);
+                    last = self.call_compile(ast)?;
                 }
-                self.ir.ret(last)
+                Ok(self.ir.ret(last))
             }
             Ast::Function {
                 name,
@@ -663,9 +658,7 @@ impl AstCompiler<'_> {
                 } else {
                     None
                 };
-                let allocate_fn_pointer = self.compiler.allocate_fn_pointer().expect(
-                    "Failed to get allocate function pointer - this is a fatal compiler error",
-                );
+                let allocate_fn_pointer = self.compiler.allocate_fn_pointer()?;
                 let old_ir = std::mem::replace(&mut self.ir, Ir::new(allocate_fn_pointer));
                 let old_name = self.name.clone();
                 let old_arity = self.current_function_arity;
@@ -829,10 +822,10 @@ impl AstCompiler<'_> {
                 }
 
                 for ast in body[..body.len().saturating_sub(1)].iter() {
-                    self.call_compile(&Box::new(ast));
+                    self.call_compile(&Box::new(ast))?;
                 }
                 let last = body.last().unwrap_or(&Ast::Null(0));
-                let return_value = self.call_compile(&Box::new(last));
+                let return_value = self.call_compile(&Box::new(last))?;
                 self.ir.ret(return_value);
 
                 self.name = old_name;
@@ -925,7 +918,7 @@ impl AstCompiler<'_> {
                 if is_not_top_level {
                     let function = self.compile_closure(
                         BuiltInTypes::Function.tag(function_pointer as isize) as usize,
-                    );
+                    )?;
                     if let Some(VariableLocation::Local(index)) = variable_locaton {
                         let reg = self.ir.assign_new(function);
                         self.ir.store_local(index, reg.into());
@@ -937,7 +930,7 @@ impl AstCompiler<'_> {
                     {
                         self.insert_variable(name.to_string(), VariableLocation::Local(index));
                     }
-                    return function;
+                    return Ok(function);
                 }
 
                 let function = self.ir.function(Value::Function(function_pointer));
@@ -963,7 +956,7 @@ impl AstCompiler<'_> {
                 }
                 self.pop_environment();
 
-                function
+                Ok(function)
             }
 
             Ast::Loop { body, .. } => {
@@ -977,7 +970,7 @@ impl AstCompiler<'_> {
 
                 self.ir.write_label(loop_start);
                 for ast in body.iter() {
-                    self.call_compile(ast);
+                    self.call_compile(ast)?;
                 }
                 self.ir.jump(loop_start);
 
@@ -987,7 +980,7 @@ impl AstCompiler<'_> {
                 // Exit label (only reached via break)
                 self.ir.write_label(loop_exit);
 
-                result_reg.into() // Return the break value
+                Ok(result_reg.into()) // Return the break value
             }
             Ast::While {
                 condition, body, ..
@@ -1003,14 +996,14 @@ impl AstCompiler<'_> {
                 self.ir.write_label(loop_start);
 
                 // Check condition
-                let cond_value = self.call_compile(&condition);
+                let cond_value = self.call_compile(&condition)?;
                 self.ir
                     .jump_if(loop_exit, Condition::NotEqual, cond_value, Value::True);
 
                 // Execute body and track last expression value
                 let mut last_value = Value::Null;
                 for ast in body.iter() {
-                    last_value = self.call_compile(ast);
+                    last_value = self.call_compile(ast)?;
                 }
 
                 // Store last expression value in result_reg
@@ -1025,29 +1018,29 @@ impl AstCompiler<'_> {
                 // Exit label
                 self.ir.write_label(loop_exit);
 
-                result_reg.into() // Return last expression or break value
+                Ok(result_reg.into()) // Return last expression or break value
             }
             Ast::Break { value, .. } => {
                 if self.loop_exit_stack.is_empty() {
-                    panic!("break statement outside of loop");
+                    return Err(CompileError::BreakOutsideLoop);
                 }
 
                 let (exit_label, result_reg, _) = *self.loop_exit_stack.last().unwrap();
-                let break_value = self.call_compile(&value);
+                let break_value = self.call_compile(&value)?;
                 self.ir.assign(result_reg, break_value);
                 self.ir.jump(exit_label);
 
-                Value::Null // Unreachable after jump
+                Ok(Value::Null) // Unreachable after jump
             }
             Ast::Continue { .. } => {
                 if self.loop_exit_stack.is_empty() {
-                    panic!("continue statement outside of loop");
+                    return Err(CompileError::ContinueOutsideLoop);
                 }
 
                 let (_, _, loop_start) = *self.loop_exit_stack.last().unwrap();
                 self.ir.jump(loop_start);
 
-                Value::Null // Unreachable after jump
+                Ok(Value::Null) // Unreachable after jump
             }
             Ast::For {
                 binding,
@@ -1084,21 +1077,21 @@ impl AstCompiler<'_> {
                         token_range,
                     }),
                     token_range,
-                });
+                })?;
 
                 // Second: let mut __first = true
                 self.call_compile(&Ast::LetMut {
                     name: Box::new(Ast::Identifier(first_var.clone(), token_range.start)),
                     value: Box::new(Ast::True(token_range.start)),
                     token_range,
-                });
+                })?;
 
                 // Third: let mut __result = null
                 self.call_compile(&Ast::LetMut {
                     name: Box::new(Ast::Identifier(result_var.clone(), token_range.start)),
                     value: Box::new(Ast::Null(token_range.start)),
                     token_range,
-                });
+                })?;
 
                 // Third: loop { ... }
                 let mut loop_body = vec![
@@ -1227,7 +1220,7 @@ impl AstCompiler<'_> {
                 let mut try_result = Value::Null;
                 for ast in body.iter() {
                     self.not_tail_position();
-                    try_result = self.call_compile(ast);
+                    try_result = self.call_compile(ast)?;
                 }
 
                 // Normal path: store result, pop handler and skip catch
@@ -1248,7 +1241,7 @@ impl AstCompiler<'_> {
                 let mut catch_result = Value::Null;
                 for ast in catch_body.iter() {
                     self.not_tail_position();
-                    catch_result = self.call_compile(ast);
+                    catch_result = self.call_compile(ast)?;
                 }
 
                 // Store catch result in the same result register
@@ -1265,10 +1258,10 @@ impl AstCompiler<'_> {
                     current_env.variables.remove(&exception_binding);
                 }
 
-                result_reg.into()
+                Ok(result_reg.into())
             }
             Ast::Throw { value, .. } => {
-                let exception_value = self.call_compile(&value);
+                let exception_value = self.call_compile(&value)?;
                 // Ensure the exception value is in a register
                 let exception_value = match exception_value {
                     Value::Register(_) => exception_value,
@@ -1285,7 +1278,7 @@ impl AstCompiler<'_> {
                 let throw_fn_ptr = usize::from(throw_fn.pointer);
                 self.ir.throw_value(exception_value, throw_fn_ptr);
                 // Throw never returns, but we need to return something for type checking
-                Value::Null
+                Ok(Value::Null)
             }
             Ast::Match {
                 value,
@@ -1293,7 +1286,7 @@ impl AstCompiler<'_> {
                 token_range,
             } => {
                 // Compile the value to match on
-                let value_reg = self.call_compile(&value);
+                let value_reg = self.call_compile(&value)?;
 
                 // Ensure value is in a register
                 let value_reg = match value_reg {
@@ -1319,7 +1312,7 @@ impl AstCompiler<'_> {
                     };
 
                     // Test pattern
-                    self.compile_pattern_test(&arm.pattern, value_reg, next_arm_label);
+                    self.compile_pattern_test(&arm.pattern, value_reg, next_arm_label)?;
 
                     // Pattern matched - save current environment before binding pattern variables
                     // We need to save the actual VariableLocation values, not just keys,
@@ -1327,12 +1320,12 @@ impl AstCompiler<'_> {
                     let saved_env: HashMap<String, VariableLocation> =
                         self.environment_stack.last().unwrap().variables.clone();
 
-                    self.bind_pattern_variables(&arm.pattern, value_reg);
+                    self.bind_pattern_variables(&arm.pattern, value_reg)?;
 
                     // Compile arm body
                     let mut arm_result = Value::Null;
                     for ast in arm.body.iter() {
-                        arm_result = self.call_compile(ast);
+                        arm_result = self.call_compile(ast)?;
                     }
                     self.ir.assign(result_reg, arm_result);
 
@@ -1353,10 +1346,10 @@ impl AstCompiler<'_> {
 
                 // No pattern matched - throw error
                 self.ir.write_label(no_match_label);
-                self.call_builtin("beagle.builtin/throw-error", vec![]);
+                let _ = self.call_builtin("beagle.builtin/throw-error", vec![]);
 
                 self.ir.write_label(end_label);
-                result_reg.into()
+                Ok(result_reg.into())
             }
             Ast::Struct {
                 name, fields: _, ..
@@ -1368,7 +1361,9 @@ impl AstCompiler<'_> {
                 let (struct_id, _) = self
                     .compiler
                     .get_struct(&fully_qualified_name)
-                    .unwrap_or_else(|| panic!("Struct not found {}", name));
+                    .ok_or_else(|| CompileError::StructResolution {
+                        struct_name: name.clone(),
+                    })?;
 
                 let value = self.call_compile(&Ast::StructCreation {
                     name: "beagle.core/Struct".to_string(),
@@ -1377,17 +1372,17 @@ impl AstCompiler<'_> {
                         ("id".to_string(), Ast::IntegerLiteral(struct_id as i64, 0)),
                     ],
                     token_range: ast.token_range(),
-                });
+                })?;
                 let namespace_id = self
                     .compiler
                     .find_binding(self.current_namespace_id(), &name)
-                    .unwrap_or_else(|| panic!("binding not found {}", name));
+                    .ok_or_else(|| CompileError::BindingNotFound { name: name.clone() })?;
                 let value_reg = self.ir.assign_new(value);
                 self.store_namespaced_variable(
                     Value::TaggedConstant(namespace_id as isize),
                     value_reg,
                 );
-                value
+                Ok(value)
             }
             Ast::Enum {
                 name,
@@ -1420,18 +1415,22 @@ impl AstCompiler<'_> {
                                 },
                             ));
                         }
-                        _ => panic!("Shouldn't get here"),
+                        _ => {
+                            return Err(CompileError::InternalError {
+                                message: "Expected enum variant in Ast::Enum".to_string(),
+                            });
+                        }
                     }
                 }
                 let value = self.call_compile(&Ast::StructCreation {
                     name: name.clone(),
                     fields: struct_fields,
                     token_range,
-                });
+                })?;
                 let namespace_id = self
                     .compiler
                     .find_binding(self.current_namespace_id(), &name)
-                    .unwrap_or_else(|| panic!("binding not found {}", name));
+                    .ok_or_else(|| CompileError::BindingNotFound { name: name.clone() })?;
                 let value_reg = self.ir.assign_new(value);
                 self.store_namespaced_variable(
                     Value::TaggedConstant(namespace_id as isize),
@@ -1439,16 +1438,16 @@ impl AstCompiler<'_> {
                 );
                 // TODO: This should probably return the enum value
                 // A concept I don't yet have
-                Value::Null
+                Ok(Value::Null)
             }
             Ast::EnumVariant {
                 name: _, fields: _, ..
-            } => {
-                panic!("Shouldn't get here")
-            }
-            Ast::EnumStaticVariant { name: _, .. } => {
-                panic!("Shouldn't get here")
-            }
+            } => Err(CompileError::InternalError {
+                message: "EnumVariant should not be compiled directly".to_string(),
+            }),
+            Ast::EnumStaticVariant { name: _, .. } => Err(CompileError::InternalError {
+                message: "EnumStaticVariant should not be compiled directly".to_string(),
+            }),
             Ast::Protocol {
                 name,
                 body,
@@ -1456,14 +1455,16 @@ impl AstCompiler<'_> {
             } => {
                 for ast in body.iter() {
                     if matches!(ast, Ast::Function { .. }) {
-                        self.call_compile(ast);
+                        self.call_compile(ast)?;
                         // TODO: This is not great, but I am just trying to get things working
                         let Ast::Function {
                             name: function_name,
                             ..
                         } = ast
                         else {
-                            panic!("Expected function")
+                            return Err(CompileError::InternalError {
+                                message: "Expected function in Protocol".to_string(),
+                            });
                         };
                         let function = self
                             .compiler
@@ -1485,7 +1486,7 @@ impl AstCompiler<'_> {
                             .compiler
                             .add_function_alias(&fully_qualified_name, function);
                     } else {
-                        self.call_compile(ast);
+                        self.call_compile(ast)?;
                     }
                 }
                 let fully_qualified_name =
@@ -1494,14 +1495,14 @@ impl AstCompiler<'_> {
                     name: "beagle.core/Protocol".to_string(),
                     fields: vec![("name".to_string(), Ast::String(fully_qualified_name, 0))],
                     token_range: ast.token_range(),
-                });
+                })?;
                 let reserved_namespace_slot = self.compiler.reserve_namespace_slot(&name);
                 let value_reg = self.ir.assign_new(value);
                 self.store_namespaced_variable(
                     Value::TaggedConstant(reserved_namespace_slot as isize),
                     value_reg,
                 );
-                value
+                Ok(value)
             }
             Ast::FunctionStub {
                 name,
@@ -1523,8 +1524,8 @@ impl AstCompiler<'_> {
                         token_range,
                     }],
                     token_range,
-                });
-                Value::Null
+                })?;
+                Ok(Value::Null)
             }
             Ast::Extend {
                 target_type,
@@ -1550,7 +1551,7 @@ impl AstCompiler<'_> {
                             rest_param: rest_param.clone(),
                             body: body.clone(),
                             token_range: ast.token_range(),
-                        });
+                        })?;
                         let fully_qualified_name =
                             format!("{}/{}", self.compiler.current_namespace_name(), new_name);
                         let function = self
@@ -1574,7 +1575,7 @@ impl AstCompiler<'_> {
                         let name = self.ir.assign_new(name);
                         let function_pointer = self.ir.assign_new(function_pointer);
                         // self.ir.breakpoint();
-                        self.call_builtin(
+                        let _ = self.call_builtin(
                             "beagle.builtin/register-extension",
                             vec![
                                 target_type.into(),
@@ -1584,11 +1585,13 @@ impl AstCompiler<'_> {
                             ],
                         );
                     } else {
-                        panic!("Expected function");
+                        return Err(CompileError::InternalError {
+                            message: "Expected function in Extend".to_string(),
+                        });
                     }
                 }
 
-                Value::Null
+                Ok(Value::Null)
             }
             Ast::EnumCreation {
                 name,
@@ -1596,26 +1599,26 @@ impl AstCompiler<'_> {
                 fields,
                 ..
             } => {
-                let (namespace, name) = self.get_namespace_name_and_name(&name);
+                let (namespace, name) = self.get_namespace_name_and_name(&name)?;
 
                 let full_struct_name = format!("{}/{}.{}", namespace, name, variant);
                 let (struct_id, struct_type) = self
                     .compiler
                     .get_struct(&full_struct_name)
-                    .unwrap_or_else(|| panic!("Struct not found {}", name));
+                    .ok_or_else(|| CompileError::StructResolution {
+                        struct_name: full_struct_name.clone(),
+                    })?;
 
                 // Clone the field names to avoid borrow checker issues
                 let defined_fields = struct_type.fields.clone();
                 let size = struct_type.size();
 
                 // Compile field values
-                let field_results: Vec<_> = fields
-                    .iter()
-                    .map(|field| {
-                        self.not_tail_position();
-                        self.call_compile(&field.1)
-                    })
-                    .collect();
+                let mut field_results: Vec<Value> = Vec::new();
+                for field in fields.iter() {
+                    self.not_tail_position();
+                    field_results.push(self.call_compile(&field.1)?);
+                }
 
                 // Build a mapping from field name to its compiled value
                 let field_map: std::collections::HashMap<String, Value> = fields
@@ -1627,10 +1630,10 @@ impl AstCompiler<'_> {
                 // Validate that all user-provided fields exist in the struct definition
                 for (field_name, _) in fields.iter() {
                     if !defined_fields.contains(field_name) {
-                        panic!(
-                            "Struct field not defined: '{}' in {}.{}",
-                            field_name, name, variant
-                        );
+                        return Err(CompileError::StructFieldNotDefined {
+                            struct_name: format!("{}.{}", name, variant),
+                            field: field_name.clone(),
+                        });
                     }
                 }
 
@@ -1639,10 +1642,12 @@ impl AstCompiler<'_> {
                 for defined_field in defined_fields.iter() {
                     match field_map.get(defined_field) {
                         Some(&result) => ordered_field_results.push(result),
-                        None => panic!(
-                            "Field '{}' not provided in enum variant creation",
-                            defined_field
-                        ),
+                        None => {
+                            return Err(CompileError::StructFieldNotDefined {
+                                struct_name: format!("{}.{}", name, variant),
+                                field: defined_field.clone(),
+                            });
+                        }
                     }
                 }
 
@@ -1666,14 +1671,15 @@ impl AstCompiler<'_> {
                 self.ir.write_struct_id(struct_pointer, struct_id);
                 self.ir.write_fields(struct_pointer, &ordered_field_results);
 
-                self.ir
-                    .tag(struct_pointer, BuiltInTypes::HeapObject.get_tag())
+                Ok(self
+                    .ir
+                    .tag(struct_pointer, BuiltInTypes::HeapObject.get_tag()))
             }
             Ast::StructCreation { name, fields, .. } => {
-                let (namespace, name) = self.get_namespace_name_and_name(&name);
+                let (namespace, name) = self.get_namespace_name_and_name(&name)?;
                 for field in fields.iter() {
                     self.not_tail_position();
-                    let value = self.call_compile(&field.1);
+                    let value = self.call_compile(&field.1)?;
                     let reg = self.ir.assign_new(value);
                     self.ir.push_to_stack(reg.into());
                 }
@@ -1704,13 +1710,13 @@ impl AstCompiler<'_> {
                         let error = self.call_builtin(
                             "beagle.builtin/create-error",
                             vec![kind_str, message_str, null_reg.into()],
-                        );
+                        )?;
 
                         // Throw the exception (this doesn't return)
-                        self.call_builtin("beagle.builtin/throw-exception", vec![error]);
+                        self.call_builtin("beagle.builtin/throw-exception", vec![error])?;
 
                         // Return null (unreachable but needed for type checking)
-                        return Value::Null;
+                        return Ok(Value::Null);
                     }
                 };
 
@@ -1725,7 +1731,10 @@ impl AstCompiler<'_> {
                         }
                     }
                     if !found {
-                        panic!("Struct field not defined {}", field.0);
+                        return Err(CompileError::StructFieldNotDefined {
+                            struct_name: name.clone(),
+                            field: field.0.clone(),
+                        });
                     }
                 }
 
@@ -1753,8 +1762,9 @@ impl AstCompiler<'_> {
                     self.ir.write_field(struct_pointer, *field, reg);
                 }
 
-                self.ir
-                    .tag(struct_pointer, BuiltInTypes::HeapObject.get_tag())
+                Ok(self
+                    .ir
+                    .tag(struct_pointer, BuiltInTypes::HeapObject.get_tag()))
             }
             Ast::Array {
                 array: elements, ..
@@ -1762,12 +1772,12 @@ impl AstCompiler<'_> {
                 // Let's stary by just adding a popping for simplicity
                 for element in elements.iter() {
                     self.not_tail_position();
-                    let value = self.call_compile(element);
+                    let value = self.call_compile(element)?;
                     let reg = self.ir.assign_new(value);
                     self.ir.push_to_stack(reg.into());
                 }
 
-                let vector_pointer = self.call("beagle.collections/vec", vec![]);
+                let vector_pointer = self.call("beagle.collections/vec", vec![])?;
 
                 let vector_register = self.ir.assign_new(vector_pointer);
                 // the elements are on the stack in reverse, so I need to grab them by index in reverse
@@ -1779,7 +1789,7 @@ impl AstCompiler<'_> {
                     let push_result = self.call(
                         "beagle.collections/vec-push",
                         vec![vector_register.into(), value],
-                    );
+                    )?;
                     self.ir.assign(vector_register, push_result);
                 }
                 for _ in 0..elements.len() {
@@ -1788,7 +1798,7 @@ impl AstCompiler<'_> {
                     self.ir.pop_from_stack();
                 }
 
-                vector_register.into()
+                Ok(vector_register.into())
             }
             Ast::MapLiteral { pairs, .. } => {
                 // Special case: empty map
@@ -1813,11 +1823,10 @@ impl AstCompiler<'_> {
                     };
 
                     if let Some(key_repr) = key_str {
-                        if let Some(first_key) = seen_keys.get(&key_repr) {
-                            panic!(
-                                "Duplicate key in map literal: {:?}. First occurrence: {:?}, Second occurrence: {:?}",
-                                key_repr, first_key, key
-                            );
+                        if seen_keys.contains_key(&key_repr) {
+                            return Err(CompileError::InternalError {
+                                message: format!("Duplicate key in map literal: {}", key_repr),
+                            });
                         }
                         seen_keys.insert(key_repr, key);
                     }
@@ -1826,18 +1835,18 @@ impl AstCompiler<'_> {
                 // Push all keys and values to stack
                 for (key, value) in pairs.iter() {
                     self.not_tail_position();
-                    let key_val = self.call_compile(key);
+                    let key_val = self.call_compile(key)?;
                     let key_reg = self.ir.assign_new(key_val);
                     self.ir.push_to_stack(key_reg.into());
 
                     self.not_tail_position();
-                    let val_val = self.call_compile(value);
+                    let val_val = self.call_compile(value)?;
                     let val_reg = self.ir.assign_new(val_val);
                     self.ir.push_to_stack(val_reg.into());
                 }
 
                 // Create empty map
-                let map_pointer = self.call("beagle.collections/map", vec![]);
+                let map_pointer = self.call("beagle.collections/map", vec![])?;
                 let map_register = self.ir.assign_new(map_pointer);
 
                 // Load pairs from stack and assoc them
@@ -1859,7 +1868,7 @@ impl AstCompiler<'_> {
                     let assoc_result = self.call(
                         "beagle.collections/map-assoc",
                         vec![map_register.into(), key, value],
-                    );
+                    )?;
                     self.ir.assign(map_register, assoc_result);
                 }
 
@@ -1868,7 +1877,7 @@ impl AstCompiler<'_> {
                     self.ir.pop_from_stack();
                 }
 
-                map_register.into()
+                Ok(map_register.into())
             }
             Ast::SetLiteral { elements, .. } => {
                 // Special case: empty set
@@ -1893,11 +1902,10 @@ impl AstCompiler<'_> {
                     };
 
                     if let Some(elem_repr) = elem_str {
-                        if let Some(first_elem) = seen_elements.get(&elem_repr) {
-                            panic!(
-                                "Duplicate element in set literal: {:?}. First occurrence: {:?}, Second occurrence: {:?}",
-                                elem_repr, first_elem, element
-                            );
+                        if seen_elements.contains_key(&elem_repr) {
+                            return Err(CompileError::InternalError {
+                                message: format!("Duplicate element in set literal: {}", elem_repr),
+                            });
                         }
                         seen_elements.insert(elem_repr, element);
                     }
@@ -1906,13 +1914,13 @@ impl AstCompiler<'_> {
                 // Push all elements to stack
                 for element in elements.iter() {
                     self.not_tail_position();
-                    let elem_val = self.call_compile(element);
+                    let elem_val = self.call_compile(element)?;
                     let elem_reg = self.ir.assign_new(elem_val);
                     self.ir.push_to_stack(elem_reg.into());
                 }
 
                 // Create empty set
-                let set_pointer = self.call("beagle.collections/set", vec![]);
+                let set_pointer = self.call("beagle.collections/set", vec![])?;
                 let set_register = self.ir.assign_new(set_pointer);
 
                 // Load elements from stack and add them
@@ -1928,7 +1936,7 @@ impl AstCompiler<'_> {
                     let add_result = self.call(
                         "beagle.collections/set-add",
                         vec![set_register.into(), element],
-                    );
+                    )?;
                     self.ir.assign(set_register, add_result);
                 }
 
@@ -1937,7 +1945,7 @@ impl AstCompiler<'_> {
                     self.ir.pop_from_stack();
                 }
 
-                set_register.into()
+                Ok(set_register.into())
             }
             Ast::Namespace { name, .. } => {
                 let namespace_id = self.compiler.reserve_namespace(name);
@@ -1955,12 +1963,12 @@ impl AstCompiler<'_> {
             } => {
                 self.compiler
                     .add_alias(library_name, (*alias).get_string().to_string());
-                Value::Null
+                Ok(Value::Null)
             }
             Ast::PropertyAccess {
                 object, property, ..
             } => {
-                let object = self.call_compile(object.as_ref());
+                let object = self.call_compile(object.as_ref())?;
                 let object = self.ir.assign_new(object);
                 let untagged_object = self.ir.untag(object.into());
                 // self.ir.breakpoint();
@@ -1990,7 +1998,9 @@ impl AstCompiler<'_> {
                 let property = if let Ast::Identifier(name, _) = property.as_ref() {
                     name.clone()
                 } else {
-                    panic!("Expected identifier got {:?}", property)
+                    return Err(CompileError::ExpectedIdentifier {
+                        got: format!("{:?}", property),
+                    });
                 };
 
                 let constant_ptr = self.string_constant(property.clone());
@@ -1998,17 +2008,17 @@ impl AstCompiler<'_> {
                 let call_result = self.call_builtin(
                     "beagle.builtin/property-access",
                     vec![object.into(), constant_ptr.into(), property_location.into()],
-                );
+                )?;
 
                 self.ir.assign(result, call_result);
 
                 self.ir.write_label(exit_property_access);
 
-                result.into()
+                Ok(result.into())
             }
             Ast::IndexOperator { array, index, .. } => {
-                let array = self.call_compile(array.as_ref());
-                let index = self.call_compile(index.as_ref());
+                let array = self.call_compile(array.as_ref())?;
+                let index = self.call_compile(index.as_ref())?;
                 let array = self.ir.assign_new(array);
                 let index = self.ir.assign_new(index);
                 self.call("beagle.core/get", vec![array.into(), index.into()])
@@ -2019,7 +2029,7 @@ impl AstCompiler<'_> {
                 else_,
                 ..
             } => {
-                let condition = self.call_compile(&condition);
+                let condition = self.call_compile(&condition)?;
 
                 let end_if_label = self.ir.label("end_if");
 
@@ -2031,7 +2041,7 @@ impl AstCompiler<'_> {
 
                 let mut else_result = Value::TaggedConstant(0);
                 for ast in else_.iter() {
-                    else_result = self.call_compile(&Box::new(ast));
+                    else_result = self.call_compile(&Box::new(ast))?;
                 }
                 self.ir.assign(result_reg, else_result);
                 self.ir.jump(end_if_label);
@@ -2040,131 +2050,129 @@ impl AstCompiler<'_> {
 
                 let mut then_result = Value::TaggedConstant(0);
                 for ast in then.iter() {
-                    then_result = self.call_compile(&Box::new(ast));
+                    then_result = self.call_compile(&Box::new(ast))?;
                 }
                 self.ir.assign(result_reg, then_result);
 
                 self.ir.write_label(end_if_label);
 
-                result_reg.into()
+                Ok(result_reg.into())
             }
             Ast::And { left, right, .. } => {
                 let result_reg = self.ir.volatile_register();
                 self.ir.assign(result_reg, Value::False);
                 let short_circuit = self.ir.label("short_circuit_and");
-                let left = self.call_compile(&left);
+                let left = self.call_compile(&left)?;
                 self.ir
                     .jump_if(short_circuit, Condition::Equal, left, Value::False);
-                let right = self.call_compile(&right);
+                let right = self.call_compile(&right)?;
                 self.ir.assign(result_reg, right);
                 self.ir.write_label(short_circuit);
-                result_reg.into()
+                Ok(result_reg.into())
             }
             Ast::Or { left, right, .. } => {
                 let result_reg = self.ir.volatile_register();
                 self.ir.assign(result_reg, Value::True);
                 let short_circuit = self.ir.label("short_circuit_or");
-                let left = self.call_compile(&left);
+                let left = self.call_compile(&left)?;
                 self.ir
                     .jump_if(short_circuit, Condition::Equal, left, Value::True);
-                let right = self.call_compile(&right);
+                let right = self.call_compile(&right)?;
                 self.ir.assign(result_reg, right);
                 self.ir.write_label(short_circuit);
-                result_reg.into()
+                Ok(result_reg.into())
             }
             Ast::Add { left, right, .. } => {
                 self.not_tail_position();
-                let left = self.call_compile(&left);
+                let left = self.call_compile(&left)?;
                 self.not_tail_position();
-                let right = self.call_compile(&right);
-                self.ir.add_any(left, right)
+                let right = self.call_compile(&right)?;
+                Ok(self.ir.add_any(left, right))
             }
             Ast::Sub { left, right, .. } => {
                 self.not_tail_position();
-                let left = self.call_compile(&left);
+                let left = self.call_compile(&left)?;
                 self.not_tail_position();
-                let right = self.call_compile(&right);
-                self.ir.sub_any(left, right)
+                let right = self.call_compile(&right)?;
+                Ok(self.ir.sub_any(left, right))
             }
             Ast::Mul { left, right, .. } => {
                 self.not_tail_position();
-                let left = self.call_compile(&left);
+                let left = self.call_compile(&left)?;
                 self.not_tail_position();
-                let right = self.call_compile(&right);
-                self.ir.mul_any(left, right)
+                let right = self.call_compile(&right)?;
+                Ok(self.ir.mul_any(left, right))
             }
             Ast::Div { left, right, .. } => {
                 self.not_tail_position();
-                let left = self.call_compile(&left);
+                let left = self.call_compile(&left)?;
                 self.not_tail_position();
-                let right = self.call_compile(&right);
-                self.ir.div_any(left, right)
+                let right = self.call_compile(&right)?;
+                Ok(self.ir.div_any(left, right))
             }
             Ast::Modulo { left, right, .. } => {
                 self.not_tail_position();
-                let left = self.call_compile(&left);
+                let left = self.call_compile(&left)?;
                 self.not_tail_position();
-                let right = self.call_compile(&right);
-                self.ir.modulo_any(left, right)
+                let right = self.call_compile(&right)?;
+                Ok(self.ir.modulo_any(left, right))
             }
             Ast::ShiftLeft { left, right, .. } => {
                 self.not_tail_position();
-                let left = self.call_compile(&left);
+                let left = self.call_compile(&left)?;
                 self.not_tail_position();
-                let right = self.call_compile(&right);
-                self.ir.shift_left(left, right)
+                let right = self.call_compile(&right)?;
+                Ok(self.ir.shift_left(left, right))
             }
             Ast::ShiftRight { left, right, .. } => {
                 self.not_tail_position();
-                let left = self.call_compile(&left);
+                let left = self.call_compile(&left)?;
                 self.not_tail_position();
-                let right = self.call_compile(&right);
-                self.ir.shift_right(left, right)
+                let right = self.call_compile(&right)?;
+                Ok(self.ir.shift_right(left, right))
             }
             Ast::ShiftRightZero { left, right, .. } => {
                 self.not_tail_position();
-                let left = self.call_compile(&left);
+                let left = self.call_compile(&left)?;
                 self.not_tail_position();
-                let right = self.call_compile(&right);
-                self.ir.shift_right_zero(left, right)
+                let right = self.call_compile(&right)?;
+                Ok(self.ir.shift_right_zero(left, right))
             }
             Ast::BitWiseAnd { left, right, .. } => {
                 self.not_tail_position();
-                let left = self.call_compile(&left);
+                let left = self.call_compile(&left)?;
                 self.not_tail_position();
-                let right = self.call_compile(&right);
-                self.ir.bitwise_and(left, right)
+                let right = self.call_compile(&right)?;
+                Ok(self.ir.bitwise_and(left, right))
             }
             Ast::BitWiseOr { left, right, .. } => {
                 self.not_tail_position();
-                let left = self.call_compile(&left);
+                let left = self.call_compile(&left)?;
                 self.not_tail_position();
-                let right = self.call_compile(&right);
-                self.ir.bitwise_or(left, right)
+                let right = self.call_compile(&right)?;
+                Ok(self.ir.bitwise_or(left, right))
             }
             Ast::BitWiseXor { left, right, .. } => {
                 self.not_tail_position();
-                let left = self.call_compile(&left);
+                let left = self.call_compile(&left)?;
                 self.not_tail_position();
-                let right = self.call_compile(&right);
-                self.ir.bitwise_xor(left, right)
+                let right = self.call_compile(&right)?;
+                Ok(self.ir.bitwise_xor(left, right))
             }
             Ast::Recurse { args, .. } | Ast::TailRecurse { args, .. } => {
-                let compiled_args: Vec<Value> = args
-                    .iter()
-                    .map(|arg| {
-                        self.not_tail_position();
-                        self.call_compile(&Box::new(arg.clone()))
-                    })
-                    .collect();
+                let mut compiled_args: Vec<Value> = Vec::new();
+                for arg in args.iter() {
+                    self.not_tail_position();
+                    compiled_args.push(self.call_compile(&Box::new(arg.clone()))?);
+                }
 
                 // Uniform variadic calling convention: callee builds the rest array
                 // No caller-side packing needed
 
                 if matches!(ast, Ast::TailRecurse { .. }) {
-                    self.ir.tail_recurse(compiled_args)
+                    Ok(self.ir.tail_recurse(compiled_args))
                 } else {
-                    self.ir.recurse(compiled_args)
+                    Ok(self.ir.recurse(compiled_args))
                 }
             }
             Ast::Call {
@@ -2172,27 +2180,31 @@ impl AstCompiler<'_> {
                 args,
                 token_range,
             } => {
-                let name = self.get_qualified_function_name(&name);
+                let name = self.get_qualified_function_name(&name)?;
 
                 if self.name_matches(&name) {
                     // Check arity for recursive calls
                     if self.current_function_is_variadic {
                         // For variadic functions, we need at least min_args arguments
                         if args.len() < self.current_function_min_args {
-                            panic!(
-                                "Recursive call to variadic '{}' requires at least {} argument(s), but {} were provided",
-                                self.name.as_ref().unwrap_or(&"<unknown>".to_string()),
-                                self.current_function_min_args,
-                                args.len()
-                            );
+                            return Err(CompileError::InternalError {
+                                message: format!(
+                                    "Recursive call to variadic '{}' requires at least {} argument(s), but {} were provided",
+                                    self.name.as_ref().unwrap_or(&"<unknown>".to_string()),
+                                    self.current_function_min_args,
+                                    args.len()
+                                ),
+                            });
                         }
                     } else if args.len() != self.current_function_arity {
-                        panic!(
-                            "Recursive call to '{}' expects {} argument(s), but {} were provided",
-                            self.name.as_ref().unwrap_or(&"<unknown>".to_string()),
-                            self.current_function_arity,
-                            args.len()
-                        );
+                        return Err(CompileError::InternalError {
+                            message: format!(
+                                "Recursive call to '{}' expects {} argument(s), but {} were provided",
+                                self.name.as_ref().unwrap_or(&"<unknown>".to_string()),
+                                self.current_function_arity,
+                                args.len()
+                            ),
+                        });
                     }
                     if self.is_tail_position() {
                         return self.call_compile(&Ast::TailRecurse { args, token_range });
@@ -2205,21 +2217,21 @@ impl AstCompiler<'_> {
                     return self.compile_macro_like_primitive(name, args);
                 }
 
-                let args: Vec<Value> = args
-                    .iter()
-                    .map(|arg| {
-                        self.not_tail_position();
-                        let value = self.call_compile(&Box::new(arg.clone()));
-                        match value {
-                            Value::Register(_) => value,
-                            _ => {
-                                let reg = self.ir.volatile_register();
-                                self.ir.assign(reg, value);
-                                reg.into()
-                            }
+                let mut args_vec: Vec<Value> = Vec::new();
+                for arg in args.iter() {
+                    self.not_tail_position();
+                    let value = self.call_compile(&Box::new(arg.clone()))?;
+                    let value = match value {
+                        Value::Register(_) => value,
+                        _ => {
+                            let reg = self.ir.volatile_register();
+                            self.ir.assign(reg, value);
+                            reg.into()
                         }
-                    })
-                    .collect();
+                    };
+                    args_vec.push(value);
+                }
+                let args = args_vec;
 
                 // TODO: Should the arguments be evaluated first?
                 // I think so, this will matter once I think about macros
@@ -2227,27 +2239,29 @@ impl AstCompiler<'_> {
                 if self.compiler.is_inline_primitive_function(&name) {
                     let expected = crate::primitives::get_inline_primitive_arity(&name);
                     if args.len() != expected {
-                        panic!(
-                            "Function '{}' expects {} argument(s), but {} were provided",
-                            name,
-                            expected,
-                            args.len()
-                        );
+                        return Err(CompileError::InternalError {
+                            message: format!(
+                                "Function '{}' expects {} argument(s), but {} were provided",
+                                name,
+                                expected,
+                                args.len()
+                            ),
+                        });
                     }
-                    return self.compile_inline_primitive_function(&name, args);
+                    return Ok(self.compile_inline_primitive_function(&name, args));
                 }
 
                 // If it's not a qualified function name, it might be a closure variable
                 // Use get_variable_alloc_free_variable to properly handle closures that
                 // need to access variables from parent scopes as free variables
                 if !self.is_qualifed_function_name(&name) {
-                    let function = self.get_variable_alloc_free_variable(&name);
-                    self.compile_closure_call(function, args)
+                    let function = self.get_variable_alloc_free_variable(&name)?;
+                    Ok(self.compile_closure_call(function, args))
                 } else {
                     self.call(&name, args)
                 }
             }
-            Ast::IntegerLiteral(n, _) => Value::TaggedConstant(n as isize),
+            Ast::IntegerLiteral(n, _) => Ok(Value::TaggedConstant(n as isize)),
             Ast::FloatLiteral(n, _) => {
                 // floats are heap allocated
                 // Sadly I have to do this to avoid loss of percision
@@ -2271,12 +2285,13 @@ impl AstCompiler<'_> {
                 self.ir.write_small_object_header(float_pointer);
                 self.ir.write_float_literal(float_pointer, n);
 
-                self.ir.tag(float_pointer, BuiltInTypes::Float.get_tag())
+                Ok(self.ir.tag(float_pointer, BuiltInTypes::Float.get_tag()))
             }
             Ast::Identifier(name, _) => {
-                let reg = &self.get_variable_alloc_free_variable(&name);
-                self.resolve_variable(reg)
-                    .unwrap_or_else(|_| panic!("Could not resolve variable {}", name))
+                let reg = self.get_variable_alloc_free_variable(&name)?;
+                self.resolve_variable(&reg).map_err(|_| CompileError::UndefinedVariable {
+                    name: name.clone(),
+                })
             }
             Ast::Let { name, value, .. } | Ast::LetMut { name, value, .. } => {
                 let needs_boxing = self
@@ -2287,11 +2302,11 @@ impl AstCompiler<'_> {
                 if let Ast::Identifier(name, _) = name.as_ref() {
                     if self.environment_stack.len() == 1 {
                         if matches!(ast, Ast::LetMut { .. }) {
-                            panic!("Can't create mutable variable in global scope");
+                            return Err(CompileError::GlobalMutableVariable);
                         }
 
                         self.not_tail_position();
-                        let value = self.call_compile(&value);
+                        let value = self.call_compile(&value)?;
                         self.not_tail_position();
                         let reg = self.ir.assign_new(value);
                         let namespace_id = self.compiler.current_namespace_id();
@@ -2307,7 +2322,7 @@ impl AstCompiler<'_> {
                                 reserved_namespace_slot,
                             ),
                         );
-                        reg.into()
+                        Ok(reg.into())
                     } else {
                         let reg = self.ir.volatile_register();
                         if needs_boxing {
@@ -2315,11 +2330,11 @@ impl AstCompiler<'_> {
                                 name: "beagle.core/__Box__".to_string(),
                                 fields: vec![("value".to_string(), *value)],
                                 token_range: ast.token_range(),
-                            });
+                            })?;
                             self.ir.assign(reg, boxed);
                         } else {
                             self.not_tail_position();
-                            let value = self.call_compile(&value);
+                            let value = self.call_compile(&value)?;
                             self.not_tail_position();
                             self.ir.assign(reg, value);
                         }
@@ -2342,12 +2357,16 @@ impl AstCompiler<'_> {
                                 VariableLocation::BoxedMutableLocal(local_index),
                             );
                         } else {
-                            panic!("Expected let or mutlet")
+                            return Err(CompileError::InternalError {
+                                message: "Expected let or mutlet".to_string(),
+                            });
                         }
-                        reg.into()
+                        Ok(reg.into())
                     }
                 } else {
-                    panic!("Expected variable")
+                    Err(CompileError::ExpectedIdentifier {
+                        got: format!("{:?}", name),
+                    })
                 }
             }
             Ast::Assignment { name, value, .. } => {
@@ -2357,18 +2376,24 @@ impl AstCompiler<'_> {
                 let name = if let Ast::Identifier(name, _) = name.as_ref() {
                     name
                 } else {
-                    panic!("Expected identifier")
+                    return Err(CompileError::ExpectedIdentifier {
+                        got: format!("{:?}", name),
+                    });
                 };
-                let value = self.call_compile(&value);
+                let value = self.call_compile(&value)?;
                 let value = self.ir.assign_new(value);
-                let variable = self.get_variable_alloc_free_variable(name);
+                let variable = self.get_variable_alloc_free_variable(name)?;
                 match variable {
                     // TODO: Do I have mutable namespace variables?
                     VariableLocation::NamespaceVariable(_namespace_id, _slott) => {
-                        panic!("Can't assign to a namespace variable {}", name);
+                        return Err(CompileError::InvalidAssignment {
+                            reason: format!("Cannot assign to namespace variable '{}'", name),
+                        });
                     }
                     VariableLocation::Local(_local_index) => {
-                        panic!("You can only assign to mutable variables");
+                        return Err(CompileError::InvalidAssignment {
+                            reason: format!("Cannot assign to immutable variable '{}' - use 'let mut' to make it mutable", name),
+                        });
                     }
                     VariableLocation::MutableLocal(local_index) => {
                         self.ir.store_local(local_index, value.into());
@@ -2382,14 +2407,21 @@ impl AstCompiler<'_> {
                         self.ir.write_field(local, 0, value.into());
                     }
                     VariableLocation::FreeVariable(_free_variable) => {
-                        panic!("Can't assign to a non-mutable free variable {}", name);
+                        return Err(CompileError::InvalidAssignment {
+                            reason: format!("Cannot assign to non-mutable free variable '{}'", name),
+                        });
                     }
                     VariableLocation::BoxedFreeVariable(index) => {
                         let arg0_location = self
                             .get_argument_location(0)
-                            .ok_or("Variable not found")
-                            .unwrap();
-                        let arg0 = self.resolve_variable(&arg0_location).unwrap();
+                            .ok_or_else(|| CompileError::InternalError {
+                                message: "Variable not found in BoxedFreeVariable".to_string(),
+                            })?;
+                        let arg0 = self.resolve_variable(&arg0_location).map_err(|_| {
+                            CompileError::InternalError {
+                                message: "Could not resolve arg0".to_string(),
+                            }
+                        })?;
                         let arg0: VirtualRegister = self.ir.assign_new(arg0);
                         let arg0 = self.ir.untag(arg0.into());
                         let index = self
@@ -2405,9 +2437,14 @@ impl AstCompiler<'_> {
                     VariableLocation::MutableFreeVariable(index) => {
                         let arg0_location = self
                             .get_argument_location(0)
-                            .ok_or("Variable not found")
-                            .unwrap();
-                        let arg0 = self.resolve_variable(&arg0_location).unwrap();
+                            .ok_or_else(|| CompileError::InternalError {
+                                message: "Variable not found in MutableFreeVariable".to_string(),
+                            })?;
+                        let arg0 = self.resolve_variable(&arg0_location).map_err(|_| {
+                            CompileError::InternalError {
+                                message: "Could not resolve arg0".to_string(),
+                            }
+                        })?;
                         let arg0: VirtualRegister = self.ir.assign_new(arg0);
                         // I thought I needed a write barrier, but I believe that isn't the case
                         // because these are only heap allocated if captured.
@@ -2416,10 +2453,12 @@ impl AstCompiler<'_> {
                         self.ir.write_field(arg0, index + 3, value.into());
                     }
                     VariableLocation::Register(_virtual_register) => {
-                        panic!("Can't assign to a register {}", name);
+                        return Err(CompileError::InvalidAssignment {
+                            reason: format!("Cannot assign to register '{}'", name),
+                        });
                     }
                 }
-                Value::Null
+                Ok(Value::Null)
             }
             Ast::Condition {
                 operator,
@@ -2428,14 +2467,14 @@ impl AstCompiler<'_> {
                 ..
             } => {
                 self.not_tail_position();
-                let a = self.call_compile(&left);
+                let a = self.call_compile(&left)?;
                 self.not_tail_position();
-                let b = self.call_compile(&right);
-                self.ir.compare_any(a, b, operator)
+                let b = self.call_compile(&right)?;
+                Ok(self.ir.compare_any(a, b, operator))
             }
             Ast::String(str, _) => {
                 let constant_ptr = self.string_constant(str);
-                self.ir.load_string_constant(constant_ptr)
+                Ok(self.ir.load_string_constant(constant_ptr))
             }
             Ast::Keyword(keyword_text, _) => {
                 let constant_ptr = self.keyword_constant(keyword_text);
@@ -2457,10 +2496,12 @@ impl AstCompiler<'_> {
                 // cache: [type_id (8 bytes), fn_ptr (8 bytes)]
 
                 // 1. Load arg0 (the dispatch target) into a register
-                let arg0_loc = self.get_variable_alloc_free_variable(&args[0]);
-                let arg0_val = self
-                    .resolve_variable(&arg0_loc)
-                    .expect("Could not resolve first argument");
+                let arg0_loc = self.get_variable_alloc_free_variable(&args[0])?;
+                let arg0_val = self.resolve_variable(&arg0_loc).map_err(|_| {
+                    CompileError::UndefinedVariable {
+                        name: args[0].clone(),
+                    }
+                })?;
                 let arg0_reg = self.ir.assign_new(arg0_val);
 
                 // 2. Get the tag to determine if heap object or primitive
@@ -2484,10 +2525,12 @@ impl AstCompiler<'_> {
                 // Get all args for the call (needed in both paths)
                 let mut call_args = Vec::new();
                 for arg_name in args.iter() {
-                    let arg_loc = self.get_variable_alloc_free_variable(arg_name);
-                    let arg_val = self
-                        .resolve_variable(&arg_loc)
-                        .expect("Could not resolve argument");
+                    let arg_loc = self.get_variable_alloc_free_variable(arg_name)?;
+                    let arg_val = self.resolve_variable(&arg_loc).map_err(|_| {
+                        CompileError::UndefinedVariable {
+                            name: arg_name.clone(),
+                        }
+                    })?;
                     call_args.push(arg_val);
                 }
 
@@ -2570,7 +2613,7 @@ impl AstCompiler<'_> {
                         cache_ptr_reg.into(),
                         dispatch_table_ptr_reg.into(),
                     ],
-                );
+                )?;
 
                 // Call the returned fn_ptr with all args
                 let fn_val = self.ir.function(slow_fn_ptr);
@@ -2579,20 +2622,18 @@ impl AstCompiler<'_> {
 
                 // 10. Exit
                 self.ir.write_label(exit_label);
-                result_reg.into()
+                Ok(result_reg.into())
             }
-            Ast::True(_) => Value::True,
-            Ast::False(_) => Value::False,
-            Ast::Null(_) => Value::Null,
-            Ast::StructField { .. } => {
-                panic!(
-                    "StructField should not be compiled directly - it's only used in struct definitions"
-                )
-            }
+            Ast::True(_) => Ok(Value::True),
+            Ast::False(_) => Ok(Value::False),
+            Ast::Null(_) => Ok(Value::Null),
+            Ast::StructField { .. } => Err(CompileError::InternalError {
+                message: "StructField should not be compiled directly - it's only used in struct definitions".to_string(),
+            }),
         }
     }
 
-    fn call(&mut self, name: &str, mut args: Vec<Value>) -> Value {
+    fn call(&mut self, name: &str, mut args: Vec<Value>) -> Result<Value, CompileError> {
         assert!(
             name.contains("/"),
             "Function name should be fully qualified {}",
@@ -2601,9 +2642,12 @@ impl AstCompiler<'_> {
 
         // TODO: I shouldn't just assume the function will exist
         // unless I have a good plan for dealing with when it doesn't
-        let function = self.compiler.find_function(name);
-
-        let function = function.unwrap_or_else(|| panic!("Could not find function {}", name));
+        let function =
+            self.compiler
+                .find_function(name)
+                .ok_or_else(|| CompileError::FunctionNotFound {
+                    function_name: name.to_string(),
+                })?;
 
         let builtin = function.is_builtin;
         let needs_stack_pointer = function.needs_stack_pointer;
@@ -2620,26 +2664,21 @@ impl AstCompiler<'_> {
             // Uniform variadic calling convention: callee builds the rest array
             // Just validate minimum arg count here
             if args.len() < min_args {
-                panic!(
-                    "Variadic function '{}' requires at least {} argument(s), but {} were provided",
-                    name,
-                    min_args,
-                    args.len()
-                );
+                return Err(CompileError::ArityMismatch {
+                    function_name: name.to_string(),
+                    expected: min_args,
+                    got: args.len(),
+                    is_variadic: true,
+                });
             }
             // No caller-side packing - callee handles rest array construction
         } else if args.len() != expected_user_args {
-            panic!(
-                "Function '{}' expects {} argument(s), but {} were provided\n\
-                 (function.number_of_args={}, needs_stack_pointer={}, needs_frame_pointer={}, is_builtin={})",
-                name,
-                expected_user_args,
-                args.len(),
-                function.number_of_args,
-                needs_stack_pointer,
-                needs_frame_pointer,
-                builtin
-            );
+            return Err(CompileError::ArityMismatch {
+                function_name: name.to_string(),
+                expected: expected_user_args,
+                got: args.len(),
+                is_variadic: false,
+            });
         }
         // Insert frame_pointer first (so it becomes arg 1 after stack_pointer is inserted)
         if needs_frame_pointer {
@@ -2660,9 +2699,9 @@ impl AstCompiler<'_> {
         let function = self.ir.function(function_pointer);
         if builtin {
             // self.ir.breakpoint();
-            self.ir.call_builtin(function, args)
+            Ok(self.ir.call_builtin(function, args))
         } else {
-            self.ir.call(function, args)
+            Ok(self.ir.call(function, args))
         }
     }
 
@@ -2691,7 +2730,7 @@ impl AstCompiler<'_> {
         None
     }
 
-    fn get_qualified_function_name(&mut self, name: &String) -> String {
+    fn get_qualified_function_name(&mut self, name: &String) -> Result<String, CompileError> {
         if name.contains("/") {
             let parts: Vec<&str> = name.split("/").collect();
             let alias = parts[0];
@@ -2699,26 +2738,30 @@ impl AstCompiler<'_> {
             let namespace = self
                 .compiler
                 .get_namespace_from_alias(alias)
-                .unwrap_or_else(|| panic!("Can't find alias {}", alias));
-            namespace + "/" + name
+                .ok_or_else(|| CompileError::NamespaceAliasNotFound {
+                    alias: alias.to_string(),
+                })?;
+            Ok(namespace + "/" + name)
         } else if self.get_variable_including_free(name).is_some() {
-            name.clone()
+            Ok(name.clone())
         } else if self
             .compiler
             .find_function(&(self.compiler.current_namespace_name() + "/" + name))
             .is_some()
         {
-            self.compiler.current_namespace_name() + "/" + name
+            Ok(self.compiler.current_namespace_name() + "/" + name)
         } else if self
             .compiler
             .find_function(&("beagle.core/".to_owned() + name))
             .is_some()
         {
-            "beagle.core/".to_string() + name
+            Ok("beagle.core/".to_string() + name)
         } else if self.create_free_if_closable(name).is_some() {
-            name.clone()
+            Ok(name.clone())
         } else {
-            panic!("Can't find function {}", name);
+            Err(CompileError::FunctionNotFound {
+                function_name: name.clone(),
+            })
         }
     }
 
@@ -2776,7 +2819,7 @@ impl AstCompiler<'_> {
         // self.ir.breakpoint();
     }
 
-    fn compile_closure(&mut self, function_pointer: usize) -> Value {
+    fn compile_closure(&mut self, function_pointer: usize) -> Result<Value, CompileError> {
         // When I get those free variables, I'd need to
         // make sure that the variables they refer to are
         // heap allocated. How am I going to do that?
@@ -2796,9 +2839,11 @@ impl AstCompiler<'_> {
 
         self.ir.write_label(label);
         for free_variable in self.get_current_env().free_variables.clone().iter().rev() {
-            let variable = self
-                .get_variable(&free_variable.name)
-                .unwrap_or_else(|| panic!("Can't find variable {:?}", free_variable));
+            let variable = self.get_variable(&free_variable.name).ok_or_else(|| {
+                CompileError::UndefinedVariable {
+                    name: free_variable.name.clone(),
+                }
+            })?;
             // we are now going to push these variables onto the stack
 
             match variable {
@@ -2845,7 +2890,7 @@ impl AstCompiler<'_> {
         let stack_pointer = self.ir.get_stack_pointer_imm(0);
         let frame_pointer = self.ir.get_frame_pointer();
 
-        self.ir.call(
+        Ok(self.ir.call(
             make_closure_reg.into(),
             vec![
                 stack_pointer,
@@ -2854,7 +2899,7 @@ impl AstCompiler<'_> {
                 num_free_reg.into(),
                 free_variable_pointer,
             ],
-        )
+        ))
     }
 
     fn find_or_insert_local(&mut self, name: &str) -> usize {
@@ -2934,22 +2979,32 @@ impl AstCompiler<'_> {
         }
     }
 
-    fn get_variable_alloc_free_variable(&mut self, name: &str) -> VariableLocation {
+    fn get_variable_alloc_free_variable(
+        &mut self,
+        name: &str,
+    ) -> Result<VariableLocation, CompileError> {
         let existing_location = self.get_variable(name);
         if let Some(variable) = self.get_accessible_variable(name) {
-            variable.clone()
+            Ok(variable.clone())
         } else if name.contains("/") {
-            let (namespace_name, name) = self.get_namespace_name_and_name(name);
-            let namespace_id = self.compiler.get_namespace_id(&namespace_name).unwrap();
+            let (namespace_name, var_name) = self.get_namespace_name_and_name(name)?;
+            let namespace_id =
+                self.compiler
+                    .get_namespace_id(&namespace_name)
+                    .ok_or_else(|| CompileError::NamespaceAliasNotFound {
+                        alias: namespace_name.clone(),
+                    })?;
 
             let slot = self
                 .compiler
-                .find_binding(namespace_id, &name)
-                .unwrap_or_else(|| panic!("Can't find variable {}", name));
+                .find_binding(namespace_id, &var_name)
+                .ok_or_else(|| CompileError::BindingNotFound {
+                    name: name.to_string(),
+                })?;
 
-            VariableLocation::NamespaceVariable(namespace_id, slot)
+            Ok(VariableLocation::NamespaceVariable(namespace_id, slot))
         } else if let Some(free_var) = self.create_free_if_closable(&name.to_string()) {
-            free_var
+            Ok(free_var)
         } else {
             let current_env = self.environment_stack.last_mut().unwrap();
             current_env.free_variables.push(FreeVariable {
@@ -2968,7 +3023,7 @@ impl AstCompiler<'_> {
             };
             current_env.variables.insert(name.to_string(), free);
             let current_env = self.environment_stack.last().unwrap();
-            current_env.variables.get(name).unwrap().clone()
+            Ok(current_env.variables.get(name).unwrap().clone())
         }
     }
 
@@ -3016,15 +3071,15 @@ impl AstCompiler<'_> {
         self.environment_stack.last_mut().unwrap()
     }
 
-    pub fn call_builtin(&mut self, name: &str, args: Vec<Value>) -> Value {
+    pub fn call_builtin(&mut self, name: &str, args: Vec<Value>) -> Result<Value, CompileError> {
         self.call(name, args)
     }
 
-    fn first_pass(&mut self, ast: &Ast) {
+    fn first_pass(&mut self, ast: &Ast) -> Result<(), CompileError> {
         match ast {
             Ast::Program { elements, .. } => {
                 for ast in elements.iter() {
-                    self.first_pass(ast);
+                    self.first_pass(ast)?;
                 }
             }
             Ast::Function {
@@ -3043,11 +3098,13 @@ impl AstCompiler<'_> {
                         .reserve_function(&full_function_name, arity, is_variadic, min_args)
                         .unwrap();
                 } else {
-                    panic!("Why do we have a top level function without a name? Is that allowed?");
+                    return Err(CompileError::InternalError {
+                        message: "Top level function without a name".to_string(),
+                    });
                 }
             }
             Ast::Struct { name, fields, .. } => {
-                let (namespace, name) = self.get_namespace_name_and_name(name);
+                let (namespace, name) = self.get_namespace_name_and_name(name)?;
                 let mut field_names = Vec::new();
                 let mut mutable_fields = Vec::new();
                 for field in fields.iter() {
@@ -3061,7 +3118,14 @@ impl AstCompiler<'_> {
                             field_names.push(name.clone());
                             mutable_fields.push(false);
                         }
-                        _ => panic!("Expected StructField or Identifier, got {:?}", field),
+                        _ => {
+                            return Err(CompileError::InternalError {
+                                message: format!(
+                                    "Expected StructField or Identifier, got {:?}",
+                                    field
+                                ),
+                            });
+                        }
                     }
                 }
                 self.compiler.add_struct(Struct {
@@ -3071,56 +3135,77 @@ impl AstCompiler<'_> {
                 });
             }
             Ast::Enum { name, variants, .. } => {
-                let (namespace, name) = self.get_namespace_name_and_name(name);
-                let enum_repr = Enum {
-                    name: format!("{}/{}", namespace, name),
-                    variants: variants
-                        .iter()
-                        .map(|variant| match variant {
-                            Ast::EnumVariant { name, fields, .. } => {
-                                let fields = fields
-                                    .iter()
-                                    .map(|field| match field {
-                                        Ast::StructField { name, .. } => name.clone(),
-                                        Ast::Identifier(name, _) => name.clone(),
-                                        _ => panic!(
-                                            "Expected StructField or Identifier, got {:?}",
-                                            field
-                                        ),
-                                    })
-                                    .collect();
-                                EnumVariant::StructVariant {
-                                    name: name.clone(),
-                                    fields,
+                let (namespace, enum_name) = self.get_namespace_name_and_name(name)?;
+
+                // Build variants list
+                let mut enum_variants = Vec::new();
+                for variant in variants.iter() {
+                    match variant {
+                        Ast::EnumVariant {
+                            name: var_name,
+                            fields,
+                            ..
+                        } => {
+                            let mut field_names = Vec::new();
+                            for field in fields.iter() {
+                                match field {
+                                    Ast::StructField { name, .. } => field_names.push(name.clone()),
+                                    Ast::Identifier(name, _) => field_names.push(name.clone()),
+                                    _ => {
+                                        return Err(CompileError::InternalError {
+                                            message: format!(
+                                                "Expected StructField or Identifier, got {:?}",
+                                                field
+                                            ),
+                                        });
+                                    }
                                 }
                             }
-                            Ast::EnumStaticVariant { name, .. } => {
-                                EnumVariant::StaticVariant { name: name.clone() }
-                            }
-                            _ => panic!("Expected enum variant got {:?}", variant),
-                        })
-                        .collect(),
+                            enum_variants.push(EnumVariant::StructVariant {
+                                name: var_name.clone(),
+                                fields: field_names,
+                            });
+                        }
+                        Ast::EnumStaticVariant { name, .. } => {
+                            enum_variants.push(EnumVariant::StaticVariant { name: name.clone() });
+                        }
+                        _ => {
+                            return Err(CompileError::InternalError {
+                                message: format!("Expected enum variant got {:?}", variant),
+                            });
+                        }
+                    }
+                }
+
+                let enum_repr = Enum {
+                    name: format!("{}/{}", namespace, enum_name),
+                    variants: enum_variants,
                 };
 
-                let (namespace, name) = self.get_namespace_name_and_name(&name);
-                let variant_names: Vec<String> = variants
-                    .iter()
-                    .map(|variant| match variant {
-                        Ast::EnumVariant {
-                            name, fields: _, ..
-                        } => name.clone(),
-                        Ast::EnumStaticVariant { name, .. } => name.clone(),
-                        _ => panic!("Expected enum variant got {:?}", variant),
-                    })
-                    .collect();
+                // Build variant_names for the enum struct
+                let mut variant_names = Vec::new();
+                for variant in variants.iter() {
+                    match variant {
+                        Ast::EnumVariant { name, .. } => variant_names.push(name.clone()),
+                        Ast::EnumStaticVariant { name, .. } => variant_names.push(name.clone()),
+                        _ => {
+                            return Err(CompileError::InternalError {
+                                message: format!("Expected enum variant got {:?}", variant),
+                            });
+                        }
+                    }
+                }
+
                 let mutable_fields = vec![false; variant_names.len()];
                 self.compiler.add_struct(Struct {
-                    name: format!("{}/{}", namespace, name),
+                    name: format!("{}/{}", namespace, enum_name),
                     fields: variant_names,
                     mutable_fields,
                 });
 
                 self.compiler.add_enum(enum_repr);
+
+                // Add structs for each variant
                 for variant in variants.iter() {
                     match variant {
                         Ast::EnumVariant {
@@ -3128,37 +3213,43 @@ impl AstCompiler<'_> {
                             fields,
                             ..
                         } => {
-                            let (namespace, name) = self.get_namespace_name_and_name(&name);
-                            let field_names: Vec<String> = fields
-                                .iter()
-                                .map(|field| match field {
-                                    Ast::StructField { name, .. } => name.clone(),
-                                    Ast::Identifier(name, _) => name.clone(),
-                                    _ => panic!(
-                                        "Expected StructField or Identifier, got {:?}",
-                                        field
-                                    ),
-                                })
-                                .collect();
+                            let mut field_names = Vec::new();
+                            for field in fields.iter() {
+                                match field {
+                                    Ast::StructField { name, .. } => field_names.push(name.clone()),
+                                    Ast::Identifier(name, _) => field_names.push(name.clone()),
+                                    _ => {
+                                        return Err(CompileError::InternalError {
+                                            message: format!(
+                                                "Expected StructField or Identifier, got {:?}",
+                                                field
+                                            ),
+                                        });
+                                    }
+                                }
+                            }
                             // Enum variant fields are always immutable
                             let mutable_fields = vec![false; field_names.len()];
                             self.compiler.add_struct(Struct {
-                                name: format!("{}/{}.{}", namespace, name, variant_name),
+                                name: format!("{}/{}.{}", namespace, enum_name, variant_name),
                                 fields: field_names,
                                 mutable_fields,
-                            })
+                            });
                         }
                         Ast::EnumStaticVariant {
                             name: variant_name, ..
                         } => {
-                            let (namespace, name) = self.get_namespace_name_and_name(&name);
                             self.compiler.add_struct(Struct {
-                                name: format!("{}/{}.{}", namespace, name, variant_name),
+                                name: format!("{}/{}.{}", namespace, enum_name, variant_name),
                                 fields: vec![],
                                 mutable_fields: vec![],
                             });
                         }
-                        _ => panic!("Expected enum variant got {:?}", variant),
+                        _ => {
+                            return Err(CompileError::InternalError {
+                                message: format!("Expected enum variant got {:?}", variant),
+                            });
+                        }
                     }
                 }
             }
@@ -3176,7 +3267,7 @@ impl AstCompiler<'_> {
             } => {
                 self.compiler.reserve_namespace_slot(name);
                 for ast in body.iter() {
-                    self.first_pass(ast);
+                    self.first_pass(ast)?;
                 }
             }
             Ast::FunctionStub {
@@ -3197,17 +3288,18 @@ impl AstCompiler<'_> {
             }
             _ => {}
         }
+        Ok(())
     }
 
     fn store_namespaced_variable(&mut self, slot: Value, reg: VirtualRegister) {
         let slot: VirtualRegister = self.ir.assign_new(slot);
-        self.call_builtin(
+        let _ = self.call_builtin(
             "beagle.builtin/update-binding",
             vec![slot.into(), reg.into()],
         );
     }
 
-    fn resolve_variable(&mut self, reg: &VariableLocation) -> Result<Value, String> {
+    fn resolve_variable(&mut self, reg: &VariableLocation) -> Result<Value, CompileError> {
         match reg {
             VariableLocation::Register(reg) => Ok(Value::Register(*reg)),
             VariableLocation::Local(index) | VariableLocation::MutableLocal(index) => {
@@ -3222,7 +3314,11 @@ impl AstCompiler<'_> {
             }
             VariableLocation::FreeVariable(index)
             | VariableLocation::MutableFreeVariable(index) => {
-                let arg0_location = self.get_argument_location(0).ok_or("Variable not found")?;
+                let arg0_location =
+                    self.get_argument_location(0)
+                        .ok_or_else(|| CompileError::InternalError {
+                            message: "Variable not found".to_string(),
+                        })?;
                 let arg0 = self.resolve_variable(&arg0_location)?;
                 let arg0: VirtualRegister = self.ir.assign_new(arg0);
                 let arg0 = self.ir.untag(arg0.into());
@@ -3232,7 +3328,11 @@ impl AstCompiler<'_> {
                 Ok(self.ir.read_field(arg0, index.into()))
             }
             VariableLocation::BoxedFreeVariable(index) => {
-                let arg0_location = self.get_argument_location(0).ok_or("Variable not found")?;
+                let arg0_location =
+                    self.get_argument_location(0)
+                        .ok_or_else(|| CompileError::InternalError {
+                            message: "Variable not found".to_string(),
+                        })?;
                 let arg0 = self.resolve_variable(&arg0_location)?;
                 let arg0: VirtualRegister = self.ir.assign_new(arg0);
                 let arg0 = self.ir.untag(arg0.into());
@@ -3249,10 +3349,10 @@ impl AstCompiler<'_> {
             VariableLocation::NamespaceVariable(namespace, slot) => {
                 let slot = self.ir.assign_new(*slot);
                 let namespace = self.ir.assign_new(*namespace);
-                Ok(self.call_builtin(
+                self.call_builtin(
                     "beagle.builtin/get-binding",
                     vec![namespace.into(), slot.into()],
-                ))
+                )
             }
         }
     }
@@ -3273,7 +3373,7 @@ impl AstCompiler<'_> {
         Some(self.compiler.current_namespace_name() + "/" + name)
     }
 
-    fn get_namespace_name_and_name(&self, name: &str) -> (String, String) {
+    fn get_namespace_name_and_name(&self, name: &str) -> Result<(String, String), CompileError> {
         if name.contains("/") {
             let parts: Vec<&str> = name.split("/").collect();
             let alias = parts[0];
@@ -3281,15 +3381,12 @@ impl AstCompiler<'_> {
             let namespace = self
                 .compiler
                 .get_namespace_from_alias(alias)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "Namespace alias '{}' not found - did you forget to import it?",
-                        alias
-                    )
-                });
-            (namespace, name.to_string())
+                .ok_or_else(|| CompileError::NamespaceAliasNotFound {
+                    alias: alias.to_string(),
+                })?;
+            Ok((namespace, name.to_string()))
         } else {
-            (self.compiler.current_namespace_name(), name.to_string())
+            Ok((self.compiler.current_namespace_name(), name.to_string()))
         }
     }
 
@@ -3696,7 +3793,12 @@ impl AstCompiler<'_> {
         }
     }
 
-    fn compile_pattern_test(&mut self, pattern: &Pattern, value_reg: Value, no_match_label: Label) {
+    fn compile_pattern_test(
+        &mut self,
+        pattern: &Pattern,
+        value_reg: Value,
+        no_match_label: Label,
+    ) -> Result<(), CompileError> {
         match pattern {
             Pattern::EnumVariant {
                 enum_name,
@@ -3706,10 +3808,12 @@ impl AstCompiler<'_> {
                 // Get the struct ID for this enum variant
                 let full_enum_name = self.get_full_enum_name(enum_name);
                 let full_name = format!("{}.{}", full_enum_name, variant_name);
-                let (expected_struct_id, _) = self
-                    .compiler
-                    .get_struct(&full_name)
-                    .unwrap_or_else(|| panic!("Enum variant not found: {}", full_name));
+                let (expected_struct_id, _) =
+                    self.compiler.get_struct(&full_name).ok_or_else(|| {
+                        CompileError::EnumVariantNotFound {
+                            name: full_name.clone(),
+                        }
+                    })?;
 
                 // Untag the value before reading struct ID
                 let untagged_value = self.ir.untag(value_reg);
@@ -3731,10 +3835,11 @@ impl AstCompiler<'_> {
                     tagged_struct_id,
                     expected_reg,
                 );
+                Ok(())
             }
             Pattern::Literal { value, .. } => {
                 // Compile the literal value
-                let literal_value = self.call_compile(value);
+                let literal_value = self.call_compile(value)?;
 
                 // Ensure literal is in a register
                 let literal_reg = match literal_value {
@@ -3747,7 +3852,7 @@ impl AstCompiler<'_> {
 
                 // Use the equal builtin to compare
                 let result_value =
-                    self.call_builtin("beagle.core/equal", vec![value_reg, literal_reg]);
+                    self.call_builtin("beagle.core/equal", vec![value_reg, literal_reg])?;
 
                 // Jump if not equal (false)
                 self.ir.jump_if(
@@ -3756,14 +3861,20 @@ impl AstCompiler<'_> {
                     result_value,
                     Value::True,
                 );
+                Ok(())
             }
             Pattern::Wildcard { .. } => {
                 // Wildcard always matches - no test needed
+                Ok(())
             }
         }
     }
 
-    fn bind_pattern_variables(&mut self, pattern: &Pattern, value_reg: Value) {
+    fn bind_pattern_variables(
+        &mut self,
+        pattern: &Pattern,
+        value_reg: Value,
+    ) -> Result<(), CompileError> {
         match pattern {
             Pattern::EnumVariant {
                 enum_name,
@@ -3774,10 +3885,12 @@ impl AstCompiler<'_> {
                 // Get the variant's struct definition to look up field indices by name
                 let full_enum_name = self.get_full_enum_name(enum_name);
                 let full_name = format!("{}.{}", full_enum_name, variant_name);
-                let (_, variant_struct) = self
-                    .compiler
-                    .get_struct(&full_name)
-                    .unwrap_or_else(|| panic!("Enum variant not found: {}", full_name));
+                let (_, variant_struct) =
+                    self.compiler.get_struct(&full_name).ok_or_else(|| {
+                        CompileError::EnumVariantNotFound {
+                            name: full_name.clone(),
+                        }
+                    })?;
 
                 // Clone the field names to avoid borrow checker issues
                 let variant_field_names = variant_struct.fields.clone();
@@ -3791,12 +3904,10 @@ impl AstCompiler<'_> {
                     let actual_field_idx = variant_field_names
                         .iter()
                         .position(|f| f == &field_pattern.field_name)
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "Field '{}' not found in variant {}.{}",
-                                field_pattern.field_name, enum_name, variant_name
-                            )
-                        });
+                        .ok_or_else(|| CompileError::StructFieldNotDefined {
+                            struct_name: full_name.clone(),
+                            field: field_pattern.field_name.clone(),
+                        })?;
 
                     // Read the field from the value using the ACTUAL index, not iteration order
                     let field_value = self.ir.read_field(
@@ -3828,6 +3939,7 @@ impl AstCompiler<'_> {
                 // Literals and wildcards don't bind variables
             }
         }
+        Ok(())
     }
 
     fn check_match_exhaustiveness(&mut self, arms: &[MatchArm], token_range: TokenRange) {

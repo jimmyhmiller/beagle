@@ -3,6 +3,7 @@ use std::ops::Deref;
 use crate::{
     ast::{Ast, AstCompiler},
     builtins::mark_card,
+    compiler::CompileError,
     ir::{Condition, Value},
     types::{BuiltInTypes, Header},
 };
@@ -239,8 +240,8 @@ impl AstCompiler<'_> {
             "beagle.primitive/panic" => {
                 let message = args[0];
                 // print the message then call throw_error
-                self.call_builtin("beagle.core/_println", vec![message]);
-                self.call_builtin("beagle.builtin/throw-error", vec![]);
+                let _ = self.call_builtin("beagle.core/_println", vec![message]);
+                let _ = self.call_builtin("beagle.builtin/throw-error", vec![]);
                 Value::Null
             }
             "beagle.primitive/is-object" => {
@@ -318,7 +319,11 @@ impl AstCompiler<'_> {
         false
     }
 
-    pub fn compile_macro_like_primitive(&mut self, name: String, args: Vec<Ast>) -> Value {
+    pub fn compile_macro_like_primitive(
+        &mut self,
+        name: String,
+        args: Vec<Ast>,
+    ) -> Result<Value, CompileError> {
         if name != "beagle.primitive/set!" {
             panic!("Unknown macro-like primitive {}", name);
         }
@@ -352,8 +357,8 @@ impl AstCompiler<'_> {
             panic!("set! expects an identifier as the second argument for now");
         }
 
-        let object = self.call_compile(object);
-        let value = self.call_compile(&args[1]);
+        let object = self.call_compile(object)?;
+        let value = self.call_compile(&args[1])?;
         // Value must be in a register for write_field_dynamic and call_builtin
         let value = self.ir.assign_new(value);
 
@@ -406,12 +411,12 @@ impl AstCompiler<'_> {
                 property_location.into(),
                 Value::Register(value),
             ],
-        );
+        )?;
 
         self.ir.assign(result, call_result);
 
         self.ir.write_label(exit_property_access);
 
-        Value::Null
+        Ok(Value::Null)
     }
 }

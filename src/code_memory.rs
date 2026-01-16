@@ -80,7 +80,7 @@ impl CodeAllocator {
                 // but it could be that compilation is crossing a page
                 // boundary and this code isn't dealing with that
                 // correctly
-                if self.current_offset % 2 != 0 {
+                if !self.current_offset.is_multiple_of(2) {
                     self.current_offset += 1;
                 }
 

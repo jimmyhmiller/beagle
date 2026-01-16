@@ -32,14 +32,59 @@ use std::{
 #[derive(Debug, Clone)]
 pub enum CompileError {
     RegisterAllocation(String),
-    LabelLookup { label: String },
-    StructResolution { struct_name: String },
+    LabelLookup {
+        label: String,
+    },
+    StructResolution {
+        struct_name: String,
+    },
     PropertyCacheFull,
     MemoryMapping(String),
     ParseError(crate::parser::ParseError),
-    FunctionNotFound { function_name: String },
-    InvalidFunctionPointer { function_name: String },
-    PathConversion { path: String },
+    FunctionNotFound {
+        function_name: String,
+    },
+    InvalidFunctionPointer {
+        function_name: String,
+    },
+    PathConversion {
+        path: String,
+    },
+    // New semantic errors
+    UndefinedVariable {
+        name: String,
+    },
+    GlobalMutableVariable,
+    BreakOutsideLoop,
+    ContinueOutsideLoop,
+    BindingNotFound {
+        name: String,
+    },
+    EnumVariantNotFound {
+        name: String,
+    },
+    StructFieldNotDefined {
+        struct_name: String,
+        field: String,
+    },
+    ExpectedIdentifier {
+        got: String,
+    },
+    InvalidAssignment {
+        reason: String,
+    },
+    InternalError {
+        message: String,
+    },
+    NamespaceAliasNotFound {
+        alias: String,
+    },
+    ArityMismatch {
+        function_name: String,
+        expected: usize,
+        got: usize,
+        is_variadic: bool,
+    },
 }
 
 impl fmt::Display for CompileError {
@@ -63,6 +108,63 @@ impl fmt::Display for CompileError {
             }
             CompileError::PathConversion { path } => {
                 write!(f, "Failed to convert path to string: {}", path)
+            }
+            CompileError::UndefinedVariable { name } => {
+                write!(f, "Undefined variable: {}", name)
+            }
+            CompileError::GlobalMutableVariable => {
+                write!(f, "Cannot create mutable variable in global scope")
+            }
+            CompileError::BreakOutsideLoop => {
+                write!(f, "break statement outside of loop")
+            }
+            CompileError::ContinueOutsideLoop => {
+                write!(f, "continue statement outside of loop")
+            }
+            CompileError::BindingNotFound { name } => {
+                write!(f, "Binding not found: {}", name)
+            }
+            CompileError::EnumVariantNotFound { name } => {
+                write!(f, "Enum variant not found: {}", name)
+            }
+            CompileError::StructFieldNotDefined { struct_name, field } => {
+                write!(
+                    f,
+                    "Struct field '{}' not defined on '{}'",
+                    field, struct_name
+                )
+            }
+            CompileError::ExpectedIdentifier { got } => {
+                write!(f, "Expected identifier, got: {}", got)
+            }
+            CompileError::InvalidAssignment { reason } => {
+                write!(f, "Invalid assignment: {}", reason)
+            }
+            CompileError::InternalError { message } => {
+                write!(f, "Internal compiler error: {}", message)
+            }
+            CompileError::NamespaceAliasNotFound { alias } => {
+                write!(f, "Namespace alias not found: {}", alias)
+            }
+            CompileError::ArityMismatch {
+                function_name,
+                expected,
+                got,
+                is_variadic,
+            } => {
+                if *is_variadic {
+                    write!(
+                        f,
+                        "Function '{}' requires at least {} argument(s), but {} were provided",
+                        function_name, expected, got
+                    )
+                } else {
+                    write!(
+                        f,
+                        "Function '{}' expects {} argument(s), but {} were provided",
+                        function_name, expected, got
+                    )
+                }
             }
         }
     }
@@ -292,7 +394,7 @@ impl Compiler {
         file_name: &str,
         token_line_column_map: Vec<(usize, usize)>,
     ) -> Result<Option<String>, Box<dyn Error>> {
-        let (mut ir, token_map) = ast.compile(self, file_name, token_line_column_map);
+        let (mut ir, token_map) = ast.compile(self, file_name, token_line_column_map)?;
         let top_level_name =
             fn_name.unwrap_or_else(|| format!("{}/__top_level", self.current_namespace_name()));
         if ast.has_top_level() {
