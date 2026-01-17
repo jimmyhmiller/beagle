@@ -393,6 +393,10 @@ impl AstCompiler<'_> {
         self.ir
             .write_field_dynamic(untagged_object, property_offset, Value::Register(value));
 
+        // Card marking for generational GC write barrier
+        let mark_card_fn = Value::RawValue((mark_card as usize) << BuiltInTypes::tag_size());
+        self.ir.call_builtin(mark_card_fn, vec![untagged_object]);
+
         self.ir.jump(exit_property_access);
 
         self.ir.write_label(slow_property_path);
