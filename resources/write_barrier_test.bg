@@ -1,0 +1,115 @@
+namespace write_barrier_test
+// gc-always
+
+import "beagle.primitive" as primitive
+
+// Test that write barriers are called for set! operations on mutable struct fields.
+//
+// This test uses TWO levels of indirection to trigger the write barrier bug:
+// - Stack -> old_wrapper -> old_holder -> young_data
+//
+// The key is that when GC runs, holder must NOT be on any stack frame,
+// only reachable through wrapper. Without write barrier, holder's card
+// isn't marked, so GC won't scan holder's fields, and young_data is lost.
+//
+// The "// gc-always" annotation above ensures this test runs with --gc-always.
+
+struct Wrapper {
+    holder
+}
+
+struct MutableHolder {
+    mut value
+    id
+}
+
+struct Data {
+    x
+    y
+    z
+}
+
+// Create a holder and force it to old gen
+fn make_old_holder(id, initial_value) {
+    let h = MutableHolder { value: initial_value, id: id }
+    gc()
+    gc()
+    gc()
+    h
+}
+
+// Create a wrapper holding a holder, both in old gen
+fn make_old_wrapper_with_holder() {
+    let h = make_old_holder(0, null)
+    let w = Wrapper { holder: h }
+    gc()
+    gc()
+    gc()
+    w
+}
+
+// This function sets data AND triggers GC while holder is still on its stack
+// Returns just an integer, NOT the holder
+fn set_and_gc(holder, x) {
+    primitive/set!(holder.value, Data { x: x, y: x + 1, z: x + 2 })
+    // Now trigger GC - holder IS on our stack, so it gets scanned
+    // This isn't the test case we want
+    x
+}
+
+// This does the set, then calls another function that triggers GC
+// When the GC happens, the holder from THIS frame has been popped
+fn set_then_trigger_gc_elsewhere(holder, x) {
+    primitive/set!(holder.value, Data { x: x, y: x + 1, z: x + 2 })
+    // Don't GC here - holder is on stack
+    // Return just x, not holder
+    x
+}
+
+// Trigger GC in a separate call - holder is NOT on stack here
+fn just_gc() {
+    gc()
+    0
+}
+
+fn test_two_level_write_barrier() {
+    println("=== Two-level indirection test ===")
+
+    // Create wrapper -> holder, both in old gen
+    let wrapper = make_old_wrapper_with_holder()
+    println("Created old wrapper -> old holder")
+
+    // Do the set! in a helper - after it returns, holder is off our stack
+    // We access wrapper.holder inline to avoid putting it in a local variable
+    set_then_trigger_gc_elsewhere(wrapper.holder, 99999)
+    println("Stored young data via set!")
+
+    // Now trigger GC - wrapper is on stack, wrapper.holder is in old gen
+    // holder is NOT directly on any stack - only reachable through wrapper
+    // Without write barrier: holder's card not marked, Data is lost!
+    just_gc()
+    println("GC completed")
+
+    // Try to read the data
+    let result = wrapper.holder.value.x
+    if result == 99999 {
+        println("PASS: Write barrier worked!")
+    } else {
+        println("FAIL: Expected 99999 but got " + to-string(result))
+    }
+}
+
+fn main() {
+    test_two_level_write_barrier()
+    println("Test completed!")
+    "done"
+}
+
+// Expect
+// === Two-level indirection test ===
+// Created old wrapper -> old holder
+// Stored young data via set!
+// GC completed
+// PASS: Write barrier worked!
+// Test completed!
+//

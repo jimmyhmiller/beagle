@@ -999,6 +999,8 @@ extern "C" fn write_field(
     let runtime = get_runtime().get_mut();
     // write_field checks mutability and throws if not mutable
     let index = runtime.write_field(stack_pointer, struct_pointer, str_constant_ptr, value);
+    // Write barrier for generational GC - mark the card containing this object
+    runtime.mark_card_for_object(struct_pointer);
     let type_id = HeapObject::from_tagged(struct_pointer).get_struct_id();
     // Cache layout: [struct_id, field_offset, is_mutable]
     // We only reach here if field is mutable (otherwise write_field would have thrown)

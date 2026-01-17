@@ -464,6 +464,8 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         }
 
         println!("Running test: {}", path);
+        // Check for gc-always annotation - test requests gc on every allocation
+        let gc_always = args.gc_always || source.contains("// gc-always");
         let args = CommandLineArguments {
             program: Some(path.to_string()),
             program_args: vec![], // Tests don't receive extra args
@@ -471,7 +473,7 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             show_gc_times: args.show_gc_times,
             print_ast: args.print_ast,
             no_gc: args.no_gc,
-            gc_always: args.gc_always,
+            gc_always,
             all_tests: false,
             test: true,
             debug: args.debug,
