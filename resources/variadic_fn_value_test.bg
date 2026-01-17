@@ -22,9 +22,7 @@ fn main() {
     "done"
 }
 
-// TODO: This test is currently broken - variadic functions through function values
-// don't work correctly with protocol dispatch
-// Expected output (when fixed):
+// Expect
 // hello world
 // a b c
 // 1 2 3

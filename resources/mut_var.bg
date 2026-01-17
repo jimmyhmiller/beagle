@@ -1,10 +1,5 @@
 namespace mut_var
 
-
-// I don't have write barriers on these.
-// I need them for generational gc
-// I need to figure out a nice simple way
-// of adding write barriers for anything mutable
 fn main() {
     let mut x = 0
     let mut y = 0

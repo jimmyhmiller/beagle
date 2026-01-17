@@ -290,6 +290,13 @@ pub enum Ast {
         num_args: usize,
         token_range: TokenRange,
     },
+    /// Multi-arity function with distinct implementations for different argument counts.
+    /// e.g., `fn greet { () => greet("World") (name) => println("Hello, " ++ name) }`
+    MultiArityFunction {
+        name: Option<String>,
+        cases: Vec<ArityCase>,
+        token_range: TokenRange,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -321,6 +328,16 @@ pub enum Pattern {
 pub struct FieldPattern {
     pub field_name: String,
     pub binding_name: Option<String>,
+    pub token_range: TokenRange,
+}
+
+/// Represents a single arity case in a multi-arity function.
+/// e.g., `(x, y) => x + y` in `fn foo { () => 0 (x, y) => x + y }`
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArityCase {
+    pub args: Vec<String>,
+    pub rest_param: Option<String>,
+    pub body: Vec<Ast>,
     pub token_range: TokenRange,
 }
 
@@ -375,7 +392,8 @@ impl Ast {
             | Ast::Throw { token_range, .. }
             | Ast::Match { token_range, .. }
             | Ast::ProtocolDispatch { token_range, .. }
-            | Ast::StructField { token_range, .. } => *token_range,
+            | Ast::StructField { token_range, .. }
+            | Ast::MultiArityFunction { token_range, .. } => *token_range,
             Ast::IntegerLiteral(_, position)
             | Ast::FloatLiteral(_, position)
             | Ast::Identifier(_, position)
@@ -429,14 +447,17 @@ impl Ast {
     }
 
     pub fn has_top_level(&self) -> bool {
+        // Multi-arity functions need runtime initialization (heap allocation for dispatch object)
+        // so they count as top-level code
         self.nodes().iter().any(|node| {
-            !matches!(
-                node,
-                Ast::Function { .. }
-                    | Ast::Struct { .. }
-                    // | Ast::Enum { .. }
-                    | Ast::Namespace { .. }
-            )
+            matches!(node, Ast::MultiArityFunction { .. })
+                || !matches!(
+                    node,
+                    Ast::Function { .. }
+                        | Ast::Struct { .. }
+                        // | Ast::Enum { .. }
+                        | Ast::Namespace { .. }
+                )
         })
     }
 
@@ -2630,6 +2651,163 @@ impl AstCompiler<'_> {
             Ast::StructField { .. } => Err(CompileError::InternalError {
                 message: "StructField should not be compiled directly - it's only used in struct definitions".to_string(),
             }),
+            Ast::MultiArityFunction {
+                name,
+                cases,
+                token_range: _,
+            } => {
+                // Compile each arity case as a distinct function with name suffixed by $N
+                // where N is the number of fixed args for that arity.
+                let base_name = name.clone();
+
+                // First, collect arity info and register with the compiler so that
+                // inter-arity calls (e.g., () => greet("World")) can resolve correctly.
+                let arities: Vec<(usize, bool)> = cases
+                    .iter()
+                    .map(|case| (case.args.len(), case.rest_param.is_some()))
+                    .collect();
+
+                if let Some(ref fn_name) = base_name {
+                    let full_function_name = self.compiler.current_namespace_name() + "/" + fn_name;
+                    self.compiler
+                        .register_multi_arity_function(&full_function_name, arities);
+                }
+
+                // Now compile each arity case
+                let mut arity_function_pointers: Vec<(usize, usize, bool)> = Vec::new(); // (fixed_arity, fn_ptr, is_variadic)
+
+                for case in cases.iter() {
+                    let arity = case.args.len();
+                    let is_variadic = case.rest_param.is_some();
+                    let arity_name = base_name
+                        .as_ref()
+                        .map(|n| format!("{}${}", n, arity));
+
+                    // Create an Ast::Function for this arity case and compile it
+                    let arity_function = Ast::Function {
+                        name: arity_name.clone(),
+                        args: case.args.clone(),
+                        rest_param: case.rest_param.clone(),
+                        body: case.body.clone(),
+                        token_range: case.token_range,
+                    };
+
+                    // Compile the arity function
+                    let _fn_value = self.call_compile(&arity_function)?;
+
+                    // Get the function pointer by looking up the compiled function by name
+                    // (call_compile returns a Value::Register, not Value::Function)
+                    if let Some(ref arity_fn_name) = arity_name {
+                        let full_arity_name =
+                            self.compiler.current_namespace_name() + "/" + arity_fn_name;
+                        if let Some(function) = self.compiler.get_function_by_name(&full_arity_name)
+                        {
+                            if let Some(fn_ptr) =
+                                self.compiler.get_pointer_for_function(function)
+                            {
+                                arity_function_pointers.push((arity, fn_ptr, is_variadic));
+                            }
+                        }
+                    }
+                }
+
+                // Now create the multi-arity dispatch structure
+                // For now, we allocate a MultiArityFunction heap object that stores:
+                // - num_arities
+                // - for each: (arity_count, fn_ptr, is_variadic_flag)
+                // Then bind this to the function name
+
+                // Allocate heap space for the multi-arity function object
+                let num_arities = arity_function_pointers.len();
+                // Layout: [header: 1 word] [num_arities: 1 word] [entries: num_arities * 3 words each]
+                // Each entry: [arity_count, fn_ptr, is_variadic]
+                let num_fields = 1 + num_arities * 3;
+
+                let allocate_fn = self
+                    .compiler
+                    .find_function("beagle.builtin/allocate")
+                    .unwrap();
+                let allocate_fn_ptr = self.compiler.get_function_pointer(allocate_fn).unwrap();
+                let allocate_fn_val = self.ir.assign_new(allocate_fn_ptr);
+
+                let size_reg = self.ir.assign_new(num_fields);
+                let stack_pointer = self.ir.get_stack_pointer_imm(0);
+                let frame_pointer = self.ir.get_frame_pointer();
+
+                let obj_ptr = self.ir.call_builtin(
+                    allocate_fn_val.into(),
+                    vec![stack_pointer, frame_pointer, size_reg.into()],
+                );
+
+                let obj_ptr_reg = self.ir.assign_new(obj_ptr);
+                let untagged_obj = self.ir.untag(obj_ptr_reg.into());
+
+                // Write header with type_id = TYPE_ID_MULTI_ARITY_FUNCTION (we'll use 11)
+                use crate::types::Header;
+                let header = Header {
+                    type_id: crate::collections::TYPE_ID_MULTI_ARITY_FUNCTION,
+                    type_data: 0,
+                    size: num_fields as u16,
+                    opaque: false,
+                    marked: false,
+                    large: false,
+                };
+                self.ir.heap_store(untagged_obj, Value::RawValue(header.to_usize()));
+
+                // Write num_arities at field 0 (offset 1 from start)
+                self.ir.heap_store_offset(
+                    untagged_obj,
+                    Value::TaggedConstant(num_arities as isize),
+                    1,
+                );
+
+                // Write each arity entry
+                for (i, (arity, fn_ptr, is_variadic)) in arity_function_pointers.iter().enumerate() {
+                    let base_offset = 2 + i * 3;
+                    // Arity count (tagged)
+                    self.ir.heap_store_offset(
+                        untagged_obj,
+                        Value::TaggedConstant(*arity as isize),
+                        base_offset,
+                    );
+                    // Function pointer (tagged as Function)
+                    let tagged_fn = BuiltInTypes::Function.tag(*fn_ptr as isize);
+                    self.ir.heap_store_offset(
+                        untagged_obj,
+                        Value::RawValue(tagged_fn as usize),
+                        base_offset + 1,
+                    );
+                    // Is variadic flag (tagged bool)
+                    let is_var_val = if *is_variadic {
+                        Value::True
+                    } else {
+                        Value::False
+                    };
+                    self.ir.heap_store_offset(untagged_obj, is_var_val, base_offset + 2);
+                }
+
+                // Tag as HeapObject
+                let result = self.ir.tag(untagged_obj, BuiltInTypes::HeapObject.get_tag());
+
+                // Bind to namespace if named
+                if let Some(ref fn_name) = base_name {
+                    let full_function_name = self.compiler.current_namespace_name() + "/" + fn_name;
+                    let result_reg = self.ir.assign_new(result);
+                    let namespace_id = self.current_namespace_id();
+                    let reserved_namespace_slot = self.compiler.reserve_namespace_slot(&full_function_name);
+                    self.store_namespaced_variable(
+                        Value::TaggedConstant(reserved_namespace_slot as isize),
+                        result_reg,
+                    );
+                    self.insert_variable(
+                        full_function_name.to_string(),
+                        VariableLocation::NamespaceVariable(namespace_id, reserved_namespace_slot),
+                    );
+                    // Multi-arity info was already registered at the start for inter-arity calls
+                }
+
+                Ok(result)
+            }
         }
     }
 
@@ -2640,14 +2818,26 @@ impl AstCompiler<'_> {
             name
         );
 
-        // TODO: I shouldn't just assume the function will exist
-        // unless I have a good plan for dealing with when it doesn't
-        let function =
-            self.compiler
-                .find_function(name)
-                .ok_or_else(|| CompileError::FunctionNotFound {
+        // Check if this is a multi-arity function and resolve to the correct arity variant
+        let resolved_name =
+            if let Some(arity_name) = self.compiler.resolve_multi_arity_call(name, args.len()) {
+                arity_name
+            } else if let Some(info) = self.compiler.get_multi_arity_info(name) {
+                // This is a known multi-arity function but no arity matches
+                return Err(CompileError::MultiArityNoMatch {
                     function_name: name.to_string(),
-                })?;
+                    arg_count: args.len(),
+                    available_arities: info.arities.iter().map(|(a, _)| *a).collect(),
+                });
+            } else {
+                name.to_string()
+            };
+
+        let function = self.compiler.find_function(&resolved_name).ok_or_else(|| {
+            CompileError::FunctionNotFound {
+                function_name: resolved_name.to_string(),
+            }
+        })?;
 
         let builtin = function.is_builtin;
         let needs_stack_pointer = function.needs_stack_pointer;
@@ -2752,9 +2942,23 @@ impl AstCompiler<'_> {
             Ok(self.compiler.current_namespace_name() + "/" + name)
         } else if self
             .compiler
+            .get_multi_arity_info(&(self.compiler.current_namespace_name() + "/" + name))
+            .is_some()
+        {
+            // Multi-arity function in current namespace
+            Ok(self.compiler.current_namespace_name() + "/" + name)
+        } else if self
+            .compiler
             .find_function(&("beagle.core/".to_owned() + name))
             .is_some()
         {
+            Ok("beagle.core/".to_string() + name)
+        } else if self
+            .compiler
+            .get_multi_arity_info(&("beagle.core/".to_owned() + name))
+            .is_some()
+        {
+            // Multi-arity function in beagle.core
             Ok("beagle.core/".to_string() + name)
         } else if self.create_free_if_closable(name).is_some() {
             Ok(name.clone())
@@ -2770,49 +2974,104 @@ impl AstCompiler<'_> {
         let ret_register = self.ir.assign_new(Value::TaggedConstant(0));
         let function = self.resolve_variable(&function).unwrap();
         let function_register = self.ir.assign_new(function);
-        let closure_register = self.ir.assign_new(function_register);
-        // Check if the tag is a closure
-        let tag = self.ir.get_tag(closure_register.into());
-        let closure_tag = BuiltInTypes::Closure.get_tag();
-        let closure_tag = Value::RawValue(closure_tag as usize);
-        let call_closure = self.ir.label("call_closure");
-        let exit_closure_call = self.ir.label("exit_closure_call");
-        // TODO: It might be better to change the layout of these jumps
-        // so that the non-closure case is the fall through
-        // I just have to think about the correct way to do that
-        self.ir
-            .jump_if(call_closure, Condition::Equal, tag, closure_tag);
 
-        // Non-closure function call path
+        // Save the function value to a local to survive across branch checks
+        // This is critical because register allocation may clobber virtual registers
+        let saved_func_local = self.find_or_insert_local("__closure_call_func");
+        self.ir
+            .store_local(saved_func_local, function_register.into());
+
+        let closure_register = self.ir.assign_new(function_register);
+
+        // Get the tag and save it to a local to avoid any register clobbering issues
+        let tag = self.ir.get_tag(closure_register.into());
+        let tag_reg = self.ir.assign_new(tag);
+
+        let call_closure = self.ir.label("call_closure");
+        let call_multi_arity = self.ir.label("call_multi_arity");
+        let call_function = self.ir.label("call_function");
+        let exit_closure_call = self.ir.label("exit_closure_call");
+
+        // Check for Closure tag
+        let closure_tag = BuiltInTypes::Closure.get_tag();
+        let closure_tag_val = Value::RawValue(closure_tag as usize);
+        self.ir
+            .jump_if(call_closure, Condition::Equal, tag_reg, closure_tag_val);
+
+        // Check for HeapObject tag (multi-arity functions are stored as HeapObjects)
+        let heap_object_tag = BuiltInTypes::HeapObject.get_tag();
+        let heap_object_tag_val = Value::RawValue(heap_object_tag as usize);
+        self.ir.jump_if(
+            call_multi_arity,
+            Condition::Equal,
+            tag_reg,
+            heap_object_tag_val,
+        );
+
+        // Fall through to direct function call
+        self.ir.write_label(call_function);
+
+        // Non-closure, non-multi-arity function call path
         // Top-level functions are stored as tagged Function pointers in namespace bindings
-        // Similar to closures, extract and call the function pointer
         let saved_fn = self.ir.assign_new(function_register);
         let result = self.ir.call(saved_fn.into(), args.clone());
         self.ir.assign(ret_register, result);
         self.ir.jump(exit_closure_call);
-        self.ir.write_label(call_closure);
+
+        // Multi-arity function call path
+        self.ir.write_label(call_multi_arity);
+        {
+            // Reload function value from local (it may have been clobbered)
+            let func_obj = self.ir.load_local(saved_func_local);
+
+            // Call dispatch_multi_arity builtin to get the correct function pointer
+            let dispatch_fn = self
+                .compiler
+                .find_function("beagle.builtin/dispatch-multi-arity")
+                .expect("dispatch-multi-arity builtin not found");
+            let dispatch_fn_ptr = self.compiler.get_function_pointer(dispatch_fn).unwrap();
+            let dispatch_fn_val = self.ir.assign_new(dispatch_fn_ptr);
+
+            // Pass stack_pointer, frame_pointer, multi-arity object, and arg count
+            let stack_pointer = self.ir.get_stack_pointer_imm(0);
+            let frame_pointer = self.ir.get_frame_pointer();
+            let arg_count = Value::TaggedConstant(args.len() as isize);
+            let arg_count_reg = self.ir.assign_new(arg_count);
+            let fn_ptr = self.ir.call_builtin(
+                dispatch_fn_val.into(),
+                vec![stack_pointer, frame_pointer, func_obj, arg_count_reg.into()],
+            );
+
+            // The returned fn_ptr is a tagged Function pointer, call it directly
+            let saved_fn_ptr = self.ir.assign_new(fn_ptr);
+            let result = self.ir.call(saved_fn_ptr.into(), args.clone());
+            self.ir.assign(ret_register, result);
+        }
+        self.ir.jump(exit_closure_call);
 
         // Closure call path
-        // I need to grab the function pointer
-        // Closures are a pointer to a structure like this
-        // struct Closure {
-        //     function_pointer: *const u8,
-        //     num_free_variables: usize,
-        //     free_variables: *const Value,
-        // }
-        let untagged_closure_register = self.ir.untag(closure_register.into());
-        // self.ir.breakpoint();
-        // Load function pointer from closure structure (field 0 = offset 1, after 8-byte header)
-        let function_pointer = self.ir.load_from_memory(untagged_closure_register, 1);
+        self.ir.write_label(call_closure);
+        {
+            // I need to grab the function pointer
+            // Closures are a pointer to a structure like this
+            // struct Closure {
+            //     function_pointer: *const u8,
+            //     num_free_variables: usize,
+            //     free_variables: *const Value,
+            // }
+            let untagged_closure_register = self.ir.untag(closure_register.into());
+            // Load function pointer from closure structure (field 0 = offset 1, after 8-byte header)
+            let function_pointer = self.ir.load_from_memory(untagged_closure_register, 1);
 
-        // Save function pointer before making builtin calls that could clobber it
-        let saved_fn_ptr = self.ir.assign_new(function_pointer);
+            // Save function pointer before making builtin calls that could clobber it
+            let saved_fn_ptr = self.ir.assign_new(function_pointer);
 
-        // Non-variadic closure: call directly (skip arity/variadic checks for now)
-        let mut closure_args = args.clone();
-        closure_args.insert(0, closure_register.into());
-        let result = self.ir.call(saved_fn_ptr.into(), closure_args);
-        self.ir.assign(ret_register, result);
+            // Non-variadic closure: call directly (skip arity/variadic checks for now)
+            let mut closure_args = args.clone();
+            closure_args.insert(0, closure_register.into());
+            let result = self.ir.call(saved_fn_ptr.into(), closure_args);
+            self.ir.assign(ret_register, result);
+        }
 
         self.ir.write_label(exit_closure_call);
         ret_register.into()
@@ -3286,6 +3545,34 @@ impl AstCompiler<'_> {
                     .reserve_function(&full_function_name, arity, is_variadic, min_args)
                     .unwrap();
             }
+            Ast::MultiArityFunction {
+                name,
+                cases,
+                token_range: _,
+            } => {
+                // Reserve function slots for all arity variants so inter-arity calls work
+                if let Some(fn_name) = name {
+                    // Register multi-arity info for resolution
+                    let full_base_name = self.compiler.current_namespace_name() + "/" + fn_name;
+                    let arities: Vec<(usize, bool)> = cases
+                        .iter()
+                        .map(|case| (case.args.len(), case.rest_param.is_some()))
+                        .collect();
+                    self.compiler
+                        .register_multi_arity_function(&full_base_name, arities);
+
+                    // Reserve each arity function
+                    for case in cases.iter() {
+                        let arity = case.args.len();
+                        let is_variadic = case.rest_param.is_some();
+                        let full_arity_name = format!("{}${}", full_base_name, arity);
+                        let actual_arity = arity + if is_variadic { 1 } else { 0 };
+                        self.compiler
+                            .reserve_function(&full_arity_name, actual_arity, is_variadic, arity)
+                            .unwrap();
+                    }
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -3711,6 +3998,22 @@ impl AstCompiler<'_> {
             }
             Ast::ProtocolDispatch { .. } => {
                 // Protocol dispatch has no sub-expressions, just argument names
+            }
+            Ast::MultiArityFunction {
+                name,
+                cases,
+                token_range: _,
+            } => {
+                if let Some(name) = name {
+                    self.add_variable_for_mutable_pass(name);
+                }
+                self.track_function_mutable_variable_pass();
+                for case in cases.iter() {
+                    for expression in case.body.iter() {
+                        self.find_mutable_vars_that_need_boxing(expression);
+                    }
+                }
+                self.pop_function_mutable_variable_pass();
             }
         }
     }

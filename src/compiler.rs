@@ -18,7 +18,7 @@ use crate::{Data, Message, builtins::debugger, pretty_print::PrettyPrint};
 
 use mmap_rs::{MmapMut, MmapOptions};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     env,
     error::Error,
     fmt,
@@ -84,6 +84,11 @@ pub enum CompileError {
         expected: usize,
         got: usize,
         is_variadic: bool,
+    },
+    MultiArityNoMatch {
+        function_name: String,
+        arg_count: usize,
+        available_arities: Vec<usize>,
     },
 }
 
@@ -166,6 +171,21 @@ impl fmt::Display for CompileError {
                     )
                 }
             }
+            CompileError::MultiArityNoMatch {
+                function_name,
+                arg_count,
+                available_arities,
+            } => {
+                let arities_str: Vec<String> =
+                    available_arities.iter().map(|a| a.to_string()).collect();
+                write!(
+                    f,
+                    "No arity of '{}' accepts {} argument(s). Available arities: {}",
+                    function_name,
+                    arg_count,
+                    arities_str.join(", ")
+                )
+            }
         }
     }
 }
@@ -197,6 +217,13 @@ pub enum WarningKind {
     UnreachablePattern,
 }
 
+/// Metadata about a multi-arity function
+#[derive(Debug, Clone)]
+pub struct MultiArityInfo {
+    /// List of (fixed_arity, is_variadic) for each case
+    pub arities: Vec<(usize, bool)>,
+}
+
 pub struct Compiler {
     pub code_allocator: CodeAllocator,
     pub property_look_up_cache: MmapMut,
@@ -210,6 +237,8 @@ pub struct Compiler {
     /// Layout per entry: [type_id (8 bytes), fn_ptr (8 bytes)]
     pub protocol_dispatch_cache: MmapMut,
     pub protocol_dispatch_cache_offset: usize,
+    /// Multi-arity function metadata for static dispatch
+    pub multi_arity_functions: HashMap<String, MultiArityInfo>,
 }
 
 impl Compiler {
@@ -236,6 +265,7 @@ impl Compiler {
         self.stack_map = StackMap::new();
         self.pause_atom_ptr = None;
         self.compiled_file_cache.clear();
+        self.multi_arity_functions.clear();
         // If lock is poisoned, we can still clear by ignoring the error
         if let Ok(mut warnings) = self.warnings.lock() {
             warnings.clear();
@@ -835,6 +865,40 @@ impl Compiler {
             .ok()
     }
 
+    /// Register a multi-arity function for static dispatch optimization.
+    /// The arities list contains (fixed_arity, is_variadic) pairs.
+    pub fn register_multi_arity_function(&mut self, name: &str, arities: Vec<(usize, bool)>) {
+        self.multi_arity_functions
+            .insert(name.to_string(), MultiArityInfo { arities });
+    }
+
+    /// Look up multi-arity function info for static dispatch.
+    pub fn get_multi_arity_info(&self, name: &str) -> Option<&MultiArityInfo> {
+        self.multi_arity_functions.get(name)
+    }
+
+    /// Find the appropriate arity variant for a multi-arity function call.
+    /// Returns the name of the specific arity function to call.
+    pub fn resolve_multi_arity_call(&self, name: &str, arg_count: usize) -> Option<String> {
+        let info = self.multi_arity_functions.get(name)?;
+
+        // First try exact match
+        for (arity, is_variadic) in &info.arities {
+            if !is_variadic && *arity == arg_count {
+                return Some(format!("{}${}", name, arity));
+            }
+        }
+
+        // Then try variadic match (arg_count >= min_args for variadic)
+        for (min_arity, is_variadic) in &info.arities {
+            if *is_variadic && arg_count >= *min_arity {
+                return Some(format!("{}${}", name, min_arity));
+            }
+        }
+
+        None
+    }
+
     fn build_method_if_chain(
         &mut self,
         default_method: Option<&Function>,
@@ -1069,6 +1133,7 @@ impl CompilerThread {
                 pause_atom_ptr: None,
                 compiled_file_cache: HashSet::new(),
                 warnings,
+                multi_arity_functions: HashMap::new(),
             },
             channel,
         })

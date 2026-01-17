@@ -1,0 +1,44 @@
+namespace multi_arity_test
+
+fn greet {
+    () => greet("World")
+    (name) => "Hello, " ++ name
+}
+
+fn sum {
+    () => 0
+    (x) => x
+    (x, y) => x + y
+}
+
+// Test dynamic dispatch through function values
+fn call_with_one(f) {
+    f("Dynamic")
+}
+
+fn main() {
+    // Static calls
+    println(greet())
+    println(greet("Alice"))
+    println(sum())
+    println(sum(5))
+    println(sum(1, 2))
+
+    // Dynamic call through function value
+    let g = greet
+    println(g())
+    println(g("Direct"))
+    println(call_with_one(g))
+
+    "done"
+}
+
+// Expect
+// Hello, World
+// Hello, Alice
+// 0
+// 5
+// 3
+// Hello, World
+// Hello, Direct
+// Hello, Dynamic
