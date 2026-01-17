@@ -49,7 +49,6 @@ fn call_function() {
     // Doing this because locals live for the whole function
      let x = Thing { x: 42 };
 
-    // TODO: This closure is breaking stuff right now
     let f = fn() {
         // primitive/breakpoint()
         testGc(0)

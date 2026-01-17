@@ -4309,6 +4309,83 @@ pub unsafe fn throw_runtime_error(stack_pointer: usize, kind: &str, message: Str
     }
 }
 
+/// Dispatch a call to a multi-arity function.
+/// Takes stack_pointer, frame_pointer, the multi-arity function object and the number of arguments.
+/// Returns the function pointer for the matching arity, or throws an ArityError if no match found.
+///
+/// Layout of MultiArityFunction heap object:
+/// - header (8 bytes)
+/// - num_arities (8 bytes, tagged int)
+/// - entries: [arity (tagged), fn_ptr (tagged Function), is_variadic (tagged bool)] * num_arities
+pub extern "C" fn dispatch_multi_arity(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    multi_arity_obj: usize,
+    arg_count: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+
+    // Untag the heap object
+    let ptr = BuiltInTypes::untag(multi_arity_obj);
+
+    // Read num_arities from offset 1 (after header)
+    let num_arities_raw = unsafe { *((ptr + 8) as *const usize) };
+    let num_arities = BuiltInTypes::untag(num_arities_raw);
+
+    // Untag the arg_count
+    let arg_count = BuiltInTypes::untag(arg_count);
+
+    // Collect available arities for error message
+    let mut available_arities = Vec::new();
+
+    // Search for matching arity - first try exact match for non-variadic
+    for i in 0..num_arities {
+        let base_offset = 16 + i * 24; // header(8) + num_arities(8) + i * (3 * 8)
+        let arity = unsafe { *((ptr + base_offset) as *const usize) };
+        let arity = BuiltInTypes::untag(arity);
+        let fn_ptr = unsafe { *((ptr + base_offset + 8) as *const usize) };
+        let is_variadic = unsafe { *((ptr + base_offset + 16) as *const usize) };
+        let is_variadic = is_variadic == BuiltInTypes::true_value() as usize;
+
+        available_arities.push(if is_variadic {
+            format!("{}+", arity)
+        } else {
+            arity.to_string()
+        });
+
+        if !is_variadic && arity == arg_count {
+            return fn_ptr;
+        }
+    }
+
+    // Then try variadic match (arg_count >= min_arity)
+    for i in 0..num_arities {
+        let base_offset = 16 + i * 24;
+        let min_arity = unsafe { *((ptr + base_offset) as *const usize) };
+        let min_arity = BuiltInTypes::untag(min_arity);
+        let fn_ptr = unsafe { *((ptr + base_offset + 8) as *const usize) };
+        let is_variadic = unsafe { *((ptr + base_offset + 16) as *const usize) };
+        let is_variadic = is_variadic == BuiltInTypes::true_value() as usize;
+
+        if is_variadic && arg_count >= min_arity {
+            return fn_ptr;
+        }
+    }
+
+    // No matching arity found - throw a catchable ArityError
+    unsafe {
+        throw_runtime_error(
+            stack_pointer,
+            "ArityError",
+            format!(
+                "No matching arity for multi-arity function call with {} argument(s). Available arities: {}",
+                arg_count,
+                available_arities.join(", ")
+            ),
+        );
+    }
+}
+
 // It is very important that this isn't inlined
 // because other code is expecting that
 // If we inline, we need to remove a skip frame
@@ -4324,6 +4401,15 @@ impl Runtime {
         self.add_builtin_function("beagle.core/_println", println_value as *const u8, false, 1)?;
 
         self.add_builtin_function("beagle.core/_print", print_value as *const u8, false, 1)?;
+
+        // Multi-arity dispatch builtin (needs stack/frame pointer for throwing ArityError)
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/dispatch-multi-arity",
+            dispatch_multi_arity as *const u8,
+            true,
+            true,
+            4, // stack_pointer + frame_pointer + multi_arity_obj + arg_count
+        )?;
 
         // to_string now takes (stack_pointer, frame_pointer, value)
         self.add_builtin_function_with_fp(

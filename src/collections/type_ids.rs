@@ -43,3 +43,7 @@ pub const TYPE_ID_FUNCTION_OBJECT: u8 = 10;
 /// Type ID for PersistentSet struct (2 fields: count, root)
 /// Backed by PersistentMap internally (keys are elements, values are true)
 pub const TYPE_ID_PERSISTENT_SET: u8 = 28;
+
+/// Type ID for MultiArityFunction (dispatch structure for multi-arity functions)
+/// Layout: [num_arities] [entry0: arity, fn_ptr, is_variadic] [entry1: ...] ...
+pub const TYPE_ID_MULTI_ARITY_FUNCTION: u8 = 29;

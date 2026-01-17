@@ -9,12 +9,6 @@ fn main() {
     println(x)
 
     println(x[0])
-    // TODO: I want to make indexed operations
-    // work on strings.
-    // Right now, I am assuming persistent vectors
-    // I should definitely make this extensible.
-    // Given that, I think I need impl and/or protocols
-    // Protocols honestly probably make sense
 }
 
 // Expect

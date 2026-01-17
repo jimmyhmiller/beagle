@@ -4,7 +4,7 @@
 
 use crate::{
     Data,
-    ast::{Ast, FieldPattern, MatchArm, Pattern, TokenRange},
+    ast::{ArityCase, Ast, FieldPattern, MatchArm, Pattern, TokenRange},
     builtins::debugger,
 };
 use std::{error::Error, fmt};
@@ -1189,6 +1189,12 @@ impl Parser {
             }
             _ => None,
         };
+
+        // Check if this is a multi-arity function (fn name { ... })
+        if self.current_token() == Token::OpenCurly {
+            return self.parse_multi_arity_function(name, start_position);
+        }
+
         self.expect_open_paren()?;
         let (args, rest_param) = self.parse_args()?;
         self.expect_close_paren()?;
@@ -1196,6 +1202,84 @@ impl Parser {
         let end_position = self.position;
         Ok(Ast::Function {
             name,
+            args,
+            rest_param,
+            body,
+            token_range: TokenRange::new(start_position, end_position),
+        })
+    }
+
+    /// Parse a multi-arity function: fn name { () => expr (x) => expr (x, y) => expr }
+    fn parse_multi_arity_function(
+        &mut self,
+        name: Option<String>,
+        start_position: usize,
+    ) -> ParseResult<Ast> {
+        // We're at the opening {
+        self.move_to_next_non_whitespace();
+
+        let mut cases = Vec::new();
+
+        while self.current_token() != Token::CloseCurly {
+            let case = self.parse_arity_case()?;
+            cases.push(case);
+
+            // Skip whitespace/newlines between cases
+            while matches!(
+                self.current_token(),
+                Token::NewLine | Token::Spaces(_) | Token::Comment(_)
+            ) {
+                self.consume();
+            }
+        }
+
+        // Consume the closing }
+        self.move_to_next_non_whitespace();
+
+        let end_position = self.position;
+        Ok(Ast::MultiArityFunction {
+            name,
+            cases,
+            token_range: TokenRange::new(start_position, end_position),
+        })
+    }
+
+    /// Parse a single arity case: (args...) => body or (args...) => { body }
+    fn parse_arity_case(&mut self) -> ParseResult<ArityCase> {
+        let start_position = self.position;
+
+        // Parse the argument list
+        self.expect_open_paren()?;
+        let (args, rest_param) = self.parse_args()?;
+        self.expect_close_paren()?;
+
+        // Skip whitespace before '=>'
+        self.skip_whitespace();
+
+        // Expect '=>'
+        if !matches!(self.current_token(), Token::Arrow) {
+            return Err(ParseError::MissingToken {
+                expected: "'=>' after arity case arguments".to_string(),
+                position: self.position,
+            });
+        }
+        self.move_to_next_non_whitespace();
+
+        // Parse the body - either a single expression or a block
+        let body = if self.current_token() == Token::OpenCurly {
+            self.parse_block()?
+        } else {
+            // Single expression body
+            let expr = self.parse_expression(0, true, false)?.ok_or_else(|| {
+                ParseError::UnexpectedEof {
+                    expected: "expression after '=>'".to_string(),
+                }
+            })?;
+            vec![expr]
+        };
+
+        let end_position = self.position;
+        Ok(ArityCase {
             args,
             rest_param,
             body,

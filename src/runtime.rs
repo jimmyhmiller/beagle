@@ -2931,20 +2931,19 @@ impl Runtime {
     }
 
     pub fn get_binding(&self, namespace: usize, slot: usize) -> usize {
-        let namespace = self
+        let ns_obj = self
             .namespaces
             .namespaces
             .get(namespace)
             .expect("Namespace not found in get_binding - this is a fatal error");
-        let namespace = namespace
+        let ns = ns_obj
             .lock()
             .expect("Failed to lock namespace in get_binding - this is a fatal error");
-        let name = namespace
+        let name = ns
             .ids
             .get(slot)
             .expect("Namespace slot not found in get_binding - this is a fatal error");
-        *namespace
-            .bindings
+        *ns.bindings
             .get(name)
             .expect("Binding not found in namespace - this is a fatal error")
     }
@@ -3332,12 +3331,13 @@ impl Runtime {
                 let heap_object = HeapObject::from_tagged(value);
                 let type_id = heap_object.get_type_id();
                 match type_id {
-                    1 => "Array",             // Raw mutable array (type_id == 1)
-                    2 => "String",            // HeapObject string (type_id == 2)
-                    3 => "Keyword",           // Keyword type (type_id == 3)
-                    20 => "PersistentVector", // Rust-backed persistent vector
-                    22 => "PersistentMap",    // Rust-backed persistent map
-                    28 => "PersistentSet",    // Rust-backed persistent set
+                    1 => "Array",               // Raw mutable array (type_id == 1)
+                    2 => "String",              // HeapObject string (type_id == 2)
+                    3 => "Keyword",             // Keyword type (type_id == 3)
+                    20 => "PersistentVector",   // Rust-backed persistent vector
+                    22 => "PersistentMap",      // Rust-backed persistent map
+                    28 => "PersistentSet",      // Rust-backed persistent set
+                    29 => "MultiArityFunction", // Multi-arity function dispatch object
                     _ => {
                         // Custom struct (type_id == 0 or other) - use struct_id
                         let struct_type_id = heap_object.get_struct_id();

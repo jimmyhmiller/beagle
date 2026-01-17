@@ -96,6 +96,11 @@ let PersistentSet = Struct {
     id: -28
 }
 
+let MultiArityFunction = Struct {
+    name: "MultiArityFunction",
+    id: -29
+}
+
 // ============================================================================
 // Math Constants
 // ============================================================================
