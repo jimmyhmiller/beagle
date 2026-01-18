@@ -101,6 +101,11 @@ let MultiArityFunction = Struct {
     id: -29
 }
 
+let Regex = Struct {
+    name: "Regex",
+    id: -30
+}
+
 // ============================================================================
 // Math Constants
 // ============================================================================
@@ -1746,4 +1751,14 @@ fn set-subset-helper(elems1, s2, idx, len) {
 // into-set: Convert a collection to a set
 fn into-set(coll) {
     reduce(coll, #{}, fn(acc, elem) { rust-coll/set-add(acc, elem) })
+}
+
+// ============================================================================
+// Regex Protocol Implementations
+// ============================================================================
+
+extend Regex with Format {
+    fn format(regex, depth) {
+        "#regex"
+    }
 }

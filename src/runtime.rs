@@ -1,5 +1,6 @@
 use libloading::Library;
 use mmap_rs::{Mmap, MmapMut, MmapOptions};
+use regex::Regex;
 use std::{
     collections::HashMap,
     error::Error,
@@ -1244,6 +1245,10 @@ pub struct Runtime {
     /// Used when bindings are added from threads without a Beagle stack (e.g., compiler thread).
     /// Format: (namespace_id, slot, value)
     pending_heap_bindings: Mutex<Vec<(usize, usize, usize)>>,
+    /// Storage for compiled Regex objects.
+    /// Regexes are stored here and accessed by index.
+    /// The index is tagged as a special "Regex" type for Beagle.
+    pub compiled_regexes: Vec<Regex>,
 }
 
 pub fn create_stack_with_protected_page_after(stack_size: usize) -> MmapMut {
@@ -1344,6 +1349,7 @@ impl Runtime {
             default_exception_handler_fn: None,
             keyword_namespace: 0, // Will be set when first keyword is allocated
             pending_heap_bindings: Mutex::new(Vec::new()),
+            compiled_regexes: Vec::new(),
         }
     }
 
@@ -4325,6 +4331,7 @@ impl Runtime {
             "beagle.core/PersistentVector" => Some(20), // TYPE_ID_PERSISTENT_VEC
             "beagle.core/PersistentMap" => Some(22),    // TYPE_ID_PERSISTENT_MAP
             "beagle.core/PersistentSet" => Some(28),    // TYPE_ID_PERSISTENT_SET
+            "beagle.core/Regex" => Some(30),            // TYPE_ID_REGEX
             _ => None,
         };
 
