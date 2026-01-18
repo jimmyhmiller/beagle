@@ -4,7 +4,7 @@
 
 use crate::{
     Data,
-    ast::{ArityCase, Ast, FieldPattern, MatchArm, Pattern, TokenRange},
+    ast::{ArityCase, Ast, FieldPattern, MapFieldPattern, MapKey, MatchArm, Pattern, TokenRange},
     builtins::debugger,
 };
 use std::{error::Error, fmt};
@@ -1111,10 +1111,8 @@ impl Parser {
                 if self.peek_next_non_whitespace() == Token::Mut {
                     self.consume();
                     self.move_to_next_non_whitespace();
-                    let name_position = self.position;
-                    let name = self.expect_atom()?;
-                    self.consume();
-                    self.move_to_next_non_whitespace();
+                    let pattern = self.parse_binding_pattern()?;
+                    self.skip_whitespace();
                     self.expect_equal()?;
                     self.move_to_next_non_whitespace();
                     let value = self.parse_expression(0, true, true)?.ok_or_else(|| {
@@ -1124,14 +1122,13 @@ impl Parser {
                     })?;
                     let end_position = self.position;
                     return Ok(Some(Ast::LetMut {
-                        name: Box::new(Ast::Identifier(name, name_position)),
+                        pattern,
                         value: Box::new(value),
                         token_range: TokenRange::new(start_position, end_position),
                     }));
                 }
-                let name_position = self.position;
-                let name = self.expect_atom()?;
-                self.move_to_next_non_whitespace();
+                let pattern = self.parse_binding_pattern()?;
+                self.skip_whitespace();
                 self.expect_equal()?;
                 self.move_to_next_non_whitespace();
                 let value = self.parse_expression(0, true, true)?.ok_or_else(|| {
@@ -1141,7 +1138,7 @@ impl Parser {
                 })?;
                 let end_position = self.position;
                 Ok(Some(Ast::Let {
-                    name: Box::new(Ast::Identifier(name, name_position)),
+                    pattern,
                     value: Box::new(value),
                     token_range: TokenRange::new(start_position, end_position),
                 }))
@@ -1766,12 +1763,12 @@ impl Parser {
         self.current_token() == Token::Comma
     }
 
-    fn parse_args(&mut self) -> ParseResult<(Vec<String>, Option<String>)> {
+    fn parse_args(&mut self) -> ParseResult<(Vec<Pattern>, Option<String>)> {
         let mut result = Vec::new();
         let mut rest_param = None;
         self.skip_whitespace();
         while !self.at_end() && !self.is_close_paren() {
-            let (name, is_rest) = self.parse_arg()?;
+            let (pattern, is_rest) = self.parse_arg()?;
             if is_rest {
                 if rest_param.is_some() {
                     return Err(ParseError::InvalidDeclaration {
@@ -1779,7 +1776,15 @@ impl Parser {
                         position: self.position,
                     });
                 }
-                rest_param = Some(name);
+                // Rest params must be simple identifiers
+                if let Some(name) = pattern.as_identifier() {
+                    rest_param = Some(name.to_string());
+                } else {
+                    return Err(ParseError::InvalidDeclaration {
+                        message: "Rest parameter must be a simple identifier".to_string(),
+                        position: self.position,
+                    });
+                }
             } else {
                 if rest_param.is_some() {
                     return Err(ParseError::InvalidDeclaration {
@@ -1787,7 +1792,7 @@ impl Parser {
                         position: self.position,
                     });
                 }
-                result.push(name);
+                result.push(pattern);
             }
             self.skip_whitespace();
         }
@@ -1922,7 +1927,7 @@ impl Parser {
         }
     }
 
-    fn parse_arg(&mut self) -> ParseResult<(String, bool)> {
+    fn parse_arg(&mut self) -> ParseResult<(Pattern, bool)> {
         // Check for rest parameter syntax: ...name
         let is_rest = if self.current_token() == Token::DotDotDot {
             self.consume();
@@ -1932,20 +1937,241 @@ impl Parser {
             false
         };
 
+        let pattern = self.parse_binding_pattern()?;
+        self.skip_whitespace();
+        if !self.is_close_paren() {
+            self.expect_comma()?;
+        }
+        Ok((pattern, is_rest))
+    }
+
+    /// Parses a binding pattern for let bindings and function arguments.
+    /// Supports:
+    /// - Simple identifiers: `x`
+    /// - Struct destructuring: `Point { x, y }` or `Point { x: a, y: b }`
+    /// - Array destructuring: `[first, second, ...rest]`
+    fn parse_binding_pattern(&mut self) -> ParseResult<Pattern> {
+        self.skip_whitespace();
+        let start = self.position;
+
         match self.current_token() {
-            Token::Atom((start, end)) => {
-                let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
+            // Simple identifier
+            Token::Atom((atom_start, atom_end)) => {
+                let name = String::from_utf8(self.source.as_bytes()[atom_start..atom_end].to_vec())
+                    .map_err(|_| ParseError::InvalidUtf8 { position: atom_start })?;
                 self.consume();
                 self.skip_whitespace();
-                if !self.is_close_paren() {
-                    self.expect_comma()?;
+
+                // Check if it's struct destructuring: `Name { ... }`
+                if matches!(self.current_token(), Token::OpenCurly) {
+                    let fields = self.parse_field_patterns()?;
+                    Ok(Pattern::Struct {
+                        name,
+                        fields,
+                        token_range: TokenRange::new(start, self.position),
+                    })
+                } else {
+                    // Simple identifier pattern
+                    Ok(Pattern::Identifier {
+                        name,
+                        token_range: TokenRange::new(start, self.position),
+                    })
                 }
-                Ok((name, is_rest))
             }
-            _ => Err(ParseError::UnexpectedToken {
-                expected: "argument name".to_string(),
-                found: self.get_token_repr(),
+            // Array destructuring: [a, b, ...rest]
+            Token::OpenBracket => {
+                self.consume();
+                self.skip_whitespace();
+
+                let mut elements = vec![];
+                let mut rest = None;
+
+                while !matches!(self.current_token(), Token::CloseBracket) {
+                    // Check for rest pattern
+                    if matches!(self.current_token(), Token::DotDotDot) {
+                        self.consume();
+                        self.skip_whitespace();
+                        let rest_pattern = self.parse_binding_pattern()?;
+                        rest = Some(Box::new(rest_pattern));
+                        self.skip_whitespace();
+                        // Rest must be last
+                        if !matches!(self.current_token(), Token::CloseBracket) {
+                            return Err(ParseError::InvalidPattern {
+                                message: "Rest pattern must be last in array destructuring".to_string(),
+                                position: self.position,
+                            });
+                        }
+                        break;
+                    }
+
+                    let element_pattern = self.parse_binding_pattern()?;
+                    elements.push(element_pattern);
+                    self.skip_whitespace();
+
+                    if matches!(self.current_token(), Token::Comma) {
+                        self.consume();
+                        self.skip_whitespace();
+                    } else if !matches!(self.current_token(), Token::CloseBracket) {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "',' or ']'".to_string(),
+                            found: self.get_token_repr(),
+                            position: self.position,
+                        });
+                    }
+                }
+
+                // Consume ']'
+                if !matches!(self.current_token(), Token::CloseBracket) {
+                    return Err(ParseError::MissingToken {
+                        expected: "']' to close array pattern".to_string(),
+                        position: self.position,
+                    });
+                }
+                self.consume();
+
+                Ok(Pattern::Array {
+                    elements,
+                    rest,
+                    token_range: TokenRange::new(start, self.position),
+                })
+            }
+            // Map destructuring: { name, age } or { "key": value }
+            Token::OpenCurly => {
+                self.consume();
+                self.skip_whitespace();
+
+                let mut fields = vec![];
+
+                while !matches!(self.current_token(), Token::CloseCurly) {
+                    let field_start = self.position;
+
+                    match self.current_token() {
+                        // Keyword key syntax: { name } or { name: binding }
+                        Token::Atom((atom_start, atom_end)) => {
+                            let key_name = String::from_utf8(
+                                self.source.as_bytes()[atom_start..atom_end].to_vec(),
+                            )
+                            .map_err(|_| ParseError::InvalidUtf8 {
+                                position: atom_start,
+                            })?;
+                            self.consume();
+                            self.skip_whitespace();
+
+                            // Check for rename syntax: name: binding
+                            let binding_name = if matches!(self.current_token(), Token::Colon) {
+                                self.consume();
+                                self.skip_whitespace();
+
+                                if let Token::Atom((bind_start, bind_end)) = self.current_token() {
+                                    let binding = String::from_utf8(
+                                        self.source.as_bytes()[bind_start..bind_end].to_vec(),
+                                    )
+                                    .map_err(|_| ParseError::InvalidUtf8 {
+                                        position: bind_start,
+                                    })?;
+                                    self.consume();
+                                    self.skip_whitespace();
+                                    binding
+                                } else {
+                                    return Err(ParseError::InvalidPattern {
+                                        message: "Expected binding name after ':'".to_string(),
+                                        position: self.position,
+                                    });
+                                }
+                            } else {
+                                key_name.clone()
+                            };
+
+                            fields.push(MapFieldPattern {
+                                key: MapKey::Keyword(key_name),
+                                binding_name,
+                                token_range: TokenRange::new(field_start, self.position),
+                            });
+                        }
+                        // String key syntax: { "some-key": binding }
+                        Token::String((str_start, str_end)) => {
+                            // Strip quotes from string (start+1 to end-1)
+                            let key_string = String::from_utf8(
+                                self.source.as_bytes()[str_start + 1..str_end - 1].to_vec(),
+                            )
+                            .map_err(|_| ParseError::InvalidUtf8 {
+                                position: str_start,
+                            })?;
+                            self.consume();
+                            self.skip_whitespace();
+
+                            // String keys require the : binding syntax
+                            if !matches!(self.current_token(), Token::Colon) {
+                                return Err(ParseError::InvalidPattern {
+                                    message: "String keys in map destructuring require ': binding' syntax".to_string(),
+                                    position: self.position,
+                                });
+                            }
+                            self.consume();
+                            self.skip_whitespace();
+
+                            let binding_name = if let Token::Atom((bind_start, bind_end)) =
+                                self.current_token()
+                            {
+                                let binding = String::from_utf8(
+                                    self.source.as_bytes()[bind_start..bind_end].to_vec(),
+                                )
+                                .map_err(|_| ParseError::InvalidUtf8 {
+                                    position: bind_start,
+                                })?;
+                                self.consume();
+                                self.skip_whitespace();
+                                binding
+                            } else {
+                                return Err(ParseError::InvalidPattern {
+                                    message: "Expected binding name after ':'".to_string(),
+                                    position: self.position,
+                                });
+                            };
+
+                            fields.push(MapFieldPattern {
+                                key: MapKey::String(key_string),
+                                binding_name,
+                                token_range: TokenRange::new(field_start, self.position),
+                            });
+                        }
+                        _ => {
+                            return Err(ParseError::InvalidPattern {
+                                message: "Expected field name or string key in map pattern"
+                                    .to_string(),
+                                position: self.position,
+                            });
+                        }
+                    }
+
+                    // Allow comma or newline between fields
+                    if matches!(self.current_token(), Token::Comma) {
+                        self.consume();
+                        self.skip_whitespace();
+                    } else {
+                        self.skip_whitespace();
+                    }
+                }
+
+                // Consume '}'
+                if !matches!(self.current_token(), Token::CloseCurly) {
+                    return Err(ParseError::MissingToken {
+                        expected: "'}' to close map pattern".to_string(),
+                        position: self.position,
+                    });
+                }
+                self.consume();
+
+                Ok(Pattern::Map {
+                    fields,
+                    token_range: TokenRange::new(start, self.position),
+                })
+            }
+            _ => Err(ParseError::InvalidPattern {
+                message: format!(
+                    "Expected identifier or destructuring pattern, found {:?}",
+                    self.current_token()
+                ),
                 position: self.position,
             }),
         }

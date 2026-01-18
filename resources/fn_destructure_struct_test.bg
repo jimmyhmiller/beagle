@@ -1,0 +1,21 @@
+namespace fn_destructure_struct_test
+
+struct Point {
+    x
+    y
+}
+
+// Function with struct destructuring in parameter
+fn add_point(Point { x, y }) {
+    x + y
+}
+
+fn main() {
+    let p = Point { x: 15, y: 25 }
+    let result = add_point(p)
+    println(result)
+    "done"
+}
+
+// Expect
+// 40

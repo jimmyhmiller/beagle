@@ -1,0 +1,16 @@
+namespace let_destructure_map_test
+
+fn main() {
+    let m = {:name "Alice", :age 30}
+
+    // Destructure map by keyword keys
+    let { name, age } = m
+
+    println(name)
+    println(age)
+    "done"
+}
+
+// Expect
+// Alice
+// 30

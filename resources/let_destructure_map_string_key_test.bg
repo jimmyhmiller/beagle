@@ -1,0 +1,16 @@
+namespace let_destructure_map_string_key_test
+
+fn main() {
+    let m = {"user-name" "Charlie", "user-age" 35}
+
+    // Destructure with string keys
+    let { "user-name": name, "user-age": age } = m
+
+    println(name)
+    println(age)
+    "done"
+}
+
+// Expect
+// Charlie
+// 35

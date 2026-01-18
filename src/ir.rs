@@ -18,6 +18,7 @@ cfg_if::cfg_if! {
 use crate::common::Label;
 use crate::register_allocation::linear_scan::LinearScan;
 use crate::types::BuiltInTypes;
+use crate::pretty_print::PrettyPrint;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Encode, Decode)]
 pub enum Condition {

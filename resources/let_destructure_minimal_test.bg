@@ -1,0 +1,13 @@
+namespace let_destructure_minimal_test
+
+fn main() {
+    let arr = [10, 20]
+
+    // Manual destructuring to test
+    let a = nth(arr, 0)
+    let b = nth(arr, 1)
+
+    println(a)
+    println(b)
+    "done"
+}

@@ -1,0 +1,23 @@
+namespace let_destructure_struct_test
+
+struct Point {
+    x
+    y
+}
+
+fn main() {
+    let p = Point { x: 10, y: 20 }
+
+    // Destructure struct in let binding
+    let Point { x, y } = p
+
+    println(x)
+    println(y)
+    println(x + y)
+    "done"
+}
+
+// Expect
+// 10
+// 20
+// 30

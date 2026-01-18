@@ -36,8 +36,7 @@ pub enum Ast {
     },
     Function {
         name: Option<String>,
-        // TODO: Change this to a Vec<Ast>
-        args: Vec<String>,
+        args: Vec<Pattern>,
         rest_param: Option<String>,
         body: Vec<Ast>,
         token_range: TokenRange,
@@ -79,7 +78,7 @@ pub enum Ast {
     },
     FunctionStub {
         name: String,
-        args: Vec<String>,
+        args: Vec<Pattern>,
         rest_param: Option<String>,
         token_range: TokenRange,
     },
@@ -134,12 +133,12 @@ pub enum Ast {
         token_range: TokenRange,
     },
     Let {
-        name: Box<Ast>,
+        pattern: Pattern,
         value: Box<Ast>,
         token_range: TokenRange,
     },
     LetMut {
-        name: Box<Ast>,
+        pattern: Pattern,
         value: Box<Ast>,
         token_range: TokenRange,
     },
@@ -309,19 +308,96 @@ pub struct MatchArm {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Pattern {
+    /// Binds a value to an identifier: `x`, `foo`
+    Identifier {
+        name: String,
+        token_range: TokenRange,
+    },
+    /// Matches an enum variant: `Result.ok { value }`
     EnumVariant {
         enum_name: String,
         variant_name: String,
         fields: Vec<FieldPattern>,
         token_range: TokenRange,
     },
+    /// Matches a struct and destructures its fields: `Point { x, y }`
+    Struct {
+        name: String,
+        fields: Vec<FieldPattern>,
+        token_range: TokenRange,
+    },
+    /// Matches an array and destructures elements: `[first, second, ...rest]`
+    Array {
+        elements: Vec<Pattern>,
+        rest: Option<Box<Pattern>>,
+        token_range: TokenRange,
+    },
+    /// Matches a map and destructures by key: `{ name, age }` or `{ "key": value }`
+    Map {
+        fields: Vec<MapFieldPattern>,
+        token_range: TokenRange,
+    },
+    /// Matches a literal value: `1`, `"hello"`, `true`
     Literal {
         value: Box<Ast>,
         token_range: TokenRange,
     },
+    /// Matches anything without binding: `_`
     Wildcard {
         token_range: TokenRange,
     },
+}
+
+impl Pattern {
+    /// Returns the name if this is a simple identifier pattern
+    pub fn as_identifier(&self) -> Option<&str> {
+        match self {
+            Pattern::Identifier { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Returns true if this is a simple identifier pattern
+    pub fn is_identifier(&self) -> bool {
+        matches!(self, Pattern::Identifier { .. })
+    }
+
+    /// Get the token range for this pattern
+    pub fn token_range(&self) -> TokenRange {
+        match self {
+            Pattern::Identifier { token_range, .. }
+            | Pattern::EnumVariant { token_range, .. }
+            | Pattern::Struct { token_range, .. }
+            | Pattern::Array { token_range, .. }
+            | Pattern::Map { token_range, .. }
+            | Pattern::Literal { token_range, .. }
+            | Pattern::Wildcard { token_range, .. } => *token_range,
+        }
+    }
+
+    /// Collects all binding names introduced by this pattern
+    pub fn binding_names(&self) -> Vec<String> {
+        match self {
+            Pattern::Identifier { name, .. } => vec![name.clone()],
+            Pattern::EnumVariant { fields, .. } | Pattern::Struct { fields, .. } => {
+                fields
+                    .iter()
+                    .map(|f| f.binding_name.clone().unwrap_or_else(|| f.field_name.clone()))
+                    .collect()
+            }
+            Pattern::Array { elements, rest, .. } => {
+                let mut names: Vec<String> = elements.iter().flat_map(|p| p.binding_names()).collect();
+                if let Some(rest_pattern) = rest {
+                    names.extend(rest_pattern.binding_names());
+                }
+                names
+            }
+            Pattern::Map { fields, .. } => {
+                fields.iter().map(|f| f.binding_name.clone()).collect()
+            }
+            Pattern::Literal { .. } | Pattern::Wildcard { .. } => vec![],
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -331,11 +407,28 @@ pub struct FieldPattern {
     pub token_range: TokenRange,
 }
 
+/// The key type for map destructuring patterns
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum MapKey {
+    /// Keyword key: `{ name }` or `{ name: binding }` - looks up `:name`
+    Keyword(String),
+    /// String key: `{ "some-key": binding }` - looks up "some-key"
+    String(String),
+}
+
+/// A field pattern for map destructuring
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MapFieldPattern {
+    pub key: MapKey,
+    pub binding_name: String,
+    pub token_range: TokenRange,
+}
+
 /// Represents a single arity case in a multi-arity function.
 /// e.g., `(x, y) => x + y` in `fn foo { () => 0 (x, y) => x + y }`
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ArityCase {
-    pub args: Vec<String>,
+    pub args: Vec<Pattern>,
     pub rest_param: Option<String>,
     pub body: Vec<Ast>,
     pub token_range: TokenRange,
@@ -730,18 +823,31 @@ impl AstCompiler<'_> {
                     self.register_arg_location(0, local.clone());
                     self.insert_variable(context_name.to_string(), local);
                 }
-                for (index, arg) in args.iter().enumerate() {
+                for (index, arg_pattern) in args.iter().enumerate() {
                     let mut index = index;
                     if is_not_top_level {
                         index += 1;
                     }
                     let reg = self.ir.arg(index);
-                    let local = self.find_or_insert_local(&arg.clone());
                     let reg = self.ir.assign_new(reg);
-                    self.ir.store_local(local, reg.into());
-                    let local = VariableLocation::Local(local);
-                    self.register_arg_location(index, local.clone());
-                    self.insert_variable(arg.clone(), local);
+
+                    // Handle simple identifier patterns directly
+                    if let Some(arg_name) = arg_pattern.as_identifier() {
+                        let local = self.find_or_insert_local(arg_name);
+                        self.ir.store_local(local, reg.into());
+                        let local = VariableLocation::Local(local);
+                        self.register_arg_location(index, local.clone());
+                        self.insert_variable(arg_name.to_string(), local);
+                    } else {
+                        // For complex patterns, store in a temp local and then destructure
+                        let temp_name = format!("__arg_{}__", index);
+                        let local = self.find_or_insert_local(&temp_name);
+                        self.ir.store_local(local, reg.into());
+                        let local_var = VariableLocation::Local(local);
+                        self.register_arg_location(index, local_var);
+                        // Bind the pattern variables from the argument value
+                        self.bind_pattern_variables(arg_pattern, reg.into())?;
+                    }
                 }
 
                 // Handle rest parameter - build from raw arguments using uniform calling convention
@@ -1091,7 +1197,10 @@ impl AstCompiler<'_> {
 
                 // First: let mut __seq = seq(coll)
                 self.call_compile(&Ast::LetMut {
-                    name: Box::new(Ast::Identifier(seq_var.clone(), token_range.start)),
+                    pattern: Pattern::Identifier {
+                        name: seq_var.clone(),
+                        token_range: TokenRange::new(token_range.start, token_range.start),
+                    },
                     value: Box::new(Ast::Call {
                         name: "beagle.core/seq".to_string(),
                         args: vec![*collection.clone()],
@@ -1102,14 +1211,20 @@ impl AstCompiler<'_> {
 
                 // Second: let mut __first = true
                 self.call_compile(&Ast::LetMut {
-                    name: Box::new(Ast::Identifier(first_var.clone(), token_range.start)),
+                    pattern: Pattern::Identifier {
+                        name: first_var.clone(),
+                        token_range: TokenRange::new(token_range.start, token_range.start),
+                    },
                     value: Box::new(Ast::True(token_range.start)),
                     token_range,
                 })?;
 
                 // Third: let mut __result = null
                 self.call_compile(&Ast::LetMut {
-                    name: Box::new(Ast::Identifier(result_var.clone(), token_range.start)),
+                    pattern: Pattern::Identifier {
+                        name: result_var.clone(),
+                        token_range: TokenRange::new(token_range.start, token_range.start),
+                    },
                     value: Box::new(Ast::Null(token_range.start)),
                     token_range,
                 })?;
@@ -1159,7 +1274,10 @@ impl AstCompiler<'_> {
                     },
                     // let binding = first(__seq)
                     Ast::Let {
-                        name: Box::new(Ast::Identifier(binding.clone(), token_range.start)),
+                        pattern: Pattern::Identifier {
+                            name: binding.clone(),
+                            token_range: TokenRange::new(token_range.start, token_range.start),
+                        },
                         value: Box::new(Ast::Call {
                             name: "beagle.core/first".to_string(),
                             args: vec![Ast::Identifier(seq_var.clone(), token_range.start)],
@@ -2314,15 +2432,18 @@ impl AstCompiler<'_> {
                     name: name.clone(),
                 })
             }
-            Ast::Let { name, value, .. } | Ast::LetMut { name, value, .. } => {
+            Ast::Let { pattern, value, .. } | Ast::LetMut { pattern, value, .. } => {
                 let needs_boxing = self
                     .metadata
                     .get(ast)
                     .map(|m| m.needs_to_be_boxed)
                     .unwrap_or(false);
-                if let Ast::Identifier(name, _) = name.as_ref() {
+                let is_mutable = matches!(ast, Ast::LetMut { .. });
+
+                // Handle simple identifier pattern (most common case)
+                if let Some(name) = pattern.as_identifier() {
                     if self.environment_stack.len() == 1 {
-                        if matches!(ast, Ast::LetMut { .. }) {
+                        if is_mutable {
                             return Err(CompileError::GlobalMutableVariable);
                         }
 
@@ -2349,7 +2470,7 @@ impl AstCompiler<'_> {
                         if needs_boxing {
                             let boxed = self.call_compile(&Ast::StructCreation {
                                 name: "beagle.core/__Box__".to_string(),
-                                fields: vec![("value".to_string(), *value)],
+                                fields: vec![("value".to_string(), (*value).clone())],
                                 token_range: ast.token_range(),
                             })?;
                             self.ir.assign(reg, boxed);
@@ -2362,17 +2483,17 @@ impl AstCompiler<'_> {
                         let local_index = self.find_or_insert_local(name);
                         self.ir.store_local(local_index, reg.into());
 
-                        if matches!(ast, Ast::Let { .. }) {
+                        if !is_mutable {
                             self.insert_variable(
                                 name.to_string(),
                                 VariableLocation::Local(local_index),
                             );
-                        } else if matches!(ast, Ast::LetMut { .. }) && !needs_boxing {
+                        } else if is_mutable && !needs_boxing {
                             self.insert_variable(
                                 name.to_string(),
                                 VariableLocation::MutableLocal(local_index),
                             );
-                        } else if matches!(ast, Ast::LetMut { .. }) && needs_boxing {
+                        } else if is_mutable && needs_boxing {
                             self.insert_variable(
                                 name.to_string(),
                                 VariableLocation::BoxedMutableLocal(local_index),
@@ -2385,9 +2506,27 @@ impl AstCompiler<'_> {
                         Ok(reg.into())
                     }
                 } else {
-                    Err(CompileError::ExpectedIdentifier {
-                        got: format!("{:?}", name),
-                    })
+                    // Handle destructuring patterns
+                    if self.environment_stack.len() == 1 {
+                        return Err(CompileError::InternalError {
+                            message: "Destructuring patterns not allowed at global scope".to_string(),
+                        });
+                    }
+                    if is_mutable {
+                        return Err(CompileError::InternalError {
+                            message: "Destructuring patterns not allowed with let mut".to_string(),
+                        });
+                    }
+
+                    // Compile the value
+                    self.not_tail_position();
+                    let value_compiled = self.call_compile(&value)?;
+                    let value_reg = self.ir.assign_new(value_compiled);
+
+                    // Bind the pattern variables
+                    self.bind_pattern_variables(&pattern, value_reg.into())?;
+
+                    Ok(value_reg.into())
                 }
             }
             Ast::Assignment { name, value, .. } => {
@@ -3513,7 +3652,7 @@ impl AstCompiler<'_> {
                 }
             }
             Ast::Let {
-                name: _, value: _, ..
+                pattern: _, value: _, ..
             } => {}
             Ast::Namespace { name, .. } => {
                 let namespace_id = self.compiler.reserve_namespace(name.clone());
@@ -3723,12 +3862,14 @@ impl AstCompiler<'_> {
     fn find_mutable_vars_that_need_boxing(&mut self, ast: &Ast) {
         match ast {
             Ast::LetMut {
-                name,
+                pattern,
                 value,
                 token_range: _,
             } => {
-                self.add_mutable_variable(name, ast);
-
+                // For mutable variables, we only support simple identifier patterns currently
+                if let Some(name) = pattern.as_identifier() {
+                    self.add_mutable_variable_by_name(name, ast);
+                }
                 self.find_mutable_vars_that_need_boxing(value);
             }
 
@@ -3743,13 +3884,19 @@ impl AstCompiler<'_> {
 
             Ast::Function {
                 name,
-                args: _,
+                args,
                 rest_param: _,
                 body,
                 token_range: _,
             } => {
                 if let Some(name) = name {
                     self.add_variable_for_mutable_pass(name);
+                }
+                // Add all argument bindings
+                for arg_pattern in args.iter() {
+                    for binding_name in arg_pattern.binding_names() {
+                        self.add_variable_for_mutable_pass(&binding_name);
+                    }
                 }
                 self.track_function_mutable_variable_pass();
                 for expression in body.iter() {
@@ -3759,11 +3906,14 @@ impl AstCompiler<'_> {
             }
 
             Ast::Let {
-                name,
+                pattern,
                 value,
                 token_range: _,
             } => {
-                self.add_variable_for_mutable_pass(&name.get_string());
+                // Add all binding names from the pattern
+                for binding_name in pattern.binding_names() {
+                    self.add_variable_for_mutable_pass(&binding_name);
+                }
                 self.find_mutable_vars_that_need_boxing(value);
             }
 
@@ -4009,6 +4159,12 @@ impl AstCompiler<'_> {
                 }
                 self.track_function_mutable_variable_pass();
                 for case in cases.iter() {
+                    // Add all argument bindings for each arity case
+                    for arg_pattern in case.args.iter() {
+                        for binding_name in arg_pattern.binding_names() {
+                            self.add_variable_for_mutable_pass(&binding_name);
+                        }
+                    }
                     for expression in case.body.iter() {
                         self.find_mutable_vars_that_need_boxing(expression);
                     }
@@ -4021,6 +4177,15 @@ impl AstCompiler<'_> {
     fn add_mutable_variable(&mut self, name: &Ast, ast: &Ast) {
         self.mutable_pass_env_stack.last_mut().unwrap().insert(
             name.get_string(),
+            MutablePassInfo {
+                mutable_definition: Some(ast.clone()),
+            },
+        );
+    }
+
+    fn add_mutable_variable_by_name(&mut self, name: &str, ast: &Ast) {
+        self.mutable_pass_env_stack.last_mut().unwrap().insert(
+            name.to_string(),
             MutablePassInfo {
                 mutable_definition: Some(ast.clone()),
             },
@@ -4103,6 +4268,10 @@ impl AstCompiler<'_> {
         no_match_label: Label,
     ) -> Result<(), CompileError> {
         match pattern {
+            Pattern::Identifier { .. } => {
+                // Identifier patterns always match - they just bind the value
+                Ok(())
+            }
             Pattern::EnumVariant {
                 enum_name,
                 variant_name,
@@ -4140,6 +4309,70 @@ impl AstCompiler<'_> {
                 );
                 Ok(())
             }
+            Pattern::Struct { name, .. } => {
+                // Check if the value is a struct with the expected struct ID
+                let full_struct_name = self.get_full_struct_name(name);
+                let (expected_struct_id, _) =
+                    self.compiler.get_struct(&full_struct_name).ok_or_else(|| {
+                        CompileError::StructResolution {
+                            struct_name: full_struct_name.clone(),
+                        }
+                    })?;
+
+                // Untag the value before reading struct ID
+                let untagged_value = self.ir.untag(value_reg);
+
+                // Read the struct ID from the value
+                let struct_id_reg = self.ir.read_struct_id(untagged_value);
+
+                // Tag the struct ID before comparison (as Int)
+                let tagged_struct_id = self.ir.tag(struct_id_reg, BuiltInTypes::Int.get_tag());
+
+                // Create expected value as tagged int
+                let expected_value = BuiltInTypes::Int.tag(expected_struct_id as isize);
+                let expected_reg = self.ir.assign_new(Value::TaggedConstant(expected_value));
+
+                // Compare and jump if not equal
+                self.ir.jump_if(
+                    no_match_label,
+                    Condition::NotEqual,
+                    tagged_struct_id,
+                    expected_reg,
+                );
+                Ok(())
+            }
+            Pattern::Array { elements, rest, .. } => {
+                // Check that value is an array with at least `elements.len()` items
+                // If there's no rest pattern, it must be exactly that length
+                let min_length = elements.len();
+
+                // Get array length
+                let length_value = self.call_builtin("beagle.core/count", vec![value_reg])?;
+
+                if rest.is_some() {
+                    // Must have at least min_length elements
+                    let min_length_val = Value::TaggedConstant(BuiltInTypes::Int.tag(min_length as isize));
+                    let min_length_reg: Value = self.ir.assign_new(min_length_val).into();
+                    // Jump if length < min_length
+                    self.ir.jump_if(
+                        no_match_label,
+                        Condition::LessThan,
+                        length_value,
+                        min_length_reg,
+                    );
+                } else {
+                    // Must have exactly min_length elements
+                    let expected_length_val = Value::TaggedConstant(BuiltInTypes::Int.tag(min_length as isize));
+                    let expected_length_reg: Value = self.ir.assign_new(expected_length_val).into();
+                    self.ir.jump_if(
+                        no_match_label,
+                        Condition::NotEqual,
+                        length_value,
+                        expected_length_reg,
+                    );
+                }
+                Ok(())
+            }
             Pattern::Literal { value, .. } => {
                 // Compile the literal value
                 let literal_value = self.call_compile(value)?;
@@ -4170,6 +4403,19 @@ impl AstCompiler<'_> {
                 // Wildcard always matches - no test needed
                 Ok(())
             }
+            Pattern::Map { .. } => {
+                // Map patterns always match at runtime - we just extract fields
+                // Could add type check for map here if needed
+                Ok(())
+            }
+        }
+    }
+
+    fn get_full_struct_name(&self, struct_name: &str) -> String {
+        if struct_name.contains('/') {
+            struct_name.to_string()
+        } else {
+            format!("{}/{}", self.compiler.current_namespace_name(), struct_name)
         }
     }
 
@@ -4179,6 +4425,14 @@ impl AstCompiler<'_> {
         value_reg: Value,
     ) -> Result<(), CompileError> {
         match pattern {
+            Pattern::Identifier { name, .. } => {
+                // Simple binding - bind value to name
+                // Store in a local to preserve across function calls
+                let reg = self.ir.assign_new(value_reg);
+                let local_index = self.find_or_insert_local(name);
+                self.ir.store_local(local_index, reg.into());
+                self.insert_variable(name.clone(), VariableLocation::Local(local_index));
+            }
             Pattern::EnumVariant {
                 enum_name,
                 variant_name,
@@ -4238,6 +4492,144 @@ impl AstCompiler<'_> {
                     self.insert_variable(binding_name.clone(), location);
                 }
             }
+            Pattern::Struct { name, fields, .. } => {
+                // Get the struct definition to look up field indices by name
+                let full_struct_name = self.get_full_struct_name(name);
+                let (_, struct_def) =
+                    self.compiler.get_struct(&full_struct_name).ok_or_else(|| {
+                        CompileError::StructResolution {
+                            struct_name: full_struct_name.clone(),
+                        }
+                    })?;
+
+                // Clone the field names to avoid borrow checker issues
+                let struct_field_names = struct_def.fields.clone();
+
+                // Untag the value once before reading fields
+                let untagged_value = self.ir.untag(value_reg);
+
+                // Bind each field to a local variable
+                for field_pattern in fields.iter() {
+                    // Look up the actual field index in the struct definition
+                    let actual_field_idx = struct_field_names
+                        .iter()
+                        .position(|f| f == &field_pattern.field_name)
+                        .ok_or_else(|| CompileError::StructFieldNotDefined {
+                            struct_name: full_struct_name.clone(),
+                            field: field_pattern.field_name.clone(),
+                        })?;
+
+                    // Read the field from the value using the ACTUAL index
+                    let field_value = self.ir.read_field(
+                        untagged_value,
+                        Value::TaggedConstant(actual_field_idx as isize),
+                    );
+
+                    // Determine the variable name to bind to
+                    let binding_name = field_pattern
+                        .binding_name
+                        .as_ref()
+                        .unwrap_or(&field_pattern.field_name);
+
+                    // Convert Value to VariableLocation
+                    let location = match field_value {
+                        Value::Register(reg) => VariableLocation::Register(reg),
+                        _ => {
+                            let reg = self.ir.assign_new(field_value);
+                            VariableLocation::Register(reg)
+                        }
+                    };
+
+                    // Add to environment
+                    self.insert_variable(binding_name.clone(), location);
+                }
+            }
+            Pattern::Array { elements, rest, token_range } => {
+                // Store array in a let binding so it persists across function calls
+                // Generate a unique temp name
+                let array_temp_name = format!("__arr_{}__", token_range.start);
+
+                // First store the array value to a local
+                let array_local_idx = self.find_or_insert_local(&array_temp_name);
+                let array_reg = self.ir.assign_new(value_reg);
+                self.ir.store_local(array_local_idx, array_reg.into());
+                self.insert_variable(array_temp_name.clone(), VariableLocation::Local(array_local_idx));
+
+                // Bind each element by index using AST generation
+                // This ensures we go through the normal compilation path
+                for (idx, element_pattern) in elements.iter().enumerate() {
+                    let nth_call = Ast::Call {
+                        name: "beagle.core/nth".to_string(),
+                        args: vec![
+                            Ast::Identifier(array_temp_name.clone(), token_range.start),
+                            Ast::IntegerLiteral(idx as i64, token_range.start),
+                        ],
+                        token_range: *token_range,
+                    };
+
+                    self.not_tail_position();
+                    let element_value = self.call_compile(&nth_call)?;
+
+                    // Recursively bind the element pattern
+                    self.bind_pattern_variables(element_pattern, element_value)?;
+                }
+
+                // Bind rest if present (e.g., [a, b, ...rest])
+                if let Some(rest_pattern) = rest {
+                    // Generate AST for: drop(array_temp_name, elements.len())
+                    let drop_call = Ast::Call {
+                        name: "beagle.core/drop".to_string(),
+                        args: vec![
+                            Ast::Identifier(array_temp_name.clone(), token_range.start),
+                            Ast::IntegerLiteral(elements.len() as i64, token_range.start),
+                        ],
+                        token_range: *token_range,
+                    };
+
+                    self.not_tail_position();
+                    let rest_value = self.call_compile(&drop_call)?;
+
+                    // Recursively bind the rest pattern
+                    self.bind_pattern_variables(rest_pattern, rest_value)?;
+                }
+            }
+            Pattern::Map { fields, token_range } => {
+                // Store the map in a local so it persists across function calls
+                let map_temp_name = format!("__map_{}__", token_range.start);
+                let map_local_idx = self.find_or_insert_local(&map_temp_name);
+                let map_reg = self.ir.assign_new(value_reg);
+                self.ir.store_local(map_local_idx, map_reg.into());
+                self.insert_variable(map_temp_name.clone(), VariableLocation::Local(map_local_idx));
+
+                // Bind each field by key using get
+                for field in fields.iter() {
+                    // Generate the key AST based on key type
+                    let key_ast = match &field.key {
+                        MapKey::Keyword(name) => Ast::Keyword(name.clone(), token_range.start),
+                        MapKey::String(s) => Ast::String(s.clone(), token_range.start),
+                    };
+
+                    // Generate AST for: get(map_temp_name, key)
+                    let get_call = Ast::Call {
+                        name: "beagle.core/get".to_string(),
+                        args: vec![
+                            Ast::Identifier(map_temp_name.clone(), token_range.start),
+                            key_ast,
+                        ],
+                        token_range: *token_range,
+                    };
+
+                    self.not_tail_position();
+                    let field_value = self.call_compile(&get_call)?;
+
+                    // Bind the value to the binding name
+                    let binding_pattern = Pattern::Identifier {
+                        name: field.binding_name.clone(),
+                        token_range: field.token_range,
+                    };
+                    self.bind_pattern_variables(&binding_pattern, field_value)?;
+                }
+            }
             Pattern::Literal { .. } | Pattern::Wildcard { .. } => {
                 // Literals and wildcards don't bind variables
             }
@@ -4254,6 +4646,10 @@ impl AstCompiler<'_> {
 
         for arm in arms {
             match &arm.pattern {
+                Pattern::Identifier { .. } => {
+                    // Identifier patterns act like wildcards for exhaustiveness
+                    has_wildcard = true;
+                }
                 Pattern::EnumVariant {
                     enum_name,
                     variant_name,
@@ -4267,7 +4663,7 @@ impl AstCompiler<'_> {
                 Pattern::Wildcard { .. } => {
                     has_wildcard = true;
                 }
-                Pattern::Literal { .. } => {}
+                Pattern::Struct { .. } | Pattern::Array { .. } | Pattern::Literal { .. } | Pattern::Map { .. } => {}
             }
         }
 

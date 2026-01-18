@@ -1,0 +1,16 @@
+namespace fn_destructure_array_test
+
+// Function with array destructuring in parameter
+fn first_two([a, b, ...rest]) {
+    a + b
+}
+
+fn main() {
+    let arr = [10, 20, 30, 40]
+    let result = first_two(arr)
+    println(result)
+    "done"
+}
+
+// Expect
+// 30

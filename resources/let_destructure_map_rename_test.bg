@@ -1,0 +1,16 @@
+namespace let_destructure_map_rename_test
+
+fn main() {
+    let m = {:name "Bob", :age 42}
+
+    // Destructure with renaming
+    let { name: person_name, age: person_age } = m
+
+    println(person_name)
+    println(person_age)
+    "done"
+}
+
+// Expect
+// Bob
+// 42
