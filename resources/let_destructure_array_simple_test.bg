@@ -1,0 +1,18 @@
+namespace let_destructure_array_simple_test
+
+fn main() {
+    let arr = [10, 20]
+
+    // Simple array destructuring without rest
+    let [first, second] = arr
+
+    println(first)
+    println(second)
+    println(first + second)
+    "done"
+}
+
+// Expect
+// 10
+// 20
+// 30

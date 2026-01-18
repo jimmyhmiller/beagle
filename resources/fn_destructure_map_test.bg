@@ -1,0 +1,15 @@
+namespace fn_destructure_map_test
+
+fn add_coords({ x, y }) {
+    x + y
+}
+
+fn main() {
+    let point = {:x 10, :y 20}
+    let result = add_coords(point)
+    println(result)
+    "done"
+}
+
+// Expect
+// 30

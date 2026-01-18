@@ -1,0 +1,9 @@
+namespace array_destruct_simple
+
+fn main() {
+    let arr = [10, 20]
+    let [a, b] = arr
+    println(a)
+    println(b)
+    "done"
+}

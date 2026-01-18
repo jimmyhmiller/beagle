@@ -1,0 +1,17 @@
+namespace array_destruct_manual
+
+fn main() {
+    let arr = [10, 20]
+
+    // This is what bind_pattern_variables should generate:
+    // 1. Store arr in a local
+    // 2. Load arr, call nth with index 0, store result in local for a
+    // 3. Load arr, call nth with index 1, store result in local for b
+
+    let a = nth(arr, 0)
+    let b = nth(arr, 1)
+
+    println(a)
+    println(b)
+    "done"
+}

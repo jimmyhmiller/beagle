@@ -1,0 +1,17 @@
+namespace array_nth_test
+
+fn main() {
+    let arr = [10, 20, 30]
+
+    // Call nth twice in sequence without destructuring
+    let a = nth(arr, 0)
+    let b = nth(arr, 1)
+
+    println(a)
+    println(b)
+    "done"
+}
+
+// Expect
+// 10
+// 20

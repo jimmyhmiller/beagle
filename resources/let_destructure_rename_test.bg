@@ -1,0 +1,21 @@
+namespace let_destructure_rename_test
+
+struct Person {
+    name
+    age
+}
+
+fn main() {
+    let p = Person { name: "Alice", age: 30 }
+
+    // Destructure with renaming
+    let Person { name: person_name, age: person_age } = p
+
+    println(person_name)
+    println(person_age)
+    "done"
+}
+
+// Expect
+// Alice
+// 30

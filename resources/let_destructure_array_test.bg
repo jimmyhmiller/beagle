@@ -1,0 +1,20 @@
+namespace let_destructure_array_test
+
+fn main() {
+    let arr = [1, 2, 3, 4, 5]
+
+    // Destructure array in let binding
+    let [first, second, ...rest] = arr
+
+    println(first)
+    println(second)
+    println(count(rest))
+    println(nth(rest, 0))
+    "done"
+}
+
+// Expect
+// 1
+// 2
+// 3
+// 3

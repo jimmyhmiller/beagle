@@ -1,0 +1,17 @@
+namespace let_destructure_array_debug_test
+
+fn main() {
+    let arr = [10, 20]
+
+    println("Array created")
+    println(nth(arr, 0))
+    println(nth(arr, 1))
+
+    // Simple array destructuring without rest
+    let [first, second] = arr
+
+    println("After destructure")
+    println(first)
+    println(second)
+    "done"
+}

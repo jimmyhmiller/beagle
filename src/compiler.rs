@@ -1,6 +1,6 @@
 use crate::{
     CommandLineArguments,
-    ast::{Ast, TokenRange},
+    ast::{Ast, Pattern, TokenRange},
     backend::{Backend, CodegenBackend},
     code_memory::CodeAllocator,
     debug_only,
@@ -1023,7 +1023,13 @@ impl Compiler {
                 function_name: full_method_name.clone(),
             }
         })?;
-        let args: Vec<String> = (0..function.number_of_args)
+        let args: Vec<Pattern> = (0..function.number_of_args)
+            .map(|x| Pattern::Identifier {
+                name: format!("arg{}", x),
+                token_range: TokenRange::new(0, 0),
+            })
+            .collect();
+        let args_as_strings: Vec<String> = (0..function.number_of_args)
             .map(|x| format!("arg{}", x))
             .collect();
 
@@ -1038,7 +1044,7 @@ impl Compiler {
             &protocol_name,
             &method_name,
             default_method.as_ref(),
-            args.clone(),
+            args_as_strings.clone(),
         ) {
             vec![optimized]
         } else {
@@ -1046,7 +1052,7 @@ impl Compiler {
             vec![self.build_method_if_chain(
                 default_method.as_ref(),
                 protocol_methods,
-                args.clone(),
+                args_as_strings.clone(),
             )]
         };
 
