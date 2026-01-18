@@ -47,3 +47,7 @@ pub const TYPE_ID_PERSISTENT_SET: u8 = 28;
 /// Type ID for MultiArityFunction (dispatch structure for multi-arity functions)
 /// Layout: [num_arities] [entry0: arity, fn_ptr, is_variadic] [entry1: ...] ...
 pub const TYPE_ID_MULTI_ARITY_FUNCTION: u8 = 29;
+
+/// Type ID for Regex (compiled regular expression)
+/// The heap object stores an index into Runtime::compiled_regexes
+pub const TYPE_ID_REGEX: u8 = 30;
