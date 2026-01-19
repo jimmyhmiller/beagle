@@ -18,7 +18,6 @@ cfg_if::cfg_if! {
 use crate::common::Label;
 use crate::register_allocation::linear_scan::LinearScan;
 use crate::types::BuiltInTypes;
-use crate::pretty_print::PrettyPrint;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Encode, Decode)]
 pub enum Condition {
@@ -180,6 +179,12 @@ pub enum Instruction {
     Throw(Value, usize),                       // value, builtin_fn_ptr
     ReadArgCount(Value), // Read arg count register (X9/R10) for variadic functions
     Label(Label),
+    // Delimited continuation instructions
+    PushPromptHandler(Label, Value, usize), // prompt_handler_label, result_local, builtin_fn_ptr
+    PopPromptHandler(Value, usize),         // result_value, builtin_fn_ptr
+    LoadLabelAddress(Value, Label), // dest, label - loads the address of a label into a register
+    CaptureContinuation(Value, Label, usize, usize), // dest, resume_label, result_local_index, builtin_fn_ptr
+    ReturnFromShift(Value, usize), // value, builtin_fn_ptr - calls return_from_shift with current SP/FP
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -518,6 +523,21 @@ impl Instruction {
             Instruction::ReadArgCount(a) => {
                 get_register!(a)
             }
+            Instruction::PushPromptHandler(_, local, _) => {
+                get_register!(local)
+            }
+            Instruction::PopPromptHandler(result, _) => {
+                get_register!(result)
+            }
+            Instruction::LoadLabelAddress(dest, _) => {
+                get_register!(dest)
+            }
+            Instruction::CaptureContinuation(dest, _, _, _) => {
+                get_register!(dest)
+            }
+            Instruction::ReturnFromShift(value, _) => {
+                get_register!(value)
+            }
         }
     }
 
@@ -646,6 +666,21 @@ impl Instruction {
             }
             Instruction::PopExceptionHandler(_) => {}
             Instruction::Throw(value, _) => {
+                replace_register!(value, old_register, new_register);
+            }
+            Instruction::PushPromptHandler(_, value, _) => {
+                replace_register!(value, old_register, new_register);
+            }
+            Instruction::PopPromptHandler(result, _) => {
+                replace_register!(result, old_register, new_register);
+            }
+            Instruction::LoadLabelAddress(dest, _) => {
+                replace_register!(dest, old_register, new_register);
+            }
+            Instruction::CaptureContinuation(dest, _, _, _) => {
+                replace_register!(dest, old_register, new_register);
+            }
+            Instruction::ReturnFromShift(value, _) => {
                 replace_register!(value, old_register, new_register);
             }
         }
@@ -2216,6 +2251,116 @@ impl Ir {
                     backend.call_builtin(fn_ptr);
                     // Note: execution never continues past this point
                 }
+                Instruction::PushPromptHandler(label, result_local, builtin_fn) => {
+                    // Call push_prompt builtin
+                    // Arguments: (handler_address, result_local_offset, link_register, stack_pointer, frame_pointer)
+
+                    // Get the backend label for the prompt handler
+                    let prompt_label = ir_label_to_lang_label.get(label).unwrap();
+
+                    // Load the address of the prompt handler label into arg 0
+                    backend.load_label_address(backend.arg(0), *prompt_label);
+
+                    // Load result_local offset into arg 1
+                    let local_index = result_local.as_local();
+                    let local_offset = backend.get_local_byte_offset(local_index);
+                    backend.mov_64(backend.arg(1), local_offset);
+
+                    // Load return address into arg 2
+                    backend.load_return_address(backend.arg(2));
+
+                    // Get stack pointer into arg 3
+                    backend.get_stack_pointer_imm(backend.arg(3), 0);
+
+                    // Copy frame pointer to arg 4
+                    backend.mov_reg(backend.arg(4), backend.frame_pointer());
+
+                    // Call the push_prompt builtin
+                    let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
+                    backend.call_builtin(fn_ptr);
+                }
+                Instruction::PopPromptHandler(result_value, builtin_fn) => {
+                    // Call pop_prompt builtin with result value as argument
+                    // arg0 = stack_pointer, arg1 = frame_pointer, arg2 = result_value
+
+                    // Get stack pointer into arg0
+                    backend.get_stack_pointer_imm(backend.arg(0), 0);
+
+                    // Get frame pointer into arg1
+                    backend.mov_reg(backend.arg(1), backend.frame_pointer());
+
+                    // Get result value into arg2
+                    let result_reg = self.value_to_register(result_value, backend);
+                    backend.mov_reg(backend.arg(2), result_reg);
+
+                    let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
+                    backend.call_builtin(fn_ptr);
+                }
+                Instruction::LoadLabelAddress(dest, label) => {
+                    // Load the address of a label into a register
+                    let dest_reg = self.value_to_register(dest, backend);
+                    let backend_label = ir_label_to_lang_label.get(label).unwrap();
+                    backend.load_label_address(dest_reg, *backend_label);
+                }
+                Instruction::CaptureContinuation(
+                    dest,
+                    resume_label,
+                    result_local_index,
+                    builtin_fn,
+                ) => {
+                    // Call capture_continuation builtin
+                    // Arguments: (stack_pointer, frame_pointer, resume_address, result_local_offset)
+
+                    // Get current stack pointer into arg 0
+                    backend.get_stack_pointer_imm(backend.arg(0), 0);
+
+                    // Get current frame pointer into arg 1
+                    backend.mov_reg(backend.arg(1), backend.frame_pointer());
+
+                    // Load address of resume label into arg 2
+                    let resume_backend_label = ir_label_to_lang_label.get(resume_label).unwrap();
+                    backend.load_label_address(backend.arg(2), *resume_backend_label);
+
+                    // Load result_local byte offset into arg 3 (as signed value)
+                    let local_offset = backend.get_local_byte_offset(*result_local_index);
+                    backend.mov_64(backend.arg(3), local_offset);
+
+                    // Call the builtin
+                    let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
+                    backend.call_builtin(fn_ptr);
+
+                    // Store result in dest
+                    let dest_spill = self.dest_spill(dest);
+                    let dest_reg = match dest {
+                        Value::Register(register) => backend.register_from_index(register.index),
+                        Value::Spill(_, _) => backend.temporary_register(),
+                        _ => panic!("Unexpected dest type for CaptureContinuation: {:?}", dest),
+                    };
+                    backend.mov_reg(dest_reg, backend.ret_reg());
+                    self.store_spill(dest_reg, dest_spill, backend);
+                    if matches!(dest, Value::Spill(_, _)) {
+                        backend.free_temporary_register(dest_reg);
+                    }
+                }
+                Instruction::ReturnFromShift(value, builtin_fn) => {
+                    // Call return_from_shift builtin (does not return)
+                    // Arguments: (stack_pointer, frame_pointer, value)
+
+                    // Get current stack pointer into arg 0
+                    backend.get_stack_pointer_imm(backend.arg(0), 0);
+
+                    // Get current frame pointer into arg 1
+                    backend.mov_reg(backend.arg(1), backend.frame_pointer());
+
+                    // Load value into arg 2
+                    let value_reg = self.value_to_register(value, backend);
+                    backend.mov_reg(backend.arg(2), value_reg);
+
+                    // Call the builtin (does not return)
+                    let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
+                    backend.call_builtin(fn_ptr);
+                    // Note: execution never continues past this point
+                }
             }
             let end_machine_code = backend.current_position();
             self.ir_to_machine_code_range.push((
@@ -2254,6 +2399,45 @@ impl Ir {
     pub fn throw_value(&mut self, value: Value, builtin_fn: usize) {
         self.instructions
             .push(Instruction::Throw(value, builtin_fn));
+    }
+
+    pub fn push_prompt_handler(&mut self, handler: Label, result_local: Value, builtin_fn: usize) {
+        self.instructions.push(Instruction::PushPromptHandler(
+            handler,
+            result_local,
+            builtin_fn,
+        ));
+    }
+
+    pub fn pop_prompt_handler(&mut self, result_value: Value, builtin_fn: usize) {
+        self.instructions
+            .push(Instruction::PopPromptHandler(result_value, builtin_fn));
+    }
+
+    pub fn load_label_address(&mut self, dest: VirtualRegister, label: Label) {
+        self.instructions
+            .push(Instruction::LoadLabelAddress(dest.into(), label));
+    }
+
+    pub fn capture_continuation(
+        &mut self,
+        resume_label: Label,
+        result_local_index: usize,
+        builtin_fn: usize,
+    ) -> Value {
+        let dest = self.volatile_register();
+        self.instructions.push(Instruction::CaptureContinuation(
+            dest.into(),
+            resume_label,
+            result_local_index,
+            builtin_fn,
+        ));
+        dest.into()
+    }
+
+    pub fn return_from_shift(&mut self, value: Value, builtin_fn: usize) {
+        self.instructions
+            .push(Instruction::ReturnFromShift(value, builtin_fn));
     }
 
     pub fn load_string_constant(&mut self, string_constant: Value) -> Value {

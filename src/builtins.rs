@@ -891,10 +891,13 @@ extern "C" fn property_access(
 /// - Heap objects with type_id > 0 (Array=1, String=2, Keyword=3): high bit marker + type_id
 /// - Heap objects with type_id = 0 (structs): struct_id from type_data (tagged)
 extern "C" fn protocol_dispatch(
+    stack_pointer: usize,
+    frame_pointer: usize,
     first_arg: usize,
     cache_location: usize,
     dispatch_table_ptr: usize,
 ) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
     let type_id = if BuiltInTypes::is_heap_pointer(first_arg) {
         let heap_obj = HeapObject::from_tagged(first_arg);
         let header_type_id = heap_obj.get_type_id();
@@ -937,10 +940,37 @@ extern "C" fn protocol_dispatch(
     };
 
     if fn_ptr == 0 {
-        panic!(
-            "Protocol dispatch failed: no implementation found for type_id={:#x}",
-            type_id
-        );
+        // Get a string representation of the value for the error message
+        let runtime = get_runtime().get_mut();
+        let value_repr = runtime
+            .get_repr(first_arg, 0)
+            .unwrap_or_else(|| "<unknown>".to_string());
+
+        // Get type name for better error message
+        let type_name = if type_id & 0x8000_0000_0000_0000 != 0 {
+            let primitive_index = type_id & 0x7FFF_FFFF_FFFF_FFFF;
+            match primitive_index {
+                1 => "Array",
+                2 => "String",
+                3 => "Keyword",
+                16 => "Int",
+                17 => "Float",
+                19 => "Bool",
+                _ => "Unknown",
+            }
+        } else {
+            "Struct"
+        };
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "TypeError",
+                format!(
+                    "Function not implemented for {} value: {}",
+                    type_name, value_repr
+                ),
+            );
+        }
     }
 
     // Update cache
@@ -4309,6 +4339,618 @@ pub unsafe fn throw_runtime_error(stack_pointer: usize, kind: &str, message: Str
     }
 }
 
+// ============================================================================
+// Delimited Continuation Builtins
+// ============================================================================
+
+/// Push a prompt handler for delimited continuations.
+/// Similar to push_exception_handler but for continuation capture.
+pub unsafe extern "C" fn push_prompt_runtime(
+    handler_address: usize,
+    result_local: isize,
+    link_register: usize,
+    stack_pointer: usize,
+    frame_pointer: usize,
+) -> usize {
+    print_call_builtin(get_runtime().get(), "push_prompt");
+    let runtime = get_runtime().get_mut();
+
+    let handler = crate::runtime::PromptHandler {
+        handler_address,
+        stack_pointer,
+        frame_pointer,
+        link_register,
+        result_local,
+    };
+
+    runtime.push_prompt_handler(handler);
+    BuiltInTypes::null_value() as usize
+}
+
+/// Pop the current prompt handler.
+/// If there's an invocation return point (continuation was invoked), returns via
+/// return_from_shift_runtime to enable multi-shot continuations.
+pub unsafe extern "C" fn pop_prompt_runtime(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    result_value: usize,
+) -> usize {
+    print_call_builtin(get_runtime().get(), "pop_prompt");
+    let runtime = get_runtime().get_mut();
+    let thread_id = std::thread::current().id();
+
+    // Check if there's an invocation return point (meaning we're completing
+    // a continuation body that was invoked via k(value)).
+    // If so, we should return through return_from_shift_runtime to enable multi-shot.
+    if let Some(return_points) = runtime.invocation_return_points.get(&thread_id) {
+        if !return_points.is_empty() {
+            // Don't pop the prompt handler - the continuation might be invoked again.
+            // Instead, route through return_from_shift_runtime which will return to
+            // where k() was called.
+            return_from_shift_runtime(stack_pointer, frame_pointer, result_value);
+        }
+    }
+
+    // Normal path - no continuation invocation, just pop and return
+    runtime.pop_prompt_handler();
+    BuiltInTypes::null_value() as usize
+}
+
+/// Capture a continuation up to the nearest prompt.
+/// This captures the stack segment and creates a continuation object.
+///
+/// Arguments:
+/// - stack_pointer: current SP
+/// - frame_pointer: current FP
+/// - resume_address: where to resume when continuation is invoked
+/// - result_local_offset: offset where the invoked value should be stored
+///
+/// Returns: a tagged continuation index that can be invoked later
+pub unsafe extern "C" fn capture_continuation_runtime(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    resume_address: usize,
+    result_local_offset: isize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(get_runtime().get(), "capture_continuation");
+    let runtime = get_runtime().get_mut();
+
+    // Pop the prompt handler to get the delimiter information
+    let prompt = match runtime.pop_prompt_handler() {
+        Some(p) => p,
+        None => {
+            // No prompt found - this is an error
+            drop(runtime);
+            throw_runtime_error(
+                stack_pointer,
+                "ContinuationError",
+                "shift without enclosing reset".to_string(),
+            );
+        }
+    };
+
+    // Calculate stack segment size (from current SP to prompt's SP)
+    let prompt_sp = prompt.stack_pointer;
+
+    // Stack grows downward, so current SP < prompt SP
+    let stack_size = if prompt_sp >= stack_pointer {
+        prompt_sp - stack_pointer
+    } else {
+        // This shouldn't happen in normal operation
+        0
+    };
+
+    // Copy the stack segment
+    let mut stack_segment = vec![0u8; stack_size];
+    if stack_size > 0 {
+        std::ptr::copy_nonoverlapping(
+            stack_pointer as *const u8,
+            stack_segment.as_mut_ptr(),
+            stack_size,
+        );
+    }
+
+    // Create the captured continuation
+    let continuation = crate::runtime::CapturedContinuation {
+        stack_segment,
+        original_sp: stack_pointer,
+        original_fp: frame_pointer,
+        resume_address,
+        result_local: result_local_offset,
+        prompt,
+    };
+
+    // Store the continuation and get its index
+    let cont_index = runtime.store_captured_continuation(continuation);
+
+    let tagged = BuiltInTypes::Int.tag(cont_index as isize) as usize;
+
+    // Return the continuation index tagged as a special type
+    // We'll use a simple integer tag for now - the index can be used to invoke the continuation
+    // For a proper implementation, we'd create a heap object wrapping this
+    tagged
+}
+
+/// Return from shift body to the enclosing reset.
+/// This pops the prompt and jumps to the prompt handler with the given value.
+pub unsafe extern "C" fn return_from_shift_runtime(
+    _stack_pointer: usize,
+    _frame_pointer: usize,
+    value: usize,
+) -> ! {
+    print_call_builtin(get_runtime().get(), "return_from_shift");
+
+    let runtime = get_runtime().get_mut();
+    let thread_id = std::thread::current().id();
+
+    // Check if there's an invocation return point (multi-shot continuation case).
+    // If a continuation was invoked via k(value), we should return to where k() was called,
+    // not to the original prompt handler.
+    if let Some(return_points) = runtime.invocation_return_points.get_mut(&thread_id) {
+        if let Some(return_point) = return_points.pop() {
+            let new_sp = return_point.stack_pointer;
+            let new_fp = return_point.frame_pointer;
+            let return_address = return_point.return_address;
+            let callee_saved = return_point.callee_saved_regs;
+
+            // CRITICAL for multi-shot continuations: Restore the shift body's stack frame.
+            // The continuation body may have written to stack locations that overlap with
+            // the shift body's frame (e.g., the result_local slot where k is stored).
+            // We must restore the original frame contents so that the shift body can
+            // continue to access its local variables (including k for subsequent calls).
+            let saved_frame = &return_point.saved_stack_frame;
+            if !saved_frame.is_empty() {
+                std::ptr::copy_nonoverlapping(
+                    saved_frame.as_ptr(),
+                    new_sp as *mut u8,
+                    saved_frame.len(),
+                );
+            }
+
+            // Restore callee-saved registers and return to the call site
+            cfg_if::cfg_if! {
+                if #[cfg(target_arch = "x86_64")] {
+                    // x86-64 callee-saved: rbx, r12-r15
+                    asm!(
+                        // Restore callee-saved registers
+                        "mov rbx, [{4}]",
+                        "mov r12, [{4} + 8]",
+                        "mov r13, [{4} + 16]",
+                        "mov r14, [{4} + 24]",
+                        "mov r15, [{4} + 32]",
+                        // Restore stack state and return
+                        "mov rsp, {0}",
+                        "mov rbp, {1}",
+                        "mov rax, {2}",
+                        "jmp {3}",
+                        in(reg) new_sp,
+                        in(reg) new_fp,
+                        in(reg) value,
+                        in(reg) return_address,
+                        in(reg) callee_saved.as_ptr(),
+                        options(noreturn)
+                    );
+                } else {
+                    // ARM64 callee-saved: x19-x28
+                    // Use explicit register constraints to avoid conflicts.
+                    // We put inputs in specific registers that won't be clobbered
+                    // before we use them.
+                    asm!(
+                        // Restore callee-saved registers from array (x9 has the pointer)
+                        "ldr x19, [x9]",
+                        "ldr x20, [x9, #8]",
+                        "ldr x21, [x9, #16]",
+                        "ldr x22, [x9, #24]",
+                        "ldr x23, [x9, #32]",
+                        "ldr x24, [x9, #40]",
+                        "ldr x25, [x9, #48]",
+                        "ldr x26, [x9, #56]",
+                        "ldr x27, [x9, #64]",
+                        "ldr x28, [x9, #72]",
+                        // Restore stack state and return
+                        // x10=sp, x11=fp, x12=value, x13=return_addr
+                        "mov sp, x10",
+                        "mov x29, x11",
+                        "mov x0, x12",
+                        "br x13",
+                        in("x9") callee_saved.as_ptr(),
+                        in("x10") new_sp,
+                        in("x11") new_fp,
+                        in("x12") value,
+                        in("x13") return_address,
+                        options(noreturn)
+                    );
+                }
+            }
+        }
+    }
+
+    // No invocation return point - fall back to original behavior (return to prompt handler)
+    // This happens when shift body doesn't invoke the continuation at all.
+    let continuations = runtime.captured_continuations.get(&thread_id);
+
+    if let Some(conts) = continuations {
+        if let Some(last_cont) = conts.last() {
+            let prompt = &last_cont.prompt;
+            let handler_address = prompt.handler_address;
+            let new_sp = prompt.stack_pointer;
+            let new_fp = prompt.frame_pointer;
+            let new_lr = prompt.link_register;
+            let result_local_offset = prompt.result_local;
+
+            // Store the value in the result local
+            let result_ptr = (new_fp as isize).wrapping_add(result_local_offset) as *mut usize;
+            // SAFETY: result_ptr points to a valid stack location
+            unsafe {
+                *result_ptr = value;
+            }
+
+            // Jump to the prompt handler with restored SP, FP, and LR
+            cfg_if::cfg_if! {
+                if #[cfg(target_arch = "x86_64")] {
+                    let _ = new_lr;
+                    asm!(
+                        "mov rsp, {0}",
+                        "mov rbp, {1}",
+                        "jmp {2}",
+                        in(reg) new_sp,
+                        in(reg) new_fp,
+                        in(reg) handler_address,
+                        options(noreturn)
+                    );
+                } else {
+                    asm!(
+                        "mov sp, {0}",
+                        "mov x29, {1}",
+                        "mov x30, {2}",
+                        "br {3}",
+                        in(reg) new_sp,
+                        in(reg) new_fp,
+                        in(reg) new_lr,
+                        in(reg) handler_address,
+                        options(noreturn)
+                    );
+                }
+            }
+        }
+    }
+
+    // No continuation found - panic
+    panic!("return_from_shift called without captured continuation");
+}
+
+/// Invoke a captured continuation with a value.
+/// This restores the stack segment and resumes execution.
+/// The callee_saved_regs parameter contains the callee-saved registers that Beagle was using
+/// when it called k() - these are saved at the very start of continuation_trampoline.
+pub unsafe extern "C" fn invoke_continuation_runtime(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    cont_index: usize,
+    value: usize,
+    callee_saved_regs: [usize; 10],
+) -> ! {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(get_runtime().get(), "invoke_continuation");
+
+    // Untag the continuation index
+    let cont_index = BuiltInTypes::untag(cont_index);
+
+    let runtime = get_runtime().get_mut();
+
+    // Clone the captured continuation (multi-shot support)
+    let continuation = match runtime.clone_captured_continuation(cont_index) {
+        Some(c) => c,
+        None => {
+            drop(runtime);
+            throw_runtime_error(
+                stack_pointer,
+                "ContinuationError",
+                "invalid continuation".to_string(),
+            );
+        }
+    };
+
+    // For multi-shot continuations: push an invocation return point.
+    // When the continuation body completes (via return_from_shift_runtime),
+    // it will pop this and return here with the result value.
+    //
+    // We need to get the return address for where k() was called in Beagle code.
+    // The call chain is: Beagle code -> continuation_trampoline -> invoke_continuation_runtime
+    //
+    // Stack frame chain (on ARM64):
+    // - invoke_continuation_runtime's FP (rust_fp) points to continuation_trampoline's FP
+    // - continuation_trampoline's FP (trampoline_fp) points to Beagle's FP
+    // - continuation_trampoline's FP+8 has the return address to Beagle code
+    let rust_fp = get_current_rust_frame_pointer();
+    let trampoline_fp = unsafe { *(rust_fp as *const usize) }; // continuation_trampoline's FP
+    let beagle_fp = unsafe { *(trampoline_fp as *const usize) }; // Beagle caller's FP
+    let beagle_return_address = unsafe { *((trampoline_fp + 8) as *const usize) }; // LR saved by trampoline
+    // Beagle's SP when it called the closure is typically at trampoline's stack entry point
+    // On ARM64, SP at function entry is FP + 16 (for the saved FP and LR)
+    let beagle_sp = trampoline_fp + 16;
+
+    // callee_saved_regs was already captured at the start of continuation_trampoline,
+    // before any Rust code could clobber the registers
+
+    let thread_id = std::thread::current().id();
+
+    // Save the shift body's stack frame for multi-shot continuations.
+    // The frame contains local variables including the continuation k.
+    // When the continuation body runs, it may write to stack locations that
+    // overlap with this frame (e.g., the result_local), so we need to
+    // save and restore the frame contents.
+    //
+    // Stack layout (grows downward):
+    //   beagle_fp (high address)
+    //      |  saved FP  | <- [beagle_fp]
+    //      |  saved LR  | <- [beagle_fp + 8]
+    //      |  local k   | <- [beagle_fp - 0x10] etc
+    //      |   ...      |
+    //   beagle_sp (low address)
+    //
+    // We save from beagle_sp up to (but not including) beagle_fp.
+    let frame_size = if beagle_fp > beagle_sp {
+        beagle_fp - beagle_sp
+    } else {
+        0
+    };
+    let mut saved_stack_frame = vec![0u8; frame_size];
+    if frame_size > 0 {
+        std::ptr::copy_nonoverlapping(
+            beagle_sp as *const u8,
+            saved_stack_frame.as_mut_ptr(),
+            frame_size,
+        );
+    }
+
+    runtime
+        .invocation_return_points
+        .entry(thread_id)
+        .or_default()
+        .push(crate::runtime::InvocationReturnPoint {
+            stack_pointer: beagle_sp,
+            frame_pointer: beagle_fp,
+            return_address: beagle_return_address,
+            callee_saved_regs,
+            saved_stack_frame,
+        });
+
+    let stack_segment_size = continuation.stack_segment.len();
+    let resume_address = continuation.resume_address;
+    // Use the return trampoline as LR so that when the continuation body returns,
+    // it goes through return_from_shift_runtime for proper multi-shot handling.
+    let return_trampoline = continuation_return_trampoline as usize;
+
+    // Handle empty stack segment case (capture and prompt at same stack depth)
+    // IMPORTANT for multi-shot: Even with empty stack segment, we must run the
+    // continuation body at a safe SP that won't clobber the shift body's stack.
+    // The continuation body may allocate stack space (e.g., for println calls),
+    // and if we use original_sp (which is above the shift body), the stack
+    // growth will overwrite the shift body's locals (including k).
+    //
+    // Solution: Run the continuation body with current stack_pointer (which is
+    // below everything) so the continuation can allocate stack space safely.
+    if stack_segment_size == 0 {
+        // Store the value in the result local (relative to the original FP)
+        let result_ptr = (continuation.original_fp as isize).wrapping_add(continuation.result_local)
+            as *mut usize;
+        *result_ptr = value;
+
+        // Use current stack_pointer (deep in the stack) instead of original_sp
+        // This ensures continuation body's stack usage won't clobber shift body
+        let safe_sp = (stack_pointer - 16) & !0xF; // Align to 16 bytes
+
+        cfg_if::cfg_if! {
+            if #[cfg(target_arch = "x86_64")] {
+                asm!(
+                    "mov rsp, {0}",
+                    "mov rbp, {1}",
+                    "jmp {2}",
+                    in(reg) safe_sp,
+                    in(reg) continuation.original_fp,
+                    in(reg) resume_address,
+                    options(noreturn)
+                );
+            } else {
+                // Use safe_sp instead of original_sp to protect shift body's stack
+                asm!(
+                    "mov sp, {0}",
+                    "mov x29, {1}",
+                    "mov x30, {2}",
+                    "br {3}",
+                    in(reg) safe_sp,
+                    in(reg) continuation.original_fp,
+                    in(reg) return_trampoline,
+                    in(reg) resume_address,
+                    options(noreturn)
+                );
+            }
+        }
+    }
+
+    // Non-empty stack segment - need to copy and relocate
+
+    // Place the stack segment below the current stack pointer
+    let new_sp = stack_pointer - stack_segment_size - 16;
+    let new_sp = new_sp & !0xF; // Align to 16 bytes
+
+    // Copy the stack segment
+    std::ptr::copy_nonoverlapping(
+        continuation.stack_segment.as_ptr(),
+        new_sp as *mut u8,
+        stack_segment_size,
+    );
+
+    // Calculate relocation offset for frame pointers
+    let relocation_offset = (new_sp as isize) - (continuation.original_sp as isize);
+
+    // Adjust the frame pointer
+    let new_fp = (continuation.original_fp as isize + relocation_offset) as usize;
+
+    // Store the invoked value in the result local (relative to the new FP)
+    let result_ptr = (new_fp as isize).wrapping_add(continuation.result_local) as *mut usize;
+    *result_ptr = value;
+
+    // Relocate the entire frame pointer chain within the copied stack segment
+    let mut current_fp = new_fp;
+    let stack_segment_end = new_sp + stack_segment_size;
+
+    while current_fp >= new_sp && current_fp < stack_segment_end {
+        let saved_fp_ptr = current_fp as *mut usize;
+        let old_saved_fp = *saved_fp_ptr;
+
+        if old_saved_fp >= continuation.original_sp
+            && old_saved_fp < continuation.original_sp + stack_segment_size
+        {
+            let new_saved_fp = (old_saved_fp as isize + relocation_offset) as usize;
+            *saved_fp_ptr = new_saved_fp;
+            current_fp = new_saved_fp;
+        } else {
+            break;
+        }
+    }
+
+    cfg_if::cfg_if! {
+        if #[cfg(target_arch = "x86_64")] {
+            asm!(
+                "mov rsp, {0}",
+                "mov rbp, {1}",
+                "jmp {2}",
+                in(reg) new_sp,
+                in(reg) new_fp,
+                in(reg) resume_address,
+                options(noreturn)
+            );
+        } else {
+            asm!(
+                "mov sp, {0}",
+                "mov x29, {1}",
+                "mov x30, {2}",
+                "br {3}",
+                in(reg) new_sp,
+                in(reg) new_fp,
+                in(reg) return_trampoline,
+                in(reg) resume_address,
+                options(noreturn)
+            );
+        }
+    }
+}
+
+// ============================================================================
+
+/// Trampoline function for continuation closures.
+/// When a continuation is captured, it's wrapped in a closure with this function as its body.
+/// When called, it extracts the continuation index from the closure and invokes it.
+///
+/// Layout: closure_ptr points to a closure with:
+/// - header (8 bytes)
+/// - function pointer (8 bytes) - points to this trampoline
+/// - cont_index (8 bytes) - the captured continuation index (tagged)
+///
+/// Note: This is called as a regular closure body, so we receive (closure_ptr, value)
+/// and need to get SP/FP ourselves.
+#[allow(unused_variables)]
+pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usize) -> ! {
+    // Save callee-saved registers IMMEDIATELY before any Rust code runs
+    // These are the registers Beagle was using when it called k()
+    let mut saved_regs = [0usize; 10];
+    cfg_if::cfg_if! {
+        if #[cfg(target_arch = "aarch64")] {
+            std::arch::asm!(
+                "str x19, [{0}]",
+                "str x20, [{0}, #8]",
+                "str x21, [{0}, #16]",
+                "str x22, [{0}, #24]",
+                "str x23, [{0}, #32]",
+                "str x24, [{0}, #40]",
+                "str x25, [{0}, #48]",
+                "str x26, [{0}, #56]",
+                "str x27, [{0}, #64]",
+                "str x28, [{0}, #72]",
+                in(reg) saved_regs.as_mut_ptr(),
+            );
+        } else if #[cfg(target_arch = "x86_64")] {
+            std::arch::asm!(
+                "mov [{0}], rbx",
+                "mov [{0} + 8], r12",
+                "mov [{0} + 16], r13",
+                "mov [{0} + 24], r14",
+                "mov [{0} + 32], r15",
+                in(reg) saved_regs.as_mut_ptr(),
+            );
+        }
+    }
+
+    // Get current stack pointer and frame pointer
+    let stack_pointer: usize;
+    let frame_pointer: usize;
+
+    cfg_if::cfg_if! {
+        if #[cfg(target_arch = "x86_64")] {
+            std::arch::asm!(
+                "mov {0}, rsp",
+                "mov {1}, rbp",
+                out(reg) stack_pointer,
+                out(reg) frame_pointer,
+            );
+        } else {
+            std::arch::asm!(
+                "mov {0}, sp",
+                "mov {1}, x29",
+                out(reg) stack_pointer,
+                out(reg) frame_pointer,
+            );
+        }
+    }
+
+    // Extract the continuation index from the closure's free variables
+    // Closure layout: header(8) + fn_ptr(8) + num_free(8) + num_locals(8) + free_vars...
+    // First free variable is at offset 32
+    let untagged_closure = BuiltInTypes::untag(closure_ptr);
+    let cont_index = *((untagged_closure + 32) as *const usize);
+
+    // Now invoke the continuation, passing the saved callee-saved registers
+    invoke_continuation_runtime(stack_pointer, frame_pointer, cont_index, value, saved_regs)
+}
+
+/// Return trampoline for multi-shot continuations.
+/// When a continuation body returns, this trampoline is called to route the
+/// return value through `return_from_shift_runtime` so that multi-shot
+/// continuations work correctly.
+///
+/// On entry: the return value is in x0 (ARM64) or rax (x86-64)
+/// This gets SP/FP and calls return_from_shift_runtime.
+#[allow(unused_variables)]
+pub unsafe extern "C" fn continuation_return_trampoline(value: usize) -> ! {
+    // Get current stack pointer and frame pointer
+    let stack_pointer: usize;
+    let frame_pointer: usize;
+
+    cfg_if::cfg_if! {
+        if #[cfg(target_arch = "x86_64")] {
+            std::arch::asm!(
+                "mov {0}, rsp",
+                "mov {1}, rbp",
+                out(reg) stack_pointer,
+                out(reg) frame_pointer,
+            );
+        } else {
+            std::arch::asm!(
+                "mov {0}, sp",
+                "mov {1}, x29",
+                out(reg) stack_pointer,
+                out(reg) frame_pointer,
+            );
+        }
+    }
+
+    // Route through return_from_shift_runtime so multi-shot works
+    return_from_shift_runtime(stack_pointer, frame_pointer, value)
+}
+
 /// Dispatch a call to a multi-arity function.
 /// Takes stack_pointer, frame_pointer, the multi-arity function object and the number of arguments.
 /// Returns the function pointer for the matching arity, or throws an ArityError if no match found.
@@ -4510,11 +5152,12 @@ impl Runtime {
             3,
         )?;
 
-        self.add_builtin_function(
+        self.add_builtin_function_with_fp(
             "beagle.builtin/protocol-dispatch",
             protocol_dispatch as *const u8,
-            false,
-            3, // first_arg, cache_location, dispatch_table_ptr
+            true,
+            true,
+            5, // stack_pointer, frame_pointer, first_arg, cache_location, dispatch_table_ptr
         )?;
 
         // type_of now takes (stack_pointer, frame_pointer, value)
@@ -4635,6 +5278,57 @@ impl Runtime {
             true,
             true,
             3,
+        )?;
+
+        // Delimited continuation builtins
+        self.add_builtin_function(
+            "beagle.builtin/push-prompt",
+            push_prompt_runtime as *const u8,
+            false,
+            5, // handler_address, result_local, link_register, stack_pointer, frame_pointer
+        )?;
+
+        self.add_builtin_function(
+            "beagle.builtin/pop-prompt",
+            pop_prompt_runtime as *const u8,
+            false,
+            0,
+        )?;
+
+        // capture-continuation takes (stack_pointer, frame_pointer, resume_address, result_local_offset)
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/capture-continuation",
+            capture_continuation_runtime as *const u8,
+            true,
+            true,
+            4,
+        )?;
+
+        // return-from-shift takes (stack_pointer, frame_pointer, value)
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/return-from-shift",
+            return_from_shift_runtime as *const u8,
+            true,
+            true,
+            3,
+        )?;
+
+        // invoke-continuation takes (stack_pointer, frame_pointer, cont_index, value)
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/invoke-continuation",
+            invoke_continuation_runtime as *const u8,
+            true,
+            true,
+            4,
+        )?;
+
+        // continuation-trampoline is the function body for continuation closures
+        // takes (closure_ptr, value) - it's a closure body, not a regular builtin
+        self.add_builtin_function(
+            "beagle.builtin/continuation-trampoline",
+            continuation_trampoline as *const u8,
+            false,
+            2,
         )?;
 
         self.add_builtin_function(
@@ -6357,7 +7051,8 @@ mod regex_builtins {
         let string_str = runtime.get_string(stack_pointer, string);
 
         // Collect all matches
-        let matches: Vec<String> = regex.find_iter(&string_str)
+        let matches: Vec<String> = regex
+            .find_iter(&string_str)
             .map(|m| m.as_str().to_string())
             .collect();
 
@@ -6402,7 +7097,9 @@ mod regex_builtins {
         let string_str = runtime.get_string(stack_pointer, string);
         let replacement_str = runtime.get_string(stack_pointer, replacement);
 
-        let result = regex.replace(&string_str, replacement_str.as_str()).to_string();
+        let result = regex
+            .replace(&string_str, replacement_str.as_str())
+            .to_string();
 
         match runtime.allocate_string(stack_pointer, result) {
             Ok(ptr) => ptr.into(),
@@ -6429,7 +7126,9 @@ mod regex_builtins {
         let string_str = runtime.get_string(stack_pointer, string);
         let replacement_str = runtime.get_string(stack_pointer, replacement);
 
-        let result = regex.replace_all(&string_str, replacement_str.as_str()).to_string();
+        let result = regex
+            .replace_all(&string_str, replacement_str.as_str())
+            .to_string();
 
         match runtime.allocate_string(stack_pointer, result) {
             Ok(ptr) => ptr.into(),

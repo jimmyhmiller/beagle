@@ -1,0 +1,19 @@
+namespace continuation_nested_call_test
+
+// Test: call a function inside shift body before invoking k
+fn helper() {
+    42
+}
+
+fn main() {
+    let result = reset {
+        1 + shift(|k| {
+            let x = helper()  // call a function
+            k(x)  // then invoke k
+        })
+    }
+    println(result)
+}
+
+// Expect
+// 43

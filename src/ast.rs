@@ -308,6 +308,19 @@ pub enum Ast {
         cases: Vec<ArityCase>,
         token_range: TokenRange,
     },
+    /// Delimited continuation reset/prompt: `reset { body }`
+    /// Establishes a delimiter for continuation capture
+    Reset {
+        body: Vec<Ast>,
+        token_range: TokenRange,
+    },
+    /// Delimited continuation shift/control: `shift(|k| { body })`
+    /// Captures the continuation up to the nearest reset and binds it to `k`
+    Shift {
+        continuation_param: String,
+        body: Vec<Ast>,
+        token_range: TokenRange,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -498,7 +511,9 @@ impl Ast {
             | Ast::ProtocolDispatch { token_range, .. }
             | Ast::StructField { token_range, .. }
             | Ast::MultiArityFunction { token_range, .. }
-            | Ast::StringInterpolation { token_range, .. } => *token_range,
+            | Ast::StringInterpolation { token_range, .. }
+            | Ast::Reset { token_range, .. }
+            | Ast::Shift { token_range, .. } => *token_range,
             Ast::IntegerLiteral(_, position)
             | Ast::FloatLiteral(_, position)
             | Ast::Identifier(_, position)
@@ -3027,6 +3042,192 @@ impl AstCompiler<'_> {
 
                 Ok(result)
             }
+            Ast::Reset { body, token_range } => {
+                // Delimited continuation reset: establishes a prompt
+                // Pattern: push prompt, execute body, pop prompt on success or when continuation captured
+
+                // Create labels for after-reset continuation
+                let after_reset = self.ir.label("after_reset");
+                let prompt_handler = self.ir.label("prompt_handler");
+
+                // Create a result register that will hold the final value
+                let result_reg = self.ir.assign_new(Value::Null);
+
+                // Allocate local for captured value (when shift returns a value)
+                let unique_captured_name = format!("__captured_val_{}__", token_range.start);
+                let captured_local = self.find_or_insert_local(&unique_captured_name);
+                let null_reg = self.ir.assign_new(Value::Null);
+                self.ir.store_local(captured_local, null_reg.into());
+
+                // Get builtin function pointers
+                let push_prompt_fn = self
+                    .compiler
+                    .find_function("beagle.builtin/push-prompt")
+                    .expect("push-prompt builtin not found");
+                let push_prompt_fn_ptr = usize::from(push_prompt_fn.pointer);
+
+                let pop_prompt_fn = self
+                    .compiler
+                    .find_function("beagle.builtin/pop-prompt")
+                    .expect("pop-prompt builtin not found");
+                let pop_prompt_fn_ptr = usize::from(pop_prompt_fn.pointer);
+
+                // Push the prompt handler
+                self.ir.push_prompt_handler(
+                    prompt_handler,
+                    Value::Local(captured_local),
+                    push_prompt_fn_ptr,
+                );
+
+                // Compile reset body - disable tail call optimization
+                self.not_tail_position();
+                let mut body_result = Value::Null;
+                for ast in body.iter() {
+                    self.not_tail_position();
+                    body_result = self.call_compile(ast)?;
+                }
+
+                // Normal path: store result, pop prompt and skip handler
+                self.ir.assign(result_reg, body_result);
+                // Pass the result value so pop_prompt can check for continuation invocation
+                self.ir.pop_prompt_handler(result_reg.into(), pop_prompt_fn_ptr);
+                self.ir.jump(after_reset);
+
+                // Prompt handler block (target of shift returning)
+                self.ir.write_label(prompt_handler);
+                // The value from shift is already stored in captured_local by shift
+                let captured_value = self.ir.load_local(captured_local);
+                self.ir.assign(result_reg, captured_value);
+
+                self.ir.write_label(after_reset);
+                Ok(result_reg.into())
+            }
+            Ast::Shift {
+                continuation_param,
+                body,
+                token_range,
+            } => {
+                // Delimited continuation shift: captures continuation up to nearest reset
+
+                // Create labels for after shift (normal path) and continuation entry
+                let after_shift = self.ir.label("after_shift");
+
+                // Create a result register
+                let result_reg = self.ir.assign_new(Value::Null);
+
+                // Save any existing binding with the continuation param name
+                let saved_binding = self.get_variable(&continuation_param).clone();
+
+                // Allocate local for continuation object with unique name
+                let unique_cont_name = format!("__cont_{}__", token_range.start);
+                let cont_local = self.find_or_insert_local(&unique_cont_name);
+
+                // Get builtin function pointers
+                let capture_fn = self
+                    .compiler
+                    .find_function("beagle.builtin/capture-continuation")
+                    .expect("capture-continuation builtin not found");
+                let capture_fn_ptr = usize::from(capture_fn.pointer);
+
+                // Capture the continuation using the specialized instruction
+                // This properly passes the local byte offset to the builtin
+                let cont_index =
+                    self.ir
+                        .capture_continuation(after_shift, cont_local, capture_fn_ptr);
+
+                // Wrap the continuation index in a closure so it can be called like a function
+                // The closure's function pointer is continuation_trampoline, and it captures
+                // the continuation index
+
+                // Get continuation_trampoline function pointer
+                let trampoline_fn = self
+                    .compiler
+                    .find_function("beagle.builtin/continuation-trampoline")
+                    .expect("continuation-trampoline builtin not found");
+                let trampoline_ptr = usize::from(trampoline_fn.pointer);
+
+                // Get the stack position BEFORE pushing (where the cont_index will go)
+                // This matches the pattern in compile_closure
+                let free_var_ptr = self.ir.get_current_stack_position();
+
+                // Push the continuation index onto the stack as a captured variable
+                let cont_index_reg = self.ir.assign_new(cont_index);
+                self.ir.push_to_stack(cont_index_reg.into());
+
+                // Call make_closure to create the continuation closure
+                let make_closure = self
+                    .compiler
+                    .find_function("beagle.builtin/make-closure")
+                    .expect("make-closure builtin not found");
+                let make_closure_ptr = self.compiler.get_function_pointer(make_closure).unwrap();
+                let make_closure_reg = self.ir.assign_new(make_closure_ptr);
+
+                // Tag the trampoline pointer as a function - make_closure expects tagged pointers
+                // Use RawValue since the value is already tagged (matching compile_closure pattern)
+                let tagged_trampoline =
+                    BuiltInTypes::Function.tag(trampoline_ptr as isize) as usize;
+                let trampoline_reg = self.ir.assign_new(Value::RawValue(tagged_trampoline));
+                let num_free_reg = self.ir.assign_new(Value::TaggedConstant(1)); // 1 captured var
+
+                let stack_pointer = self.ir.get_stack_pointer_imm(0);
+                let frame_pointer = self.ir.get_frame_pointer();
+
+                let cont_closure = self.ir.call(
+                    make_closure_reg.into(),
+                    vec![
+                        stack_pointer,
+                        frame_pointer,
+                        trampoline_reg.into(),
+                        num_free_reg.into(),
+                        free_var_ptr,
+                    ],
+                );
+
+                // Store the continuation closure in local and bind to param name
+                let cont_closure_reg = self.ir.assign_new(cont_closure);
+                self.ir.store_local(cont_local, cont_closure_reg.into());
+                self.insert_variable(
+                    continuation_param.clone(),
+                    VariableLocation::Local(cont_local),
+                );
+
+                // Compile shift body - this can use the continuation
+                self.not_tail_position();
+                let mut shift_result = Value::Null;
+                for ast in body.iter() {
+                    self.not_tail_position();
+                    shift_result = self.call_compile(ast)?;
+                }
+
+                // Normal completion of shift body - this value goes to the enclosing reset
+                // We need to return to reset's handler using the specialized instruction
+                let return_to_reset_fn = self
+                    .compiler
+                    .find_function("beagle.builtin/return-from-shift")
+                    .expect("return-from-shift builtin not found");
+                let return_fn_ptr = usize::from(return_to_reset_fn.pointer);
+
+                // Use specialized instruction that correctly handles the builtin call
+                let shift_result_reg = self.ir.assign_new(shift_result);
+                self.ir.return_from_shift(shift_result_reg.into(), return_fn_ptr);
+                // Note: return-from-shift does not return normally
+
+                // After shift label - this is where we land when continuation is invoked
+                self.ir.write_label(after_shift);
+                // The invoked value is in the continuation local
+                let resumed_value = self.ir.load_local(cont_local);
+                self.ir.assign(result_reg, resumed_value);
+
+                // Restore the saved binding
+                if let Some(saved) = saved_binding.clone() {
+                    self.insert_variable(continuation_param.clone(), saved);
+                } else {
+                    let current_env = self.environment_stack.last_mut().unwrap();
+                    current_env.variables.remove(&continuation_param);
+                }
+
+                Ok(result_reg.into())
+            }
         }
     }
 
@@ -4367,6 +4568,22 @@ impl AstCompiler<'_> {
                     if let StringInterpolationPart::Expression(expr) = part {
                         self.find_mutable_vars_that_need_boxing(expr);
                     }
+                }
+            }
+            Ast::Reset { body, .. } => {
+                for ast in body.iter() {
+                    self.find_mutable_vars_that_need_boxing(ast);
+                }
+            }
+            Ast::Shift {
+                continuation_param,
+                body,
+                ..
+            } => {
+                // The continuation param is a binding
+                self.add_variable_for_mutable_pass(continuation_param);
+                for ast in body.iter() {
+                    self.find_mutable_vars_that_need_boxing(ast);
                 }
             }
         }

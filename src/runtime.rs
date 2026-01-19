@@ -1194,6 +1194,65 @@ pub struct ExceptionHandler {
     pub result_local: isize,
 }
 
+/// Prompt handler for delimited continuations.
+/// Marks a point on the stack that serves as a delimiter for continuation capture.
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct PromptHandler {
+    /// Address to jump to when the shift body completes normally
+    pub handler_address: usize,
+    /// Stack pointer at the time of prompt
+    pub stack_pointer: usize,
+    /// Frame pointer at the time of prompt
+    pub frame_pointer: usize,
+    /// Link register (return address) at the time of prompt
+    pub link_register: usize,
+    /// Local variable offset to store the result value
+    pub result_local: isize,
+}
+
+/// Invocation return point for multi-shot continuations.
+/// When a continuation k is invoked via k(value), we save where to return after the
+/// continuation body completes. This enables multiple invocations like [k(1), k(2), k(3)].
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct InvocationReturnPoint {
+    /// Stack pointer at the point where k(value) was called
+    pub stack_pointer: usize,
+    /// Frame pointer at the point where k(value) was called
+    pub frame_pointer: usize,
+    /// Address to return to after continuation body completes
+    pub return_address: usize,
+    /// Callee-saved registers (x19-x28 on ARM64) that must be preserved
+    /// These are saved when k() is called and restored when returning
+    pub callee_saved_regs: [usize; 10],
+    /// Saved stack frame contents from the shift body.
+    /// For multi-shot continuations, we need to preserve the shift body's locals
+    /// (including the continuation k) when the continuation body runs, because
+    /// the continuation body may write to stack locations that overlap with
+    /// the shift body's frame. We save the frame from FP to SP.
+    pub saved_stack_frame: Vec<u8>,
+}
+
+/// Captured continuation: a snapshot of the stack between a shift point and its enclosing reset.
+/// This is a heap object that can be invoked to restore the captured computation.
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct CapturedContinuation {
+    /// The raw stack bytes from shift's SP to reset's SP
+    pub stack_segment: Vec<u8>,
+    /// The original stack pointer at capture time
+    pub original_sp: usize,
+    /// The original frame pointer at capture time
+    pub original_fp: usize,
+    /// Where to resume when invoked (the after_shift label address)
+    pub resume_address: usize,
+    /// Local offset where the invoked value should be stored
+    pub result_local: isize,
+    /// The prompt handler that was active when captured
+    pub prompt: PromptHandler,
+}
+
 pub struct Runtime {
     pub memory: Memory,
     pub libraries: Vec<Library>,
@@ -1235,6 +1294,14 @@ pub struct Runtime {
     stacks_for_continuation_swapping: Vec<ContinuationStack>,
     // Per-thread try-catch handler stacks
     pub exception_handlers: HashMap<ThreadId, Vec<ExceptionHandler>>,
+    // Per-thread prompt handler stacks for delimited continuations
+    pub prompt_handlers: HashMap<ThreadId, Vec<PromptHandler>>,
+    // Per-thread captured continuations storage
+    pub captured_continuations: HashMap<ThreadId, Vec<CapturedContinuation>>,
+    // Per-thread invocation return points for multi-shot continuations.
+    // When a continuation k is invoked via k(value), we push where to return to here.
+    // When the continuation body completes, return_from_shift pops from here.
+    pub invocation_return_points: HashMap<ThreadId, Vec<InvocationReturnPoint>>,
     // Per-thread uncaught exception handlers (Beagle function pointers)
     pub thread_exception_handler_fns: HashMap<ThreadId, usize>,
     // Global default uncaught exception handler (Beagle function pointer)
@@ -1341,6 +1408,21 @@ impl Runtime {
                 stack: [0; 512],
             }],
             exception_handlers: {
+                let mut map = HashMap::new();
+                map.insert(std::thread::current().id(), Vec::new());
+                map
+            },
+            prompt_handlers: {
+                let mut map = HashMap::new();
+                map.insert(std::thread::current().id(), Vec::new());
+                map
+            },
+            captured_continuations: {
+                let mut map = HashMap::new();
+                map.insert(std::thread::current().id(), Vec::new());
+                map
+            },
+            invocation_return_points: {
                 let mut map = HashMap::new();
                 map.insert(std::thread::current().id(), Vec::new());
                 map
@@ -1850,6 +1932,37 @@ impl Runtime {
     pub fn update_exception_handlers_after_gc(&mut self) {
         // No-op: Exception handlers and keywords are now stored in heap-based PersistentMap
         // which is automatically updated by GC during tracing
+    }
+
+    // Delimited continuation (prompt handler) methods
+    pub fn push_prompt_handler(&mut self, handler: PromptHandler) {
+        let thread_id = std::thread::current().id();
+        self.prompt_handlers
+            .entry(thread_id)
+            .or_default()
+            .push(handler);
+    }
+
+    pub fn pop_prompt_handler(&mut self) -> Option<PromptHandler> {
+        let thread_id = std::thread::current().id();
+        self.prompt_handlers.get_mut(&thread_id)?.pop()
+    }
+
+    pub fn store_captured_continuation(&mut self, cont: CapturedContinuation) -> usize {
+        let thread_id = std::thread::current().id();
+        let continuations = self.captured_continuations.entry(thread_id).or_default();
+        let index = continuations.len();
+        continuations.push(cont);
+        index
+    }
+
+    pub fn get_captured_continuation(&self, index: usize) -> Option<&CapturedContinuation> {
+        let thread_id = std::thread::current().id();
+        self.captured_continuations.get(&thread_id)?.get(index)
+    }
+
+    pub fn clone_captured_continuation(&self, index: usize) -> Option<CapturedContinuation> {
+        self.get_captured_continuation(index).cloned()
     }
 
     pub fn cleanup_finished_thread_handlers(&mut self) {

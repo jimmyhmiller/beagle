@@ -1,0 +1,14 @@
+namespace continuation_invoke_test
+
+// Test: invoke continuation with a value
+fn main() {
+    let result = reset {
+        1 + shift(|k| {
+            k(10)  // invoke with 10, computes 1 + 10 = 11
+        })
+    }
+    println(result)
+}
+
+// Expect
+// 11

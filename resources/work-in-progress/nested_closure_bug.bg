@@ -1,0 +1,39 @@
+namespace nested_closure_bug
+
+// BUG: 3-level nested closure captures wrong variable
+// Inner closure gets sibling variable instead of grandparent variable
+//
+// ACTUAL OUTPUT:
+//   x = 20
+//   y = 20
+//   Result: 40
+//
+// EXPECTED OUTPUT:
+//   x = 10
+//   y = 20
+//   Result: 30
+
+fn main() {
+    println("Starting...")
+
+    let outer = fn() {
+        let x = 10
+
+        let middle = fn() {
+            let y = 20
+
+            let inner = fn() {
+                println("x = ${x}")
+                println("y = ${y}")
+                x + y
+            }
+
+            inner()
+        }
+
+        middle()
+    }
+
+    let result = outer()
+    println("Result: ${result}")
+}
