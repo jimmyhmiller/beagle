@@ -1,0 +1,10 @@
+namespace match_literal_array_test
+
+fn main() {
+    let r1 = match [1, 2, 3] {
+        [1, b, c] => b + c,
+        _ => 0,
+    }
+    println(r1)
+    "done"
+}

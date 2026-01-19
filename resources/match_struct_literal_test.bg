@@ -1,0 +1,14 @@
+namespace match_struct_literal_test
+
+struct Point { x, y }
+
+fn main() {
+    let p = Point { x: 0, y: 5 }
+
+    let r = match p {
+        Point { x: 0, y } => y * 10,
+        Point { x, y } => x + y,
+    }
+    println(r)
+    "done"
+}

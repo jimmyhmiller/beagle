@@ -1,0 +1,25 @@
+namespace match_array_len_test
+
+fn main() {
+    let arr = [42]
+
+    // Debug: check what count and equal return
+    let len = count(arr)
+    println(len)
+    let is_one = equal(len, 1)
+    println(is_one)
+
+    let result = match arr {
+        [x] => { println("matched!"); x },
+        _ => { println("fell through"); 0 },
+    }
+
+    println(result)
+    "done"
+}
+
+// Expect
+// 1
+// true
+// matched!
+// 42

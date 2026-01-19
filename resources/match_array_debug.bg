@@ -1,0 +1,29 @@
+namespace match_array_debug
+
+fn main() {
+    // Test 1: Should match [2, b, c] and return 5 * 6 = 30
+    let arr1 = [2, 5, 6]
+    println("Test 1: arr1 = [2, 5, 6]")
+
+    let r1 = match arr1 {
+        [1, b, c] => { println("matched [1, b, c]"); b + c },
+        [2, b, c] => { println("matched [2, b, c]"); b * c },
+        _ => { println("matched wildcard"); 0 },
+    }
+    print("Result: ")
+    println(r1)
+
+    // Test 2: Should fall through to wildcard and return 999
+    let arr2 = [5, 5, 5]
+    println("\nTest 2: arr2 = [5, 5, 5]")
+
+    let r2 = match arr2 {
+        [1, b, c] => { println("matched [1, b, c]"); 100 },
+        [2, b, c] => { println("matched [2, b, c]"); 200 },
+        _ => { println("matched wildcard"); 999 },
+    }
+    print("Result: ")
+    println(r2)
+
+    "done"
+}
