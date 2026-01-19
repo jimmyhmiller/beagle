@@ -2935,13 +2935,11 @@ impl AstCompiler<'_> {
                         let full_arity_name =
                             self.compiler.current_namespace_name() + "/" + arity_fn_name;
                         if let Some(function) = self.compiler.get_function_by_name(&full_arity_name)
-                        {
-                            if let Some(fn_ptr) =
+                            && let Some(fn_ptr) =
                                 self.compiler.get_pointer_for_function(function)
                             {
                                 arity_function_pointers.push((arity, fn_ptr, is_variadic));
                             }
-                        }
                     }
                 }
 
@@ -4587,15 +4585,6 @@ impl AstCompiler<'_> {
                 }
             }
         }
-    }
-
-    fn add_mutable_variable(&mut self, name: &Ast, ast: &Ast) {
-        self.mutable_pass_env_stack.last_mut().unwrap().insert(
-            name.get_string(),
-            MutablePassInfo {
-                mutable_definition: Some(ast.clone()),
-            },
-        );
     }
 
     fn add_mutable_variable_by_name(&mut self, name: &str, ast: &Ast) {

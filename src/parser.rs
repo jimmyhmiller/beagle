@@ -461,21 +461,21 @@ impl Tokenizer {
 
         while !self.at_end(input_bytes) && !self.is_quote(input_bytes) {
             // Check for escape sequences
-            if self.current_byte(input_bytes) == b'\\' {
-                if let Some(next) = self.peek(input_bytes) {
-                    // Handle escaped $ to allow literal ${
-                    if next == b'$'
-                        || next == b'"'
-                        || next == b'\\'
-                        || next == b'n'
-                        || next == b'r'
-                        || next == b't'
-                        || next == b'0'
-                    {
-                        self.consume(input_bytes); // consume backslash
-                        self.consume(input_bytes); // consume escaped char
-                        continue;
-                    }
+            if self.current_byte(input_bytes) == b'\\'
+                && let Some(next) = self.peek(input_bytes)
+            {
+                // Handle escaped $ to allow literal ${
+                if next == b'$'
+                    || next == b'"'
+                    || next == b'\\'
+                    || next == b'n'
+                    || next == b'r'
+                    || next == b't'
+                    || next == b'0'
+                {
+                    self.consume(input_bytes); // consume backslash
+                    self.consume(input_bytes); // consume escaped char
+                    continue;
                 }
             }
 
