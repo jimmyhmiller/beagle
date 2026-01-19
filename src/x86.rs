@@ -859,9 +859,10 @@ impl LowLevelX86 {
     pub fn load_label_address(&mut self, dest: X86Register, label: Label) {
         // LEA with RIP-relative addressing
         // Uses LeaRipRel which will be patched to correct offset
+        // Store label index as i32 for now (will be replaced with displacement during patching)
         self.instructions.push(X86Asm::LeaRipRel {
             dest,
-            label_index: label.index,
+            label_index: label.index as i32,
         });
     }
 
@@ -1182,12 +1183,14 @@ impl LowLevelX86 {
                     }
                 }
                 X86Asm::LeaRipRel { dest, label_index } => {
-                    if let Some(&target) = byte_offsets.get(label_index) {
+                    // label_index starts as a label index (cast to i32), lookup using it as usize
+                    if let Some(&target) = byte_offsets.get(&(*label_index as usize)) {
                         // RIP-relative offset is from end of instruction
                         let rel = (target as i64) - (current_offset as i64 + instr_size as i64);
+                        // Store the signed displacement as i32
                         *instr = X86Asm::LeaRipRel {
                             dest: *dest,
-                            label_index: rel as usize,
+                            label_index: rel as i32,
                         };
                     }
                 }
