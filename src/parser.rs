@@ -4,7 +4,7 @@
 
 use crate::{
     Data,
-    ast::{ArityCase, Ast, FieldPattern, MapFieldPattern, MapKey, MatchArm, Pattern, TokenRange},
+    ast::{ArityCase, Ast, FieldPattern, MapFieldPattern, MapKey, MatchArm, Pattern, StringInterpolationPart, TokenRange},
     builtins::debugger,
 };
 use std::{error::Error, fmt};
@@ -119,7 +119,7 @@ impl From<std::io::Error> for ParseError {
 
 pub type ParseResult<T> = Result<T, ParseError>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Token {
     OpenParen,
     CloseParen,
@@ -171,6 +171,10 @@ pub enum Token {
     Comment((usize, usize)),
     Spaces((usize, usize)),
     String((usize, usize)),
+    /// Interpolated string: contains segments that are either string literals or expressions
+    /// Each segment is (start, end, is_expression) - if is_expression is true, the bytes represent
+    /// an expression to be parsed; otherwise they represent a string literal
+    InterpolatedString(Vec<(usize, usize, bool)>),
     Integer((usize, usize)),
     Float((usize, usize)),
     // I should replace this with builtins
@@ -304,6 +308,7 @@ impl Token {
             | Token::Integer((start, end))
             | Token::Float((start, end)) => String::from_utf8(input_bytes[*start..*end].to_vec())
                 .map_err(|_| ParseError::InvalidUtf8 { position: *start }),
+            Token::InterpolatedString(_) => Ok("<interpolated string>".to_string()),
             Token::Never => Err(ParseError::InvalidExpression {
                 message: "Internal error: Token::Never should not be used".to_string(),
                 position: 0,
@@ -441,18 +446,100 @@ impl Tokenizer {
 
     pub fn parse_string(&mut self, input_bytes: &[u8]) -> Token {
         let start = self.position;
-        self.consume(input_bytes);
+        self.consume(input_bytes); // consume opening quote
+
+        let mut segments: Vec<(usize, usize, bool)> = Vec::new();
+        let mut has_interpolation = false;
+        let mut current_string_start = self.position;
+
         while !self.at_end(input_bytes) && !self.is_quote(input_bytes) {
-            // TOOD: Better escape handling
-            if self.current_byte(input_bytes) == b'\\' && self.peek(input_bytes).unwrap() == b'"' {
-                self.consume(input_bytes);
+            // Check for escape sequences
+            if self.current_byte(input_bytes) == b'\\' {
+                if let Some(next) = self.peek(input_bytes) {
+                    // Handle escaped $ to allow literal ${
+                    if next == b'$' || next == b'"' || next == b'\\' || next == b'n' || next == b'r' || next == b't' || next == b'0' {
+                        self.consume(input_bytes); // consume backslash
+                        self.consume(input_bytes); // consume escaped char
+                        continue;
+                    }
+                }
             }
+
+            // Check for interpolation start: ${
+            if self.current_byte(input_bytes) == b'$'
+                && self.peek(input_bytes) == Some(b'{')
+            {
+                has_interpolation = true;
+
+                // Save the string segment before the interpolation (if any)
+                if self.position > current_string_start {
+                    segments.push((current_string_start, self.position, false));
+                }
+
+                self.consume(input_bytes); // consume $
+                self.consume(input_bytes); // consume {
+
+                let expr_start = self.position;
+                let mut brace_depth = 1;
+
+                // Find the matching closing brace, handling nested braces
+                while !self.at_end(input_bytes) && brace_depth > 0 {
+                    let byte = self.current_byte(input_bytes);
+                    if byte == b'{' {
+                        brace_depth += 1;
+                        self.consume(input_bytes);
+                    } else if byte == b'}' {
+                        brace_depth -= 1;
+                        if brace_depth > 0 {
+                            self.consume(input_bytes);
+                        }
+                    } else if byte == b'"' {
+                        // Skip nested strings in expressions
+                        self.consume(input_bytes); // opening quote
+                        while !self.at_end(input_bytes) && self.current_byte(input_bytes) != b'"' {
+                            if self.current_byte(input_bytes) == b'\\' {
+                                self.consume(input_bytes); // escape char
+                            }
+                            self.consume(input_bytes);
+                        }
+                        if !self.at_end(input_bytes) {
+                            self.consume(input_bytes); // consume closing quote
+                        }
+                    } else {
+                        self.consume(input_bytes);
+                    }
+                }
+
+                let expr_end = self.position;
+                segments.push((expr_start, expr_end, true));
+
+                if !self.at_end(input_bytes) {
+                    self.consume(input_bytes); // consume closing }
+                }
+
+                current_string_start = self.position;
+                continue;
+            }
+
             self.consume(input_bytes);
         }
-        if !self.at_end(input_bytes) {
-            self.consume(input_bytes);
+
+        // If we have interpolation, add the final string segment and return InterpolatedString
+        if has_interpolation {
+            if self.position > current_string_start {
+                segments.push((current_string_start, self.position, false));
+            }
+            if !self.at_end(input_bytes) {
+                self.consume(input_bytes); // consume closing quote
+            }
+            Token::InterpolatedString(segments)
+        } else {
+            // Regular string
+            if !self.at_end(input_bytes) {
+                self.consume(input_bytes); // consume closing quote
+            }
+            Token::String((start, self.position))
         }
-        Token::String((start, self.position))
     }
 
     pub fn is_open_paren(&self, input_bytes: &[u8]) -> bool {
@@ -1040,6 +1127,41 @@ impl Parser {
                 value = stripslashes(&value);
                 let position = self.consume();
                 Ok(Some(Ast::String(value, position)))
+            }
+            Token::InterpolatedString(segments) => {
+                let start_position = self.position;
+                self.consume(); // consume the interpolated string token
+
+                let mut parts = Vec::new();
+                for (seg_start, seg_end, is_expr) in segments {
+                    if is_expr {
+                        // Parse the expression from the byte range
+                        let expr_bytes = &self.source.as_bytes()[seg_start..seg_end];
+                        let expr_source = String::from_utf8(expr_bytes.to_vec())
+                            .map_err(|_| ParseError::InvalidUtf8 { position: seg_start })?;
+
+                        // Create a new parser for the expression
+                        let mut expr_parser = Parser::new("<interpolation>".to_string(), expr_source)?;
+                        let expr_ast = expr_parser.parse_expression(0, true, true)?;
+                        if let Some(ast) = expr_ast {
+                            parts.push(StringInterpolationPart::Expression(Box::new(ast)));
+                        }
+                    } else {
+                        // String literal segment
+                        let seg_bytes = &self.source.as_bytes()[seg_start..seg_end];
+                        let seg_str = String::from_utf8(seg_bytes.to_vec())
+                            .map_err(|_| ParseError::InvalidUtf8 { position: seg_start })?;
+                        let processed = stripslashes(&seg_str);
+                        if !processed.is_empty() {
+                            parts.push(StringInterpolationPart::Literal(processed));
+                        }
+                    }
+                }
+
+                Ok(Some(Ast::StringInterpolation {
+                    parts,
+                    token_range: TokenRange::new(start_position, self.position),
+                }))
             }
             Token::Keyword((start, end)) => {
                 let keyword_text = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
@@ -2294,7 +2416,7 @@ impl Parser {
         if self.position >= self.tokens.len() {
             Token::Never
         } else {
-            self.tokens[self.position]
+            self.tokens[self.position].clone()
         }
     }
 
