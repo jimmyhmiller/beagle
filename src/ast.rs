@@ -28,6 +28,13 @@ impl TokenRange {
     }
 }
 
+/// Part of a string interpolation - either a literal string or an expression to evaluate
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum StringInterpolationPart {
+    Literal(String),
+    Expression(Box<Ast>),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ast {
     Program {
@@ -146,6 +153,11 @@ pub enum Ast {
     FloatLiteral(String, TokenPosition),
     Identifier(String, TokenPosition),
     String(String, TokenPosition),
+    /// String interpolation: list of parts that are either string literals or expressions
+    StringInterpolation {
+        parts: Vec<StringInterpolationPart>,
+        token_range: TokenRange,
+    },
     Keyword(String, TokenPosition),
     True(TokenPosition),
     False(TokenPosition),
@@ -486,7 +498,8 @@ impl Ast {
             | Ast::Match { token_range, .. }
             | Ast::ProtocolDispatch { token_range, .. }
             | Ast::StructField { token_range, .. }
-            | Ast::MultiArityFunction { token_range, .. } => *token_range,
+            | Ast::MultiArityFunction { token_range, .. }
+            | Ast::StringInterpolation { token_range, .. } => *token_range,
             Ast::IntegerLiteral(_, position)
             | Ast::FloatLiteral(_, position)
             | Ast::Identifier(_, position)
@@ -2643,6 +2656,52 @@ impl AstCompiler<'_> {
                 let constant_ptr = self.string_constant(str);
                 Ok(self.ir.load_string_constant(constant_ptr))
             }
+            Ast::StringInterpolation { parts, .. } => {
+                // Compile string interpolation by converting each part to a string
+                // and concatenating them together
+                if parts.is_empty() {
+                    // Empty interpolation -> empty string
+                    let constant_ptr = self.string_constant("".to_string());
+                    return Ok(self.ir.load_string_constant(constant_ptr));
+                }
+
+                // Compile first part
+                let first_value = match &parts[0] {
+                    StringInterpolationPart::Literal(s) => {
+                        let constant_ptr = self.string_constant(s.clone());
+                        self.ir.load_string_constant(constant_ptr)
+                    }
+                    StringInterpolationPart::Expression(expr) => {
+                        let value = self.call_compile(expr)?;
+                        // Call to-string on the expression result
+                        self.call_builtin("beagle.core/to-string", vec![value])?
+                    }
+                };
+
+                if parts.len() == 1 {
+                    return Ok(first_value);
+                }
+
+                // Concatenate remaining parts
+                let mut result = first_value;
+                for part in parts.iter().skip(1) {
+                    let part_value = match part {
+                        StringInterpolationPart::Literal(s) => {
+                            let constant_ptr = self.string_constant(s.clone());
+                            self.ir.load_string_constant(constant_ptr)
+                        }
+                        StringInterpolationPart::Expression(expr) => {
+                            let value = self.call_compile(expr)?;
+                            // Call to-string on the expression result
+                            self.call_builtin("beagle.core/to-string", vec![value])?
+                        }
+                    };
+                    // Concatenate result with part_value
+                    result = self.call_builtin("beagle.core/string-concat", vec![result, part_value])?;
+                }
+
+                Ok(result)
+            }
             Ast::Keyword(keyword_text, _) => {
                 let constant_ptr = self.keyword_constant(keyword_text);
                 let constant_ptr = self.ir.assign_new(constant_ptr);
@@ -4177,6 +4236,13 @@ impl AstCompiler<'_> {
                     }
                 }
                 self.pop_function_mutable_variable_pass();
+            }
+            Ast::StringInterpolation { parts, .. } => {
+                for part in parts.iter() {
+                    if let StringInterpolationPart::Expression(expr) = part {
+                        self.find_mutable_vars_that_need_boxing(expr);
+                    }
+                }
             }
         }
     }

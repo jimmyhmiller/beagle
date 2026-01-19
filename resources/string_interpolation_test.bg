@@ -1,0 +1,203 @@
+namespace string_interpolation_test
+
+// Test basic string interpolation
+fn test_basic_interpolation() {
+    let name = "World"
+    let greeting = "Hello, ${name}!"
+    println(greeting)
+    greeting
+}
+
+// Test interpolation with numbers
+fn test_number_interpolation() {
+    let x = 42
+    let result = "The answer is ${x}"
+    println(result)
+    result
+}
+
+// Test multiple interpolations
+fn test_multiple_interpolations() {
+    let first = "John"
+    let last = "Doe"
+    let age = 30
+    let result = "Name: ${first} ${last}, Age: ${age}"
+    println(result)
+    result
+}
+
+// Test interpolation with expressions
+fn test_expression_interpolation() {
+    let a = 10
+    let b = 20
+    let result = "Sum: ${a + b}"
+    println(result)
+    result
+}
+
+// Test nested function call in interpolation
+fn double(x) {
+    x * 2
+}
+
+fn test_function_call_interpolation() {
+    let x = 5
+    let result = "Double of ${x} is ${double(x)}"
+    println(result)
+    result
+}
+
+// Test interpolation at start/end
+fn test_edge_cases() {
+    let x = "start"
+    let y = "end"
+    let result1 = "${x} is the beginning"
+    let result2 = "This is the ${y}"
+    let result3 = "${x}${y}"
+    println(result1)
+    println(result2)
+    println(result3)
+    result3
+}
+
+// Test escaped dollar sign
+fn test_escaped_dollar() {
+    let result = "Price: \$100"
+    println(result)
+    result
+}
+
+// Test string without interpolation still works
+fn test_plain_string() {
+    let result = "Just a plain string"
+    println(result)
+    result
+}
+
+// Test with struct
+struct Person {
+    name
+    age
+}
+
+fn test_struct_interpolation() {
+    let p = Person { name: "Alice", age: 25 }
+    let result = "Person: ${p.name} is ${p.age} years old"
+    println(result)
+    result
+}
+
+// Test with map literal
+fn test_map_access() {
+    let data = {"key" "value"}
+    let result = "Map value: ${get(data, "key")}"
+    println(result)
+    result
+}
+
+// Test with array
+fn test_array_interpolation() {
+    let arr = [1, 2, 3]
+    let result = "First element: ${arr[0]}, Length: ${length(arr)}"
+    println(result)
+    result
+}
+
+// Test with conditionals in expressions
+fn test_conditional_expression() {
+    let x = 10
+    let result = "x is ${if x > 5 { "big" } else { "small" }}"
+    println(result)
+    result
+}
+
+// Test with boolean
+fn test_boolean_interpolation() {
+    let flag = true
+    let result = "Flag is ${flag}"
+    println(result)
+    result
+}
+
+// Test with null
+fn test_null_interpolation() {
+    let n = null
+    let result = "Null value: ${n}"
+    println(result)
+    result
+}
+
+// Test deeply nested expression
+fn add(a, b) { a + b }
+fn mul(a, b) { a * b }
+
+fn test_nested_calls() {
+    let result = "Result: ${add(mul(2, 3), mul(4, 5))}"
+    println(result)
+    result
+}
+
+// Test string with nested string literal in interpolation
+fn test_nested_string_literal() {
+    let data = {"hello" "world"}
+    let result = "Value: ${get(data, "hello")}"
+    println(result)
+    result
+}
+
+// Run all tests
+fn main() {
+    println("=== String Interpolation Tests ===")
+
+    println("\n--- Basic Interpolation ---")
+    test_basic_interpolation()
+
+    println("\n--- Number Interpolation ---")
+    test_number_interpolation()
+
+    println("\n--- Multiple Interpolations ---")
+    test_multiple_interpolations()
+
+    println("\n--- Expression Interpolation ---")
+    test_expression_interpolation()
+
+    println("\n--- Function Call Interpolation ---")
+    test_function_call_interpolation()
+
+    println("\n--- Edge Cases ---")
+    test_edge_cases()
+
+    println("\n--- Escaped Dollar ---")
+    test_escaped_dollar()
+
+    println("\n--- Plain String ---")
+    test_plain_string()
+
+    println("\n--- Struct Interpolation ---")
+    test_struct_interpolation()
+
+    println("\n--- Map Access ---")
+    test_map_access()
+
+    println("\n--- Array Interpolation ---")
+    test_array_interpolation()
+
+    println("\n--- Conditional Expression ---")
+    test_conditional_expression()
+
+    println("\n--- Boolean Interpolation ---")
+    test_boolean_interpolation()
+
+    println("\n--- Null Interpolation ---")
+    test_null_interpolation()
+
+    println("\n--- Nested Function Calls ---")
+    test_nested_calls()
+
+    println("\n--- Nested String Literal ---")
+    test_nested_string_literal()
+
+    println("\n=== All Tests Complete ===")
+}
+
+main()
