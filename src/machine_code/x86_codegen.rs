@@ -273,7 +273,7 @@ pub enum X86Asm {
     /// LEA r64, [rip + offset] - RIP-relative addressing for label addresses
     LeaRipRel {
         dest: X86Register,
-        label_index: usize, // Will be patched to actual offset
+        label_index: i32, // Will be patched to actual offset (signed displacement)
     },
 
     // === Arithmetic instructions ===
@@ -618,7 +618,7 @@ impl X86Asm {
                 let reg = dest.index;
                 let rex = 0x48 | ((reg >> 3) << 2); // REX.W + REX.R if needed
                 let modrm = ((reg & 0b111) << 3) | 0b101; // mod=00, rm=101 (RIP)
-                let disp = *label_index as i32;
+                let disp = *label_index; // Already an i32
                 let mut bytes = vec![rex, 0x8D, modrm];
                 bytes.extend(&disp.to_le_bytes());
                 bytes
