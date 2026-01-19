@@ -1,0 +1,11 @@
+namespace match_minimal
+
+fn main() {
+    let arr = [42]
+    let result = match arr {
+        [x] => x,
+        _ => 0,
+    }
+    println(result)
+    "done"
+}

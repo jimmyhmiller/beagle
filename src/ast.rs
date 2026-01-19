@@ -1425,17 +1425,18 @@ impl AstCompiler<'_> {
                 token_range,
             } => {
                 // Compile the value to match on
-                let value_reg = self.call_compile(&value)?;
+                let compiled_value = self.call_compile(&value)?;
 
-                // Ensure value is in a register
-                let value_reg = match value_reg {
-                    Value::Register(_) => value_reg,
-                    _ => {
-                        let reg = self.ir.volatile_register();
-                        self.ir.assign(reg, value_reg);
-                        reg.into()
-                    }
-                };
+                // Store the match value in a local so it survives across function calls
+                // during pattern testing and binding
+                let match_temp_name = format!("__match_val_{}__", token_range.start);
+                let match_local_idx = self.find_or_insert_local(&match_temp_name);
+                let value_reg: Value = self.ir.assign_new(compiled_value).into();
+                self.ir.store_local(match_local_idx, value_reg);
+                self.insert_variable(
+                    match_temp_name.clone(),
+                    VariableLocation::Local(match_local_idx),
+                );
 
                 // Create labels
                 let end_label = self.ir.label("match_end");
@@ -1450,8 +1451,12 @@ impl AstCompiler<'_> {
                         no_match_label
                     };
 
+                    // Load the match value fresh from the local for this arm
+                    // (function calls during pattern testing may clobber registers)
+                    let fresh_value = self.ir.load_local(match_local_idx);
+
                     // Test pattern
-                    self.compile_pattern_test(&arm.pattern, value_reg, next_arm_label)?;
+                    self.compile_pattern_test(&arm.pattern, fresh_value, next_arm_label)?;
 
                     // Pattern matched - save current environment before binding pattern variables
                     // We need to save the actual VariableLocation values, not just keys,
@@ -1459,7 +1464,9 @@ impl AstCompiler<'_> {
                     let saved_env: HashMap<String, VariableLocation> =
                         self.environment_stack.last().unwrap().variables.clone();
 
-                    self.bind_pattern_variables(&arm.pattern, value_reg)?;
+                    // Load value again for binding (pattern test may have clobbered it)
+                    let fresh_value_for_bind = self.ir.load_local(match_local_idx);
+                    self.bind_pattern_variables(&arm.pattern, fresh_value_for_bind)?;
 
                     // Compile arm body
                     let mut arm_result = Value::Null;
@@ -4341,36 +4348,56 @@ impl AstCompiler<'_> {
                 );
                 Ok(())
             }
-            Pattern::Array { elements, rest, .. } => {
-                // Check that value is an array with at least `elements.len()` items
-                // If there's no rest pattern, it must be exactly that length
+            Pattern::Array { elements, rest, token_range } => {
                 let min_length = elements.len();
+                let _ = rest;
+                let _ = token_range;
 
-                // Get array length
-                let length_value = self.call_builtin("beagle.core/count", vec![value_reg])?;
+                // Store the array in a local so we can access it multiple times
+                let array_local_name = format!("__array_test_{}__", token_range.start);
+                let array_local_idx = self.find_or_insert_local(&array_local_name);
+                self.ir.store_local(array_local_idx, value_reg);
 
-                if rest.is_some() {
-                    // Must have at least min_length elements
-                    let min_length_val = Value::TaggedConstant(BuiltInTypes::Int.tag(min_length as isize));
-                    let min_length_reg: Value = self.ir.assign_new(min_length_val).into();
-                    // Jump if length < min_length
-                    self.ir.jump_if(
-                        no_match_label,
-                        Condition::LessThan,
-                        length_value,
-                        min_length_reg,
-                    );
-                } else {
-                    // Must have exactly min_length elements
-                    let expected_length_val = Value::TaggedConstant(BuiltInTypes::Int.tag(min_length as isize));
-                    let expected_length_reg: Value = self.ir.assign_new(expected_length_val).into();
-                    self.ir.jump_if(
-                        no_match_label,
-                        Condition::NotEqual,
-                        length_value,
-                        expected_length_reg,
-                    );
+                // Get the count using vec-count directly (doesn't need stack/frame pointer)
+                let arr_for_count = self.ir.load_local(array_local_idx);
+                let length_value =
+                    self.call_builtin("beagle.collections/vec-count", vec![arr_for_count])?;
+
+                // Create expected length as tagged int
+                // Note: TaggedConstant takes the UNTAGGED value; code gen will tag it
+                let expected_length_val = Value::TaggedConstant(min_length as isize);
+                let expected_length_reg = self.ir.assign_new(expected_length_val);
+
+                // Use the equal builtin to compare (like literal pattern does)
+                let result_value = self.call_builtin(
+                    "beagle.core/equal",
+                    vec![length_value, expected_length_reg.into()],
+                )?;
+
+                // Jump if length doesn't match
+                self.ir.jump_if(no_match_label, Condition::NotEqual, result_value, Value::True);
+
+                // Now test each element pattern that needs testing (literals, nested patterns)
+                for (idx, elem_pattern) in elements.iter().enumerate() {
+                    // Skip patterns that don't need testing (identifiers, wildcards)
+                    match elem_pattern {
+                        Pattern::Identifier { .. } | Pattern::Wildcard { .. } => continue,
+                        _ => {}
+                    }
+
+                    // Load the array fresh and get the element at this index
+                    let arr_for_get = self.ir.load_local(array_local_idx);
+                    let index_val = Value::TaggedConstant(idx as isize);
+                    let index_reg = self.ir.assign_new(index_val);
+                    let elem_value = self.call_builtin(
+                        "beagle.collections/vec-get",
+                        vec![arr_for_get, index_reg.into()],
+                    )?;
+
+                    // Recursively test this element pattern
+                    self.compile_pattern_test(elem_pattern, elem_value, no_match_label)?;
                 }
+
                 Ok(())
             }
             Pattern::Literal { value, .. } => {
@@ -4603,6 +4630,11 @@ impl AstCompiler<'_> {
 
                 // Bind each field by key using get
                 for field in fields.iter() {
+                    // Skip wildcard bindings - they don't need to be bound
+                    if field.binding_name == "_" {
+                        continue;
+                    }
+
                     // Generate the key AST based on key type
                     let key_ast = match &field.key {
                         MapKey::Keyword(name) => Ast::Keyword(name.clone(), token_range.start),

@@ -1,0 +1,460 @@
+namespace match_comprehensive_test
+
+// ============================================
+// COMPREHENSIVE MATCH AND DESTRUCTURING TESTS
+// ============================================
+
+fn assert_eq(actual, expected, name) {
+    if equal(actual, expected) {
+        print("PASS ")
+        println(name)
+        true
+    } else {
+        print("FAIL ")
+        println(name)
+        print("  Expected: ")
+        println(expected)
+        print("  Actual: ")
+        println(actual)
+        false
+    }
+}
+
+// ============================================
+// 1. ARRAY PATTERN MATCHING - LENGTH CHECKS
+// ============================================
+
+fn test_array_length_patterns() {
+    println("\n=== Array Length Pattern Tests ===")
+
+    // Empty array
+    let r1 = match [] {
+        [] => "empty",
+        _ => "not empty",
+    }
+    assert_eq(r1, "empty", "Empty array matches []")
+
+    // Single element
+    let r2 = match [42] {
+        [] => "empty",
+        [x] => "single",
+        _ => "other",
+    }
+    assert_eq(r2, "single", "Single element matches [x]")
+
+    // Two elements
+    let r3 = match [1, 2] {
+        [] => "empty",
+        [x] => "single",
+        [x, y] => "pair",
+        _ => "other",
+    }
+    assert_eq(r3, "pair", "Two elements matches [x, y]")
+
+    // Three elements
+    let r4 = match [1, 2, 3] {
+        [] => "empty",
+        [x] => "single",
+        [x, y] => "pair",
+        [x, y, z] => "triple",
+        _ => "other",
+    }
+    assert_eq(r4, "triple", "Three elements matches [x, y, z]")
+
+    // Four elements falls through to wildcard
+    let r5 = match [1, 2, 3, 4] {
+        [] => "empty",
+        [x] => "single",
+        [x, y] => "pair",
+        [x, y, z] => "triple",
+        _ => "many",
+    }
+    assert_eq(r5, "many", "Four elements falls through to wildcard")
+}
+
+// ============================================
+// 2. ARRAY PATTERN MATCHING - ELEMENT BINDING
+// ============================================
+
+fn test_array_element_binding() {
+    println("\n=== Array Element Binding Tests ===")
+
+    // Bind single element
+    let r1 = match [42] {
+        [x] => x,
+        _ => 0,
+    }
+    assert_eq(r1, 42, "Single element binding")
+
+    // Bind multiple elements
+    let r2 = match [10, 20, 30] {
+        [a, b, c] => a + b + c,
+        _ => 0,
+    }
+    assert_eq(r2, 60, "Multiple element binding and sum")
+
+    // Bind with computation
+    let r3 = match [5, 3] {
+        [x, y] => x * y,
+        _ => 0,
+    }
+    assert_eq(r3, 15, "Element binding with multiplication")
+
+    // Nested access after binding
+    let r4 = match [[1, 2], [3, 4]] {
+        [first, second] => get(first, 0) + get(second, 1),
+        _ => 0,
+    }
+    assert_eq(r4, 5, "Binding nested arrays")
+}
+
+// ============================================
+// 3. ARRAY PATTERN MATCHING - LITERAL ELEMENTS
+// ============================================
+
+fn test_array_literal_patterns() {
+    println("\n=== Array Literal Pattern Tests ===")
+
+    // Match first element literally
+    let r1 = match [1, 2, 3] {
+        [1, b, c] => b + c,
+        [2, b, c] => 100,
+        _ => 0,
+    }
+    assert_eq(r1, 5, "Literal first element match")
+
+    // Match different first elements
+    let r2 = match [2, 5, 6] {
+        [1, b, c] => b + c,
+        [2, b, c] => b * c,
+        _ => 0,
+    }
+    assert_eq(r2, 30, "Different literal first element")
+
+    // Match middle element literally
+    let r3 = match [10, 0, 20] {
+        [a, 0, c] => a + c,
+        [a, 1, c] => a * c,
+        _ => 0,
+    }
+    assert_eq(r3, 30, "Literal middle element match")
+
+    // No literal match falls through
+    let r4 = match [5, 5, 5] {
+        [1, b, c] => 100,
+        [2, b, c] => 200,
+        _ => 999,
+    }
+    assert_eq(r4, 999, "No literal match falls through")
+}
+
+// ============================================
+// 4. ARRAY PATTERN MATCHING - WILDCARDS
+// ============================================
+
+fn test_array_wildcard_patterns() {
+    println("\n=== Array Wildcard Pattern Tests ===")
+
+    // Wildcard ignores element
+    let r1 = match [1, 2, 3] {
+        [_, b, _] => b,
+        _ => 0,
+    }
+    assert_eq(r1, 2, "Wildcard ignores first and last")
+
+    // Multiple wildcards
+    let r2 = match [10, 20, 30, 40] {
+        [a, _, _, d] => a + d,
+        _ => 0,
+    }
+    assert_eq(r2, 50, "Multiple wildcards")
+
+    // All wildcards (just length check)
+    let r3 = match [1, 2, 3] {
+        [_, _, _] => "three",
+        [_, _] => "two",
+        _ => "other",
+    }
+    assert_eq(r3, "three", "All wildcards match by length")
+}
+
+// ============================================
+// 5. LITERAL PATTERN MATCHING
+// ============================================
+
+fn test_literal_patterns() {
+    println("\n=== Literal Pattern Tests ===")
+
+    // Integer literals
+    let r1 = match 42 {
+        0 => "zero",
+        1 => "one",
+        42 => "forty-two",
+        _ => "other",
+    }
+    assert_eq(r1, "forty-two", "Integer literal match")
+
+    // String literals
+    let r2 = match "hello" {
+        "hi" => 1,
+        "hello" => 2,
+        "hey" => 3,
+        _ => 0,
+    }
+    assert_eq(r2, 2, "String literal match")
+
+    // Boolean literals
+    let r3 = match true {
+        false => "no",
+        true => "yes",
+    }
+    assert_eq(r3, "yes", "Boolean literal match")
+
+    // Negative numbers
+    let r4 = match -5 {
+        -10 => "minus ten",
+        -5 => "minus five",
+        0 => "zero",
+        _ => "other",
+    }
+    assert_eq(r4, "minus five", "Negative literal match")
+}
+
+// ============================================
+// 6. IDENTIFIER PATTERN (SIMPLE BINDING)
+// ============================================
+
+fn test_identifier_patterns() {
+    println("\n=== Identifier Pattern Tests ===")
+
+    // Simple binding
+    let r1 = match 42 {
+        x => x * 2,
+    }
+    assert_eq(r1, 84, "Simple identifier binding")
+
+    // Binding with expression
+    let r2 = match [1, 2, 3] {
+        arr => count(arr),
+    }
+    assert_eq(r2, 3, "Identifier binding array")
+}
+
+// ============================================
+// 7. MAP DESTRUCTURING IN LET
+// ============================================
+
+fn test_map_destructuring() {
+    println("\n=== Map Destructuring Tests ===")
+
+    let m = {:name "Alice", :age 30}
+
+    // Basic map destructuring - field name matches keyword
+    let { name } = m
+    assert_eq(name, "Alice", "Map destructuring :name")
+
+    // Multiple fields with rename
+    let { name: n2, age: a2 } = m
+    assert_eq(n2, "Alice", "Map destructuring with rename - name")
+    assert_eq(a2, 30, "Map destructuring with rename - age")
+
+    // Shorthand - binding name same as key
+    let { name: name3, age: age3 } = m
+    assert_eq(name3, "Alice", "Map destructuring multiple - name")
+    assert_eq(age3, 30, "Map destructuring multiple - age")
+}
+
+// ============================================
+// 8. ARRAY DESTRUCTURING IN LET
+// ============================================
+
+fn test_array_let_destructuring() {
+    println("\n=== Array Let Destructuring Tests ===")
+
+    // Basic array destructuring
+    let [a, b, c] = [10, 20, 30]
+    assert_eq(a, 10, "Array let destructuring - first")
+    assert_eq(b, 20, "Array let destructuring - second")
+    assert_eq(c, 30, "Array let destructuring - third")
+
+    // With wildcards
+    let [first, _, last] = [1, 2, 3]
+    assert_eq(first, 1, "Array let with wildcard - first")
+    assert_eq(last, 3, "Array let with wildcard - last")
+
+    // Nested arrays
+    let [[x, y], [z, w]] = [[1, 2], [3, 4]]
+    assert_eq(x, 1, "Nested array destructuring - x")
+    assert_eq(y, 2, "Nested array destructuring - y")
+    assert_eq(z, 3, "Nested array destructuring - z")
+    assert_eq(w, 4, "Nested array destructuring - w")
+}
+
+// ============================================
+// 9. STRUCT PATTERN MATCHING
+// ============================================
+
+struct Point { x, y }
+struct Point3D { x, y, z }
+
+fn test_struct_patterns() {
+    println("\n=== Struct Pattern Tests ===")
+
+    let p = Point { x: 10, y: 20 }
+
+    // Match and destructure struct
+    let r1 = match p {
+        Point { x, y } => x + y,
+    }
+    assert_eq(r1, 30, "Struct pattern destructuring")
+
+    // Match 3D point
+    let p3 = Point3D { x: 1, y: 2, z: 3 }
+    let r2 = match p3 {
+        Point3D { x, y, z } => x + y + z,
+    }
+    assert_eq(r2, 6, "3D struct pattern destructuring")
+}
+
+// ============================================
+// 10. ENUM PATTERN MATCHING
+// ============================================
+
+enum MyOption {
+    some { value },
+    none,
+}
+
+enum MyResult {
+    ok { value },
+    err { message },
+}
+
+fn test_enum_patterns() {
+    println("\n=== Enum Pattern Tests ===")
+
+    // Match some variant
+    let opt1 = MyOption.some { value: 42 }
+    let r1 = match opt1 {
+        MyOption.some { value: v } => v,
+        MyOption.none => 0,
+    }
+    assert_eq(r1, 42, "Enum some pattern")
+
+    // Match none variant
+    let opt2 = MyOption.none
+    let r2 = match opt2 {
+        MyOption.some { value: v } => v,
+        MyOption.none => -1,
+    }
+    assert_eq(r2, -1, "Enum none pattern")
+
+    // Result enum - ok
+    let res1 = MyResult.ok { value: 100 }
+    let r3 = match res1 {
+        MyResult.ok { value: v } => v,
+        MyResult.err { message: m } => 0,
+    }
+    assert_eq(r3, 100, "Result ok pattern")
+
+    // Result enum - err
+    let res2 = MyResult.err { message: "failed" }
+    let r4 = match res2 {
+        MyResult.ok { value: v } => "success",
+        MyResult.err { message: m } => m,
+    }
+    assert_eq(r4, "failed", "Result err pattern")
+}
+
+// ============================================
+// 11. MATCH AS EXPRESSION
+// ============================================
+
+fn test_match_expression() {
+    println("\n=== Match as Expression Tests ===")
+
+    // Match in arithmetic
+    let r1 = 10 + match [1, 2] {
+        [a, b] => a + b,
+        _ => 0,
+    }
+    assert_eq(r1, 13, "Match in arithmetic expression")
+
+    // Match in function call
+    let r2 = to-string(match true {
+        true => 42,
+        false => 0,
+    })
+    assert_eq(r2, "42", "Match in function call")
+
+    // Nested match
+    let r3 = match [1, 2] {
+        [a, b] => match a {
+            1 => b * 10,
+            _ => b,
+        },
+        _ => 0,
+    }
+    assert_eq(r3, 20, "Nested match expressions")
+}
+
+// ============================================
+// 12. MIXED PATTERNS
+// ============================================
+
+fn test_mixed_patterns() {
+    println("\n=== Mixed Pattern Tests ===")
+
+    // Array with different types
+    let r1 = match [1, "two", 3] {
+        [a, b, c] => a + c,
+        _ => 0,
+    }
+    assert_eq(r1, 4, "Array with mixed types")
+
+    // Match on computed value
+    let arr = [1, 2, 3]
+    let r2 = match count(arr) {
+        0 => "empty",
+        1 => "one",
+        2 => "two",
+        3 => "three",
+        _ => "many",
+    }
+    assert_eq(r2, "three", "Match on computed count")
+
+    // Chained operations
+    let r3 = match [10] {
+        [x] => x,
+        _ => 0,
+    } * 2
+    assert_eq(r3, 20, "Match result in expression")
+}
+
+// ============================================
+// MAIN - RUN ALL TESTS
+// ============================================
+
+fn main() {
+    println("========================================")
+    println("COMPREHENSIVE MATCH & DESTRUCTURING TESTS")
+    println("========================================")
+
+    test_array_length_patterns()
+    test_array_element_binding()
+    test_array_literal_patterns()
+    test_array_wildcard_patterns()
+    test_literal_patterns()
+    test_identifier_patterns()
+    test_map_destructuring()
+    test_array_let_destructuring()
+    test_struct_patterns()
+    test_enum_patterns()
+    test_match_expression()
+    test_mixed_patterns()
+
+    println("\n========================================")
+    println("ALL TESTS COMPLETE")
+    println("========================================")
+    "done"
+}

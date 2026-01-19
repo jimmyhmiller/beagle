@@ -1,0 +1,30 @@
+namespace match_debug_inline
+
+import "beagle.collections" as coll
+
+fn main() {
+    let arr = [42]
+
+    // Print what we're testing
+    println("Testing array:")
+    println(arr)
+    println("vec-count result:")
+    println(coll/vec-count(arr))
+
+    // Manual test of the comparison logic
+    let len = coll/vec-count(arr)
+    println("len value:")
+    println(len)
+    println("equal to 1?")
+    println(equal(len, 1))
+
+    // Now the actual match
+    let result = match arr {
+        [x] => { println("MATCHED!"); x },
+        _ => { println("FELL THROUGH"); 0 },
+    }
+
+    println("Result:")
+    println(result)
+    "done"
+}

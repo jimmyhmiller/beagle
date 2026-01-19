@@ -1,0 +1,23 @@
+namespace let_wildcard_test
+
+fn main() {
+    // Wildcard ignores the value
+    let _ = 42
+
+    // Wildcard in array destructuring
+    let [first, _, third] = [1, 2, 3]
+    println(first)
+    println(third)
+
+    // Wildcard in struct destructuring
+    let m = {:name "Alice", :age 30}
+    let { name, age: _ } = m
+    println(name)
+
+    "done"
+}
+
+// Expect
+// 1
+// 3
+// Alice

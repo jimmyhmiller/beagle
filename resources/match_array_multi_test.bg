@@ -1,0 +1,20 @@
+namespace match_array_multi_test
+
+fn classify(arr) {
+    match arr {
+        [] => "empty",
+        [x] => "single",
+        [x, y] => "pair",
+        [x, y, z] => "triple",
+        _ => "many",
+    }
+}
+
+fn main() {
+    println(classify([]))
+    println(classify([1]))
+    println(classify([1, 2]))
+    println(classify([1, 2, 3]))
+    println(classify([1, 2, 3, 4]))
+    "done"
+}

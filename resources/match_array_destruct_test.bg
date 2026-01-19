@@ -1,0 +1,16 @@
+namespace match_array_destruct_test
+
+fn main() {
+    let arr = [1, 2, 3]
+
+    let result = match arr {
+        [1, second, _] => second * 10,
+        _ => 0,
+    }
+
+    println(result)
+    "done"
+}
+
+// Expect
+// 20

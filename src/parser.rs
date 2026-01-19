@@ -1948,13 +1948,22 @@ impl Parser {
     /// Parses a binding pattern for let bindings and function arguments.
     /// Supports:
     /// - Simple identifiers: `x`
+    /// - Wildcard: `_` (ignores the value)
     /// - Struct destructuring: `Point { x, y }` or `Point { x: a, y: b }`
     /// - Array destructuring: `[first, second, ...rest]`
+    /// - Map destructuring: `{ name, age }` or `{ "key": value }`
     fn parse_binding_pattern(&mut self) -> ParseResult<Pattern> {
         self.skip_whitespace();
         let start = self.position;
 
         match self.current_token() {
+            // Wildcard pattern - ignores the value
+            Token::Underscore => {
+                self.consume();
+                Ok(Pattern::Wildcard {
+                    token_range: TokenRange::new(start, self.position),
+                })
+            }
             // Simple identifier
             Token::Atom((atom_start, atom_end)) => {
                 let name = String::from_utf8(self.source.as_bytes()[atom_start..atom_end].to_vec())
@@ -2057,26 +2066,34 @@ impl Parser {
                             self.consume();
                             self.skip_whitespace();
 
-                            // Check for rename syntax: name: binding
+                            // Check for rename syntax: name: binding or name: _
                             let binding_name = if matches!(self.current_token(), Token::Colon) {
                                 self.consume();
                                 self.skip_whitespace();
 
-                                if let Token::Atom((bind_start, bind_end)) = self.current_token() {
-                                    let binding = String::from_utf8(
-                                        self.source.as_bytes()[bind_start..bind_end].to_vec(),
-                                    )
-                                    .map_err(|_| ParseError::InvalidUtf8 {
-                                        position: bind_start,
-                                    })?;
-                                    self.consume();
-                                    self.skip_whitespace();
-                                    binding
-                                } else {
-                                    return Err(ParseError::InvalidPattern {
-                                        message: "Expected binding name after ':'".to_string(),
-                                        position: self.position,
-                                    });
+                                match self.current_token() {
+                                    Token::Atom((bind_start, bind_end)) => {
+                                        let binding = String::from_utf8(
+                                            self.source.as_bytes()[bind_start..bind_end].to_vec(),
+                                        )
+                                        .map_err(|_| ParseError::InvalidUtf8 {
+                                            position: bind_start,
+                                        })?;
+                                        self.consume();
+                                        self.skip_whitespace();
+                                        binding
+                                    }
+                                    Token::Underscore => {
+                                        self.consume();
+                                        self.skip_whitespace();
+                                        "_".to_string()
+                                    }
+                                    _ => {
+                                        return Err(ParseError::InvalidPattern {
+                                            message: "Expected binding name or '_' after ':'".to_string(),
+                                            position: self.position,
+                                        });
+                                    }
                                 }
                             } else {
                                 key_name.clone()
@@ -2110,23 +2127,29 @@ impl Parser {
                             self.consume();
                             self.skip_whitespace();
 
-                            let binding_name = if let Token::Atom((bind_start, bind_end)) =
-                                self.current_token()
-                            {
-                                let binding = String::from_utf8(
-                                    self.source.as_bytes()[bind_start..bind_end].to_vec(),
-                                )
-                                .map_err(|_| ParseError::InvalidUtf8 {
-                                    position: bind_start,
-                                })?;
-                                self.consume();
-                                self.skip_whitespace();
-                                binding
-                            } else {
-                                return Err(ParseError::InvalidPattern {
-                                    message: "Expected binding name after ':'".to_string(),
-                                    position: self.position,
-                                });
+                            let binding_name = match self.current_token() {
+                                Token::Atom((bind_start, bind_end)) => {
+                                    let binding = String::from_utf8(
+                                        self.source.as_bytes()[bind_start..bind_end].to_vec(),
+                                    )
+                                    .map_err(|_| ParseError::InvalidUtf8 {
+                                        position: bind_start,
+                                    })?;
+                                    self.consume();
+                                    self.skip_whitespace();
+                                    binding
+                                }
+                                Token::Underscore => {
+                                    self.consume();
+                                    self.skip_whitespace();
+                                    "_".to_string()
+                                }
+                                _ => {
+                                    return Err(ParseError::InvalidPattern {
+                                        message: "Expected binding name or '_' after ':'".to_string(),
+                                        position: self.position,
+                                    });
+                                }
                             };
 
                             fields.push(MapFieldPattern {
@@ -2675,17 +2698,23 @@ impl Parser {
         })
     }
 
+    /// Parses a pattern for match expressions.
+    /// Supports all binding patterns plus:
+    /// - Enum variants: `Enum.Variant` or `Enum.Variant { field }`
+    /// - Literals: integers, strings, booleans, null
     fn parse_pattern(&mut self) -> ParseResult<Pattern> {
         self.skip_whitespace();
         let start = self.position;
 
         Ok(match self.current_token() {
+            // Wildcard pattern
             Token::Underscore => {
                 self.consume();
                 Pattern::Wildcard {
                     token_range: TokenRange::new(start, self.position),
                 }
             }
+            // Identifier, Enum variant, or Struct destructuring
             Token::Atom((atom_start, atom_end)) => {
                 let first_name =
                     String::from_utf8(self.source.as_bytes()[atom_start..atom_end].to_vec())
@@ -2729,17 +2758,229 @@ impl Parser {
                             position: self.position,
                         });
                     }
+                } else if matches!(self.current_token(), Token::OpenCurly) {
+                    // Struct destructuring: `Name { ... }`
+                    let fields = self.parse_field_patterns()?;
+                    Pattern::Struct {
+                        name: first_name,
+                        fields,
+                        token_range: TokenRange::new(start, self.position),
+                    }
                 } else {
-                    // It's just an identifier - treat as literal variable reference
-                    // For now, we can't distinguish between a variable and an enum
-                    // variant without the dot, so we'll return an error
-                    return Err(ParseError::InvalidPattern {
-                        message: "Patterns must be enum variants (Enum.Variant), literals, or wildcards (_)".to_string(),
-                        position: start,
-                    });
+                    // Simple identifier pattern - binds value to name
+                    Pattern::Identifier {
+                        name: first_name,
+                        token_range: TokenRange::new(start, self.position),
+                    }
                 }
             }
-            // Literal patterns
+            // Array destructuring: [a, b, ...rest]
+            Token::OpenBracket => {
+                self.consume();
+                self.skip_whitespace();
+
+                let mut elements = vec![];
+                let mut rest = None;
+
+                while !matches!(self.current_token(), Token::CloseBracket) {
+                    // Check for rest pattern
+                    if matches!(self.current_token(), Token::DotDotDot) {
+                        self.consume();
+                        self.skip_whitespace();
+                        let rest_pattern = self.parse_pattern()?;
+                        rest = Some(Box::new(rest_pattern));
+                        self.skip_whitespace();
+                        // Rest must be last
+                        if !matches!(self.current_token(), Token::CloseBracket) {
+                            return Err(ParseError::InvalidPattern {
+                                message: "Rest pattern must be last in array destructuring"
+                                    .to_string(),
+                                position: self.position,
+                            });
+                        }
+                        break;
+                    }
+
+                    let element_pattern = self.parse_pattern()?;
+                    elements.push(element_pattern);
+                    self.skip_whitespace();
+
+                    if matches!(self.current_token(), Token::Comma) {
+                        self.consume();
+                        self.skip_whitespace();
+                    } else if !matches!(self.current_token(), Token::CloseBracket) {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "',' or ']'".to_string(),
+                            found: self.get_token_repr(),
+                            position: self.position,
+                        });
+                    }
+                }
+
+                // Consume ']'
+                if !matches!(self.current_token(), Token::CloseBracket) {
+                    return Err(ParseError::MissingToken {
+                        expected: "']' to close array pattern".to_string(),
+                        position: self.position,
+                    });
+                }
+                self.consume();
+
+                Pattern::Array {
+                    elements,
+                    rest,
+                    token_range: TokenRange::new(start, self.position),
+                }
+            }
+            // Map destructuring: { name, age } or { "key": value }
+            Token::OpenCurly => {
+                self.consume();
+                self.skip_whitespace();
+
+                let mut fields = vec![];
+
+                while !matches!(self.current_token(), Token::CloseCurly) {
+                    let field_start = self.position;
+
+                    match self.current_token() {
+                        // Keyword key syntax: { name } or { name: binding }
+                        Token::Atom((atom_start, atom_end)) => {
+                            let key_name = String::from_utf8(
+                                self.source.as_bytes()[atom_start..atom_end].to_vec(),
+                            )
+                            .map_err(|_| ParseError::InvalidUtf8 {
+                                position: atom_start,
+                            })?;
+                            self.consume();
+                            self.skip_whitespace();
+
+                            // Check for rename syntax: name: binding or name: _
+                            let binding_name = if matches!(self.current_token(), Token::Colon) {
+                                self.consume();
+                                self.skip_whitespace();
+
+                                match self.current_token() {
+                                    Token::Atom((bind_start, bind_end)) => {
+                                        let binding = String::from_utf8(
+                                            self.source.as_bytes()[bind_start..bind_end].to_vec(),
+                                        )
+                                        .map_err(|_| ParseError::InvalidUtf8 {
+                                            position: bind_start,
+                                        })?;
+                                        self.consume();
+                                        self.skip_whitespace();
+                                        binding
+                                    }
+                                    Token::Underscore => {
+                                        self.consume();
+                                        self.skip_whitespace();
+                                        "_".to_string()
+                                    }
+                                    _ => {
+                                        return Err(ParseError::InvalidPattern {
+                                            message: "Expected binding name or '_' after ':'".to_string(),
+                                            position: self.position,
+                                        });
+                                    }
+                                }
+                            } else {
+                                key_name.clone()
+                            };
+
+                            fields.push(MapFieldPattern {
+                                key: MapKey::Keyword(key_name),
+                                binding_name,
+                                token_range: TokenRange::new(field_start, self.position),
+                            });
+                        }
+                        // String key syntax: { "some-key": binding }
+                        Token::String((str_start, str_end)) => {
+                            // Strip quotes from string (start+1 to end-1)
+                            let key_string = String::from_utf8(
+                                self.source.as_bytes()[str_start + 1..str_end - 1].to_vec(),
+                            )
+                            .map_err(|_| ParseError::InvalidUtf8 {
+                                position: str_start,
+                            })?;
+                            self.consume();
+                            self.skip_whitespace();
+
+                            // String keys require the : binding syntax
+                            if !matches!(self.current_token(), Token::Colon) {
+                                return Err(ParseError::InvalidPattern {
+                                    message:
+                                        "String keys in map destructuring require ': binding' syntax"
+                                            .to_string(),
+                                    position: self.position,
+                                });
+                            }
+                            self.consume();
+                            self.skip_whitespace();
+
+                            let binding_name = match self.current_token() {
+                                Token::Atom((bind_start, bind_end)) => {
+                                    let binding = String::from_utf8(
+                                        self.source.as_bytes()[bind_start..bind_end].to_vec(),
+                                    )
+                                    .map_err(|_| ParseError::InvalidUtf8 {
+                                        position: bind_start,
+                                    })?;
+                                    self.consume();
+                                    self.skip_whitespace();
+                                    binding
+                                }
+                                Token::Underscore => {
+                                    self.consume();
+                                    self.skip_whitespace();
+                                    "_".to_string()
+                                }
+                                _ => {
+                                    return Err(ParseError::InvalidPattern {
+                                        message: "Expected binding name or '_' after ':'".to_string(),
+                                        position: self.position,
+                                    });
+                                }
+                            };
+
+                            fields.push(MapFieldPattern {
+                                key: MapKey::String(key_string),
+                                binding_name,
+                                token_range: TokenRange::new(field_start, self.position),
+                            });
+                        }
+                        _ => {
+                            return Err(ParseError::InvalidPattern {
+                                message: "Expected field name or string key in map pattern"
+                                    .to_string(),
+                                position: self.position,
+                            });
+                        }
+                    }
+
+                    // Allow comma or newline between fields
+                    if matches!(self.current_token(), Token::Comma) {
+                        self.consume();
+                        self.skip_whitespace();
+                    } else {
+                        self.skip_whitespace();
+                    }
+                }
+
+                // Consume '}'
+                if !matches!(self.current_token(), Token::CloseCurly) {
+                    return Err(ParseError::MissingToken {
+                        expected: "'}' to close map pattern".to_string(),
+                        position: self.position,
+                    });
+                }
+                self.consume();
+
+                Pattern::Map {
+                    fields,
+                    token_range: TokenRange::new(start, self.position),
+                }
+            }
+            // Literal patterns (only valid in match, not in let bindings)
             Token::Integer((int_start, int_end)) => {
                 let int_str =
                     String::from_utf8(self.source.as_bytes()[int_start..int_end].to_vec())
@@ -2760,8 +3001,9 @@ impl Parser {
                 }
             }
             Token::String((str_start, str_end)) => {
+                // Strip quotes from string
                 let string_value =
-                    String::from_utf8(self.source.as_bytes()[str_start..str_end].to_vec())
+                    String::from_utf8(self.source.as_bytes()[str_start + 1..str_end - 1].to_vec())
                         .map_err(|_| ParseError::InvalidUtf8 {
                             position: str_start,
                         })?;
