@@ -4,7 +4,10 @@
 
 use crate::{
     Data,
-    ast::{ArityCase, Ast, FieldPattern, MapFieldPattern, MapKey, MatchArm, Pattern, StringInterpolationPart, TokenRange},
+    ast::{
+        ArityCase, Ast, FieldPattern, MapFieldPattern, MapKey, MatchArm, Pattern,
+        StringInterpolationPart, TokenRange,
+    },
     builtins::debugger,
 };
 use std::{error::Error, fmt};
@@ -201,6 +204,8 @@ pub enum Token {
     Pipe,
     PipeLast,
     Modulo,
+    Reset,
+    Shift,
 }
 impl Token {
     fn is_binary_operator(&self) -> bool {
@@ -300,6 +305,8 @@ impl Token {
             Token::Pipe => Ok("|>".to_string()),
             Token::PipeLast => Ok("|>>".to_string()),
             Token::Modulo => Ok("%".to_string()),
+            Token::Reset => Ok("reset".to_string()),
+            Token::Shift => Ok("shift".to_string()),
             Token::Comment((start, end))
             | Token::Atom((start, end))
             | Token::Keyword((start, end))
@@ -457,7 +464,14 @@ impl Tokenizer {
             if self.current_byte(input_bytes) == b'\\' {
                 if let Some(next) = self.peek(input_bytes) {
                     // Handle escaped $ to allow literal ${
-                    if next == b'$' || next == b'"' || next == b'\\' || next == b'n' || next == b'r' || next == b't' || next == b'0' {
+                    if next == b'$'
+                        || next == b'"'
+                        || next == b'\\'
+                        || next == b'n'
+                        || next == b'r'
+                        || next == b't'
+                        || next == b'0'
+                    {
                         self.consume(input_bytes); // consume backslash
                         self.consume(input_bytes); // consume escaped char
                         continue;
@@ -466,9 +480,7 @@ impl Tokenizer {
             }
 
             // Check for interpolation start: ${
-            if self.current_byte(input_bytes) == b'$'
-                && self.peek(input_bytes) == Some(b'{')
-            {
+            if self.current_byte(input_bytes) == b'$' && self.peek(input_bytes) == Some(b'{') {
                 has_interpolation = true;
 
                 // Save the string segment before the interpolation (if any)
@@ -611,6 +623,10 @@ impl Tokenizer {
         }
     }
 
+    fn is_pipe(&self, input_bytes: &[u8]) -> bool {
+        self.current_byte(input_bytes) == b'|'
+    }
+
     pub fn parse_identifier(&mut self, input_bytes: &[u8]) -> Token {
         let start = self.position;
         while !self.at_end(input_bytes)
@@ -627,6 +643,7 @@ impl Tokenizer {
             && !self.is_newline(input_bytes)
             && !self.is_quote(input_bytes)
             && !self.is_dot(input_bytes)
+            && !self.is_pipe(input_bytes)
         {
             self.consume(input_bytes);
         }
@@ -684,6 +701,8 @@ impl Tokenizer {
             b"match" => Token::Match,
             b"_" => Token::Underscore,
             b"for" => Token::For,
+            b"reset" => Token::Reset,
+            b"shift" => Token::Shift,
             _ => Token::Atom((start, self.position)),
         }
     }
@@ -779,6 +798,27 @@ impl Tokenizer {
         } else if self.is_dot(input_bytes) {
             self.consume(input_bytes);
             Token::Dot
+        } else if self.is_pipe(input_bytes) {
+            self.consume(input_bytes);
+            // Check for multi-character pipe operators
+            if !self.at_end(input_bytes) {
+                if self.current_byte(input_bytes) == b'|' {
+                    self.consume(input_bytes);
+                    Token::Or // ||
+                } else if self.current_byte(input_bytes) == b'>' {
+                    self.consume(input_bytes);
+                    if !self.at_end(input_bytes) && self.current_byte(input_bytes) == b'>' {
+                        self.consume(input_bytes);
+                        Token::PipeLast // |>>
+                    } else {
+                        Token::Pipe // |>
+                    }
+                } else {
+                    Token::BitWiseOr // |
+                }
+            } else {
+                Token::BitWiseOr // | at end
+            }
         } else {
             // println!("identifier");
             self.parse_identifier(input_bytes)
@@ -1088,6 +1128,8 @@ impl Parser {
             Token::If => Ok(Some(self.parse_if()?)),
             Token::Try => Ok(Some(self.parse_try()?)),
             Token::Throw => Ok(Some(self.parse_throw()?)),
+            Token::Reset => Ok(Some(self.parse_reset()?)),
+            Token::Shift => Ok(Some(self.parse_shift()?)),
             Token::Match => Ok(Some(self.parse_match()?)),
             Token::Namespace => Ok(Some(self.parse_namespace()?)),
             Token::Import => Ok(Some(self.parse_import()?)),
@@ -1137,11 +1179,15 @@ impl Parser {
                     if is_expr {
                         // Parse the expression from the byte range
                         let expr_bytes = &self.source.as_bytes()[seg_start..seg_end];
-                        let expr_source = String::from_utf8(expr_bytes.to_vec())
-                            .map_err(|_| ParseError::InvalidUtf8 { position: seg_start })?;
+                        let expr_source = String::from_utf8(expr_bytes.to_vec()).map_err(|_| {
+                            ParseError::InvalidUtf8 {
+                                position: seg_start,
+                            }
+                        })?;
 
                         // Create a new parser for the expression
-                        let mut expr_parser = Parser::new("<interpolation>".to_string(), expr_source)?;
+                        let mut expr_parser =
+                            Parser::new("<interpolation>".to_string(), expr_source)?;
                         let expr_ast = expr_parser.parse_expression(0, true, true)?;
                         if let Some(ast) = expr_ast {
                             parts.push(StringInterpolationPart::Expression(Box::new(ast)));
@@ -1149,8 +1195,11 @@ impl Parser {
                     } else {
                         // String literal segment
                         let seg_bytes = &self.source.as_bytes()[seg_start..seg_end];
-                        let seg_str = String::from_utf8(seg_bytes.to_vec())
-                            .map_err(|_| ParseError::InvalidUtf8 { position: seg_start })?;
+                        let seg_str = String::from_utf8(seg_bytes.to_vec()).map_err(|_| {
+                            ParseError::InvalidUtf8 {
+                                position: seg_start,
+                            }
+                        })?;
                         let processed = stripslashes(&seg_str);
                         if !processed.is_empty() {
                             parts.push(StringInterpolationPart::Literal(processed));
@@ -1959,6 +2008,23 @@ impl Parser {
                     token_range: TokenRange::new(start_position, end_position),
                 })
             }
+            // Allow 'shift' and 'reset' as field names (they're only keywords in expression context)
+            Token::Shift => {
+                let end_position = self.consume();
+                Ok(Ast::StructField {
+                    name: "shift".to_string(),
+                    mutable,
+                    token_range: TokenRange::new(start_position, end_position),
+                })
+            }
+            Token::Reset => {
+                let end_position = self.consume();
+                Ok(Ast::StructField {
+                    name: "reset".to_string(),
+                    mutable,
+                    token_range: TokenRange::new(start_position, end_position),
+                })
+            }
             _ => Err(ParseError::UnexpectedToken {
                 expected: "field name".to_string(),
                 found: self.get_token_repr(),
@@ -2089,7 +2155,9 @@ impl Parser {
             // Simple identifier
             Token::Atom((atom_start, atom_end)) => {
                 let name = String::from_utf8(self.source.as_bytes()[atom_start..atom_end].to_vec())
-                    .map_err(|_| ParseError::InvalidUtf8 { position: atom_start })?;
+                    .map_err(|_| ParseError::InvalidUtf8 {
+                        position: atom_start,
+                    })?;
                 self.consume();
                 self.skip_whitespace();
 
@@ -2128,7 +2196,8 @@ impl Parser {
                         // Rest must be last
                         if !matches!(self.current_token(), Token::CloseBracket) {
                             return Err(ParseError::InvalidPattern {
-                                message: "Rest pattern must be last in array destructuring".to_string(),
+                                message: "Rest pattern must be last in array destructuring"
+                                    .to_string(),
                                 position: self.position,
                             });
                         }
@@ -2212,7 +2281,8 @@ impl Parser {
                                     }
                                     _ => {
                                         return Err(ParseError::InvalidPattern {
-                                            message: "Expected binding name or '_' after ':'".to_string(),
+                                            message: "Expected binding name or '_' after ':'"
+                                                .to_string(),
                                             position: self.position,
                                         });
                                     }
@@ -2268,7 +2338,8 @@ impl Parser {
                                 }
                                 _ => {
                                     return Err(ParseError::InvalidPattern {
-                                        message: "Expected binding name or '_' after ':'".to_string(),
+                                        message: "Expected binding name or '_' after ':'"
+                                            .to_string(),
                                         position: self.position,
                                     });
                                 }
@@ -2549,6 +2620,39 @@ impl Parser {
                 }
                 Ok(Some((name, value)))
             }
+            // Allow 'shift' and 'reset' as struct field names
+            Token::Shift => {
+                self.consume();
+                self.skip_spaces();
+                self.expect_colon()?;
+                self.skip_spaces();
+                let value = self.parse_expression(0, false, true)?.ok_or_else(|| {
+                    ParseError::InvalidExpression {
+                        message: "Expected value for struct field".to_string(),
+                        position: self.position,
+                    }
+                })?;
+                if !self.is_close_curly() {
+                    self.data_delimiter()?;
+                }
+                Ok(Some(("shift".to_string(), value)))
+            }
+            Token::Reset => {
+                self.consume();
+                self.skip_spaces();
+                self.expect_colon()?;
+                self.skip_spaces();
+                let value = self.parse_expression(0, false, true)?.ok_or_else(|| {
+                    ParseError::InvalidExpression {
+                        message: "Expected value for struct field".to_string(),
+                        position: self.position,
+                    }
+                })?;
+                if !self.is_close_curly() {
+                    self.data_delimiter()?;
+                }
+                Ok(Some(("reset".to_string(), value)))
+            }
             _ => Ok(None),
         }
     }
@@ -2728,6 +2832,93 @@ impl Parser {
         let end_position = self.position;
         Ok(Ast::Throw {
             value,
+            token_range: TokenRange::new(start_position, end_position),
+        })
+    }
+
+    fn parse_reset(&mut self) -> ParseResult<Ast> {
+        let start_position = self.position;
+        self.move_to_next_non_whitespace();
+
+        // Parse reset block: reset { body }
+        let body = self.parse_block()?;
+
+        let end_position = self.position;
+        Ok(Ast::Reset {
+            body,
+            token_range: TokenRange::new(start_position, end_position),
+        })
+    }
+
+    fn parse_shift(&mut self) -> ParseResult<Ast> {
+        let start_position = self.position;
+        self.move_to_next_non_whitespace();
+
+        // Parse shift(|k| { body })
+        // Expect '('
+        if !matches!(self.current_token(), Token::OpenParen) {
+            return Err(ParseError::MissingToken {
+                expected: "'(' after 'shift'".to_string(),
+                position: self.position,
+            });
+        }
+        self.consume();
+        self.skip_whitespace();
+
+        // Expect '|'
+        if !matches!(self.current_token(), Token::BitWiseOr) {
+            return Err(ParseError::MissingToken {
+                expected: "'|' for continuation parameter".to_string(),
+                position: self.position,
+            });
+        }
+        self.consume();
+        self.skip_whitespace();
+
+        // Get the continuation parameter identifier
+        let continuation_param = if let Token::Atom((start, end)) = self.current_token() {
+            let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
+            self.consume();
+            name
+        } else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "identifier for continuation parameter".to_string(),
+                found: self.get_token_repr(),
+                position: self.position,
+            });
+        };
+
+        self.skip_whitespace();
+
+        // Expect closing '|'
+        if !matches!(self.current_token(), Token::BitWiseOr) {
+            return Err(ParseError::MissingToken {
+                expected: "'|' after continuation parameter".to_string(),
+                position: self.position,
+            });
+        }
+        self.consume();
+        self.skip_whitespace();
+
+        // Parse the body block
+        let body = self.parse_block()?;
+
+        self.skip_whitespace();
+
+        // Expect closing ')'
+        if !matches!(self.current_token(), Token::CloseParen) {
+            return Err(ParseError::MissingToken {
+                expected: "')' after shift body".to_string(),
+                position: self.position,
+            });
+        }
+        self.consume();
+
+        let end_position = self.position;
+        Ok(Ast::Shift {
+            continuation_param,
+            body,
             token_range: TokenRange::new(start_position, end_position),
         })
     }
@@ -3000,7 +3191,8 @@ impl Parser {
                                     }
                                     _ => {
                                         return Err(ParseError::InvalidPattern {
-                                            message: "Expected binding name or '_' after ':'".to_string(),
+                                            message: "Expected binding name or '_' after ':'"
+                                                .to_string(),
                                             position: self.position,
                                         });
                                     }
@@ -3058,7 +3250,8 @@ impl Parser {
                                 }
                                 _ => {
                                     return Err(ParseError::InvalidPattern {
-                                        message: "Expected binding name or '_' after ':'".to_string(),
+                                        message: "Expected binding name or '_' after ':'"
+                                            .to_string(),
                                         position: self.position,
                                     });
                                 }

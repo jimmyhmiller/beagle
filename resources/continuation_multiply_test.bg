@@ -1,0 +1,14 @@
+namespace continuation_multiply_test
+
+// Test: continuation captures multiplication
+fn main() {
+    let result = reset {
+        2 * shift(|k| {
+            k(5)  // invoke with 5, computes 2 * 5 = 10
+        })
+    }
+    println(result)
+}
+
+// Expect
+// 10

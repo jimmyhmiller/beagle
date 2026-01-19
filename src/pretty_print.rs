@@ -493,6 +493,34 @@ impl PrettyPrint for Instruction {
             Instruction::ReadArgCount(dest) => {
                 format!("read_arg_count {}", dest.pretty_print())
             }
+            Instruction::PushPromptHandler(label, result_local, _) => {
+                format!(
+                    "push_prompt_handler {}, {}",
+                    label.index,
+                    result_local.pretty_print()
+                )
+            }
+            Instruction::PopPromptHandler(result, _) => {
+                format!("pop_prompt_handler {}", result.pretty_print())
+            }
+            Instruction::LoadLabelAddress(dest, label) => {
+                format!(
+                    "load_label_address {}, {}",
+                    dest.pretty_print(),
+                    label.index
+                )
+            }
+            Instruction::CaptureContinuation(dest, label, local_index, _) => {
+                format!(
+                    "capture_continuation {}, label_{}, local_{}",
+                    dest.pretty_print(),
+                    label.index,
+                    local_index
+                )
+            }
+            Instruction::ReturnFromShift(value, _) => {
+                format!("return_from_shift {}", value.pretty_print())
+            }
         }
     }
 }

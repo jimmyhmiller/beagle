@@ -1,0 +1,33 @@
+namespace continuation_gc_stress_test
+
+// This test exposes a potential GC bug:
+// The continuation captures stack state that includes a string pointer.
+// If GC runs between capture and invoke, the string might be moved/collected.
+
+fn make_garbage(n) {
+    if n <= 0 {
+        []
+    } else {
+        let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        push(make_garbage(n - 1), arr)
+    }
+}
+
+fn main() {
+    // Capture a continuation that has a string in scope
+    let result = reset {
+        let captured_string = "hello world"
+        let x = shift(|k| {
+            // Allocate lots of objects to trigger GC
+            let garbage = make_garbage(50)
+            // Now invoke k - if GC ran, captured_string might be corrupted
+            k(captured_string)
+        })
+        // x should be the captured_string we passed to k
+        x
+    }
+    println(result)
+}
+
+// Expect
+// hello world
