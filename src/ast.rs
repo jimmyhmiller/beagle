@@ -355,9 +355,7 @@ pub enum Pattern {
         token_range: TokenRange,
     },
     /// Matches anything without binding: `_`
-    Wildcard {
-        token_range: TokenRange,
-    },
+    Wildcard { token_range: TokenRange },
 }
 
 impl Pattern {
@@ -391,22 +389,23 @@ impl Pattern {
     pub fn binding_names(&self) -> Vec<String> {
         match self {
             Pattern::Identifier { name, .. } => vec![name.clone()],
-            Pattern::EnumVariant { fields, .. } | Pattern::Struct { fields, .. } => {
-                fields
-                    .iter()
-                    .map(|f| f.binding_name.clone().unwrap_or_else(|| f.field_name.clone()))
-                    .collect()
-            }
+            Pattern::EnumVariant { fields, .. } | Pattern::Struct { fields, .. } => fields
+                .iter()
+                .map(|f| {
+                    f.binding_name
+                        .clone()
+                        .unwrap_or_else(|| f.field_name.clone())
+                })
+                .collect(),
             Pattern::Array { elements, rest, .. } => {
-                let mut names: Vec<String> = elements.iter().flat_map(|p| p.binding_names()).collect();
+                let mut names: Vec<String> =
+                    elements.iter().flat_map(|p| p.binding_names()).collect();
                 if let Some(rest_pattern) = rest {
                     names.extend(rest_pattern.binding_names());
                 }
                 names
             }
-            Pattern::Map { fields, .. } => {
-                fields.iter().map(|f| f.binding_name.clone()).collect()
-            }
+            Pattern::Map { fields, .. } => fields.iter().map(|f| f.binding_name.clone()).collect(),
             Pattern::Literal { .. } | Pattern::Wildcard { .. } => vec![],
         }
     }
@@ -763,14 +762,15 @@ impl AstCompiler<'_> {
                 body,
                 ..
             } => {
-                self.create_new_environment();
-
-                let is_not_top_level = self.environment_stack.len() > 2;
+                // Check if this is a nested function BEFORE creating new environment
+                // so we can create the local in the parent environment
+                let is_not_top_level = self.environment_stack.len() > 1;
                 let is_variadic = rest_param.is_some();
                 let min_args = args.len();
                 // For variadic functions, the actual arity is min_args + 1 (for the rest vector)
                 let actual_arity = if is_variadic { min_args + 1 } else { min_args };
 
+                // Create local for nested function name in PARENT environment before creating new env
                 let variable_locaton = if is_not_top_level {
                     // We are inside a function already, so this isn't a top level function
                     // We are going to create a location for it, so that we can make sure recursion will work
@@ -785,6 +785,8 @@ impl AstCompiler<'_> {
                 } else {
                     None
                 };
+
+                self.create_new_environment();
                 let allocate_fn_pointer = self.compiler.allocate_fn_pointer()?;
                 let old_ir = std::mem::replace(&mut self.ir, Ir::new(allocate_fn_pointer));
                 let old_name = self.name.clone();
@@ -2320,6 +2322,18 @@ impl AstCompiler<'_> {
             }
             Ast::Recurse { args, .. } | Ast::TailRecurse { args, .. } => {
                 let mut compiled_args: Vec<Value> = Vec::new();
+
+                // For nested functions (closures), the first argument is the closure context
+                // We need to pass it through when recursing
+                let is_nested_function = self.environment_stack.len() > 1;
+                if is_nested_function {
+                    // Load the closure context from its local
+                    if let Some(context_loc) = self.get_variable_including_free("<closure_context>") {
+                        let context_val = self.resolve_variable(&context_loc)?;
+                        compiled_args.push(context_val);
+                    }
+                }
+
                 for arg in args.iter() {
                     self.not_tail_position();
                     compiled_args.push(self.call_compile(&Box::new(arg.clone()))?);
@@ -3101,28 +3115,61 @@ impl AstCompiler<'_> {
     }
 
     fn create_free_if_closable(&mut self, name: &String) -> Option<VariableLocation> {
-        let mut location = None;
-        for environment in self.environment_stack.iter_mut().rev().skip(1) {
-            if let Some(loc) = environment.variables.get(name) {
-                location = Some(loc.clone());
+        // Find which environment (by index) contains the variable
+        let stack_len = self.environment_stack.len();
+        let mut found_idx = None;
+        let mut original_location = None;
+
+        // Search from parent (stack_len - 2) down to root (0)
+        for idx in (0..stack_len - 1).rev() {
+            if let Some(loc) = self.environment_stack[idx].variables.get(name) {
+                found_idx = Some(idx);
+                original_location = Some(loc.clone());
                 break;
             }
         }
-        if let Some(location) = location {
-            let free_variable = self.find_or_insert_free_variable(name);
-            match location {
-                VariableLocation::BoxedMutableLocal(_) => {
-                    return Some(VariableLocation::BoxedFreeVariable(free_variable));
-                }
-                VariableLocation::MutableLocal(_) => {
-                    return Some(VariableLocation::MutableFreeVariable(free_variable));
-                }
-                _ => {
-                    return Some(VariableLocation::FreeVariable(free_variable));
-                }
+
+        let found_idx = found_idx?;
+        let original_location = original_location?;
+
+        // Determine the variable kind based on the original location
+        let var_kind = match &original_location {
+            VariableLocation::BoxedMutableLocal(_) | VariableLocation::BoxedFreeVariable(_) => {
+                "boxed"
+            }
+            VariableLocation::MutableLocal(_) | VariableLocation::MutableFreeVariable(_) => {
+                "mutable"
+            }
+            _ => "normal",
+        };
+
+        // Propagate free variables through ALL intermediate environments
+        // from found_idx+1 up to (but not including) current (stack_len-1)
+        // Each intermediate scope must capture from its parent
+        for idx in (found_idx + 1)..(stack_len - 1) {
+            let env = &mut self.environment_stack[idx];
+            if env.variables.get(name).is_none() {
+                // Add free variable entry to this intermediate environment
+                let free_idx = env.free_variables.len();
+                env.free_variables.push(FreeVariable {
+                    name: name.to_string(),
+                });
+                let free_var_loc = match var_kind {
+                    "boxed" => VariableLocation::BoxedFreeVariable(free_idx),
+                    "mutable" => VariableLocation::MutableFreeVariable(free_idx),
+                    _ => VariableLocation::FreeVariable(free_idx),
+                };
+                env.variables.insert(name.to_string(), free_var_loc);
             }
         }
-        None
+
+        // Now add to current environment
+        let free_variable = self.find_or_insert_free_variable(name);
+        match var_kind {
+            "boxed" => Some(VariableLocation::BoxedFreeVariable(free_variable)),
+            "mutable" => Some(VariableLocation::MutableFreeVariable(free_variable)),
+            _ => Some(VariableLocation::FreeVariable(free_variable)),
+        }
     }
 
     fn get_qualified_function_name(&mut self, name: &String) -> Result<String, CompileError> {
@@ -3177,6 +3224,20 @@ impl AstCompiler<'_> {
     fn compile_closure_call(&mut self, function: VariableLocation, args: Vec<Value>) -> Value {
         // self.ir.breakpoint();
         let ret_register = self.ir.assign_new(Value::TaggedConstant(0));
+
+        // Save argument values to locals FIRST, before any operations that could clobber registers
+        // This is critical because resolving the function and checking tags may clobber argument registers
+        // We must use assign_new_force (not assign_new) because assign_new short-circuits for
+        // Value::Register inputs and just returns the same register, which would be clobbered later
+        let mut saved_arg_locals = Vec::new();
+        for (i, arg) in args.iter().enumerate() {
+            let local_name = format!("__closure_call_arg_{}", i);
+            let local = self.find_or_insert_local(&local_name);
+            let arg_reg = self.ir.assign_new_force(*arg);
+            self.ir.store_local(local, arg_reg.into());
+            saved_arg_locals.push(local);
+        }
+
         let function = self.resolve_variable(&function).unwrap();
         let function_register = self.ir.assign_new(function);
 
@@ -3219,7 +3280,12 @@ impl AstCompiler<'_> {
         // Non-closure, non-multi-arity function call path
         // Top-level functions are stored as tagged Function pointers in namespace bindings
         let saved_fn = self.ir.assign_new(function_register);
-        let result = self.ir.call(saved_fn.into(), args.clone());
+        // Reload arguments from locals
+        let reloaded_args: Vec<Value> = saved_arg_locals
+            .iter()
+            .map(|local| self.ir.load_local(*local))
+            .collect();
+        let result = self.ir.call(saved_fn.into(), reloaded_args);
         self.ir.assign(ret_register, result);
         self.ir.jump(exit_closure_call);
 
@@ -3249,7 +3315,12 @@ impl AstCompiler<'_> {
 
             // The returned fn_ptr is a tagged Function pointer, call it directly
             let saved_fn_ptr = self.ir.assign_new(fn_ptr);
-            let result = self.ir.call(saved_fn_ptr.into(), args.clone());
+            // Reload arguments from locals
+            let reloaded_args: Vec<Value> = saved_arg_locals
+                .iter()
+                .map(|local| self.ir.load_local(*local))
+                .collect();
+            let result = self.ir.call(saved_fn_ptr.into(), reloaded_args);
             self.ir.assign(ret_register, result);
         }
         self.ir.jump(exit_closure_call);
@@ -3257,6 +3328,9 @@ impl AstCompiler<'_> {
         // Closure call path
         self.ir.write_label(call_closure);
         {
+            // Reload closure from saved local (may have been clobbered)
+            let closure_val = self.ir.load_local(saved_func_local);
+
             // I need to grab the function pointer
             // Closures are a pointer to a structure like this
             // struct Closure {
@@ -3264,17 +3338,20 @@ impl AstCompiler<'_> {
             //     num_free_variables: usize,
             //     free_variables: *const Value,
             // }
-            let untagged_closure_register = self.ir.untag(closure_register.into());
+            let untagged_closure_register = self.ir.untag(closure_val);
             // Load function pointer from closure structure (field 0 = offset 1, after 8-byte header)
             let function_pointer = self.ir.load_from_memory(untagged_closure_register, 1);
 
             // Save function pointer before making builtin calls that could clobber it
             let saved_fn_ptr = self.ir.assign_new(function_pointer);
 
-            // Non-variadic closure: call directly (skip arity/variadic checks for now)
-            let mut closure_args = args.clone();
-            closure_args.insert(0, closure_register.into());
-            let result = self.ir.call(saved_fn_ptr.into(), closure_args);
+            // Reload arguments from locals and prepend closure
+            let mut reloaded_args: Vec<Value> = saved_arg_locals
+                .iter()
+                .map(|local| self.ir.load_local(*local))
+                .collect();
+            reloaded_args.insert(0, closure_val);
+            let result = self.ir.call(saved_fn_ptr.into(), reloaded_args);
             self.ir.assign(ret_register, result);
         }
 
@@ -3303,11 +3380,13 @@ impl AstCompiler<'_> {
 
         self.ir.write_label(label);
         for free_variable in self.get_current_env().free_variables.clone().iter().rev() {
-            let variable = self.get_variable(&free_variable.name).ok_or_else(|| {
-                CompileError::UndefinedVariable {
+            // Look in the PARENT environment specifically (not searching all the way up)
+            // because we're generating code for the parent function
+            let variable = self
+                .get_variable_from_parent(&free_variable.name)
+                .ok_or_else(|| CompileError::UndefinedVariable {
                     name: free_variable.name.clone(),
-                }
-            })?;
+                })?;
             // we are now going to push these variables onto the stack
 
             match variable {
@@ -3321,15 +3400,19 @@ impl AstCompiler<'_> {
                     self.ir.push_to_stack(reg);
                 }
                 VariableLocation::NamespaceVariable(namespace, slot) => {
-                    self.resolve_variable(&VariableLocation::NamespaceVariable(namespace, slot))
+                    let val = self
+                        .resolve_variable(&VariableLocation::NamespaceVariable(namespace, slot))
                         .unwrap();
+                    let reg = self.ir.assign_new(val);
+                    self.ir.push_to_stack(reg.into());
                 }
                 VariableLocation::FreeVariable(_)
                 | VariableLocation::BoxedFreeVariable(_)
                 | VariableLocation::MutableFreeVariable(_) => {
-                    panic!(
-                        "We are trying to find this variable concretely and found a free variable"
-                    )
+                    // The parent has this as a free variable - load it from the parent's closure
+                    let val = self.resolve_variable(&variable).unwrap();
+                    let reg = self.ir.assign_new(val);
+                    self.ir.push_to_stack(reg.into());
                 }
             }
         }
@@ -3385,9 +3468,11 @@ impl AstCompiler<'_> {
         // Let's look in the current environment
         // Then we will look in the current namespace
         // then we will look in the global namespace
+        // First check the current (innermost) environment for direct access
         if let Some(variable) = self.environment_stack.last().unwrap().variables.get(name) {
-            Some(variable.clone())
-        } else if let Some(slot) = self
+            return Some(variable.clone());
+        }
+        if let Some(slot) = self
             .compiler
             .find_binding(self.compiler.current_namespace_id(), name)
         {
@@ -3448,9 +3533,34 @@ impl AstCompiler<'_> {
         name: &str,
     ) -> Result<VariableLocation, CompileError> {
         let existing_location = self.get_variable(name);
+        // Check if variable is accessible from current scope
         if let Some(variable) = self.get_accessible_variable(name) {
-            Ok(variable.clone())
-        } else if name.contains("/") {
+            // Variable found in current env or namespace bindings
+            // But we need to check if there's also a parent scope variable that should take precedence
+            // This happens when a sibling closure is shadowed by a namespace binding of the same name
+            if let Some(parent_loc) = &existing_location {
+                // Variable exists in parent scope - it should be captured, not the namespace binding
+                // Only do this if:
+                // 1. The accessible variable is a namespace variable (not current env local)
+                // 2. The parent location is a LOCAL (not itself a namespace variable)
+                // This ensures sibling closures are captured, but namespace imports still work
+                let parent_is_local = matches!(
+                    parent_loc,
+                    VariableLocation::Local(_)
+                        | VariableLocation::MutableLocal(_)
+                        | VariableLocation::BoxedMutableLocal(_)
+                );
+                if matches!(variable, VariableLocation::NamespaceVariable(..)) && parent_is_local {
+                    // Parent scope local variable takes precedence over namespace binding
+                    // Fall through to free variable handling
+                } else {
+                    return Ok(variable.clone());
+                }
+            } else {
+                return Ok(variable.clone());
+            }
+        }
+        if name.contains("/") {
             let (namespace_name, var_name) = self.get_namespace_name_and_name(name)?;
             let namespace_id =
                 self.compiler
@@ -3509,6 +3619,19 @@ impl AstCompiler<'_> {
             }
         }
         None
+    }
+
+    /// Get a variable from the immediate parent environment.
+    /// Used when building closures - we're generating code for the parent function,
+    /// so we need to look at parent's variables (which includes parent's free variables).
+    fn get_variable_from_parent(&self, name: &str) -> Option<VariableLocation> {
+        let stack_len = self.environment_stack.len();
+        if stack_len < 2 {
+            return None;
+        }
+        // Parent is at index stack_len - 2
+        let parent_env = &self.environment_stack[stack_len - 2];
+        parent_env.variables.get(name).cloned()
     }
 
     pub fn string_constant(&mut self, str: String) -> Value {
@@ -3718,7 +3841,9 @@ impl AstCompiler<'_> {
                 }
             }
             Ast::Let {
-                pattern: _, value: _, ..
+                pattern: _,
+                value: _,
+                ..
             } => {}
             Ast::Namespace { name, .. } => {
                 let namespace_id = self.compiler.reserve_namespace(name.clone());
@@ -4385,11 +4510,11 @@ impl AstCompiler<'_> {
             Pattern::Struct { name, .. } => {
                 // Check if the value is a struct with the expected struct ID
                 let full_struct_name = self.get_full_struct_name(name);
-                let (expected_struct_id, _) =
-                    self.compiler.get_struct(&full_struct_name).ok_or_else(|| {
-                        CompileError::StructResolution {
-                            struct_name: full_struct_name.clone(),
-                        }
+                let (expected_struct_id, _) = self
+                    .compiler
+                    .get_struct(&full_struct_name)
+                    .ok_or_else(|| CompileError::StructResolution {
+                        struct_name: full_struct_name.clone(),
                     })?;
 
                 // Untag the value before reading struct ID
@@ -4414,7 +4539,11 @@ impl AstCompiler<'_> {
                 );
                 Ok(())
             }
-            Pattern::Array { elements, rest, token_range } => {
+            Pattern::Array {
+                elements,
+                rest,
+                token_range,
+            } => {
                 let min_length = elements.len();
                 let _ = rest;
                 let _ = token_range;
@@ -4441,7 +4570,12 @@ impl AstCompiler<'_> {
                 )?;
 
                 // Jump if length doesn't match
-                self.ir.jump_if(no_match_label, Condition::NotEqual, result_value, Value::True);
+                self.ir.jump_if(
+                    no_match_label,
+                    Condition::NotEqual,
+                    result_value,
+                    Value::True,
+                );
 
                 // Now test each element pattern that needs testing (literals, nested patterns)
                 for (idx, elem_pattern) in elements.iter().enumerate() {
@@ -4637,7 +4771,11 @@ impl AstCompiler<'_> {
                     self.insert_variable(binding_name.clone(), location);
                 }
             }
-            Pattern::Array { elements, rest, token_range } => {
+            Pattern::Array {
+                elements,
+                rest,
+                token_range,
+            } => {
                 // Store array in a let binding so it persists across function calls
                 // Generate a unique temp name
                 let array_temp_name = format!("__arr_{}__", token_range.start);
@@ -4646,7 +4784,10 @@ impl AstCompiler<'_> {
                 let array_local_idx = self.find_or_insert_local(&array_temp_name);
                 let array_reg = self.ir.assign_new(value_reg);
                 self.ir.store_local(array_local_idx, array_reg.into());
-                self.insert_variable(array_temp_name.clone(), VariableLocation::Local(array_local_idx));
+                self.insert_variable(
+                    array_temp_name.clone(),
+                    VariableLocation::Local(array_local_idx),
+                );
 
                 // Bind each element by index using AST generation
                 // This ensures we go through the normal compilation path
@@ -4686,13 +4827,19 @@ impl AstCompiler<'_> {
                     self.bind_pattern_variables(rest_pattern, rest_value)?;
                 }
             }
-            Pattern::Map { fields, token_range } => {
+            Pattern::Map {
+                fields,
+                token_range,
+            } => {
                 // Store the map in a local so it persists across function calls
                 let map_temp_name = format!("__map_{}__", token_range.start);
                 let map_local_idx = self.find_or_insert_local(&map_temp_name);
                 let map_reg = self.ir.assign_new(value_reg);
                 self.ir.store_local(map_local_idx, map_reg.into());
-                self.insert_variable(map_temp_name.clone(), VariableLocation::Local(map_local_idx));
+                self.insert_variable(
+                    map_temp_name.clone(),
+                    VariableLocation::Local(map_local_idx),
+                );
 
                 // Bind each field by key using get
                 for field in fields.iter() {
@@ -4761,7 +4908,10 @@ impl AstCompiler<'_> {
                 Pattern::Wildcard { .. } => {
                     has_wildcard = true;
                 }
-                Pattern::Struct { .. } | Pattern::Array { .. } | Pattern::Literal { .. } | Pattern::Map { .. } => {}
+                Pattern::Struct { .. }
+                | Pattern::Array { .. }
+                | Pattern::Literal { .. }
+                | Pattern::Map { .. } => {}
             }
         }
 
