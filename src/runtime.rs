@@ -740,7 +740,8 @@ pub struct Memory {
     pub threads: Vec<Thread>,
     pub stack_map: StackMap,
     /// Per-thread GlobalObject management (now owned by Memory, not GC)
-    pub thread_globals: HashMap<ThreadId, ThreadGlobal>,
+    /// Protected by Mutex for thread-safe access from multiple threads
+    pub thread_globals: Mutex<HashMap<ThreadId, ThreadGlobal>>,
     #[allow(unused)]
     command_line_arguments: CommandLineArguments,
 }
@@ -757,7 +758,7 @@ impl Memory {
         self.join_handles = vec![];
         self.threads = vec![std::thread::current()];
         self.stack_map = StackMap::new();
-        self.thread_globals.clear();
+        self.thread_globals.lock().unwrap().clear();
     }
 
     fn active_threads(&mut self) -> usize {
@@ -908,7 +909,8 @@ impl Memory {
             let global_block_slot = (stack_base - 8) as *const usize;
             let new_head_block = unsafe { *global_block_slot };
 
-            for tg in self.thread_globals.values_mut() {
+            let mut thread_globals = self.thread_globals.lock().unwrap();
+            for tg in thread_globals.values_mut() {
                 if tg.stack_base == *stack_base {
                     tg.head_block = new_head_block;
                     break;
@@ -1368,7 +1370,7 @@ impl Runtime {
                 threads: vec![std::thread::current()],
                 command_line_arguments,
                 stack_map: StackMap::new(),
-                thread_globals: HashMap::new(),
+                thread_globals: Mutex::new(HashMap::new()),
             },
             libraries: vec![],
             is_paused: AtomicUsize::new(0),
@@ -2193,6 +2195,8 @@ impl Runtime {
         let thread_id = std::thread::current().id();
         self.memory
             .thread_globals
+            .lock()
+            .unwrap()
             .get_mut(&thread_id)
             .map(|tg| tg.remove_root(id))
             .unwrap_or(0)
@@ -2220,8 +2224,11 @@ impl Runtime {
         stack_base: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Skip if already initialized
-        if self.memory.thread_globals.contains_key(&thread_id) {
-            return Ok(());
+        {
+            let thread_globals = self.memory.thread_globals.lock().unwrap();
+            if thread_globals.contains_key(&thread_id) {
+                return Ok(());
+            }
         }
 
         // Allocate GlobalObjectBlock using allocate_for_runtime (long-lived)
@@ -2236,7 +2243,7 @@ impl Runtime {
 
         // Create and store the ThreadGlobal
         let thread_global = ThreadGlobal::new(head_block, thread_id, stack_base);
-        self.memory.thread_globals.insert(thread_id, thread_global);
+        self.memory.thread_globals.lock().unwrap().insert(thread_id, thread_global);
 
         // Write the GlobalObjectBlock pointer to the stack at stack_base - 8.
         // This is critical for GC: the stack walker reads from this slot, and after GC,
@@ -2255,7 +2262,7 @@ impl Runtime {
     /// Check if the current thread has a GlobalObject initialized.
     pub fn has_thread_global(&self) -> bool {
         let thread_id = std::thread::current().id();
-        self.memory.thread_globals.contains_key(&thread_id)
+        self.memory.thread_globals.lock().unwrap().contains_key(&thread_id)
     }
 
     /// Initialize the namespaces atom in GlobalObject slot 0.
@@ -2273,6 +2280,8 @@ impl Runtime {
         let current = self
             .memory
             .thread_globals
+            .lock()
+            .unwrap()
             .get(&thread_id)
             .map(|tg| tg.get_namespaces_atom())
             .unwrap_or(GLOBAL_BLOCK_FREE_SLOT);
@@ -2299,7 +2308,8 @@ impl Runtime {
         let atom_ptr = atom.get();
         drop(scope);
 
-        if let Some(tg) = self.memory.thread_globals.get(&thread_id) {
+        let thread_globals = self.memory.thread_globals.lock().unwrap();
+        if let Some(tg) = thread_globals.get(&thread_id) {
             tg.set_namespaces_atom(atom_ptr);
         }
         Ok(())
@@ -2311,6 +2321,8 @@ impl Runtime {
         let thread_id = std::thread::current().id();
         self.memory
             .thread_globals
+            .lock()
+            .unwrap()
             .get(&thread_id)
             .map(|tg| tg.get_namespaces_atom())
             .unwrap_or(GLOBAL_BLOCK_FREE_SLOT)
@@ -2376,6 +2388,8 @@ impl Runtime {
         let atom_ptr = self
             .memory
             .thread_globals
+            .lock()
+            .unwrap()
             .get(&thread_id)
             .map(|tg| tg.get_namespaces_atom())
             .unwrap_or(GLOBAL_BLOCK_FREE_SLOT);
@@ -2409,6 +2423,8 @@ impl Runtime {
         let atom_ptr = self
             .memory
             .thread_globals
+            .lock()
+            .unwrap()
             .get(&thread_id)
             .map(|tg| tg.get_namespaces_atom())
             .unwrap_or(GLOBAL_BLOCK_FREE_SLOT);
@@ -2453,6 +2469,8 @@ impl Runtime {
         let thread_id = std::thread::current().id();
         self.memory
             .thread_globals
+            .lock()
+            .unwrap()
             .get(&thread_id)
             .map(|tg| tg.head_block)
             .unwrap_or(0)
@@ -2465,14 +2483,17 @@ impl Runtime {
         let thread_id = std::thread::current().id();
 
         // First try to add to existing block
-        if let Some(tg) = self.memory.thread_globals.get_mut(&thread_id) {
-            if let Some(slot) = tg.add_root(value) {
-                return Some(slot);
+        {
+            let mut thread_globals = self.memory.thread_globals.lock().unwrap();
+            if let Some(tg) = thread_globals.get_mut(&thread_id) {
+                if let Some(slot) = tg.add_root(value) {
+                    return Some(slot);
+                }
+                // Block is full, need to allocate a new one
+            } else {
+                // No ThreadGlobal for this thread
+                return None;
             }
-            // Block is full, need to allocate a new one
-        } else {
-            // No ThreadGlobal for this thread
-            return None;
         }
 
         // Allocate new block using allocate_for_runtime (long-lived)
@@ -2487,7 +2508,8 @@ impl Runtime {
         block.initialize();
 
         // Link it and add the root
-        let tg = self.memory.thread_globals.get_mut(&thread_id)?;
+        let mut thread_globals = self.memory.thread_globals.lock().unwrap();
+        let tg = thread_globals.get_mut(&thread_id)?;
         tg.link_new_block(new_block);
         tg.add_root(value)
     }
@@ -2495,7 +2517,8 @@ impl Runtime {
     /// Remove a handle root from the current thread's GlobalObject.
     pub fn remove_handle_root(&mut self, slot: usize) {
         let thread_id = std::thread::current().id();
-        if let Some(tg) = self.memory.thread_globals.get_mut(&thread_id) {
+        let mut thread_globals = self.memory.thread_globals.lock().unwrap();
+        if let Some(tg) = thread_globals.get_mut(&thread_id) {
             tg.remove_root(slot);
         }
     }
@@ -2505,6 +2528,8 @@ impl Runtime {
         let thread_id = std::thread::current().id();
         self.memory
             .thread_globals
+            .lock()
+            .unwrap()
             .get(&thread_id)
             .map(|tg| tg.get_root(slot))
             .unwrap_or(0)
@@ -2889,25 +2914,28 @@ impl Runtime {
 
         // Get the Thread object from main thread's temp root (may have been relocated by GC)
         // and store it in the child's reserved GLOBAL_SLOT_THREAD
-        let current_thread_obj = self
-            .memory
-            .thread_globals
+        let thread_globals = self.memory.thread_globals.lock().unwrap();
+        let current_thread_obj = thread_globals
             .get(&main_thread_id)
             .map(|tg| tg.get_root(thread_temp_id))
             .unwrap_or(0);
 
-        if let Some(child_tg) = self.memory.thread_globals.get(&thread_id) {
+        if let Some(child_tg) = thread_globals.get(&thread_id) {
             child_tg.set_thread_object(current_thread_obj);
         }
+        drop(thread_globals);
 
         // Now we can unregister the temp root - child's GlobalObjectBlock keeps it alive
         self.memory
             .thread_globals
+            .lock()
+            .unwrap()
             .get_mut(&main_thread_id)
             .map(|tg| tg.remove_root(thread_temp_id));
 
         // Write the child's GlobalObjectBlock pointer to its stack (at stack_base - 8)
-        if let Some(thread_global) = self.memory.thread_globals.get(&thread_id) {
+        let thread_globals = self.memory.thread_globals.lock().unwrap();
+        if let Some(thread_global) = thread_globals.get(&thread_id) {
             unsafe {
                 *((child_stack_base - 8) as *mut usize) = thread_global.head_block;
             }
