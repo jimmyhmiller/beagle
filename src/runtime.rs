@@ -2840,44 +2840,31 @@ impl Runtime {
         };
 
         let thread = thread::spawn(move || {
-            // Wrap entire thread body to catch any panics and prevent mutex poisoning
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                // Wait for main thread to finish registering us
-                barrier_clone.wait();
+            // Wait for main thread to finish registering us
+            barrier_clone.wait();
 
-                // No c_calling registration here - run_thread handles GC coordination
-                // by waiting for GC, acquiring gc_lock, and calling __pause as first instruction
+            // No c_calling registration here - run_thread handles GC coordination
+            // by waiting for GC, acquiring gc_lock, and calling __pause as first instruction
 
-                // Call trampoline. The builtin run_thread will:
-                // 1. Wait for any ongoing GC
-                // 2. Acquire gc_lock briefly to prevent new GC during transition
-                // 3. Enter Beagle code where __pause is the first instruction
-                // 4. On cleanup: wait for GC, acquire gc_lock, remove thread root
-                let exec_result = trampoline(new_thread_stack_pointer as u64, function_pointer as u64, 0);
+            // Call trampoline. The builtin run_thread will:
+            // 1. Wait for any ongoing GC
+            // 2. Acquire gc_lock briefly to prevent new GC during transition
+            // 3. Enter Beagle code where __pause is the first instruction
+            // 4. On cleanup: wait for GC, acquire gc_lock, remove thread root
+            let result = trampoline(new_thread_stack_pointer as u64, function_pointer as u64, 0);
 
-                // If we end while another thread is waiting for us to pause
-                // we need to notify that waiter so they can see we are dead.
-                let (_lock, cvar) = &*thread_state;
-                cvar.notify_one();
-
-                exec_result
-            }));
-
-            // Return the result or 0 if there was a panic
-            result.unwrap_or_else(|_| {
-                eprintln!("Warning: Thread panicked during execution");
-                // Still try to notify condvar even after panic
-                let (_lock, cvar) = &*thread_state;
-                cvar.notify_one();
-                0
-            })
+            // If we end while another thread is waiting for us to pause
+            // we need to notify that waiter so they can see we are dead.
+            let (_lock, cvar) = &*thread_state;
+            cvar.notify_one();
+            result
         });
 
         // Fire USDT probe - OS thread now exists but not yet registered
         usdt_probes::fire_thread_spawn();
 
         {
-            let mut stacks = self.memory.stacks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut stacks = self.memory.stacks.lock().unwrap();
             stacks.push((thread.thread().id(), new_stack));
         }
         self.memory.heap.register_thread(thread.thread().id());
@@ -2896,12 +2883,9 @@ impl Runtime {
 
         // Initialize GlobalObject for the new thread
         // This allocates a GlobalObjectBlock so the child can use temporary roots
-        if let Err(e) = self.initialize_thread_global_for(thread_id, child_stack_base) {
-            eprintln!(
-                "Warning: Failed to initialize ThreadGlobal for new thread: {}",
-                e
-            );
-        }
+        // CRITICAL: If this fails, we must not release the barrier - the thread cannot run without this
+        self.initialize_thread_global_for(thread_id, child_stack_base)
+            .expect("Failed to initialize ThreadGlobal for new thread - this is a fatal error");
 
         // Get the Thread object from main thread's temp root (may have been relocated by GC)
         // and store it in the child's reserved GLOBAL_SLOT_THREAD
@@ -2935,25 +2919,36 @@ impl Runtime {
     }
 
     pub fn wait_for_other_threads(&mut self) {
-        // Keep joining until all threads are done
+        let mut panicked_threads = Vec::new();
+
         loop {
             if self.memory.join_handles.is_empty() {
                 break;
             }
 
-            // Take all current handles and join them
             let handles: Vec<_> = self.memory.join_handles.drain(..).collect();
             for thread in handles {
-                // Handle thread panics gracefully to avoid double-panic during cleanup
-                if let Err(_) = thread.join() {
-                    eprintln!("Warning: A spawned thread panicked during execution");
+                if let Err(panic_payload) = thread.join() {
+                    // Extract panic message if possible
+                    let msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "Unknown panic payload".to_string()
+                    };
+                    eprintln!("ERROR: Spawned thread panicked: {}", msg);
+                    panicked_threads.push(msg);
                 }
             }
 
             // Clean up exception handlers for finished threads
             self.cleanup_finished_thread_handlers();
+        }
 
-            // Check if any new threads were spawned during cleanup (shouldn't happen but be safe)
+        // After all threads are joined, if any panicked, propagate the error
+        if !panicked_threads.is_empty() {
+            panic!("One or more spawned threads panicked during execution: {:?}", panicked_threads);
         }
     }
 
