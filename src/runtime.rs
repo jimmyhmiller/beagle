@@ -2241,15 +2241,17 @@ impl Runtime {
         // Atomically insert if not already present (entry API ensures atomicity)
         let mut thread_globals = self.memory.thread_globals.lock().unwrap();
         use std::collections::hash_map::Entry;
-        match thread_globals.entry(thread_id) {
+        let actual_head_block = match thread_globals.entry(thread_id) {
             Entry::Vacant(e) => {
                 e.insert(thread_global);
+                head_block // Use the newly allocated block
             }
-            Entry::Occupied(_) => {
-                // Already initialized by another thread, that's fine
-                // Our allocated block will just be unused (minor leak but rare)
+            Entry::Occupied(e) => {
+                // Already initialized by another thread, use existing head_block
+                e.get().head_block
             }
-        }
+        };
+        drop(thread_globals);
 
         // Write the GlobalObjectBlock pointer to the stack at stack_base - 8.
         // This is critical for GC: the stack walker reads from this slot, and after GC,
@@ -2258,7 +2260,7 @@ impl Runtime {
         // writes separately after the child's stack is set up.
         if thread_id == std::thread::current().id() {
             unsafe {
-                *((stack_base - 8) as *mut usize) = head_block;
+                *((stack_base - 8) as *mut usize) = actual_head_block;
             }
         }
 
