@@ -312,6 +312,181 @@ fn compile_save_volatile_registers_for(runtime: &mut Runtime, register_num: usiz
     function.is_builtin = true;
 }
 
+/// Generate the continuation trampoline and return jump functions using the code generator.
+/// This avoids inline assembly which gets broken by LLVM optimizer in release builds.
+#[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))]
+fn compile_continuation_trampolines(runtime: &mut Runtime) {
+    use crate::builtins::invoke_continuation_runtime;
+    use crate::machine_code::x86_codegen::{RBP, RBX, R8, R11, R12, R13, R14, R15, RAX};
+    use crate::types::BuiltInTypes;
+
+    // Generate continuation_trampoline_generated
+    // This is called when k(value) is invoked on a continuation closure
+    // Arguments: RDI = closure_ptr, RSI = value
+    {
+        let mut lang = x86::LowLevelX86::new();
+
+        // Standard function prologue
+        lang.instructions.push(X86Asm::Push { reg: RBP });
+        lang.instructions.push(X86Asm::MovRR { dest: RBP, src: RSP });
+
+        // Allocate stack space for saved_regs array (80 bytes = 10 * 8) + alignment
+        // We need space for: saved_regs[0..5], closure_ptr, value, and padding
+        lang.instructions.push(X86Asm::SubRI { dest: RSP, imm: 96 });
+
+        // Save arguments to stack before we clobber any registers
+        // closure_ptr (RDI) -> [RSP + 80]
+        // value (RSI) -> [RSP + 88]
+        lang.instructions.push(X86Asm::MovMR { base: RSP, offset: 80, src: RDI });
+        lang.instructions.push(X86Asm::MovMR { base: RSP, offset: 88, src: RSI });
+
+        // Save callee-saved registers (Beagle's values at the time k() was called)
+        // saved_regs[0] = RBX, [1] = R12, [2] = R13, [3] = R14, [4] = R15
+        lang.instructions.push(X86Asm::MovMR { base: RSP, offset: 0, src: RBX });
+        lang.instructions.push(X86Asm::MovMR { base: RSP, offset: 8, src: R12 });
+        lang.instructions.push(X86Asm::MovMR { base: RSP, offset: 16, src: R13 });
+        lang.instructions.push(X86Asm::MovMR { base: RSP, offset: 24, src: R14 });
+        lang.instructions.push(X86Asm::MovMR { base: RSP, offset: 32, src: R15 });
+
+        // Capture stack_pointer (RSP) and frame_pointer (RBP)
+        lang.instructions.push(X86Asm::MovRR { dest: R14, src: RSP }); // stack_pointer
+        lang.instructions.push(X86Asm::MovRR { dest: R15, src: RBP }); // frame_pointer
+
+        // Extract continuation index from closure
+        // closure_ptr is tagged, need to untag: untagged = closure_ptr >> 3
+        lang.instructions.push(X86Asm::MovRM { dest: R12, base: RSP, offset: 80 }); // Load closure_ptr
+        lang.instructions.push(X86Asm::ShrRI { dest: R12, imm: BuiltInTypes::tag_size() as u8 }); // Untag
+        // cont_index is at offset 32 in the closure
+        lang.instructions.push(X86Asm::MovRM { dest: RDX, base: R12, offset: 32 }); // cont_index -> RDX (arg3)
+
+        // Prepare arguments for invoke_continuation_runtime
+        // Args: (stack_pointer, frame_pointer, cont_index, value, saved_regs)
+        // RDI = stack_pointer (R14)
+        // RSI = frame_pointer (R15)
+        // RDX = cont_index (already set)
+        // RCX = value (from stack)
+        // R8 = pointer to saved_regs array (RSP)
+        lang.instructions.push(X86Asm::MovRR { dest: RDI, src: R14 }); // stack_pointer
+        lang.instructions.push(X86Asm::MovRR { dest: RSI, src: R15 }); // frame_pointer
+        lang.instructions.push(X86Asm::MovRM { dest: RCX, base: RBP, offset: -8 }); // value (use RBP-relative since we pushed args there... wait, no)
+
+        // Actually, we saved value at [RSP + 88], but RSP changed after SubRI
+        // Let's recalculate: after SubRI, RSP points to saved_regs[0]
+        // So value is at [RSP + 88]
+        lang.instructions.push(X86Asm::MovRM { dest: RCX, base: RSP, offset: 88 }); // value
+        lang.instructions.push(X86Asm::MovRR { dest: R8, src: RSP }); // saved_regs pointer
+
+        // Load function pointer and call
+        let fn_ptr = invoke_continuation_runtime as *const u8 as i64;
+        lang.instructions.push(X86Asm::MovRI { dest: RAX, imm: fn_ptr });
+        lang.instructions.push(X86Asm::CallR { target: RAX });
+
+        // invoke_continuation_runtime never returns, but add Int3 for safety
+        lang.instructions.push(X86Asm::Int3);
+
+        let code = lang.compile_to_bytes();
+
+        // Replace the existing continuation-trampoline function
+        // add_function_mark_executable handles both writing the code and updating the function
+        runtime.add_function_mark_executable(
+            "beagle.builtin/continuation-trampoline".to_string(),
+            &code,
+            0,
+            2, // 2 arguments: closure_ptr, value
+        ).unwrap();
+    }
+
+    // Generate return_jump_generated
+    // This is called from return_from_shift_runtime to restore state and jump back
+    // We'll store this function pointer in a global so return_from_shift_runtime can call it
+    {
+        let mut lang = x86::LowLevelX86::new();
+
+        // Arguments (System V AMD64 ABI):
+        // RDI = new_sp
+        // RSI = new_fp
+        // RDX = value (return value)
+        // RCX = return_address
+        // R8 = callee_saved pointer
+
+        // Restore callee-saved registers from the array
+        lang.instructions.push(X86Asm::MovRM { dest: RBX, base: R8, offset: 0 });
+        lang.instructions.push(X86Asm::MovRM { dest: R12, base: R8, offset: 8 });
+        lang.instructions.push(X86Asm::MovRM { dest: R13, base: R8, offset: 16 });
+        lang.instructions.push(X86Asm::MovRM { dest: R14, base: R8, offset: 24 });
+        lang.instructions.push(X86Asm::MovRM { dest: R15, base: R8, offset: 32 });
+
+        // Restore stack state
+        lang.instructions.push(X86Asm::MovRR { dest: RSP, src: RDI }); // RSP = new_sp
+        lang.instructions.push(X86Asm::MovRR { dest: RBP, src: RSI }); // RBP = new_fp
+
+        // Put return value in RAX
+        lang.instructions.push(X86Asm::MovRR { dest: RAX, src: RDX });
+
+        // Jump to return address (in RCX)
+        lang.instructions.push(X86Asm::JmpR { target: RCX });
+
+        let code = lang.compile_to_bytes();
+
+        // Store this pointer somewhere accessible by return_from_shift_runtime
+        // add_function_mark_executable handles both writing the code and registering the function
+        runtime.add_function_mark_executable(
+            "beagle.builtin/return-jump".to_string(),
+            &code,
+            0,
+            5, // 5 arguments
+        ).unwrap();
+    }
+
+    // Generate invoke_continuation_jump
+    // This is called from invoke_continuation_runtime to jump to the continuation
+    // Arguments (System V AMD64 ABI):
+    // RDI = original_fp (used for empty stack segment case)
+    // RSI = resume_address
+    // RDX = stack_segment_size (0 for empty)
+    // RCX = new_sp (for non-empty)
+    // R8 = new_fp (for non-empty)
+    {
+        let mut lang = x86::LowLevelX86::new();
+
+        // Check if stack_segment_size (RDX) is 0
+        lang.instructions.push(X86Asm::TestRR { a: RDX, b: RDX });
+
+        // If zero, jump to empty path
+        let empty_label = lang.get_label_index();
+        lang.instructions.push(X86Asm::Jcc {
+            label_index: empty_label,
+            cond: crate::machine_code::x86_codegen::Condition::E,
+        });
+
+        // Non-empty stack segment path:
+        // Set RSP = new_sp (RCX), RBP = new_fp (R8), jump to resume_address (RSI)
+        lang.instructions.push(X86Asm::MovRR { dest: RSP, src: RCX });
+        lang.instructions.push(X86Asm::MovRR { dest: RBP, src: R8 });
+        lang.instructions.push(X86Asm::JmpR { target: RSI });
+
+        // Empty stack segment path:
+        lang.instructions.push(X86Asm::Label { index: empty_label });
+        // Calculate safe_sp = (RSP - 16) & ~0xF
+        lang.instructions.push(X86Asm::MovRR { dest: R11, src: RSP });
+        lang.instructions.push(X86Asm::SubRI { dest: R11, imm: 16 });
+        lang.instructions.push(X86Asm::AndRI { dest: R11, imm: -16 }); // AND with ~0xF = -16 in two's complement
+        lang.instructions.push(X86Asm::MovRR { dest: RSP, src: R11 });
+        // Set RBP = original_fp (RDI)
+        lang.instructions.push(X86Asm::MovRR { dest: RBP, src: RDI });
+        // Jump to resume_address (RSI)
+        lang.instructions.push(X86Asm::JmpR { target: RSI });
+
+        let code = lang.compile_to_bytes();
+        runtime.add_function_mark_executable(
+            "beagle.builtin/invoke-continuation-jump".to_string(),
+            &code,
+            0,
+            5, // 5 arguments
+        ).unwrap();
+    }
+}
+
 #[derive(ClapParser, Debug, Clone)]
 #[command(version, about, long_about = None)]
 #[command(name = "beag")]
@@ -530,6 +705,11 @@ fn run_repl(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     runtime.install_builtins()?;
 
+    // Generate continuation trampolines using the code generator (x86-64 only)
+    // This replaces the Rust inline assembly version which gets broken by LLVM optimizer
+    #[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))]
+    compile_continuation_trampolines(runtime);
+
     let mut top_levels = vec![];
     if !args.no_std {
         top_levels = load_default_files(runtime)?;
@@ -704,6 +884,12 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     runtime.initialize_namespaces()?;
 
     runtime.install_builtins()?;
+
+    // Generate continuation trampolines using the code generator (x86-64 only)
+    // This replaces the Rust inline assembly version which gets broken by LLVM optimizer
+    #[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))]
+    compile_continuation_trampolines(runtime);
+
     let compile_time = Instant::now();
 
     let mut top_levels = vec![];

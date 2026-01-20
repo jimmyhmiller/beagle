@@ -510,6 +510,10 @@ pub enum X86Asm {
     Int3,
     /// NOP
     Nop,
+    /// JMP r64 (indirect jump through register)
+    JmpR {
+        target: X86Register,
+    },
 
     // === Placeholder for label locations ===
     Label {
@@ -1015,6 +1019,18 @@ impl X86Asm {
 
             X86Asm::Nop => {
                 vec![0x90]
+            }
+
+            X86Asm::JmpR { target } => {
+                // JMP r64: FF /4 (opcode extension 4 in modrm reg field)
+                // For r64 indirect jump, modrm = 11 100 rrr (mod=3, reg=4, r/m=target)
+                let mut bytes = Vec::new();
+                if target.needs_rex_ext() {
+                    bytes.push(rex(false, false, false, true));
+                }
+                bytes.push(0xFF);
+                bytes.push(modrm(0b11, 4, target.index));
+                bytes
             }
 
             X86Asm::Label { index: _ } => {
