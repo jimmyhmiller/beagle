@@ -749,6 +749,9 @@ pub struct Memory {
 
 impl Memory {
     fn reset(&mut self) {
+        // Full memory barrier before reset to ensure all pending stores are visible
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+
         let options = self.heap.get_allocation_options();
         self.heap = Alloc::new(options);
         let mut stacks = self.stacks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -760,6 +763,9 @@ impl Memory {
         self.threads = vec![std::thread::current()];
         self.stack_map = StackMap::new();
         self.thread_globals.lock().unwrap().clear();
+
+        // Full memory barrier after reset to ensure all stores are visible
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
     }
 
     fn active_threads(&mut self) -> usize {
