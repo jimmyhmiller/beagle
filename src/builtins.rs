@@ -2733,7 +2733,7 @@ pub extern "C" fn run_thread(_unused: usize) -> usize {
                     - 1;
                 // Thread object is in our GlobalObjectBlock - cleanup happens
                 // when thread_globals entry is removed
-                runtime.memory.thread_globals.remove(&my_thread_id);
+                runtime.memory.thread_globals.lock().unwrap().remove(&my_thread_id);
                 // Fire USDT probes for thread unregistration and exit
                 crate::gc::usdt_probes::fire_thread_unregister(new_count);
                 crate::gc::usdt_probes::fire_thread_exit();
@@ -2774,12 +2774,13 @@ pub extern "C" fn get_my_thread_obj(stack_pointer: usize, frame_pointer: usize) 
 
         // Try to get the lock
         let obj = match runtime.gc_lock.try_lock() {
-            Ok(_guard) => runtime
-                .memory
-                .thread_globals
-                .get(&thread_id)
-                .map(|tg| tg.get_thread_object())
-                .expect("ThreadGlobal not found in get_my_thread_obj"),
+            Ok(_guard) => {
+                let thread_globals = runtime.memory.thread_globals.lock().unwrap();
+                thread_globals
+                    .get(&thread_id)
+                    .map(|tg| tg.get_thread_object())
+                    .expect("ThreadGlobal not found in get_my_thread_obj")
+            }
             Err(_) => {
                 thread::yield_now();
                 continue;
