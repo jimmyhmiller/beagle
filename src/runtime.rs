@@ -203,7 +203,7 @@ impl ThreadGlobal {
         debug_assert!(BuiltInTypes::is_heap_pointer(new_block));
 
         // Find the last block in the chain
-        let mut current = GlobalObjectBlock::from_tagged(self.head_block.load(Ordering::Acquire));
+        let mut current = GlobalObjectBlock::from_tagged(self.head_block.load(Ordering::SeqCst));
         let mut block_count = 1;
         while let Some(next) = current.next_block() {
             current = next;
@@ -227,7 +227,7 @@ impl ThreadGlobal {
     pub fn add_root(&mut self, value: usize) -> Option<usize> {
         // Search for a free slot starting from next_free_slot hint
         let mut block_num = 0;
-        let mut current = Some(GlobalObjectBlock::from_tagged(self.head_block.load(Ordering::Acquire)));
+        let mut current = Some(GlobalObjectBlock::from_tagged(self.head_block.load(Ordering::SeqCst)));
 
         while let Some(block) = current {
             // In the first block (block_num == 0), skip reserved slots
@@ -285,14 +285,14 @@ impl ThreadGlobal {
     /// Get this thread's Thread object from the reserved slot.
     #[inline]
     pub fn get_thread_object(&self) -> usize {
-        let block = GlobalObjectBlock::from_tagged(self.head_block.load(Ordering::Acquire));
+        let block = GlobalObjectBlock::from_tagged(self.head_block.load(Ordering::SeqCst));
         block.get_entry(GLOBAL_SLOT_THREAD)
     }
 
     /// Set this thread's Thread object in the reserved slot.
     #[inline]
     pub fn set_thread_object(&self, thread_obj: usize) {
-        let block = GlobalObjectBlock::from_tagged(self.head_block.load(Ordering::Acquire));
+        let block = GlobalObjectBlock::from_tagged(self.head_block.load(Ordering::SeqCst));
         block.set_entry(GLOBAL_SLOT_THREAD, thread_obj)
     }
 
@@ -302,7 +302,7 @@ impl ThreadGlobal {
         let block_num = slot / GLOBAL_BLOCK_SIZE;
         let local_index = slot % GLOBAL_BLOCK_SIZE;
 
-        let mut current = GlobalObjectBlock::from_tagged(self.head_block.load(Ordering::Acquire));
+        let mut current = GlobalObjectBlock::from_tagged(self.head_block.load(Ordering::SeqCst));
         for _ in 0..block_num {
             current = current.next_block().expect("slot index out of bounds");
         }
@@ -313,20 +313,20 @@ impl ThreadGlobal {
     /// Iterate over all blocks in this ThreadGlobal
     pub fn iter_blocks(&self) -> GlobalBlockIter {
         GlobalBlockIter {
-            current: Some(GlobalObjectBlock::from_tagged(self.head_block.load(Ordering::Acquire))),
+            current: Some(GlobalObjectBlock::from_tagged(self.head_block.load(Ordering::SeqCst))),
         }
     }
 
     /// Update the head block pointer (called by GC after copying)
     pub fn update_head_block(&mut self, new_ptr: usize) {
         debug_assert!(BuiltInTypes::is_heap_pointer(new_ptr));
-        self.head_block.store(new_ptr, Ordering::Release);
+        self.head_block.store(new_ptr, Ordering::SeqCst);
     }
 
     /// Check if the head block is full (all slots used).
     /// Returns true if we need to allocate a new block before adding a root.
     pub fn is_head_block_full(&self) -> bool {
-        let block = GlobalObjectBlock::from_tagged(self.head_block.load(Ordering::Acquire));
+        let block = GlobalObjectBlock::from_tagged(self.head_block.load(Ordering::SeqCst));
         for i in 0..GLOBAL_BLOCK_SIZE {
             if block.is_entry_free(i) {
                 return false;
@@ -914,7 +914,7 @@ impl Memory {
 
             for tg in thread_globals.values_mut() {
                 if tg.stack_base == *stack_base {
-                    tg.head_block.store(new_head_block, Ordering::Release);
+                    tg.head_block.store(new_head_block, Ordering::SeqCst);
                     break;
                 }
             }
@@ -2249,7 +2249,7 @@ impl Runtime {
             }
             Entry::Occupied(e) => {
                 // Already initialized by another thread, use existing head_block
-                e.get().head_block.load(Ordering::Acquire)
+                e.get().head_block.load(Ordering::SeqCst)
             }
         };
         drop(thread_globals);
@@ -2481,7 +2481,7 @@ impl Runtime {
             .lock()
             .unwrap()
             .get(&thread_id)
-            .map(|tg| tg.head_block.load(Ordering::Acquire))
+            .map(|tg| tg.head_block.load(Ordering::SeqCst))
             .unwrap_or(0)
     }
 
@@ -2946,7 +2946,7 @@ impl Runtime {
         let thread_globals = self.memory.thread_globals.lock().unwrap();
         if let Some(thread_global) = thread_globals.get(&thread_id) {
             unsafe {
-                *((child_stack_base - 8) as *mut usize) = thread_global.head_block.load(Ordering::Acquire);
+                *((child_stack_base - 8) as *mut usize) = thread_global.head_block.load(Ordering::SeqCst);
             }
         }
 
