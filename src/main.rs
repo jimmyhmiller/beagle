@@ -744,7 +744,7 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         // Register main thread so child-triggered GC waits for us.
         // This mirrors what run_thread does for child threads.
         {
-            let _guard = runtime.gc_lock.lock().unwrap();
+            let _guard = runtime.gc_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let new_count = runtime
                 .registered_thread_count
                 .fetch_add(1, std::sync::atomic::Ordering::Release)
@@ -774,7 +774,7 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         // Solution: register as c_calling so GC counts us and proceeds.
         {
             let (lock, condvar) = &*runtime.thread_state.clone();
-            let mut state = lock.lock().unwrap();
+            let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             state.register_c_call((0, 0, 0)); // No stack to scan
             condvar.notify_one();
         }
@@ -791,7 +791,7 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
                     // While holding lock: unregister from c_calling, decrement count
                     {
                         let (lock, condvar) = &*runtime.thread_state.clone();
-                        let mut state = lock.lock().unwrap();
+                        let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                         state.unregister_c_call();
                         condvar.notify_one();
                     }

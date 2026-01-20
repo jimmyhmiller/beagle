@@ -2599,7 +2599,7 @@ pub unsafe extern "C" fn __pause(_stack_pointer: usize, frame_pointer: usize) ->
 fn pause_current_thread(frame_pointer: usize, gc_return_addr: usize, runtime: &mut Runtime) {
     let thread_state = runtime.thread_state.clone();
     let (lock, condvar) = &*thread_state;
-    let mut state = lock.lock().unwrap();
+    let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let stack_base = runtime.get_stack_base();
     // Store (stack_base, frame_pointer, gc_return_addr) for stack walking
     state.pause((stack_base, frame_pointer, gc_return_addr));
@@ -2610,7 +2610,7 @@ fn pause_current_thread(frame_pointer: usize, gc_return_addr: usize, runtime: &m
 fn unpause_current_thread(runtime: &mut Runtime) {
     let thread_state = runtime.thread_state.clone();
     let (lock, condvar) = &*thread_state;
-    let mut state = lock.lock().unwrap();
+    let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     state.unpause();
     condvar.notify_one();
 }
@@ -2624,7 +2624,7 @@ pub extern "C" fn register_c_call(_stack_pointer: usize, frame_pointer: usize) -
     let runtime = get_runtime().get_mut();
     let thread_state = runtime.thread_state.clone();
     let (lock, condvar) = &*thread_state;
-    let mut state = lock.lock().unwrap();
+    let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let stack_base = runtime.get_stack_base();
     state.register_c_call((stack_base, frame_pointer, gc_return_addr));
     condvar.notify_one();
@@ -2635,7 +2635,7 @@ pub extern "C" fn unregister_c_call() -> usize {
     let runtime = get_runtime().get_mut();
     let thread_state = runtime.thread_state.clone();
     let (lock, condvar) = &*thread_state;
-    let mut state = lock.lock().unwrap();
+    let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     state.unregister_c_call();
     condvar.notify_one();
     while runtime.is_paused() {
@@ -2684,7 +2684,7 @@ pub extern "C" fn run_thread(_unused: usize) -> usize {
     // We use blocking lock() here because we are NOT yet counted in registered_thread_count,
     // so GC won't wait for us - no deadlock possible.
     {
-        let _guard = runtime.gc_lock.lock().unwrap();
+        let _guard = runtime.gc_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         // Now register ourselves - GC will count us from this point on
         let new_count = runtime
             .registered_thread_count
@@ -2706,7 +2706,7 @@ pub extern "C" fn run_thread(_unused: usize) -> usize {
     // Solution: register as c_calling so GC counts us and proceeds.
     {
         let (lock, condvar) = &*runtime.thread_state.clone();
-        let mut state = lock.lock().unwrap();
+        let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         state.register_c_call((0, 0, 0)); // No stack to scan
         condvar.notify_one();
     }
@@ -2723,7 +2723,7 @@ pub extern "C" fn run_thread(_unused: usize) -> usize {
                 // While holding lock: unregister from c_calling, decrement count, remove root
                 {
                     let (lock, condvar) = &*runtime.thread_state.clone();
-                    let mut state = lock.lock().unwrap();
+                    let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                     state.unregister_c_call();
                     condvar.notify_one();
                 }

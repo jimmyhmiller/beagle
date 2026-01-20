@@ -749,7 +749,7 @@ impl Memory {
     fn reset(&mut self) {
         let options = self.heap.get_allocation_options();
         self.heap = Alloc::new(options);
-        let mut stacks = self.stacks.lock().unwrap();
+        let mut stacks = self.stacks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         *stacks = vec![(
             std::thread::current().id(),
             create_stack_with_protected_page_after(STACK_SIZE),
@@ -770,7 +770,7 @@ impl Memory {
         for index in completed_threads.iter().rev() {
             if let Some(thread) = self.join_handles.get(*index) {
                 let thread_id = thread.thread().id();
-                let mut stacks = self.stacks.lock().unwrap();
+                let mut stacks = self.stacks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 stacks.retain(|(id, _)| *id != thread_id);
                 self.threads.retain(|t| t.id() != thread_id);
                 self.join_handles.remove(*index);
@@ -2526,7 +2526,7 @@ impl Runtime {
     /// (e.g., compiler thread).
     pub fn try_get_stack_base(&self) -> Option<usize> {
         let current_thread = std::thread::current().id();
-        let stacks = self.memory.stacks.lock().unwrap();
+        let stacks = self.memory.stacks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         stacks
             .iter()
             .find(|(thread_id, _)| *thread_id == current_thread)
@@ -2840,31 +2840,44 @@ impl Runtime {
         };
 
         let thread = thread::spawn(move || {
-            // Wait for main thread to finish registering us
-            barrier_clone.wait();
+            // Wrap entire thread body to catch any panics and prevent mutex poisoning
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // Wait for main thread to finish registering us
+                barrier_clone.wait();
 
-            // No c_calling registration here - run_thread handles GC coordination
-            // by waiting for GC, acquiring gc_lock, and calling __pause as first instruction
+                // No c_calling registration here - run_thread handles GC coordination
+                // by waiting for GC, acquiring gc_lock, and calling __pause as first instruction
 
-            // Call trampoline. The builtin run_thread will:
-            // 1. Wait for any ongoing GC
-            // 2. Acquire gc_lock briefly to prevent new GC during transition
-            // 3. Enter Beagle code where __pause is the first instruction
-            // 4. On cleanup: wait for GC, acquire gc_lock, remove thread root
-            let result = trampoline(new_thread_stack_pointer as u64, function_pointer as u64, 0);
+                // Call trampoline. The builtin run_thread will:
+                // 1. Wait for any ongoing GC
+                // 2. Acquire gc_lock briefly to prevent new GC during transition
+                // 3. Enter Beagle code where __pause is the first instruction
+                // 4. On cleanup: wait for GC, acquire gc_lock, remove thread root
+                let exec_result = trampoline(new_thread_stack_pointer as u64, function_pointer as u64, 0);
 
-            // If we end while another thread is waiting for us to pause
-            // we need to notify that waiter so they can see we are dead.
-            let (_lock, cvar) = &*thread_state;
-            cvar.notify_one();
-            result
+                // If we end while another thread is waiting for us to pause
+                // we need to notify that waiter so they can see we are dead.
+                let (_lock, cvar) = &*thread_state;
+                cvar.notify_one();
+
+                exec_result
+            }));
+
+            // Return the result or 0 if there was a panic
+            result.unwrap_or_else(|_| {
+                eprintln!("Warning: Thread panicked during execution");
+                // Still try to notify condvar even after panic
+                let (_lock, cvar) = &*thread_state;
+                cvar.notify_one();
+                0
+            })
         });
 
         // Fire USDT probe - OS thread now exists but not yet registered
         usdt_probes::fire_thread_spawn();
 
         {
-            let mut stacks = self.memory.stacks.lock().unwrap();
+            let mut stacks = self.memory.stacks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             stacks.push((thread.thread().id(), new_stack));
         }
         self.memory.heap.register_thread(thread.thread().id());
@@ -2922,17 +2935,26 @@ impl Runtime {
     }
 
     pub fn wait_for_other_threads(&mut self) {
-        if self.memory.join_handles.is_empty() {
-            return;
+        // Keep joining until all threads are done
+        loop {
+            if self.memory.join_handles.is_empty() {
+                break;
+            }
+
+            // Take all current handles and join them
+            let handles: Vec<_> = self.memory.join_handles.drain(..).collect();
+            for thread in handles {
+                // Handle thread panics gracefully to avoid double-panic during cleanup
+                if let Err(_) = thread.join() {
+                    eprintln!("Warning: A spawned thread panicked during execution");
+                }
+            }
+
+            // Clean up exception handlers for finished threads
+            self.cleanup_finished_thread_handlers();
+
+            // Check if any new threads were spawned during cleanup (shouldn't happen but be safe)
         }
-        for thread in self.memory.join_handles.drain(..) {
-            thread
-                .join()
-                .expect("Thread panicked - this is a fatal error");
-        }
-        // Clean up exception handlers for finished threads
-        self.cleanup_finished_thread_handlers();
-        self.wait_for_other_threads();
     }
 
     pub fn get_pause_atom(&self) -> usize {
