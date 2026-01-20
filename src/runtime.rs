@@ -905,11 +905,12 @@ impl Memory {
         self.heap.gc(&self.stack_map, stack_pointers);
 
         // Sync ThreadGlobal.head_block from stack slots (updated by GC)
+        // Hold lock for entire operation to prevent concurrent modifications
+        let mut thread_globals = self.thread_globals.lock().unwrap();
         for (stack_base, _, _) in stack_pointers.iter() {
             let global_block_slot = (stack_base - 8) as *const usize;
             let new_head_block = unsafe { *global_block_slot };
 
-            let mut thread_globals = self.thread_globals.lock().unwrap();
             for tg in thread_globals.values_mut() {
                 if tg.stack_base == *stack_base {
                     tg.head_block = new_head_block;
@@ -2223,15 +2224,8 @@ impl Runtime {
         thread_id: std::thread::ThreadId,
         stack_base: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // Skip if already initialized
-        {
-            let thread_globals = self.memory.thread_globals.lock().unwrap();
-            if thread_globals.contains_key(&thread_id) {
-                return Ok(());
-            }
-        }
-
-        // Allocate GlobalObjectBlock using allocate_for_runtime (long-lived)
+        // Allocate GlobalObjectBlock first (before checking/locking)
+        // This avoids holding the lock during allocation
         let head_block = self
             .memory
             .heap
@@ -2241,9 +2235,21 @@ impl Runtime {
         let block = GlobalObjectBlock::from_tagged(head_block);
         block.initialize();
 
-        // Create and store the ThreadGlobal
+        // Create the ThreadGlobal
         let thread_global = ThreadGlobal::new(head_block, thread_id, stack_base);
-        self.memory.thread_globals.lock().unwrap().insert(thread_id, thread_global);
+
+        // Atomically insert if not already present (entry API ensures atomicity)
+        let mut thread_globals = self.memory.thread_globals.lock().unwrap();
+        use std::collections::hash_map::Entry;
+        match thread_globals.entry(thread_id) {
+            Entry::Vacant(e) => {
+                e.insert(thread_global);
+            }
+            Entry::Occupied(_) => {
+                // Already initialized by another thread, that's fine
+                // Our allocated block will just be unused (minor leak but rare)
+            }
+        }
 
         // Write the GlobalObjectBlock pointer to the stack at stack_base - 8.
         // This is critical for GC: the stack walker reads from this slot, and after GC,
