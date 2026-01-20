@@ -1,4 +1,3 @@
-use std::env;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -6,7 +5,7 @@ use std::path::PathBuf;
 fn get_build_profile_name() -> String {
     // The profile name is always the 3rd last part of the path (with 1 based indexing).
     // e.g. /code/core/target/cli/build/my-build-info-9f91ba6f99d7a061/out
-    env::var("OUT_DIR")
+    std::env::var("OUT_DIR")
         .unwrap()
         .split(std::path::MAIN_SEPARATOR)
         .nth_back(3)
