@@ -175,7 +175,8 @@ impl GlobalObjectBlock {
 /// - Rust reads via (updated) head_block, so it always gets current values
 pub struct ThreadGlobal {
     /// Tagged pointer to the first GlobalObjectBlock (GC updates this when block moves!)
-    pub head_block: usize,
+    /// Must be atomic since it's read without holding the mutex lock
+    pub head_block: AtomicUsize,
     /// Hint for fast slot allocation (global slot index across all blocks)
     next_free_slot: usize,
     /// Thread ID for debugging/validation
@@ -189,7 +190,7 @@ impl ThreadGlobal {
     pub fn new(head_block: usize, thread_id: ThreadId, stack_base: usize) -> Self {
         debug_assert!(BuiltInTypes::is_heap_pointer(head_block));
         ThreadGlobal {
-            head_block,
+            head_block: AtomicUsize::new(head_block),
             next_free_slot: 0,
             thread_id,
             stack_base,
@@ -202,7 +203,7 @@ impl ThreadGlobal {
         debug_assert!(BuiltInTypes::is_heap_pointer(new_block));
 
         // Find the last block in the chain
-        let mut current = GlobalObjectBlock::from_tagged(self.head_block);
+        let mut current = GlobalObjectBlock::from_tagged(self.head_block.load(Ordering::Acquire));
         let mut block_count = 1;
         while let Some(next) = current.next_block() {
             current = next;
@@ -226,7 +227,7 @@ impl ThreadGlobal {
     pub fn add_root(&mut self, value: usize) -> Option<usize> {
         // Search for a free slot starting from next_free_slot hint
         let mut block_num = 0;
-        let mut current = Some(GlobalObjectBlock::from_tagged(self.head_block));
+        let mut current = Some(GlobalObjectBlock::from_tagged(self.head_block.load(Ordering::Acquire)));
 
         while let Some(block) = current {
             // In the first block (block_num == 0), skip reserved slots
@@ -284,15 +285,15 @@ impl ThreadGlobal {
     /// Get this thread's Thread object from the reserved slot.
     #[inline]
     pub fn get_thread_object(&self) -> usize {
-        let block = GlobalObjectBlock::from_tagged(self.head_block);
+        let block = GlobalObjectBlock::from_tagged(self.head_block.load(Ordering::Acquire));
         block.get_entry(GLOBAL_SLOT_THREAD)
     }
 
     /// Set this thread's Thread object in the reserved slot.
     #[inline]
     pub fn set_thread_object(&self, thread_obj: usize) {
-        let block = GlobalObjectBlock::from_tagged(self.head_block);
-        block.set_entry(GLOBAL_SLOT_THREAD, thread_obj);
+        let block = GlobalObjectBlock::from_tagged(self.head_block.load(Ordering::Acquire));
+        block.set_entry(GLOBAL_SLOT_THREAD, thread_obj)
     }
 
     /// Find the block and local index for a global slot index
@@ -301,7 +302,7 @@ impl ThreadGlobal {
         let block_num = slot / GLOBAL_BLOCK_SIZE;
         let local_index = slot % GLOBAL_BLOCK_SIZE;
 
-        let mut current = GlobalObjectBlock::from_tagged(self.head_block);
+        let mut current = GlobalObjectBlock::from_tagged(self.head_block.load(Ordering::Acquire));
         for _ in 0..block_num {
             current = current.next_block().expect("slot index out of bounds");
         }
@@ -312,20 +313,20 @@ impl ThreadGlobal {
     /// Iterate over all blocks in this ThreadGlobal
     pub fn iter_blocks(&self) -> GlobalBlockIter {
         GlobalBlockIter {
-            current: Some(GlobalObjectBlock::from_tagged(self.head_block)),
+            current: Some(GlobalObjectBlock::from_tagged(self.head_block.load(Ordering::Acquire))),
         }
     }
 
     /// Update the head block pointer (called by GC after copying)
     pub fn update_head_block(&mut self, new_ptr: usize) {
         debug_assert!(BuiltInTypes::is_heap_pointer(new_ptr));
-        self.head_block = new_ptr;
+        self.head_block.store(new_ptr, Ordering::Release);
     }
 
     /// Check if the head block is full (all slots used).
     /// Returns true if we need to allocate a new block before adding a root.
     pub fn is_head_block_full(&self) -> bool {
-        let block = GlobalObjectBlock::from_tagged(self.head_block);
+        let block = GlobalObjectBlock::from_tagged(self.head_block.load(Ordering::Acquire));
         for i in 0..GLOBAL_BLOCK_SIZE {
             if block.is_entry_free(i) {
                 return false;
@@ -913,7 +914,7 @@ impl Memory {
 
             for tg in thread_globals.values_mut() {
                 if tg.stack_base == *stack_base {
-                    tg.head_block = new_head_block;
+                    tg.head_block.store(new_head_block, Ordering::Release);
                     break;
                 }
             }
@@ -2248,7 +2249,7 @@ impl Runtime {
             }
             Entry::Occupied(e) => {
                 // Already initialized by another thread, use existing head_block
-                e.get().head_block
+                e.get().head_block.load(Ordering::Acquire)
             }
         };
         drop(thread_globals);
@@ -2480,7 +2481,7 @@ impl Runtime {
             .lock()
             .unwrap()
             .get(&thread_id)
-            .map(|tg| tg.head_block)
+            .map(|tg| tg.head_block.load(Ordering::Acquire))
             .unwrap_or(0)
     }
 
@@ -2945,7 +2946,7 @@ impl Runtime {
         let thread_globals = self.memory.thread_globals.lock().unwrap();
         if let Some(thread_global) = thread_globals.get(&thread_id) {
             unsafe {
-                *((child_stack_base - 8) as *mut usize) = thread_global.head_block;
+                *((child_stack_base - 8) as *mut usize) = thread_global.head_block.load(Ordering::Acquire);
             }
         }
 
