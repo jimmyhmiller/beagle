@@ -1,0 +1,32 @@
+namespace handler_inline_test
+
+enum Log {
+    Info { message }
+}
+
+protocol Handler(T) {
+    fn handle(self, op, resume)
+}
+
+struct ConsoleLogger {}
+
+extend ConsoleLogger with Handler(Log) {
+    fn handle(self, op, resume) {
+        println("in handler")
+        resume(null)
+    }
+}
+
+fn main() {
+    // This should work - inline handler instance without result assignment
+    handle Handler(Log) with ConsoleLogger {} {
+        perform Log.Info { message: "Hello!" }
+        println("After perform")
+    }
+    println("Done")
+}
+
+// Expect
+// in handler
+// After perform
+// Done

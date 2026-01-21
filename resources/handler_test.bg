@@ -1,0 +1,42 @@
+namespace handler_test
+
+// Test basic effect handlers with parameterized protocols
+
+// Define an effect enum
+enum Log {
+    Info { message }
+}
+
+// Define the Handler protocol (parameterized)
+protocol Handler(T) {
+    fn handle(self, op, resume)
+}
+
+// Define a struct that will handle Log effects
+struct ConsoleLogger {}
+
+// Implement Handler(Log) for ConsoleLogger
+extend ConsoleLogger with Handler(Log) {
+    fn handle(self, op, resume) {
+        println("in handler")
+        resume(null)
+    }
+}
+
+fn main() {
+    // Test: basic handler that logs and resumes
+    let logger = ConsoleLogger {}
+    let result = handle Handler(Log) with logger {
+        perform Log.Info { message: "Hello from handler!" }
+        println("After perform")
+        42
+    }
+    println(result)
+    println("Done")
+}
+
+// Expect
+// in handler
+// After perform
+// 42
+// Done

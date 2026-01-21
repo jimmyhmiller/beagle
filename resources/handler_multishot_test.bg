@@ -1,0 +1,55 @@
+namespace handler_multishot_test
+
+// Test multi-shot continuations - calling resume multiple times
+
+enum Choice {
+    Choose {}
+}
+
+protocol Handler(T) {
+    fn handle(self, op, resume)
+}
+
+struct Chooser {}
+
+extend Chooser with Handler(Choice) {
+    fn handle(self, op, resume) {
+        // Multi-shot: call resume twice with different values
+        // This should run the continuation twice
+        let result1 = resume(1)
+        println("first branch returned:")
+        println(result1)
+        let result2 = resume(2)
+        println("second branch returned:")
+        println(result2)
+        result1 + result2
+    }
+}
+
+fn main() {
+    println("main started")
+    let chooser = Chooser {}
+    let result = handle Handler(Choice) with chooser {
+        let x = perform Choice.Choose {}
+        println("chose:")
+        println(x)
+        x * 10
+    }
+    println("final result:")
+    println(result)
+    println("main done")
+}
+
+// Expect
+// main started
+// chose:
+// 1
+// first branch returned:
+// 10
+// chose:
+// 2
+// second branch returned:
+// 20
+// final result:
+// 30
+// main done

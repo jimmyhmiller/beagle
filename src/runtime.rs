@@ -734,6 +734,94 @@ thread_local! {
     pub static NATIVE_ARGUMENTS : RefCell<MMapMutWithOffset> = RefCell::new(MMapMutWithOffset::new());
 }
 
+// ============================================================================
+// Effect Handler Stack (Thread-Local)
+// ============================================================================
+
+/// An entry in the handler stack.
+/// Each entry maps a protocol key (e.g., "Handler<Async>") to a handler instance.
+#[derive(Clone, Debug)]
+pub struct HandlerEntry {
+    /// Protocol key including type args, e.g., "Handler<Async>" or "Handler<Log>"
+    pub protocol_key: String,
+    /// Tagged pointer to the handler instance object
+    pub handler_instance: usize,
+}
+
+/// Thread-local handler stack for effect handlers.
+/// Handlers are scoped - inner handlers shadow outer ones for the same protocol key.
+#[derive(Default)]
+pub struct HandlerStack {
+    entries: Vec<HandlerEntry>,
+}
+
+impl HandlerStack {
+    pub fn new() -> Self {
+        HandlerStack { entries: Vec::new() }
+    }
+
+    /// Push a handler onto the stack
+    pub fn push(&mut self, protocol_key: String, handler_instance: usize) {
+        self.entries.push(HandlerEntry {
+            protocol_key,
+            handler_instance,
+        });
+    }
+
+    /// Pop the most recent handler with the given protocol key
+    pub fn pop(&mut self, protocol_key: &str) -> Option<HandlerEntry> {
+        // Find the last entry with matching protocol key
+        if let Some(idx) = self.entries.iter().rposition(|e| e.protocol_key == protocol_key) {
+            Some(self.entries.remove(idx))
+        } else {
+            None
+        }
+    }
+
+    /// Find the most recent handler for the given protocol key
+    pub fn find(&self, protocol_key: &str) -> Option<&HandlerEntry> {
+        self.entries.iter().rfind(|e| e.protocol_key == protocol_key)
+    }
+
+    /// Clear all handlers (used on reset)
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
+
+thread_local! {
+    /// Per-thread handler stack for effect handlers
+    pub static HANDLER_STACK: RefCell<HandlerStack> = RefCell::new(HandlerStack::new());
+}
+
+/// Push a handler onto the current thread's handler stack
+pub fn push_handler(protocol_key: String, handler_instance: usize) {
+    HANDLER_STACK.with(|stack| {
+        stack.borrow_mut().push(protocol_key, handler_instance);
+    });
+}
+
+/// Pop a handler from the current thread's handler stack
+pub fn pop_handler(protocol_key: &str) -> Option<HandlerEntry> {
+    HANDLER_STACK.with(|stack| {
+        stack.borrow_mut().pop(protocol_key)
+    })
+}
+
+/// Find a handler in the current thread's handler stack
+pub fn find_handler(protocol_key: &str) -> Option<usize> {
+    HANDLER_STACK.with(|stack| {
+        stack.borrow().find(protocol_key).map(|e| e.handler_instance)
+    })
+}
+
+/// Clear the handler stack (called on reset)
+pub fn clear_handler_stack() {
+    HANDLER_STACK.with(|stack| {
+        stack.borrow_mut().clear();
+    });
+}
+
 pub struct Memory {
     heap: Alloc,
     stacks: Mutex<Vec<(ThreadId, MmapMut)>>,
@@ -763,6 +851,9 @@ impl Memory {
         self.threads = vec![std::thread::current()];
         self.stack_map = StackMap::new();
         self.thread_globals.lock().unwrap().clear();
+
+        // Clear the effect handler stack
+        clear_handler_stack();
 
         // Full memory barrier after reset to ensure all stores are visible
         std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
@@ -1322,6 +1413,9 @@ pub struct Runtime {
     /// Used when bindings are added from threads without a Beagle stack (e.g., compiler thread).
     /// Format: (namespace_id, slot, value)
     pending_heap_bindings: Mutex<Vec<(usize, usize, usize)>>,
+    /// Mapping from enum variant struct_id to enum name
+    /// Used by effect handlers to determine which handler to call for a `perform` value
+    pub variant_to_enum: HashMap<usize, String>,
     /// Storage for compiled Regex objects.
     /// Regexes are stored here and accessed by index.
     /// The index is tagged as a special "Regex" type for Beagle.
@@ -1441,6 +1535,7 @@ impl Runtime {
             default_exception_handler_fn: None,
             keyword_namespace: 0, // Will be set when first keyword is allocated
             pending_heap_bindings: Mutex::new(Vec::new()),
+            variant_to_enum: HashMap::new(),
             compiled_regexes: Vec::new(),
         }
     }
@@ -1956,6 +2051,11 @@ impl Runtime {
     pub fn pop_prompt_handler(&mut self) -> Option<PromptHandler> {
         let thread_id = std::thread::current().id();
         self.prompt_handlers.get_mut(&thread_id)?.pop()
+    }
+
+    pub fn prompt_handler_count(&self) -> usize {
+        let thread_id = std::thread::current().id();
+        self.prompt_handlers.get(&thread_id).map(|v| v.len()).unwrap_or(0)
     }
 
     pub fn store_captured_continuation(&mut self, cont: CapturedContinuation) -> usize {
@@ -4420,6 +4520,18 @@ impl Runtime {
 
     pub fn get_struct(&self, name: &str) -> Option<(usize, &Struct)> {
         self.structs.get(name)
+    }
+
+    /// Register a mapping from enum variant struct_id to enum name
+    /// Called when enum variants are compiled
+    pub fn register_enum_variant(&mut self, struct_id: usize, enum_name: String) {
+        self.variant_to_enum.insert(struct_id, enum_name);
+    }
+
+    /// Get the enum name for a given struct_id (type_id from header)
+    /// Returns None if this isn't an enum variant
+    pub fn get_enum_name_for_variant(&self, struct_id: usize) -> Option<&String> {
+        self.variant_to_enum.get(&struct_id)
     }
 
     pub fn get_namespace_from_alias(&self, alias: &str) -> Option<String> {

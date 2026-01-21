@@ -74,12 +74,14 @@ pub enum Ast {
     },
     Protocol {
         name: String,
+        type_params: Vec<String>,  // e.g., ["T"] for Handler(T)
         body: Vec<Ast>,
         token_range: TokenRange,
     },
     Extend {
         target_type: String,
         protocol: String,
+        protocol_type_args: Vec<String>,  // e.g., ["Async"] for Handler(Async)
         body: Vec<Ast>,
         token_range: TokenRange,
     },
@@ -314,10 +316,25 @@ pub enum Ast {
         body: Vec<Ast>,
         token_range: TokenRange,
     },
-    /// Delimited continuation shift/control: `shift(|k| { body })`
+    /// Delimited continuation shift/control: `shift(fn(k) { body })`
     /// Captures the continuation up to the nearest reset and binds it to `k`
     Shift {
         continuation_param: String,
+        body: Vec<Ast>,
+        token_range: TokenRange,
+    },
+    /// Effect operation: `perform Async.Read { fd: fd }`
+    /// Captures continuation, looks up handler for enum type, calls handle(op, resume)
+    Perform {
+        value: Box<Ast>,
+        token_range: TokenRange,
+    },
+    /// Effect handler block: `handle Handler(Async) with instance { body }`
+    /// Installs a handler for the given protocol+type during body execution
+    Handle {
+        protocol: String,
+        protocol_type_args: Vec<String>,  // e.g., ["Async"] for Handler(Async)
+        handler_instance: Box<Ast>,
         body: Vec<Ast>,
         token_range: TokenRange,
     },
@@ -513,7 +530,9 @@ impl Ast {
             | Ast::MultiArityFunction { token_range, .. }
             | Ast::StringInterpolation { token_range, .. }
             | Ast::Reset { token_range, .. }
-            | Ast::Shift { token_range, .. } => *token_range,
+            | Ast::Shift { token_range, .. }
+            | Ast::Perform { token_range, .. }
+            | Ast::Handle { token_range, .. } => *token_range,
             Ast::IntegerLiteral(_, position)
             | Ast::FloatLiteral(_, position)
             | Ast::Identifier(_, position)
@@ -1626,6 +1645,7 @@ impl AstCompiler<'_> {
             }),
             Ast::Protocol {
                 name,
+                type_params: _,
                 body,
                 token_range: _,
             } => {
@@ -1706,6 +1726,7 @@ impl AstCompiler<'_> {
             Ast::Extend {
                 target_type,
                 protocol,
+                protocol_type_args,
                 body,
                 token_range: _,
             } => {
@@ -1745,7 +1766,23 @@ impl AstCompiler<'_> {
                         // TODO: I need to fully resolve the target_type and protocol if they are aliased
                         let target_type = self.string_constant(target_type.clone());
                         let target_type = self.ir.assign_new(target_type);
-                        let protocol = self.string_constant(protocol.clone());
+                        // Mangle protocol name with type args: e.g., Handler(Async) -> Handler<Async>
+                        // Fully qualify the type args so they match what perform looks up
+                        let qualified_type_args: Vec<String> = protocol_type_args
+                            .iter()
+                            .map(|arg| {
+                                let (ns, name) = self.get_namespace_name_and_name(arg).unwrap_or_else(|_| {
+                                    (self.compiler.current_namespace_name(), arg.clone())
+                                });
+                                format!("{}/{}", ns, name)
+                            })
+                            .collect();
+                        let protocol_mangled = if qualified_type_args.is_empty() {
+                            protocol.clone()
+                        } else {
+                            format!("{}<{}>", protocol, qualified_type_args.join(","))
+                        };
+                        let protocol = self.string_constant(protocol_mangled);
                         let protocol = self.ir.assign_new(protocol);
                         let name = self.string_constant(name.clone());
                         let name = self.ir.assign_new(name);
@@ -3226,6 +3263,323 @@ impl AstCompiler<'_> {
 
                 Ok(result_reg.into())
             }
+            Ast::Perform { value, token_range } => {
+                // perform evaluates the value, finds the handler, and calls it with continuation
+                //
+                // Compiles to:
+                // 1. Evaluate the value (e.g., Async.Read { fd: fd })
+                // 2. Get enum type name from the value using get-enum-type builtin
+                // 3. Construct protocol key: "Handler<EnumType>"
+                // 4. Find handler for that protocol key using find-handler builtin
+                // 5. Check if handler is null (no handler installed) and throw error
+                // 6. Use shift to capture continuation
+                // 7. Call handler.handle(op_value, resume_continuation) via call-handler builtin
+
+                // Step 1: Evaluate the op value
+                self.not_tail_position();
+                let op_value = self.call_compile(&value)?;
+                let op_reg = self.ir.assign_new(op_value);
+
+                // Step 2: Get enum type using get-enum-type builtin
+                let enum_type_value = self.call_builtin(
+                    "beagle.builtin/get-enum-type",
+                    vec![op_reg.into()],
+                )?;
+                let enum_type_reg = self.ir.assign_new(enum_type_value);
+
+                // Step 2.5: Check if enum type is null (not an enum variant)
+                let enum_type_error_label = self.ir.label("perform_enum_type_error");
+                let enum_type_ok_label = self.ir.label("perform_enum_type_ok");
+                self.ir.jump_if(
+                    enum_type_error_label,
+                    Condition::Equal,
+                    enum_type_reg,
+                    Value::Null,
+                );
+                self.ir.jump(enum_type_ok_label);
+
+                // Error path: not an enum variant
+                self.ir.write_label(enum_type_error_label);
+                let error_msg = self.string_constant("perform requires an enum value".to_string());
+                let error_msg_reg = self.ir.assign_new(error_msg);
+                let _ = self.call_builtin("beagle.builtin/panic", vec![error_msg_reg.into()]);
+
+                // Continue path: enum type is valid
+                self.ir.write_label(enum_type_ok_label);
+
+                // Step 3: Construct protocol key "Handler<{enum_type}>"
+                // We need to allocate a string at runtime: "Handler<" + enum_type + ">"
+                // For now, we'll use a simpler approach: pass enum_type to find-handler which
+                // internally constructs the key. But find-handler takes the full key...
+                //
+                // Actually, let's construct the key at runtime using string concatenation
+                let handler_prefix = self.string_constant("Handler<".to_string());
+                let handler_prefix_reg = self.ir.assign_new(handler_prefix);
+                let handler_suffix = self.string_constant(">".to_string());
+                let handler_suffix_reg = self.ir.assign_new(handler_suffix);
+
+                // Concat: "Handler<" + enum_type
+                let partial_key = self.call_builtin("beagle.core/string-concat", vec![
+                    handler_prefix_reg.into(),
+                    enum_type_reg.into(),
+                ])?;
+                let partial_key_reg = self.ir.assign_new(partial_key);
+
+                // Concat: partial_key + ">"
+                let protocol_key = self.call_builtin("beagle.core/string-concat", vec![
+                    partial_key_reg.into(),
+                    handler_suffix_reg.into(),
+                ])?;
+                let protocol_key_reg = self.ir.assign_new(protocol_key);
+
+                // Step 4: Find handler using find-handler builtin
+                let handler_value = self.call_builtin(
+                    "beagle.builtin/find-handler",
+                    vec![protocol_key_reg.into()],
+                )?;
+                let handler_reg = self.ir.assign_new(handler_value);
+
+                // Step 5: Check if handler is null
+                let handler_error_label = self.ir.label("perform_no_handler_error");
+                let handler_ok_label = self.ir.label("perform_handler_ok");
+                self.ir.jump_if(
+                    handler_error_label,
+                    Condition::Equal,
+                    handler_reg,
+                    Value::Null,
+                );
+                self.ir.jump(handler_ok_label);
+
+                // Error path: no handler installed
+                self.ir.write_label(handler_error_label);
+                // Create a more informative error message
+                let no_handler_prefix = self.string_constant("No handler installed for ".to_string());
+                let no_handler_prefix_reg = self.ir.assign_new(no_handler_prefix);
+                let error_msg = self.call_builtin("beagle.core/string-concat", vec![
+                    no_handler_prefix_reg.into(),
+                    protocol_key_reg.into(),
+                ])?;
+                let error_msg_reg = self.ir.assign_new(error_msg);
+                let _ = self.call_builtin("beagle.builtin/panic", vec![error_msg_reg.into()]);
+
+                // Step 6: Handler found, use shift to capture continuation
+                self.ir.write_label(handler_ok_label);
+
+                // Create labels for after shift (normal path) - this is where continuation resumes
+                let after_shift = self.ir.label("perform_after_shift");
+
+                // Create a result register for the resumed value
+                let result_reg = self.ir.assign_new(Value::Null);
+
+                // Allocate local for continuation object with unique name
+                let unique_cont_name = format!("__perform_cont_{}__", token_range.start);
+                let cont_local = self.find_or_insert_local(&unique_cont_name);
+
+                // Get builtin function pointers for continuation capture
+                let capture_fn = self
+                    .compiler
+                    .find_function("beagle.builtin/capture-continuation")
+                    .expect("capture-continuation builtin not found");
+                let capture_fn_ptr = usize::from(capture_fn.pointer);
+
+                // Capture the continuation using the specialized instruction
+                let cont_index =
+                    self.ir
+                        .capture_continuation(after_shift, cont_local, capture_fn_ptr);
+
+                // Wrap the continuation index in a closure so it can be called like a function
+                let trampoline_fn = self
+                    .compiler
+                    .find_function("beagle.builtin/continuation-trampoline")
+                    .expect("continuation-trampoline builtin not found");
+                let trampoline_ptr = usize::from(trampoline_fn.pointer);
+
+                // Get the stack position BEFORE pushing (where the cont_index will go)
+                let free_var_ptr = self.ir.get_current_stack_position();
+
+                // Push the continuation index onto the stack as a captured variable
+                let cont_index_reg = self.ir.assign_new(cont_index);
+                self.ir.push_to_stack(cont_index_reg.into());
+
+                // Call make_closure to create the continuation closure (resume function)
+                let make_closure = self
+                    .compiler
+                    .find_function("beagle.builtin/make-closure")
+                    .expect("make-closure builtin not found");
+                let make_closure_ptr = self.compiler.get_function_pointer(make_closure).unwrap();
+                let make_closure_reg = self.ir.assign_new(make_closure_ptr);
+
+                let tagged_trampoline =
+                    BuiltInTypes::Function.tag(trampoline_ptr as isize) as usize;
+                let trampoline_reg = self.ir.assign_new(Value::RawValue(tagged_trampoline));
+                let num_free_reg = self.ir.assign_new(Value::TaggedConstant(1));
+
+                let stack_pointer = self.ir.get_stack_pointer_imm(0);
+                let frame_pointer = self.ir.get_frame_pointer();
+
+                let resume_closure = self.ir.call(
+                    make_closure_reg.into(),
+                    vec![
+                        stack_pointer.clone(),
+                        frame_pointer.clone(),
+                        trampoline_reg.into(),
+                        num_free_reg.into(),
+                        free_var_ptr,
+                    ],
+                );
+
+                // Store the resume closure in local
+                let resume_closure_reg = self.ir.assign_new(resume_closure);
+                self.ir.store_local(cont_local, resume_closure_reg.into());
+
+                // Step 7: Call handler.handle(op, resume) via call-handler builtin
+                // call-handler takes: (handler, enum_type_ptr, op_value, resume)
+                let handler_result = self.call_builtin(
+                    "beagle.builtin/call-handler",
+                    vec![
+                        handler_reg.into(),
+                        enum_type_reg.into(),
+                        op_reg.into(),
+                        resume_closure_reg.into(),
+                    ],
+                )?;
+
+                // The handler's result goes to the enclosing reset (handle block)
+                let return_to_reset_fn = self
+                    .compiler
+                    .find_function("beagle.builtin/return-from-shift")
+                    .expect("return-from-shift builtin not found");
+                let return_fn_ptr = usize::from(return_to_reset_fn.pointer);
+
+                let handler_result_reg = self.ir.assign_new(handler_result);
+                self.ir.return_from_shift(handler_result_reg.into(), return_fn_ptr);
+
+                // After shift label - this is where we land when continuation (resume) is invoked
+                self.ir.write_label(after_shift);
+                // The resumed value is in the continuation local
+                let resumed_value = self.ir.load_local(cont_local);
+                self.ir.assign(result_reg, resumed_value);
+
+                Ok(result_reg.into())
+            }
+            Ast::Handle {
+                protocol,
+                protocol_type_args,
+                handler_instance,
+                body,
+                token_range,
+            } => {
+                // handle installs a handler for a protocol and executes body
+                //
+                // Compiles to:
+                // 1. Evaluate handler_instance expression
+                // 2. Construct protocol key string: "Protocol<TypeArgs>"
+                // 3. Call push_handler(protocol_key, handler_instance)
+                // 4. Wrap body in reset { ... } for continuation capture
+                // 5. Call pop_handler(protocol_key)
+                // 6. Return result
+
+                // Construct the protocol key string with fully qualified type args
+                let qualified_type_args: Vec<String> = protocol_type_args
+                    .iter()
+                    .map(|arg| {
+                        let (ns, name) = self.get_namespace_name_and_name(arg).unwrap_or_else(|_| {
+                            (self.compiler.current_namespace_name(), arg.clone())
+                        });
+                        format!("{}/{}", ns, name)
+                    })
+                    .collect();
+                let protocol_key = if qualified_type_args.is_empty() {
+                    protocol.clone()
+                } else {
+                    format!("{}<{}>", protocol, qualified_type_args.join(","))
+                };
+
+                // Evaluate handler instance
+                self.not_tail_position();
+                let handler_value = self.call_compile(&handler_instance)?;
+                let handler_reg = self.ir.assign_new(handler_value);
+
+                // Create protocol key string constant
+                let key_str = self.string_constant(protocol_key.clone());
+                let key_reg = self.ir.assign_new(key_str);
+
+                // Call push_handler builtin
+                let _ = self.call_builtin(
+                    "beagle.builtin/push-handler",
+                    vec![key_reg.into(), handler_reg.into()],
+                );
+
+                // Compile body wrapped in reset for continuation capture
+                // This follows the same pattern as Ast::Reset
+                let after_handle = self.ir.label("after_handle");
+                let handle_prompt_handler = self.ir.label("handle_prompt_handler");
+
+                let result_reg = self.ir.assign_new(Value::Null);
+
+                // Allocate local for captured value
+                let unique_captured_name = format!("__handle_captured_{}__", token_range.start);
+                let captured_local = self.find_or_insert_local(&unique_captured_name);
+                let null_reg = self.ir.assign_new(Value::Null);
+                self.ir.store_local(captured_local, null_reg.into());
+
+                // Get prompt builtins
+                let push_prompt_fn = self
+                    .compiler
+                    .find_function("beagle.builtin/push-prompt")
+                    .expect("push-prompt builtin not found");
+                let push_prompt_fn_ptr = usize::from(push_prompt_fn.pointer);
+
+                let pop_prompt_fn = self
+                    .compiler
+                    .find_function("beagle.builtin/pop-prompt")
+                    .expect("pop-prompt builtin not found");
+                let pop_prompt_fn_ptr = usize::from(pop_prompt_fn.pointer);
+
+                // Push prompt handler
+                self.ir.push_prompt_handler(
+                    handle_prompt_handler,
+                    Value::Local(captured_local),
+                    push_prompt_fn_ptr,
+                );
+
+                // Compile body
+                self.not_tail_position();
+                let mut body_result = Value::Null;
+                for ast in body.iter() {
+                    self.not_tail_position();
+                    body_result = self.call_compile(ast)?;
+                }
+
+                // Store result and pop prompt
+                self.ir.assign(result_reg, body_result);
+                self.ir.pop_prompt_handler(result_reg.into(), pop_prompt_fn_ptr);
+
+                // Pop the effect handler
+                let key_str2 = self.string_constant(protocol_key);
+                let key_reg2 = self.ir.assign_new(key_str2);
+                let _ = self.call_builtin("beagle.builtin/pop-handler", vec![key_reg2.into()]);
+
+                self.ir.jump(after_handle);
+
+                // Prompt handler block
+                self.ir.write_label(handle_prompt_handler);
+                let captured_value = self.ir.load_local(captured_local);
+                self.ir.assign(result_reg, captured_value);
+
+                // Also pop the effect handler on this path
+                let key_str3 = self.string_constant(protocol.clone());
+                let key_str3 = if protocol_type_args.is_empty() {
+                    key_str3
+                } else {
+                    self.string_constant(format!("{}<{}>", protocol, protocol_type_args.join(",")))
+                };
+                let key_reg3 = self.ir.assign_new(key_str3);
+                let _ = self.call_builtin("beagle.builtin/pop-handler", vec![key_reg3.into()]);
+
+                self.ir.write_label(after_handle);
+                Ok(result_reg.into())
+            }
         }
     }
 
@@ -3991,7 +4345,8 @@ impl AstCompiler<'_> {
 
                 self.compiler.add_enum(enum_repr);
 
-                // Add structs for each variant
+                // Add structs for each variant and register variant-to-enum mapping
+                let full_enum_name = format!("{}/{}", namespace, enum_name);
                 for variant in variants.iter() {
                     match variant {
                         Ast::EnumVariant {
@@ -4016,20 +4371,30 @@ impl AstCompiler<'_> {
                             }
                             // Enum variant fields are always immutable
                             let mutable_fields = vec![false; field_names.len()];
+                            let variant_struct_name = format!("{}/{}.{}", namespace, enum_name, variant_name);
                             self.compiler.add_struct(Struct {
-                                name: format!("{}/{}.{}", namespace, enum_name, variant_name),
+                                name: variant_struct_name.clone(),
                                 fields: field_names,
                                 mutable_fields,
                             });
+                            // Register variant-to-enum mapping for effect handlers
+                            if let Some((struct_id, _)) = self.compiler.get_struct(&variant_struct_name) {
+                                self.compiler.register_enum_variant(struct_id, full_enum_name.clone());
+                            }
                         }
                         Ast::EnumStaticVariant {
                             name: variant_name, ..
                         } => {
+                            let variant_struct_name = format!("{}/{}.{}", namespace, enum_name, variant_name);
                             self.compiler.add_struct(Struct {
-                                name: format!("{}/{}.{}", namespace, enum_name, variant_name),
+                                name: variant_struct_name.clone(),
                                 fields: vec![],
                                 mutable_fields: vec![],
                             });
+                            // Register variant-to-enum mapping for effect handlers
+                            if let Some((struct_id, _)) = self.compiler.get_struct(&variant_struct_name) {
+                                self.compiler.register_enum_variant(struct_id, full_enum_name.clone());
+                            }
                         }
                         _ => {
                             return Err(CompileError::InternalError {
@@ -4050,6 +4415,7 @@ impl AstCompiler<'_> {
             }
             Ast::Protocol {
                 name,
+                type_params: _,
                 body,
                 token_range: _,
             } => {
@@ -4341,6 +4707,7 @@ impl AstCompiler<'_> {
             Ast::Extend {
                 target_type: _,
                 protocol: _,
+                protocol_type_args: _,
                 body,
                 token_range: _,
             } => {
@@ -4580,6 +4947,19 @@ impl AstCompiler<'_> {
             } => {
                 // The continuation param is a binding
                 self.add_variable_for_mutable_pass(continuation_param);
+                for ast in body.iter() {
+                    self.find_mutable_vars_that_need_boxing(ast);
+                }
+            }
+            Ast::Perform { value, .. } => {
+                self.find_mutable_vars_that_need_boxing(value);
+            }
+            Ast::Handle {
+                handler_instance,
+                body,
+                ..
+            } => {
+                self.find_mutable_vars_that_need_boxing(handler_instance);
                 for ast in body.iter() {
                     self.find_mutable_vars_that_need_boxing(ast);
                 }
