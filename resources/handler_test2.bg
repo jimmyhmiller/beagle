@@ -1,16 +1,14 @@
 namespace handler_test2
 
+import "beagle.effect" as effect
+
 enum Log {
     Info { message }
 }
 
-protocol Handler(T) {
-    fn handle(self, op, resume)
-}
-
 struct ConsoleLogger {}
 
-extend ConsoleLogger with Handler(Log) {
+extend ConsoleLogger with effect/Handler(Log) {
     fn handle(self, op, resume) {
         println("in handler")
         println("op:")
@@ -27,7 +25,7 @@ extend ConsoleLogger with Handler(Log) {
 fn main() {
     println("main started")
     let logger = ConsoleLogger {}
-    let result = handle Handler(Log) with logger {
+    let result = handle effect/Handler(Log) with logger {
         println("before perform")
         let x = perform Log.Info { message: "Hello from effect!" }
         println("after perform")

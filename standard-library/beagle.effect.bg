@@ -1,0 +1,56 @@
+namespace beagle.effect
+
+// ============================================================================
+// Effect Handler Protocol
+// ============================================================================
+// This module defines the core Handler protocol used by the algebraic effect
+// system. All effect handlers must implement this protocol.
+//
+// The Handler protocol is parameterized by the effect type T. For example:
+//   - Handler(Async) handles Async effects
+//   - Handler(Log) handles Log effects
+//   - Handler(State) handles State effects
+//
+// To create an effect handler:
+// 1. Define an effect enum with variants for each operation
+// 2. Create a handler struct
+// 3. Extend the struct with Handler(YourEffect)
+// 4. Use `handle Handler(YourEffect) with instance { ... }` to install it
+//
+// Example:
+//   enum Counter { Inc {}, Dec {}, Get {} }
+//
+//   struct CounterHandler { count }
+//
+//   extend CounterHandler with Handler(Counter) {
+//       fn handle(self, op, resume) {
+//           match op {
+//               Counter.Inc {} => resume(self.count = self.count + 1),
+//               Counter.Dec {} => resume(self.count = self.count - 1),
+//               Counter.Get {} => resume(self.count)
+//           }
+//       }
+//   }
+//
+//   let handler = CounterHandler { count: 0 }
+//   handle Handler(Counter) with handler {
+//       perform Counter.Inc {}
+//       perform Counter.Inc {}
+//       perform Counter.Get {}  // returns 2
+//   }
+
+protocol Handler(T) {
+    // Handle an effect operation.
+    //
+    // Arguments:
+    //   self - the handler instance
+    //   op - the effect operation (a variant of the effect enum T)
+    //   resume - the continuation to call with the result
+    //
+    // The handler can:
+    //   - Call resume(value) to continue execution with the given value
+    //   - Call resume multiple times (multishot continuations)
+    //   - Not call resume at all (abort the computation)
+    //   - Transform the result before/after calling resume
+    fn handle(self, op, resume)
+}

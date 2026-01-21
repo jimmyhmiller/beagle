@@ -1777,10 +1777,18 @@ impl AstCompiler<'_> {
                                 format!("{}/{}", ns, name)
                             })
                             .collect();
-                        let protocol_mangled = if qualified_type_args.is_empty() {
-                            protocol.clone()
+                        // Strip namespace prefix from protocol name for parameterized protocols
+                        // e.g., "effect/Handler" -> "Handler" so that Handler<ns/Type> is consistent
+                        // between extend, handle, and perform
+                        let protocol_base_name = if protocol.contains('/') {
+                            protocol.split('/').last().unwrap_or(&protocol).to_string()
                         } else {
-                            format!("{}<{}>", protocol, qualified_type_args.join(","))
+                            protocol.clone()
+                        };
+                        let protocol_mangled = if qualified_type_args.is_empty() {
+                            protocol.clone()  // Keep original for non-parameterized protocols
+                        } else {
+                            format!("{}<{}>", protocol_base_name, qualified_type_args.join(","))
                         };
                         let protocol = self.string_constant(protocol_mangled);
                         let protocol = self.ir.assign_new(protocol);

@@ -1,18 +1,16 @@
 namespace handler_multishot_test
 
+import "beagle.effect" as effect
+
 // Test multi-shot continuations - calling resume multiple times
 
 enum Choice {
     Choose {}
 }
 
-protocol Handler(T) {
-    fn handle(self, op, resume)
-}
-
 struct Chooser {}
 
-extend Chooser with Handler(Choice) {
+extend Chooser with effect/Handler(Choice) {
     fn handle(self, op, resume) {
         // Multi-shot: call resume twice with different values
         // This should run the continuation twice
@@ -29,7 +27,7 @@ extend Chooser with Handler(Choice) {
 fn main() {
     println("main started")
     let chooser = Chooser {}
-    let result = handle Handler(Choice) with chooser {
+    let result = handle effect/Handler(Choice) with chooser {
         let x = perform Choice.Choose {}
         println("chose:")
         println(x)
