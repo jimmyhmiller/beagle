@@ -7,7 +7,7 @@ fn helper() {
 
 fn main() {
     let result = reset {
-        1 + shift(|k| {
+        1 + shift(fn(k) {
             let x = helper()  // call a function
             k(x)  // then invoke k
         })

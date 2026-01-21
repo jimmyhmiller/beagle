@@ -3,7 +3,7 @@ namespace continuation_basic_test
 // Basic test: shift returns a value without using k
 fn main() {
     let result = reset {
-        1 + shift(|k| {
+        1 + shift(fn(k) {
             42  // Don't use k, just return 42
         })
     }

@@ -3,7 +3,7 @@ namespace continuation_test
 fn main() {
     // Test: invoke continuation with a value
     let result = reset {
-        1 + shift(|k| {
+        1 + shift(fn(k) {
             k(10)  // invoke continuation with 10, should compute 1 + 10 = 11
         })
     }

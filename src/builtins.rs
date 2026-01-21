@@ -3968,7 +3968,13 @@ pub extern "C" fn register_extension(
     let method_name = runtime.get_string_literal(method_name);
 
     let struct_name = runtime.resolve(struct_name);
-    let protocol_name = runtime.resolve(protocol_name);
+    // Don't resolve protocol names that contain type parameters (e.g., Handler<ns/Type>)
+    // as they are already fully qualified
+    let protocol_name = if protocol_name.contains('<') {
+        protocol_name
+    } else {
+        runtime.resolve(protocol_name)
+    };
 
     runtime.add_protocol_info(&protocol_name, &struct_name, &method_name, f);
 
@@ -4950,8 +4956,16 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
     // Closure layout: header(8) + fn_ptr(8) + num_free(8) + num_locals(8) + free_vars...
     // First free variable is at offset 32
     let untagged_closure = BuiltInTypes::untag(closure_ptr);
+
+    // Debug: Check closure validity
+    eprintln!("DEBUG continuation_trampoline: closure_ptr=0x{:x}, untagged=0x{:x}, value=0x{:x}",
+              closure_ptr, untagged_closure, value);
+
     // SAFETY: closure memory layout is known
     let cont_index = unsafe { *((untagged_closure + 32) as *const usize) };
+
+    eprintln!("DEBUG continuation_trampoline: cont_index=0x{:x} (untagged={})",
+              cont_index, BuiltInTypes::untag(cont_index));
 
     // Now invoke the continuation, passing the saved callee-saved registers
     // SAFETY: invoke_continuation_runtime is an unsafe function
@@ -6083,8 +6097,242 @@ impl Runtime {
         self.install_rust_collection_builtins()?;
         self.install_regex_builtins()?;
 
+        // Effect handler builtins
+        self.add_builtin_function(
+            "beagle.builtin/push-handler",
+            push_handler_builtin as *const u8,
+            false,
+            2, // protocol_key_str, handler_instance
+        )?;
+
+        self.add_builtin_function(
+            "beagle.builtin/pop-handler",
+            pop_handler_builtin as *const u8,
+            false,
+            1, // protocol_key_str
+        )?;
+
+        // find-handler needs stack_pointer for get_string error handling
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/find-handler",
+            find_handler_builtin as *const u8,
+            true,  // needs stack_pointer
+            false, // doesn't need frame_pointer
+            2, // stack_pointer, protocol_key_str
+        )?;
+
+        // get-enum-type needs stack_pointer and frame_pointer for GC-safe string allocation
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/get-enum-type",
+            get_enum_type_builtin as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, value
+        )?;
+
+        // call-handler calls handler.handle(op, resume) using protocol dispatch
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/call-handler",
+            call_handler_builtin as *const u8,
+            true,
+            true,
+            6, // stack_pointer, frame_pointer, handler, enum_type_ptr, op_value, resume
+        )?;
+
         Ok(())
     }
+}
+
+// ============================================================================
+// Effect Handler Builtins
+// ============================================================================
+
+/// Push a handler onto the thread-local handler stack
+pub extern "C" fn push_handler_builtin(protocol_key_ptr: usize, handler_instance: usize) -> usize {
+    let runtime = get_runtime().get();
+    let protocol_key = runtime.get_string_literal(protocol_key_ptr);
+    crate::runtime::push_handler(protocol_key.to_string(), handler_instance);
+    BuiltInTypes::null_value() as usize
+}
+
+/// Pop a handler from the thread-local handler stack
+pub extern "C" fn pop_handler_builtin(protocol_key_ptr: usize) -> usize {
+    let runtime = get_runtime().get();
+    let protocol_key = runtime.get_string_literal(protocol_key_ptr);
+    crate::runtime::pop_handler(&protocol_key);
+    BuiltInTypes::null_value() as usize
+}
+
+/// Find a handler in the thread-local handler stack
+/// Returns the handler instance or null if not found
+pub extern "C" fn find_handler_builtin(stack_pointer: usize, protocol_key_ptr: usize) -> usize {
+    let runtime = get_runtime().get();
+    // Use get_string which handles both string literals and heap-allocated strings
+    let protocol_key = runtime.get_string(stack_pointer, protocol_key_ptr);
+    match crate::runtime::find_handler(&protocol_key) {
+        Some(handler) => handler,
+        None => BuiltInTypes::null_value() as usize,
+    }
+}
+
+/// Get the enum name for a value (by examining its struct_id/type_id)
+/// Returns a string pointer to the enum name, or null if not an enum variant
+pub extern "C" fn get_enum_type_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let _ = stack_pointer; // Used by save_gc_context!
+
+    // Check if the value is a heap pointer
+    if !BuiltInTypes::is_heap_pointer(value) {
+        return BuiltInTypes::null_value() as usize;
+    }
+
+    // Get the struct_id from the heap object
+    // For custom structs (including enum variants), header type_id is 0,
+    // and the actual struct_id is stored separately
+    let heap_obj = HeapObject::from_tagged(value);
+    let header_type_id = heap_obj.get_type_id();
+
+    // Only custom structs (type_id == 0) can be enum variants
+    if header_type_id != 0 {
+        return BuiltInTypes::null_value() as usize;
+    }
+
+    // Get struct_id - it's tagged, need to untag it
+    let struct_id_tagged = heap_obj.get_struct_id();
+    let struct_id = BuiltInTypes::untag(struct_id_tagged);
+
+    // Look up the enum name for this struct_id
+    let runtime = get_runtime().get_mut();
+    match runtime.get_enum_name_for_variant(struct_id) {
+        Some(enum_name) => {
+            // Allocate a string for the enum name
+            match runtime.allocate_string(stack_pointer, enum_name.to_string()) {
+                Ok(string_ptr) => usize::from(string_ptr),
+                Err(_) => BuiltInTypes::null_value() as usize,
+            }
+        }
+        None => BuiltInTypes::null_value() as usize,
+    }
+}
+
+/// Call the `handle` method on a handler instance with the given operation and resume continuation.
+///
+/// This is used by `perform` to dispatch to the handler's `handle(op, resume)` method.
+/// The protocol key is constructed from the enum type: "Handler<{enum_type}>"
+///
+/// # Arguments
+/// * `stack_pointer` - Stack pointer for GC safety
+/// * `frame_pointer` - Frame pointer for GC safety
+/// * `handler` - The handler instance (implements Handler(T))
+/// * `enum_type_ptr` - String pointer to the enum type name (e.g., "myns/Async")
+/// * `op_value` - The operation value (enum variant)
+/// * `resume` - The continuation closure
+///
+/// # Returns
+/// The result of calling handler.handle(op, resume)
+pub extern "C" fn call_handler_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    handler: usize,
+    enum_type_ptr: usize,
+    op_value: usize,
+    resume: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+
+    let runtime = get_runtime().get_mut();
+
+    // Get the enum type string (can be heap-allocated or string literal)
+    let enum_type = runtime.get_string(stack_pointer, enum_type_ptr);
+
+    // Construct the protocol key: "Handler<{enum_type}>"
+    let protocol_key = format!("Handler<{}>", enum_type);
+
+    // Get the namespace from the enum type (e.g., "myns/Async" -> "myns")
+    let (namespace, _) = enum_type.split_once('/').unwrap_or(("", &enum_type));
+
+    // The dispatch key is "{namespace}/handle"
+    let dispatch_key = format!("{}/handle", namespace);
+
+    // Look up the dispatch table
+    let dispatch_table_ptr = runtime.get_dispatch_table_ptr(&protocol_key, "handle");
+
+    if dispatch_table_ptr.is_none() {
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "NoHandlerError",
+                format!(
+                    "No handler registered for protocol {}, dispatch key {}",
+                    protocol_key, dispatch_key
+                ),
+            );
+        }
+    }
+
+    let dispatch_table_ptr = dispatch_table_ptr.unwrap();
+    let dispatch_table = unsafe { &*(dispatch_table_ptr as *const DispatchTable) };
+
+    // Get the type_id from the handler to look up the function
+    let type_id = if BuiltInTypes::is_heap_pointer(handler) {
+        let heap_obj = HeapObject::from_tagged(handler);
+        let header_type_id = heap_obj.get_type_id();
+
+        if header_type_id == 0 {
+            // Custom struct - use struct_id from type_data (tagged)
+            heap_obj.get_struct_id()
+        } else {
+            // Built-in heap type
+            0x8000_0000_0000_0000 | header_type_id
+        }
+    } else {
+        // Tagged primitive
+        let kind = BuiltInTypes::get_kind(handler);
+        let tag = kind.get_tag() as usize;
+        let primitive_index = if tag == 2 { 2 } else { tag + 16 };
+        0x8000_0000_0000_0000 | primitive_index
+    };
+
+    // Look up function pointer in dispatch table
+    let fn_ptr = if type_id & 0x8000_0000_0000_0000 != 0 {
+        let primitive_index = type_id & 0x7FFF_FFFF_FFFF_FFFF;
+        dispatch_table.lookup_primitive(primitive_index)
+    } else {
+        let struct_id = BuiltInTypes::untag(type_id);
+        dispatch_table.lookup_struct(struct_id)
+    };
+
+    if fn_ptr == 0 {
+        let handler_repr = runtime
+            .get_repr(handler, 0)
+            .unwrap_or_else(|| "<unknown>".to_string());
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "NoHandlerError",
+                format!(
+                    "Handler type does not implement {} protocol. Handler: {}",
+                    protocol_key, handler_repr
+                ),
+            );
+        }
+    }
+
+    // Call the handle function: fn handle(self, op, resume) -> result
+    // The function pointer is tagged, untag it
+    let fn_ptr = BuiltInTypes::untag(fn_ptr as usize);
+
+    // The handler is compiled Beagle code, NOT a builtin.
+    // Beagle functions do NOT take stack_pointer and frame_pointer as explicit args.
+    // The signature is just: fn handle(self, op, resume) -> result
+    let func: extern "C" fn(usize, usize, usize) -> usize =
+        unsafe { std::mem::transmute(fn_ptr) };
+
+    func(handler, op_value, resume)
 }
 
 /// Allocates a Beagle struct from Rust using struct registry lookup.

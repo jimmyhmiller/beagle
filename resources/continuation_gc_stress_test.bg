@@ -17,7 +17,7 @@ fn main() {
     // Capture a continuation that has a string in scope
     let result = reset {
         let captured_string = "hello world"
-        let x = shift(|k| {
+        let x = shift(fn(k) {
             // Allocate lots of objects to trigger GC
             let garbage = make_garbage(50)
             // Now invoke k - if GC ran, captured_string might be corrupted

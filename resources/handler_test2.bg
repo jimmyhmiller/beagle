@@ -1,0 +1,52 @@
+namespace handler_test2
+
+enum Log {
+    Info { message }
+}
+
+protocol Handler(T) {
+    fn handle(self, op, resume)
+}
+
+struct ConsoleLogger {}
+
+extend ConsoleLogger with Handler(Log) {
+    fn handle(self, op, resume) {
+        println("in handler")
+        println("op:")
+        println(op)
+        // Call the resume continuation with a value
+        // This value will be returned by the perform expression
+        let result = resume(42)
+        println("after resume, got:")
+        println(result)
+        result
+    }
+}
+
+fn main() {
+    println("main started")
+    let logger = ConsoleLogger {}
+    let result = handle Handler(Log) with logger {
+        println("before perform")
+        let x = perform Log.Info { message: "Hello from effect!" }
+        println("after perform")
+        println(x)
+        x + 1
+    }
+    println(result)
+    println("main done")
+}
+
+// Expect
+// main started
+// before perform
+// in handler
+// op:
+// Log.Info { message: "Hello from effect!" }
+// after perform
+// 42
+// after resume, got:
+// 43
+// 43
+// main done

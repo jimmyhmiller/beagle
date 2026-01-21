@@ -206,6 +206,8 @@ pub enum Token {
     Modulo,
     Reset,
     Shift,
+    Perform,
+    Handle,
 }
 impl Token {
     fn is_binary_operator(&self) -> bool {
@@ -307,6 +309,8 @@ impl Token {
             Token::Modulo => Ok("%".to_string()),
             Token::Reset => Ok("reset".to_string()),
             Token::Shift => Ok("shift".to_string()),
+            Token::Perform => Ok("perform".to_string()),
+            Token::Handle => Ok("handle".to_string()),
             Token::Comment((start, end))
             | Token::Atom((start, end))
             | Token::Keyword((start, end))
@@ -703,6 +707,8 @@ impl Tokenizer {
             b"for" => Token::For,
             b"reset" => Token::Reset,
             b"shift" => Token::Shift,
+            b"perform" => Token::Perform,
+            b"handle" => Token::Handle,
             _ => Token::Atom((start, self.position)),
         }
     }
@@ -1130,6 +1136,42 @@ impl Parser {
             Token::Throw => Ok(Some(self.parse_throw()?)),
             Token::Reset => Ok(Some(self.parse_reset()?)),
             Token::Shift => Ok(Some(self.parse_shift()?)),
+            Token::Perform => {
+                // Check if this looks like a perform statement: `perform <expr>`
+                // If followed by something that can't start an expression, treat as identifier
+                // We need to peek ahead: consume perform, skip whitespace, check next token, restore
+                let saved_position = self.position;
+                self.consume(); // consume 'perform'
+                let next = self.peek_next_non_whitespace();
+                self.position = saved_position; // restore
+                let looks_like_statement = matches!(
+                    next,
+                    Token::Atom(_) | Token::OpenParen | Token::OpenBracket | Token::OpenCurly
+                        | Token::Integer(_) | Token::Float(_) | Token::String(_)
+                        | Token::True | Token::False | Token::Null
+                );
+                if looks_like_statement && min_precedence == 0 {
+                    Ok(Some(self.parse_perform()?))
+                } else {
+                    self.consume();
+                    Ok(Some(Ast::Identifier("perform".to_string(), self.position)))
+                }
+            }
+            Token::Handle => {
+                // Check if this looks like a handle statement: `handle Protocol(...) with ...`
+                // Handle statements always start with `handle <Atom>`
+                // We need to peek ahead: consume handle, skip whitespace, check next token, restore
+                let saved_position = self.position;
+                self.consume(); // consume 'handle'
+                let next = self.peek_next_non_whitespace();
+                self.position = saved_position; // restore
+                if matches!(next, Token::Atom(_)) && min_precedence == 0 {
+                    Ok(Some(self.parse_handle()?))
+                } else {
+                    self.consume();
+                    Ok(Some(Ast::Identifier("handle".to_string(), self.position)))
+                }
+            }
             Token::Match => Ok(Some(self.parse_match()?)),
             Token::Namespace => Ok(Some(self.parse_namespace()?)),
             Token::Import => Ok(Some(self.parse_import()?)),
@@ -1347,6 +1389,7 @@ impl Parser {
     fn parse_function(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
         self.move_to_next_non_whitespace();
+        // Allow keywords like "handle" and "perform" to be used as function names
         let name = match self.current_token() {
             Token::Atom((start, end)) => {
                 self.move_to_next_non_whitespace();
@@ -1354,6 +1397,14 @@ impl Parser {
                     String::from_utf8(self.source.as_bytes()[start..end].to_vec())
                         .map_err(|_| ParseError::InvalidUtf8 { position: start })?,
                 )
+            }
+            Token::Handle => {
+                self.move_to_next_non_whitespace();
+                Some("handle".to_string())
+            }
+            Token::Perform => {
+                self.move_to_next_non_whitespace();
+                Some("perform".to_string())
             }
             _ => None,
         };
@@ -1648,12 +1699,49 @@ impl Parser {
             }
         };
         self.move_to_next_non_whitespace();
+
+        // Parse optional type parameters: protocol Handler(T) { ... }
+        let type_params = if matches!(self.current_token(), Token::OpenParen) {
+            self.consume();
+            self.skip_whitespace();
+            let mut params = Vec::new();
+            while !self.at_end() && !matches!(self.current_token(), Token::CloseParen) {
+                match self.current_token() {
+                    Token::Atom((start, end)) => {
+                        let param = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                            .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
+                        params.push(param);
+                        self.consume();
+                        self.skip_whitespace();
+                        // Handle comma-separated params
+                        if matches!(self.current_token(), Token::Comma) {
+                            self.consume();
+                            self.skip_whitespace();
+                        }
+                    }
+                    _ => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "type parameter name".to_string(),
+                            found: self.get_token_repr(),
+                            position: self.position,
+                        });
+                    }
+                }
+            }
+            self.expect_close_paren()?;
+            self.skip_whitespace();
+            params
+        } else {
+            Vec::new()
+        };
+
         self.expect_open_curly()?;
         let body = self.parse_protocol_body()?;
         self.expect_close_curly()?;
         let end_position = self.position;
         Ok(Ast::Protocol {
             name,
+            type_params,
             body,
             token_range: TokenRange::new(start_position, end_position),
         })
@@ -1679,11 +1767,14 @@ impl Parser {
             Token::Fn => {
                 self.consume();
                 self.move_to_next_non_whitespace();
+                // Allow keywords like "handle" and "perform" to be used as function names
                 let name = match self.current_token() {
                     Token::Atom((start, end)) => {
                         String::from_utf8(self.source.as_bytes()[start..end].to_vec())
                             .map_err(|_| ParseError::InvalidUtf8 { position: start })?
                     }
+                    Token::Handle => "handle".to_string(),
+                    Token::Perform => "perform".to_string(),
                     _ => {
                         return Err(ParseError::UnexpectedToken {
                             expected: "protocol member name".to_string(),
@@ -1758,6 +1849,42 @@ impl Parser {
             }
         };
         self.move_to_next_non_whitespace();
+
+        // Parse optional type arguments: extend X with Handler(Async) { ... }
+        let protocol_type_args = if matches!(self.current_token(), Token::OpenParen) {
+            self.consume();
+            self.skip_whitespace();
+            let mut args = Vec::new();
+            while !self.at_end() && !matches!(self.current_token(), Token::CloseParen) {
+                match self.current_token() {
+                    Token::Atom((start, end)) => {
+                        let arg = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                            .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
+                        args.push(arg);
+                        self.consume();
+                        self.skip_whitespace();
+                        // Handle comma-separated args
+                        if matches!(self.current_token(), Token::Comma) {
+                            self.consume();
+                            self.skip_whitespace();
+                        }
+                    }
+                    _ => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "type argument".to_string(),
+                            found: self.get_token_repr(),
+                            position: self.position,
+                        });
+                    }
+                }
+            }
+            self.expect_close_paren()?;
+            self.skip_whitespace();
+            args
+        } else {
+            Vec::new()
+        };
+
         self.expect_open_curly()?;
         let body = self.parse_extend_body()?;
         self.expect_close_curly()?;
@@ -1765,6 +1892,7 @@ impl Parser {
         Ok(Ast::Extend {
             target_type,
             protocol,
+            protocol_type_args,
             body,
             token_range: TokenRange::new(start_position, end_position),
         })
@@ -2021,6 +2149,22 @@ impl Parser {
                 let end_position = self.consume();
                 Ok(Ast::StructField {
                     name: "reset".to_string(),
+                    mutable,
+                    token_range: TokenRange::new(start_position, end_position),
+                })
+            }
+            Token::Perform => {
+                let end_position = self.consume();
+                Ok(Ast::StructField {
+                    name: "perform".to_string(),
+                    mutable,
+                    token_range: TokenRange::new(start_position, end_position),
+                })
+            }
+            Token::Handle => {
+                let end_position = self.consume();
+                Ok(Ast::StructField {
+                    name: "handle".to_string(),
                     mutable,
                     token_range: TokenRange::new(start_position, end_position),
                 })
@@ -2383,6 +2527,21 @@ impl Parser {
                     token_range: TokenRange::new(start, self.position),
                 })
             }
+            // Allow keywords that can also be used as identifiers
+            Token::Handle => {
+                self.consume();
+                Ok(Pattern::Identifier {
+                    name: "handle".to_string(),
+                    token_range: TokenRange::new(start, self.position),
+                })
+            }
+            Token::Perform => {
+                self.consume();
+                Ok(Pattern::Identifier {
+                    name: "perform".to_string(),
+                    token_range: TokenRange::new(start, self.position),
+                })
+            }
             _ => Err(ParseError::InvalidPattern {
                 message: format!(
                     "Expected identifier or destructuring pattern, found {:?}",
@@ -2653,6 +2812,38 @@ impl Parser {
                 }
                 Ok(Some(("reset".to_string(), value)))
             }
+            Token::Perform => {
+                self.consume();
+                self.skip_spaces();
+                self.expect_colon()?;
+                self.skip_spaces();
+                let value = self.parse_expression(0, false, true)?.ok_or_else(|| {
+                    ParseError::InvalidExpression {
+                        message: "Expected value for struct field".to_string(),
+                        position: self.position,
+                    }
+                })?;
+                if !self.is_close_curly() {
+                    self.data_delimiter()?;
+                }
+                Ok(Some(("perform".to_string(), value)))
+            }
+            Token::Handle => {
+                self.consume();
+                self.skip_spaces();
+                self.expect_colon()?;
+                self.skip_spaces();
+                let value = self.parse_expression(0, false, true)?.ok_or_else(|| {
+                    ParseError::InvalidExpression {
+                        message: "Expected value for struct field".to_string(),
+                        position: self.position,
+                    }
+                })?;
+                if !self.is_close_curly() {
+                    self.data_delimiter()?;
+                }
+                Ok(Some(("handle".to_string(), value)))
+            }
             _ => Ok(None),
         }
     }
@@ -2854,7 +3045,7 @@ impl Parser {
         let start_position = self.position;
         self.move_to_next_non_whitespace();
 
-        // Parse shift(|k| { body })
+        // Parse shift(fn(k) { body })
         // Expect '('
         if !matches!(self.current_token(), Token::OpenParen) {
             return Err(ParseError::MissingToken {
@@ -2865,10 +3056,20 @@ impl Parser {
         self.consume();
         self.skip_whitespace();
 
-        // Expect '|'
-        if !matches!(self.current_token(), Token::BitWiseOr) {
+        // Expect 'fn'
+        if !matches!(self.current_token(), Token::Fn) {
             return Err(ParseError::MissingToken {
-                expected: "'|' for continuation parameter".to_string(),
+                expected: "'fn' for continuation handler".to_string(),
+                position: self.position,
+            });
+        }
+        self.consume();
+        self.skip_whitespace();
+
+        // Expect '('
+        if !matches!(self.current_token(), Token::OpenParen) {
+            return Err(ParseError::MissingToken {
+                expected: "'(' after 'fn'".to_string(),
                 position: self.position,
             });
         }
@@ -2891,10 +3092,10 @@ impl Parser {
 
         self.skip_whitespace();
 
-        // Expect closing '|'
-        if !matches!(self.current_token(), Token::BitWiseOr) {
+        // Expect closing ')'
+        if !matches!(self.current_token(), Token::CloseParen) {
             return Err(ParseError::MissingToken {
-                expected: "'|' after continuation parameter".to_string(),
+                expected: "')' after continuation parameter".to_string(),
                 position: self.position,
             });
         }
@@ -2918,6 +3119,162 @@ impl Parser {
         let end_position = self.position;
         Ok(Ast::Shift {
             continuation_param,
+            body,
+            token_range: TokenRange::new(start_position, end_position),
+        })
+    }
+
+    /// Parse `perform <expression>` - effect operation
+    fn parse_perform(&mut self) -> ParseResult<Ast> {
+        let start_position = self.position;
+        self.move_to_next_non_whitespace();
+
+        // Parse the value expression (e.g., Async.Read { fd: fd })
+        // Allow struct/enum creation since perform values are typically enum variants
+        let value = Box::new(self.parse_expression(1, true, true)?.ok_or_else(|| {
+            ParseError::UnexpectedEof {
+                expected: "value after 'perform'".to_string(),
+            }
+        })?);
+
+        let end_position = self.position;
+        Ok(Ast::Perform {
+            value,
+            token_range: TokenRange::new(start_position, end_position),
+        })
+    }
+
+    /// Parse `handle Protocol(Args) with instance { body }` - effect handler block
+    fn parse_handle(&mut self) -> ParseResult<Ast> {
+        let start_position = self.position;
+        self.move_to_next_non_whitespace();
+
+        // Parse protocol name
+        let protocol = match self.current_token() {
+            Token::Atom((start, end)) => {
+                String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?
+            }
+            _ => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "protocol name after 'handle'".to_string(),
+                    found: self.get_token_repr(),
+                    position: self.position,
+                });
+            }
+        };
+        self.consume();
+        self.skip_whitespace();
+
+        // Parse optional type arguments: Handler(Async)
+        let protocol_type_args = if matches!(self.current_token(), Token::OpenParen) {
+            self.consume();
+            self.skip_whitespace();
+            let mut args = Vec::new();
+            while !self.at_end() && !matches!(self.current_token(), Token::CloseParen) {
+                match self.current_token() {
+                    Token::Atom((start, end)) => {
+                        let arg = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                            .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
+                        args.push(arg);
+                        self.consume();
+                        self.skip_whitespace();
+                        // Handle comma-separated args
+                        if matches!(self.current_token(), Token::Comma) {
+                            self.consume();
+                            self.skip_whitespace();
+                        }
+                    }
+                    _ => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "type argument".to_string(),
+                            found: self.get_token_repr(),
+                            position: self.position,
+                        });
+                    }
+                }
+            }
+            self.expect_close_paren()?;
+            self.skip_whitespace();
+            args
+        } else {
+            Vec::new()
+        };
+
+        // Expect 'with' keyword
+        self.expect_with()?;
+        self.skip_whitespace();
+
+        // Parse handler instance expression (e.g., BlockingAsync {} or my_handler)
+        // We need to be careful here: `handler {}` could be struct creation followed by body,
+        // or just a variable followed by body. We parse without struct_creation first,
+        // then check if we need to consume an empty struct `{}`.
+        let handler_expr = self.parse_expression(1, true, false)?.ok_or_else(|| {
+            ParseError::UnexpectedEof {
+                expected: "handler instance after 'with'".to_string(),
+            }
+        })?;
+
+        self.skip_whitespace();
+
+        // Check if this is an empty struct creation: `MyHandler {} { body }`
+        // We look for `{}` followed by another `{` (the body)
+        let handler_instance = if matches!(self.current_token(), Token::OpenCurly) {
+            // Peek ahead to see if this is `{}` (empty struct) or `{ body }`
+            let saved_position = self.position;
+            self.consume(); // consume first `{`
+            self.skip_whitespace();
+
+            if matches!(self.current_token(), Token::CloseCurly) {
+                // This is `{}` - empty struct creation
+                self.consume(); // consume `}`
+                self.skip_whitespace();
+
+                // Now we should have another `{` for the body
+                if !matches!(self.current_token(), Token::OpenCurly) {
+                    return Err(ParseError::MissingToken {
+                        expected: "'{{' for handle body after struct creation".to_string(),
+                        position: self.position,
+                    });
+                }
+
+                // Create struct creation from the handler expression
+                match handler_expr {
+                    Ast::Identifier(name, pos) => Box::new(Ast::StructCreation {
+                        name,
+                        fields: vec![],
+                        token_range: TokenRange::new(pos, self.position),
+                    }),
+                    _ => {
+                        return Err(ParseError::InvalidExpression {
+                            message: "Expected identifier before '{}'".to_string(),
+                            position: saved_position,
+                        });
+                    }
+                }
+            } else {
+                // This is `{ body }` - restore position, handler is just the expression
+                self.position = saved_position;
+                Box::new(handler_expr)
+            }
+        } else {
+            Box::new(handler_expr)
+        };
+
+        // Parse body block
+        if !matches!(self.current_token(), Token::OpenCurly) {
+            return Err(ParseError::MissingToken {
+                expected: "'{{' for handle body".to_string(),
+                position: self.position,
+            });
+        }
+        let body = self.parse_block()?;
+
+        let end_position = self.position;
+        Ok(Ast::Handle {
+            protocol,
+            protocol_type_args,
+            handler_instance,
             body,
             token_range: TokenRange::new(start_position, end_position),
         })

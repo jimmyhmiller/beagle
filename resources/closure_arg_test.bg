@@ -1,0 +1,19 @@
+namespace closure_arg_test
+
+fn call_with_fn(callback) {
+    println("before callback")
+    let result = callback(42)
+    println("after callback")
+    result
+}
+
+fn main() {
+    let myfn = fn(x) { x + 1 }
+    let result = call_with_fn(myfn)
+    println(result)
+}
+
+// Expect:
+// before callback
+// after callback
+// 43

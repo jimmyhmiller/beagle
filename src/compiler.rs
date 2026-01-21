@@ -553,6 +553,13 @@ impl Compiler {
         runtime.get_struct(name)
     }
 
+    /// Register a mapping from enum variant struct_id to enum name
+    /// Used by effect handlers to determine which handler to call for a `perform` value
+    pub fn register_enum_variant(&mut self, struct_id: usize, enum_name: String) {
+        let runtime = get_runtime().get_mut();
+        runtime.register_enum_variant(struct_id, enum_name);
+    }
+
     pub fn is_inline_primitive_function(&self, name: &str) -> bool {
         name.starts_with("beagle.primitive/")
     }

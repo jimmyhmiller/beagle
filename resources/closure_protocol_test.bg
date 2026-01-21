@@ -1,0 +1,19 @@
+namespace closure_protocol_test
+
+// Test continuation closure specifically
+fn main() {
+    let result = reset {
+        1 + shift(fn(k) {
+            println("in shift, about to call k")
+            let r = k(10)
+            println("k returned")
+            r
+        })
+    }
+    println(result)
+}
+
+// Expect:
+// in shift, about to call k
+// k returned
+// 11

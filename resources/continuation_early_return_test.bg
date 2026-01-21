@@ -8,7 +8,7 @@ fn find_first_even(numbers) {
         for n in numbers {
             if n % 2 == 0 {
                 // "Return early" by using shift to escape the loop
-                shift(|k| { n })  // Don't call k, just return n
+                shift(fn(k) { n })  // Don't call k, just return n
             }
         }
         -1  // Not found
