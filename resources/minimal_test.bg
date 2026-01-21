@@ -1,0 +1,5 @@
+namespace minimal_test
+
+fn main() {
+    println("Hello from minimal test")
+}

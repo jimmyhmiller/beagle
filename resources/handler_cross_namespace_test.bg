@@ -1,0 +1,27 @@
+namespace handler_cross_namespace_test
+
+import "beagle.async" as async
+
+// Test that handlers work across namespaces
+// This tests the core functionality needed for async effects
+
+fn main() {
+    println("=== Cross-namespace handler test ===")
+
+    // Create the handler
+    let handler = async/BlockingHandler {}
+    println("Created handler")
+
+    // Install handler and perform operation
+    let result = handle async/Handler(async/Async) with handler {
+        println("Inside handle block, about to perform")
+        let op = async/Async.Sleep { ms: 10 }
+        println("Created operation:", op)
+        let sleep-result = perform op
+        println("Sleep returned:", sleep-result)
+        sleep-result
+    }
+
+    println("Final result:", result)
+    println("=== Test complete ===")
+}

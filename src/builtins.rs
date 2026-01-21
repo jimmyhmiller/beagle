@@ -4497,6 +4497,10 @@ pub unsafe extern "C" fn return_from_shift_runtime(
     if let Some(return_points) = runtime.invocation_return_points.get_mut(&thread_id)
         && let Some(return_point) = return_points.pop()
     {
+        // For deep handler semantics: try to pop the prompt that was pushed by invoke.
+        // If prompt stack is empty (because a subsequent perform captured it), that's OK.
+        let _ = runtime.pop_prompt_handler();
+
         let new_sp = return_point.stack_pointer;
         let new_fp = return_point.frame_pointer;
         let return_address = return_point.return_address;
@@ -4571,13 +4575,17 @@ pub unsafe extern "C" fn return_from_shift_runtime(
     }
 
     // No invocation return point - fall back to original behavior (return to prompt handler)
-    // This happens when shift body doesn't invoke the continuation at all.
+    // This happens when shift body doesn't invoke the continuation at all,
+    // OR when all nested handlers have returned and we need to return to the handle block.
     let continuations = runtime.captured_continuations.get(&thread_id);
 
     if let Some(conts) = continuations
-        && let Some(last_cont) = conts.last()
+        && let Some(first_cont) = conts.first()
     {
-        let prompt = &last_cont.prompt;
+        // Use the FIRST continuation's prompt - this contains the original handle block's
+        // handler address and stack state. The last continuation would have the deep handler's
+        // prompt which is not what we want when returning from nested handlers.
+        let prompt = &first_cont.prompt;
         let handler_address = prompt.handler_address;
         let new_sp = prompt.stack_pointer;
         let new_fp = prompt.frame_pointer;
@@ -4625,8 +4633,8 @@ pub unsafe extern "C" fn return_from_shift_runtime(
         }
     }
 
-    // No continuation found - panic
-    panic!("return_from_shift called without captured continuation");
+    // No continuation found - this shouldn't happen in normal operation.
+    panic!("return_from_shift called without captured continuation or return point");
 }
 
 /// Invoke a captured continuation with a value.
@@ -4752,7 +4760,32 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
         // SAFETY: result_ptr points to valid stack location
         unsafe { *result_ptr = value };
 
+        // Deep handler semantics: Push a prompt handler for the empty stack segment case.
+        // This enables sequential effects (multiple performs in one handle block).
+        //
+        // For deep handlers, we want subsequent performs to also capture empty continuations.
+        // The trick is to set the prompt SP to be ABOVE where subsequent code will execute.
+        // We use original_fp + 16 (just above the FP frame) as the prompt SP.
+        // This ensures stack_size = prompt_sp - current_sp will include frames from current
+        // execution but the FP will still be at original_fp level.
+        //
+        // Actually, for empty continuations to work for subsequent performs, we need
+        // the prompt SP to match where subsequent performs will be called from.
+        // Since we can't predict that, we use the handle block's original prompt position.
+        let relocated_prompt = crate::runtime::PromptHandler {
+            handler_address: continuation.prompt.handler_address,
+            // Set SP above the FP so subsequent captures have their FP within the segment
+            stack_pointer: continuation.original_fp + 16,
+            frame_pointer: continuation.original_fp,
+            link_register: continuation.prompt.link_register,
+            result_local: continuation.prompt.result_local,
+        };
+        runtime.push_prompt_handler(relocated_prompt);
+
         // SAFETY: inline assembly for stack/register manipulation
+        // Note: For empty stack segment, we write result before the jump since the
+        // result_ptr is in Beagle stack (not Rust stack) and won't be corrupted.
+        // The assembly still has the write-after-switch capability for consistency.
         cfg_if::cfg_if! {
             if #[cfg(target_arch = "x86_64")] {
                 // On x86-64, call the generated invoke_continuation_jump function
@@ -4762,7 +4795,7 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
                     .get_function_by_name("beagle.builtin/invoke-continuation-jump")
                     .expect("invoke-continuation-jump function not found");
                 let ptr: *const u8 = jump_fn.pointer.into();
-                let jump_ptr: extern "C" fn(usize, usize, usize, usize, usize) -> ! =
+                let jump_ptr: extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> ! =
                     unsafe { std::mem::transmute(ptr) };
                 jump_ptr(
                     continuation.original_fp,
@@ -4770,6 +4803,8 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
                     0,  // stack_segment_size = 0 (empty stack segment)
                     0,  // new_sp (unused for empty)
                     0,  // new_fp (unused for empty)
+                    result_ptr as usize,  // result_ptr (assembly will write after stack switch)
+                    value,                // value to write
                 );
             } else {
                 // Use current stack_pointer instead of original_sp
@@ -4793,12 +4828,28 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
 
     // Non-empty stack segment - need to copy and relocate
 
-    // Place the stack segment below the current stack pointer
-    let new_sp = stack_pointer - stack_segment_size - 16;
+    // Get the actual current RSP - we need to place the stack segment below this,
+    // not below the Beagle SP, to avoid corrupting Rust's stack
+    let actual_rsp: usize;
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        std::arch::asm!("mov {}, rsp", out(reg) actual_rsp);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        actual_rsp = stack_pointer; // Fall back to Beagle SP for other architectures
+    }
+
+    // Place the stack segment below the actual RSP with safety margin
+    // IMPORTANT: Need a LARGE margin because Rust code (eprintln, etc.) uses the stack
+    // and the stack segment includes high addresses that could overlap with Rust's stack.
+    // The margin needs to be at least as large as the stack segment to avoid overlap.
+    let safety_margin = stack_segment_size.max(4096) + 4096; // At least segment size + 4KB extra
+    let new_sp = actual_rsp - stack_segment_size - safety_margin;
     let new_sp = new_sp & !0xF; // Align to 16 bytes
 
     // Copy the stack segment
-    // SAFETY: new_sp points to valid stack memory
+    // SAFETY: new_sp points to valid stack memory below actual RSP
     unsafe {
         std::ptr::copy_nonoverlapping(
             continuation.stack_segment.as_ptr(),
@@ -4813,14 +4864,14 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
     // Adjust the frame pointer
     let new_fp = (continuation.original_fp as isize + relocation_offset) as usize;
 
-    // Store the invoked value in the result local (relative to the new FP)
+    // Check if new_fp is within the copied stack segment
+    let stack_segment_end = new_sp + stack_segment_size;
+
+    // Calculate result_ptr for later - the assembly will write the value
     let result_ptr = (new_fp as isize).wrapping_add(continuation.result_local) as *mut usize;
-    // SAFETY: result_ptr points to valid stack location
-    unsafe { *result_ptr = value };
 
     // Relocate the entire frame pointer chain within the copied stack segment
     let mut current_fp = new_fp;
-    let stack_segment_end = new_sp + stack_segment_size;
 
     while current_fp >= new_sp && current_fp < stack_segment_end {
         let saved_fp_ptr = current_fp as *mut usize;
@@ -4839,7 +4890,20 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
         }
     }
 
+    // Deep handler semantics: Push a relocated prompt handler for the non-empty stack segment case.
+    // This enables sequential effects (multiple performs in one handle block).
+    // The prompt's SP should be above the FP so subsequent captures have their FP within the segment.
+    let relocated_prompt = crate::runtime::PromptHandler {
+        handler_address: continuation.prompt.handler_address,
+        stack_pointer: new_fp + 16,
+        frame_pointer: new_fp,
+        link_register: continuation.prompt.link_register,
+        result_local: continuation.prompt.result_local,
+    };
+    runtime.push_prompt_handler(relocated_prompt);
+
     // SAFETY: inline assembly for stack/register manipulation
+    // The assembly writes the result value AFTER switching stacks to avoid Rust stack corruption
     cfg_if::cfg_if! {
         if #[cfg(target_arch = "x86_64")] {
             // On x86-64, call the generated invoke_continuation_jump function
@@ -4848,7 +4912,7 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
                 .get_function_by_name("beagle.builtin/invoke-continuation-jump")
                 .expect("invoke-continuation-jump function not found");
             let ptr: *const u8 = jump_fn.pointer.into();
-            let jump_ptr: extern "C" fn(usize, usize, usize, usize, usize) -> ! =
+            let jump_ptr: extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> ! =
                 unsafe { std::mem::transmute(ptr) };
             jump_ptr(
                 continuation.original_fp,
@@ -4856,8 +4920,12 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
                 stack_segment_size,  // Non-zero, so will use non-empty path
                 new_sp,
                 new_fp,
+                result_ptr as usize,  // Where to write the result
+                value,                // The result value to write
             );
         } else {
+            // ARM64: Write result before switching stacks (TODO: move to assembly)
+            unsafe { *result_ptr = value };
             unsafe {
                 asm!(
                     "mov sp, {0}",

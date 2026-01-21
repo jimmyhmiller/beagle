@@ -3480,6 +3480,15 @@ impl AstCompiler<'_> {
                 // 6. Return result
 
                 // Construct the protocol key string with fully qualified type args
+                // The protocol name itself (e.g., "Handler") should not include namespace prefix
+                // Only the type args need to be fully qualified
+                let protocol_base_name = if protocol.contains('/') {
+                    // If protocol has a namespace prefix like "async/Handler", extract just "Handler"
+                    protocol.split('/').last().unwrap_or(&protocol).to_string()
+                } else {
+                    protocol.clone()
+                };
+
                 let qualified_type_args: Vec<String> = protocol_type_args
                     .iter()
                     .map(|arg| {
@@ -3490,9 +3499,9 @@ impl AstCompiler<'_> {
                     })
                     .collect();
                 let protocol_key = if qualified_type_args.is_empty() {
-                    protocol.clone()
+                    protocol_base_name.clone()
                 } else {
-                    format!("{}<{}>", protocol, qualified_type_args.join(","))
+                    format!("{}<{}>", protocol_base_name, qualified_type_args.join(","))
                 };
 
                 // Evaluate handler instance
@@ -3556,7 +3565,7 @@ impl AstCompiler<'_> {
                 self.ir.pop_prompt_handler(result_reg.into(), pop_prompt_fn_ptr);
 
                 // Pop the effect handler
-                let key_str2 = self.string_constant(protocol_key);
+                let key_str2 = self.string_constant(protocol_key.clone());
                 let key_reg2 = self.ir.assign_new(key_str2);
                 let _ = self.call_builtin("beagle.builtin/pop-handler", vec![key_reg2.into()]);
 
@@ -3568,12 +3577,8 @@ impl AstCompiler<'_> {
                 self.ir.assign(result_reg, captured_value);
 
                 // Also pop the effect handler on this path
-                let key_str3 = self.string_constant(protocol.clone());
-                let key_str3 = if protocol_type_args.is_empty() {
-                    key_str3
-                } else {
-                    self.string_constant(format!("{}<{}>", protocol, protocol_type_args.join(",")))
-                };
+                // Use the same protocol_key we computed earlier (with normalized protocol name)
+                let key_str3 = self.string_constant(protocol_key.clone());
                 let key_reg3 = self.ir.assign_new(key_str3);
                 let _ = self.call_builtin("beagle.builtin/pop-handler", vec![key_reg3.into()]);
 

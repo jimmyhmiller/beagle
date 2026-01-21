@@ -1,0 +1,76 @@
+namespace async_blocking_test
+
+import "beagle.async" as async
+
+// Test the blocking convenience functions
+
+fn main() {
+    println("=== Async Blocking Functions Test ===")
+
+    // Test sleep
+    println("Testing blocking-sleep...")
+    let sleep-result = async/blocking-sleep(10)
+    println("Sleep result:", sleep-result)
+
+    // Test file write
+    println("Testing blocking-write-file...")
+    let write-result = async/blocking-write-file("/tmp/beagle_blocking_test.txt", "Hello from blocking async!\n")
+    println("Write result:", write-result)
+
+    // Test file exists
+    println("Testing blocking-file-exists?...")
+    let exists-result = async/blocking-file-exists?("/tmp/beagle_blocking_test.txt")
+    println("File exists:", exists-result)
+
+    // Test file read
+    println("Testing blocking-read-file...")
+    let read-result = async/blocking-read-file("/tmp/beagle_blocking_test.txt")
+    println("Read result:", read-result)
+
+    // Test file size
+    println("Testing blocking-file-size...")
+    let size-result = async/blocking-file-size("/tmp/beagle_blocking_test.txt")
+    println("File size:", size-result)
+
+    // Test append
+    println("Testing blocking-append-file...")
+    let append-result = async/blocking-append-file("/tmp/beagle_blocking_test.txt", "Second line\n")
+    println("Append result:", append-result)
+
+    // Read again
+    println("Reading after append...")
+    let read2-result = async/blocking-read-file("/tmp/beagle_blocking_test.txt")
+    println("Read after append:", read2-result)
+
+    // Test delete
+    println("Testing blocking-delete-file...")
+    let delete-result = async/blocking-delete-file("/tmp/beagle_blocking_test.txt")
+    println("Delete result:", delete-result)
+
+    // Verify deleted
+    println("Verifying deletion...")
+    let exists-after = async/blocking-file-exists?("/tmp/beagle_blocking_test.txt")
+    println("File exists after delete:", exists-after)
+
+    // Test directory operations
+    println("Testing blocking-create-dir...")
+    let mkdir-result = async/blocking-create-dir("/tmp/beagle_blocking_test_dir")
+    println("Mkdir result:", mkdir-result)
+
+    println("Testing blocking-read-dir on /tmp...")
+    let readdir-result = async/blocking-read-dir("/tmp")
+    match readdir-result {
+        async/AsyncResult.Ok { value } => {
+            println("Read dir: got", length(value), "entries")
+        },
+        async/AsyncResult.Err { code, message } => {
+            println("Read dir error:", message)
+        }
+    }
+
+    println("Testing blocking-remove-dir...")
+    let rmdir-result = async/blocking-remove-dir("/tmp/beagle_blocking_test_dir")
+    println("Rmdir result:", rmdir-result)
+
+    println("=== All tests completed successfully ===")
+}

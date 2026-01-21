@@ -1403,6 +1403,10 @@ pub struct Runtime {
     // When a continuation k is invoked via k(value), we push where to return to here.
     // When the continuation body completes, return_from_shift pops from here.
     pub invocation_return_points: HashMap<ThreadId, Vec<InvocationReturnPoint>>,
+    // Per-thread counter for how many return_from_shift calls to skip.
+    // This is incremented when continuations are fully invoked, to skip the
+    // spurious return_from_shift calls that happen when handlers return.
+    pub skip_return_from_shift: HashMap<ThreadId, usize>,
     // Per-thread uncaught exception handlers (Beagle function pointers)
     pub thread_exception_handler_fns: HashMap<ThreadId, usize>,
     // Global default uncaught exception handler (Beagle function pointer)
@@ -1531,6 +1535,7 @@ impl Runtime {
                 map.insert(std::thread::current().id(), Vec::new());
                 map
             },
+            skip_return_from_shift: HashMap::new(),
             thread_exception_handler_fns: HashMap::new(),
             default_exception_handler_fn: None,
             keyword_namespace: 0, // Will be set when first keyword is allocated

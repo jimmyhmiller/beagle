@@ -1,0 +1,658 @@
+namespace beagle.async
+
+import "beagle.io" as io
+import "beagle.ffi" as ffi
+import "beagle.builtin" as builtin
+
+// ============================================================================
+// FFI Wrappers for File System Builtins
+// ============================================================================
+// These wrap the Rust builtins for file system operations
+
+fn unlink(path) {
+    builtin/unlink(path)
+}
+
+fn access(path, mode) {
+    builtin/access(path, mode)
+}
+
+fn mkdir(path, mode) {
+    builtin/mkdir(path, mode)
+}
+
+fn rmdir(path) {
+    builtin/rmdir(path)
+}
+
+fn readdir(path) {
+    builtin/readdir(path)
+}
+
+fn file-size-raw(path) {
+    builtin/file-size(path)
+}
+
+// ============================================================================
+// Async Effect System
+// ============================================================================
+// This module provides an effect-based async system for file I/O operations.
+// The Async effect allows code to be written in a direct style while
+// supporting different execution strategies (blocking, event-loop, etc.)
+
+// ============================================================================
+// Async Effect Enum
+// ============================================================================
+// Each variant represents an async operation that can be performed.
+// Handlers intercept these operations and decide how to execute them.
+
+enum Async {
+    // File operations
+    ReadFile { path },
+    WriteFile { path, content },
+    AppendFile { path, content },
+    DeleteFile { path },
+    FileExists { path },
+
+    // Directory operations
+    ReadDir { path },
+    CreateDir { path },
+    CreateDirAll { path },
+    RemoveDir { path },
+    RemoveDirAll { path },
+
+    // File metadata
+    FileSize { path },
+
+    // Low-level file operations
+    Open { path, mode },
+    Close { file },
+    Read { file, n },
+    Write { file, content },
+    ReadLine { file },
+    Flush { file },
+
+    // Timing
+    Sleep { ms },
+
+    // Utility
+    Spawn { thunk }
+}
+
+// ============================================================================
+// Handler Protocol
+// ============================================================================
+// The Handler protocol is parameterized by the effect type.
+// Any struct implementing Handler(Async) can handle Async effects.
+
+protocol Handler(T) {
+    fn handle(self, op, resume)
+}
+
+// ============================================================================
+// Async Result Types
+// ============================================================================
+
+enum AsyncResult {
+    Ok { value },
+    Err { code, message }
+}
+
+fn async-ok(value) { AsyncResult.Ok { value: value } }
+fn async-err(code, msg) { AsyncResult.Err { code: code, message: msg } }
+
+fn async-ok?(result) {
+    match result {
+        AsyncResult.Ok { value } => true,
+        AsyncResult.Err { code, message } => false
+    }
+}
+
+fn async-unwrap(result) {
+    match result {
+        AsyncResult.Ok { value } => value,
+        AsyncResult.Err { code, message } => {
+            println("Async Error: ", message)
+            null
+        }
+    }
+}
+
+fn async-unwrap-or(result, default) {
+    match result {
+        AsyncResult.Ok { value } => value,
+        AsyncResult.Err { code, message } => default
+    }
+}
+
+// ============================================================================
+// Default Blocking Handler
+// ============================================================================
+// This handler performs I/O operations synchronously using the beagle.io module.
+// It's the default handler that gets installed when running main.
+
+struct BlockingHandler {}
+
+extend BlockingHandler with Handler(Async) {
+    fn handle(self, op, resume) {
+        let result = match op {
+            Async.ReadFile { path } => {
+                handle-read-file(path)
+            },
+            Async.WriteFile { path, content } => {
+                handle-write-file(path, content)
+            },
+            Async.AppendFile { path, content } => {
+                handle-append-file(path, content)
+            },
+            Async.DeleteFile { path } => {
+                handle-delete-file(path)
+            },
+            Async.FileExists { path } => {
+                handle-file-exists(path)
+            },
+            Async.ReadDir { path } => {
+                handle-read-dir(path)
+            },
+            Async.CreateDir { path } => {
+                handle-create-dir(path)
+            },
+            Async.CreateDirAll { path } => {
+                handle-create-dir-all(path)
+            },
+            Async.RemoveDir { path } => {
+                handle-remove-dir(path)
+            },
+            Async.RemoveDirAll { path } => {
+                handle-remove-dir-all(path)
+            },
+            Async.FileSize { path } => {
+                handle-file-size(path)
+            },
+            Async.Open { path, mode } => {
+                handle-open(path, mode)
+            },
+            Async.Close { file } => {
+                handle-close(file)
+            },
+            Async.Read { file, n } => {
+                handle-read(file, n)
+            },
+            Async.Write { file, content } => {
+                handle-write(file, content)
+            },
+            Async.ReadLine { file } => {
+                handle-read-line(file)
+            },
+            Async.Flush { file } => {
+                handle-flush(file)
+            },
+            Async.Sleep { ms } => {
+                handle-sleep(ms)
+            },
+            Async.Spawn { thunk } => {
+                handle-spawn(thunk)
+            }
+        }
+        resume(result)
+    }
+}
+
+// ============================================================================
+// Handler Implementation Functions
+// ============================================================================
+
+fn handle-read-file(path) {
+    // Use the built-in read-full-file which is faster
+    try {
+        let content = read-full-file(path)
+        async-ok(content)
+    } catch (e) {
+        async-err(-1, "Failed to read file")
+    }
+}
+
+fn handle-write-file(path, content) {
+    let file-result = io/open(path, "w")
+    match file-result {
+        io/Result.Ok { value } => {
+            let file = value
+            let write-result = io/write-string(file, content)
+            io/close(file)
+            match write-result {
+                io/Result.Ok { value } => async-ok(value),
+                io/Result.Err { code, message } => async-err(code, message)
+            }
+        },
+        io/Result.Err { code, message } => {
+            async-err(code, message)
+        }
+    }
+}
+
+fn handle-append-file(path, content) {
+    let file-result = io/open(path, "a")
+    match file-result {
+        io/Result.Ok { value } => {
+            let file = value
+            let write-result = io/write-string(file, content)
+            io/close(file)
+            match write-result {
+                io/Result.Ok { value } => async-ok(value),
+                io/Result.Err { code, message } => async-err(code, message)
+            }
+        },
+        io/Result.Err { code, message } => {
+            async-err(code, message)
+        }
+    }
+}
+
+fn handle-delete-file(path) {
+    let result = unlink(path)
+    if result == 0 {
+        async-ok(null)
+    } else {
+        async-err(result, "Failed to delete file")
+    }
+}
+
+fn handle-file-exists(path) {
+    let result = access(path, 0) // F_OK = 0
+    async-ok(result == 0)
+}
+
+fn handle-read-dir(path) {
+    let entries = readdir(path)
+    if entries == null {
+        async-err(-1, "Failed to read directory")
+    } else {
+        async-ok(entries)
+    }
+}
+
+fn handle-create-dir(path) {
+    let result = mkdir(path, 493) // 0755 in octal
+    if result == 0 {
+        async-ok(null)
+    } else {
+        async-err(result, "Failed to create directory")
+    }
+}
+
+fn handle-create-dir-all(path) {
+    // Simple implementation - try to create, if exists that's ok
+    let result = mkdir(path, 493) // 0755 in octal
+    if result == 0 || result == -17 { // EEXIST
+        async-ok(null)
+    } else {
+        async-err(result, "Failed to create directory")
+    }
+}
+
+fn handle-remove-dir(path) {
+    let result = rmdir(path)
+    if result == 0 {
+        async-ok(null)
+    } else {
+        async-err(result, "Failed to remove directory")
+    }
+}
+
+fn handle-remove-dir-all(path) {
+    // For now, just try simple rmdir - recursive delete is complex
+    let result = rmdir(path)
+    if result == 0 {
+        async-ok(null)
+    } else {
+        async-err(result, "Failed to remove directory")
+    }
+}
+
+fn handle-file-size(path) {
+    let size = file-size-raw(path)
+    if size < 0 {
+        async-err(size, "Failed to get file size")
+    } else {
+        async-ok(size)
+    }
+}
+
+fn handle-open(path, mode) {
+    let result = io/open(path, mode)
+    match result {
+        io/Result.Ok { value } => async-ok(value),
+        io/Result.Err { code, message } => async-err(code, message)
+    }
+}
+
+fn handle-close(file) {
+    let result = io/close(file)
+    match result {
+        io/Result.Ok { value } => async-ok(null),
+        io/Result.Err { code, message } => async-err(code, message)
+    }
+}
+
+fn handle-read(file, n) {
+    let result = io/read-bytes(file, n)
+    match result {
+        io/Result.Ok { value } => {
+            let s = ffi/get-string(value.buffer, 0, value.length)
+            ffi/deallocate(value.buffer)
+            async-ok(s)
+        },
+        io/Result.Err { code, message } => async-err(code, message)
+    }
+}
+
+fn handle-write(file, content) {
+    let result = io/write-string(file, content)
+    match result {
+        io/Result.Ok { value } => async-ok(value),
+        io/Result.Err { code, message } => async-err(code, message)
+    }
+}
+
+fn handle-read-line(file) {
+    let result = io/read-line(file, 4096)
+    match result {
+        io/Result.Ok { value } => async-ok(value),
+        io/Result.Err { code, message } => async-err(code, message)
+    }
+}
+
+fn handle-flush(file) {
+    let result = io/flush(file)
+    match result {
+        io/Result.Ok { value } => async-ok(null),
+        io/Result.Err { code, message } => async-err(code, message)
+    }
+}
+
+fn handle-sleep(ms) {
+    // Use the builtin sleep, not the effect-based one
+    builtin/sleep-ms(ms)
+    async-ok(null)
+}
+
+fn handle-spawn(thunk) {
+    // For blocking handler, just run the thunk synchronously
+    let result = thunk()
+    async-ok(result)
+}
+
+// ============================================================================
+// Public Async API Functions
+// ============================================================================
+// These functions perform effects. They must be called within a
+// `handle Handler(Async) with handler { ... }` block.
+
+// Read the entire contents of a file as a string
+fn read-file(path) {
+    perform Async.ReadFile { path: path }
+}
+
+// Write content to a file (creates or overwrites)
+fn write-file(path, content) {
+    perform Async.WriteFile { path: path, content: content }
+}
+
+// Append content to a file (creates if doesn't exist)
+fn append-file(path, content) {
+    perform Async.AppendFile { path: path, content: content }
+}
+
+// Delete a file
+fn delete-file(path) {
+    perform Async.DeleteFile { path: path }
+}
+
+// Check if a file exists
+fn file-exists?(path) {
+    perform Async.FileExists { path: path }
+}
+
+// List directory contents
+fn read-dir(path) {
+    perform Async.ReadDir { path: path }
+}
+
+// Create a directory
+fn create-dir(path) {
+    perform Async.CreateDir { path: path }
+}
+
+// Create a directory and all parent directories
+fn create-dir-all(path) {
+    perform Async.CreateDirAll { path: path }
+}
+
+// Remove an empty directory
+fn remove-dir(path) {
+    perform Async.RemoveDir { path: path }
+}
+
+// Remove a directory and all contents
+fn remove-dir-all(path) {
+    perform Async.RemoveDirAll { path: path }
+}
+
+// Get file size in bytes
+fn file-size(path) {
+    perform Async.FileSize { path: path }
+}
+
+// Open a file with mode ("r", "w", "a", etc.)
+fn open(path, mode) {
+    perform Async.Open { path: path, mode: mode }
+}
+
+// Close a file handle
+fn close(file) {
+    perform Async.Close { file: file }
+}
+
+// Read n bytes from a file
+fn read(file, n) {
+    perform Async.Read { file: file, n: n }
+}
+
+// Write content to a file
+fn write(file, content) {
+    perform Async.Write { file: file, content: content }
+}
+
+// Read a line from a file
+fn read-line(file) {
+    perform Async.ReadLine { file: file }
+}
+
+// Flush a file's buffers
+fn flush(file) {
+    perform Async.Flush { file: file }
+}
+
+// Sleep for a number of milliseconds
+fn sleep(ms) {
+    perform Async.Sleep { ms: ms }
+}
+
+// Spawn a computation (handler determines execution strategy)
+fn spawn(thunk) {
+    perform Async.Spawn { thunk: thunk }
+}
+
+// ============================================================================
+// Convenience Functions
+// ============================================================================
+
+// Read file and unwrap the result
+fn read-file!(path) {
+    async-unwrap(read-file(path))
+}
+
+// Write file and unwrap the result
+fn write-file!(path, content) {
+    async-unwrap(write-file(path, content))
+}
+
+// Check if operation was successful
+fn ok?(result) {
+    async-ok?(result)
+}
+
+// Unwrap result or return default
+fn unwrap-or(result, default) {
+    async-unwrap-or(result, default)
+}
+
+// Create the default async handler
+fn default-handler() {
+    BlockingHandler {}
+}
+
+// Run a block with the default blocking handler
+// NOTE: Due to current limitations, the thunk should only perform ONE async operation.
+// For multiple operations, use separate run-blocking calls or use the explicit
+// handle/with pattern with separate handle blocks for each operation.
+fn run-blocking(thunk) {
+    let handler = BlockingHandler {}
+    handle Handler(Async) with handler {
+        thunk()
+    }
+}
+
+// ============================================================================
+// Single-Operation Convenience Functions
+// ============================================================================
+// These functions wrap each async operation in its own handler block,
+// making it easy to use async operations without manual handler setup.
+
+fn blocking-read-file(path) {
+    let handler = BlockingHandler {}
+    handle Handler(Async) with handler {
+        read-file(path)
+    }
+}
+
+fn blocking-write-file(path, content) {
+    let handler = BlockingHandler {}
+    handle Handler(Async) with handler {
+        write-file(path, content)
+    }
+}
+
+fn blocking-append-file(path, content) {
+    let handler = BlockingHandler {}
+    handle Handler(Async) with handler {
+        append-file(path, content)
+    }
+}
+
+fn blocking-delete-file(path) {
+    let handler = BlockingHandler {}
+    handle Handler(Async) with handler {
+        delete-file(path)
+    }
+}
+
+fn blocking-file-exists?(path) {
+    let handler = BlockingHandler {}
+    handle Handler(Async) with handler {
+        file-exists?(path)
+    }
+}
+
+fn blocking-read-dir(path) {
+    let handler = BlockingHandler {}
+    handle Handler(Async) with handler {
+        read-dir(path)
+    }
+}
+
+fn blocking-create-dir(path) {
+    let handler = BlockingHandler {}
+    handle Handler(Async) with handler {
+        create-dir(path)
+    }
+}
+
+fn blocking-remove-dir(path) {
+    let handler = BlockingHandler {}
+    handle Handler(Async) with handler {
+        remove-dir(path)
+    }
+}
+
+fn blocking-file-size(path) {
+    let handler = BlockingHandler {}
+    handle Handler(Async) with handler {
+        file-size(path)
+    }
+}
+
+fn blocking-sleep(ms) {
+    let handler = BlockingHandler {}
+    handle Handler(Async) with handler {
+        sleep(ms)
+    }
+}
+
+// ============================================================================
+// Async Combinators
+// ============================================================================
+
+// Run multiple async operations and collect results
+fn await-all(thunks) {
+    let mut results = []
+    let mut s = seq(thunks)
+    while s != null {
+        let thunk = first(s)
+        results = push(results, thunk())
+        s = next(s)
+    }
+    results
+}
+
+// Run operations until one succeeds
+fn await-any(thunks) {
+    let mut s = seq(thunks)
+    let mut result = null
+    let mut found = false
+    while s != null && found == false {
+        let thunk = first(s)
+        let r = thunk()
+        if async-ok?(r) {
+            result = r
+            found = true
+        }
+        s = next(s)
+    }
+    result
+}
+
+// Map over results
+fn map-results(results, f) {
+    map(results, fn(r) {
+        match r {
+            AsyncResult.Ok { value } => async-ok(f(value)),
+            AsyncResult.Err { code, message } => r
+        }
+    })
+}
+
+// Filter to only successful results
+fn filter-ok(results) {
+    filter(results, fn(r) { async-ok?(r) })
+}
+
+// Extract values from successful results
+fn unwrap-all(results) {
+    map(filter-ok(results), fn(r) {
+        match r {
+            AsyncResult.Ok { value } => value,
+            AsyncResult.Err { code, message } => null
+        }
+    })
+}
