@@ -1576,6 +1576,34 @@ impl Runtime {
             .send(CompilerMessage::Reset);
         self.protocol_info.clear();
         self.dispatch_tables.clear();
+
+        // Clear continuation and exception handler state to prevent stale pointers
+        self.exception_handlers = {
+            let mut map = HashMap::new();
+            map.insert(std::thread::current().id(), Vec::new());
+            map
+        };
+        self.prompt_handlers = {
+            let mut map = HashMap::new();
+            map.insert(std::thread::current().id(), Vec::new());
+            map
+        };
+        self.captured_continuations = {
+            let mut map = HashMap::new();
+            map.insert(std::thread::current().id(), Vec::new());
+            map
+        };
+        self.invocation_return_points = {
+            let mut map = HashMap::new();
+            map.insert(std::thread::current().id(), Vec::new());
+            map
+        };
+        self.skip_return_from_shift.clear();
+        self.thread_exception_handler_fns.clear();
+        self.default_exception_handler_fn = None;
+        self.stacks_for_continuation_swapping.clear();
+        self.variant_to_enum.clear();
+        self.compiled_regexes.clear();
     }
 
     pub fn start_compiler_thread(&mut self) {
