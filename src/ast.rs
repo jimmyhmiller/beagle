@@ -1767,6 +1767,12 @@ impl AstCompiler<'_> {
                         let target_type = self.string_constant(target_type.clone());
                         let target_type = self.ir.assign_new(target_type);
                         // Mangle protocol name with type args: e.g., Handler(Async) -> Handler<Async>
+                        // Fully resolve the protocol name through the namespace system
+                        let (protocol_ns, protocol_name) = self.get_namespace_name_and_name(&protocol).unwrap_or_else(|_| {
+                            (self.compiler.current_namespace_name(), protocol.clone())
+                        });
+                        let qualified_protocol = format!("{}/{}", protocol_ns, protocol_name);
+
                         // Fully qualify the type args so they match what perform looks up
                         let qualified_type_args: Vec<String> = protocol_type_args
                             .iter()
@@ -1777,18 +1783,10 @@ impl AstCompiler<'_> {
                                 format!("{}/{}", ns, name)
                             })
                             .collect();
-                        // Strip namespace prefix from protocol name for parameterized protocols
-                        // e.g., "effect/Handler" -> "Handler" so that Handler<ns/Type> is consistent
-                        // between extend, handle, and perform
-                        let protocol_base_name = if protocol.contains('/') {
-                            protocol.split('/').last().unwrap_or(&protocol).to_string()
-                        } else {
-                            protocol.clone()
-                        };
                         let protocol_mangled = if qualified_type_args.is_empty() {
-                            protocol.clone()  // Keep original for non-parameterized protocols
+                            qualified_protocol.clone()
                         } else {
-                            format!("{}<{}>", protocol_base_name, qualified_type_args.join(","))
+                            format!("{}<{}>", qualified_protocol, qualified_type_args.join(","))
                         };
                         let protocol = self.string_constant(protocol_mangled);
                         let protocol = self.ir.assign_new(protocol);
@@ -3315,13 +3313,10 @@ impl AstCompiler<'_> {
                 // Continue path: enum type is valid
                 self.ir.write_label(enum_type_ok_label);
 
-                // Step 3: Construct protocol key "Handler<{enum_type}>"
-                // We need to allocate a string at runtime: "Handler<" + enum_type + ">"
-                // For now, we'll use a simpler approach: pass enum_type to find-handler which
-                // internally constructs the key. But find-handler takes the full key...
-                //
-                // Actually, let's construct the key at runtime using string concatenation
-                let handler_prefix = self.string_constant("Handler<".to_string());
+                // Step 3: Construct protocol key "beagle.effect/Handler<{enum_type}>"
+                // The protocol key must match what extend and handle use - fully qualified
+                // Handler is always from beagle.effect (it's the core effect handler protocol)
+                let handler_prefix = self.string_constant("beagle.effect/Handler<".to_string());
                 let handler_prefix_reg = self.ir.assign_new(handler_prefix);
                 let handler_suffix = self.string_constant(">".to_string());
                 let handler_suffix_reg = self.ir.assign_new(handler_suffix);
@@ -3487,15 +3482,12 @@ impl AstCompiler<'_> {
                 // 5. Call pop_handler(protocol_key)
                 // 6. Return result
 
-                // Construct the protocol key string with fully qualified type args
-                // The protocol name itself (e.g., "Handler") should not include namespace prefix
-                // Only the type args need to be fully qualified
-                let protocol_base_name = if protocol.contains('/') {
-                    // If protocol has a namespace prefix like "async/Handler", extract just "Handler"
-                    protocol.split('/').last().unwrap_or(&protocol).to_string()
-                } else {
-                    protocol.clone()
-                };
+                // Construct the protocol key string with fully qualified names
+                // Resolve the protocol name through the namespace system
+                let (protocol_ns, protocol_name) = self.get_namespace_name_and_name(&protocol).unwrap_or_else(|_| {
+                    (self.compiler.current_namespace_name(), protocol.clone())
+                });
+                let qualified_protocol = format!("{}/{}", protocol_ns, protocol_name);
 
                 let qualified_type_args: Vec<String> = protocol_type_args
                     .iter()
@@ -3507,9 +3499,9 @@ impl AstCompiler<'_> {
                     })
                     .collect();
                 let protocol_key = if qualified_type_args.is_empty() {
-                    protocol_base_name.clone()
+                    qualified_protocol.clone()
                 } else {
-                    format!("{}<{}>", protocol_base_name, qualified_type_args.join(","))
+                    format!("{}<{}>", qualified_protocol, qualified_type_args.join(","))
                 };
 
                 // Evaluate handler instance

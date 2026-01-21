@@ -6317,14 +6317,12 @@ pub extern "C" fn call_handler_builtin(
     // Get the enum type string (can be heap-allocated or string literal)
     let enum_type = runtime.get_string(stack_pointer, enum_type_ptr);
 
-    // Construct the protocol key: "Handler<{enum_type}>"
-    let protocol_key = format!("Handler<{}>", enum_type);
+    // Construct the protocol key: "beagle.effect/Handler<{enum_type}>"
+    // Handler is always from beagle.effect (the core effect handler protocol)
+    let protocol_key = format!("beagle.effect/Handler<{}>", enum_type);
 
-    // Get the namespace from the enum type (e.g., "myns/Async" -> "myns")
-    let (namespace, _) = enum_type.split_once('/').unwrap_or(("", &enum_type));
-
-    // The dispatch key is "{namespace}/handle"
-    let dispatch_key = format!("{}/handle", namespace);
+    // The dispatch key is "beagle.effect/handle" since Handler is in beagle.effect
+    let dispatch_key = "beagle.effect/handle".to_string();
 
     // Look up the dispatch table
     let dispatch_table_ptr = runtime.get_dispatch_table_ptr(&protocol_key, "handle");
