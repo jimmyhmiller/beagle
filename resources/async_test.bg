@@ -70,7 +70,7 @@ fn main() {
 // NOTE: Test disabled - awaiting builtin implementations
 // TODO: Re-enable once unlink, access, mkdir, rmdir, readdir, file-size, sleep-ms are implemented
 /*
-// Expected output (test disabled):
+// Test output (disabled):
 // === Async Effect Test ===
 // Testing sleep...
 // Sleep result: AsyncResult.Ok { value: null }
