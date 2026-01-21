@@ -1,18 +1,16 @@
 namespace seq_test2
 
+import "beagle.effect" as effect
+
 // Even simpler sequential effects test
 
 enum Ask {
     Get {}
 }
 
-protocol Handler(T) {
-    fn handle(self, op, resume)
-}
-
 struct SimpleHandler {}
 
-extend SimpleHandler with Handler(Ask) {
+extend SimpleHandler with effect/Handler(Ask) {
     fn handle(self, op, resume) {
         println("Handler called")
         resume(42)
@@ -24,7 +22,7 @@ fn main() {
 
     let handler = SimpleHandler {}
 
-    let result = handle Handler(Ask) with handler {
+    let result = handle effect/Handler(Ask) with handler {
         println("Before first perform")
         let r1 = perform Ask.Get {}
         println("After first, r1 =", r1)

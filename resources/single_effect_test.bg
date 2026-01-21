@@ -1,20 +1,18 @@
 namespace single_effect_test
 
+import "beagle.effect" as effect
+
 // Single effect test
 
 enum Counter {
     Inc {}
 }
 
-protocol Handler(T) {
-    fn handle(self, op, resume)
-}
-
 struct CountHandler {
     count
 }
 
-extend CountHandler with Handler(Counter) {
+extend CountHandler with effect/Handler(Counter) {
     fn handle(self, op, resume) {
         println("Handler called")
         resume(42)
@@ -26,7 +24,7 @@ fn main() {
 
     let handler = CountHandler { count: 0 }
 
-    let result = handle Handler(Counter) with handler {
+    let result = handle effect/Handler(Counter) with handler {
         println("About to perform")
         let r1 = perform Counter.Inc {}
         println("Got result:", r1)

@@ -3,6 +3,7 @@ namespace beagle.async
 import "beagle.io" as io
 import "beagle.ffi" as ffi
 import "beagle.builtin" as builtin
+import "beagle.effect" as effect
 
 // ============================================================================
 // FFI Wrappers for File System Builtins
@@ -79,15 +80,8 @@ enum Async {
     Spawn { thunk }
 }
 
-// ============================================================================
-// Handler Protocol
-// ============================================================================
-// The Handler protocol is parameterized by the effect type.
-// Any struct implementing Handler(Async) can handle Async effects.
-
-protocol Handler(T) {
-    fn handle(self, op, resume)
-}
+// Handler is imported from beagle.effect
+// Use effect/Handler(Async) in extend and handle statements
 
 // ============================================================================
 // Async Result Types
@@ -133,7 +127,7 @@ fn async-unwrap-or(result, default) {
 
 struct BlockingHandler {}
 
-extend BlockingHandler with Handler(Async) {
+extend BlockingHandler with effect/Handler(Async) {
     fn handle(self, op, resume) {
         let result = match op {
             Async.ReadFile { path } => {
@@ -386,7 +380,7 @@ fn handle-spawn(thunk) {
 // Public Async API Functions
 // ============================================================================
 // These functions perform effects. They must be called within a
-// `handle Handler(Async) with handler { ... }` block.
+// `handle effect/Handler(Async) with handler { ... }` block.
 
 // Read the entire contents of a file as a string
 fn read-file(path) {
@@ -518,7 +512,7 @@ fn default-handler() {
 // handle/with pattern with separate handle blocks for each operation.
 fn run-blocking(thunk) {
     let handler = BlockingHandler {}
-    handle Handler(Async) with handler {
+    handle effect/Handler(Async) with handler {
         thunk()
     }
 }
@@ -531,70 +525,70 @@ fn run-blocking(thunk) {
 
 fn blocking-read-file(path) {
     let handler = BlockingHandler {}
-    handle Handler(Async) with handler {
+    handle effect/Handler(Async) with handler {
         read-file(path)
     }
 }
 
 fn blocking-write-file(path, content) {
     let handler = BlockingHandler {}
-    handle Handler(Async) with handler {
+    handle effect/Handler(Async) with handler {
         write-file(path, content)
     }
 }
 
 fn blocking-append-file(path, content) {
     let handler = BlockingHandler {}
-    handle Handler(Async) with handler {
+    handle effect/Handler(Async) with handler {
         append-file(path, content)
     }
 }
 
 fn blocking-delete-file(path) {
     let handler = BlockingHandler {}
-    handle Handler(Async) with handler {
+    handle effect/Handler(Async) with handler {
         delete-file(path)
     }
 }
 
 fn blocking-file-exists?(path) {
     let handler = BlockingHandler {}
-    handle Handler(Async) with handler {
+    handle effect/Handler(Async) with handler {
         file-exists?(path)
     }
 }
 
 fn blocking-read-dir(path) {
     let handler = BlockingHandler {}
-    handle Handler(Async) with handler {
+    handle effect/Handler(Async) with handler {
         read-dir(path)
     }
 }
 
 fn blocking-create-dir(path) {
     let handler = BlockingHandler {}
-    handle Handler(Async) with handler {
+    handle effect/Handler(Async) with handler {
         create-dir(path)
     }
 }
 
 fn blocking-remove-dir(path) {
     let handler = BlockingHandler {}
-    handle Handler(Async) with handler {
+    handle effect/Handler(Async) with handler {
         remove-dir(path)
     }
 }
 
 fn blocking-file-size(path) {
     let handler = BlockingHandler {}
-    handle Handler(Async) with handler {
+    handle effect/Handler(Async) with handler {
         file-size(path)
     }
 }
 
 fn blocking-sleep(ms) {
     let handler = BlockingHandler {}
-    handle Handler(Async) with handler {
+    handle effect/Handler(Async) with handler {
         sleep(ms)
     }
 }
