@@ -1,0 +1,5 @@
+namespace simple
+
+fn main() {
+    42
+}

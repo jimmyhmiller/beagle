@@ -1,0 +1,43 @@
+namespace seq_test4
+
+// Test sequential effects with return computation
+
+enum Ask {
+    Get {}
+}
+
+protocol Handler(T) {
+    fn handle(self, op, resume)
+}
+
+struct SimpleHandler {}
+
+extend SimpleHandler with Handler(Ask) {
+    fn handle(self, op, resume) {
+        println("Handler")
+        resume(10)
+    }
+}
+
+fn main() {
+    println("Start")
+
+    let handler = SimpleHandler {}
+
+    let result = handle Handler(Ask) with handler {
+        println("First")
+        let r1 = perform Ask.Get {}
+        println("r1 =", r1)
+
+        println("Second")
+        let r2 = perform Ask.Get {}
+        println("r2 =", r2)
+
+        println("Computing r1 + r2")
+        let sum = r1 + r2
+        println("sum =", sum)
+        sum
+    }
+
+    println("Done:", result)
+}

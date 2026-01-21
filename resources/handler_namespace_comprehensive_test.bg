@@ -1,0 +1,119 @@
+namespace handler_namespace_comprehensive_test
+
+import "beagle.async" as async
+
+// Comprehensive tests for effect handlers with cross-namespace usage
+
+fn test-sleep() {
+    println("Test 1: Sleep effect")
+    let handler = async/BlockingHandler {}
+    let result = handle async/Handler(async/Async) with handler {
+        let r = async/sleep(5)
+        r
+    }
+    println("  Sleep result:", result)
+    println("  PASS")
+}
+
+fn test-file-exists() {
+    println("Test 2: File exists effect")
+    let handler = async/BlockingHandler {}
+    let result = handle async/Handler(async/Async) with handler {
+        async/file-exists?("/tmp")
+    }
+    println("  /tmp exists:", result)
+    println("  PASS")
+}
+
+fn test-file-write-read-delete() {
+    println("Test 3: File write, read, delete (separate handle blocks)")
+    let handler = async/BlockingHandler {}
+
+    // Write
+    let write-result = handle async/Handler(async/Async) with handler {
+        async/write-file("/tmp/beagle_handler_test.txt", "Hello from handler test!\n")
+    }
+    println("  Write result:", write-result)
+
+    // Read
+    let read-result = handle async/Handler(async/Async) with handler {
+        async/read-file("/tmp/beagle_handler_test.txt")
+    }
+    println("  Read result:", read-result)
+
+    // Delete
+    let delete-result = handle async/Handler(async/Async) with handler {
+        async/delete-file("/tmp/beagle_handler_test.txt")
+    }
+    println("  Delete result:", delete-result)
+
+    // Verify deleted
+    let exists-result = handle async/Handler(async/Async) with handler {
+        async/file-exists?("/tmp/beagle_handler_test.txt")
+    }
+    println("  Exists after delete:", exists-result)
+    println("  PASS")
+}
+
+fn test-directory-operations() {
+    println("Test 4: Directory operations")
+    let handler = async/BlockingHandler {}
+
+    // Create directory
+    let mkdir-result = handle async/Handler(async/Async) with handler {
+        async/create-dir("/tmp/beagle_handler_test_dir")
+    }
+    println("  Mkdir result:", mkdir-result)
+
+    // Check exists
+    let exists-result = handle async/Handler(async/Async) with handler {
+        async/file-exists?("/tmp/beagle_handler_test_dir")
+    }
+    println("  Dir exists:", exists-result)
+
+    // Remove directory
+    let rmdir-result = handle async/Handler(async/Async) with handler {
+        async/remove-dir("/tmp/beagle_handler_test_dir")
+    }
+    println("  Rmdir result:", rmdir-result)
+    println("  PASS")
+}
+
+fn test-read-dir() {
+    println("Test 5: Read directory")
+    let handler = async/BlockingHandler {}
+    let result = handle async/Handler(async/Async) with handler {
+        async/read-dir("/tmp")
+    }
+    match result {
+        async/AsyncResult.Ok { value } => {
+            println("  Read /tmp: got", length(value), "entries")
+            println("  PASS")
+        },
+        async/AsyncResult.Err { code, message } => {
+            println("  FAIL:", message)
+        }
+    }
+}
+
+fn main() {
+    println("=== Handler Namespace Comprehensive Tests ===")
+    println("")
+
+    test-sleep()
+    println("")
+
+    test-file-exists()
+    println("")
+
+    test-file-write-read-delete()
+    println("")
+
+    test-directory-operations()
+    println("")
+
+    test-read-dir()
+    println("")
+
+    println("=== All tests completed ===")
+}

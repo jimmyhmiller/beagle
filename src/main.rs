@@ -7,7 +7,7 @@
 //   - Building for x86_64 architecture (and no explicit ARM64 feature)
 cfg_if::cfg_if! {
     if #[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))] {
-        use crate::machine_code::x86_codegen::{RCX, RDX, RSI, RDI, R8, R10, RSP, X86Asm};
+        use crate::machine_code::x86_codegen::{RCX, RDX, RSI, RDI, R8, R9, R10, RSP, X86Asm};
     } else {
         use crate::machine_code::arm_codegen::{SP, X0, X1, X2, X3, X4, X10};
     }
@@ -446,8 +446,17 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
     // RDX = stack_segment_size (0 for empty)
     // RCX = new_sp (for non-empty)
     // R8 = new_fp (for non-empty)
+    // R9 = result_ptr (where to store the result value)
+    // [RSP+8] = value (the result value to store)
     {
         let mut lang = x86::LowLevelX86::new();
+
+        // Load value from stack into R11 (7th argument is at [RSP+8] after call)
+        lang.instructions.push(X86Asm::MovRM {
+            dest: R11,
+            base: RSP,
+            offset: 8, // 7th argument
+        });
 
         // Check if stack_segment_size (RDX) is 0
         lang.instructions.push(X86Asm::TestRR { a: RDX, b: RDX });
@@ -460,20 +469,33 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
         });
 
         // Non-empty stack segment path:
-        // Set RSP = new_sp (RCX), RBP = new_fp (R8), jump to resume_address (RSI)
+        // Set RSP = new_sp (RCX), RBP = new_fp (R8)
         lang.instructions.push(X86Asm::MovRR { dest: RSP, src: RCX });
         lang.instructions.push(X86Asm::MovRR { dest: RBP, src: R8 });
+        // Write result value: [R9] = R11
+        lang.instructions.push(X86Asm::MovMR {
+            base: R9,
+            offset: 0,
+            src: R11,
+        });
+        // Jump to resume_address (RSI)
         lang.instructions.push(X86Asm::JmpR { target: RSI });
 
         // Empty stack segment path:
         lang.instructions.push(X86Asm::Label { index: empty_label });
         // Calculate safe_sp = (RSP - 16) & ~0xF
-        lang.instructions.push(X86Asm::MovRR { dest: R11, src: RSP });
-        lang.instructions.push(X86Asm::SubRI { dest: R11, imm: 16 });
-        lang.instructions.push(X86Asm::AndRI { dest: R11, imm: -16 }); // AND with ~0xF = -16 in two's complement
-        lang.instructions.push(X86Asm::MovRR { dest: RSP, src: R11 });
+        lang.instructions.push(X86Asm::MovRR { dest: R10, src: RSP });
+        lang.instructions.push(X86Asm::SubRI { dest: R10, imm: 16 });
+        lang.instructions.push(X86Asm::AndRI { dest: R10, imm: -16 }); // AND with ~0xF = -16 in two's complement
+        lang.instructions.push(X86Asm::MovRR { dest: RSP, src: R10 });
         // Set RBP = original_fp (RDI)
         lang.instructions.push(X86Asm::MovRR { dest: RBP, src: RDI });
+        // Write result value: [R9] = R11
+        lang.instructions.push(X86Asm::MovMR {
+            base: R9,
+            offset: 0,
+            src: R11,
+        });
         // Jump to resume_address (RSI)
         lang.instructions.push(X86Asm::JmpR { target: RSI });
 
@@ -482,7 +504,7 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
             "beagle.builtin/invoke-continuation-jump".to_string(),
             &code,
             0,
-            5, // 5 arguments
+            7, // 7 arguments
         ).unwrap();
     }
 }

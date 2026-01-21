@@ -1,0 +1,43 @@
+namespace sequential_test
+
+// Minimal test for sequential effects
+
+enum Counter {
+    Inc {}
+}
+
+protocol Handler(T) {
+    fn handle(self, op, resume)
+}
+
+struct CountHandler {
+    count
+}
+
+extend CountHandler with Handler(Counter) {
+    fn handle(self, op, resume) {
+        println("Handler called, count:", self.count)
+        let new_count = self.count + 1
+        resume(new_count)
+    }
+}
+
+fn main() {
+    println("Starting test")
+
+    let handler = CountHandler { count: 0 }
+
+    let result = handle Handler(Counter) with handler {
+        println("About to perform first")
+        let r1 = perform Counter.Inc {}
+        println("First result:", r1)
+
+        println("About to perform second")
+        let r2 = perform Counter.Inc {}
+        println("Second result:", r2)
+
+        r1 + r2
+    }
+
+    println("Final result:", result)
+}

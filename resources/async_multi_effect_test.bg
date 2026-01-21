@@ -1,0 +1,30 @@
+namespace async_multi_effect_test
+
+import "beagle.async" as async
+
+// Test multiple sequential effects
+
+fn main() {
+    println("=== Multiple Effect Test ===")
+
+    let handler = async/BlockingHandler {}
+
+    let result = handle async/Handler(async/Async) with handler {
+        println("First sleep...")
+        let r1 = async/sleep(10)
+        println("First sleep done:", r1)
+
+        println("Second sleep...")
+        let r2 = async/sleep(10)
+        println("Second sleep done:", r2)
+
+        println("Third sleep...")
+        let r3 = async/sleep(10)
+        println("Third sleep done:", r3)
+
+        println("=== All done ===")
+        42
+    }
+
+    println("Result:", result)
+}

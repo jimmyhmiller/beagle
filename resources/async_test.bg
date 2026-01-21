@@ -1,0 +1,90 @@
+namespace async_test
+
+import "beagle.async" as async
+
+// Test basic async file operations with effect handlers
+
+fn main() {
+    println("=== Async Effect Test ===")
+
+    // Create the handler ourselves to have more control
+    let handler = async/BlockingHandler {}
+
+    let result = handle async/Handler(async/Async) with handler {
+        // Test sleep
+        println("Testing sleep...")
+        let sleep-result = async/sleep(10)
+        println("Sleep result:", sleep-result)
+
+        // Test file write
+        println("Testing file write...")
+        let write-result = async/write-file("/tmp/beagle_async_test.txt", "Hello from async!\n")
+        println("Write result:", write-result)
+
+        // Test file exists
+        println("Testing file exists...")
+        let exists-result = async/file-exists?("/tmp/beagle_async_test.txt")
+        println("File exists result:", exists-result)
+
+        // Test file read
+        println("Testing file read...")
+        let read-result = async/read-file("/tmp/beagle_async_test.txt")
+        println("Read result:", read-result)
+
+        // Test file size
+        println("Testing file size...")
+        let size-result = async/file-size("/tmp/beagle_async_test.txt")
+        println("File size result:", size-result)
+
+        // Test append
+        println("Testing append...")
+        let append-result = async/append-file("/tmp/beagle_async_test.txt", "Appended line\n")
+        println("Append result:", append-result)
+
+        // Read again
+        println("Reading after append...")
+        let read2-result = async/read-file("/tmp/beagle_async_test.txt")
+        println("Read after append:", read2-result)
+
+        // Test delete
+        println("Testing delete...")
+        let delete-result = async/delete-file("/tmp/beagle_async_test.txt")
+        println("Delete result:", delete-result)
+
+        // Test file exists after delete
+        println("Testing file exists after delete...")
+        let exists-after-result = async/file-exists?("/tmp/beagle_async_test.txt")
+        println("File exists after delete:", exists-after-result)
+
+        println("=== All tests completed ===")
+        42
+    }
+
+    println("Handler block returned:", result)
+}
+
+// Expect
+// === Async Effect Test ===
+// Testing sleep...
+// Sleep result: AsyncResult.Ok { value: null }
+// Testing file write...
+// Write result: AsyncResult.Ok { value: 18 }
+// Testing file exists...
+// File exists result: AsyncResult.Ok { value: true }
+// Testing file read...
+// Read result: AsyncResult.Ok { value: "Hello from async!
+// " }
+// Testing file size...
+// File size result: AsyncResult.Ok { value: 18 }
+// Testing append...
+// Append result: AsyncResult.Ok { value: 14 }
+// Reading after append...
+// Read after append: AsyncResult.Ok { value: "Hello from async!
+// Appended line
+// " }
+// Testing delete...
+// Delete result: AsyncResult.Ok { value: null }
+// Testing file exists after delete...
+// File exists after delete: AsyncResult.Ok { value: false }
+// === All tests completed ===
+// Handler block returned: 42
