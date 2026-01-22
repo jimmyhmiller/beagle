@@ -482,14 +482,12 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
         lang.instructions.push(X86Asm::JmpR { target: RSI });
 
         // Empty stack segment path:
+        // For empty segments, restore the original stack/frame pointers from when
+        // the continuation was captured. RCX contains original_sp, R8 contains original_fp.
         lang.instructions.push(X86Asm::Label { index: empty_label });
-        // Calculate safe_sp = (RSP - 16) & ~0xF
-        lang.instructions.push(X86Asm::MovRR { dest: R10, src: RSP });
-        lang.instructions.push(X86Asm::SubRI { dest: R10, imm: 16 });
-        lang.instructions.push(X86Asm::AndRI { dest: R10, imm: -16 }); // AND with ~0xF = -16 in two's complement
-        lang.instructions.push(X86Asm::MovRR { dest: RSP, src: R10 });
-        // Set RBP = original_fp (RDI)
-        lang.instructions.push(X86Asm::MovRR { dest: RBP, src: RDI });
+        // Set RSP = original_sp (RCX), RBP = original_fp (R8)
+        lang.instructions.push(X86Asm::MovRR { dest: RSP, src: RCX });
+        lang.instructions.push(X86Asm::MovRR { dest: RBP, src: R8 });
         // Write result value: [R9] = R11
         lang.instructions.push(X86Asm::MovMR {
             base: R9,
@@ -975,6 +973,13 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         } else {
             panic!("main() must take 0 or 1 arguments, got {}", arity);
         };
+
+        // Force cleanup of all continuation state before main returns
+        // This prevents crashes during Runtime drop
+        runtime.captured_continuations.clear();
+        runtime.invocation_return_points.clear();
+        runtime.prompt_handlers.clear();
+        runtime.return_from_shift_via_pop_prompt.clear();
 
         // Unregister main thread after Beagle code completes.
         // We're still registered but we're in Rust code now, not Beagle code.

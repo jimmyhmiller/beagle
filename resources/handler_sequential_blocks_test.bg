@@ -1,0 +1,75 @@
+namespace handler_sequential_blocks_test
+
+import "beagle.effect" as effect
+
+// Test multiple sequential handler blocks in main
+// This test exposes a bug: sequential handle blocks cause infinite loops
+
+enum EffectA {
+    DoA {}
+}
+
+enum EffectB {
+    DoB {}
+}
+
+struct HandlerA {}
+
+extend HandlerA with effect/Handler(EffectA) {
+    fn handle(self, op, resume) {
+        match op {
+            EffectA.DoA {} => {
+                println("HandlerA handling DoA")
+                resume(1)
+            }
+        }
+    }
+}
+
+struct HandlerB {}
+
+extend HandlerB with effect/Handler(EffectB) {
+    fn handle(self, op, resume) {
+        match op {
+            EffectB.DoB {} => {
+                println("HandlerB handling DoB")
+                resume(2)
+            }
+        }
+    }
+}
+
+fn main() {
+    println("=== Sequential Handler Blocks Test ===")
+
+    // BUG: Having two separate handle blocks causes an infinite loop
+    // The second handle block loops forever
+
+    let handler_a = HandlerA {}
+    let result_a = handle effect/Handler(EffectA) with handler_a {
+        let x = perform EffectA.DoA {}
+        println("Got from A:", x)
+        x
+    }
+    println("Result A:", result_a)
+
+    let handler_b = HandlerB {}
+    let result_b = handle effect/Handler(EffectB) with handler_b {
+        let y = perform EffectB.DoB {}
+        println("Got from B:", y)
+        y
+    }
+    println("Result B:", result_b)
+
+    println("=== Test Complete ===")
+}
+
+// Expect
+// === Sequential Handler Blocks Test ===
+// HandlerA handling DoA
+// Got from A: 1
+// Result A: 1
+// HandlerB handling DoB
+// Got from B: 2
+// Result B: 2
+// === Test Complete ===

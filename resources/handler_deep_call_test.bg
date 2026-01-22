@@ -1,0 +1,82 @@
+namespace handler_deep_call_test
+
+import "beagle.effect" as effect
+
+// Test effects through deep call stacks
+// This test exposes a bug: effects through multiple call levels crash
+
+enum Trace {
+    Log { depth, message }
+}
+
+struct TraceHandler {}
+
+extend TraceHandler with effect/Handler(Trace) {
+    fn handle(self, op, resume) {
+        match op {
+            Trace.Log { depth, message } => {
+                println("[Trace depth", depth, "]", message)
+                resume(depth)
+            }
+        }
+    }
+}
+
+fn trace(depth, msg) {
+    perform Trace.Log { depth: depth, message: msg }
+}
+
+// BUG: Effects through 3+ levels of nested calls crash
+fn level1() {
+    trace(1, "In level1")
+    let r = level2()
+    trace(1, "Back in level1")
+    r
+}
+
+fn level2() {
+    trace(2, "In level2")
+    let r = level3()
+    trace(2, "Back in level2")
+    r
+}
+
+fn level3() {
+    trace(3, "In level3")
+    let r = level4()
+    trace(3, "Back in level3")
+    r
+}
+
+fn level4() {
+    trace(4, "In level4 - deepest")
+    42
+}
+
+fn main() {
+    println("=== Deep Call Stack Test ===")
+
+    let trace_h = TraceHandler {}
+    let result = handle effect/Handler(Trace) with trace_h {
+        trace(0, "Starting")
+        let r = level1()
+        trace(0, "Finished")
+        r
+    }
+    println("Result:", result)
+    println("=== Test Complete ===")
+}
+
+// Expect
+// === Deep Call Stack Test ===
+// [Trace depth 0 ] Starting
+// [Trace depth 1 ] In level1
+// [Trace depth 2 ] In level2
+// [Trace depth 3 ] In level3
+// [Trace depth 4 ] In level4 - deepest
+// [Trace depth 3 ] Back in level3
+// [Trace depth 2 ] Back in level2
+// [Trace depth 1 ] Back in level1
+// [Trace depth 0 ] Finished
+// Result: 42
+// === Test Complete ===

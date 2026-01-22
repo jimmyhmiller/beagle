@@ -5,7 +5,7 @@ use std::{collections::HashMap, hash::Hash};
 use crate::{
     Data, Message,
     backend::{Backend, CodegenBackend},
-    builtins::debugger,
+    builtins::{debugger, mark_card},
     common::Label,
     compiler::{CompileError, Compiler},
     ir::{self, Condition},
@@ -2625,6 +2625,84 @@ impl AstCompiler<'_> {
                 // TODO: if not marked as mut error
                 // I will need to make it so that this gets heap allocated
                 // if we access from a closure
+
+                // Handle property access assignment (e.g., self.count = value)
+                if let Ast::PropertyAccess {
+                    object, property, ..
+                } = name.as_ref()
+                {
+                    let object_val = self.call_compile(object.as_ref())?;
+                    let value_val = self.call_compile(value.as_ref())?;
+                    // Value must be in a register for write_field_dynamic and call_builtin
+                    let value_reg = self.ir.assign_new(value_val);
+
+                    let object_reg = self.ir.assign_new(object_val);
+                    let untagged_object = self.ir.untag(object_reg.into());
+                    let struct_id = self.ir.read_struct_id(untagged_object);
+                    let property_location =
+                        Value::RawValue(self.compiler.add_property_lookup().unwrap());
+                    let property_location = self.ir.assign_new(property_location);
+                    let property_value = self.ir.load_from_heap(property_location.into(), 0);
+                    let result = self.ir.assign_new(0);
+
+                    let exit_property_access = self.ir.label("exit_property_access");
+                    let slow_property_path = self.ir.label("slow_property_path");
+
+                    // Check if cached struct_id matches
+                    self.ir.jump_if(
+                        slow_property_path,
+                        Condition::NotEqual,
+                        struct_id,
+                        property_value,
+                    );
+
+                    // Check if field is mutable (cache[2] == 1)
+                    let is_mutable = self.ir.load_from_heap(property_location.into(), 2);
+                    let one = self.ir.assign_new(Value::RawValue(1));
+                    self.ir
+                        .jump_if(slow_property_path, Condition::NotEqual, is_mutable, one);
+
+                    let property_offset = self.ir.load_from_heap(property_location.into(), 1);
+                    self.ir.write_field_dynamic(
+                        untagged_object,
+                        property_offset,
+                        Value::Register(value_reg),
+                    );
+
+                    // Card marking for generational GC write barrier
+                    let mark_card_fn =
+                        Value::RawValue((mark_card as usize) << BuiltInTypes::tag_size());
+                    self.ir.call_builtin(mark_card_fn, vec![untagged_object]);
+
+                    self.ir.jump(exit_property_access);
+
+                    self.ir.write_label(slow_property_path);
+                    let property_name = if let Ast::Identifier(name, _) = property.as_ref() {
+                        name.clone()
+                    } else {
+                        return Err(CompileError::ExpectedIdentifier {
+                            got: format!("{:?}", property),
+                        });
+                    };
+                    let constant_ptr = self.string_constant(property_name);
+                    let constant_ptr = self.ir.assign_new(constant_ptr);
+                    let call_result = self.call_builtin(
+                        "beagle.builtin/write-field",
+                        vec![
+                            object_reg.into(),
+                            constant_ptr.into(),
+                            property_location.into(),
+                            Value::Register(value_reg),
+                        ],
+                    )?;
+
+                    self.ir.assign(result, call_result);
+
+                    self.ir.write_label(exit_property_access);
+
+                    return Ok(Value::Null);
+                }
+
                 let name = if let Ast::Identifier(name, _) = name.as_ref() {
                     name
                 } else {
@@ -4639,7 +4717,14 @@ impl AstCompiler<'_> {
                 value,
                 token_range: _,
             } => {
-                self.update_mutable_variable_meta(name);
+                // For property access assignments (e.g., self.count = value),
+                // we don't need to track mutable variables - just recurse into the object and value
+                if let Ast::PropertyAccess { object, property, .. } = name.as_ref() {
+                    self.find_mutable_vars_that_need_boxing(object);
+                    self.find_mutable_vars_that_need_boxing(property);
+                } else {
+                    self.update_mutable_variable_meta(name);
+                }
                 self.find_mutable_vars_that_need_boxing(value);
             }
 

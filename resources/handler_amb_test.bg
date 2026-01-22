@@ -1,0 +1,50 @@
+namespace handler_amb_test
+
+import "beagle.effect" as effect
+
+// Test amb (ambiguous choice) - classic nondeterminism effect
+// Handler explores all possible paths using multishot continuations
+
+enum Amb {
+    Flip {}
+}
+
+struct ExploreAllHandler {}
+
+extend ExploreAllHandler with effect/Handler(Amb) {
+    fn handle(self, op, resume) {
+        match op {
+            Amb.Flip {} => {
+                // Try both true and false
+                let r_true = resume(true)
+                let r_false = resume(false)
+                // Collect both results
+                r_true + r_false
+            }
+        }
+    }
+}
+
+fn flip() {
+    perform Amb.Flip {}
+}
+
+fn main() {
+    println("=== Amb Effect Test ===")
+
+    let amb_h = ExploreAllHandler {}
+    let result = handle effect/Handler(Amb) with amb_h {
+        let x = flip()
+        println("Flipped:", x)
+        if x { 1 } else { 0 }
+    }
+    println("Sum of all paths:", result)
+    println("=== Test Complete ===")
+}
+
+// Expect
+// === Amb Effect Test ===
+// Flipped: true
+// Flipped: false
+// Sum of all paths: 1
+// === Test Complete ===
