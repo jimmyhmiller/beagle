@@ -1,0 +1,51 @@
+namespace sequential_handler_minimal
+
+import "beagle.effect" as effect
+
+// Minimal reproducer for sequential handler bug
+
+enum EffectA {
+    DoA {}
+}
+
+enum EffectB {
+    DoB {}
+}
+
+struct HandlerA {}
+
+extend HandlerA with effect/Handler(EffectA) {
+    fn handle(self, op, resume) {
+        match op {
+            EffectA.DoA {} => resume(1)
+        }
+    }
+}
+
+struct HandlerB {}
+
+extend HandlerB with effect/Handler(EffectB) {
+    fn handle(self, op, resume) {
+        match op {
+            EffectB.DoB {} => resume(2)
+        }
+    }
+}
+
+fn main() {
+    // First handler
+    let result_a = handle effect/Handler(EffectA) with HandlerA {} {
+        perform EffectA.DoA {}
+    }
+    println("A:", result_a)
+
+    // Second handler - this loops infinitely
+    let result_b = handle effect/Handler(EffectB) with HandlerB {} {
+        perform EffectB.DoB {}
+    }
+    println("B:", result_b)
+}
+
+// Expect
+// A: 1
+// B: 2

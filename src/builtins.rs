@@ -4414,24 +4414,26 @@ pub unsafe extern "C" fn pop_prompt_runtime(
     // Strategy: Check for return points FIRST, regardless of current_prompt_id.
     // Match on the prompt_id stored in the return point itself.
 
-    // Check for return points
-    if let Some(return_points) = runtime.invocation_return_points.get(&thread_id) {
-        if let Some(top_point) = return_points.last() {
-            // For empty segments: current_prompt_id will be None, but we still want to route
-            // through return_from_shift.
-            // For non-empty segments: current_prompt_id should match top_point.prompt_id.
-            //
-            // Check: if current_prompt_id is None OR matches, route through return_from_shift.
-            let should_route = current_prompt_id.is_none() ||
-                               current_prompt_id == Some(top_point.prompt_id);
-
-            if should_route {
-                // Set flag so return_from_shift knows to use InvocationReturnPoints
-                runtime.return_from_shift_via_pop_prompt.insert(thread_id, true);
-                unsafe { return_from_shift_runtime(stack_pointer, frame_pointer, result_value) };
-            }
-        }
-    }
+    // IMPORTANT: Do NOT route through return_from_shift when the handle block completes normally.
+    // InvocationReturnPoints are created when resume() is called, but if the handler just calls
+    // resume() once and returns (not multi-shot), these return points are stale and should just
+    // be cleaned up here, not routed through.
+    //
+    // Routing through them would cause us to return to where resume() was called in the handler,
+    // but the handler has already completed, so we'd be returning into a stale stack frame.
+    //
+    // OLD BUGGY CODE (commented out):
+    // if let Some(return_points) = runtime.invocation_return_points.get(&thread_id) {
+    //     if let Some(top_point) = return_points.last() {
+    //         let should_route = current_prompt_id.is_none() || current_prompt_id == Some(top_point.prompt_id);
+    //         if should_route {
+    //             runtime.return_from_shift_via_pop_prompt.insert(thread_id, true);
+    //             unsafe { return_from_shift_runtime(stack_pointer, frame_pointer, result_value) };
+    //         }
+    //     }
+    // }
+    //
+    // NEW FIX: Just clean up return points below, don't route through them.
 
     // Normal path - no matching invocation return point, just pop and return
     // Only pop if there's actually a prompt to pop
@@ -4439,8 +4441,10 @@ pub unsafe extern "C" fn pop_prompt_runtime(
         runtime.pop_prompt_handler();
     }
 
-    // Clear invocation return points that belong to THIS handle block (with current_prompt_id).
+    // Clear invocation return points that belong to THIS handle block.
     // This ensures subsequent sequential handlers don't see stale return points.
+    // NOTE: We do NOT clean up captured_continuations here - that's done in return_from_shift_runtime
+    // when the handler returns (from_pop_prompt=false path).
     if let Some(prompt_id) = current_prompt_id {
         if let Some(return_points) = runtime.invocation_return_points.get_mut(&thread_id) {
             // Remove all return points that were created for this prompt
@@ -4448,21 +4452,24 @@ pub unsafe extern "C" fn pop_prompt_runtime(
         }
     }
 
-    // When all prompts are done, clear ALL continuation state for this thread
-    // to prevent issues during Runtime cleanup
+    // When all prompts are done, clear continuation state for this thread.
+    // NOTE: Don't remove HashMap entries - just clear the vectors.
+    // The HashMap entries will be cleaned up by main.rs after the program finishes.
+    // Removing them here was causing crashes because generated code might still
+    // reference these structures during cleanup.
     if runtime.prompt_handler_count() == 0 {
-        if let Some(conts) = runtime.captured_continuations.get_mut(&thread_id) {
-            // Manually drop all continuations to free their Vec<u8> data
-            conts.clear();
+        {
+            let mut captured_continuations = runtime.captured_continuations.lock().unwrap();
+            if let Some(conts) = captured_continuations.get_mut(&thread_id) {
+                // Clear all continuations to free their Vec<u8> data
+                conts.clear();
+            }
+            // Don't remove the HashMap entry - main.rs will do final cleanup
         }
         if let Some(return_points) = runtime.invocation_return_points.get_mut(&thread_id) {
             return_points.clear();
         }
-        // Also remove the thread's entry from the HashMaps
-        runtime.captured_continuations.remove(&thread_id);
-        runtime.invocation_return_points.remove(&thread_id);
-        runtime.prompt_handlers.remove(&thread_id);
-        runtime.return_from_shift_via_pop_prompt.remove(&thread_id);
+        // Don't remove HashMap entries - main.rs will do final cleanup
     }
 
     BuiltInTypes::null_value() as usize
@@ -4492,15 +4499,10 @@ pub unsafe extern "C" fn capture_continuation_runtime(
     let prompt = match runtime.pop_prompt_handler() {
         Some(p) => p,
         None => {
-            // No prompt found - this is an error
-            // SAFETY: throw_runtime_error never returns
-            unsafe {
-                throw_runtime_error(
-                    stack_pointer,
-                    "ContinuationError",
-                    "shift without enclosing reset".to_string(),
-                )
-            };
+            panic!(
+                "shift/perform without enclosing reset/handle. This is a compiler bug - \
+                 shift/perform must be inside a reset/handle block."
+            );
         }
     };
 
@@ -4555,20 +4557,19 @@ pub unsafe extern "C" fn return_from_shift_runtime(
     let thread_id = std::thread::current().id();
 
     // Check if we're being called from pop_prompt (via the flag).
-    // Only use InvocationReturnPoints if pop_prompt set the flag.
-    // This prevents handler-return calls from incorrectly using return points from outer handlers.
     let from_pop_prompt = runtime
         .return_from_shift_via_pop_prompt
         .remove(&thread_id)
         .unwrap_or(false);
 
-
     // Check if there's an invocation return point (multi-shot continuation case).
     // If a continuation was invoked via k(value), we should return to where k() was called,
     // not to the original prompt handler.
-    // Only use this path if we're coming from pop_prompt.
-    if from_pop_prompt
-        && let Some(return_points) = runtime.invocation_return_points.get_mut(&thread_id)
+    //
+    // ALWAYS check for and pop return points when they exist, regardless of from_pop_prompt.
+    // The from_pop_prompt flag only tells us if we're coming from pop_prompt or not,
+    // but we should still clean up return points when resume() returns.
+    if let Some(return_points) = runtime.invocation_return_points.get_mut(&thread_id)
         && let Some(return_point) = return_points.pop()
     {
         // For deep handler semantics: pop the prompt that was pushed by invoke_continuation.
@@ -4653,15 +4654,20 @@ pub unsafe extern "C" fn return_from_shift_runtime(
     // No invocation return point - fall back to original behavior (return to prompt handler)
     // This happens when shift body doesn't invoke the continuation at all (handler didn't call resume),
     // OR when all nested handlers have returned and we need to return to the handle block.
-    let continuations = runtime.captured_continuations.get(&thread_id);
+    //
+    // Use the LAST (most recent) continuation. This fixes sequential handlers where
+    // conts.first() would return a stale continuation from a previous handler.
+    // We don't pop here because cleanup happens in pop_prompt_runtime when prompts are done.
+    let prompt_opt = {
+        let continuations = runtime.captured_continuations.lock().unwrap();
+        continuations
+            .get(&thread_id)
+            .and_then(|conts| conts.last().map(|cont| cont.prompt.clone()))
+    };
 
-    if let Some(conts) = continuations
-        && let Some(first_cont) = conts.first()
-    {
-        // Use the FIRST continuation's prompt - this contains the original handle block's
-        // handler address and stack state. For nested handlers, this ensures we return
-        // to the outermost handler's prompt.
-        let prompt = &first_cont.prompt;
+    if let Some(prompt) = prompt_opt {
+        // Use the continuation's prompt - this contains the handle block's handler address
+        // and stack state for the current handler being returned from.
         let handler_address = prompt.handler_address;
         let new_sp = prompt.stack_pointer;
         let new_fp = prompt.frame_pointer;
@@ -4737,14 +4743,10 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
     let continuation = match runtime.clone_captured_continuation(cont_index) {
         Some(c) => c,
         None => {
-            // SAFETY: throw_runtime_error never returns
-            unsafe {
-                throw_runtime_error(
-                    stack_pointer,
-                    "ContinuationError",
-                    "invalid continuation".to_string(),
-                )
-            };
+            panic!(
+                "Invalid continuation index: {}. This is a compiler bug - trying to invoke a continuation that doesn't exist.",
+                cont_index
+            );
         }
     };
 

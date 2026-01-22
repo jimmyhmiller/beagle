@@ -9,7 +9,7 @@ use crate::types::{BuiltInTypes, Header, HeapObject, Word};
 
 use super::{
     AllocateAction, Allocator, AllocatorOptions, StackMap, mark_and_sweep::MarkAndSweep,
-    stack_walker::StackWalker,
+    stack_walker::StackWalker, continuation_walker::ContinuationSegmentWalker,
 };
 
 /// Represents a reference to a GC root that needs updating after collection.
@@ -326,6 +326,88 @@ pub struct GenerationalGC {
     card_table: CardTable,
 }
 
+impl GenerationalGC {
+    fn update_continuation_segments(&mut self, stack_map: &StackMap) {
+        let runtime = crate::get_runtime().get_mut();
+
+        // Fast path: skip if no continuations
+        let mut captured_continuations = runtime.captured_continuations.lock().unwrap();
+        if captured_continuations.is_empty() && runtime.invocation_return_points.is_empty() {
+            return;
+        }
+
+        // Process captured continuations
+        for (_thread_id, conts) in captured_continuations.iter_mut() {
+            for cont in conts.iter_mut() {
+                if cont.stack_segment.is_empty() {
+                    continue;
+                }
+                self.update_segment_young_gen_pointers(
+                    &mut cont.stack_segment,
+                    cont.original_sp,
+                    cont.original_fp,
+                    cont.prompt.stack_pointer,
+                    stack_map,
+                );
+            }
+        }
+
+        // Process InvocationReturnPoint saved frames
+        for (_thread_id, rps) in runtime.invocation_return_points.iter_mut() {
+            for rp in rps.iter_mut() {
+                if rp.saved_stack_frame.is_empty() {
+                    continue;
+                }
+                self.update_segment_young_gen_pointers(
+                    &mut rp.saved_stack_frame,
+                    rp.stack_pointer,
+                    rp.frame_pointer,
+                    rp.frame_pointer,
+                    stack_map,
+                );
+            }
+        }
+    }
+
+    fn update_segment_young_gen_pointers(
+        &mut self,
+        segment: &mut Vec<u8>,
+        original_sp: usize,
+        original_fp: usize,
+        prompt_sp: usize,
+        stack_map: &StackMap,
+    ) {
+        ContinuationSegmentWalker::update_segment_pointers(
+            segment,
+            original_sp,
+            original_fp,
+            prompt_sp,
+            stack_map,
+            |old_value| {
+                if !BuiltInTypes::is_heap_pointer(old_value) {
+                    return old_value;
+                }
+
+                let heap_object = HeapObject::from_tagged(old_value);
+                if !self.young.contains(heap_object.get_pointer()) {
+                    return old_value; // Not in young gen
+                }
+
+                // Get forwarding pointer
+                let untagged = heap_object.untagged();
+                let pointer = untagged as *mut usize;
+                let header_data = unsafe { *pointer };
+
+                if Header::is_forwarding_bit_set(header_data) {
+                    Header::clear_forwarding_bit(header_data)
+                } else {
+                    old_value // Not forwarded (shouldn't happen)
+                }
+            },
+        );
+    }
+}
+
 impl Allocator for GenerationalGC {
     fn new(options: AllocatorOptions) -> Self {
         let young = Space::new(DEFAULT_PAGE_COUNT * 10);
@@ -616,6 +698,9 @@ impl GenerationalGC {
 
         let (stack_roots, stack_old_gen) = self.gather_stack_root_refs(stack_map, stack_pointers);
         self.process_all_roots(stack_roots);
+
+        // Update continuation segments
+        self.update_continuation_segments(stack_map);
 
         // Process old gen objects found on stack - update their young gen references.
         // This scans one level deep for old gen objects directly referenced from stack.

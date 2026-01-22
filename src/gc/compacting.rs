@@ -6,7 +6,11 @@ use super::get_page_size;
 
 use crate::types::{BuiltInTypes, Header, HeapObject, Word};
 
-use super::{AllocateAction, Allocator, AllocatorOptions, StackMap, stack_walker::StackWalker};
+use super::{
+    AllocateAction, Allocator, AllocatorOptions, StackMap,
+    continuation_walker::ContinuationSegmentWalker,
+    stack_walker::StackWalker,
+};
 
 const DEFAULT_PAGE_COUNT: usize = 1024;
 // Aribtary number that should be changed when I have
@@ -278,6 +282,87 @@ impl CompactingHeap {
             }
         }
     }
+
+    fn gc_continuations(&mut self, stack_map: &StackMap) {
+        let runtime = crate::get_runtime().get_mut();
+
+        // Fast path: skip if no continuations
+        let mut captured_continuations = runtime.captured_continuations.lock().unwrap();
+        if captured_continuations.is_empty() && runtime.invocation_return_points.is_empty() {
+            return;
+        }
+
+        // Process captured continuations
+        for (_thread_id, conts) in captured_continuations.iter_mut() {
+            for cont in conts.iter_mut() {
+                if cont.stack_segment.is_empty() {
+                    continue;
+                }
+                self.gc_continuation_segment(
+                    &mut cont.stack_segment,
+                    cont.original_sp,
+                    cont.original_fp,
+                    cont.prompt.stack_pointer,
+                    stack_map,
+                );
+            }
+        }
+
+        // Process InvocationReturnPoint saved frames
+        for (_thread_id, rps) in runtime.invocation_return_points.iter_mut() {
+            for rp in rps.iter_mut() {
+                if rp.saved_stack_frame.is_empty() {
+                    continue;
+                }
+                self.gc_continuation_segment(
+                    &mut rp.saved_stack_frame,
+                    rp.stack_pointer,
+                    rp.frame_pointer,
+                    rp.frame_pointer,
+                    stack_map,
+                );
+            }
+        }
+    }
+
+    fn gc_continuation_segment(
+        &mut self,
+        segment: &mut Vec<u8>,
+        original_sp: usize,
+        original_fp: usize,
+        prompt_sp: usize,
+        stack_map: &StackMap,
+    ) {
+        // Collect heap pointers and their offsets
+        let mut roots = Vec::new();
+        ContinuationSegmentWalker::walk_segment_roots(
+            segment,
+            original_sp,
+            original_fp,
+            prompt_sp,
+            stack_map,
+            |offset, tagged_value| {
+                roots.push((offset, tagged_value));
+            },
+        );
+
+        // Copy objects to to_space using Cheney's algorithm
+        let new_values: Vec<usize> = roots
+            .iter()
+            .map(|(_offset, tagged_value)| {
+                let heap_object = HeapObject::from_tagged(*tagged_value);
+                unsafe { self.copy_using_cheneys_algorithm(heap_object) }
+            })
+            .collect();
+
+        // Update pointers in segment
+        for (i, (offset, _)) in roots.iter().enumerate() {
+            unsafe {
+                let ptr = segment.as_mut_ptr().add(*offset) as *mut usize;
+                *ptr = new_values[i];
+            }
+        }
+    }
 }
 
 impl Allocator for CompactingHeap {
@@ -341,6 +426,9 @@ impl Allocator for CompactingHeap {
                 }
             }
         }
+
+        // Process continuation segments
+        self.gc_continuations(stack_map);
 
         let start_offset = self.to_space.allocation_offset;
 
