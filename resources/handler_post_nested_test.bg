@@ -1,0 +1,78 @@
+namespace handler_post_nested_test
+
+import "beagle.effect" as effect
+
+// Test performing effects after a nested handler completes
+// This test exposes a bug: effects after nested handlers don't execute
+
+enum Outer {
+    Log { message }
+}
+
+enum Inner {
+    Compute { value }
+}
+
+struct OuterHandler {}
+
+extend OuterHandler with effect/Handler(Outer) {
+    fn handle(self, op, resume) {
+        match op {
+            Outer.Log { message } => {
+                println("[Outer]", message)
+                resume(null)
+            }
+        }
+    }
+}
+
+struct InnerHandler {}
+
+extend InnerHandler with effect/Handler(Inner) {
+    fn handle(self, op, resume) {
+        match op {
+            Inner.Compute { value } => {
+                println("[Inner] Computing:", value)
+                resume(value * 2)
+            }
+        }
+    }
+}
+
+fn main() {
+    println("=== Post-Nested Handler Test ===")
+
+    let outer_h = OuterHandler {}
+    let inner_h = InnerHandler {}
+
+    let result = handle effect/Handler(Outer) with outer_h {
+        perform Outer.Log { message: "Before nested handler" }
+
+        let inner_result = handle effect/Handler(Inner) with inner_h {
+            perform Outer.Log { message: "Inside inner, before compute" }
+            let x = perform Inner.Compute { value: 21 }
+            perform Outer.Log { message: "Inside inner, after compute" }
+            x
+        }
+
+        // BUG: This effect doesn't execute - the handler block ends early
+        perform Outer.Log { message: "After nested handler" }
+
+        println("Inner result was:", inner_result)
+        inner_result
+    }
+
+    println("Final result:", result)
+    println("=== Test Complete ===")
+}
+
+// Expect
+// === Post-Nested Handler Test ===
+// [Outer] Before nested handler
+// [Outer] Inside inner, before compute
+// [Inner] Computing: 21
+// [Outer] Inside inner, after compute
+// [Outer] After nested handler
+// Inner result was: 42
+// Final result: 42
+// === Test Complete ===

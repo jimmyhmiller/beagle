@@ -1,0 +1,64 @@
+namespace handler_stateful_test
+
+import "beagle.effect" as effect
+
+// Test stateful handlers with field mutation
+// This test exposes a bug: self.field = value in handler causes compiler panic
+
+enum Counter {
+    Inc {},
+    Get {}
+}
+
+struct CounterHandler {
+    mut count
+}
+
+extend CounterHandler with effect/Handler(Counter) {
+    fn handle(self, op, resume) {
+        match op {
+            Counter.Inc {} => {
+                // BUG: This line causes compiler panic: "Expected string"
+                self.count = self.count + 1
+                resume(self.count)
+            },
+            Counter.Get {} => {
+                resume(self.count)
+            }
+        }
+    }
+}
+
+fn main() {
+    println("=== Stateful Handler Test ===")
+
+    let counter_h = CounterHandler { count: 0 }
+
+    let result = handle effect/Handler(Counter) with counter_h {
+        let c1 = perform Counter.Inc {}
+        println("After first inc:", c1)
+
+        let c2 = perform Counter.Inc {}
+        println("After second inc:", c2)
+
+        let c3 = perform Counter.Inc {}
+        println("After third inc:", c3)
+
+        let final_count = perform Counter.Get {}
+        println("Final count:", final_count)
+
+        final_count
+    }
+
+    println("Result:", result)
+    println("=== Test Complete ===")
+}
+
+// Expect
+// === Stateful Handler Test ===
+// After first inc: 1
+// After second inc: 2
+// After third inc: 3
+// Final count: 3
+// Result: 3
+// === Test Complete ===

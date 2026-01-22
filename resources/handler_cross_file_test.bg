@@ -1,0 +1,56 @@
+namespace handler_cross_file_test
+
+import "beagle.effect" as effect
+
+// Test cross-file effect handling using the standard beagle.effect module
+// This verifies that effects can use the Handler protocol from beagle.effect
+
+// State Effect
+enum State {
+    Get {},
+    Put { value }
+}
+
+struct IntStateHandler {
+    value
+}
+
+extend IntStateHandler with effect/Handler(State) {
+    fn handle(self, op, resume) {
+        match op {
+            State.Get {} => {
+                resume(self.value)
+            },
+            State.Put { value } => {
+                let old = self.value
+                resume(old)
+            }
+        }
+    }
+}
+
+fn get-state() {
+    perform State.Get {}
+}
+
+fn main() {
+    println("=== Cross-File Effect Test ===")
+
+    let state_h = IntStateHandler { value: 100 }
+    let state_result = handle effect/Handler(State) with state_h {
+        let v1 = get-state()
+        println("Got state:", v1)
+        let v2 = get-state()
+        println("Got state again:", v2)
+        v1 + v2
+    }
+    println("State result:", state_result)
+    println("=== Test Complete ===")
+}
+
+// Expect
+// === Cross-File Effect Test ===
+// Got state: 100
+// Got state again: 100
+// State result: 200
+// === Test Complete ===

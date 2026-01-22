@@ -1,0 +1,70 @@
+namespace handler_generator_test
+
+import "beagle.effect" as effect
+
+// Test generator/yield pattern using effects
+// This test exposes a bug: effects in loops through nested functions crash
+
+enum Gen {
+    Yield { value }
+}
+
+struct CollectHandler {}
+
+extend CollectHandler with effect/Handler(Gen) {
+    fn handle(self, op, resume) {
+        match op {
+            Gen.Yield { value } => {
+                println("Yielded:", value)
+                resume(null)
+            }
+        }
+    }
+}
+
+fn yield-val(v) {
+    perform Gen.Yield { value: v }
+}
+
+// BUG: Effects in a loop through a nested function call crash
+fn range-gen(start, end) {
+    let mut i = start
+    while i < end {
+        yield-val(i)
+        i = i + 1
+    }
+}
+
+fn main() {
+    println("=== Generator Effect Test ===")
+
+    let gen_h = CollectHandler {}
+    let result = handle effect/Handler(Gen) with gen_h {
+        yield-val(1)
+        yield-val(2)
+        yield-val(3)
+
+        println("Now generating range 10-15:")
+        range-gen(10, 15)
+
+        println("Done generating")
+        100
+    }
+    println("Result:", result)
+    println("=== Test Complete ===")
+}
+
+// Expect
+// === Generator Effect Test ===
+// Yielded: 1
+// Yielded: 2
+// Yielded: 3
+// Now generating range 10-15:
+// Yielded: 10
+// Yielded: 11
+// Yielded: 12
+// Yielded: 13
+// Yielded: 14
+// Done generating
+// Result: 100
+// === Test Complete ===

@@ -1,0 +1,58 @@
+namespace handler_writer_test
+
+import "beagle.effect" as effect
+
+// Test Writer effect - logging/output accumulation
+// This test exposes a bug: performing effects through nested function calls crashes
+
+enum Writer {
+    Tell { message }
+}
+
+struct WriterHandler {}
+
+extend WriterHandler with effect/Handler(Writer) {
+    fn handle(self, op, resume) {
+        match op {
+            Writer.Tell { message } => {
+                println("[Writer]", message)
+                resume(null)
+            }
+        }
+    }
+}
+
+fn tell(msg) {
+    perform Writer.Tell { message: msg }
+}
+
+// BUG: Calling tell() from inside another function causes a crash
+fn log-operation(name) {
+    tell("Starting operation")
+    tell(name)
+    tell("Finished operation")
+}
+
+fn main() {
+    println("=== Writer Effect Test ===")
+
+    let writer_h = WriterHandler {}
+    let result = handle effect/Handler(Writer) with writer_h {
+        tell("Hello")
+        tell("World")
+        log-operation("computation")
+        42
+    }
+    println("Result:", result)
+    println("=== Test Complete ===")
+}
+
+// Expect
+// === Writer Effect Test ===
+// [Writer] Hello
+// [Writer] World
+// [Writer] Starting operation
+// [Writer] computation
+// [Writer] Finished operation
+// Result: 42
+// === Test Complete ===

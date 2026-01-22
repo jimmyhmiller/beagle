@@ -1,0 +1,59 @@
+namespace handler_reader_test
+
+import "beagle.effect" as effect
+
+// Test Reader effect - reading from an environment/config
+
+enum Reader {
+    Ask {}
+}
+
+struct ReaderHandler {
+    env
+}
+
+extend ReaderHandler with effect/Handler(Reader) {
+    fn handle(self, op, resume) {
+        match op {
+            Reader.Ask {} => {
+                resume(self.env)
+            }
+        }
+    }
+}
+
+fn ask() {
+    perform Reader.Ask {}
+}
+
+fn get-config-value() {
+    let env = ask()
+    env
+}
+
+fn main() {
+    println("=== Reader Effect Test ===")
+
+    let reader_h = ReaderHandler { env: "production" }
+    let result = handle effect/Handler(Reader) with reader_h {
+        println("Asking for environment...")
+        let env1 = ask()
+        println("Got environment:", env1)
+
+        // Call through another function
+        let env2 = get-config-value()
+        println("Got via function:", env2)
+
+        env1
+    }
+    println("Result:", result)
+    println("=== Test Complete ===")
+}
+
+// Expect
+// === Reader Effect Test ===
+// Asking for environment...
+// Got environment: production
+// Got via function: production
+// Result: production
+// === Test Complete ===

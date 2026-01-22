@@ -1310,6 +1310,8 @@ pub struct PromptHandler {
     pub link_register: usize,
     /// Local variable offset to store the result value
     pub result_local: isize,
+    /// Unique ID for this prompt (to distinguish sequential handlers at same depth)
+    pub prompt_id: usize,
 }
 
 /// Invocation return point for multi-shot continuations.
@@ -1333,6 +1335,13 @@ pub struct InvocationReturnPoint {
     /// the continuation body may write to stack locations that overlap with
     /// the shift body's frame. We save the frame from FP to SP.
     pub saved_stack_frame: Vec<u8>,
+    /// Index of the continuation that was invoked.
+    /// Used to remove the correct continuation from captured_continuations when returning.
+    pub continuation_index: usize,
+    /// Unique ID of the prompt handler that this return point belongs to.
+    /// Used to match return points with their corresponding handle blocks.
+    /// This distinguishes sequential handlers at the same stack depth.
+    pub prompt_id: usize,
 }
 
 /// Captured continuation: a snapshot of the stack between a shift point and its enclosing reset.
@@ -1407,6 +1416,12 @@ pub struct Runtime {
     // This is incremented when continuations are fully invoked, to skip the
     // spurious return_from_shift calls that happen when handlers return.
     pub skip_return_from_shift: HashMap<ThreadId, usize>,
+    // Per-thread flag indicating pop_prompt is calling return_from_shift.
+    // When set, return_from_shift should use InvocationReturnPoints.
+    // When not set (handler return case), it should use captured_continuations.
+    pub return_from_shift_via_pop_prompt: HashMap<ThreadId, bool>,
+    // Counter for generating unique prompt IDs to distinguish sequential handlers
+    pub prompt_id_counter: AtomicUsize,
     // Per-thread uncaught exception handlers (Beagle function pointers)
     pub thread_exception_handler_fns: HashMap<ThreadId, usize>,
     // Global default uncaught exception handler (Beagle function pointer)
@@ -1536,6 +1551,8 @@ impl Runtime {
                 map
             },
             skip_return_from_shift: HashMap::new(),
+            return_from_shift_via_pop_prompt: HashMap::new(),
+            prompt_id_counter: AtomicUsize::new(1),
             thread_exception_handler_fns: HashMap::new(),
             default_exception_handler_fn: None,
             keyword_namespace: 0, // Will be set when first keyword is allocated
@@ -1599,6 +1616,7 @@ impl Runtime {
             map
         };
         self.skip_return_from_shift.clear();
+        self.return_from_shift_via_pop_prompt.clear();
         self.thread_exception_handler_fns.clear();
         self.default_exception_handler_fn = None;
         self.stacks_for_continuation_swapping.clear();

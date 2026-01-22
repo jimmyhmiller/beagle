@@ -1,0 +1,60 @@
+namespace handler_choice_multishot_test
+
+import "beagle.effect" as effect
+
+// Test multishot continuations with a Choice effect
+// The handler calls resume multiple times to explore all choices
+
+enum Choice {
+    Pick { a, b }
+}
+
+struct AllChoicesHandler {}
+
+extend AllChoicesHandler with effect/Handler(Choice) {
+    fn handle(self, op, resume) {
+        match op {
+            Choice.Pick { a, b } => {
+                // Multishot: try both choices
+                println("Exploring choice a:", a)
+                let result_a = resume(a)
+                println("Result from a:", result_a)
+
+                println("Exploring choice b:", b)
+                let result_b = resume(b)
+                println("Result from b:", result_b)
+
+                // Return combined results
+                result_a + result_b
+            }
+        }
+    }
+}
+
+fn pick(a, b) {
+    perform Choice.Pick { a: a, b: b }
+}
+
+fn main() {
+    println("=== Choice Multishot Test ===")
+
+    let choice_h = AllChoicesHandler {}
+    let result = handle effect/Handler(Choice) with choice_h {
+        let x = pick(1, 2)
+        println("Picked:", x)
+        x * 10
+    }
+    println("Final result:", result)
+    println("=== Test Complete ===")
+}
+
+// Expect
+// === Choice Multishot Test ===
+// Exploring choice a: 1
+// Picked: 1
+// Result from a: 10
+// Exploring choice b: 2
+// Picked: 2
+// Result from b: 20
+// Final result: 30
+// === Test Complete ===

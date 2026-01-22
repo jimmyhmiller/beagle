@@ -1,0 +1,66 @@
+namespace handler_exception_test
+
+import "beagle.effect" as effect
+
+// Test Exception-like effects that abort computation
+// Handler can choose NOT to call resume, effectively aborting
+
+enum Exc {
+    Raise { error }
+}
+
+struct DefaultExcHandler {
+    default_value
+}
+
+extend DefaultExcHandler with effect/Handler(Exc) {
+    fn handle(self, op, resume) {
+        match op {
+            Exc.Raise { error } => {
+                println("[Exception] Caught:", error)
+                // Don't call resume - abort computation and return default
+                self.default_value
+            }
+        }
+    }
+}
+
+fn raise(err) {
+    perform Exc.Raise { error: err }
+}
+
+fn safe-divide(a, b) {
+    if b == 0 {
+        raise("Division by zero")
+    } else {
+        a / b
+    }
+}
+
+fn main() {
+    println("=== Exception Effect Test ===")
+
+    let exc_h = DefaultExcHandler { default_value: -1 }
+    let result = handle effect/Handler(Exc) with exc_h {
+        println("Trying safe division...")
+        let r1 = safe-divide(10, 2)
+        println("10 / 2 =", r1)
+
+        println("Trying division by zero...")
+        let r2 = safe-divide(10, 0)
+        // This should never execute because raise aborts
+        println("This should not print")
+        r2
+    }
+    println("Result:", result)
+    println("=== Test Complete ===")
+}
+
+// Expect
+// === Exception Effect Test ===
+// Trying safe division...
+// 10 / 2 = 5
+// Trying division by zero...
+// [Exception] Caught: Division by zero
+// Result: -1
+// === Test Complete ===

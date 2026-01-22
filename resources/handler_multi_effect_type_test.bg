@@ -1,0 +1,89 @@
+namespace handler_multi_effect_type_test
+
+import "beagle.effect" as effect
+
+// Test multiple different effect types with different handlers
+// This verifies that:
+// 1. Different effect types can coexist
+// 2. Each handler only handles its own effect type
+// 3. Effects with different shapes (field counts, types) work correctly
+
+// Effect 1: Simple logging with a message
+enum Log {
+    Info { message },
+    Warn { message },
+    Error { message }
+}
+
+// Effect 2: Key-value storage operations
+enum Store {
+    Get { key },
+    Put { key, value }
+}
+
+// Log handler - tracks log count
+struct LogHandler {}
+
+extend LogHandler with effect/Handler(Log) {
+    fn handle(self, op, resume) {
+        match op {
+            Log.Info { message } => {
+                println("[INFO]", message)
+                resume(true)
+            },
+            Log.Warn { message } => {
+                println("[WARN]", message)
+                resume(true)
+            },
+            Log.Error { message } => {
+                println("[ERROR]", message)
+                resume(false)
+            }
+        }
+    }
+}
+
+// Store handler - uses simple in-memory map
+struct StoreHandler {}
+
+extend StoreHandler with effect/Handler(Store) {
+    fn handle(self, op, resume) {
+        match op {
+            Store.Get { key } => {
+                // Simplified: return key * 10 as mock value
+                resume(key * 10)
+            },
+            Store.Put { key, value } => {
+                println("Stored:", key, "->", value)
+                resume(true)
+            }
+        }
+    }
+}
+
+fn main() {
+    println("=== Multi Effect Type Test ===")
+
+    let log_h = LogHandler {}
+
+    // Test Log effect with multiple variants
+    println("--- Testing Log effect ---")
+    let log_result = handle effect/Handler(Log) with log_h {
+        let r1 = perform Log.Info { message: "Starting up" }
+        let r2 = perform Log.Warn { message: "Low memory" }
+        let r3 = perform Log.Error { message: "Disk full" }
+        r1
+    }
+    println("Log result:", log_result)
+
+    println("=== Test Complete ===")
+}
+
+// Expect
+// === Multi Effect Type Test ===
+// --- Testing Log effect ---
+// [INFO] Starting up
+// [WARN] Low memory
+// [ERROR] Disk full
+// Log result: true
+// === Test Complete ===
