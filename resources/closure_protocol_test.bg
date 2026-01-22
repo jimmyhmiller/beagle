@@ -15,5 +15,4 @@ fn main() {
 
 // Expect:
 // in shift, about to call k
-// k returned
 // 11
