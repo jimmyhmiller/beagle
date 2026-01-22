@@ -5101,15 +5101,8 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
     // First free variable is at offset 32
     let untagged_closure = BuiltInTypes::untag(closure_ptr);
 
-    // Debug: Check closure validity
-    eprintln!("DEBUG continuation_trampoline: closure_ptr=0x{:x}, untagged=0x{:x}, value=0x{:x}",
-              closure_ptr, untagged_closure, value);
-
     // SAFETY: closure memory layout is known
     let cont_index = unsafe { *((untagged_closure + 32) as *const usize) };
-
-    eprintln!("DEBUG continuation_trampoline: cont_index=0x{:x} (untagged={})",
-              cont_index, BuiltInTypes::untag(cont_index));
 
     // Now invoke the continuation, passing the saved callee-saved registers
     // SAFETY: invoke_continuation_runtime is an unsafe function
