@@ -4741,35 +4741,37 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
     let thread_id = std::thread::current().id();
     let prompt_id = continuation.prompt.prompt_id;
 
-    // Only create InvocationReturnPoint for NON-EMPTY stack segments.
-    // Empty segments run in-place and return through normal pop_prompt.
-    // Note: This means multi-shot continuations and shift/reset dont work correctly for empty segments.
-    if stack_segment_size > 0 {
-        // We need to get the return address for where k() was called in Beagle code.
-        // The call chain is: Beagle code -> continuation_trampoline -> invoke_continuation_runtime
-        //
-        // Stack frame chain (on ARM64):
-        // - invoke_continuation_runtime's FP (rust_fp) points to continuation_trampoline's FP
-        // - continuation_trampoline's FP (trampoline_fp) points to Beagle's FP
-        // - continuation_trampoline's FP+8 has the return address to Beagle code
-        let rust_fp = get_current_rust_frame_pointer();
-        // SAFETY: rust_fp points to valid stack frame
-        let trampoline_fp = unsafe { *(rust_fp as *const usize) }; // continuation_trampoline's FP
-        let beagle_fp = unsafe { *(trampoline_fp as *const usize) }; // Beagle caller's FP
-        let beagle_return_address = unsafe { *((trampoline_fp + 8) as *const usize) }; // LR saved by trampoline
-        // Beagle's SP when it called the closure is typically at trampoline's stack entry point
-        // On ARM64, SP at function entry is FP + 16 (for the saved FP and LR)
-        let beagle_sp = trampoline_fp + 16;
+    // Create InvocationReturnPoint for ALL continuations (empty and non-empty).
+    // This enables multi-shot and allows handlers to continue after calling resume().
+    // For empty segments, we don't save the stack frame since there's nothing to relocate.
 
-        // callee_saved_regs was already captured at the start of continuation_trampoline,
-        // before any Rust code could clobber the registers
+    // We need to get the return address for where k() was called in Beagle code.
+    // The call chain is: Beagle code -> continuation_trampoline -> invoke_continuation_runtime
+    //
+    // Stack frame chain (on ARM64):
+    // - invoke_continuation_runtime's FP (rust_fp) points to continuation_trampoline's FP
+    // - continuation_trampoline's FP (trampoline_fp) points to Beagle's FP
+    // - continuation_trampoline's FP+8 has the return address to Beagle code
+    let rust_fp = get_current_rust_frame_pointer();
+    // SAFETY: rust_fp points to valid stack frame
+    let trampoline_fp = unsafe { *(rust_fp as *const usize) }; // continuation_trampoline's FP
+    let beagle_fp = unsafe { *(trampoline_fp as *const usize) }; // Beagle caller's FP
+    let beagle_return_address = unsafe { *((trampoline_fp + 8) as *const usize) }; // LR saved by trampoline
+    // Beagle's SP when it called the closure is typically at trampoline's stack entry point
+    // On ARM64, SP at function entry is FP + 16 (for the saved FP and LR)
+    let beagle_sp = trampoline_fp + 16;
 
-        // Save the shift body's stack frame for multi-shot continuations.
-        // The frame contains local variables including the continuation k.
-        // When the continuation body runs, it may write to stack locations that
-        // overlap with this frame (e.g., the result_local), so we need to
-        // save and restore the frame contents.
-        //
+    // callee_saved_regs was already captured at the start of continuation_trampoline,
+    // before any Rust code could clobber the registers
+
+    // For NON-EMPTY segments: Save the shift body's stack frame for multi-shot continuations.
+    // The frame contains local variables including the continuation k.
+    // When the continuation body runs, it may write to stack locations that
+    // overlap with this frame (e.g., the result_local), so we need to
+    // save and restore the frame contents.
+    //
+    // For EMPTY segments: Don't save the frame - there's no relocation so nothing to restore.
+    let saved_stack_frame = if stack_segment_size > 0 {
         // Stack layout (grows downward):
         //   beagle_fp (high address)
         //      |  saved FP  | <- [beagle_fp]
@@ -4791,21 +4793,25 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
                 );
             }
         }
+        saved_stack_frame
+    } else {
+        // Empty segment: no frame to save
+        Vec::new()
+    };
 
-        runtime
-            .invocation_return_points
-            .entry(thread_id)
-            .or_default()
-            .push(crate::runtime::InvocationReturnPoint {
-                stack_pointer: beagle_sp,
-                frame_pointer: beagle_fp,
-                return_address: beagle_return_address,
-                callee_saved_regs,
-                saved_stack_frame,
-                continuation_index: cont_index,
-                prompt_id,
-            });
-    }
+    runtime
+        .invocation_return_points
+        .entry(thread_id)
+        .or_default()
+        .push(crate::runtime::InvocationReturnPoint {
+            stack_pointer: beagle_sp,
+            frame_pointer: beagle_fp,
+            return_address: beagle_return_address,
+            callee_saved_regs,
+            saved_stack_frame,
+            continuation_index: cont_index,
+            prompt_id,
+        });
 
     let resume_address = continuation.resume_address;
     // Use the return trampoline as LR so that when the continuation body returns,
