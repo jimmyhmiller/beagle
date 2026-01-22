@@ -9,6 +9,7 @@ use crate::{CommandLineArguments, types::BuiltInTypes};
 pub use crate::mmap_utils::get_page_size;
 
 pub mod compacting;
+pub mod continuation_walker;
 pub mod generational;
 #[cfg(feature = "heap-dump")]
 pub mod heap_dump;

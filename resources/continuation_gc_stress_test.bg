@@ -1,33 +1,61 @@
 namespace continuation_gc_stress_test
 
-// This test exposes a potential GC bug:
-// The continuation captures stack state that includes a string pointer.
-// If GC runs between capture and invoke, the string might be moved/collected.
+import "beagle.effect" as effect
 
-fn make_garbage(n) {
-    if n <= 0 {
-        []
-    } else {
-        let arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-        push(make_garbage(n - 1), arr)
+struct Node { value, next }
+
+enum Probe {
+    Capture { heap_obj }
+}
+
+struct ProbeHandler {}
+
+extend ProbeHandler with effect/Handler(Probe) {
+    fn handle(self, op, resume) {
+        match op {
+            Probe.Capture { heap_obj } => {
+                // Force GC - allocate many objects
+                let mut i = 0
+                loop {
+                    if i >= 1000 {
+                        break(null)
+                    }
+                    let _ = Node { value: i, next: null }
+                    i = i + 1
+                }
+
+                // Resume - if heap_obj was collected, this crashes
+                resume(heap_obj)
+            }
+        }
     }
 }
 
 fn main() {
-    // Capture a continuation that has a string in scope
-    let result = reset {
-        let captured_string = "hello world"
-        let x = shift(fn(k) {
-            // Allocate lots of objects to trigger GC
-            let garbage = make_garbage(50)
-            // Now invoke k - if GC ran, captured_string might be corrupted
-            k(captured_string)
-        })
-        // x should be the captured_string we passed to k
-        x
+    println("Creating heap object in continuation...")
+
+    let handler = ProbeHandler {}
+    let result = handle effect/Handler(Probe) with handler {
+        let live_obj = Node {
+            value: 42,
+            next: Node { value: 99, next: null }
+        }
+
+        let recovered = perform Probe.Capture { heap_obj: live_obj }
+
+        println("Recovered value:", recovered.value)
+        println("Recovered next:", recovered.next.value)
+
+        recovered.value + recovered.next.value
     }
-    println(result)
+
+    println("Final result:", result)
+    println("Success!")
 }
 
 // Expect
-// hello world
+// Creating heap object in continuation...
+// Recovered value: 42
+// Recovered next: 99
+// Final result: 141
+// Success!

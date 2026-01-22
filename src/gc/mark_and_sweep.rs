@@ -6,7 +6,11 @@ use super::get_page_size;
 
 use crate::types::{Header, HeapObject, Word};
 
-use super::{AllocateAction, Allocator, AllocatorOptions, StackMap, stack_walker::StackWalker};
+use super::{
+    AllocateAction, Allocator, AllocatorOptions, StackMap,
+    continuation_walker::ContinuationSegmentWalker,
+    stack_walker::StackWalker,
+};
 
 const DEFAULT_PAGE_COUNT: usize = 1024;
 // Aribtary number that should be changed when I have
@@ -341,6 +345,9 @@ impl MarkAndSweep {
             },
         );
 
+        // Scan continuation segments for heap pointers
+        self.mark_continuation_roots(stack_map, &mut to_mark);
+
         while let Some(object) = to_mark.pop() {
             if object.marked() {
                 continue;
@@ -349,6 +356,60 @@ impl MarkAndSweep {
             object.mark();
             for child in object.get_heap_references() {
                 to_mark.push(child);
+            }
+        }
+    }
+
+    fn mark_continuation_roots(
+        &self,
+        stack_map: &StackMap,
+        to_mark: &mut Vec<HeapObject>,
+    ) {
+        let runtime = crate::get_runtime().get();
+
+        // Fast path: skip if no continuations
+        let captured_continuations = runtime.captured_continuations.lock().unwrap();
+        if captured_continuations.is_empty() {
+            return;
+        }
+
+        // Scan captured continuations
+        for (_thread_id, conts) in captured_continuations.iter() {
+            for cont in conts {
+                if cont.stack_segment.is_empty() {
+                    continue; // Fast path for empty segments
+                }
+
+                ContinuationSegmentWalker::walk_segment_roots(
+                    &cont.stack_segment,
+                    cont.original_sp,
+                    cont.original_fp,
+                    cont.prompt.stack_pointer,
+                    stack_map,
+                    |_offset, pointer| {
+                        to_mark.push(HeapObject::from_tagged(pointer));
+                    },
+                );
+            }
+        }
+
+        // Scan InvocationReturnPoint saved frames (for multi-shot continuations)
+        for (_thread_id, rps) in runtime.invocation_return_points.iter() {
+            for rp in rps {
+                if rp.saved_stack_frame.is_empty() {
+                    continue;
+                }
+
+                ContinuationSegmentWalker::walk_segment_roots(
+                    &rp.saved_stack_frame,
+                    rp.stack_pointer,
+                    rp.frame_pointer,
+                    rp.frame_pointer, // upper bound is FP
+                    stack_map,
+                    |_offset, pointer| {
+                        to_mark.push(HeapObject::from_tagged(pointer));
+                    },
+                );
             }
         }
     }

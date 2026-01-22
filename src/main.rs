@@ -1044,7 +1044,7 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
         // Force cleanup of all continuation state before main returns
         // This prevents crashes during Runtime drop
-        runtime.captured_continuations.clear();
+        runtime.captured_continuations.lock().unwrap().clear();
         runtime.invocation_return_points.clear();
         runtime.prompt_handlers.clear();
         runtime.return_from_shift_via_pop_prompt.clear();

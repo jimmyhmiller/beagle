@@ -1407,7 +1407,8 @@ pub struct Runtime {
     // Per-thread prompt handler stacks for delimited continuations
     pub prompt_handlers: HashMap<ThreadId, Vec<PromptHandler>>,
     // Per-thread captured continuations storage
-    pub captured_continuations: HashMap<ThreadId, Vec<CapturedContinuation>>,
+    // SAFETY: Protected by Mutex because accessed from both mutator threads and GC thread
+    pub captured_continuations: Mutex<HashMap<ThreadId, Vec<CapturedContinuation>>>,
     // Per-thread invocation return points for multi-shot continuations.
     // When a continuation k is invoked via k(value), we push where to return to here.
     // When the continuation body completes, return_from_shift pops from here.
@@ -1540,11 +1541,11 @@ impl Runtime {
                 map.insert(std::thread::current().id(), Vec::new());
                 map
             },
-            captured_continuations: {
+            captured_continuations: Mutex::new({
                 let mut map = HashMap::new();
                 map.insert(std::thread::current().id(), Vec::new());
                 map
-            },
+            }),
             invocation_return_points: {
                 let mut map = HashMap::new();
                 map.insert(std::thread::current().id(), Vec::new());
@@ -1605,11 +1606,11 @@ impl Runtime {
             map.insert(std::thread::current().id(), Vec::new());
             map
         };
-        self.captured_continuations = {
+        self.captured_continuations = Mutex::new({
             let mut map = HashMap::new();
             map.insert(std::thread::current().id(), Vec::new());
             map
-        };
+        });
         self.invocation_return_points = {
             let mut map = HashMap::new();
             map.insert(std::thread::current().id(), Vec::new());
@@ -2111,19 +2112,21 @@ impl Runtime {
 
     pub fn store_captured_continuation(&mut self, cont: CapturedContinuation) -> usize {
         let thread_id = std::thread::current().id();
-        let continuations = self.captured_continuations.entry(thread_id).or_default();
+        let mut captured_continuations = self.captured_continuations.lock().unwrap();
+        let continuations = captured_continuations.entry(thread_id).or_default();
         let index = continuations.len();
         continuations.push(cont);
         index
     }
 
-    pub fn get_captured_continuation(&self, index: usize) -> Option<&CapturedContinuation> {
+    pub fn get_captured_continuation(&self, index: usize) -> Option<CapturedContinuation> {
         let thread_id = std::thread::current().id();
-        self.captured_continuations.get(&thread_id)?.get(index)
+        let captured_continuations = self.captured_continuations.lock().unwrap();
+        captured_continuations.get(&thread_id)?.get(index).cloned()
     }
 
     pub fn clone_captured_continuation(&self, index: usize) -> Option<CapturedContinuation> {
-        self.get_captured_continuation(index).cloned()
+        self.get_captured_continuation(index)
     }
 
     pub fn cleanup_finished_thread_handlers(&mut self) {
@@ -2148,6 +2151,12 @@ impl Runtime {
             self.exception_handlers.remove(&thread_id);
             self.thread_exception_handler_fns.remove(&thread_id);
         }
+
+        // Clean up captured continuations for dead threads
+        self.captured_continuations
+            .lock()
+            .unwrap()
+            .retain(|id, _| active_thread_ids.contains(id));
     }
 
     pub fn create_exception(

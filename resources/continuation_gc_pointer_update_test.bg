@@ -1,0 +1,60 @@
+namespace continuation_gc_pointer_update_test
+
+import "beagle.effect" as effect
+
+struct Box { data }
+
+enum Delay {
+    Suspend { value }
+}
+
+struct DelayHandler {}
+
+extend DelayHandler with effect/Handler(Delay) {
+    fn handle(self, op, resume) {
+        match op {
+            Delay.Suspend { value } => {
+                // Allocate many objects to trigger compaction
+                let mut i = 0
+                loop {
+                    if i >= 5000 {
+                        break(null)
+                    }
+                    let _ = Box { data: i }
+                    i = i + 1
+                }
+
+                // Resume - if pointer wasn't updated, crashes
+                resume(value)
+            }
+        }
+    }
+}
+
+fn main() {
+    println("Test: Pointer update in continuation segments")
+
+    let handler = DelayHandler {}
+    let result = handle effect/Handler(Delay) with handler {
+        let obj = Box {
+            data: Box {
+                data: Box { data: 12345 }
+            }
+        }
+
+        let resumed_obj = perform Delay.Suspend { value: obj }
+
+        let final_value = resumed_obj.data.data.data
+        println("Final value:", final_value)
+        final_value
+    }
+
+    println("Result:", result)
+    println("Success!")
+}
+
+// Expect
+// Test: Pointer update in continuation segments
+// Final value: 12345
+// Result: 12345
+// Success!
