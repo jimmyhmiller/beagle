@@ -4403,27 +4403,41 @@ pub unsafe extern "C" fn pop_prompt_runtime(
 
 
     // Check if there's an invocation return point for THIS handle block.
-    // Only use return points that were created for the current prompt ID.
-    // This prevents sequential handlers from incorrectly using return points from other handlers.
-    if let Some(prompt_id) = current_prompt_id {
-        if let Some(return_points) = runtime.invocation_return_points.get(&thread_id) {
-            if let Some(top_point) = return_points.last() {
-                if top_point.prompt_id == prompt_id {
-                    // This return point belongs to the current handle block.
-                    // Don't pop the prompt handler - the continuation might be invoked again.
-                    // Instead, route through return_from_shift_runtime which will return to
-                    // where k() was called.
+    //
+    // For empty segments: the prompt was already popped by capture_continuation (perform/shift),
+    // and NOT re-pushed by invoke_continuation. So current_prompt_id will be None.
+    // But we still have an InvocationReturnPoint that we need to route through.
+    //
+    // For non-empty segments: the prompt was popped by capture_continuation, then RE-PUSHED
+    // by invoke_continuation at the relocated location. So current_prompt_id will match.
+    //
+    // Strategy: Check for return points FIRST, regardless of current_prompt_id.
+    // Match on the prompt_id stored in the return point itself.
 
-                    // Set flag so return_from_shift knows to use InvocationReturnPoints
-                    runtime.return_from_shift_via_pop_prompt.insert(thread_id, true);
-                    unsafe { return_from_shift_runtime(stack_pointer, frame_pointer, result_value) };
-                }
+    // Check for return points
+    if let Some(return_points) = runtime.invocation_return_points.get(&thread_id) {
+        if let Some(top_point) = return_points.last() {
+            // For empty segments: current_prompt_id will be None, but we still want to route
+            // through return_from_shift.
+            // For non-empty segments: current_prompt_id should match top_point.prompt_id.
+            //
+            // Check: if current_prompt_id is None OR matches, route through return_from_shift.
+            let should_route = current_prompt_id.is_none() ||
+                               current_prompt_id == Some(top_point.prompt_id);
+
+            if should_route {
+                // Set flag so return_from_shift knows to use InvocationReturnPoints
+                runtime.return_from_shift_via_pop_prompt.insert(thread_id, true);
+                unsafe { return_from_shift_runtime(stack_pointer, frame_pointer, result_value) };
             }
         }
     }
 
     // Normal path - no matching invocation return point, just pop and return
-    runtime.pop_prompt_handler();
+    // Only pop if there's actually a prompt to pop
+    if runtime.prompt_handler_count() > 0 {
+        runtime.pop_prompt_handler();
+    }
 
     // Clear invocation return points that belong to THIS handle block (with current_prompt_id).
     // This ensures subsequent sequential handlers don't see stale return points.
@@ -4557,14 +4571,19 @@ pub unsafe extern "C" fn return_from_shift_runtime(
         && let Some(return_points) = runtime.invocation_return_points.get_mut(&thread_id)
         && let Some(return_point) = return_points.pop()
     {
-        // For deep handler semantics: try to pop the prompt that was pushed by invoke.
-        // If prompt stack is empty (because a subsequent perform captured it), that's OK.
-        let _ = runtime.pop_prompt_handler();
+        // For deep handler semantics: pop the prompt that was pushed by invoke_continuation.
+        // For NON-EMPTY segments, invoke_continuation pushes a relocated prompt that must be popped.
+        // For EMPTY segments, invoke_continuation does NOT push a prompt, so don't pop.
+        let is_empty_segment = return_point.saved_stack_frame.is_empty();
+        if !is_empty_segment {
+            let _ = runtime.pop_prompt_handler();
+        }
 
         let new_sp = return_point.stack_pointer;
         let new_fp = return_point.frame_pointer;
         let return_address = return_point.return_address;
         let callee_saved = return_point.callee_saved_regs;
+
 
         // CRITICAL for multi-shot continuations: Restore the shift body's stack frame.
         // The continuation body may have written to stack locations that overlap with
@@ -4761,6 +4780,7 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
     // On ARM64, SP at function entry is FP + 16 (for the saved FP and LR)
     let beagle_sp = trampoline_fp + 16;
 
+
     // callee_saved_regs was already captured at the start of continuation_trampoline,
     // before any Rust code could clobber the registers
 
@@ -4770,17 +4790,12 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
     // overlap with this frame (e.g., the result_local), so we need to
     // save and restore the frame contents.
     //
-    // For EMPTY segments: Don't save the frame - there's no relocation so nothing to restore.
+    // For EMPTY segments: Save the HANDLER's stack frame (from beagle_sp to original_sp).
+    // When the continuation runs at original_sp/fp, it may allocate stack space that
+    // grows downward and overlaps with the handler's frame at beagle_sp/fp.
+    // We need to save and restore the handler's frame to prevent corruption.
     let saved_stack_frame = if stack_segment_size > 0 {
-        // Stack layout (grows downward):
-        //   beagle_fp (high address)
-        //      |  saved FP  | <- [beagle_fp]
-        //      |  saved LR  | <- [beagle_fp + 8]
-        //      |  local k   | <- [beagle_fp - 0x10] etc
-        //      |   ...      |
-        //   beagle_sp (low address)
-        //
-        // We save from beagle_sp up to (but not including) beagle_fp.
+        // Non-empty segment: Save the shift body's stack frame (beagle_sp to beagle_fp)
         let frame_size = beagle_fp.saturating_sub(beagle_sp);
         let mut saved_stack_frame = vec![0u8; frame_size];
         if frame_size > 0 {
@@ -4795,8 +4810,22 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
         }
         saved_stack_frame
     } else {
-        // Empty segment: no frame to save
-        Vec::new()
+        // Empty segment: Save the HANDLER's stack frame (beagle_sp to original_sp).
+        // The continuation runs at original_sp/fp and may allocate stack downward,
+        // potentially overwriting the handler's frame. Save it to prevent corruption.
+        let frame_size = continuation.original_sp.saturating_sub(beagle_sp);
+        let mut saved_stack_frame = vec![0u8; frame_size];
+        if frame_size > 0 {
+            // SAFETY: beagle_sp points to valid stack memory
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    beagle_sp as *const u8,
+                    saved_stack_frame.as_mut_ptr(),
+                    frame_size,
+                );
+            }
+        }
+        saved_stack_frame
     };
 
     runtime
@@ -4835,21 +4864,24 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
         // SAFETY: result_ptr points to valid stack location
         unsafe { *result_ptr = value };
 
-        // Deep handler semantics: Push a prompt handler for the empty stack segment case.
-        // This enables sequential effects (multiple performs in one handle block).
+        // For empty segments, DO NOT push a prompt.
+        // The original prompt (from handle/reset) is still on the stack and will be used.
+        // Pushing a duplicate prompt with the same ID causes prompt stack corruption.
+        // When the continuation completes and we return to the handler, the handler will
+        // eventually return and the original handle block will pop the original prompt.
         //
-        // For empty stack segments, there's no relocation - we use the original prompt
-        // positions since the continuation is resumed at the same stack location.
-        // IMPORTANT: Preserve the prompt_id so return points can match this prompt.
-        let relocated_prompt = crate::runtime::PromptHandler {
-            handler_address: continuation.prompt.handler_address,
-            stack_pointer: continuation.prompt.stack_pointer,
-            frame_pointer: continuation.prompt.frame_pointer,
-            link_register: continuation.prompt.link_register,
-            result_local: continuation.prompt.result_local,
-            prompt_id: continuation.prompt.prompt_id,
-        };
-        runtime.push_prompt_handler(relocated_prompt);
+        // NOTE: This means deep handler semantics (multiple performs in one handle block)
+        // may not work correctly for empty segments. That's a known limitation.
+        //
+        // let relocated_prompt = crate::runtime::PromptHandler {
+        //     handler_address: continuation.prompt.handler_address,
+        //     stack_pointer: continuation.prompt.stack_pointer,
+        //     frame_pointer: continuation.prompt.frame_pointer,
+        //     link_register: continuation.prompt.link_register,
+        //     result_local: continuation.prompt.result_local,
+        //     prompt_id: continuation.prompt.prompt_id,
+        // };
+        // runtime.push_prompt_handler(relocated_prompt);
 
         // SAFETY: inline assembly for stack/register manipulation
         // Note: For empty stack segment, we write result before the jump since the
