@@ -494,6 +494,7 @@ pub enum FFIType {
     U8,
     U32,
     I32,
+    F32,
     Pointer,
     MutablePointer,
     String,

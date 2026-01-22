@@ -30,12 +30,24 @@ fn __make_buffer_struct(ptr, size) {
     Buffer { ptr: ptr, size: size }
 }
 
+// Struct for holding raw C struct returns (up to 16 bytes)
+// low = first 8 bytes, high = second 8 bytes
+struct StructReturn {
+    low
+    high
+}
+
+fn __make_struct_return(low, high) {
+    StructReturn { low: low, high: high }
+}
+
 enum Type {
     U8,
     U16,
     U32,
     U64,
     I32,
+    F32,
     Pointer,
     MutablePointer,
     String,
