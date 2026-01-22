@@ -1,0 +1,397 @@
+namespace raylib_2d
+
+// A 2D graphics example using raylib via FFI
+// Demonstrates: window creation, input handling, drawing shapes, animation
+
+import "beagle.ffi" as ffi
+
+// ============================================================
+// Raylib Library Setup
+// ============================================================
+
+let raylib = ffi/load-library("/opt/homebrew/lib/libraylib.dylib")
+
+// Core window functions
+let rl_init_window = ffi/get-function(
+    raylib, "InitWindow",
+    [ffi/Type.I32, ffi/Type.I32, ffi/Type.String],
+    ffi/Type.Void
+)
+
+let rl_close_window = ffi/get-function(
+    raylib, "CloseWindow", [], ffi/Type.Void
+)
+
+let rl_window_should_close = ffi/get-function(
+    raylib, "WindowShouldClose", [], ffi/Type.I32
+)
+
+let rl_set_target_fps = ffi/get-function(
+    raylib, "SetTargetFPS", [ffi/Type.I32], ffi/Type.Void
+)
+
+// Drawing control
+let rl_begin_drawing = ffi/get-function(
+    raylib, "BeginDrawing", [], ffi/Type.Void
+)
+
+let rl_end_drawing = ffi/get-function(
+    raylib, "EndDrawing", [], ffi/Type.Void
+)
+
+// Note: ClearBackground takes Color by value (4 bytes = u32)
+let rl_clear_background = ffi/get-function(
+    raylib, "ClearBackground", [ffi/Type.U32], ffi/Type.Void
+)
+
+// Drawing shapes (all use Color as u32)
+let rl_draw_rectangle = ffi/get-function(
+    raylib, "DrawRectangle",
+    [ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.U32],
+    ffi/Type.Void
+)
+
+let rl_draw_rectangle_lines = ffi/get-function(
+    raylib, "DrawRectangleLines",
+    [ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.U32],
+    ffi/Type.Void
+)
+
+let rl_draw_line = ffi/get-function(
+    raylib, "DrawLine",
+    [ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.U32],
+    ffi/Type.Void
+)
+
+let rl_draw_text = ffi/get-function(
+    raylib, "DrawText",
+    [ffi/Type.String, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.U32],
+    ffi/Type.Void
+)
+
+// Input
+let rl_is_key_down = ffi/get-function(
+    raylib, "IsKeyDown", [ffi/Type.I32], ffi/Type.I32
+)
+
+let rl_is_key_pressed = ffi/get-function(
+    raylib, "IsKeyPressed", [ffi/Type.I32], ffi/Type.I32
+)
+
+let rl_get_random_value = ffi/get-function(
+    raylib, "GetRandomValue", [ffi/Type.I32, ffi/Type.I32], ffi/Type.I32
+)
+
+// ============================================================
+// Color Helper
+// ============================================================
+
+// Raylib Color struct: { r: u8, g: u8, b: u8, a: u8 }
+// On little-endian ARM64, this packs to: r | (g << 8) | (b << 16) | (a << 24)
+fn color(r, g, b, a) {
+    r + (g * 256) + (b * 65536) + (a * 16777216)
+}
+
+fn rgb(r, g, b) {
+    color(r, g, b, 255)
+}
+
+// Predefined colors (matching raylib's palette)
+let RAYWHITE = rgb(245, 245, 245)
+let BLACK = rgb(0, 0, 0)
+let WHITE = rgb(255, 255, 255)
+let RED = rgb(230, 41, 55)
+let GREEN = rgb(0, 228, 48)
+let BLUE = rgb(0, 121, 241)
+let YELLOW = rgb(253, 249, 0)
+let ORANGE = rgb(255, 161, 0)
+let PINK = rgb(255, 109, 194)
+let PURPLE = rgb(200, 122, 255)
+let DARKGRAY = rgb(80, 80, 80)
+let LIGHTGRAY = rgb(200, 200, 200)
+let SKYBLUE = rgb(102, 191, 255)
+let LIME = rgb(0, 158, 47)
+let GOLD = rgb(255, 203, 0)
+let MAROON = rgb(190, 33, 55)
+
+// Key codes
+let KEY_RIGHT = 262
+let KEY_LEFT = 263
+let KEY_DOWN = 264
+let KEY_UP = 265
+let KEY_SPACE = 32
+let KEY_R = 82
+
+// ============================================================
+// Game State
+// ============================================================
+
+struct Ball {
+    x
+    y
+    dx
+    dy
+    size
+}
+
+// ============================================================
+// Helper Functions
+// ============================================================
+
+fn init_window(width, height, title) {
+    rl_init_window(width, height, title, 0, 0, 0)
+}
+
+fn close_window() {
+    rl_close_window(0, 0, 0, 0, 0, 0)
+}
+
+fn window_should_close() {
+    rl_window_should_close(0, 0, 0, 0, 0, 0) != 0
+}
+
+fn set_target_fps(fps) {
+    rl_set_target_fps(fps, 0, 0, 0, 0, 0)
+}
+
+fn begin_drawing() {
+    rl_begin_drawing(0, 0, 0, 0, 0, 0)
+}
+
+fn end_drawing() {
+    rl_end_drawing(0, 0, 0, 0, 0, 0)
+}
+
+fn clear_background(c) {
+    rl_clear_background(c, 0, 0, 0, 0, 0)
+}
+
+fn draw_rectangle(x, y, w, h, c) {
+    rl_draw_rectangle(x, y, w, h, c, 0)
+}
+
+fn draw_rectangle_lines(x, y, w, h, c) {
+    rl_draw_rectangle_lines(x, y, w, h, c, 0)
+}
+
+fn draw_line(x1, y1, x2, y2, c) {
+    rl_draw_line(x1, y1, x2, y2, c, 0)
+}
+
+fn draw_text(text, x, y, size, c) {
+    rl_draw_text(text, x, y, size, c, 0)
+}
+
+fn is_key_down(key) {
+    rl_is_key_down(key, 0, 0, 0, 0, 0) != 0
+}
+
+fn is_key_pressed(key) {
+    rl_is_key_pressed(key, 0, 0, 0, 0, 0) != 0
+}
+
+fn random_value(min, max) {
+    rl_get_random_value(min, max, 0, 0, 0, 0)
+}
+
+// ============================================================
+// Game Logic
+// ============================================================
+
+fn create_ball(screen_width) {
+    let size = random_value(15, 35)
+    Ball {
+        x: random_value(size, screen_width - size),
+        y: 0 - size,
+        dx: random_value(-3, 3),
+        dy: random_value(3, 6),
+        size: size
+    }
+}
+
+fn update_ball(ball, screen_width, screen_height) {
+    let new_x = ball.x + ball.dx
+    let new_y = ball.y + ball.dy
+
+    // Bounce off walls
+    let new_dx = if new_x <= 0 || new_x + ball.size >= screen_width {
+        ball.dx * -1
+    } else {
+        ball.dx
+    }
+
+    Ball {
+        x: new_x,
+        y: new_y,
+        dx: new_dx,
+        dy: ball.dy,
+        size: ball.size
+    }
+}
+
+fn ball_alive(ball, screen_height) {
+    ball.y < screen_height + 50
+}
+
+fn collides_with_player(ball, player_x, player_y, player_size) {
+    let ball_right = ball.x + ball.size
+    let ball_bottom = ball.y + ball.size
+    let player_right = player_x + player_size
+    let player_bottom = player_y + player_size
+
+    // Check if ball overlaps player
+    ball_right > player_x &&
+    ball.x < player_right &&
+    ball_bottom > player_y &&
+    ball.y < player_bottom
+}
+
+fn update_player_x(player_x, player_speed, player_size, screen_width) {
+    let dx = if is_key_down(KEY_LEFT) { 0 - player_speed } else { 0 }
+    let dx2 = if is_key_down(KEY_RIGHT) { dx + player_speed } else { dx }
+
+    let new_x = player_x + dx2
+
+    // Clamp to screen
+    if new_x < 0 {
+        0
+    } else if new_x + player_size > screen_width {
+        screen_width - player_size
+    } else {
+        new_x
+    }
+}
+
+// ============================================================
+// Rendering
+// ============================================================
+
+fn draw_balls(balls) {
+    let mut i = 0
+    while i < length(balls) {
+        let ball = balls[i]
+        // Draw with color based on size
+        let c = if ball.size > 28 {
+            GOLD
+        } else if ball.size > 22 {
+            ORANGE
+        } else {
+            YELLOW
+        }
+        draw_rectangle(ball.x, ball.y, ball.size, ball.size, c)
+        draw_rectangle_lines(ball.x, ball.y, ball.size, ball.size, WHITE)
+        i = i + 1
+    }
+}
+
+fn draw_background_pattern(screen_height) {
+    let mut y = 0
+    let mut count = 0
+    while y < screen_height {
+        let x_offset = (count * 47) % 800
+        draw_line(x_offset, y, x_offset + 50, y + 20, DARKGRAY)
+        y = y + 30
+        count = count + 1
+    }
+}
+
+fn render(player_x, player_y, player_size, balls, score, screen_width, screen_height) {
+    begin_drawing()
+    clear_background(rgb(30, 30, 40))
+
+    // Draw background pattern
+    draw_background_pattern(screen_height)
+
+    // Draw player
+    draw_rectangle(player_x, player_y, player_size, player_size, SKYBLUE)
+    draw_rectangle_lines(player_x, player_y, player_size, player_size, WHITE)
+
+    // Draw balls
+    draw_balls(balls)
+
+    // Draw UI
+    draw_text("CATCH THE FALLING SQUARES!", 10, 10, 20, LIGHTGRAY)
+    draw_text("Use LEFT/RIGHT arrows to move", 10, 35, 16, DARKGRAY)
+    draw_text("ESC to quit", 10, 55, 14, DARKGRAY)
+
+    // Draw score
+    let score_text = "Score: " ++ to-string(score)
+    draw_text(score_text, screen_width - 150, 10, 24, GREEN)
+
+    // Draw ball count
+    let ball_text = "Balls: " ++ to-string(length(balls))
+    draw_text(ball_text, screen_width - 150, 40, 16, YELLOW)
+
+    end_drawing()
+}
+
+// ============================================================
+// Main Loop
+// ============================================================
+
+fn game_loop(player_x, player_y, player_size, player_speed, balls, score, frame, screen_width, screen_height) {
+    if window_should_close() {
+        score
+    } else {
+        // Update player
+        let new_player_x = update_player_x(player_x, player_speed, player_size, screen_width)
+
+        // Update balls and collect score
+        let mut new_balls = []
+        let mut new_score = score
+        let mut i = 0
+        while i < length(balls) {
+            let ball = balls[i]
+            let updated = update_ball(ball, screen_width, screen_height)
+
+            if collides_with_player(updated, new_player_x, player_y, player_size) {
+                // Ball caught! Add to score
+                new_score = new_score + updated.size
+            } else if ball_alive(updated, screen_height) {
+                // Ball still alive, keep it
+                new_balls = push(new_balls, updated)
+            }
+            // else: ball fell off screen, don't keep it
+
+            i = i + 1
+        }
+
+        // Spawn new balls occasionally
+        let spawn = frame % 25 == 0
+        let final_balls = if spawn {
+            push(new_balls, create_ball(screen_width))
+        } else {
+            new_balls
+        }
+
+        // Render
+        render(new_player_x, player_y, player_size, final_balls, new_score, screen_width, screen_height)
+
+        // Continue loop
+        game_loop(new_player_x, player_y, player_size, player_speed, final_balls, new_score, frame + 1, screen_width, screen_height)
+    }
+}
+
+fn main() {
+    let screen_width = 800
+    let screen_height = 600
+
+    println("Initializing raylib window...")
+    init_window(screen_width, screen_height, "Beagle + Raylib 2D Demo")
+    set_target_fps(60)
+
+    let player_size = 80
+    let player_x = screen_width / 2 - player_size / 2
+    let player_y = screen_height - 70
+    let player_speed = 8
+
+    println("Starting game loop...")
+    println("Use LEFT/RIGHT arrows to catch falling squares!")
+    println("Press ESC to quit")
+
+    let final_score = game_loop(player_x, player_y, player_size, player_speed, [], 0, 0, screen_width, screen_height)
+
+    println("Game over! Final score: " ++ to-string(final_score))
+    close_window()
+    final_score
+}

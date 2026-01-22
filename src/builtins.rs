@@ -26,6 +26,8 @@ use std::hint::black_box;
 thread_local! {
     static SAVED_FRAME_POINTER: Cell<usize> = const { Cell::new(0) };
     static SAVED_GC_RETURN_ADDR: Cell<usize> = const { Cell::new(0) };
+    // Used for struct returns - stores the high 64 bits of a 16-byte struct return
+    static STRUCT_RETURN_HIGH: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Save the frame pointer for later use by gc().
@@ -2994,6 +2996,7 @@ pub fn map_beagle_type_to_ffi_type(runtime: &Runtime, value: usize) -> Result<FF
         "Type.U32" => Ok(FFIType::U32),
         "Type.U64" => Ok(FFIType::U64),
         "Type.I32" => Ok(FFIType::I32),
+        "Type.F32" => Ok(FFIType::F32),
         "Type.Pointer" => Ok(FFIType::Pointer),
         "Type.MutablePointer" => Ok(FFIType::MutablePointer),
         "Type.String" => Ok(FFIType::String),
@@ -3112,6 +3115,12 @@ unsafe fn marshal_ffi_argument(
             FFIType::U8 | FFIType::U16 | FFIType::U32 | FFIType::U64 | FFIType::I32 => {
                 BuiltInTypes::untag(argument) as u64
             }
+            FFIType::F32 => {
+                // Convert integer to f32 and get its bit representation
+                let int_val = BuiltInTypes::untag(argument) as i64;
+                let f32_val = int_val as f32;
+                f32_val.to_bits() as u64
+            }
             FFIType::Pointer => {
                 if BuiltInTypes::untag(argument) == 0 {
                     0u64
@@ -3176,9 +3185,19 @@ unsafe fn call_native_function(
     func_ptr: *const u8,
     num_args: usize,
     args: [u64; 6],
+    arg_types: &[FFIType],
     return_type: &FFIType,
 ) -> u64 {
-    // Macro for non-void return types
+    // Check if any arguments are floats
+    let has_float = arg_types.iter().any(|t| matches!(t, FFIType::F32));
+
+    if has_float {
+        // Use float-aware calling for functions with float arguments
+        // SAFETY: Same requirements as this function - func_ptr must be valid
+        return unsafe { call_native_function_with_floats(func_ptr, num_args, args, arg_types, return_type) };
+    }
+
+    // Macro for non-void return types (all integer arguments)
     macro_rules! call_with_args {
         ($ret_type:ty) => {
             match num_args {
@@ -3272,9 +3291,193 @@ unsafe fn call_native_function(
             FFIType::U64 | FFIType::Pointer | FFIType::MutablePointer | FFIType::String => {
                 call_with_args!(u64)
             }
-            FFIType::Structure(_) => {
-                // Structure returns not yet implemented, keep existing behavior
-                call_with_args!(u64)
+            FFIType::F32 => call_with_args!(f32),
+            FFIType::Structure(fields) => {
+                // For small structs (≤16 bytes on ARM64), they're returned in x0/x1
+                // We call with a struct return type and pack the result
+                call_struct_return(func_ptr, num_args, args, fields)
+            }
+        }
+    }
+}
+
+/// A 16-byte struct for receiving struct returns from C functions.
+/// On ARM64, structs up to 16 bytes are returned in x0 and x1.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct StructReturn16 {
+    low: u64,
+    high: u64,
+}
+
+/// Call a function that returns a struct (up to 16 bytes).
+/// Returns the struct packed as two u64 values in a single u128.
+#[inline(never)]
+unsafe fn call_struct_return(
+    func_ptr: *const u8,
+    num_args: usize,
+    args: [u64; 6],
+    _fields: &[FFIType],
+) -> u64 {
+    unsafe {
+        // Call the function with struct return type
+        let result: StructReturn16 = match num_args {
+            0 => {
+                let f: extern "C" fn() -> StructReturn16 = transmute(func_ptr);
+                f()
+            }
+            1 => {
+                let f: extern "C" fn(u64) -> StructReturn16 = transmute(func_ptr);
+                f(args[0])
+            }
+            2 => {
+                let f: extern "C" fn(u64, u64) -> StructReturn16 = transmute(func_ptr);
+                f(args[0], args[1])
+            }
+            3 => {
+                let f: extern "C" fn(u64, u64, u64) -> StructReturn16 = transmute(func_ptr);
+                f(args[0], args[1], args[2])
+            }
+            4 => {
+                let f: extern "C" fn(u64, u64, u64, u64) -> StructReturn16 = transmute(func_ptr);
+                f(args[0], args[1], args[2], args[3])
+            }
+            5 => {
+                let f: extern "C" fn(u64, u64, u64, u64, u64) -> StructReturn16 = transmute(func_ptr);
+                f(args[0], args[1], args[2], args[3], args[4])
+            }
+            6 => {
+                let f: extern "C" fn(u64, u64, u64, u64, u64, u64) -> StructReturn16 = transmute(func_ptr);
+                f(args[0], args[1], args[2], args[3], args[4], args[5])
+            }
+            _ => panic!("Too many arguments for FFI call: {}", num_args),
+        };
+
+        // Store the struct in thread-local storage so unmarshal can access both parts
+        STRUCT_RETURN_HIGH.with(|cell| cell.set(result.high));
+        result.low
+    }
+}
+
+/// Call a native function that has float arguments.
+/// This creates function signatures with f32 in the appropriate positions
+/// so that the Rust compiler places floats in FP registers per the C ABI.
+#[inline(never)]
+unsafe fn call_native_function_with_floats(
+    func_ptr: *const u8,
+    num_args: usize,
+    args: [u64; 6],
+    arg_types: &[FFIType],
+    return_type: &FFIType,
+) -> u64 {
+    // Helper to convert u64 (containing f32 bits) to f32
+    fn to_f32(v: u64) -> f32 {
+        f32::from_bits(v as u32)
+    }
+
+    // Build a signature pattern: which positions are floats?
+    // We encode this as a bitmask for efficient dispatch
+    let mut float_mask: u8 = 0;
+    for (i, t) in arg_types.iter().enumerate() {
+        if matches!(t, FFIType::F32) {
+            float_mask |= 1 << i;
+        }
+    }
+
+    // For void return, we need separate handling
+    let is_void = matches!(return_type, FFIType::Void);
+
+    // Dispatch based on number of args and float positions
+    // We handle common patterns explicitly
+    unsafe {
+        match (num_args, float_mask) {
+            // 1 arg patterns
+            (1, 0b0001) => {
+                // f32
+                let f: extern "C" fn(f32) -> u64 = transmute(func_ptr);
+                if is_void { f(to_f32(args[0])); 0 } else { f(to_f32(args[0])) }
+            }
+
+            // 2 arg patterns
+            (2, 0b0001) => {
+                // f32, u64
+                let f: extern "C" fn(f32, u64) -> u64 = transmute(func_ptr);
+                if is_void { f(to_f32(args[0]), args[1]); 0 } else { f(to_f32(args[0]), args[1]) }
+            }
+            (2, 0b0010) => {
+                // u64, f32
+                let f: extern "C" fn(u64, f32) -> u64 = transmute(func_ptr);
+                if is_void { f(args[0], to_f32(args[1])); 0 } else { f(args[0], to_f32(args[1])) }
+            }
+            (2, 0b0011) => {
+                // f32, f32
+                let f: extern "C" fn(f32, f32) -> u64 = transmute(func_ptr);
+                if is_void { f(to_f32(args[0]), to_f32(args[1])); 0 } else { f(to_f32(args[0]), to_f32(args[1])) }
+            }
+
+            // 3 arg patterns
+            (3, 0b0001) => {
+                let f: extern "C" fn(f32, u64, u64) -> u64 = transmute(func_ptr);
+                if is_void { f(to_f32(args[0]), args[1], args[2]); 0 } else { f(to_f32(args[0]), args[1], args[2]) }
+            }
+            (3, 0b0010) => {
+                let f: extern "C" fn(u64, f32, u64) -> u64 = transmute(func_ptr);
+                if is_void { f(args[0], to_f32(args[1]), args[2]); 0 } else { f(args[0], to_f32(args[1]), args[2]) }
+            }
+            (3, 0b0100) => {
+                let f: extern "C" fn(u64, u64, f32) -> u64 = transmute(func_ptr);
+                if is_void { f(args[0], args[1], to_f32(args[2])); 0 } else { f(args[0], args[1], to_f32(args[2])) }
+            }
+
+            // 4 arg patterns (common for raylib: int, int, float, color)
+            (4, 0b0001) => {
+                let f: extern "C" fn(f32, u64, u64, u64) -> u64 = transmute(func_ptr);
+                if is_void { f(to_f32(args[0]), args[1], args[2], args[3]); 0 } else { f(to_f32(args[0]), args[1], args[2], args[3]) }
+            }
+            (4, 0b0010) => {
+                let f: extern "C" fn(u64, f32, u64, u64) -> u64 = transmute(func_ptr);
+                if is_void { f(args[0], to_f32(args[1]), args[2], args[3]); 0 } else { f(args[0], to_f32(args[1]), args[2], args[3]) }
+            }
+            (4, 0b0100) => {
+                // DrawCircle pattern: int, int, float, color
+                let f: extern "C" fn(u64, u64, f32, u64) -> u64 = transmute(func_ptr);
+                if is_void { f(args[0], args[1], to_f32(args[2]), args[3]); 0 } else { f(args[0], args[1], to_f32(args[2]), args[3]) }
+            }
+            (4, 0b1000) => {
+                let f: extern "C" fn(u64, u64, u64, f32) -> u64 = transmute(func_ptr);
+                if is_void { f(args[0], args[1], args[2], to_f32(args[3])); 0 } else { f(args[0], args[1], args[2], to_f32(args[3])) }
+            }
+            (4, 0b0011) => {
+                let f: extern "C" fn(f32, f32, u64, u64) -> u64 = transmute(func_ptr);
+                if is_void { f(to_f32(args[0]), to_f32(args[1]), args[2], args[3]); 0 } else { f(to_f32(args[0]), to_f32(args[1]), args[2], args[3]) }
+            }
+            (4, 0b0110) => {
+                let f: extern "C" fn(u64, f32, f32, u64) -> u64 = transmute(func_ptr);
+                if is_void { f(args[0], to_f32(args[1]), to_f32(args[2]), args[3]); 0 } else { f(args[0], to_f32(args[1]), to_f32(args[2]), args[3]) }
+            }
+            (4, 0b1100) => {
+                let f: extern "C" fn(u64, u64, f32, f32) -> u64 = transmute(func_ptr);
+                if is_void { f(args[0], args[1], to_f32(args[2]), to_f32(args[3])); 0 } else { f(args[0], args[1], to_f32(args[2]), to_f32(args[3])) }
+            }
+
+            // 5 arg patterns
+            (5, 0b00100) => {
+                let f: extern "C" fn(u64, u64, f32, u64, u64) -> u64 = transmute(func_ptr);
+                if is_void { f(args[0], args[1], to_f32(args[2]), args[3], args[4]); 0 } else { f(args[0], args[1], to_f32(args[2]), args[3], args[4]) }
+            }
+
+            // 6 arg patterns
+            (6, 0b000100) => {
+                let f: extern "C" fn(u64, u64, f32, u64, u64, u64) -> u64 = transmute(func_ptr);
+                if is_void { f(args[0], args[1], to_f32(args[2]), args[3], args[4], args[5]); 0 } else { f(args[0], args[1], to_f32(args[2]), args[3], args[4], args[5]) }
+            }
+
+            _ => {
+                panic!(
+                    "Unsupported float argument pattern: {} args, float_mask=0b{:06b}. \
+                     Add this pattern to call_native_function_with_floats.",
+                    num_args, float_mask
+                );
             }
         }
     }
@@ -3298,6 +3501,12 @@ unsafe fn unmarshal_ffi_return(
                 let signed_result = result as i32 as isize;
                 BuiltInTypes::Int.tag(signed_result) as usize
             }
+            FFIType::F32 => {
+                // Convert f32 bits to integer for Beagle
+                // The result is already the f32 bit pattern in the low 32 bits
+                let f32_val = f32::from_bits(result as u32);
+                BuiltInTypes::Int.tag(f32_val as i32 as isize) as usize
+            }
             FFIType::Pointer | FFIType::MutablePointer => {
                 let pointer_value = BuiltInTypes::Int.tag(result as isize) as usize;
                 call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", pointer_value)
@@ -3313,8 +3522,57 @@ unsafe fn unmarshal_ffi_return(
                     .unwrap()
                     .into()
             }
-            FFIType::Structure(_) => {
-                todo!("Structure return not yet implemented")
+            FFIType::Structure(fields) => {
+                // Get the high part from thread-local storage
+                let high = STRUCT_RETURN_HIGH.with(|cell| cell.get());
+
+                // Create a Beagle array with the struct fields
+                // For a 16-byte struct like Shader {id: u32, locs: *int}:
+                // - low contains the first 8 bytes (id in lower 4 bytes)
+                // - high contains the next 8 bytes (locs pointer)
+                let mut offset = 0u64;
+                let low = result;
+
+                // Build an array of field values based on field types
+                let mut field_values = Vec::with_capacity(fields.len());
+                for field in fields {
+                    let (value, size) = match field {
+                        FFIType::U32 | FFIType::I32 => {
+                            let v = if offset < 8 {
+                                ((low >> (offset * 8)) & 0xFFFFFFFF) as u32
+                            } else {
+                                ((high >> ((offset - 8) * 8)) & 0xFFFFFFFF) as u32
+                            };
+                            (BuiltInTypes::Int.tag(v as isize) as usize, 4)
+                        }
+                        FFIType::Pointer | FFIType::MutablePointer | FFIType::U64 => {
+                            let v = if offset < 8 {
+                                low
+                            } else {
+                                high
+                            };
+                            // Align offset to 8 bytes for pointers
+                            offset = (offset + 7) & !7;
+                            (BuiltInTypes::Int.tag(v as isize) as usize, 8)
+                        }
+                        _ => {
+                            // For other types, just use the raw value
+                            let v = if offset < 8 { low } else { high };
+                            (BuiltInTypes::Int.tag(v as isize) as usize, 8)
+                        }
+                    };
+                    field_values.push(value);
+                    offset += size as u64;
+                }
+
+                // Create a simple array/tuple to hold the struct fields
+                // The caller can access fields by index
+                call_fn_2(
+                    runtime,
+                    "beagle.ffi/__make_struct_return",
+                    BuiltInTypes::Int.tag(low as isize) as usize,
+                    BuiltInTypes::Int.tag(high as isize) as usize,
+                )
             }
         }
     }
@@ -3359,7 +3617,7 @@ pub unsafe extern "C" fn call_ffi_info(
         }
 
         // Call the native function directly using transmute
-        let result = call_native_function(func_ptr, number_of_arguments, native_args, &return_type);
+        let result = call_native_function(func_ptr, number_of_arguments, native_args, &argument_types, &return_type);
 
         // Unmarshal the return value
         let return_value = unmarshal_ffi_return(runtime, stack_pointer, result, &return_type);
@@ -3576,6 +3834,7 @@ unsafe extern "C" fn ffi_create_array(
                 FFIType::U32 => todo!(),
                 FFIType::U64 => todo!(),
                 FFIType::I32 => todo!(),
+                FFIType::F32 => todo!(),
                 FFIType::Pointer => {
                     todo!()
                 }
