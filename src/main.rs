@@ -425,8 +425,8 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
         lang.instructions.push(X86Asm::MovRR { dest: RSP, src: RDI }); // RSP = new_sp
         lang.instructions.push(X86Asm::MovRR { dest: RBP, src: RSI }); // RBP = new_fp
 
-        // Stack frame restoration for multi-shot continuations.
-        // For NON-EMPTY stack segments only (empty segments don't create InvocationReturnPoints).
+        // Stack frame restoration for multi-shot continuations with non-empty segments.
+        // Empty segments have frame_size=0 and frame_src=null, so they skip this.
         // Check if frame_size (R10) is non-zero
         lang.instructions.push(X86Asm::TestRR { a: R10, b: R10 });
         let skip_restore_label = lang.get_label_index();
