@@ -408,6 +408,11 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
         // RDX = value (return value)
         // RCX = return_address
         // R8 = callee_saved pointer
+        // R9 = frame_src pointer (saved stack frame data)
+        // [RSP+8] = frame_size (7th argument on stack)
+
+        // Load frame_size from stack into R10
+        lang.instructions.push(X86Asm::MovRM { dest: R10, base: RSP, offset: 8 });
 
         // Restore callee-saved registers from the array
         lang.instructions.push(X86Asm::MovRM { dest: RBX, base: R8, offset: 0 });
@@ -419,6 +424,69 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
         // Restore stack state
         lang.instructions.push(X86Asm::MovRR { dest: RSP, src: RDI }); // RSP = new_sp
         lang.instructions.push(X86Asm::MovRR { dest: RBP, src: RSI }); // RBP = new_fp
+
+        // Stack frame restoration for multi-shot continuations.
+        // For NON-EMPTY stack segments only (empty segments don't create InvocationReturnPoints).
+        // Check if frame_size (R10) is non-zero
+        lang.instructions.push(X86Asm::TestRR { a: R10, b: R10 });
+        let skip_restore_label = lang.get_label_index();
+        lang.instructions.push(X86Asm::Jcc {
+            label_index: skip_restore_label,
+            cond: crate::machine_code::x86_codegen::Condition::E, // Jump if zero
+        });
+
+        // Also check if frame_src (R9) is null
+        lang.instructions.push(X86Asm::TestRR { a: R9, b: R9 });
+        lang.instructions.push(X86Asm::Jcc {
+            label_index: skip_restore_label,
+            cond: crate::machine_code::x86_codegen::Condition::E, // Jump if null
+        });
+
+        // Restore the stack frame by copying frame_size bytes from frame_src to RSP
+        // The loop uses non-callee-saved registers to avoid conflicts:
+        // - R11 = offset counter
+        // - RAX = temp for copying data
+        // - R9 = frame_src (input, preserved)
+        // - R10 = frame_size (input, preserved)
+        // - RSP = destination (already set)
+        // - RCX = return_address (input, must preserve)
+        // - RDX = value (input, must preserve)
+
+        // R11 = offset counter, start at 0
+        lang.instructions.push(X86Asm::XorRR { dest: R11, src: R11 });
+
+        let copy_loop = lang.get_label_index();
+        lang.instructions.push(X86Asm::Label { index: copy_loop });
+
+        // if offset >= frame_size, done
+        lang.instructions.push(X86Asm::CmpRR { a: R11, b: R10 });
+        let copy_done = lang.get_label_index();
+        lang.instructions.push(X86Asm::Jcc {
+            label_index: copy_done,
+            cond: crate::machine_code::x86_codegen::Condition::GE,
+        });
+
+        // Load 8 bytes from [R9 + R11] into RAX
+        // We need to compute the address first
+        // Use R14 as temp (it's callee-saved and already restored, we'll restore it again after)
+        lang.instructions.push(X86Asm::MovRR { dest: R14, src: R9 });
+        lang.instructions.push(X86Asm::AddRR { dest: R14, src: R11 });
+        lang.instructions.push(X86Asm::MovRM { dest: RAX, base: R14, offset: 0 });
+
+        // Store 8 bytes to [RSP + R11]
+        lang.instructions.push(X86Asm::MovRR { dest: R14, src: RSP });
+        lang.instructions.push(X86Asm::AddRR { dest: R14, src: R11 });
+        lang.instructions.push(X86Asm::MovMR { base: R14, offset: 0, src: RAX });
+
+        // offset += 8
+        lang.instructions.push(X86Asm::AddRI { dest: R11, imm: 8 });
+        lang.instructions.push(X86Asm::Jmp { label_index: copy_loop });
+
+        lang.instructions.push(X86Asm::Label { index: copy_done });
+
+        // Re-restore R14 from callee_saved array (we used it as temp)
+        lang.instructions.push(X86Asm::MovRM { dest: R14, base: R8, offset: 24 });
+        lang.instructions.push(X86Asm::Label { index: skip_restore_label });
 
         // Put return value in RAX
         lang.instructions.push(X86Asm::MovRR { dest: RAX, src: RDX });
@@ -434,7 +502,7 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
             "beagle.builtin/return-jump".to_string(),
             &code,
             0,
-            5, // 5 arguments
+            7, // 7 arguments (6 in registers + 1 on stack)
         ).unwrap();
     }
 
@@ -1072,7 +1140,6 @@ fn get_expect(source: &str) -> String {
 }
 
 #[test]
-#[ignore = "Fails in release mode due to test harness interaction - use 'cargo run -- --all-tests' instead"]
 fn try_all_examples() -> Result<(), Box<dyn Error>> {
     let args = CommandLineArguments {
         program: None,

@@ -4401,6 +4401,7 @@ pub unsafe extern "C" fn pop_prompt_runtime(
         .and_then(|handlers| handlers.last())
         .map(|h| h.prompt_id);
 
+
     // Check if there's an invocation return point for THIS handle block.
     // Only use return points that were created for the current prompt ID.
     // This prevents sequential handlers from incorrectly using return points from other handlers.
@@ -4547,6 +4548,7 @@ pub unsafe extern "C" fn return_from_shift_runtime(
         .remove(&thread_id)
         .unwrap_or(false);
 
+
     // Check if there's an invocation return point (multi-shot continuation case).
     // If a continuation was invoked via k(value), we should return to where k() was called,
     // not to the original prompt handler.
@@ -4569,23 +4571,14 @@ pub unsafe extern "C" fn return_from_shift_runtime(
         // the shift body's frame (e.g., the result_local slot where k is stored).
         // We must restore the original frame contents so that the shift body can
         // continue to access its local variables (including k for subsequent calls).
-        //
-        // TODO: This restoration is currently DISABLED because it corrupts the active
-        // call stack when done from Rust code. We need to do this AFTER switching SP,
-        // which requires doing it in assembly or finding another approach.
-        // For now, sequential handlers work without this, but multi-shot continuations may break.
         let saved_frame = &return_point.saved_stack_frame;
-        let _ = saved_frame; // Silence unused warning
-        // if !saved_frame.is_empty() {
-        //     // SAFETY: new_sp points to valid stack memory
-        //     unsafe {
-        //         std::ptr::copy_nonoverlapping(
-        //             saved_frame.as_ptr(),
-        //             new_sp as *mut u8,
-        //             saved_frame.len(),
-        //         );
-        //     }
-        // }
+        let frame_src = if !saved_frame.is_empty() {
+            saved_frame.as_ptr()
+        } else {
+            std::ptr::null()
+        };
+        let frame_size = saved_frame.len();
+
 
         // Restore callee-saved registers and return to the call site
         // SAFETY: inline assembly for register/stack manipulation
@@ -4599,9 +4592,9 @@ pub unsafe extern "C" fn return_from_shift_runtime(
                     .get_function_by_name("beagle.builtin/return-jump")
                     .expect("return-jump function not found");
                 let ptr: *const u8 = return_jump_fn.pointer.into();
-                let return_jump_ptr: extern "C" fn(usize, usize, usize, usize, *const usize) -> ! =
+                let return_jump_ptr: extern "C" fn(usize, usize, usize, usize, *const usize, *const u8, usize) -> ! =
                     unsafe { std::mem::transmute(ptr) };
-                return_jump_ptr(new_sp, new_fp, value, return_address, callee_saved.as_ptr());
+                return_jump_ptr(new_sp, new_fp, value, return_address, callee_saved.as_ptr(), frame_src, frame_size);
             } else {
                 // ARM64 callee-saved: x19-x28
                 // Use explicit register constraints to avoid conflicts.
@@ -4741,14 +4734,16 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
     // When the continuation body completes (via return_from_shift_runtime),
     // it will pop this and return here with the result value.
     //
-    // CRITICAL: For empty stack segments, do NOT create InvocationReturnPoints.
-    // Empty segments mean the continuation runs in-place and should return through
-    // pop_prompt naturally, not through InvocationReturnPoint machinery.
+    // This is needed for BOTH empty and non-empty stack segments, because multi-shot
+    // continuations need to preserve the shift body's stack frame (including local
+    // variables like the continuation k itself) when resuming multiple times.
     let stack_segment_size = continuation.stack_segment.len();
     let thread_id = std::thread::current().id();
     let prompt_id = continuation.prompt.prompt_id;
 
-    // Only create InvocationReturnPoint for NON-EMPTY stack segments
+    // Only create InvocationReturnPoint for NON-EMPTY stack segments.
+    // Empty segments run in-place and return through normal pop_prompt.
+    // Note: This means multi-shot continuations and shift/reset dont work correctly for empty segments.
     if stack_segment_size > 0 {
         // We need to get the return address for where k() was called in Beagle code.
         // The call chain is: Beagle code -> continuation_trampoline -> invoke_continuation_runtime
@@ -4811,6 +4806,7 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
                 prompt_id,
             });
     }
+
     let resume_address = continuation.resume_address;
     // Use the return trampoline as LR so that when the continuation body returns,
     // it goes through return_from_shift_runtime for proper multi-shot handling.

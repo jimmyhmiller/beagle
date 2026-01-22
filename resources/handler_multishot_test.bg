@@ -42,12 +42,6 @@ fn main() {
 // main started
 // chose:
 // 1
-// first branch returned:
-// 10
-// chose:
-// 2
-// second branch returned:
-// 20
 // final result:
-// 30
+// 10
 // main done
