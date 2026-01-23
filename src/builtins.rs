@@ -4743,6 +4743,7 @@ pub unsafe extern "C" fn pop_prompt_runtime(
     print_call_builtin(get_runtime().get(), "pop_prompt");
     let runtime = get_runtime().get_mut();
     let thread_id = std::thread::current().id();
+    let debug_prompts = runtime.get_command_line_args().debug;
 
     // Get the current prompt's ID BEFORE popping - this tells us which handle block is completing
     let current_prompt_id = runtime
@@ -4750,6 +4751,27 @@ pub unsafe extern "C" fn pop_prompt_runtime(
         .get(&thread_id)
         .and_then(|handlers| handlers.last())
         .map(|h| h.prompt_id);
+
+    if debug_prompts {
+        let rp_len = runtime
+            .invocation_return_points
+            .get(&thread_id)
+            .map(|rps| rps.len())
+            .unwrap_or(0);
+        let top_rp = runtime
+            .invocation_return_points
+            .get(&thread_id)
+            .and_then(|rps| rps.last())
+            .map(|rp| (rp.stack_pointer, rp.frame_pointer, rp.return_address, rp.prompt_id));
+        eprintln!(
+            "[pop_prompt] current_prompt_id={:?} return_points={} top={:?} sp={:#x} fp={:#x}",
+            current_prompt_id,
+            rp_len,
+            top_rp,
+            stack_pointer,
+            frame_pointer
+        );
+    }
 
     // Check if there's an invocation return point for THIS handle block.
     //
@@ -4762,23 +4784,17 @@ pub unsafe extern "C" fn pop_prompt_runtime(
     //
     // Strategy: Check for return points FIRST, regardless of current_prompt_id.
     // Match on the prompt_id stored in the return point itself.
+    if let Some(return_points) = runtime.invocation_return_points.get(&thread_id)
+        && let Some(top_point) = return_points.last()
+    {
+        let should_route =
+            current_prompt_id.is_none() || current_prompt_id == Some(top_point.prompt_id);
 
-    // Check for return points that need routing through return_from_shift
-    if let Some(return_points) = runtime.invocation_return_points.get(&thread_id) {
-        if let Some(top_point) = return_points.last() {
-            // For empty segments: current_prompt_id will be None, but we still want to route
-            // through return_from_shift.
-            // For non-empty segments: current_prompt_id should match top_point.prompt_id.
-            let should_route =
-                current_prompt_id.is_none() || current_prompt_id == Some(top_point.prompt_id);
-
-            if should_route {
-                // Set flag so return_from_shift knows to use InvocationReturnPoints
-                runtime
-                    .return_from_shift_via_pop_prompt
-                    .insert(thread_id, true);
-                unsafe { return_from_shift_runtime(stack_pointer, frame_pointer, result_value) };
-            }
+        if should_route {
+            runtime
+                .return_from_shift_via_pop_prompt
+                .insert(thread_id, true);
+            unsafe { return_from_shift_runtime(stack_pointer, frame_pointer, result_value) };
         }
     }
 
@@ -4838,6 +4854,7 @@ pub unsafe extern "C" fn capture_continuation_runtime(
     save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "capture_continuation");
     let runtime = get_runtime().get_mut();
+    let debug_prompts = runtime.get_command_line_args().debug;
 
     // Pop the prompt handler to get the delimiter information
     let prompt = match runtime.pop_prompt_handler() {
@@ -4904,6 +4921,18 @@ pub unsafe extern "C" fn capture_continuation_runtime(
     // Store the continuation and get its index
     let cont_index = runtime.store_captured_continuation(continuation);
 
+    if debug_prompts {
+        eprintln!(
+            "[capture_cont] prompt_id={} stack_size={} prompt_sp={:#x} prompt_fp={:#x} resume={:#x} cont_index={}",
+            prompt.prompt_id,
+            stack_size,
+            prompt_sp,
+            prompt_fp,
+            resume_address,
+            cont_index
+        );
+    }
+
     // Return the continuation index tagged as a special type
     // We'll use a simple integer tag for now - the index can be used to invoke the continuation
     // For a proper implementation, we'd create a heap object wrapping this
@@ -4921,6 +4950,7 @@ pub unsafe extern "C" fn return_from_shift_runtime(
 
     let runtime = get_runtime().get_mut();
     let thread_id = std::thread::current().id();
+    let debug_prompts = runtime.get_command_line_args().debug;
 
     // Check if we're being called from pop_prompt (via the flag).
     let from_pop_prompt = runtime
@@ -4938,6 +4968,17 @@ pub unsafe extern "C" fn return_from_shift_runtime(
     if let Some(return_points) = runtime.invocation_return_points.get_mut(&thread_id)
         && let Some(return_point) = return_points.pop()
     {
+        if debug_prompts {
+            eprintln!(
+                "[return_from_shift] via_return_point from_pop_prompt={} remaining_after_pop={} rp_sp={:#x} rp_fp={:#x} ret_addr={:#x} prompt_id={}",
+                from_pop_prompt,
+                return_points.len(),
+                return_point.stack_pointer,
+                return_point.frame_pointer,
+                return_point.return_address,
+                return_point.prompt_id
+            );
+        }
         // For deep handler semantics: pop the prompt that was pushed by invoke_continuation.
         // Both empty and non-empty segments push a prompt that must be popped.
         let _ = runtime.pop_prompt_handler();
@@ -5026,6 +5067,16 @@ pub unsafe extern "C" fn return_from_shift_runtime(
     };
 
     if let Some(prompt) = prompt_opt {
+        if debug_prompts {
+            eprintln!(
+                "[return_from_shift] via_prompt from_pop_prompt={} prompt_sp={:#x} prompt_fp={:#x} handler={:#x} prompt_id={}",
+                from_pop_prompt,
+                prompt.stack_pointer,
+                prompt.frame_pointer,
+                prompt.handler_address,
+                prompt.prompt_id
+            );
+        }
         // Use the continuation's prompt - this contains the handle block's handler address
         // and stack state for the current handler being returned from.
         let handler_address = prompt.handler_address;
@@ -5098,6 +5149,7 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
     let cont_index = BuiltInTypes::untag(cont_index);
 
     let runtime = get_runtime().get_mut();
+    let debug_prompts = runtime.get_command_line_args().debug;
 
     // Clone the captured continuation (multi-shot support)
     let continuation = match runtime.clone_captured_continuation(cont_index) {
@@ -5218,6 +5270,17 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
         // For empty segments, DON'T create InvocationReturnPoint and DON'T use return trampoline.
         // This is single-shot - the continuation will return normally through the handle block.
 
+        if debug_prompts {
+            eprintln!(
+                "[invoke_cont] empty_segment prompt_id={} value={:#x} orig_sp={:#x} orig_fp={:#x} result_local_off={}",
+                prompt_id,
+                value,
+                continuation.original_sp,
+                continuation.original_fp,
+                continuation.result_local
+            );
+        }
+
         cfg_if::cfg_if! {
             if #[cfg(target_arch = "x86_64")] {
                 let runtime = get_runtime().get();
@@ -5274,6 +5337,23 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
             continuation_index: cont_index,
             prompt_id,
         });
+
+    if debug_prompts {
+        let rp_len = runtime
+            .invocation_return_points
+            .get(&thread_id)
+            .map(|rps| rps.len())
+            .unwrap_or(0);
+        eprintln!(
+            "[invoke_cont] push_return_point prompt_id={} stack_seg={} beagle_sp={:#x} beagle_fp={:#x} ret_addr={:#x} rp_len={}",
+            prompt_id,
+            stack_segment_size,
+            beagle_sp,
+            beagle_fp,
+            beagle_return_address,
+            rp_len
+        );
+    }
 
     #[allow(unused_variables)]
     let return_trampoline = continuation_return_trampoline as usize;
