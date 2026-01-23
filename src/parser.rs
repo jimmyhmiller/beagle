@@ -1146,9 +1146,16 @@ impl Parser {
                 self.position = saved_position; // restore
                 let looks_like_statement = matches!(
                     next,
-                    Token::Atom(_) | Token::OpenParen | Token::OpenBracket | Token::OpenCurly
-                        | Token::Integer(_) | Token::Float(_) | Token::String(_)
-                        | Token::True | Token::False | Token::Null
+                    Token::Atom(_)
+                        | Token::OpenParen
+                        | Token::OpenBracket
+                        | Token::OpenCurly
+                        | Token::Integer(_)
+                        | Token::Float(_)
+                        | Token::String(_)
+                        | Token::True
+                        | Token::False
+                        | Token::Null
                 );
                 if looks_like_statement && min_precedence == 0 {
                     Ok(Some(self.parse_perform()?))
@@ -3209,11 +3216,11 @@ impl Parser {
         // We need to be careful here: `handler {}` could be struct creation followed by body,
         // or just a variable followed by body. We parse without struct_creation first,
         // then check if we need to consume an empty struct `{}`.
-        let handler_expr = self.parse_expression(1, true, false)?.ok_or_else(|| {
-            ParseError::UnexpectedEof {
-                expected: "handler instance after 'with'".to_string(),
-            }
-        })?;
+        let handler_expr =
+            self.parse_expression(1, true, false)?
+                .ok_or_else(|| ParseError::UnexpectedEof {
+                    expected: "handler instance after 'with'".to_string(),
+                })?;
 
         self.skip_whitespace();
 

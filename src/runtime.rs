@@ -227,7 +227,9 @@ impl ThreadGlobal {
     pub fn add_root(&mut self, value: usize) -> Option<usize> {
         // Search for a free slot starting from next_free_slot hint
         let mut block_num = 0;
-        let mut current = Some(GlobalObjectBlock::from_tagged(self.head_block.load(Ordering::SeqCst)));
+        let mut current = Some(GlobalObjectBlock::from_tagged(
+            self.head_block.load(Ordering::SeqCst),
+        ));
 
         while let Some(block) = current {
             // In the first block (block_num == 0), skip reserved slots
@@ -313,7 +315,9 @@ impl ThreadGlobal {
     /// Iterate over all blocks in this ThreadGlobal
     pub fn iter_blocks(&self) -> GlobalBlockIter {
         GlobalBlockIter {
-            current: Some(GlobalObjectBlock::from_tagged(self.head_block.load(Ordering::SeqCst))),
+            current: Some(GlobalObjectBlock::from_tagged(
+                self.head_block.load(Ordering::SeqCst),
+            )),
         }
     }
 
@@ -758,7 +762,9 @@ pub struct HandlerStack {
 
 impl HandlerStack {
     pub fn new() -> Self {
-        HandlerStack { entries: Vec::new() }
+        HandlerStack {
+            entries: Vec::new(),
+        }
     }
 
     /// Push a handler onto the stack
@@ -772,7 +778,11 @@ impl HandlerStack {
     /// Pop the most recent handler with the given protocol key
     pub fn pop(&mut self, protocol_key: &str) -> Option<HandlerEntry> {
         // Find the last entry with matching protocol key
-        if let Some(idx) = self.entries.iter().rposition(|e| e.protocol_key == protocol_key) {
+        if let Some(idx) = self
+            .entries
+            .iter()
+            .rposition(|e| e.protocol_key == protocol_key)
+        {
             Some(self.entries.remove(idx))
         } else {
             None
@@ -781,7 +791,9 @@ impl HandlerStack {
 
     /// Find the most recent handler for the given protocol key
     pub fn find(&self, protocol_key: &str) -> Option<&HandlerEntry> {
-        self.entries.iter().rfind(|e| e.protocol_key == protocol_key)
+        self.entries
+            .iter()
+            .rfind(|e| e.protocol_key == protocol_key)
     }
 
     /// Clear all handlers (used on reset)
@@ -804,15 +816,16 @@ pub fn push_handler(protocol_key: String, handler_instance: usize) {
 
 /// Pop a handler from the current thread's handler stack
 pub fn pop_handler(protocol_key: &str) -> Option<HandlerEntry> {
-    HANDLER_STACK.with(|stack| {
-        stack.borrow_mut().pop(protocol_key)
-    })
+    HANDLER_STACK.with(|stack| stack.borrow_mut().pop(protocol_key))
 }
 
 /// Find a handler in the current thread's handler stack
 pub fn find_handler(protocol_key: &str) -> Option<usize> {
     HANDLER_STACK.with(|stack| {
-        stack.borrow().find(protocol_key).map(|e| e.handler_instance)
+        stack
+            .borrow()
+            .find(protocol_key)
+            .map(|e| e.handler_instance)
     })
 }
 
@@ -843,7 +856,10 @@ impl Memory {
 
         let options = self.heap.get_allocation_options();
         self.heap = Alloc::new(options);
-        let mut stacks = self.stacks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut stacks = self
+            .stacks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         *stacks = vec![(
             std::thread::current().id(),
             create_stack_with_protected_page_after(STACK_SIZE),
@@ -870,7 +886,10 @@ impl Memory {
         for index in completed_threads.iter().rev() {
             if let Some(thread) = self.join_handles.get(*index) {
                 let thread_id = thread.thread().id();
-                let mut stacks = self.stacks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut stacks = self
+                    .stacks
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 stacks.retain(|(id, _)| *id != thread_id);
                 self.threads.retain(|t| t.id() != thread_id);
                 self.join_handles.remove(*index);
@@ -2108,7 +2127,10 @@ impl Runtime {
 
     pub fn prompt_handler_count(&self) -> usize {
         let thread_id = std::thread::current().id();
-        self.prompt_handlers.get(&thread_id).map(|v| v.len()).unwrap_or(0)
+        self.prompt_handlers
+            .get(&thread_id)
+            .map(|v| v.len())
+            .unwrap_or(0)
     }
 
     pub fn store_captured_continuation(&mut self, cont: CapturedContinuation) -> usize {
@@ -2438,7 +2460,11 @@ impl Runtime {
     /// Check if the current thread has a GlobalObject initialized.
     pub fn has_thread_global(&self) -> bool {
         let thread_id = std::thread::current().id();
-        self.memory.thread_globals.lock().unwrap().contains_key(&thread_id)
+        self.memory
+            .thread_globals
+            .lock()
+            .unwrap()
+            .contains_key(&thread_id)
     }
 
     /// Initialize the namespaces atom in GlobalObject slot 0.
@@ -2727,7 +2753,11 @@ impl Runtime {
     /// (e.g., compiler thread).
     pub fn try_get_stack_base(&self) -> Option<usize> {
         let current_thread = std::thread::current().id();
-        let stacks = self.memory.stacks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let stacks = self
+            .memory
+            .stacks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         stacks
             .iter()
             .find(|(thread_id, _)| *thread_id == current_thread)
@@ -3113,7 +3143,8 @@ impl Runtime {
         let thread_globals = self.memory.thread_globals.lock().unwrap();
         if let Some(thread_global) = thread_globals.get(&thread_id) {
             unsafe {
-                *((child_stack_base - 8) as *mut usize) = thread_global.head_block.load(Ordering::SeqCst);
+                *((child_stack_base - 8) as *mut usize) =
+                    thread_global.head_block.load(Ordering::SeqCst);
             }
         }
 
@@ -3152,7 +3183,10 @@ impl Runtime {
 
         // After all threads are joined, if any panicked, propagate the error
         if !panicked_threads.is_empty() {
-            panic!("One or more spawned threads panicked during execution: {:?}", panicked_threads);
+            panic!(
+                "One or more spawned threads panicked during execution: {:?}",
+                panicked_threads
+            );
         }
     }
 

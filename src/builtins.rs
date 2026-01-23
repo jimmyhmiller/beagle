@@ -2735,7 +2735,12 @@ pub extern "C" fn run_thread(_unused: usize) -> usize {
                     - 1;
                 // Thread object is in our GlobalObjectBlock - cleanup happens
                 // when thread_globals entry is removed
-                runtime.memory.thread_globals.lock().unwrap().remove(&my_thread_id);
+                runtime
+                    .memory
+                    .thread_globals
+                    .lock()
+                    .unwrap()
+                    .remove(&my_thread_id);
                 // Fire USDT probes for thread unregistration and exit
                 crate::gc::usdt_probes::fire_thread_unregister(new_count);
                 crate::gc::usdt_probes::fire_thread_exit();
@@ -3194,7 +3199,9 @@ unsafe fn call_native_function(
     if has_float {
         // Use float-aware calling for functions with float arguments
         // SAFETY: Same requirements as this function - func_ptr must be valid
-        return unsafe { call_native_function_with_floats(func_ptr, num_args, args, arg_types, return_type) };
+        return unsafe {
+            call_native_function_with_floats(func_ptr, num_args, args, arg_types, return_type)
+        };
     }
 
     // Macro for non-void return types (all integer arguments)
@@ -3343,11 +3350,13 @@ unsafe fn call_struct_return(
                 f(args[0], args[1], args[2], args[3])
             }
             5 => {
-                let f: extern "C" fn(u64, u64, u64, u64, u64) -> StructReturn16 = transmute(func_ptr);
+                let f: extern "C" fn(u64, u64, u64, u64, u64) -> StructReturn16 =
+                    transmute(func_ptr);
                 f(args[0], args[1], args[2], args[3], args[4])
             }
             6 => {
-                let f: extern "C" fn(u64, u64, u64, u64, u64, u64) -> StructReturn16 = transmute(func_ptr);
+                let f: extern "C" fn(u64, u64, u64, u64, u64, u64) -> StructReturn16 =
+                    transmute(func_ptr);
                 f(args[0], args[1], args[2], args[3], args[4], args[5])
             }
             _ => panic!("Too many arguments for FFI call: {}", num_args),
@@ -3395,81 +3404,161 @@ unsafe fn call_native_function_with_floats(
             (1, 0b0001) => {
                 // f32
                 let f: extern "C" fn(f32) -> u64 = transmute(func_ptr);
-                if is_void { f(to_f32(args[0])); 0 } else { f(to_f32(args[0])) }
+                if is_void {
+                    f(to_f32(args[0]));
+                    0
+                } else {
+                    f(to_f32(args[0]))
+                }
             }
 
             // 2 arg patterns
             (2, 0b0001) => {
                 // f32, u64
                 let f: extern "C" fn(f32, u64) -> u64 = transmute(func_ptr);
-                if is_void { f(to_f32(args[0]), args[1]); 0 } else { f(to_f32(args[0]), args[1]) }
+                if is_void {
+                    f(to_f32(args[0]), args[1]);
+                    0
+                } else {
+                    f(to_f32(args[0]), args[1])
+                }
             }
             (2, 0b0010) => {
                 // u64, f32
                 let f: extern "C" fn(u64, f32) -> u64 = transmute(func_ptr);
-                if is_void { f(args[0], to_f32(args[1])); 0 } else { f(args[0], to_f32(args[1])) }
+                if is_void {
+                    f(args[0], to_f32(args[1]));
+                    0
+                } else {
+                    f(args[0], to_f32(args[1]))
+                }
             }
             (2, 0b0011) => {
                 // f32, f32
                 let f: extern "C" fn(f32, f32) -> u64 = transmute(func_ptr);
-                if is_void { f(to_f32(args[0]), to_f32(args[1])); 0 } else { f(to_f32(args[0]), to_f32(args[1])) }
+                if is_void {
+                    f(to_f32(args[0]), to_f32(args[1]));
+                    0
+                } else {
+                    f(to_f32(args[0]), to_f32(args[1]))
+                }
             }
 
             // 3 arg patterns
             (3, 0b0001) => {
                 let f: extern "C" fn(f32, u64, u64) -> u64 = transmute(func_ptr);
-                if is_void { f(to_f32(args[0]), args[1], args[2]); 0 } else { f(to_f32(args[0]), args[1], args[2]) }
+                if is_void {
+                    f(to_f32(args[0]), args[1], args[2]);
+                    0
+                } else {
+                    f(to_f32(args[0]), args[1], args[2])
+                }
             }
             (3, 0b0010) => {
                 let f: extern "C" fn(u64, f32, u64) -> u64 = transmute(func_ptr);
-                if is_void { f(args[0], to_f32(args[1]), args[2]); 0 } else { f(args[0], to_f32(args[1]), args[2]) }
+                if is_void {
+                    f(args[0], to_f32(args[1]), args[2]);
+                    0
+                } else {
+                    f(args[0], to_f32(args[1]), args[2])
+                }
             }
             (3, 0b0100) => {
                 let f: extern "C" fn(u64, u64, f32) -> u64 = transmute(func_ptr);
-                if is_void { f(args[0], args[1], to_f32(args[2])); 0 } else { f(args[0], args[1], to_f32(args[2])) }
+                if is_void {
+                    f(args[0], args[1], to_f32(args[2]));
+                    0
+                } else {
+                    f(args[0], args[1], to_f32(args[2]))
+                }
             }
 
             // 4 arg patterns (common for raylib: int, int, float, color)
             (4, 0b0001) => {
                 let f: extern "C" fn(f32, u64, u64, u64) -> u64 = transmute(func_ptr);
-                if is_void { f(to_f32(args[0]), args[1], args[2], args[3]); 0 } else { f(to_f32(args[0]), args[1], args[2], args[3]) }
+                if is_void {
+                    f(to_f32(args[0]), args[1], args[2], args[3]);
+                    0
+                } else {
+                    f(to_f32(args[0]), args[1], args[2], args[3])
+                }
             }
             (4, 0b0010) => {
                 let f: extern "C" fn(u64, f32, u64, u64) -> u64 = transmute(func_ptr);
-                if is_void { f(args[0], to_f32(args[1]), args[2], args[3]); 0 } else { f(args[0], to_f32(args[1]), args[2], args[3]) }
+                if is_void {
+                    f(args[0], to_f32(args[1]), args[2], args[3]);
+                    0
+                } else {
+                    f(args[0], to_f32(args[1]), args[2], args[3])
+                }
             }
             (4, 0b0100) => {
                 // DrawCircle pattern: int, int, float, color
                 let f: extern "C" fn(u64, u64, f32, u64) -> u64 = transmute(func_ptr);
-                if is_void { f(args[0], args[1], to_f32(args[2]), args[3]); 0 } else { f(args[0], args[1], to_f32(args[2]), args[3]) }
+                if is_void {
+                    f(args[0], args[1], to_f32(args[2]), args[3]);
+                    0
+                } else {
+                    f(args[0], args[1], to_f32(args[2]), args[3])
+                }
             }
             (4, 0b1000) => {
                 let f: extern "C" fn(u64, u64, u64, f32) -> u64 = transmute(func_ptr);
-                if is_void { f(args[0], args[1], args[2], to_f32(args[3])); 0 } else { f(args[0], args[1], args[2], to_f32(args[3])) }
+                if is_void {
+                    f(args[0], args[1], args[2], to_f32(args[3]));
+                    0
+                } else {
+                    f(args[0], args[1], args[2], to_f32(args[3]))
+                }
             }
             (4, 0b0011) => {
                 let f: extern "C" fn(f32, f32, u64, u64) -> u64 = transmute(func_ptr);
-                if is_void { f(to_f32(args[0]), to_f32(args[1]), args[2], args[3]); 0 } else { f(to_f32(args[0]), to_f32(args[1]), args[2], args[3]) }
+                if is_void {
+                    f(to_f32(args[0]), to_f32(args[1]), args[2], args[3]);
+                    0
+                } else {
+                    f(to_f32(args[0]), to_f32(args[1]), args[2], args[3])
+                }
             }
             (4, 0b0110) => {
                 let f: extern "C" fn(u64, f32, f32, u64) -> u64 = transmute(func_ptr);
-                if is_void { f(args[0], to_f32(args[1]), to_f32(args[2]), args[3]); 0 } else { f(args[0], to_f32(args[1]), to_f32(args[2]), args[3]) }
+                if is_void {
+                    f(args[0], to_f32(args[1]), to_f32(args[2]), args[3]);
+                    0
+                } else {
+                    f(args[0], to_f32(args[1]), to_f32(args[2]), args[3])
+                }
             }
             (4, 0b1100) => {
                 let f: extern "C" fn(u64, u64, f32, f32) -> u64 = transmute(func_ptr);
-                if is_void { f(args[0], args[1], to_f32(args[2]), to_f32(args[3])); 0 } else { f(args[0], args[1], to_f32(args[2]), to_f32(args[3])) }
+                if is_void {
+                    f(args[0], args[1], to_f32(args[2]), to_f32(args[3]));
+                    0
+                } else {
+                    f(args[0], args[1], to_f32(args[2]), to_f32(args[3]))
+                }
             }
 
             // 5 arg patterns
             (5, 0b00100) => {
                 let f: extern "C" fn(u64, u64, f32, u64, u64) -> u64 = transmute(func_ptr);
-                if is_void { f(args[0], args[1], to_f32(args[2]), args[3], args[4]); 0 } else { f(args[0], args[1], to_f32(args[2]), args[3], args[4]) }
+                if is_void {
+                    f(args[0], args[1], to_f32(args[2]), args[3], args[4]);
+                    0
+                } else {
+                    f(args[0], args[1], to_f32(args[2]), args[3], args[4])
+                }
             }
 
             // 6 arg patterns
             (6, 0b000100) => {
                 let f: extern "C" fn(u64, u64, f32, u64, u64, u64) -> u64 = transmute(func_ptr);
-                if is_void { f(args[0], args[1], to_f32(args[2]), args[3], args[4], args[5]); 0 } else { f(args[0], args[1], to_f32(args[2]), args[3], args[4], args[5]) }
+                if is_void {
+                    f(args[0], args[1], to_f32(args[2]), args[3], args[4], args[5]);
+                    0
+                } else {
+                    f(args[0], args[1], to_f32(args[2]), args[3], args[4], args[5])
+                }
             }
 
             _ => {
@@ -3546,11 +3635,7 @@ unsafe fn unmarshal_ffi_return(
                             (BuiltInTypes::Int.tag(v as isize) as usize, 4)
                         }
                         FFIType::Pointer | FFIType::MutablePointer | FFIType::U64 => {
-                            let v = if offset < 8 {
-                                low
-                            } else {
-                                high
-                            };
+                            let v = if offset < 8 { low } else { high };
                             // Align offset to 8 bytes for pointers
                             offset = (offset + 7) & !7;
                             (BuiltInTypes::Int.tag(v as isize) as usize, 8)
@@ -3617,7 +3702,13 @@ pub unsafe extern "C" fn call_ffi_info(
         }
 
         // Call the native function directly using transmute
-        let result = call_native_function(func_ptr, number_of_arguments, native_args, &argument_types, &return_type);
+        let result = call_native_function(
+            func_ptr,
+            number_of_arguments,
+            native_args,
+            &argument_types,
+            &return_type,
+        );
 
         // Unmarshal the return value
         let return_value = unmarshal_ffi_return(runtime, stack_pointer, result, &return_type);
@@ -4660,7 +4751,6 @@ pub unsafe extern "C" fn pop_prompt_runtime(
         .and_then(|handlers| handlers.last())
         .map(|h| h.prompt_id);
 
-
     // Check if there's an invocation return point for THIS handle block.
     //
     // For empty segments: the prompt was already popped by capture_continuation (perform/shift),
@@ -4673,26 +4763,24 @@ pub unsafe extern "C" fn pop_prompt_runtime(
     // Strategy: Check for return points FIRST, regardless of current_prompt_id.
     // Match on the prompt_id stored in the return point itself.
 
-    // IMPORTANT: Do NOT route through return_from_shift when the handle block completes normally.
-    // InvocationReturnPoints are created when resume() is called, but if the handler just calls
-    // resume() once and returns (not multi-shot), these return points are stale and should just
-    // be cleaned up here, not routed through.
-    //
-    // Routing through them would cause us to return to where resume() was called in the handler,
-    // but the handler has already completed, so we'd be returning into a stale stack frame.
-    //
-    // OLD BUGGY CODE (commented out):
-    // if let Some(return_points) = runtime.invocation_return_points.get(&thread_id) {
-    //     if let Some(top_point) = return_points.last() {
-    //         let should_route = current_prompt_id.is_none() || current_prompt_id == Some(top_point.prompt_id);
-    //         if should_route {
-    //             runtime.return_from_shift_via_pop_prompt.insert(thread_id, true);
-    //             unsafe { return_from_shift_runtime(stack_pointer, frame_pointer, result_value) };
-    //         }
-    //     }
-    // }
-    //
-    // NEW FIX: Just clean up return points below, don't route through them.
+    // Check for return points that need routing through return_from_shift
+    if let Some(return_points) = runtime.invocation_return_points.get(&thread_id) {
+        if let Some(top_point) = return_points.last() {
+            // For empty segments: current_prompt_id will be None, but we still want to route
+            // through return_from_shift.
+            // For non-empty segments: current_prompt_id should match top_point.prompt_id.
+            let should_route =
+                current_prompt_id.is_none() || current_prompt_id == Some(top_point.prompt_id);
+
+            if should_route {
+                // Set flag so return_from_shift knows to use InvocationReturnPoints
+                runtime
+                    .return_from_shift_via_pop_prompt
+                    .insert(thread_id, true);
+                unsafe { return_from_shift_runtime(stack_pointer, frame_pointer, result_value) };
+            }
+        }
+    }
 
     // Normal path - no matching invocation return point, just pop and return
     // Only pop if there's actually a prompt to pop
@@ -4711,24 +4799,21 @@ pub unsafe extern "C" fn pop_prompt_runtime(
         }
     }
 
-    // When all prompts are done, clear continuation state for this thread.
-    // NOTE: Don't remove HashMap entries - just clear the vectors.
-    // The HashMap entries will be cleaned up by main.rs after the program finishes.
-    // Removing them here was causing crashes because generated code might still
-    // reference these structures during cleanup.
+    // When all prompts are done, clear ALL continuation state for this thread
     if runtime.prompt_handler_count() == 0 {
         {
             let mut captured_continuations = runtime.captured_continuations.lock().unwrap();
             if let Some(conts) = captured_continuations.get_mut(&thread_id) {
-                // Clear all continuations to free their Vec<u8> data
                 conts.clear();
             }
-            // Don't remove the HashMap entry - main.rs will do final cleanup
+            captured_continuations.remove(&thread_id);
         }
         if let Some(return_points) = runtime.invocation_return_points.get_mut(&thread_id) {
             return_points.clear();
         }
-        // Don't remove HashMap entries - main.rs will do final cleanup
+        runtime.invocation_return_points.remove(&thread_id);
+        runtime.prompt_handlers.remove(&thread_id);
+        runtime.return_from_shift_via_pop_prompt.remove(&thread_id);
     }
 
     BuiltInTypes::null_value() as usize
@@ -4765,11 +4850,33 @@ pub unsafe extern "C" fn capture_continuation_runtime(
         }
     };
 
-    // Calculate stack segment size (from current SP to prompt's SP)
-    let prompt_sp = prompt.stack_pointer;
+    // Clear any stale InvocationReturnPoints for this prompt.
+    // When a continuation body does another perform (instead of returning),
+    // the previous InvocationReturnPoint becomes stale because:
+    // - The handler from the previous resume already returned
+    // - The continuation continued without returning through the trampoline
+    // We must clear these to prevent jumping back to a stale handler frame.
+    let thread_id = std::thread::current().id();
+    if let Some(return_points) = runtime.invocation_return_points.get_mut(&thread_id) {
+        return_points.retain(|rp| rp.prompt_id != prompt.prompt_id);
+    }
 
-    // Stack grows downward, so current SP < prompt SP
-    let stack_size = prompt_sp.saturating_sub(stack_pointer);
+    // Calculate stack segment size (from current SP up to the prompt frame).
+    //
+    // NOTE: The prompt's stack_pointer is the bottom of the prompt frame
+    // (after the function prologue reserves locals). If we only copy up to
+    // prompt_sp, we exclude the prompt frame's locals and saved FP/LR.
+    // That makes relocated continuations read locals from unmapped memory.
+    //
+    // To preserve locals and frame metadata, capture up to the prompt frame
+    // pointer plus the saved FP/LR header.
+    let prompt_sp = prompt.stack_pointer;
+    let prompt_fp = prompt.frame_pointer;
+    let frame_header_bytes = std::mem::size_of::<usize>() * 2; // saved FP + LR/return address
+    let capture_top = prompt_fp.saturating_add(frame_header_bytes).max(prompt_sp);
+
+    // Stack grows downward, so current SP < capture_top
+    let stack_size = capture_top.saturating_sub(stack_pointer);
 
     // Copy the stack segment
     let mut stack_segment = vec![0u8; stack_size];
@@ -4832,18 +4939,13 @@ pub unsafe extern "C" fn return_from_shift_runtime(
         && let Some(return_point) = return_points.pop()
     {
         // For deep handler semantics: pop the prompt that was pushed by invoke_continuation.
-        // For NON-EMPTY segments, invoke_continuation pushes a relocated prompt that must be popped.
-        // For EMPTY segments, invoke_continuation does NOT push a prompt, so don't pop.
-        let is_empty_segment = return_point.saved_stack_frame.is_empty();
-        if !is_empty_segment {
-            let _ = runtime.pop_prompt_handler();
-        }
+        // Both empty and non-empty segments push a prompt that must be popped.
+        let _ = runtime.pop_prompt_handler();
 
         let new_sp = return_point.stack_pointer;
         let new_fp = return_point.frame_pointer;
         let return_address = return_point.return_address;
         let callee_saved = return_point.callee_saved_regs;
-
 
         // CRITICAL for multi-shot continuations: Restore the shift body's stack frame.
         // The continuation body may have written to stack locations that overlap with
@@ -4857,7 +4959,6 @@ pub unsafe extern "C" fn return_from_shift_runtime(
             std::ptr::null()
         };
         let frame_size = saved_frame.len();
-
 
         // Restore callee-saved registers and return to the call site
         // SAFETY: inline assembly for register/stack manipulation
@@ -5009,7 +5110,6 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
         }
     };
 
-
     // For multi-shot continuations: push an invocation return point.
     // When the continuation body completes (via return_from_shift_runtime),
     // it will pop this and return here with the result value.
@@ -5040,7 +5140,6 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
     // Beagle's SP when it called the closure is typically at trampoline's stack entry point
     // On ARM64, SP at function entry is FP + 16 (for the saved FP and LR)
     let beagle_sp = trampoline_fp + 16;
-
 
     // callee_saved_regs was already captured at the start of continuation_trampoline,
     // before any Rust code could clobber the registers
@@ -5089,6 +5188,79 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
         saved_stack_frame
     };
 
+    let resume_address = continuation.resume_address;
+
+    // Handle empty stack segment case (capture and prompt at same stack depth)
+    // For empty segments, DON'T create InvocationReturnPoint - use single-shot semantics.
+    if stack_segment_size == 0 {
+        // Empty segment: perform and handle are at the same stack depth.
+        // For single-shot use (handler calls resume once), we DON'T need
+        // InvocationReturnPoints or the return trampoline - just jump back
+        // to the continuation with the original link register.
+
+        // Store the value in the result local (relative to the original FP)
+        let result_ptr = (continuation.original_fp as isize).wrapping_add(continuation.result_local)
+            as *mut usize;
+        // SAFETY: result_ptr points to valid stack location
+        unsafe { *result_ptr = value };
+
+        // Re-push the prompt so subsequent performs can find it.
+        let relocated_prompt = crate::runtime::PromptHandler {
+            handler_address: continuation.prompt.handler_address,
+            stack_pointer: continuation.prompt.stack_pointer,
+            frame_pointer: continuation.prompt.frame_pointer,
+            link_register: continuation.prompt.link_register,
+            result_local: continuation.prompt.result_local,
+            prompt_id: continuation.prompt.prompt_id,
+        };
+        runtime.push_prompt_handler(relocated_prompt);
+
+        // For empty segments, DON'T create InvocationReturnPoint and DON'T use return trampoline.
+        // This is single-shot - the continuation will return normally through the handle block.
+
+        cfg_if::cfg_if! {
+            if #[cfg(target_arch = "x86_64")] {
+                let runtime = get_runtime().get();
+                let jump_fn = runtime
+                    .get_function_by_name("beagle.builtin/invoke-continuation-jump")
+                    .expect("invoke-continuation-jump function not found");
+                let ptr: *const u8 = jump_fn.pointer.into();
+                let jump_ptr: extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> ! =
+                    unsafe { std::mem::transmute(ptr) };
+                jump_ptr(
+                    continuation.original_fp,
+                    resume_address,
+                    0,
+                    continuation.original_sp,
+                    continuation.original_fp,
+                    result_ptr as usize,
+                    value,
+                );
+            } else {
+                // For ARM64: jump with original LR (not return_trampoline)
+                // The continuation will return normally, eventually reaching pop_prompt_runtime
+                let original_lr = continuation.prompt.link_register;
+                let safe_sp = (stack_pointer - 16) & !0xF;
+                unsafe {
+                    asm!(
+                        "mov sp, {0}",
+                        "mov x29, {1}",
+                        "mov x30, {2}",
+                        "br {3}",
+                        in(reg) safe_sp,
+                        in(reg) continuation.original_fp,
+                        in(reg) original_lr,
+                        in(reg) resume_address,
+                        options(noreturn)
+                    );
+                }
+            }
+        }
+    }
+
+    // Non-empty stack segment - need to copy and relocate
+    // For non-empty segments, create InvocationReturnPoint for multi-shot support.
+
     runtime
         .invocation_return_points
         .entry(thread_id)
@@ -5103,92 +5275,8 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
             prompt_id,
         });
 
-    let resume_address = continuation.resume_address;
-    // Use the return trampoline as LR so that when the continuation body returns,
-    // it goes through return_from_shift_runtime for proper multi-shot handling.
     #[allow(unused_variables)]
     let return_trampoline = continuation_return_trampoline as usize;
-
-    // Handle empty stack segment case (capture and prompt at same stack depth)
-    // IMPORTANT for multi-shot: Even with empty stack segment, we must run the
-    // continuation body at a safe SP that won't clobber the shift body's stack.
-    // The continuation body may allocate stack space (e.g., for println calls),
-    // and if we use original_sp (which is above the shift body), the stack
-    // growth will overwrite the shift body's locals (including k).
-    //
-    // Solution: Run the continuation body with current stack_pointer (which is
-    // below everything) so the continuation can allocate stack space safely.
-    if stack_segment_size == 0 {
-        // Store the value in the result local (relative to the original FP)
-        let result_ptr = (continuation.original_fp as isize).wrapping_add(continuation.result_local)
-            as *mut usize;
-        // SAFETY: result_ptr points to valid stack location
-        unsafe { *result_ptr = value };
-
-        // For empty segments, DO NOT push a prompt.
-        // The original prompt (from handle/reset) is still on the stack and will be used.
-        // Pushing a duplicate prompt with the same ID causes prompt stack corruption.
-        // When the continuation completes and we return to the handler, the handler will
-        // eventually return and the original handle block will pop the original prompt.
-        //
-        // NOTE: This means deep handler semantics (multiple performs in one handle block)
-        // may not work correctly for empty segments. That's a known limitation.
-        //
-        // let relocated_prompt = crate::runtime::PromptHandler {
-        //     handler_address: continuation.prompt.handler_address,
-        //     stack_pointer: continuation.prompt.stack_pointer,
-        //     frame_pointer: continuation.prompt.frame_pointer,
-        //     link_register: continuation.prompt.link_register,
-        //     result_local: continuation.prompt.result_local,
-        //     prompt_id: continuation.prompt.prompt_id,
-        // };
-        // runtime.push_prompt_handler(relocated_prompt);
-
-        // SAFETY: inline assembly for stack/register manipulation
-        // Note: For empty stack segment, we write result before the jump since the
-        // result_ptr is in Beagle stack (not Rust stack) and won't be corrupted.
-        // The assembly still has the write-after-switch capability for consistency.
-        cfg_if::cfg_if! {
-            if #[cfg(target_arch = "x86_64")] {
-                // On x86-64, call the generated invoke_continuation_jump function
-                // This avoids Rust optimizer issues with inline asm
-                let runtime = get_runtime().get();
-                let jump_fn = runtime
-                    .get_function_by_name("beagle.builtin/invoke-continuation-jump")
-                    .expect("invoke-continuation-jump function not found");
-                let ptr: *const u8 = jump_fn.pointer.into();
-                let jump_ptr: extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> ! =
-                    unsafe { std::mem::transmute(ptr) };
-                jump_ptr(
-                    continuation.original_fp,
-                    resume_address,
-                    0,  // stack_segment_size = 0 (empty stack segment)
-                    continuation.original_sp,  // original_sp (used for empty segments)
-                    continuation.original_fp,  // original_fp (used for empty segments)
-                    result_ptr as usize,  // result_ptr (assembly will write after stack switch)
-                    value,                // value to write
-                );
-            } else {
-                // Use current stack_pointer instead of original_sp
-                let safe_sp = (stack_pointer - 16) & !0xF;
-                unsafe {
-                    asm!(
-                        "mov sp, {0}",
-                        "mov x29, {1}",
-                        "mov x30, {2}",
-                        "br {3}",
-                        in(reg) safe_sp,
-                        in(reg) continuation.original_fp,
-                        in(reg) return_trampoline,
-                        in(reg) resume_address,
-                        options(noreturn)
-                    );
-                }
-            }
-        }
-    }
-
-    // Non-empty stack segment - need to copy and relocate
 
     // Get the actual current RSP - we need to place the stack segment below this,
     // not below the Beagle SP, to avoid corrupting Rust's stack
@@ -5260,8 +5348,10 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
     // After relocation, subsequent captures should capture from current SP up to
     // the relocated prompt SP (the new upper boundary).
     // IMPORTANT: Preserve the prompt_id so return points can match this prompt.
-    let relocated_prompt_sp = (continuation.prompt.stack_pointer as isize + relocation_offset) as usize;
-    let relocated_prompt_fp = (continuation.prompt.frame_pointer as isize + relocation_offset) as usize;
+    let relocated_prompt_sp =
+        (continuation.prompt.stack_pointer as isize + relocation_offset) as usize;
+    let relocated_prompt_fp =
+        (continuation.prompt.frame_pointer as isize + relocation_offset) as usize;
 
     let relocated_prompt = crate::runtime::PromptHandler {
         handler_address: continuation.prompt.handler_address,
@@ -6550,7 +6640,7 @@ impl Runtime {
             find_handler_builtin as *const u8,
             true,  // needs stack_pointer
             false, // doesn't need frame_pointer
-            2, // stack_pointer, protocol_key_str
+            2,     // stack_pointer, protocol_key_str
         )?;
 
         // get-enum-type needs stack_pointer and frame_pointer for GC-safe string allocation
@@ -6759,8 +6849,7 @@ pub extern "C" fn call_handler_builtin(
     // The handler is compiled Beagle code, NOT a builtin.
     // Beagle functions do NOT take stack_pointer and frame_pointer as explicit args.
     // The signature is just: fn handle(self, op, resume) -> result
-    let func: extern "C" fn(usize, usize, usize) -> usize =
-        unsafe { std::mem::transmute(fn_ptr) };
+    let func: extern "C" fn(usize, usize, usize) -> usize = unsafe { std::mem::transmute(fn_ptr) };
 
     func(handler, op_value, resume)
 }

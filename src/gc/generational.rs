@@ -8,8 +8,9 @@ use super::usdt_probes;
 use crate::types::{BuiltInTypes, Header, HeapObject, Word};
 
 use super::{
-    AllocateAction, Allocator, AllocatorOptions, StackMap, mark_and_sweep::MarkAndSweep,
-    stack_walker::StackWalker, continuation_walker::ContinuationSegmentWalker,
+    AllocateAction, Allocator, AllocatorOptions, StackMap,
+    continuation_walker::ContinuationSegmentWalker, mark_and_sweep::MarkAndSweep,
+    stack_walker::StackWalker,
 };
 
 /// Represents a reference to a GC root that needs updating after collection.

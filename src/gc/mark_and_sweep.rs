@@ -8,8 +8,7 @@ use crate::types::{Header, HeapObject, Word};
 
 use super::{
     AllocateAction, Allocator, AllocatorOptions, StackMap,
-    continuation_walker::ContinuationSegmentWalker,
-    stack_walker::StackWalker,
+    continuation_walker::ContinuationSegmentWalker, stack_walker::StackWalker,
 };
 
 const DEFAULT_PAGE_COUNT: usize = 1024;
@@ -360,11 +359,7 @@ impl MarkAndSweep {
         }
     }
 
-    fn mark_continuation_roots(
-        &self,
-        stack_map: &StackMap,
-        to_mark: &mut Vec<HeapObject>,
-    ) {
+    fn mark_continuation_roots(&self, stack_map: &StackMap, to_mark: &mut Vec<HeapObject>) {
         let runtime = crate::get_runtime().get();
 
         // Fast path: skip if no continuations
