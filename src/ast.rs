@@ -548,7 +548,7 @@ impl Ast {
         compiler: &mut Compiler,
         file_name: &str,
         token_line_column_map: Vec<(usize, usize)>,
-    ) -> Result<(Ir, Vec<(TokenRange, IRRange)>), CompileError> {
+    ) -> Result<(Ir, Vec<(TokenRange, IRRange)>, Vec<crate::compiler::Diagnostic>), CompileError> {
         let allocate_fn_pointer = compiler.allocate_fn_pointer()?;
         let mut ast_compiler = AstCompiler {
             ast: self.clone(),
@@ -576,13 +576,13 @@ impl Ast {
             current_function_is_variadic: false,
             current_function_min_args: 0,
             token_line_column_map,
+            diagnostics: Vec::new(),
         };
 
-        // println!("{:#?}", compiler);
-        Ok((
-            ast_compiler.compile()?,
-            ast_compiler.ir_range_to_token_range.pop().unwrap(),
-        ))
+        let ir = ast_compiler.compile()?;
+        let ir_ranges = ast_compiler.ir_range_to_token_range.pop().unwrap();
+        let diagnostics = ast_compiler.diagnostics;
+        Ok((ir, ir_ranges, diagnostics))
     }
 
     pub fn has_top_level(&self) -> bool {
@@ -732,6 +732,8 @@ pub struct AstCompiler<'a> {
     pub current_function_is_variadic: bool,
     pub current_function_min_args: usize,
     pub token_line_column_map: Vec<(usize, usize)>,
+    /// Diagnostics collected during compilation of this file
+    pub diagnostics: Vec<crate::compiler::Diagnostic>,
 }
 
 impl AstCompiler<'_> {
@@ -5637,13 +5639,10 @@ impl AstCompiler<'_> {
                         (1, 1) // Default if out of bounds
                     };
 
-                    let warning = crate::compiler::CompilerWarning {
-                        kind: crate::compiler::WarningKind::NonExhaustiveMatch {
-                            enum_name: enum_name.clone(),
-                            missing_variants: missing.clone(),
-                        },
+                    let diagnostic = crate::compiler::Diagnostic {
+                        severity: crate::compiler::Severity::Warning,
+                        kind: "NonExhaustiveMatch".to_string(),
                         file_name: self.file_name.clone(),
-                        token_range,
                         line,
                         column,
                         message: format!(
@@ -5651,8 +5650,10 @@ impl AstCompiler<'_> {
                             enum_name,
                             missing.join(", ")
                         ),
+                        enum_name: Some(enum_name.clone()),
+                        missing_variants: Some(missing.clone()),
                     };
-                    self.compiler.warnings.lock().unwrap().push(warning);
+                    self.diagnostics.push(diagnostic);
                 }
             }
         }

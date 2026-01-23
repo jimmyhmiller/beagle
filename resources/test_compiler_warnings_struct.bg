@@ -12,44 +12,48 @@ fn test_match(c) {
     match c {
         Color.Red => "red",
         Color.Green => "green",
-        // Missing Blue - triggers NonExhaustiveMatch warning
+        // Missing Blue - triggers NonExhaustiveMatch diagnostic
     }
 }
 
 fn main() {
-    let warnings = compiler-warnings()
-    let count = length(warnings)
+    let diags = diagnostics()
+    let count = length(diags)
 
-    println("Warning count:")
+    println("Diagnostic count:")
     println(count)
 
     if count > 0 {
-        let w = get(warnings, 0)
+        let d = get(diags, 0)
+        println("Severity:")
+        println(d.severity)
         println("Kind:")
-        println(w.kind)
+        println(d.kind)
         println("File:")
-        println(w.file-name)
+        println(d.file-name)
         println("Line:")
-        println(w.line)
+        println(d.line)
         println("Column:")
-        println(w.column)
+        println(d.column)
         println("Message:")
-        println(w.message)
+        println(d.message)
 
-        if w.enum-name != null {
+        if d.enum-name != null {
             println("Enum:")
-            println(w.enum-name)
+            println(d.enum-name)
             println("Missing variants count:")
-            println(length(w.missing-variants))
+            println(length(d.missing-variants))
             println("First missing variant:")
-            println(get(w.missing-variants, 0))
+            println(get(d.missing-variants, 0))
         }
     }
 }
 
 // Expect
-// Warning count:
+// Diagnostic count:
 // 1
+// Severity:
+// DiagnosticSeverity.warning
 // Kind:
 // NonExhaustiveMatch
 // File:

@@ -15,13 +15,13 @@ fn test_b(c) {
 }
 
 fn main() {
-    let warnings = compiler-warnings()
-    println("Total warnings from both files:")
-    // println(warnings)
+    let diags = diagnostics()
+    println("Total diagnostics from both files:")
+    // println(diags)
     // TODO: Fix when structs format nested fields properly
     // otherwise I was getting inconsistent order on a persistent vector
     // It might actually be from the backed, wasn't clear
 }
 
 // Expect
-// Total warnings from both files:
+// Total diagnostics from both files:

@@ -9,14 +9,14 @@ fn main() {
     let c = Color.Red
     match c {
         Color.Red => "red",
-        // Missing Green - generates 1 warning
+        // Missing Green - generates 1 diagnostic
     }
 
-    println("Warnings after initial compilation:")
-    let warnings1 = compiler-warnings()
-    println(length(warnings1))
+    println("Diagnostics after initial compilation:")
+    let diags1 = diagnostics()
+    println(length(diags1))
 
-    // Now eval some code that also has a warning
+    // Now eval some code that also has a diagnostic
     eval("
         enum Shape {
             Circle,
@@ -32,17 +32,20 @@ fn main() {
         test()
     ")
 
-    // eval() clears previous warnings, so we should only see the eval warning
-    println("Warnings after eval:")
-    let warnings2 = compiler-warnings()
-    println(length(warnings2))
+    // With the new per-file diagnostic system:
+    // - Main file's diagnostic is still stored
+    // - eval() stores its diagnostic under "repl" file
+    // - diagnostics() returns all diagnostics across all files
+    println("Diagnostics after eval:")
+    let diags2 = diagnostics()
+    println(length(diags2))
 
-    // Verify we only have 1 warning (from eval - the initial warning was cleared)
-    let count = length(warnings2)
-    if count == 1 {
-        println("PASS: Got 1 warning as expected (eval cleared previous warnings)")
+    // We should have 2 diagnostics (1 from main file, 1 from eval)
+    let count = length(diags2)
+    if count == 2 {
+        println("PASS: Got 2 diagnostics as expected (per-file storage)")
     } else {
-        println("FAIL: Expected 1 warning, got:")
+        println("FAIL: Expected 2 diagnostics, got:")
         println(count)
     }
 
@@ -50,8 +53,8 @@ fn main() {
 }
 
 // Expect
-// Warnings after initial compilation:
+// Diagnostics after initial compilation:
 // 1
-// Warnings after eval:
-// 1
-// PASS: Got 1 warning as expected (eval cleared previous warnings)
+// Diagnostics after eval:
+// 2
+// PASS: Got 2 diagnostics as expected (per-file storage)

@@ -198,23 +198,76 @@ impl From<crate::parser::ParseError> for CompileError {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct CompilerWarning {
-    pub kind: WarningKind,
-    pub file_name: String,
-    pub token_range: TokenRange,
-    pub line: usize,   // 1-based line number
-    pub column: usize, // 1-based column number
-    pub message: String,
+// ============================================================================
+// Diagnostic System
+// ============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Error = 0,
+    Warning = 1,
+    Info = 2,
+    Hint = 3,
 }
 
 #[derive(Debug, Clone)]
-pub enum WarningKind {
-    NonExhaustiveMatch {
-        enum_name: String,
-        missing_variants: Vec<String>,
-    },
-    UnreachablePattern,
+pub struct Diagnostic {
+    pub severity: Severity,
+    pub kind: String,
+    pub file_name: String,
+    pub line: usize,
+    pub column: usize,
+    pub message: String,
+    // Optional fields for specific diagnostic kinds
+    pub enum_name: Option<String>,
+    pub missing_variants: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default)]
+pub struct DiagnosticStore {
+    diagnostics: std::collections::HashMap<String, Vec<Diagnostic>>,
+}
+
+impl DiagnosticStore {
+    pub fn new() -> Self {
+        Self {
+            diagnostics: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Replace all diagnostics for a file (called after file compilation)
+    pub fn set_file_diagnostics(&mut self, file: String, diags: Vec<Diagnostic>) {
+        if diags.is_empty() {
+            self.diagnostics.remove(&file);
+        } else {
+            self.diagnostics.insert(file, diags);
+        }
+    }
+
+    /// Get all diagnostics across all files
+    pub fn all(&self) -> impl Iterator<Item = &Diagnostic> {
+        self.diagnostics.values().flatten()
+    }
+
+    /// Get diagnostics for a specific file
+    pub fn for_file(&self, file: &str) -> Option<&Vec<Diagnostic>> {
+        self.diagnostics.get(file)
+    }
+
+    /// Get list of files that have diagnostics
+    pub fn files(&self) -> impl Iterator<Item = &String> {
+        self.diagnostics.keys()
+    }
+
+    /// Clear diagnostics for a specific file
+    pub fn clear_file(&mut self, file: &str) {
+        self.diagnostics.remove(file);
+    }
+
+    /// Clear all diagnostics
+    pub fn clear_all(&mut self) {
+        self.diagnostics.clear();
+    }
 }
 
 /// Metadata about a multi-arity function
@@ -232,7 +285,7 @@ pub struct Compiler {
     pub pause_atom_ptr: Option<usize>,
     pub property_look_up_cache_offset: usize,
     pub compiled_file_cache: HashSet<String>,
-    pub warnings: Arc<Mutex<Vec<CompilerWarning>>>,
+    pub diagnostic_store: Arc<Mutex<DiagnosticStore>>,
     /// Cache for protocol dispatch inline caching
     /// Layout per entry: [type_id (8 bytes), fn_ptr (8 bytes)]
     pub protocol_dispatch_cache: MmapMut,
@@ -267,8 +320,8 @@ impl Compiler {
         self.compiled_file_cache.clear();
         self.multi_arity_functions.clear();
         // If lock is poisoned, we can still clear by ignoring the error
-        if let Ok(mut warnings) = self.warnings.lock() {
-            warnings.clear();
+        if let Ok(mut store) = self.diagnostic_store.lock() {
+            store.clear_all();
         }
         Ok(())
     }
@@ -299,21 +352,23 @@ impl Compiler {
     }
 
     pub fn compile_string(&mut self, string: &str) -> Result<usize, Box<dyn Error>> {
-        // Clear warnings at the start of each eval/REPL compilation
-        // This ensures each eval() shows only its own warnings
-        if let Ok(mut warnings) = self.warnings.lock() {
-            warnings.clear();
-        }
-
+        // For REPL/eval, we use "repl" as the file name for diagnostics.
+        // Each eval replaces the previous "repl" diagnostics.
         let mut parser = Parser::new("".to_string(), string.to_string())?;
         let ast = parser.parse()?;
         let token_line_column_map = parser.get_token_line_column_map();
-        let top_level = self.compile_ast(
+        let (top_level, diagnostics) = self.compile_ast(
             ast,
             Some("REPL_FUNCTION".to_string()),
             "repl",
             token_line_column_map,
         )?;
+
+        // Store diagnostics for "repl" (replaces previous REPL diagnostics)
+        if let Ok(mut store) = self.diagnostic_store.lock() {
+            store.set_file_diagnostics("repl".to_string(), diagnostics);
+        }
+
         self.code_allocator.make_executable();
         if let Some(top_level) = top_level {
             let function = self.get_function_by_name(&top_level).ok_or_else(|| {
@@ -353,15 +408,8 @@ impl Compiler {
             return Ok(vec![]);
         }
 
-        // Clear warnings only at the start of a new compilation session
-        // (when no files have been compiled yet). This ensures:
-        // 1. Sequential compilations (e.g., multiple eval() calls) start fresh
-        // 2. Warnings from dependencies within a single compilation accumulate
-        if self.compiled_file_cache.is_empty()
-            && let Ok(mut warnings) = self.warnings.lock()
-        {
-            warnings.clear();
-        }
+        // Note: We no longer clear diagnostics here. The new diagnostic system
+        // stores diagnostics per-file and replaces them when a file is recompiled.
         if self.command_line_arguments.verbose {
             println!("Compiling {:?}", file_name);
         }
@@ -386,9 +434,14 @@ impl Compiler {
 
         let mut top_levels_to_run = self.compile_dependencies(&ast, file_name)?;
 
-        let top_level = self.compile_ast(ast, None, file_name, token_line_column_map)?;
+        let (top_level, diagnostics) = self.compile_ast(ast, None, file_name, token_line_column_map)?;
         if let Some(top_level) = top_level {
             top_levels_to_run.push(top_level);
+        }
+
+        // Store diagnostics for this file (replaces any existing diagnostics for this file)
+        if let Ok(mut store) = self.diagnostic_store.lock() {
+            store.set_file_diagnostics(canonical_str.clone(), diagnostics);
         }
 
         if self.command_line_arguments.verbose {
@@ -423,8 +476,8 @@ impl Compiler {
         fn_name: Option<String>,
         file_name: &str,
         token_line_column_map: Vec<(usize, usize)>,
-    ) -> Result<Option<String>, Box<dyn Error>> {
-        let (mut ir, token_map) = ast.compile(self, file_name, token_line_column_map)?;
+    ) -> Result<(Option<String>, Vec<Diagnostic>), Box<dyn Error>> {
+        let (mut ir, token_map, diagnostics) = ast.compile(self, file_name, token_line_column_map)?;
         let top_level_name =
             fn_name.unwrap_or_else(|| format!("{}/__top_level", self.current_namespace_name()));
         if ast.has_top_level() {
@@ -479,9 +532,9 @@ impl Compiler {
                 });
             }
 
-            return Ok(Some(top_level_name));
+            return Ok((Some(top_level_name), diagnostics));
         }
-        Ok(None)
+        Ok((None, diagnostics))
     }
 
     pub fn add_string(&mut self, string_value: StringValue) -> Value {
@@ -1073,7 +1126,8 @@ impl Compiler {
             }],
             token_range: TokenRange::new(0, 0),
         };
-        self.compile_ast(ast, None, "test", vec![])?;
+        // Ignore diagnostics from reify method compilation - these are internal
+        let _ = self.compile_ast(ast, None, "test", vec![])?;
         self.code_allocator.make_executable();
         self.set_current_namespace(current_namespace_id);
         Ok(())
@@ -1114,7 +1168,7 @@ impl CompilerThread {
     pub fn new(
         channel: BlockingReceiver<CompilerMessage, CompilerResponse>,
         command_line_arguments: CommandLineArguments,
-        warnings: Arc<Mutex<Vec<CompilerWarning>>>,
+        diagnostic_store: Arc<Mutex<DiagnosticStore>>,
     ) -> Result<Self, CompileError> {
         Ok(CompilerThread {
             compiler: Compiler {
@@ -1145,7 +1199,7 @@ impl CompilerThread {
                 stack_map: StackMap::new(),
                 pause_atom_ptr: None,
                 compiled_file_cache: HashSet::new(),
-                warnings,
+                diagnostic_store,
                 multi_arity_functions: HashMap::new(),
             },
             channel,

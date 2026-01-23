@@ -1407,7 +1407,7 @@ pub struct Runtime {
     pub string_constants: Vec<StringValue>,
     pub keyword_constants: Vec<StringValue>,
     pub keyword_heap_ptrs: Vec<Option<usize>>,
-    pub compiler_warnings: Arc<Mutex<Vec<crate::compiler::CompilerWarning>>>,
+    pub diagnostic_store: Arc<Mutex<crate::compiler::DiagnosticStore>>,
     // TODO: Do I need anything more than
     // namespace manager? Shouldn't these functions
     // and things be under that?
@@ -1550,7 +1550,7 @@ impl Runtime {
             compiler_thread: None,
             protocol_info: HashMap::new(),
             dispatch_tables: HashMap::new(),
-            compiler_warnings: Arc::new(Mutex::new(Vec::new())),
+            diagnostic_store: Arc::new(Mutex::new(crate::compiler::DiagnosticStore::new())),
             stacks_for_continuation_swapping: vec![ContinuationStack {
                 is_used: AtomicBool::new(false),
                 stack: [0; 512],
@@ -1655,11 +1655,11 @@ impl Runtime {
         if self.compiler_channel.is_none() {
             let (sender, receiver) = blocking_channel();
             let args_clone = self.command_line_arguments.clone();
-            let warnings_clone = Arc::clone(&self.compiler_warnings);
+            let diagnostic_store_clone = Arc::clone(&self.diagnostic_store);
             let compiler_thread = thread::Builder::new()
                 .name("Beagle Compiler".to_string())
                 .spawn(move || {
-                    CompilerThread::new(receiver, args_clone, warnings_clone)
+                    CompilerThread::new(receiver, args_clone, diagnostic_store_clone)
                         .expect("Failed to create compiler thread - this is a fatal error")
                         .run();
                 })

@@ -1,7 +1,7 @@
 namespace test_kebab_case
 
 fn main() {
-    let result = compiler-warnings()
+    let result = diagnostics()
     println(result)
     "done"
 }

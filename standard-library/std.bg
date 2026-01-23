@@ -560,15 +560,25 @@ enum SystemError {
     MutabilityError { message, location }
 }
 
-// Compiler warning information for programmatic inspection
-struct CompilerWarning {
-    kind             // String: warning type identifier
+// Diagnostic severity levels
+enum DiagnosticSeverity {
+    error,
+    warning,
+    info,
+    hint,
+}
+
+// Diagnostic information for programmatic inspection
+// Returned by (diagnostics), (diagnostics-for-file path), etc.
+struct Diagnostic {
+    severity         // DiagnosticSeverity enum variant
+    kind             // String: diagnostic type identifier (e.g., "NonExhaustiveMatch")
     file-name        // String: source file path
     line             // Int: 1-based line number
     column           // Int: 1-based column number
     message          // String: human-readable description
-    enum-name        // String or null: for NonExhaustiveMatch warnings
-    missing-variants // PersistentVector or null: for NonExhaustiveMatch warnings
+    enum-name        // String or null: for NonExhaustiveMatch diagnostics
+    missing-variants // [String] or null: for NonExhaustiveMatch diagnostics
 }
 
 // Range type for iteration

@@ -4,7 +4,7 @@ import "beagle.primitive" as primitive
 import "beagle.core" as core
 
 fn main() {
-    // Trigger a warning by evaling code with non-exhaustive match
+    // Trigger a diagnostic by evaling code with non-exhaustive match
     eval("
         enum MyEnum {
             Variant1,
@@ -22,13 +22,13 @@ fn main() {
         test_match(MyEnum.Variant1)
     ")
 
-    let warnings = core/compiler-warnings()
-    println("Number of warnings:")
-    println(core/length(warnings))
+    let diags = core/diagnostics()
+    println("Number of diagnostics:")
+    println(core/length(diags))
 
-    if core/length(warnings) > 0 {
-        let first = core/get(warnings, 0)
-        println("Got first warning object")
+    if core/length(diags) > 0 {
+        let first = core/get(diags, 0)
+        println("Got first diagnostic object")
         println("Type check - is heap object?:")
         println(primitive/is_object(first))
 
