@@ -147,6 +147,10 @@ fn compile_trampoline(runtime: &mut Runtime) {
             lang.instructions.push(X86Asm::Push { reg: R14 });
             lang.instructions.push(X86Asm::Push { reg: R15 });
 
+            // Save the Rust stack pointer on the Rust stack so Beagle stack usage can't clobber it.
+            lang.mov_reg(R10, RSP);
+            lang.instructions.push(X86Asm::Push { reg: R10 }); // saved_rust_rsp at [RBP-48]
+
             lang.mov_reg(R10, RSP);
             lang.mov_reg(RSP, RDI);
             // Skip the GlobalObjectBlock slot at stack_base - 8
@@ -164,8 +168,11 @@ fn compile_trampoline(runtime: &mut Runtime) {
 
             // Pop old RSP (from stack_base - 16), RSP becomes stack_base - 8
             // GlobalBlock slot at stack_base - 8 is preserved
-            lang.instructions.push(X86Asm::Pop { reg: R10 });
-            lang.mov_reg(RSP, R10);
+            lang.instructions.push(X86Asm::MovRM {
+                dest: RSP,
+                base: RBP,
+                offset: -48,
+            });
 
             lang.instructions.push(X86Asm::Pop { reg: R15 });
             lang.instructions.push(X86Asm::Pop { reg: R14 });
