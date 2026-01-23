@@ -6835,13 +6835,37 @@ impl Runtime {
             3,
         )?;
 
-        // compiler_warnings now takes (stack_pointer, frame_pointer)
+        // Diagnostic system builtins
         self.add_builtin_function_with_fp(
-            "beagle.core/compiler-warnings",
-            compiler_warnings as *const u8,
+            "beagle.core/diagnostics",
+            diagnostics as *const u8,
             true,
             true,
-            2,
+            2, // stack_pointer, frame_pointer
+        )?;
+
+        self.add_builtin_function_with_fp(
+            "beagle.core/diagnostics-for-file",
+            diagnostics_for_file as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, file_path
+        )?;
+
+        self.add_builtin_function_with_fp(
+            "beagle.core/files-with-diagnostics",
+            files_with_diagnostics as *const u8,
+            true,
+            true,
+            2, // stack_pointer, frame_pointer
+        )?;
+
+        self.add_builtin_function_with_fp(
+            "beagle.core/clear-diagnostics",
+            clear_diagnostics as *const u8,
+            true,
+            true,
+            2, // stack_pointer, frame_pointer
         )?;
 
         self.install_rust_collection_builtins()?;
@@ -7151,19 +7175,19 @@ unsafe fn allocate_struct(
     Ok(obj_ptr)
 }
 
-/// Converts a CompilerWarning to a Beagle struct.
+/// Converts a Diagnostic to a Beagle struct.
 /// Wrapper that ensures temporary roots are always cleaned up.
-unsafe fn warning_to_struct(
+unsafe fn diagnostic_to_struct(
     runtime: &mut Runtime,
     stack_pointer: usize,
-    warning: &crate::compiler::CompilerWarning,
+    diagnostic: &crate::compiler::Diagnostic,
 ) -> Result<usize, String> {
     let mut temp_roots: Vec<usize> = Vec::new();
 
     // Do all the work that might fail
-    // SAFETY: warning_to_struct_impl is unsafe for the same reasons as this function
+    // SAFETY: diagnostic_to_struct_impl is unsafe for the same reasons as this function
     let result =
-        unsafe { warning_to_struct_impl(runtime, stack_pointer, warning, &mut temp_roots) };
+        unsafe { diagnostic_to_struct_impl(runtime, stack_pointer, diagnostic, &mut temp_roots) };
 
     // Always clean up temporary roots, whether success or failure
     for root_id in temp_roots {
@@ -7175,17 +7199,13 @@ unsafe fn warning_to_struct(
 
 /// Inner implementation that does the actual work.
 /// Any early return via ? will be caught by the wrapper which cleans up temp_roots.
-unsafe fn warning_to_struct_impl(
+unsafe fn diagnostic_to_struct_impl(
     runtime: &mut Runtime,
     stack_pointer: usize,
-    warning: &crate::compiler::CompilerWarning,
+    diagnostic: &crate::compiler::Diagnostic,
     temp_roots: &mut Vec<usize>,
 ) -> Result<usize, String> {
     use crate::collections::{GcHandle, PersistentVec};
-
-    // Use line and column directly from the warning struct
-    let line = warning.line;
-    let column = warning.column;
 
     // Helper macro to allocate, register as temp root, and return the root INDEX
     // We store root IDs and retrieve updated values before use (GC safety)
@@ -7198,14 +7218,23 @@ unsafe fn warning_to_struct_impl(
         }};
     }
 
-    // Create kind string based on warning type
-    let kind_str = match &warning.kind {
-        crate::compiler::WarningKind::NonExhaustiveMatch { .. } => "NonExhaustiveMatch",
-        crate::compiler::WarningKind::UnreachablePattern => "UnreachablePattern",
+    // Create severity as a DiagnosticSeverity enum variant
+    // Each variant is a zero-field struct named "beagle.core/DiagnosticSeverity.<variant>"
+    let severity_variant_name = match diagnostic.severity {
+        crate::compiler::Severity::Error => "beagle.core/DiagnosticSeverity.error",
+        crate::compiler::Severity::Warning => "beagle.core/DiagnosticSeverity.warning",
+        crate::compiler::Severity::Info => "beagle.core/DiagnosticSeverity.info",
+        crate::compiler::Severity::Hint => "beagle.core/DiagnosticSeverity.hint",
     };
+    let severity_root_idx = alloc_and_root!(
+        unsafe { allocate_struct(runtime, stack_pointer, severity_variant_name, &[]) }
+            .map_err(|e| format!("Failed to create severity enum variant: {}", e))?
+    );
+
+    // Create kind string
     let kind_root_idx = alloc_and_root!(
         runtime
-            .allocate_string(stack_pointer, kind_str.to_string())
+            .allocate_string(stack_pointer, diagnostic.kind.clone())
             .map_err(|e| format!("Failed to create kind string: {}", e))?
             .into()
     );
@@ -7213,7 +7242,7 @@ unsafe fn warning_to_struct_impl(
     // Create file_name string
     let file_name_root_idx = alloc_and_root!(
         runtime
-            .allocate_string(stack_pointer, warning.file_name.clone())
+            .allocate_string(stack_pointer, diagnostic.file_name.clone())
             .map_err(|e| format!("Failed to create file_name string: {}", e))?
             .into()
     );
@@ -7221,80 +7250,70 @@ unsafe fn warning_to_struct_impl(
     // Create message string
     let message_root_idx = alloc_and_root!(
         runtime
-            .allocate_string(stack_pointer, warning.message.clone())
+            .allocate_string(stack_pointer, diagnostic.message.clone())
             .map_err(|e| format!("Failed to create message string: {}", e))?
             .into()
     );
 
     // Create line and column as tagged ints (no allocation, no rooting needed)
-    let line_tagged = BuiltInTypes::Int.tag(line as isize) as usize;
-    let column_tagged = BuiltInTypes::Int.tag(column as isize) as usize;
+    let line_tagged = BuiltInTypes::Int.tag(diagnostic.line as isize) as usize;
+    let column_tagged = BuiltInTypes::Int.tag(diagnostic.column as isize) as usize;
 
-    // Handle optional fields based on warning kind
-    let (enum_name_root_idx, missing_variants_root_idx) = match &warning.kind {
-        crate::compiler::WarningKind::NonExhaustiveMatch {
-            enum_name,
-            missing_variants,
-        } => {
-            // Create enum_name string
-            let enum_name_root_idx = alloc_and_root!(
-                runtime
-                    .allocate_string(stack_pointer, enum_name.clone())
-                    .map_err(|e| format!("Failed to create enum_name string: {}", e))?
-                    .into()
-            );
-
-            // Build persistent vector of variant strings using Rust API directly
-            let vec_handle = PersistentVec::empty(runtime, stack_pointer)
-                .map_err(|e| format!("Failed to create empty vector: {}", e))?;
-            let mut vec = vec_handle.as_tagged();
-            let mut vec_root_id = runtime.register_temporary_root(vec);
-            // Track vec_root_id immediately so it gets cleaned up on early return
-            temp_roots.push(vec_root_id);
-            let vec_root_index = temp_roots.len() - 1;
-
-            for variant in missing_variants {
-                let variant_str: usize = runtime
-                    .allocate_string(stack_pointer, variant.clone())
-                    .map_err(|e| format!("Failed to create variant string: {}", e))?
-                    .into();
-                let variant_root_id = runtime.register_temporary_root(variant_str);
-                // Get updated vec from root before calling push (GC may have moved it)
-                vec = runtime.peek_temporary_root(vec_root_id);
-                let vec_handle = GcHandle::from_tagged(vec);
-                vec = PersistentVec::push(runtime, stack_pointer, vec_handle, variant_str)
-                    .map_err(|e| format!("Failed to push variant: {}", e))?
-                    .as_tagged();
-                runtime.unregister_temporary_root(variant_root_id);
-                // Update vec root to point to new vec
-                runtime.unregister_temporary_root(vec_root_id);
-                vec_root_id = runtime.register_temporary_root(vec);
-                // Update the tracked root ID so cleanup uses the current one
-                temp_roots[vec_root_index] = vec_root_id;
-            }
-
-            (Some(enum_name_root_idx), Some(vec_root_index))
-        }
-        crate::compiler::WarningKind::UnreachablePattern => {
-            // Use null for both optional fields (no roots needed)
-            (None, None)
-        }
+    // Handle optional enum_name field
+    let enum_name_root_idx = if let Some(ref enum_name) = diagnostic.enum_name {
+        Some(alloc_and_root!(
+            runtime
+                .allocate_string(stack_pointer, enum_name.clone())
+                .map_err(|e| format!("Failed to create enum_name string: {}", e))?
+                .into()
+        ))
+    } else {
+        None
     };
 
-    // Create line and column as tagged ints (no allocation needed)
-    // These are safe since they don't require heap allocation
+    // Handle optional missing_variants field
+    let missing_variants_root_idx = if let Some(ref missing_variants) = diagnostic.missing_variants {
+        // Build persistent vector of variant strings
+        let vec_handle = PersistentVec::empty(runtime, stack_pointer)
+            .map_err(|e| format!("Failed to create empty vector: {}", e))?;
+        let mut vec = vec_handle.as_tagged();
+        let mut vec_root_id = runtime.register_temporary_root(vec);
+        temp_roots.push(vec_root_id);
+        let vec_root_index = temp_roots.len() - 1;
+
+        for variant in missing_variants {
+            let variant_str: usize = runtime
+                .allocate_string(stack_pointer, variant.clone())
+                .map_err(|e| format!("Failed to create variant string: {}", e))?
+                .into();
+            let variant_root_id = runtime.register_temporary_root(variant_str);
+            vec = runtime.peek_temporary_root(vec_root_id);
+            let vec_handle = GcHandle::from_tagged(vec);
+            vec = PersistentVec::push(runtime, stack_pointer, vec_handle, variant_str)
+                .map_err(|e| format!("Failed to push variant: {}", e))?
+                .as_tagged();
+            runtime.unregister_temporary_root(variant_root_id);
+            runtime.unregister_temporary_root(vec_root_id);
+            vec_root_id = runtime.register_temporary_root(vec);
+            temp_roots[vec_root_index] = vec_root_id;
+        }
+
+        Some(vec_root_index)
+    } else {
+        None
+    };
 
     // Allocate the struct FIRST (this can trigger GC)
     // Then peek all root values AFTER allocation
     let struct_ptr = {
         // Look up struct definition
         let (struct_id, struct_def) = runtime
-            .get_struct("beagle.core/CompilerWarning")
-            .ok_or_else(|| "Struct beagle.core/CompilerWarning not found".to_string())?;
+            .get_struct("beagle.core/Diagnostic")
+            .ok_or_else(|| "Struct beagle.core/Diagnostic not found".to_string())?;
 
-        if struct_def.fields.len() != 7 {
+        if struct_def.fields.len() != 8 {
             return Err(format!(
-                "Expected 7 fields for CompilerWarning, got {}",
+                "Expected 8 fields for Diagnostic, got {}",
                 struct_def.fields.len()
             ));
         }
@@ -7303,7 +7322,7 @@ unsafe fn warning_to_struct_impl(
 
         // Allocate the struct - this can trigger GC!
         let obj_ptr = runtime
-            .allocate(7, stack_pointer, BuiltInTypes::HeapObject)
+            .allocate(8, stack_pointer, BuiltInTypes::HeapObject)
             .map_err(|e| format!("Allocation failed: {}", e))?;
 
         // Write struct_id to header
@@ -7322,7 +7341,7 @@ unsafe fn warning_to_struct_impl(
     };
 
     // NOW peek all values from roots - AFTER allocation/GC
-    // This is critical for GC correctness - we must get updated addresses
+    let severity_tagged = runtime.peek_temporary_root(temp_roots[severity_root_idx]);
     let kind_tagged = runtime.peek_temporary_root(temp_roots[kind_root_idx]);
     let file_name_tagged = runtime.peek_temporary_root(temp_roots[file_name_root_idx]);
     let message_tagged = runtime.peek_temporary_root(temp_roots[message_root_idx]);
@@ -7334,35 +7353,38 @@ unsafe fn warning_to_struct_impl(
         .unwrap_or(BuiltInTypes::null_value() as usize);
 
     // Write all fields to the struct
+    // Fields: severity, kind, file-name, line, column, message, enum-name, missing-variants
     let heap_obj = HeapObject::from_tagged(struct_ptr);
-    heap_obj.write_field(0, kind_tagged);
-    heap_obj.write_field(1, file_name_tagged);
-    heap_obj.write_field(2, line_tagged);
-    heap_obj.write_field(3, column_tagged);
-    heap_obj.write_field(4, message_tagged);
-    heap_obj.write_field(5, enum_name_tagged);
-    heap_obj.write_field(6, missing_variants_tagged);
+    heap_obj.write_field(0, severity_tagged);
+    heap_obj.write_field(1, kind_tagged);
+    heap_obj.write_field(2, file_name_tagged);
+    heap_obj.write_field(3, line_tagged);
+    heap_obj.write_field(4, column_tagged);
+    heap_obj.write_field(5, message_tagged);
+    heap_obj.write_field(6, enum_name_tagged);
+    heap_obj.write_field(7, missing_variants_tagged);
 
     Ok(struct_ptr)
 }
 
-pub unsafe extern "C" fn compiler_warnings(stack_pointer: usize, frame_pointer: usize) -> usize {
+/// Returns all diagnostics across all files as a PersistentVec of Diagnostic structs
+pub unsafe extern "C" fn diagnostics(stack_pointer: usize, frame_pointer: usize) -> usize {
     use crate::collections::{GcHandle, PersistentVec};
 
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
 
-    // Clone warnings to avoid holding the lock while processing
-    let warnings = {
-        let warnings_guard = runtime.compiler_warnings.lock().unwrap();
-        warnings_guard.clone()
+    // Clone diagnostics to avoid holding the lock while processing
+    let all_diagnostics: Vec<crate::compiler::Diagnostic> = {
+        let store_guard = runtime.diagnostic_store.lock().unwrap();
+        store_guard.all().cloned().collect()
     };
 
     // Start with empty persistent vector using Rust API directly
     let vec_handle = match PersistentVec::empty(runtime, stack_pointer) {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("compiler_warnings: Failed to create empty vector: {}", e);
+            eprintln!("diagnostics: Failed to create empty vector: {}", e);
             return BuiltInTypes::null_value() as usize;
         }
     };
@@ -7371,47 +7393,194 @@ pub unsafe extern "C" fn compiler_warnings(stack_pointer: usize, frame_pointer: 
     // Register vec as a temporary root to protect it from GC during the loop
     let mut vec_root_id = runtime.register_temporary_root(vec);
 
-    // Convert each warning to struct and add to persistent vector
-    for warning in warnings.iter() {
-        match unsafe { warning_to_struct(runtime, stack_pointer, warning) } {
-            Ok(warning_struct) => {
-                let warning_root_id = runtime.register_temporary_root(warning_struct);
-                // Get updated values from roots before calling push (GC may have moved them)
+    // Convert each diagnostic to struct and add to persistent vector
+    for diagnostic in all_diagnostics.iter() {
+        match unsafe { diagnostic_to_struct(runtime, stack_pointer, diagnostic) } {
+            Ok(diagnostic_struct) => {
+                let diagnostic_root_id = runtime.register_temporary_root(diagnostic_struct);
                 let vec_updated = runtime.peek_temporary_root(vec_root_id);
-                let warning_struct_updated = runtime.peek_temporary_root(warning_root_id);
+                let diagnostic_struct_updated = runtime.peek_temporary_root(diagnostic_root_id);
 
-                // Use Rust API directly for push
                 let vec_handle = GcHandle::from_tagged(vec_updated);
                 match PersistentVec::push(
                     runtime,
                     stack_pointer,
                     vec_handle,
-                    warning_struct_updated,
+                    diagnostic_struct_updated,
                 ) {
                     Ok(new_vec) => {
                         vec = new_vec.as_tagged();
                     }
                     Err(e) => {
-                        eprintln!("compiler_warnings: Failed to push warning: {}", e);
+                        eprintln!("diagnostics: Failed to push diagnostic: {}", e);
                     }
                 }
 
-                runtime.unregister_temporary_root(warning_root_id);
-                // Update the root to point to the new vec
+                runtime.unregister_temporary_root(diagnostic_root_id);
                 runtime.unregister_temporary_root(vec_root_id);
                 vec_root_id = runtime.register_temporary_root(vec);
             }
             Err(e) => {
-                // Log error but continue processing other warnings
-                eprintln!("Warning: Failed to convert compiler warning: {}", e);
+                eprintln!("Warning: Failed to convert diagnostic: {}", e);
             }
         }
     }
 
-    // Unregister final vec root before returning
     runtime.unregister_temporary_root(vec_root_id);
-
     vec
+}
+
+/// Returns diagnostics for a specific file as a PersistentVec of Diagnostic structs
+pub unsafe extern "C" fn diagnostics_for_file(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    file_path: usize,
+) -> usize {
+    use crate::collections::{GcHandle, PersistentVec};
+
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+
+    // Get file path string
+    let file_path_str = {
+        let tag = BuiltInTypes::get_kind(file_path);
+        if tag != BuiltInTypes::HeapObject {
+            eprintln!("diagnostics_for_file: Invalid file path argument (not a heap object)");
+            return BuiltInTypes::null_value() as usize;
+        }
+        let heap_object = HeapObject::from_tagged(file_path);
+        if heap_object.get_type_id() != 2 {
+            eprintln!("diagnostics_for_file: Invalid file path argument (not a string)");
+            return BuiltInTypes::null_value() as usize;
+        }
+        let bytes = heap_object.get_string_bytes();
+        unsafe { std::str::from_utf8_unchecked(bytes).to_string() }
+    };
+
+    // Clone diagnostics for the specific file
+    let file_diagnostics: Vec<crate::compiler::Diagnostic> = {
+        let store_guard = runtime.diagnostic_store.lock().unwrap();
+        store_guard
+            .for_file(&file_path_str)
+            .map(|v| v.clone())
+            .unwrap_or_default()
+    };
+
+    // Build the result vector
+    let vec_handle = match PersistentVec::empty(runtime, stack_pointer) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("diagnostics_for_file: Failed to create empty vector: {}", e);
+            return BuiltInTypes::null_value() as usize;
+        }
+    };
+    let mut vec = vec_handle.as_tagged();
+    let mut vec_root_id = runtime.register_temporary_root(vec);
+
+    for diagnostic in file_diagnostics.iter() {
+        match unsafe { diagnostic_to_struct(runtime, stack_pointer, diagnostic) } {
+            Ok(diagnostic_struct) => {
+                let diagnostic_root_id = runtime.register_temporary_root(diagnostic_struct);
+                let vec_updated = runtime.peek_temporary_root(vec_root_id);
+                let diagnostic_struct_updated = runtime.peek_temporary_root(diagnostic_root_id);
+
+                let vec_handle = GcHandle::from_tagged(vec_updated);
+                match PersistentVec::push(
+                    runtime,
+                    stack_pointer,
+                    vec_handle,
+                    diagnostic_struct_updated,
+                ) {
+                    Ok(new_vec) => {
+                        vec = new_vec.as_tagged();
+                    }
+                    Err(e) => {
+                        eprintln!("diagnostics_for_file: Failed to push diagnostic: {}", e);
+                    }
+                }
+
+                runtime.unregister_temporary_root(diagnostic_root_id);
+                runtime.unregister_temporary_root(vec_root_id);
+                vec_root_id = runtime.register_temporary_root(vec);
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to convert diagnostic: {}", e);
+            }
+        }
+    }
+
+    runtime.unregister_temporary_root(vec_root_id);
+    vec
+}
+
+/// Returns a list of file paths that have diagnostics
+pub unsafe extern "C" fn files_with_diagnostics(
+    stack_pointer: usize,
+    frame_pointer: usize,
+) -> usize {
+    use crate::collections::{GcHandle, PersistentVec};
+
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+
+    // Get list of files
+    let files: Vec<String> = {
+        let store_guard = runtime.diagnostic_store.lock().unwrap();
+        store_guard.files().cloned().collect()
+    };
+
+    // Build the result vector
+    let vec_handle = match PersistentVec::empty(runtime, stack_pointer) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("files_with_diagnostics: Failed to create empty vector: {}", e);
+            return BuiltInTypes::null_value() as usize;
+        }
+    };
+    let mut vec = vec_handle.as_tagged();
+    let mut vec_root_id = runtime.register_temporary_root(vec);
+
+    for file in files.iter() {
+        let file_str: usize = match runtime.allocate_string(stack_pointer, file.clone()) {
+            Ok(s) => s.into(),
+            Err(e) => {
+                eprintln!("files_with_diagnostics: Failed to allocate string: {}", e);
+                continue;
+            }
+        };
+        let file_root_id = runtime.register_temporary_root(file_str);
+        let vec_updated = runtime.peek_temporary_root(vec_root_id);
+        let file_str_updated = runtime.peek_temporary_root(file_root_id);
+
+        let vec_handle = GcHandle::from_tagged(vec_updated);
+        match PersistentVec::push(runtime, stack_pointer, vec_handle, file_str_updated) {
+            Ok(new_vec) => {
+                vec = new_vec.as_tagged();
+            }
+            Err(e) => {
+                eprintln!("files_with_diagnostics: Failed to push file: {}", e);
+            }
+        }
+
+        runtime.unregister_temporary_root(file_root_id);
+        runtime.unregister_temporary_root(vec_root_id);
+        vec_root_id = runtime.register_temporary_root(vec);
+    }
+
+    runtime.unregister_temporary_root(vec_root_id);
+    vec
+}
+
+/// Clears all diagnostics
+pub unsafe extern "C" fn clear_diagnostics(stack_pointer: usize, frame_pointer: usize) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+
+    if let Ok(mut store) = runtime.diagnostic_store.lock() {
+        store.clear_all();
+    }
+
+    BuiltInTypes::null_value() as usize
 }
 
 // ============================================================================

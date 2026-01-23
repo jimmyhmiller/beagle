@@ -15,16 +15,16 @@ fn main() {
         Color.green => "GREEN",
     }
 
-    // Call compiler-warnings to get the warnings as a persistent vector
-    let warnings = compiler-warnings()
-    println("Warning count:")
-    println(warnings)
+    // Call diagnostics to get all diagnostics as a persistent vector
+    let diags = diagnostics()
+    println("Diagnostic count:")
+    println(diags)
 
     println(result)
     "done"
 }
 
 // Expect
-// Warning count:
-// [CompilerWarning { kind: "NonExhaustiveMatch", file-name: "resources/test_compiler_warnings.bg", line: 13, column: 23, message: "Non-exhaustive match on enum 'Color'. Missing variants: blue", enum-name: "Color", missing-variants: ["blue"] }]
+// Diagnostic count:
+// [Diagnostic { severity: DiagnosticSeverity.warning, kind: "NonExhaustiveMatch", file-name: "resources/test_compiler_warnings.bg", line: 13, column: 23, message: "Non-exhaustive match on enum 'Color'. Missing variants: blue", enum-name: "Color", missing-variants: ["blue"] }]
 // RED

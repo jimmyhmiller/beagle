@@ -1,21 +1,20 @@
 namespace match_compiler_warnings_struct_test
 
 fn main() {
-    // Get compiler warnings - tests if struct ID is properly written
-    let warnings = compiler-warnings()
+    // Get diagnostics - tests if struct ID is properly written
+    let diags = diagnostics()
 
-    println("Got warnings struct")
+    println("Got diagnostics")
 
-    // Test 1: Can we access properties on the returned struct?
-    // If struct ID is corrupted, this will fail or panic
-    let count = warnings.count
-    println("Warning count:")
+    // Test 1: Can we access properties on the returned vector?
+    let count = diags.count
+    println("Diagnostic count:")
     println(count)
 
     "done"
 }
 
 // Expect
-// Got warnings struct
-// Warning count:
+// Got diagnostics
+// Diagnostic count:
 // 0

@@ -3,7 +3,7 @@ namespace test
 import "beagle.core" as core
 
 fn main() {
-    println("CompilerWarning.id:")
-    println(core/CompilerWarning.id)
+    println("Diagnostic.id:")
+    println(core/Diagnostic.id)
     "done"
 }
