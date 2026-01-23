@@ -4762,14 +4762,17 @@ pub unsafe extern "C" fn pop_prompt_runtime(
             .invocation_return_points
             .get(&thread_id)
             .and_then(|rps| rps.last())
-            .map(|rp| (rp.stack_pointer, rp.frame_pointer, rp.return_address, rp.prompt_id));
+            .map(|rp| {
+                (
+                    rp.stack_pointer,
+                    rp.frame_pointer,
+                    rp.return_address,
+                    rp.prompt_id,
+                )
+            });
         eprintln!(
             "[pop_prompt] current_prompt_id={:?} return_points={} top={:?} sp={:#x} fp={:#x}",
-            current_prompt_id,
-            rp_len,
-            top_rp,
-            stack_pointer,
-            frame_pointer
+            current_prompt_id, rp_len, top_rp, stack_pointer, frame_pointer
         );
     }
 
@@ -4924,12 +4927,7 @@ pub unsafe extern "C" fn capture_continuation_runtime(
     if debug_prompts {
         eprintln!(
             "[capture_cont] prompt_id={} stack_size={} prompt_sp={:#x} prompt_fp={:#x} resume={:#x} cont_index={}",
-            prompt.prompt_id,
-            stack_size,
-            prompt_sp,
-            prompt_fp,
-            resume_address,
-            cont_index
+            prompt.prompt_id, stack_size, prompt_sp, prompt_fp, resume_address, cont_index
         );
     }
 
@@ -4958,14 +4956,22 @@ pub unsafe extern "C" fn return_from_shift_runtime(
         .remove(&thread_id)
         .unwrap_or(false);
 
+    // Check if this is a handler return (after `call-handler` in perform).
+    // Handler returns should skip popping InvocationReturnPoints and use captured_continuations.
+    let is_handler_return = runtime
+        .is_handler_return
+        .remove(&thread_id)
+        .unwrap_or(false);
+
     // Check if there's an invocation return point (multi-shot continuation case).
     // If a continuation was invoked via k(value), we should return to where k() was called,
     // not to the original prompt handler.
     //
-    // ALWAYS check for and pop return points when they exist, regardless of from_pop_prompt.
-    // The from_pop_prompt flag only tells us if we're coming from pop_prompt or not,
-    // but we should still clean up return points when resume() returns.
-    if let Some(return_points) = runtime.invocation_return_points.get_mut(&thread_id)
+    // ONLY check for and pop return points when NOT a handler return.
+    // Handler returns should skip this and use the captured_continuation path instead.
+    // This prevents nested handlers from incorrectly consuming outer handler return points.
+    if !is_handler_return
+        && let Some(return_points) = runtime.invocation_return_points.get_mut(&thread_id)
         && let Some(return_point) = return_points.pop()
     {
         if debug_prompts {
@@ -5058,23 +5064,65 @@ pub unsafe extern "C" fn return_from_shift_runtime(
     //
     // Use the LAST (most recent) continuation. This fixes sequential handlers where
     // conts.first() would return a stale continuation from a previous handler.
-    // We don't pop here because cleanup happens in pop_prompt_runtime when prompts are done.
-    let prompt_opt = {
-        let continuations = runtime.captured_continuations.lock().unwrap();
-        continuations
-            .get(&thread_id)
-            .and_then(|conts| conts.last().map(|cont| cont.prompt.clone()))
+    //
+    // When is_handler_return is true (handler returning after call-handler in perform),
+    // we POP the continuation because the handler is done with it.
+    // When is_handler_return is false (other return_from_shift paths),
+    // we DON'T pop to preserve the continuation for potential multi-shot use.
+    //
+    // IMPORTANT: We now extract the full continuation (including stack_segment) not just the prompt,
+    // because we need to restore the stack contents, not just SP/FP pointers.
+    let continuation_opt = {
+        let mut continuations = runtime.captured_continuations.lock().unwrap();
+        if debug_prompts {
+            if let Some(conts) = continuations.get(&thread_id) {
+                eprintln!(
+                    "[return_from_shift] captured_continuations count={} is_handler_return={}",
+                    conts.len(),
+                    is_handler_return
+                );
+                for (i, cont) in conts.iter().enumerate() {
+                    eprintln!(
+                        "[return_from_shift]   cont[{}] prompt_id={} handler={:#x} stack_size={}",
+                        i,
+                        cont.prompt.prompt_id,
+                        cont.prompt.handler_address,
+                        cont.stack_segment.len()
+                    );
+                }
+            }
+        }
+        if is_handler_return {
+            // Handler is done - pop the continuation to clean up
+            continuations
+                .get_mut(&thread_id)
+                .and_then(|conts| conts.pop())
+        } else {
+            // Other paths - clone the whole continuation (multi-shot support)
+            continuations
+                .get(&thread_id)
+                .and_then(|conts| conts.last().cloned())
+        }
     };
 
-    if let Some(prompt) = prompt_opt {
+    if let Some(continuation) = continuation_opt {
+        let prompt = &continuation.prompt;
         if debug_prompts {
             eprintln!(
-                "[return_from_shift] via_prompt from_pop_prompt={} prompt_sp={:#x} prompt_fp={:#x} handler={:#x} prompt_id={}",
+                "[return_from_shift] via_prompt from_pop_prompt={} prompt_sp={:#x} prompt_fp={:#x} handler={:#x} lr={:#x} prompt_id={}",
                 from_pop_prompt,
                 prompt.stack_pointer,
                 prompt.frame_pointer,
                 prompt.handler_address,
+                prompt.link_register,
                 prompt.prompt_id
+            );
+            // Debug: Check what's at the restored FP+8 (should be saved LR)
+            let fp_plus_8 = (prompt.frame_pointer + 8) as *const usize;
+            let saved_lr = unsafe { *fp_plus_8 };
+            eprintln!(
+                "[return_from_shift] via_prompt [FP+8]={:#x} (saved LR at stack)",
+                saved_lr
             );
         }
         // Use the continuation's prompt - this contains the handle block's handler address
@@ -5085,15 +5133,89 @@ pub unsafe extern "C" fn return_from_shift_runtime(
         let new_lr = prompt.link_register;
         let result_local_offset = prompt.result_local;
 
+        // CRITICAL: Restore the stack segment before jumping!
+        // The stack contents at capture time may have been overwritten by subsequent
+        // code execution (function calls, etc.). We must restore the original stack data
+        // for the epilogue to read correct FP/LR values.
+        //
+        // NOTE: We restore to continuation.original_sp (where the data was captured from),
+        // NOT to prompt.stack_pointer (which is the push_prompt SP, above the capture region).
+        let stack_segment = &continuation.stack_segment;
+        let restore_sp = continuation.original_sp;
+        if !stack_segment.is_empty() {
+            if debug_prompts {
+                eprintln!(
+                    "[return_from_shift] Restoring stack segment: {} bytes to original_sp={:#x} (prompt_sp={:#x})",
+                    stack_segment.len(),
+                    restore_sp,
+                    new_sp
+                );
+            }
+            // SAFETY: restore_sp points to valid stack memory that was captured earlier
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    stack_segment.as_ptr(),
+                    restore_sp as *mut u8,
+                    stack_segment.len(),
+                );
+            }
+        }
+
         // Store the value in the result local
         let result_ptr = (new_fp as isize).wrapping_add(result_local_offset) as *mut usize;
         // SAFETY: result_ptr points to a valid stack location
+        if debug_prompts {
+            eprintln!(
+                "[return_from_shift] Writing value={:#x} to result_ptr={:#x}",
+                value, result_ptr as usize
+            );
+        }
         unsafe {
             *result_ptr = value;
         }
 
         // Jump to the prompt handler with restored SP, FP, and LR
         // SAFETY: inline assembly for register/stack manipulation
+        if debug_prompts {
+            eprintln!(
+                "[return_from_shift] via_prompt JUMPING: new_sp={:#x} new_fp={:#x} new_lr={:#x} handler={:#x} result_local_offset={} result_ptr={:#x}",
+                new_sp, new_fp, new_lr, handler_address, result_local_offset, result_ptr as usize
+            );
+            // Check what's at key stack locations
+            let fp_plus_0 = new_fp as *const usize;
+            let fp_plus_8 = (new_fp + 8) as *const usize;
+            let fp_minus_8 = (new_fp - 8) as *const usize;
+            let saved_fp = unsafe { *fp_plus_0 };
+            let saved_lr = unsafe { *fp_plus_8 };
+            eprintln!(
+                "[return_from_shift] Stack check: [FP+0]={:#x} [FP+8]={:#x} [FP-8]={:#x}",
+                saved_fp,
+                saved_lr,
+                unsafe { *fp_minus_8 }
+            );
+            // Check what's at the caller's frame (main's frame)
+            if saved_fp > 0x10000000 && saved_fp < 0x200000000 {
+                let caller_fp_plus_0 = saved_fp as *const usize;
+                let caller_fp_plus_8 = (saved_fp + 8) as *const usize;
+                eprintln!(
+                    "[return_from_shift] Caller frame check: [saved_FP+0]={:#x} [saved_FP+8]={:#x}",
+                    unsafe { *caller_fp_plus_0 },
+                    unsafe { *caller_fp_plus_8 }
+                );
+            }
+            // Check the epilogue stack area - what's at SP + various offsets
+            // The epilogue will do: add sp, sp, frame_size; ldp x29, x30, [sp, #0]
+            // So we need to know what frame_size is to predict where the ldp reads from
+            // For now, check what's at various offsets from SP
+            let sp_plus_0 = new_sp as *const usize;
+            let sp_plus_240 = (new_sp + 240) as *const usize; // common frame size
+            eprintln!(
+                "[return_from_shift] SP stack: [SP+0]={:#x} [SP+240]={:#x} [SP+248]={:#x}",
+                unsafe { *sp_plus_0 },
+                unsafe { *sp_plus_240 },
+                unsafe { *((new_sp + 248) as *const usize) }
+            );
+        }
         cfg_if::cfg_if! {
             if #[cfg(target_arch = "x86_64")] {
                 let _ = new_lr;
@@ -5109,15 +5231,18 @@ pub unsafe extern "C" fn return_from_shift_runtime(
                     );
                 }
             } else {
+                // Note: We don't set LR (x30) here because:
+                // 1. The first `bl` instruction in the handler code will overwrite it
+                // 2. The function epilogue will load LR from the stack anyway
+                // Setting it could cause issues if the value is stale
+                let _ = new_lr;
                 unsafe {
                     asm!(
                         "mov sp, {0}",
                         "mov x29, {1}",
-                        "mov x30, {2}",
-                        "br {3}",
+                        "br {2}",
                         in(reg) new_sp,
                         in(reg) new_fp,
-                        in(reg) new_lr,
                         in(reg) handler_address,
                         options(noreturn)
                     );
@@ -5128,6 +5253,24 @@ pub unsafe extern "C" fn return_from_shift_runtime(
 
     // No continuation found - this shouldn't happen in normal operation.
     panic!("return_from_shift called without captured continuation or return point");
+}
+
+/// Return from shift body to the enclosing reset, specifically for handler returns.
+/// This is called after `call-handler` in perform. It sets the is_handler_return flag
+/// so that return_from_shift_runtime skips popping InvocationReturnPoints.
+/// This prevents nested handlers from incorrectly consuming outer handler return points.
+pub unsafe extern "C" fn return_from_shift_handler_runtime(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> ! {
+    // SAFETY: We are in an unsafe function and caller guarantees valid stack/frame pointers
+    unsafe {
+        let runtime = get_runtime().get_mut();
+        let thread_id = std::thread::current().id();
+        runtime.is_handler_return.insert(thread_id, true);
+        return_from_shift_runtime(stack_pointer, frame_pointer, value)
+    }
 }
 
 /// Invoke a captured continuation with a value.
@@ -5346,12 +5489,7 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
             .unwrap_or(0);
         eprintln!(
             "[invoke_cont] push_return_point prompt_id={} stack_seg={} beagle_sp={:#x} beagle_fp={:#x} ret_addr={:#x} rp_len={}",
-            prompt_id,
-            stack_segment_size,
-            beagle_sp,
-            beagle_fp,
-            beagle_return_address,
-            rp_len
+            prompt_id, stack_segment_size, beagle_sp, beagle_fp, beagle_return_address, rp_len
         );
     }
 
@@ -5974,6 +6112,16 @@ impl Runtime {
         self.add_builtin_function_with_fp(
             "beagle.builtin/return-from-shift",
             return_from_shift_runtime as *const u8,
+            true,
+            true,
+            3,
+        )?;
+
+        // return-from-shift-handler is for handler returns (after call-handler in perform)
+        // It sets is_handler_return flag so return_from_shift skips InvocationReturnPoints
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/return-from-shift-handler",
+            return_from_shift_handler_runtime as *const u8,
             true,
             true,
             3,

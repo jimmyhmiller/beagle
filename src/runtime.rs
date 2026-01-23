@@ -1441,6 +1441,10 @@ pub struct Runtime {
     // When set, return_from_shift should use InvocationReturnPoints.
     // When not set (handler return case), it should use captured_continuations.
     pub return_from_shift_via_pop_prompt: HashMap<ThreadId, bool>,
+    // Per-thread flag indicating return_from_shift is being called from handler return
+    // (after `call-handler` in perform). When set, return_from_shift should skip
+    // popping InvocationReturnPoints and use captured_continuations instead.
+    pub is_handler_return: HashMap<ThreadId, bool>,
     // Counter for generating unique prompt IDs to distinguish sequential handlers
     pub prompt_id_counter: AtomicUsize,
     // Per-thread uncaught exception handlers (Beagle function pointers)
@@ -1573,6 +1577,7 @@ impl Runtime {
             },
             skip_return_from_shift: HashMap::new(),
             return_from_shift_via_pop_prompt: HashMap::new(),
+            is_handler_return: HashMap::new(),
             prompt_id_counter: AtomicUsize::new(1),
             thread_exception_handler_fns: HashMap::new(),
             default_exception_handler_fn: None,
@@ -1638,6 +1643,7 @@ impl Runtime {
         };
         self.skip_return_from_shift.clear();
         self.return_from_shift_via_pop_prompt.clear();
+        self.is_handler_return.clear();
         self.thread_exception_handler_fns.clear();
         self.default_exception_handler_fn = None;
         self.stacks_for_continuation_swapping.clear();

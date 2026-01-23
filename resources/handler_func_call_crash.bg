@@ -1,0 +1,35 @@
+namespace handler_func_call_crash
+
+import "beagle.effect" as effect
+
+enum Logger {
+    Log { message }
+}
+
+struct LogHandler {}
+
+extend LogHandler with effect/Handler(Logger) {
+    fn handle(self, op, resume) {
+        match op {
+            Logger.Log { message } => {
+                println("[Log]", message)
+                resume(null)
+            }
+        }
+    }
+}
+
+fn test_handler() {
+    println("=== In Function ===")
+    let log_h = LogHandler {}
+    let result = handle effect/Handler(Logger) with log_h {
+        perform Logger.Log { message: "Hello" }
+        42
+    }
+    println("Result:", result)
+}
+
+fn main() {
+    test_handler()
+    println("=== Done ===")
+}

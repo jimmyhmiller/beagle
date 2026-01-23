@@ -3526,10 +3526,12 @@ impl AstCompiler<'_> {
                 )?;
 
                 // The handler's result goes to the enclosing reset (handle block)
+                // Use return-from-shift-handler to set the is_handler_return flag,
+                // which prevents nested handlers from incorrectly consuming outer handler return points.
                 let return_to_reset_fn = self
                     .compiler
-                    .find_function("beagle.builtin/return-from-shift")
-                    .expect("return-from-shift builtin not found");
+                    .find_function("beagle.builtin/return-from-shift-handler")
+                    .expect("return-from-shift-handler builtin not found");
                 let return_fn_ptr = usize::from(return_to_reset_fn.pointer);
 
                 let handler_result_reg = self.ir.assign_new(handler_result);

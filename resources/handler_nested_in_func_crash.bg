@@ -1,0 +1,60 @@
+namespace handler_nested_in_func_crash
+
+import "beagle.effect" as effect
+
+enum Logger {
+    Log { message }
+}
+
+struct LogHandler {}
+
+extend LogHandler with effect/Handler(Logger) {
+    fn handle(self, op, resume) {
+        match op {
+            Logger.Log { message } => {
+                println("[Log]", message)
+                resume(null)
+            }
+        }
+    }
+}
+
+enum Math {
+    Add { a, b }
+}
+
+struct MathHandler {}
+
+extend MathHandler with effect/Handler(Math) {
+    fn handle(self, op, resume) {
+        match op {
+            Math.Add { a, b } => {
+                let result = a + b
+                println("  [Math] Add:", a, "+", b, "=", result)
+                resume(result)
+            }
+        }
+    }
+}
+
+fn test_nested() {
+    println("=== In Function ===")
+    let log_h = LogHandler {}
+    let math_h = MathHandler {}
+
+    let result = handle effect/Handler(Logger) with log_h {
+        perform Logger.Log { message: "Start" }
+        let inner = handle effect/Handler(Math) with math_h {
+            perform Logger.Log { message: "Inner" }
+            perform Math.Add { a: 1, b: 2 }
+        }
+        perform Logger.Log { message: "End" }
+        inner
+    }
+    println("Result:", result)
+}
+
+fn main() {
+    test_nested()
+    println("=== Done ===")
+}
