@@ -8,8 +8,7 @@ use crate::types::{BuiltInTypes, Header, HeapObject, Word};
 
 use super::{
     AllocateAction, Allocator, AllocatorOptions, StackMap,
-    continuation_walker::ContinuationSegmentWalker,
-    stack_walker::StackWalker,
+    continuation_walker::ContinuationSegmentWalker, stack_walker::StackWalker,
 };
 
 const DEFAULT_PAGE_COUNT: usize = 1024;

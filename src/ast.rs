@@ -74,14 +74,14 @@ pub enum Ast {
     },
     Protocol {
         name: String,
-        type_params: Vec<String>,  // e.g., ["T"] for Handler(T)
+        type_params: Vec<String>, // e.g., ["T"] for Handler(T)
         body: Vec<Ast>,
         token_range: TokenRange,
     },
     Extend {
         target_type: String,
         protocol: String,
-        protocol_type_args: Vec<String>,  // e.g., ["Async"] for Handler(Async)
+        protocol_type_args: Vec<String>, // e.g., ["Async"] for Handler(Async)
         body: Vec<Ast>,
         token_range: TokenRange,
     },
@@ -333,7 +333,7 @@ pub enum Ast {
     /// Installs a handler for the given protocol+type during body execution
     Handle {
         protocol: String,
-        protocol_type_args: Vec<String>,  // e.g., ["Async"] for Handler(Async)
+        protocol_type_args: Vec<String>, // e.g., ["Async"] for Handler(Async)
         handler_instance: Box<Ast>,
         body: Vec<Ast>,
         token_range: TokenRange,
@@ -4454,29 +4454,37 @@ impl AstCompiler<'_> {
                             }
                             // Enum variant fields are always immutable
                             let mutable_fields = vec![false; field_names.len()];
-                            let variant_struct_name = format!("{}/{}.{}", namespace, enum_name, variant_name);
+                            let variant_struct_name =
+                                format!("{}/{}.{}", namespace, enum_name, variant_name);
                             self.compiler.add_struct(Struct {
                                 name: variant_struct_name.clone(),
                                 fields: field_names,
                                 mutable_fields,
                             });
                             // Register variant-to-enum mapping for effect handlers
-                            if let Some((struct_id, _)) = self.compiler.get_struct(&variant_struct_name) {
-                                self.compiler.register_enum_variant(struct_id, full_enum_name.clone());
+                            if let Some((struct_id, _)) =
+                                self.compiler.get_struct(&variant_struct_name)
+                            {
+                                self.compiler
+                                    .register_enum_variant(struct_id, full_enum_name.clone());
                             }
                         }
                         Ast::EnumStaticVariant {
                             name: variant_name, ..
                         } => {
-                            let variant_struct_name = format!("{}/{}.{}", namespace, enum_name, variant_name);
+                            let variant_struct_name =
+                                format!("{}/{}.{}", namespace, enum_name, variant_name);
                             self.compiler.add_struct(Struct {
                                 name: variant_struct_name.clone(),
                                 fields: vec![],
                                 mutable_fields: vec![],
                             });
                             // Register variant-to-enum mapping for effect handlers
-                            if let Some((struct_id, _)) = self.compiler.get_struct(&variant_struct_name) {
-                                self.compiler.register_enum_variant(struct_id, full_enum_name.clone());
+                            if let Some((struct_id, _)) =
+                                self.compiler.get_struct(&variant_struct_name)
+                            {
+                                self.compiler
+                                    .register_enum_variant(struct_id, full_enum_name.clone());
                             }
                         }
                         _ => {
@@ -4719,7 +4727,10 @@ impl AstCompiler<'_> {
             } => {
                 // For property access assignments (e.g., self.count = value),
                 // we don't need to track mutable variables - just recurse into the object and value
-                if let Ast::PropertyAccess { object, property, .. } = name.as_ref() {
+                if let Ast::PropertyAccess {
+                    object, property, ..
+                } = name.as_ref()
+                {
                     self.find_mutable_vars_that_need_boxing(object);
                     self.find_mutable_vars_that_need_boxing(property);
                 } else {

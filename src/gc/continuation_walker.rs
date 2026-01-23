@@ -43,7 +43,10 @@ impl ContinuationSegmentWalker {
         #[cfg(feature = "debug-continuation-gc")]
         eprintln!(
             "[CONT-GC] Walking segment: sp={:#x}, fp={:#x}, prompt_sp={:#x}, size={}",
-            original_sp, original_fp, prompt_sp, segment.len()
+            original_sp,
+            original_fp,
+            prompt_sp,
+            segment.len()
         );
 
         // Walk the frame pointer chain
@@ -123,7 +126,10 @@ impl ContinuationSegmentWalker {
                 }
             } else {
                 #[cfg(feature = "debug-continuation-gc")]
-                eprintln!("[CONT-GC]   No stack map entry for return_addr {:#x}", return_addr);
+                eprintln!(
+                    "[CONT-GC]   No stack map entry for return_addr {:#x}",
+                    return_addr
+                );
             }
 
             // Validate FP chain
