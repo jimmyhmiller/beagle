@@ -6910,16 +6910,20 @@ impl Runtime {
 
 /// Push a handler onto the thread-local handler stack
 pub extern "C" fn push_handler_builtin(protocol_key_ptr: usize, handler_instance: usize) -> usize {
-    let runtime = get_runtime().get();
-    let protocol_key = runtime.get_string_literal(protocol_key_ptr);
-    crate::runtime::push_handler(protocol_key.to_string(), handler_instance);
+    let protocol_key = {
+        let runtime = get_runtime().get();
+        runtime.get_string_literal(protocol_key_ptr)
+    };
+    crate::runtime::push_handler(protocol_key, handler_instance);
     BuiltInTypes::null_value() as usize
 }
 
 /// Pop a handler from the thread-local handler stack
 pub extern "C" fn pop_handler_builtin(protocol_key_ptr: usize) -> usize {
-    let runtime = get_runtime().get();
-    let protocol_key = runtime.get_string_literal(protocol_key_ptr);
+    let protocol_key = {
+        let runtime = get_runtime().get();
+        runtime.get_string_literal(protocol_key_ptr)
+    };
     crate::runtime::pop_handler(&protocol_key);
     BuiltInTypes::null_value() as usize
 }
@@ -6927,9 +6931,11 @@ pub extern "C" fn pop_handler_builtin(protocol_key_ptr: usize) -> usize {
 /// Find a handler in the thread-local handler stack
 /// Returns the handler instance or null if not found
 pub extern "C" fn find_handler_builtin(stack_pointer: usize, protocol_key_ptr: usize) -> usize {
-    let runtime = get_runtime().get();
     // Use get_string which handles both string literals and heap-allocated strings
-    let protocol_key = runtime.get_string(stack_pointer, protocol_key_ptr);
+    let protocol_key = {
+        let runtime = get_runtime().get();
+        runtime.get_string(stack_pointer, protocol_key_ptr)
+    };
     match crate::runtime::find_handler(&protocol_key) {
         Some(handler) => handler,
         None => BuiltInTypes::null_value() as usize,

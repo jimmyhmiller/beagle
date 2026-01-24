@@ -750,8 +750,9 @@ thread_local! {
 pub struct HandlerEntry {
     /// Protocol key including type args, e.g., "Handler<Async>" or "Handler<Log>"
     pub protocol_key: String,
-    /// Tagged pointer to the handler instance object
-    pub handler_instance: usize,
+    /// Slot in the GlobalObjectBlock that stores the handler pointer.
+    /// GC updates this slot when the handler object moves.
+    pub root_slot: usize,
 }
 
 /// Thread-local handler stack for effect handlers.
@@ -769,10 +770,10 @@ impl HandlerStack {
     }
 
     /// Push a handler onto the stack
-    pub fn push(&mut self, protocol_key: String, handler_instance: usize) {
+    pub fn push(&mut self, protocol_key: String, root_slot: usize) {
         self.entries.push(HandlerEntry {
             protocol_key,
-            handler_instance,
+            root_slot,
         });
     }
 
@@ -810,14 +811,25 @@ thread_local! {
 
 /// Push a handler onto the current thread's handler stack
 pub fn push_handler(protocol_key: String, handler_instance: usize) {
-    HANDLER_STACK.with(|stack| {
-        stack.borrow_mut().push(protocol_key, handler_instance);
-    });
+    // Register the handler as a handle root so GC can update it when moved.
+    // This also keeps the handler alive even though the stack entry lives in Rust memory.
+    let runtime = crate::get_runtime().get_mut();
+    let root_slot = runtime.register_temporary_root(handler_instance);
+    assert!(root_slot != 0, "Failed to register handler as GC root");
+
+    HANDLER_STACK.with(|stack| stack.borrow_mut().push(protocol_key, root_slot));
 }
 
 /// Pop a handler from the current thread's handler stack
-pub fn pop_handler(protocol_key: &str) -> Option<HandlerEntry> {
-    HANDLER_STACK.with(|stack| stack.borrow_mut().pop(protocol_key))
+pub fn pop_handler(protocol_key: &str) -> Option<usize> {
+    let runtime = crate::get_runtime().get_mut();
+    HANDLER_STACK.with(|stack| {
+        stack.borrow_mut().pop(protocol_key).map(|entry| {
+            let value = runtime.get_handle_root(entry.root_slot);
+            runtime.remove_handle_root(entry.root_slot);
+            value
+        })
+    })
 }
 
 /// Find a handler in the current thread's handler stack
@@ -826,14 +838,18 @@ pub fn find_handler(protocol_key: &str) -> Option<usize> {
         stack
             .borrow()
             .find(protocol_key)
-            .map(|e| e.handler_instance)
+            .map(|e| crate::get_runtime().get().get_handle_root(e.root_slot))
     })
 }
 
 /// Clear the handler stack (called on reset)
 pub fn clear_handler_stack() {
+    let runtime = crate::get_runtime().get_mut();
     HANDLER_STACK.with(|stack| {
-        stack.borrow_mut().clear();
+        let mut stack = stack.borrow_mut();
+        for entry in stack.entries.drain(..) {
+            runtime.remove_handle_root(entry.root_slot);
+        }
     });
 }
 
