@@ -5028,12 +5028,12 @@ pub unsafe extern "C" fn return_from_shift_runtime(
         // We must restore the original frame contents so that the shift body can
         // continue to access its local variables (including k for subsequent calls).
         let saved_frame = &return_point.saved_stack_frame;
-        let _frame_src = if !saved_frame.is_empty() {
+        let frame_src = if !saved_frame.is_empty() {
             saved_frame.as_ptr()
         } else {
             std::ptr::null()
         };
-        let _frame_size = saved_frame.len();
+        let frame_size = saved_frame.len();
 
         // Restore callee-saved registers and return to the call site
         // SAFETY: inline assembly for register/stack manipulation
@@ -5574,7 +5574,7 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
             let jump_ptr: extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> ! =
                 unsafe { std::mem::transmute(ptr) };
             jump_ptr(
-                continuation.original_fp,
+                continuation.original_fp(),
                 resume_address,
                 stack_segment_size,  // Non-zero, so will use non-empty path
                 new_sp,
