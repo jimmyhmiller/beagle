@@ -399,7 +399,7 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
             src: RBP,
         }); // frame_pointer
 
-        // Extract continuation index from closure
+        // Extract continuation pointer from closure
         // closure_ptr is tagged, need to untag: untagged = closure_ptr >> 3
         lang.instructions.push(X86Asm::MovRM {
             dest: R12,
@@ -410,18 +410,18 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
             dest: R12,
             imm: BuiltInTypes::tag_size() as u8,
         }); // Untag
-        // cont_index is at offset 32 in the closure
+        // cont_ptr is at offset 32 in the closure
         lang.instructions.push(X86Asm::MovRM {
             dest: RDX,
             base: R12,
             offset: 32,
-        }); // cont_index -> RDX (arg3)
+        }); // cont_ptr -> RDX (arg3)
 
         // Prepare arguments for invoke_continuation_runtime
-        // Args: (stack_pointer, frame_pointer, cont_index, value, saved_regs)
+        // Args: (stack_pointer, frame_pointer, cont_ptr, value, saved_regs)
         // RDI = stack_pointer (R14)
         // RSI = frame_pointer (R15)
-        // RDX = cont_index (already set)
+        // RDX = cont_ptr (already set)
         // RCX = value (from stack)
         // R8 = pointer to saved_regs array (RSP)
         lang.instructions.push(X86Asm::MovRR {
@@ -1203,7 +1203,6 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
         // Force cleanup of all continuation state before main returns
         // This prevents crashes during Runtime drop
-        runtime.captured_continuations.lock().unwrap().clear();
         runtime.invocation_return_points.clear();
         runtime.prompt_handlers.clear();
         runtime.return_from_shift_via_pop_prompt.clear();

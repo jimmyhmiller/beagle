@@ -3239,9 +3239,11 @@ impl AstCompiler<'_> {
                 // Save any existing binding with the continuation param name
                 let saved_binding = self.get_variable(&continuation_param).clone();
 
-                // Allocate local for continuation object with unique name
+                // Allocate locals for continuation closure and raw continuation pointer
                 let unique_cont_name = format!("__cont_{}__", token_range.start);
                 let cont_local = self.find_or_insert_local(&unique_cont_name);
+                let cont_ptr_name = format!("__cont_ptr_{}__", token_range.start);
+                let cont_ptr_local = self.find_or_insert_local(&cont_ptr_name);
 
                 // Get builtin function pointers
                 let capture_fn = self
@@ -3255,10 +3257,13 @@ impl AstCompiler<'_> {
                 let cont_index =
                     self.ir
                         .capture_continuation(after_shift, cont_local, capture_fn_ptr);
+                // Store the continuation pointer for later return_from_shift
+                let cont_ptr_reg = self.ir.assign_new(cont_index);
+                self.ir.store_local(cont_ptr_local, cont_ptr_reg.into());
 
-                // Wrap the continuation index in a closure so it can be called like a function
+                // Wrap the continuation pointer in a closure so it can be called like a function
                 // The closure's function pointer is continuation_trampoline, and it captures
-                // the continuation index
+                // the continuation pointer
 
                 // Get continuation_trampoline function pointer
                 let trampoline_fn = self
@@ -3267,13 +3272,13 @@ impl AstCompiler<'_> {
                     .expect("continuation-trampoline builtin not found");
                 let trampoline_ptr = usize::from(trampoline_fn.pointer);
 
-                // Get the stack position BEFORE pushing (where the cont_index will go)
+                // Get the stack position BEFORE pushing (where the cont_ptr will go)
                 // This matches the pattern in compile_closure
                 let free_var_ptr = self.ir.get_current_stack_position();
 
-                // Push the continuation index onto the stack as a captured variable
-                let cont_index_reg = self.ir.assign_new(cont_index);
-                self.ir.push_to_stack(cont_index_reg.into());
+                // Push the continuation pointer onto the stack as a captured variable
+                let cont_ptr_for_closure = self.ir.load_local(cont_ptr_local);
+                self.ir.push_to_stack(cont_ptr_for_closure);
 
                 // Call make_closure to create the continuation closure
                 let make_closure = self
@@ -3330,7 +3335,9 @@ impl AstCompiler<'_> {
 
                 // Use specialized instruction that correctly handles the builtin call
                 let shift_result_reg = self.ir.assign_new(shift_result);
-                self.ir.return_from_shift(shift_result_reg.into(), return_fn_ptr);
+                let cont_ptr_for_return = self.ir.load_local(cont_ptr_local);
+                self.ir
+                    .return_from_shift(shift_result_reg.into(), cont_ptr_for_return, return_fn_ptr);
                 // Note: return-from-shift does not return normally
 
                 // After shift label - this is where we land when continuation is invoked
@@ -3454,9 +3461,11 @@ impl AstCompiler<'_> {
                 // Create a result register for the resumed value
                 let result_reg = self.ir.assign_new(Value::Null);
 
-                // Allocate local for continuation object with unique name
+                // Allocate locals for continuation closure and raw continuation pointer
                 let unique_cont_name = format!("__perform_cont_{}__", token_range.start);
                 let cont_local = self.find_or_insert_local(&unique_cont_name);
+                let cont_ptr_name = format!("__perform_cont_ptr_{}__", token_range.start);
+                let cont_ptr_local = self.find_or_insert_local(&cont_ptr_name);
 
                 // Get builtin function pointers for continuation capture
                 let capture_fn = self
@@ -3469,20 +3478,23 @@ impl AstCompiler<'_> {
                 let cont_index =
                     self.ir
                         .capture_continuation(after_shift, cont_local, capture_fn_ptr);
+                // Store the continuation pointer for later return_from_shift_handler
+                let cont_ptr_reg = self.ir.assign_new(cont_index);
+                self.ir.store_local(cont_ptr_local, cont_ptr_reg.into());
 
-                // Wrap the continuation index in a closure so it can be called like a function
+                // Wrap the continuation pointer in a closure so it can be called like a function
                 let trampoline_fn = self
                     .compiler
                     .find_function("beagle.builtin/continuation-trampoline")
                     .expect("continuation-trampoline builtin not found");
                 let trampoline_ptr = usize::from(trampoline_fn.pointer);
 
-                // Get the stack position BEFORE pushing (where the cont_index will go)
+                // Get the stack position BEFORE pushing (where the cont_ptr will go)
                 let free_var_ptr = self.ir.get_current_stack_position();
 
-                // Push the continuation index onto the stack as a captured variable
-                let cont_index_reg = self.ir.assign_new(cont_index);
-                self.ir.push_to_stack(cont_index_reg.into());
+                // Push the continuation pointer onto the stack as a captured variable
+                let cont_ptr_for_closure = self.ir.load_local(cont_ptr_local);
+                self.ir.push_to_stack(cont_ptr_for_closure);
 
                 // Call make_closure to create the continuation closure (resume function)
                 let make_closure = self
@@ -3503,8 +3515,8 @@ impl AstCompiler<'_> {
                 let resume_closure = self.ir.call(
                     make_closure_reg.into(),
                     vec![
-                        stack_pointer.clone(),
-                        frame_pointer.clone(),
+                        stack_pointer,
+                        frame_pointer,
                         trampoline_reg.into(),
                         num_free_reg.into(),
                         free_var_ptr,
@@ -3537,7 +3549,12 @@ impl AstCompiler<'_> {
                 let return_fn_ptr = usize::from(return_to_reset_fn.pointer);
 
                 let handler_result_reg = self.ir.assign_new(handler_result);
-                self.ir.return_from_shift(handler_result_reg.into(), return_fn_ptr);
+                let cont_ptr_for_return = self.ir.load_local(cont_ptr_local);
+                self.ir.return_from_shift(
+                    handler_result_reg.into(),
+                    cont_ptr_for_return,
+                    return_fn_ptr,
+                );
 
                 // After shift label - this is where we land when continuation (resume) is invoked
                 self.ir.write_label(after_shift);

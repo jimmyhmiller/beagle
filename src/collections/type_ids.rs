@@ -51,3 +51,9 @@ pub const TYPE_ID_MULTI_ARITY_FUNCTION: u8 = 29;
 /// Type ID for Regex (compiled regular expression)
 /// The heap object stores an index into Runtime::compiled_regexes
 pub const TYPE_ID_REGEX: u8 = 30;
+
+/// Type ID for captured continuations (stack segment + prompt metadata)
+pub const TYPE_ID_CONTINUATION: u8 = 31;
+
+/// Type ID for continuation stack segment byte buffers (opaque)
+pub const TYPE_ID_CONTINUATION_SEGMENT: u8 = 32;

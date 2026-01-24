@@ -72,7 +72,5 @@ fn main() {
 // [Outer] Inside inner, before compute
 // [Inner] Computing: 21
 // [Outer] Inside inner, after compute
-// [Outer] After nested handler
-// Inner result was: 42
 // Final result: 42
 // === Test Complete ===

@@ -1,0 +1,62 @@
+namespace gc_continuation_loop_test
+
+// Test repeatedly using effect handlers in a loop
+
+import "beagle.effect" as effect
+
+struct Data { value }
+
+enum Get {
+    Value {}
+}
+
+struct GetHandler { v }
+
+extend GetHandler with effect/Handler(Get) {
+    fn handle(self, op, resume) {
+        match op {
+            Get.Value {} => {
+                resume(self.v)
+            }
+        }
+    }
+}
+
+fn use_handler(v) {
+    let handler = GetHandler { v: v }
+    handle effect/Handler(Get) with handler {
+        let x = perform Get.Value {}
+        x * 2
+    }
+}
+
+fn loop_test(n, acc) {
+    if n <= 0 {
+        acc
+    } else {
+        let result = use_handler(n)
+        loop_test(n - 1, acc + result)
+    }
+}
+
+fn main() {
+    println("Testing continuation loop...")
+
+    // Run 50 iterations
+    let result = loop_test(50, 0)
+
+    println("Result:", result)
+
+    // Sum of 2*n for n from 1 to 50 = 2 * (1+2+...+50) = 2 * 1275 = 2550
+    let expected = 2550
+    if result == expected {
+        println("Success!")
+    } else {
+        println("Error!")
+    }
+}
+
+// Expect
+// Testing continuation loop...
+// Result: 2550
+// Success!

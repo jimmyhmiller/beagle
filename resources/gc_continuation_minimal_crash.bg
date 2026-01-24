@@ -1,0 +1,51 @@
+namespace gc_continuation_minimal_crash
+
+// MINIMAL REPRODUCTION: 2 nested performs in a handler called from tail-recursive loop
+
+import "beagle.effect" as effect
+
+enum Get {
+    Value {}
+}
+
+struct GetHandler {}
+
+extend GetHandler with effect/Handler(Get) {
+    fn handle(self, op, resume) {
+        match op {
+            Get.Value {} => resume(1)
+        }
+    }
+}
+
+fn two_performs() {
+    let a = perform Get.Value {}
+    let b = perform Get.Value {}
+    a + b
+}
+
+fn run_handler() {
+    let handler = GetHandler {}
+    handle effect/Handler(Get) with handler {
+        two_performs()
+    }
+}
+
+fn loop_fn(n) {
+    if n <= 0 {
+        0
+    } else {
+        let _ = run_handler()
+        loop_fn(n - 1)
+    }
+}
+
+fn main() {
+    println("Testing minimal crash case...")
+    let _ = loop_fn(1)
+    println("Done!")
+}
+
+// Expect
+// Testing minimal crash case...
+// Done!

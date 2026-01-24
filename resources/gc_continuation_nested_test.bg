@@ -1,0 +1,54 @@
+namespace gc_continuation_nested_test
+
+// Test: nested perform calls within a single handler block
+
+import "beagle.effect" as effect
+
+enum Get {
+    Value {}
+}
+
+struct GetHandler { v }
+
+extend GetHandler with effect/Handler(Get) {
+    fn handle(self, op, resume) {
+        match op {
+            Get.Value {} => {
+                resume(self.v)
+            }
+        }
+    }
+}
+
+fn nested_performs(n, acc) {
+    if n <= 0 {
+        acc
+    } else {
+        let x = perform Get.Value {}
+        nested_performs(n - 1, acc + x)
+    }
+}
+
+fn main() {
+    println("Testing nested performs...")
+
+    let handler = GetHandler { v: 5 }
+    let result = handle effect/Handler(Get) with handler {
+        nested_performs(10, 0)
+    }
+
+    println("Result:", result)
+
+    // Should be 5 * 10 = 50
+    let expected = 50
+    if result == expected {
+        println("Success!")
+    } else {
+        println("Error!")
+    }
+}
+
+// Expect
+// Testing nested performs...
+// Result: 50
+// Success!

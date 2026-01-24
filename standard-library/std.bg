@@ -1321,10 +1321,20 @@ fn constantly(value) {
     fn(ignored) { value }
 }
 
-// Note: complement, compose, pipe, partial cannot be implemented as higher-order
-// functions that return closures capturing other functions, due to current
-// runtime limitations with closures capturing closures.
-// These patterns can still be used inline where needed.
+// complement: Return a function that negates the predicate
+fn complement(pred) {
+    fn(x) { not(pred(x)) }
+}
+
+// compose: Return a function that applies g then f
+fn compose(f, g) {
+    fn(x) { f(g(x)) }
+}
+
+// partial: Return a function with the first argument pre-filled
+fn partial(f, a) {
+    fn(b) { f(a, b) }
+}
 
 // ============================================================================
 // Boolean/Logic Utilities
