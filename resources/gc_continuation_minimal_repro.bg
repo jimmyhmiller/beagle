@@ -1,0 +1,81 @@
+namespace gc_continuation_minimal_repro
+
+// Minimal reproduction case for GC corruption with continuation segments.
+// This test reliably triggers heap corruption after ~500 iterations
+// when using the compacting GC with effect handlers and continuations.
+
+import "beagle.effect" as effect
+
+struct Data {
+    value
+    extra
+}
+
+enum Yield {
+    Value { v }
+}
+
+struct YieldHandler {}
+
+extend YieldHandler with effect/Handler(Yield) {
+    fn handle(self, op, resume) {
+        match op {
+            Yield.Value { v } => {
+                // Allocate objects to stress the GC and trigger collection
+                let mut i = 0
+                loop {
+                    if i >= 50 {
+                        break(null)
+                    }
+                    let _ = Data { value: i, extra: v }
+                    i = i + 1
+                }
+                // Resume the continuation
+                resume(v * 2)
+            }
+        }
+    }
+}
+
+fn generator(n, acc) {
+    if n <= 0 {
+        acc
+    } else {
+        let result = perform Yield.Value { v: n }
+        generator(n - 1, acc + result)
+    }
+}
+
+fn run_with_handler(n) {
+    let handler = YieldHandler {}
+    handle effect/Handler(Yield) with handler {
+        generator(n, 0)
+    }
+}
+
+fn stress_loop(iterations, acc) {
+    if iterations <= 0 {
+        acc
+    } else {
+        let result = run_with_handler(20)
+        stress_loop(iterations - 1, acc + result)
+    }
+}
+
+fn main() {
+    println("Running minimal GC corruption test...")
+    println("This should fail with 'Handler: ErrorOpaque' after several GC cycles")
+
+    let result = stress_loop(500, 0)
+
+    println("Result:", result)
+    println("Expected: 210000")
+}
+
+// Expected behavior: Should compute 500 * 420 = 210000
+// Actual behavior: Crashes with:
+//   "Handler type does not implement beagle.effect/Handler<...> protocol. Handler: ErrorOpaque"
+//
+// The handler object's header gets corrupted to show:
+//   type_id: 0, type_data: <large_number>, size: ~57377, opaque: true, large: true
+// This header looks like a continuation segment header but with type_id set to 0
