@@ -2295,7 +2295,6 @@ impl Runtime {
             self.exception_handlers.remove(&thread_id);
             self.thread_exception_handler_fns.remove(&thread_id);
         }
-
     }
 
     pub fn create_exception(

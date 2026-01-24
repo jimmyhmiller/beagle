@@ -434,7 +434,8 @@ impl Compiler {
 
         let mut top_levels_to_run = self.compile_dependencies(&ast, file_name)?;
 
-        let (top_level, diagnostics) = self.compile_ast(ast, None, file_name, token_line_column_map)?;
+        let (top_level, diagnostics) =
+            self.compile_ast(ast, None, file_name, token_line_column_map)?;
         if let Some(top_level) = top_level {
             top_levels_to_run.push(top_level);
         }
@@ -477,7 +478,8 @@ impl Compiler {
         file_name: &str,
         token_line_column_map: Vec<(usize, usize)>,
     ) -> Result<(Option<String>, Vec<Diagnostic>), Box<dyn Error>> {
-        let (mut ir, token_map, diagnostics) = ast.compile(self, file_name, token_line_column_map)?;
+        let (mut ir, token_map, diagnostics) =
+            ast.compile(self, file_name, token_line_column_map)?;
         let top_level_name =
             fn_name.unwrap_or_else(|| format!("{}/__top_level", self.current_namespace_name()));
         if ast.has_top_level() {

@@ -376,6 +376,23 @@ struct GameState {
     ball_attached  // Ball attached to paddle at start
 }
 
+struct StepResult {
+    done
+    score
+    state
+    frame
+    resume_cont
+}
+
+struct LoopCtx {
+    shader_ctx
+    timeline_buf
+    timeline_head
+    timeline_len
+    timeline_index
+    just_resumed
+}
+
 // ============================================================
 // Brick Management
 // ============================================================
@@ -1071,13 +1088,13 @@ fn mouse_to_timeline_index(mouse_x, timeline_length) {
 
 // Pause loop - handles timeline scrubbing
 // first_frame flag prevents immediate resume from same keypress that triggered pause
-fn pause_loop(timeline_buf, timeline_head, timeline_len, timeline_index, shader_ctx, just_resumed, first_frame) {
+fn pause_loop(ctx, first_frame) {
     if window_should_close() {
         // Exit game
-        0
+        null
     } else {
-        let idx = deref(timeline_index)
-        let tl_length = timeline_length(timeline_len)
+        let idx = deref(ctx.timeline_index)
+        let tl_length = timeline_length(ctx.timeline_len)
 
         // Handle mouse input - click/drag on timeline bar
         let mouse_x = get_mouse_x()
@@ -1097,25 +1114,24 @@ fn pause_loop(timeline_buf, timeline_head, timeline_len, timeline_index, shader_
         } else {
             idx
         }
-        reset!(timeline_index, new_idx)
+        reset!(ctx.timeline_index, new_idx)
 
         // Get current frame data for rendering
-        let frame_data = timeline_get(timeline_buf, timeline_head, timeline_len, new_idx)
+        let frame_data = timeline_get(ctx.timeline_buf, ctx.timeline_head, ctx.timeline_len, new_idx)
 
         // Check for resume with SPACE (not P, since P triggered the pause)
         if is_key_pressed(KEY_SPACE) {
             println("Resuming from frame " ++ to-string(frame_data.frame_number))
             // Trim timeline to current position (discard future)
-            reset!(timeline_len, new_idx + 1)
+            reset!(ctx.timeline_len, new_idx + 1)
             // Set flag to skip pause check when we resume
-            reset!(just_resumed, true)
-            // Invoke the continuation to resume
-            let k = frame_data.cont
-            k(null)
+            reset!(ctx.just_resumed, true)
+            // Return the continuation to resume outside the current reset
+            frame_data.cont
         } else {
             // Render paused state
-            render_paused(frame_data.state, shader_ctx, frame_data.frame_number, new_idx, tl_length)
-            pause_loop(timeline_buf, timeline_head, timeline_len, timeline_index, shader_ctx, just_resumed, false)
+            render_paused(frame_data.state, ctx.shader_ctx, frame_data.frame_number, new_idx, tl_length)
+            pause_loop(ctx, false)
         }
     }
 }
@@ -1124,44 +1140,68 @@ fn pause_loop(timeline_buf, timeline_head, timeline_len, timeline_index, shader_
 // Main Loop
 // ============================================================
 
-fn game_loop(state, shader_ctx, frame, timeline_buf, timeline_head, timeline_len, timeline_index, just_resumed) {
-    // Capture this frame's continuation and add to timeline
-    shift(fn(k) {
-        let frame_data = TimelineFrame {
-            state: state,
-            cont: k,
-            frame_number: frame
-        }
-        add_to_timeline(timeline_buf, timeline_head, timeline_len, frame_data)
-        k(null)  // Continue execution
-    })
+fn game_step(state, frame, ctx) {
+    reset {
+        // Copy into locals inside reset so continuations restore the selected frame.
+        let step_state = state
+        let step_frame = frame
 
-    // Check if we just resumed - if so, skip pause check this frame
-    if deref(just_resumed) {
-        reset!(just_resumed, false)
-        // Continue with normal game loop
-        if window_should_close() {
-            state.score
+        // Capture this frame's continuation and add to timeline
+        shift(fn(k) {
+            let frame_data = TimelineFrame {
+                state: step_state,
+                cont: k,
+                frame_number: step_frame
+            }
+            add_to_timeline(ctx.timeline_buf, ctx.timeline_head, ctx.timeline_len, frame_data)
+            k(null)  // Continue execution
+        })
+
+        // Check if we just resumed - if so, skip pause check this frame
+        if deref(ctx.just_resumed) {
+            reset!(ctx.just_resumed, false)
+            // Continue with normal game loop
+            if window_should_close() {
+                StepResult { done: true, score: step_state.score, state: step_state, frame: step_frame, resume_cont: null }
+            } else {
+                let new_state = update_game(step_state)
+                render(new_state, ctx.shader_ctx, step_frame)
+                StepResult { done: false, score: 0, state: new_state, frame: step_frame + 1, resume_cont: null }
+            }
+        } else if is_key_pressed(KEY_P) {
+            println("Paused at frame " ++ to-string(step_frame))
+            // Set timeline index to most recent frame
+            reset!(ctx.timeline_index, timeline_length(ctx.timeline_len) - 1)
+            // Enter pause loop (first_frame=true to skip immediate resume check)
+            let resume_cont = pause_loop(ctx, true)
+            StepResult { done: false, score: 0, state: step_state, frame: step_frame, resume_cont: resume_cont }
         } else {
-            let new_state = update_game(state)
-            render(new_state, shader_ctx, frame)
-            game_loop(new_state, shader_ctx, frame + 1, timeline_buf, timeline_head, timeline_len, timeline_index, just_resumed)
+            // Normal game loop
+            if window_should_close() {
+                StepResult { done: true, score: step_state.score, state: step_state, frame: step_frame, resume_cont: null }
+            } else {
+                let new_state = update_game(step_state)
+                render(new_state, ctx.shader_ctx, step_frame)
+                StepResult { done: false, score: 0, state: new_state, frame: step_frame + 1, resume_cont: null }
+            }
         }
-    } else if is_key_pressed(KEY_P) {
-        println("Paused at frame " ++ to-string(frame))
-        // Set timeline index to most recent frame
-        reset!(timeline_index, timeline_length(timeline_len) - 1)
-        // Enter pause loop (first_frame=true to skip immediate resume check)
-        pause_loop(timeline_buf, timeline_head, timeline_len, timeline_index, shader_ctx, just_resumed, true)
+    }
+}
+
+fn game_loop(state, frame, ctx) {
+    let result = game_step(state, frame, ctx)
+    if result.resume_cont != null {
+        let k = result.resume_cont
+        let resumed = k(null)
+        if resumed.done {
+            resumed.score
+        } else {
+            game_loop(resumed.state, resumed.frame, ctx)
+        }
+    } else if result.done {
+        result.score
     } else {
-        // Normal game loop
-        if window_should_close() {
-            state.score
-        } else {
-            let new_state = update_game(state)
-            render(new_state, shader_ctx, frame)
-            game_loop(new_state, shader_ctx, frame + 1, timeline_buf, timeline_head, timeline_len, timeline_index, just_resumed)
-        }
+        game_loop(result.state, result.frame, ctx)
     }
 }
 
@@ -1208,10 +1248,16 @@ fn main() {
     println("Tip: Move paddle while hitting the ball to add 'english'!")
 
     let initial_state = create_initial_state()
-    // Wrap game loop in reset for continuation capture
-    let final_score = reset {
-        game_loop(initial_state, shader_ctx, 0, timeline_buf, timeline_head, timeline_len, timeline_index, just_resumed)
+    let ctx = LoopCtx {
+        shader_ctx: shader_ctx,
+        timeline_buf: timeline_buf,
+        timeline_head: timeline_head,
+        timeline_len: timeline_len,
+        timeline_index: timeline_index,
+        just_resumed: just_resumed
     }
+
+    let final_score = game_loop(initial_state, 0, ctx)
 
     println("Game over! Final score: " ++ to-string(final_score))
     ffi/deallocate(frame_buffer)

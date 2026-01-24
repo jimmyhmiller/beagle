@@ -16,6 +16,16 @@ use crate::{
 
 type TokenPosition = usize;
 
+/// Type alias for the complex compile result to avoid clippy::type_complexity warning
+type CompileResult = Result<
+    (
+        Ir,
+        Vec<(TokenRange, IRRange)>,
+        Vec<crate::compiler::Diagnostic>,
+    ),
+    CompileError,
+>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TokenRange {
     pub start: usize,
@@ -548,7 +558,7 @@ impl Ast {
         compiler: &mut Compiler,
         file_name: &str,
         token_line_column_map: Vec<(usize, usize)>,
-    ) -> Result<(Ir, Vec<(TokenRange, IRRange)>, Vec<crate::compiler::Diagnostic>), CompileError> {
+    ) -> CompileResult {
         let allocate_fn_pointer = compiler.allocate_fn_pointer()?;
         let mut ast_compiler = AstCompiler {
             ast: self.clone(),
@@ -3805,7 +3815,7 @@ impl AstCompiler<'_> {
         // Each intermediate scope must capture from its parent
         for idx in (found_idx + 1)..(stack_len - 1) {
             let env = &mut self.environment_stack[idx];
-            if env.variables.get(name).is_none() {
+            if !env.variables.contains_key(name) {
                 // Add free variable entry to this intermediate environment
                 let free_idx = env.free_variables.len();
                 env.free_variables.push(FreeVariable {
@@ -4553,31 +4563,29 @@ impl AstCompiler<'_> {
                     .unwrap();
             }
             Ast::MultiArityFunction {
-                name,
+                name: Some(fn_name),
                 cases,
                 token_range: _,
             } => {
                 // Reserve function slots for all arity variants so inter-arity calls work
-                if let Some(fn_name) = name {
-                    // Register multi-arity info for resolution
-                    let full_base_name = self.compiler.current_namespace_name() + "/" + fn_name;
-                    let arities: Vec<(usize, bool)> = cases
-                        .iter()
-                        .map(|case| (case.args.len(), case.rest_param.is_some()))
-                        .collect();
-                    self.compiler
-                        .register_multi_arity_function(&full_base_name, arities);
+                // Register multi-arity info for resolution
+                let full_base_name = self.compiler.current_namespace_name() + "/" + fn_name;
+                let arities: Vec<(usize, bool)> = cases
+                    .iter()
+                    .map(|case| (case.args.len(), case.rest_param.is_some()))
+                    .collect();
+                self.compiler
+                    .register_multi_arity_function(&full_base_name, arities);
 
-                    // Reserve each arity function
-                    for case in cases.iter() {
-                        let arity = case.args.len();
-                        let is_variadic = case.rest_param.is_some();
-                        let full_arity_name = format!("{}${}", full_base_name, arity);
-                        let actual_arity = arity + if is_variadic { 1 } else { 0 };
-                        self.compiler
-                            .reserve_function(&full_arity_name, actual_arity, is_variadic, arity)
-                            .unwrap();
-                    }
+                // Reserve each arity function
+                for case in cases.iter() {
+                    let arity = case.args.len();
+                    let is_variadic = case.rest_param.is_some();
+                    let full_arity_name = format!("{}${}", full_base_name, arity);
+                    let actual_arity = arity + if is_variadic { 1 } else { 0 };
+                    self.compiler
+                        .reserve_function(&full_arity_name, actual_arity, is_variadic, arity)
+                        .unwrap();
                 }
             }
             _ => {}

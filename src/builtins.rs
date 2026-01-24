@@ -4820,10 +4820,11 @@ pub unsafe extern "C" fn pop_prompt_runtime(
     // NOTE: We do NOT manage continuation lifetime here - return_from_shift_runtime uses
     // the continuation pointer passed by the compiler.
     if let Some(prompt_id) = current_prompt_id
-        && let Some(return_points) = runtime.invocation_return_points.get_mut(&thread_id) {
-            // Remove all return points that were created for this prompt
-            return_points.retain(|rp| rp.prompt_id != prompt_id);
-        }
+        && let Some(return_points) = runtime.invocation_return_points.get_mut(&thread_id)
+    {
+        // Remove all return points that were created for this prompt
+        return_points.retain(|rp| rp.prompt_id != prompt_id);
+    }
 
     // When all prompts are done, clear ALL continuation state for this thread
     if runtime.prompt_handler_count() == 0 {
@@ -4904,7 +4905,11 @@ pub unsafe extern "C" fn capture_continuation_runtime(
     segment_obj.writer_header_direct(Header {
         type_id: TYPE_ID_CONTINUATION_SEGMENT,
         type_data: stack_size as u32,
-        size: if is_large { 0xFFFF } else { segment_words as u16 },
+        size: if is_large {
+            0xFFFF
+        } else {
+            segment_words as u16
+        },
         opaque: true,
         marked: false,
         large: is_large,
@@ -5135,9 +5140,7 @@ pub unsafe extern "C" fn return_from_shift_runtime(
             if debug_prompts {
                 eprintln!(
                     "[return_from_shift] Restoring stack segment: {} bytes to original_sp={:#x} (prompt_sp={:#x})",
-                    stack_segment_len,
-                    restore_sp,
-                    new_sp
+                    stack_segment_len, restore_sp, new_sp
                 );
             }
             continuation.with_segment_bytes(|stack_segment| {
@@ -5495,14 +5498,12 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
 
     // Copy the stack segment
     // SAFETY: new_sp points to valid stack memory below actual RSP
-    continuation.with_segment_bytes(|stack_segment| {
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                stack_segment.as_ptr(),
-                new_sp as *mut u8,
-                stack_segment_size,
-            );
-        }
+    continuation.with_segment_bytes(|stack_segment| unsafe {
+        std::ptr::copy_nonoverlapping(
+            stack_segment.as_ptr(),
+            new_sp as *mut u8,
+            stack_segment_size,
+        );
     });
 
     // Calculate relocation offset for frame pointers
@@ -7258,7 +7259,8 @@ unsafe fn diagnostic_to_struct_impl(
     };
 
     // Handle optional missing_variants field
-    let missing_variants_root_idx = if let Some(ref missing_variants) = diagnostic.missing_variants {
+    let missing_variants_root_idx = if let Some(ref missing_variants) = diagnostic.missing_variants
+    {
         // Build persistent vector of variant strings
         let vec_handle = PersistentVec::empty(runtime, stack_pointer)
             .map_err(|e| format!("Failed to create empty vector: {}", e))?;
@@ -7447,7 +7449,8 @@ pub unsafe extern "C" fn diagnostics_for_file(
     let file_diagnostics: Vec<crate::compiler::Diagnostic> = {
         let store_guard = runtime.diagnostic_store.lock().unwrap();
         store_guard
-            .for_file(&file_path_str).cloned()
+            .for_file(&file_path_str)
+            .cloned()
             .unwrap_or_default()
     };
 
@@ -7518,7 +7521,10 @@ pub unsafe extern "C" fn files_with_diagnostics(
     let vec_handle = match PersistentVec::empty(runtime, stack_pointer) {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("files_with_diagnostics: Failed to create empty vector: {}", e);
+            eprintln!(
+                "files_with_diagnostics: Failed to create empty vector: {}",
+                e
+            );
             return BuiltInTypes::null_value() as usize;
         }
     };
