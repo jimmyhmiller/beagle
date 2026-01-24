@@ -5094,6 +5094,31 @@ pub unsafe extern "C" fn return_from_shift_runtime(
     };
 
     if cont_ptr != 0 {
+        // Validate that cont_ptr still looks like a heap pointer before dereferencing.
+        // In debug builds this gives us a clear panic instead of a segfault if corruption occurs.
+        debug_assert!(
+            BuiltInTypes::is_heap_pointer(cont_ptr) && BuiltInTypes::untag(cont_ptr).is_multiple_of(8),
+            "return_from_shift called with non-heap continuation pointer: {:#x}",
+            cont_ptr
+        );
+        if !BuiltInTypes::is_heap_pointer(cont_ptr) || !BuiltInTypes::untag(cont_ptr).is_multiple_of(8) {
+            panic!(
+                "return_from_shift: invalid continuation pointer {:#x} (heap_pointer={}, aligned={})",
+                cont_ptr,
+                BuiltInTypes::is_heap_pointer(cont_ptr),
+                BuiltInTypes::untag(cont_ptr).is_multiple_of(8)
+            );
+        }
+        // Extra sanity: catch pointers that actually point into the current stack.
+        let untagged = BuiltInTypes::untag(cont_ptr);
+        let stack_base = runtime.get_stack_base();
+        if untagged <= stack_base && untagged + STACK_SIZE >= stack_base {
+            panic!(
+                "return_from_shift: continuation pointer {:#x} points into stack (stack_base={:#x})",
+                cont_ptr, stack_base
+            );
+        }
+
         let continuation = ContinuationObject::from_tagged(cont_ptr).unwrap_or_else(|| {
             panic!(
                 "return_from_shift called with invalid continuation pointer {:#x}",

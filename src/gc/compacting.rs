@@ -404,11 +404,6 @@ impl Allocator for CompactingHeap {
             return;
         }
 
-        #[cfg(debug_assertions)]
-        {
-            self.to_space.unprotect();
-        }
-
         for (stack_base, frame_pointer, gc_return_addr) in stack_pointers.iter() {
             let roots = StackWalker::collect_stack_roots_with_return_addr(
                 *stack_base,
@@ -440,11 +435,6 @@ impl Allocator for CompactingHeap {
         mem::swap(&mut self.from_space, &mut self.to_space);
 
         self.to_space.clear();
-        // Only do this when debug mode
-        #[cfg(debug_assertions)]
-        {
-            self.to_space.protect();
-        }
     }
 
     fn grow(&mut self) {
