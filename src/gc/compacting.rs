@@ -284,20 +284,21 @@ impl CompactingHeap {
                 }
             }
             if object.get_type_id() == TYPE_ID_CONTINUATION as usize
-                && let Some(cont) = ContinuationObject::from_heap_object(object) {
-                    cont.with_segment_bytes_mut(|segment| {
-                        if segment.is_empty() {
-                            return;
-                        }
-                        self.gc_continuation_segment(
-                            segment,
-                            cont.original_sp(),
-                            cont.original_fp(),
-                            cont.prompt_stack_pointer(),
-                            stack_map,
-                        );
-                    });
-                }
+                && let Some(cont) = ContinuationObject::from_heap_object(object)
+            {
+                cont.with_segment_bytes_mut(|segment| {
+                    if segment.is_empty() {
+                        return;
+                    }
+                    self.gc_continuation_segment(
+                        segment,
+                        cont.original_sp(),
+                        cont.original_fp(),
+                        cont.prompt_stack_pointer(),
+                        stack_map,
+                    );
+                });
+            }
         }
     }
 
@@ -352,7 +353,7 @@ impl CompactingHeap {
             .iter()
             .map(|(_offset, tagged_value)| {
                 let heap_object = HeapObject::from_tagged(*tagged_value);
-                unsafe { self.copy_using_cheneys_algorithm(heap_object) }
+                self.copy_using_cheneys_algorithm(heap_object)
             })
             .collect();
 

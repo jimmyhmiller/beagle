@@ -1007,6 +1007,7 @@ impl PersistentMap {
     }
 
     /// Create a bitmap node with two entries at different hash positions.
+    #[allow(clippy::too_many_arguments)]
     fn create_two_entry_node(
         scope: &mut HandleScope<'_>,
         shift: usize,

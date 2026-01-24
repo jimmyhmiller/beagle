@@ -810,9 +810,10 @@ impl GenerationalGC {
         }
 
         if heap_obj.get_type_id() == TYPE_ID_CONTINUATION as usize
-            && let Some(cont) = ContinuationObject::from_heap_object(heap_obj) {
-                self.update_continuation_segment(&cont, stack_map);
-            }
+            && let Some(cont) = ContinuationObject::from_heap_object(heap_obj)
+        {
+            self.update_continuation_segment(&cont, stack_map);
+        }
 
         for cont_ptr in continuation_fields {
             if let Some(cont) = ContinuationObject::from_tagged(cont_ptr) {
@@ -889,9 +890,10 @@ impl GenerationalGC {
             }
 
             if object.get_type_id() == TYPE_ID_CONTINUATION as usize
-                && let Some(cont) = ContinuationObject::from_heap_object(object) {
-                    self.update_continuation_segment(&cont, stack_map);
-                }
+                && let Some(cont) = ContinuationObject::from_heap_object(object)
+            {
+                self.update_continuation_segment(&cont, stack_map);
+            }
 
             for cont_ptr in continuation_fields {
                 if let Some(cont) = ContinuationObject::from_tagged(cont_ptr) {

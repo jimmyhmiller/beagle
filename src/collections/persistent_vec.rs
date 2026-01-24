@@ -146,6 +146,7 @@ impl PersistentVec {
     }
 
     /// Fast path for push when tail has room.
+    #[allow(clippy::too_many_arguments)]
     fn push_fast_path(
         runtime: &mut Runtime,
         stack_pointer: usize,
