@@ -2350,7 +2350,18 @@ impl Runtime {
             // so there is no need to lock anything
             // The tuple is (stack_base, frame_pointer, gc_return_addr)
             // We pass the saved gc_return_addr to ensure the first Beagle frame is scanned
-            let all_stack_pointers = vec![(self.get_stack_base(), frame_pointer, gc_return_addr)];
+            let mut all_stack_pointers = vec![(self.get_stack_base(), frame_pointer, gc_return_addr)];
+
+            // Also include all ThreadGlobal stack bases explicitly. This ensures the
+            // GlobalObjectBlock head pointers are always traced even if a thread's
+            // pause bookkeeping misses adding its stack entry (e.g., platform quirks).
+            let thread_globals = self.memory.thread_globals.lock().unwrap();
+            for tg in thread_globals.values() {
+                if tg.stack_base != 0 {
+                    all_stack_pointers.push((tg.stack_base, 0, 0));
+                }
+            }
+            drop(thread_globals);
 
             self.memory.run_gc(&all_stack_pointers);
 
@@ -2460,6 +2471,18 @@ impl Runtime {
                 .map(|(_, s)| *s)
                 .filter(|(base, _fp, _gc_ret)| *base != 0),
         );
+
+        // Add an explicit entry for each ThreadGlobal's stack base. This keeps the
+        // GlobalObjectBlock chain rooted even if a thread fails to register a pause
+        // record (observed on arm64 where handler roots went missing).
+        let thread_globals = self.memory.thread_globals.lock().unwrap();
+        for tg in thread_globals.values() {
+            if tg.stack_base != 0 {
+                stack_pointers.push((tg.stack_base, 0, 0));
+            }
+        }
+        drop(thread_globals);
+
         // Main thread uses the saved frame_pointer and gc_return_addr
         stack_pointers.push((self.get_stack_base(), frame_pointer, gc_return_addr));
 
