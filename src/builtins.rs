@@ -7024,7 +7024,7 @@ pub extern "C" fn call_handler_builtin(
         unsafe {
             throw_runtime_error(
                 stack_pointer,
-                "NoHandlerError",
+                "RuntimeError",
                 format!(
                     "No handler registered for protocol {}, dispatch key {}",
                     protocol_key, dispatch_key
@@ -7072,7 +7072,7 @@ pub extern "C" fn call_handler_builtin(
         unsafe {
             throw_runtime_error(
                 stack_pointer,
-                "NoHandlerError",
+                "RuntimeError",
                 format!(
                     "Handler type does not implement {} protocol. Handler: {}",
                     protocol_key, handler_repr
