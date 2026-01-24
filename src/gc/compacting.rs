@@ -47,7 +47,18 @@ impl Space {
         pointer >= start && pointer < end
     }
 
+    /// Ensure `size` bytes from the current offset fit in the committed region.
+    /// Grows the committed space if needed.
+    fn ensure_capacity(&mut self, size: usize) {
+        while self.allocation_offset + size > self.byte_count() {
+            self.double_committed_memory();
+        }
+    }
+
     fn copy_data_to_offset(&mut self, data: &[u8]) -> isize {
+        // Grow to_space if the live set won't fit in the currently committed pages.
+        self.ensure_capacity(data.len());
+
         unsafe {
             let start = self.start.add(self.allocation_offset);
             let new_pointer = start as isize;
