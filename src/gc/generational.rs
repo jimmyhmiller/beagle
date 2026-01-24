@@ -5,7 +5,11 @@ use libc::mprotect;
 use super::get_page_size;
 use super::usdt_probes;
 
-use crate::types::{BuiltInTypes, Header, HeapObject, Word};
+use crate::{
+    collections::TYPE_ID_CONTINUATION,
+    runtime::ContinuationObject,
+    types::{BuiltInTypes, Header, HeapObject, Word},
+};
 
 use super::{
     AllocateAction, Allocator, AllocatorOptions, StackMap,
@@ -331,26 +335,9 @@ impl GenerationalGC {
     fn update_continuation_segments(&mut self, stack_map: &StackMap) {
         let runtime = crate::get_runtime().get_mut();
 
-        // Fast path: skip if no continuations
-        let mut captured_continuations = runtime.captured_continuations.lock().unwrap();
-        if captured_continuations.is_empty() && runtime.invocation_return_points.is_empty() {
+        // Fast path: skip if no invocation return points
+        if runtime.invocation_return_points.is_empty() {
             return;
-        }
-
-        // Process captured continuations
-        for (_thread_id, conts) in captured_continuations.iter_mut() {
-            for cont in conts.iter_mut() {
-                if cont.stack_segment.is_empty() {
-                    continue;
-                }
-                self.update_segment_young_gen_pointers(
-                    &mut cont.stack_segment,
-                    cont.original_sp,
-                    cont.original_fp,
-                    cont.prompt.stack_pointer,
-                    stack_map,
-                );
-            }
         }
 
         // Process InvocationReturnPoint saved frames
@@ -372,7 +359,7 @@ impl GenerationalGC {
 
     fn update_segment_young_gen_pointers(
         &mut self,
-        segment: &mut Vec<u8>,
+        segment: &mut [u8],
         original_sp: usize,
         original_fp: usize,
         prompt_sp: usize,
@@ -384,28 +371,23 @@ impl GenerationalGC {
             original_fp,
             prompt_sp,
             stack_map,
-            |old_value| {
-                if !BuiltInTypes::is_heap_pointer(old_value) {
-                    return old_value;
-                }
-
-                let heap_object = HeapObject::from_tagged(old_value);
-                if !self.young.contains(heap_object.get_pointer()) {
-                    return old_value; // Not in young gen
-                }
-
-                // Get forwarding pointer
-                let untagged = heap_object.untagged();
-                let pointer = untagged as *mut usize;
-                let header_data = unsafe { *pointer };
-
-                if Header::is_forwarding_bit_set(header_data) {
-                    Header::clear_forwarding_bit(header_data)
-                } else {
-                    old_value // Not forwarded (shouldn't happen)
-                }
-            },
+            |old_value| self.copy(old_value),
         );
+    }
+
+    fn update_continuation_segment(&mut self, cont: &ContinuationObject, stack_map: &StackMap) {
+        cont.with_segment_bytes_mut(|segment| {
+            if segment.is_empty() {
+                return;
+            }
+            self.update_segment_young_gen_pointers(
+                segment,
+                cont.original_sp(),
+                cont.original_fp(),
+                cont.prompt_stack_pointer(),
+                stack_map,
+            );
+        });
     }
 }
 
@@ -706,7 +688,7 @@ impl GenerationalGC {
         // Process old gen objects found on stack - update their young gen references.
         // This scans one level deep for old gen objects directly referenced from stack.
         for old_root in stack_old_gen {
-            self.process_old_gen_object(old_root);
+            self.process_old_gen_object(old_root, stack_map);
         }
 
         // Process remembered set - old gen objects that were mutated to point to young gen.
@@ -723,14 +705,14 @@ impl GenerationalGC {
         for old_object in remembered {
             #[cfg(feature = "debug-gc")]
             eprintln!("[GC DEBUG] Processing remembered object {:#x}", old_object);
-            self.process_old_gen_object(old_object);
+            self.process_old_gen_object(old_object, stack_map);
         }
 
         // Process dirty cards - cards marked by generated code write barriers.
         // We need to scan all objects in dirty cards for young gen references.
-        self.process_dirty_cards();
+        self.process_dirty_cards(stack_map);
 
-        self.copy_remaining();
+        self.copy_remaining(stack_map);
 
         self.young.clear();
 
@@ -745,7 +727,7 @@ impl GenerationalGC {
 
     /// Process dirty cards from the card table.
     /// Scans all objects in old gen that are in dirty cards for young gen references.
-    fn process_dirty_cards(&mut self) {
+    fn process_dirty_cards(&mut self, stack_map: &StackMap) {
         // Use the tracked dirty card indices (O(1) to get, no scanning)
         if !self.card_table.has_dirty_cards() {
             return;
@@ -786,16 +768,17 @@ impl GenerationalGC {
 
         // Now process each object
         for old_object in objects_to_process {
-            self.process_old_gen_object(old_object);
+            self.process_old_gen_object(old_object, stack_map);
         }
     }
 
     /// Process an old gen object's fields, copying any young gen references to old gen.
-    fn process_old_gen_object(&mut self, old_object: usize) {
+    fn process_old_gen_object(&mut self, old_object: usize, stack_map: &StackMap) {
         let mut heap_obj = HeapObject::from_tagged(old_object);
 
         // Process this old gen object's fields
         let data = heap_obj.get_fields_mut();
+        let mut continuation_fields = Vec::new();
         #[cfg(feature = "debug-gc")]
         eprintln!(
             "[GC DEBUG] process_old_gen_object {:#x}: {} fields",
@@ -820,6 +803,20 @@ impl GenerationalGC {
                     #[cfg(feature = "debug-gc")]
                     eprintln!("[GC DEBUG]   -> new value: {:#x}", new_value);
                 }
+                if field_obj.get_type_id() == TYPE_ID_CONTINUATION as usize {
+                    continuation_fields.push(*field);
+                }
+            }
+        }
+
+        if heap_obj.get_type_id() == TYPE_ID_CONTINUATION as usize
+            && let Some(cont) = ContinuationObject::from_heap_object(heap_obj) {
+                self.update_continuation_segment(&cont, stack_map);
+            }
+
+        for cont_ptr in continuation_fields {
+            if let Some(cont) = ContinuationObject::from_tagged(cont_ptr) {
+                self.update_continuation_segment(&cont, stack_map);
             }
         }
     }
@@ -863,7 +860,7 @@ impl GenerationalGC {
         tagged_new
     }
 
-    fn copy_remaining(&mut self) {
+    fn copy_remaining(&mut self, stack_map: &StackMap) {
         #[cfg(feature = "debug-gc")]
         let mut iterations = 0;
         while let Some(mut object) = self.copied.pop() {
@@ -876,6 +873,7 @@ impl GenerationalGC {
                     object.untagged()
                 );
             }
+            let mut continuation_fields = Vec::new();
             for field in object.get_fields_mut().iter_mut() {
                 if BuiltInTypes::is_heap_pointer(*field) {
                     let heap_obj = HeapObject::from_tagged(*field);
@@ -884,6 +882,20 @@ impl GenerationalGC {
                         eprintln!("[GC DEBUG]   copying young-gen field {:#x}", *field);
                         *field = self.copy(*field);
                     }
+                    if heap_obj.get_type_id() == TYPE_ID_CONTINUATION as usize {
+                        continuation_fields.push(*field);
+                    }
+                }
+            }
+
+            if object.get_type_id() == TYPE_ID_CONTINUATION as usize
+                && let Some(cont) = ContinuationObject::from_heap_object(object) {
+                    self.update_continuation_segment(&cont, stack_map);
+                }
+
+            for cont_ptr in continuation_fields {
+                if let Some(cont) = ContinuationObject::from_tagged(cont_ptr) {
+                    self.update_continuation_segment(&cont, stack_map);
                 }
             }
         }

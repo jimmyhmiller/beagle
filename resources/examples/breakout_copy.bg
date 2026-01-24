@@ -1,0 +1,1221 @@
+namespace breakout_copy
+
+// Breakout game using raylib via FFI
+// Classic arcade game: destroy all bricks with the bouncing ball!
+
+import "beagle.ffi" as ffi
+import "raw-mutable-array" as arr
+
+// ============================================================
+// Raylib Library Setup
+// ============================================================
+
+let raylib = ffi/load-library("/opt/homebrew/lib/libraylib.dylib")
+
+// Core window functions
+let rl_init_window = ffi/get-function(
+    raylib, "InitWindow",
+    [ffi/Type.I32, ffi/Type.I32, ffi/Type.String],
+    ffi/Type.Void
+)
+
+let rl_close_window = ffi/get-function(
+    raylib, "CloseWindow", [], ffi/Type.Void
+)
+
+let rl_window_should_close = ffi/get-function(
+    raylib, "WindowShouldClose", [], ffi/Type.I32
+)
+
+let rl_set_target_fps = ffi/get-function(
+    raylib, "SetTargetFPS", [ffi/Type.I32], ffi/Type.Void
+)
+
+// Drawing control
+let rl_begin_drawing = ffi/get-function(
+    raylib, "BeginDrawing", [], ffi/Type.Void
+)
+
+let rl_end_drawing = ffi/get-function(
+    raylib, "EndDrawing", [], ffi/Type.Void
+)
+
+let rl_clear_background = ffi/get-function(
+    raylib, "ClearBackground", [ffi/Type.U32], ffi/Type.Void
+)
+
+// Drawing shapes
+let rl_draw_rectangle = ffi/get-function(
+    raylib, "DrawRectangle",
+    [ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.U32],
+    ffi/Type.Void
+)
+
+let rl_draw_rectangle_lines = ffi/get-function(
+    raylib, "DrawRectangleLines",
+    [ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.U32],
+    ffi/Type.Void
+)
+
+let rl_draw_circle = ffi/get-function(
+    raylib, "DrawCircle",
+    [ffi/Type.I32, ffi/Type.I32, ffi/Type.F32, ffi/Type.U32],
+    ffi/Type.Void
+)
+
+let rl_draw_text = ffi/get-function(
+    raylib, "DrawText",
+    [ffi/Type.String, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.U32],
+    ffi/Type.Void
+)
+
+// Input - Keyboard
+let rl_is_key_down = ffi/get-function(
+    raylib, "IsKeyDown", [ffi/Type.I32], ffi/Type.I32
+)
+
+let rl_is_key_pressed = ffi/get-function(
+    raylib, "IsKeyPressed", [ffi/Type.I32], ffi/Type.I32
+)
+
+// Input - Mouse
+let rl_get_mouse_x = ffi/get-function(
+    raylib, "GetMouseX", [], ffi/Type.I32
+)
+
+let rl_get_mouse_y = ffi/get-function(
+    raylib, "GetMouseY", [], ffi/Type.I32
+)
+
+let rl_is_mouse_button_down = ffi/get-function(
+    raylib, "IsMouseButtonDown", [ffi/Type.I32], ffi/Type.I32
+)
+
+let rl_get_fps = ffi/get-function(
+    raylib, "GetFPS", [], ffi/Type.I32
+)
+
+let MOUSE_LEFT_BUTTON = 0
+
+// Shader functions
+// LoadShaderFromMemory(vsCode, fsCode) -> Shader
+// Shader is a 16-byte struct: {u32 id, void* locs}
+let rl_load_shader_from_memory = ffi/get-function(
+    raylib, "LoadShaderFromMemory",
+    [ffi/Type.String, ffi/Type.String],
+    ffi/Type.Structure { types: [ffi/Type.U32, ffi/Type.Pointer] }
+)
+
+// BeginShaderMode takes Shader by value (16 bytes = 2 x u64 in registers)
+let rl_begin_shader_mode = ffi/get-function(
+    raylib, "BeginShaderMode",
+    [ffi/Type.U64, ffi/Type.U64],
+    ffi/Type.Void
+)
+
+let rl_end_shader_mode = ffi/get-function(
+    raylib, "EndShaderMode", [], ffi/Type.Void
+)
+
+// UnloadShader takes Shader by value
+let rl_unload_shader = ffi/get-function(
+    raylib, "UnloadShader",
+    [ffi/Type.U64, ffi/Type.U64],
+    ffi/Type.Void
+)
+
+// GetTime returns seconds elapsed since InitWindow (as f64 bits)
+let rl_get_time = ffi/get-function(
+    raylib, "GetTime", [], ffi/Type.U64
+)
+
+// GetShaderLocation(shader, uniformName) -> int
+let rl_get_shader_location = ffi/get-function(
+    raylib, "GetShaderLocation",
+    [ffi/Type.U64, ffi/Type.U64, ffi/Type.String],
+    ffi/Type.I32
+)
+
+// SetShaderValue(shader, locIndex, value_ptr, uniformType)
+// uniformType: 0=FLOAT, 1=VEC2, 2=VEC3, 3=VEC4
+let rl_set_shader_value = ffi/get-function(
+    raylib, "SetShaderValue",
+    [ffi/Type.U64, ffi/Type.U64, ffi/Type.I32, ffi/Type.Pointer, ffi/Type.I32],
+    ffi/Type.Void
+)
+
+// ============================================================
+// Color Helper
+// ============================================================
+
+fn color(r, g, b, a) {
+    r + (g * 256) + (b * 65536) + (a * 16777216)
+}
+
+fn rgb(r, g, b) {
+    color(r, g, b, 255)
+}
+
+// Predefined colors
+let RAYWHITE = rgb(245, 245, 245)
+let BLACK = rgb(0, 0, 0)
+let WHITE = rgb(255, 255, 255)
+let RED = rgb(230, 41, 55)
+let GREEN = rgb(0, 228, 48)
+let BLUE = rgb(0, 121, 241)
+let YELLOW = rgb(253, 249, 0)
+let ORANGE = rgb(255, 161, 0)
+let PINK = rgb(255, 109, 194)
+let PURPLE = rgb(200, 122, 255)
+let DARKGRAY = rgb(80, 80, 80)
+let LIGHTGRAY = rgb(200, 200, 200)
+let SKYBLUE = rgb(102, 191, 255)
+let LIME = rgb(0, 158, 47)
+let GOLD = rgb(255, 203, 0)
+let MAROON = rgb(190, 33, 55)
+let DARKBLUE = rgb(0, 82, 172)
+let DARKGREEN = rgb(0, 117, 44)
+
+// Key codes
+let KEY_RIGHT = 262
+let KEY_LEFT = 263
+let KEY_SPACE = 32
+let KEY_R = 82
+let KEY_C = 67
+let KEY_P = 80
+
+// Timeline constants
+let MAX_TIMELINE_FRAMES = 200
+
+// ============================================================
+// Helper Functions
+// ============================================================
+
+fn init_window(width, height, title) {
+    rl_init_window(width, height, title, 0, 0, 0)
+}
+
+fn close_window() {
+    rl_close_window(0, 0, 0, 0, 0, 0)
+}
+
+fn window_should_close() {
+    rl_window_should_close(0, 0, 0, 0, 0, 0) != 0
+}
+
+fn set_target_fps(fps) {
+    rl_set_target_fps(fps, 0, 0, 0, 0, 0)
+}
+
+fn begin_drawing() {
+    rl_begin_drawing(0, 0, 0, 0, 0, 0)
+}
+
+fn end_drawing() {
+    rl_end_drawing(0, 0, 0, 0, 0, 0)
+}
+
+fn clear_background(c) {
+    rl_clear_background(c, 0, 0, 0, 0, 0)
+}
+
+fn draw_rectangle(x, y, w, h, c) {
+    rl_draw_rectangle(x, y, w, h, c, 0)
+}
+
+fn draw_rectangle_lines(x, y, w, h, c) {
+    rl_draw_rectangle_lines(x, y, w, h, c, 0)
+}
+
+fn draw_circle(x, y, radius, c) {
+    rl_draw_circle(x, y, radius, c, 0, 0)
+}
+
+fn draw_text(text, x, y, size, c) {
+    rl_draw_text(text, x, y, size, c, 0)
+}
+
+fn is_key_down(key) {
+    rl_is_key_down(key, 0, 0, 0, 0, 0) != 0
+}
+
+fn is_key_pressed(key) {
+    rl_is_key_pressed(key, 0, 0, 0, 0, 0) != 0
+}
+
+fn get_mouse_x() {
+    rl_get_mouse_x(0, 0, 0, 0, 0, 0)
+}
+
+fn get_mouse_y() {
+    rl_get_mouse_y(0, 0, 0, 0, 0, 0)
+}
+
+fn is_mouse_button_down(button) {
+    rl_is_mouse_button_down(button, 0, 0, 0, 0, 0) != 0
+}
+
+fn get_fps() {
+    rl_get_fps(0, 0, 0, 0, 0, 0)
+}
+
+// Shader functions
+fn load_shader_from_memory(vs_code, fs_code) {
+    // Returns a StructReturn { low, high }
+    rl_load_shader_from_memory(vs_code, fs_code, 0, 0, 0, 0)
+}
+
+fn begin_shader_mode(shader) {
+    // shader is StructReturn { low, high }
+    rl_begin_shader_mode(shader.low, shader.high, 0, 0, 0, 0)
+}
+
+fn end_shader_mode() {
+    rl_end_shader_mode(0, 0, 0, 0, 0, 0)
+}
+
+fn unload_shader(shader) {
+    rl_unload_shader(shader.low, shader.high, 0, 0, 0, 0)
+}
+
+fn get_time() {
+    // Returns time as f64 bits - we need to convert to f32 for shader
+    rl_get_time(0, 0, 0, 0, 0, 0)
+}
+
+fn get_shader_location(shader, name) {
+    rl_get_shader_location(shader.low, shader.high, name, 0, 0, 0)
+}
+
+fn set_shader_value_float(shader, loc, value_buffer) {
+    // uniformType 0 = SHADER_UNIFORM_FLOAT
+    rl_set_shader_value(shader.low, shader.high, loc, value_buffer, 0, 0)
+}
+
+fn set_shader_value_int(shader, loc, value_buffer) {
+    // uniformType 4 = SHADER_UNIFORM_INT
+    rl_set_shader_value(shader.low, shader.high, loc, value_buffer, 4, 0)
+}
+
+// ============================================================
+// Glow Shader for the Ball
+// ============================================================
+
+// Fragment shader for a glowing effect
+let GLOW_FRAGMENT_SHADER = "
+#version 330
+in vec2 fragTexCoord;
+in vec4 fragColor;
+out vec4 finalColor;
+uniform sampler2D texture0;
+uniform int frame;  // Frame counter as integer
+
+void main() {
+    vec4 texelColor = texture(texture0, fragTexCoord);
+    // Convert frame to time (assuming 60 fps)
+    float time = float(frame) / 60.0;
+    // Pulsing glow effect
+    float pulse = 0.5 + 0.5 * sin(time * 8.0);
+    float glow = pulse * 0.5;
+    vec3 glowColor = vec3(1.0, 0.7, 0.2); // Golden glow
+    vec3 finalRgb = texelColor.rgb + glowColor * glow * texelColor.a;
+    finalColor = vec4(finalRgb, texelColor.a) * fragColor;
+}
+"
+
+// ============================================================
+// Game Constants
+// ============================================================
+
+let SCREEN_WIDTH = 800
+let SCREEN_HEIGHT = 600
+
+let PADDLE_WIDTH = 100
+let PADDLE_HEIGHT = 15
+let PADDLE_SPEED = 10  // Faster paddle for better control
+let PADDLE_Y = SCREEN_HEIGHT - 50
+
+let BALL_RADIUS = 8
+let BALL_SPEED = 6
+
+let BRICK_ROWS = 5
+let BRICK_COLS = 10
+let BRICK_WIDTH = 70
+let BRICK_HEIGHT = 25
+let BRICK_PADDING = 5
+let BRICK_OFFSET_TOP = 60
+let BRICK_OFFSET_LEFT = 35
+
+// ============================================================
+// Game State Structures
+// ============================================================
+
+struct Ball {
+    x
+    y
+    dx
+    dy
+}
+
+struct Brick {
+    x
+    y
+    alive
+    color
+}
+
+struct GameState {
+    paddle_x
+    paddle_prev_x  // Previous paddle position for velocity calculation
+    ball
+    bricks
+    score
+    lives
+    game_over
+    won
+    ball_attached  // Ball attached to paddle at start
+}
+
+// ============================================================
+// Brick Management
+// ============================================================
+
+fn get_brick_color(row) {
+    if row == 0 {
+        RED
+    } else if row == 1 {
+        ORANGE
+    } else if row == 2 {
+        YELLOW
+    } else if row == 3 {
+        GREEN
+    } else {
+        SKYBLUE
+    }
+}
+
+fn create_brick(row, col) {
+    let x = BRICK_OFFSET_LEFT + col * (BRICK_WIDTH + BRICK_PADDING)
+    let y = BRICK_OFFSET_TOP + row * (BRICK_HEIGHT + BRICK_PADDING)
+    Brick {
+        x: x,
+        y: y,
+        alive: true,
+        color: get_brick_color(row)
+    }
+}
+
+fn create_row_bricks(row, col, acc) {
+    if col >= BRICK_COLS {
+        acc
+    } else {
+        let brick = create_brick(row, col)
+        create_row_bricks(row, col + 1, push(acc, brick))
+    }
+}
+
+fn create_all_bricks(row, acc) {
+    if row >= BRICK_ROWS {
+        acc
+    } else {
+        let row_bricks = create_row_bricks(row, 0, [])
+        let new_acc = concat(acc, row_bricks)
+        create_all_bricks(row + 1, new_acc)
+    }
+}
+
+fn create_bricks() {
+    create_all_bricks(0, [])
+}
+
+fn count_alive_bricks(bricks, i, count) {
+    if i >= length(bricks) {
+        count
+    } else {
+        let brick = bricks[i]
+        let new_count = if brick.alive { count + 1 } else { count }
+        count_alive_bricks(bricks, i + 1, new_count)
+    }
+}
+
+// ============================================================
+// Initial Game State
+// ============================================================
+
+fn create_initial_state() {
+    let paddle_x = SCREEN_WIDTH / 2 - PADDLE_WIDTH / 2
+    let ball = Ball {
+        x: SCREEN_WIDTH / 2,
+        y: PADDLE_Y - BALL_RADIUS - 1,
+        dx: BALL_SPEED,
+        dy: 0 - BALL_SPEED
+    }
+    GameState {
+        paddle_x: paddle_x,
+        paddle_prev_x: paddle_x,
+        ball: ball,
+        bricks: create_bricks(),
+        score: 0,
+        lives: 3,
+        game_over: false,
+        won: false,
+        ball_attached: true
+    }
+}
+
+// ============================================================
+// Collision Detection
+// ============================================================
+
+fn abs(n) {
+    if n < 0 { 0 - n } else { n }
+}
+
+// Simple sqrt using Newton's method (5 iterations)
+fn sqrt_iter(x, guess, i) {
+    if i <= 0 {
+        guess
+    } else {
+        let better = (guess + x / guess) / 2
+        sqrt_iter(x, better, i - 1)
+    }
+}
+
+fn sqrt(x) {
+    if x <= 0 {
+        0
+    } else {
+        sqrt_iter(x, x / 2, 8)
+    }
+}
+
+// Clamp a value between min and max
+fn clamp(val, min_val, max_val) {
+    if val < min_val {
+        min_val
+    } else if val > max_val {
+        max_val
+    } else {
+        val
+    }
+}
+
+// Sign function: returns -1, 0, or 1
+fn sign(n) {
+    if n < 0 { 0 - 1 } else if n > 0 { 1 } else { 0 }
+}
+
+fn ball_rect_collision(ball, rx, ry, rw, rh) {
+    // Find closest point on rectangle to ball center
+    let closest_x = if ball.x < rx {
+        rx
+    } else if ball.x > rx + rw {
+        rx + rw
+    } else {
+        ball.x
+    }
+
+    let closest_y = if ball.y < ry {
+        ry
+    } else if ball.y > ry + rh {
+        ry + rh
+    } else {
+        ball.y
+    }
+
+    // Calculate distance
+    let dist_x = ball.x - closest_x
+    let dist_y = ball.y - closest_y
+    let dist_squared = dist_x * dist_x + dist_y * dist_y
+
+    dist_squared < BALL_RADIUS * BALL_RADIUS
+}
+
+// ============================================================
+// Game Logic
+// ============================================================
+
+fn update_paddle(state) {
+    let dx = if is_key_down(KEY_LEFT) { 0 - PADDLE_SPEED } else { 0 }
+    let dx2 = if is_key_down(KEY_RIGHT) { dx + PADDLE_SPEED } else { dx }
+
+    let new_x = state.paddle_x + dx2
+
+    // Clamp to screen
+    let clamped_x = if new_x < 0 {
+        0
+    } else if new_x + PADDLE_WIDTH > SCREEN_WIDTH {
+        SCREEN_WIDTH - PADDLE_WIDTH
+    } else {
+        new_x
+    }
+
+    GameState {
+        paddle_x: clamped_x,
+        paddle_prev_x: state.paddle_x,  // Track previous position
+        ball: state.ball,
+        bricks: state.bricks,
+        score: state.score,
+        lives: state.lives,
+        game_over: state.game_over,
+        won: state.won,
+        ball_attached: state.ball_attached
+    }
+}
+
+fn launch_ball(state) {
+    if state.ball_attached && is_key_pressed(KEY_SPACE) {
+        // Launch with angle based on paddle movement for immediate control feel
+        let paddle_velocity = state.paddle_x - state.paddle_prev_x
+        // Add paddle influence: moving paddle adds to launch angle
+        // Scale: paddle_velocity / 5 gives reasonable influence
+        let launch_dx = 2 + (paddle_velocity / 5)
+        // Clamp launch_dx to reasonable range
+        let clamped_dx = clamp(launch_dx, 0 - 4, 4)
+
+        let new_ball = Ball {
+            x: state.ball.x,
+            y: state.ball.y,
+            dx: clamped_dx,
+            dy: 0 - BALL_SPEED
+        }
+        GameState {
+            paddle_x: state.paddle_x,
+            paddle_prev_x: state.paddle_prev_x,
+            ball: new_ball,
+            bricks: state.bricks,
+            score: state.score,
+            lives: state.lives,
+            game_over: state.game_over,
+            won: state.won,
+            ball_attached: false
+        }
+    } else {
+        state
+    }
+}
+
+fn update_attached_ball(state) {
+    if state.ball_attached {
+        let ball_x = state.paddle_x + PADDLE_WIDTH / 2
+        let ball = Ball {
+            x: ball_x,
+            y: PADDLE_Y - BALL_RADIUS - 1,
+            dx: state.ball.dx,
+            dy: state.ball.dy
+        }
+        GameState {
+            paddle_x: state.paddle_x,
+            paddle_prev_x: state.paddle_prev_x,
+            ball: ball,
+            bricks: state.bricks,
+            score: state.score,
+            lives: state.lives,
+            game_over: state.game_over,
+            won: state.won,
+            ball_attached: state.ball_attached
+        }
+    } else {
+        state
+    }
+}
+
+fn update_ball_position(state) {
+    if state.ball_attached {
+        state
+    } else {
+        let ball = state.ball
+        let new_x = ball.x + ball.dx
+        let new_y = ball.y + ball.dy
+
+        // Wall collisions - bounce preserves speed
+        let dx1 = if new_x - BALL_RADIUS <= 0 || new_x + BALL_RADIUS >= SCREEN_WIDTH {
+            0 - ball.dx
+        } else {
+            ball.dx
+        }
+
+        // Ceiling collision
+        let dy1 = if new_y - BALL_RADIUS <= 0 {
+            0 - ball.dy
+        } else {
+            ball.dy
+        }
+
+        // Clamp position
+        let clamped_x = if new_x - BALL_RADIUS < 0 {
+            BALL_RADIUS
+        } else if new_x + BALL_RADIUS > SCREEN_WIDTH {
+            SCREEN_WIDTH - BALL_RADIUS
+        } else {
+            new_x
+        }
+
+        let clamped_y = if new_y - BALL_RADIUS < 0 {
+            BALL_RADIUS
+        } else {
+            new_y
+        }
+
+        let new_ball = Ball {
+            x: clamped_x,
+            y: clamped_y,
+            dx: dx1,
+            dy: dy1
+        }
+
+        GameState {
+            paddle_x: state.paddle_x,
+            paddle_prev_x: state.paddle_prev_x,
+            ball: new_ball,
+            bricks: state.bricks,
+            score: state.score,
+            lives: state.lives,
+            game_over: state.game_over,
+            won: state.won,
+            ball_attached: state.ball_attached
+        }
+    }
+}
+
+fn check_paddle_collision(state) {
+    if state.ball_attached {
+        state
+    } else {
+        let ball = state.ball
+        if ball_rect_collision(ball, state.paddle_x, PADDLE_Y, PADDLE_WIDTH, PADDLE_HEIGHT) {
+            // Calculate paddle velocity (how fast the paddle is moving)
+            let paddle_velocity = state.paddle_x - state.paddle_prev_x
+
+            // Calculate where on the paddle the ball hit
+            // hit_pos: 0 = left edge, PADDLE_WIDTH = right edge
+            let hit_pos = ball.x - state.paddle_x
+
+            // Convert to range: -50 to +50 (for PADDLE_WIDTH=100)
+            let offset_from_center = hit_pos - (PADDLE_WIDTH / 2)
+
+            // Calculate dx based on hit position
+            // At center (offset=0): dx = 0
+            // At edges (offset=±50): dx = ±5
+            // This gives nice angle control
+            let position_dx = (offset_from_center * BALL_SPEED) / (PADDLE_WIDTH / 2)
+
+            // Add paddle velocity influence (key to good control!)
+            // Moving paddle adds "english" to the ball
+            // Divide by 3 to make it influential but not overwhelming
+            let velocity_bonus = paddle_velocity / 3
+
+            // Combine position-based angle with paddle velocity
+            let combined_dx = position_dx + velocity_bonus
+
+            // Clamp dx to prevent too-horizontal shots
+            let max_dx = BALL_SPEED - 2  // Leave room for dy
+            let clamped_dx = clamp(combined_dx, 0 - max_dx, max_dx)
+
+            // Ensure minimum dx magnitude for playability (no straight-up shots)
+            let min_dx = 1
+            let final_dx = if abs(clamped_dx) < min_dx {
+                if clamped_dx < 0 { 0 - min_dx } else { min_dx }
+            } else {
+                clamped_dx
+            }
+
+            let new_ball = Ball {
+                x: ball.x,
+                y: PADDLE_Y - BALL_RADIUS - 1,
+                dx: final_dx,
+                dy: 0 - BALL_SPEED  // Always go up at full speed
+            }
+
+            GameState {
+                paddle_x: state.paddle_x,
+                paddle_prev_x: state.paddle_prev_x,
+                ball: new_ball,
+                bricks: state.bricks,
+                score: state.score,
+                lives: state.lives,
+                game_over: state.game_over,
+                won: state.won,
+                ball_attached: state.ball_attached
+            }
+        } else {
+            state
+        }
+    }
+}
+
+fn check_brick_collision_single(ball, brick) {
+    if brick.alive && ball_rect_collision(ball, brick.x, brick.y, BRICK_WIDTH, BRICK_HEIGHT) {
+        true
+    } else {
+        false
+    }
+}
+
+fn update_bricks_after_collision(bricks, ball, i, new_bricks, hit) {
+    if i >= length(bricks) {
+        [new_bricks, hit]
+    } else {
+        let brick = bricks[i]
+        if brick.alive && ball_rect_collision(ball, brick.x, brick.y, BRICK_WIDTH, BRICK_HEIGHT) {
+            let dead_brick = Brick {
+                x: brick.x,
+                y: brick.y,
+                alive: false,
+                color: brick.color
+            }
+            update_bricks_after_collision(bricks, ball, i + 1, push(new_bricks, dead_brick), true)
+        } else {
+            update_bricks_after_collision(bricks, ball, i + 1, push(new_bricks, brick), hit)
+        }
+    }
+}
+
+fn check_brick_collisions(state) {
+    if state.ball_attached {
+        state
+    } else {
+        let result = update_bricks_after_collision(state.bricks, state.ball, 0, [], false)
+        let new_bricks = result[0]
+        let hit = result[1]
+
+        if hit {
+            // Bounce ball (simple vertical bounce)
+            let ball = state.ball
+            let new_ball = Ball {
+                x: ball.x,
+                y: ball.y,
+                dx: ball.dx,
+                dy: 0 - ball.dy
+            }
+
+            GameState {
+                paddle_x: state.paddle_x,
+                paddle_prev_x: state.paddle_prev_x,
+                ball: new_ball,
+                bricks: new_bricks,
+                score: state.score + 10,
+                lives: state.lives,
+                game_over: state.game_over,
+                won: state.won,
+                ball_attached: state.ball_attached
+            }
+        } else {
+            state
+        }
+    }
+}
+
+fn check_ball_lost(state) {
+    if state.ball_attached {
+        state
+    } else {
+        let ball = state.ball
+        if ball.y + BALL_RADIUS > SCREEN_HEIGHT {
+            let new_lives = state.lives - 1
+            if new_lives <= 0 {
+                GameState {
+                    paddle_x: state.paddle_x,
+                    paddle_prev_x: state.paddle_prev_x,
+                    ball: state.ball,
+                    bricks: state.bricks,
+                    score: state.score,
+                    lives: 0,
+                    game_over: true,
+                    won: false,
+                    ball_attached: state.ball_attached
+                }
+            } else {
+                // Reset ball to paddle
+                let paddle_x = SCREEN_WIDTH / 2 - PADDLE_WIDTH / 2
+                let new_ball = Ball {
+                    x: paddle_x + PADDLE_WIDTH / 2,
+                    y: PADDLE_Y - BALL_RADIUS - 1,
+                    dx: BALL_SPEED,
+                    dy: 0 - BALL_SPEED
+                }
+                GameState {
+                    paddle_x: paddle_x,
+                    paddle_prev_x: paddle_x,
+                    ball: new_ball,
+                    bricks: state.bricks,
+                    score: state.score,
+                    lives: new_lives,
+                    game_over: false,
+                    won: false,
+                    ball_attached: true
+                }
+            }
+        } else {
+            state
+        }
+    }
+}
+
+fn check_win(state) {
+    let alive = count_alive_bricks(state.bricks, 0, 0)
+    if alive == 0 {
+        GameState {
+            paddle_x: state.paddle_x,
+            paddle_prev_x: state.paddle_prev_x,
+            ball: state.ball,
+            bricks: state.bricks,
+            score: state.score,
+            lives: state.lives,
+            game_over: true,
+            won: true,
+            ball_attached: state.ball_attached
+        }
+    } else {
+        state
+    }
+}
+
+fn update_game(state) {
+    if state.game_over {
+        // Check for restart
+        if is_key_pressed(KEY_R) {
+            create_initial_state()
+        } else {
+            state
+        }
+    } else {
+        let s1 = update_paddle(state)
+        let s2 = launch_ball(s1)
+        let s3 = update_attached_ball(s2)
+        let s4 = update_ball_position(s3)
+        let s5 = check_paddle_collision(s4)
+        let s6 = check_brick_collisions(s5)
+        let s7 = check_ball_lost(s6)
+        let s8 = check_win(s7)
+        s8
+    }
+}
+
+// ============================================================
+// Rendering
+// ============================================================
+
+fn draw_bricks(bricks, i) {
+    if i >= length(bricks) {
+        0
+    } else {
+        let brick = bricks[i]
+        if brick.alive {
+            draw_rectangle(brick.x, brick.y, BRICK_WIDTH, BRICK_HEIGHT, brick.color)
+            draw_rectangle_lines(brick.x, brick.y, BRICK_WIDTH, BRICK_HEIGHT, WHITE)
+        }
+        draw_bricks(bricks, i + 1)
+    }
+}
+
+fn draw_lives(lives, i, x) {
+    if i >= lives {
+        0
+    } else {
+        draw_rectangle(x + i * 25, 10, 20, 10, RED)
+        draw_lives(lives, i + 1, x)
+    }
+}
+
+fn render(state, shader_ctx, frame) {
+    begin_drawing()
+    clear_background(rgb(20, 20, 30))
+
+    // Update shader frame uniform for pulsing effect
+    ffi/set-i32(shader_ctx.frame_buffer, 0, frame)
+    set_shader_value_int(shader_ctx.shader, shader_ctx.frame_loc, shader_ctx.frame_buffer)
+
+    // Draw bricks with shader for glowing effect
+    begin_shader_mode(shader_ctx.shader)
+    draw_bricks(state.bricks, 0)
+    end_shader_mode()
+
+    // Draw paddle
+    draw_rectangle(state.paddle_x, PADDLE_Y, PADDLE_WIDTH, PADDLE_HEIGHT, SKYBLUE)
+    draw_rectangle_lines(state.paddle_x, PADDLE_Y, PADDLE_WIDTH, PADDLE_HEIGHT, WHITE)
+
+    // Draw ball with shader for glowing effect
+    begin_shader_mode(shader_ctx.shader)
+    draw_circle(state.ball.x, state.ball.y, BALL_RADIUS, GOLD)
+    // Draw a larger, more transparent circle for glow halo
+    draw_circle(state.ball.x, state.ball.y, BALL_RADIUS + 4, color(255, 200, 50, 100))
+    end_shader_mode()
+
+    // Draw UI
+    let score_text = "Score: " ++ to-string(state.score)
+    draw_text(score_text, 10, 10, 20, WHITE)
+
+    // FPS counter
+    let fps_text = "FPS: " ++ to-string(get_fps())
+    draw_text(fps_text, 10, 35, 16, LIGHTGRAY)
+
+    draw_text("Lives:", SCREEN_WIDTH - 150, 10, 20, WHITE)
+    draw_lives(state.lives, 0, SCREEN_WIDTH - 80)
+
+    if state.ball_attached {
+        draw_text("Press SPACE to launch", SCREEN_WIDTH / 2 - 100, SCREEN_HEIGHT / 2, 20, LIGHTGRAY)
+    }
+
+    if state.game_over {
+        if state.won {
+            draw_text("YOU WIN!", SCREEN_WIDTH / 2 - 80, SCREEN_HEIGHT / 2 - 20, 40, GREEN)
+        } else {
+            draw_text("GAME OVER", SCREEN_WIDTH / 2 - 100, SCREEN_HEIGHT / 2 - 20, 40, RED)
+        }
+        draw_text("Press R to restart", SCREEN_WIDTH / 2 - 80, SCREEN_HEIGHT / 2 + 30, 20, LIGHTGRAY)
+    }
+
+    end_drawing()
+}
+
+// ============================================================
+// Timeline System
+// ============================================================
+
+struct TimelineFrame {
+    state
+    cont
+    frame_number
+}
+
+// Add a frame to the timeline, keeping only the last MAX_TIMELINE_FRAMES
+fn add_to_timeline(timeline_buf, timeline_head, timeline_len, frame_data) {
+    let head = deref(timeline_head)
+    let len = deref(timeline_len)
+    let cap = MAX_TIMELINE_FRAMES
+    if len < cap {
+        let idx = (head + len) % cap
+        arr/write-field(timeline_buf, idx, frame_data)
+        reset!(timeline_len, len + 1)
+    } else {
+        // Overwrite oldest and advance head
+        arr/write-field(timeline_buf, head, frame_data)
+        reset!(timeline_head, (head + 1) % cap)
+    }
+}
+
+fn timeline_length(timeline_len) {
+    deref(timeline_len)
+}
+
+fn timeline_get(timeline_buf, timeline_head, timeline_len, idx) {
+    let len = deref(timeline_len)
+    if idx < 0 || idx >= len {
+        null
+    } else {
+        let head = deref(timeline_head)
+        let real_idx = (head + idx) % MAX_TIMELINE_FRAMES
+        arr/read-field(timeline_buf, real_idx)
+    }
+}
+
+// Timeline bar constants - positioned above the paddle area
+let TIMELINE_BAR_HEIGHT = 20
+let TIMELINE_BAR_Y = SCREEN_HEIGHT - 80
+let TIMELINE_BAR_X = 20
+let TIMELINE_BAR_WIDTH = SCREEN_WIDTH - 40
+
+// Render the game with timeline bar at bottom (no modal)
+fn render_paused(state, shader_ctx, frame_num, timeline_index, timeline_length) {
+    begin_drawing()
+    clear_background(rgb(20, 20, 30))
+
+    // Draw the full game state
+    draw_bricks(state.bricks, 0)
+    draw_rectangle(state.paddle_x, PADDLE_Y, PADDLE_WIDTH, PADDLE_HEIGHT, SKYBLUE)
+    draw_circle(state.ball.x, state.ball.y, BALL_RADIUS, GOLD)
+
+    // Draw score
+    let score_text = "Score: " ++ to-string(state.score)
+    draw_text(score_text, 10, 10, 20, WHITE)
+
+    // Draw timeline bar background
+    draw_rectangle(TIMELINE_BAR_X - 5, TIMELINE_BAR_Y - 5, TIMELINE_BAR_WIDTH + 10, TIMELINE_BAR_HEIGHT + 10, color(0, 0, 0, 200))
+    draw_rectangle(TIMELINE_BAR_X, TIMELINE_BAR_Y, TIMELINE_BAR_WIDTH, TIMELINE_BAR_HEIGHT, DARKGRAY)
+
+    // Progress fill
+    let progress = if timeline_length > 1 {
+        (timeline_index * TIMELINE_BAR_WIDTH) / (timeline_length - 1)
+    } else {
+        0
+    }
+    draw_rectangle(TIMELINE_BAR_X, TIMELINE_BAR_Y, progress, TIMELINE_BAR_HEIGHT, SKYBLUE)
+
+    // Position marker (playhead)
+    let marker_x = TIMELINE_BAR_X + progress - 3
+    draw_rectangle(marker_x, TIMELINE_BAR_Y - 5, 6, TIMELINE_BAR_HEIGHT + 10, WHITE)
+
+    // Frame info text
+    let info_text = "Frame " ++ to-string(timeline_index + 1) ++ "/" ++ to-string(timeline_length) ++ " [SPACE to resume]"
+    draw_text(info_text, TIMELINE_BAR_X, TIMELINE_BAR_Y - 25, 16, WHITE)
+
+    // PAUSED indicator
+    draw_text("PAUSED", SCREEN_WIDTH - 100, 10, 20, YELLOW)
+
+    end_drawing()
+}
+
+// Calculate timeline index from mouse X position
+fn mouse_to_timeline_index(mouse_x, timeline_length) {
+    if mouse_x < TIMELINE_BAR_X {
+        0
+    } else if mouse_x > TIMELINE_BAR_X + TIMELINE_BAR_WIDTH {
+        timeline_length - 1
+    } else {
+        let relative_x = mouse_x - TIMELINE_BAR_X
+        let idx = (relative_x * (timeline_length - 1)) / TIMELINE_BAR_WIDTH
+        if idx < 0 { 0 } else if idx >= timeline_length { timeline_length - 1 } else { idx }
+    }
+}
+
+// Pause loop - handles timeline scrubbing
+// first_frame flag prevents immediate resume from same keypress that triggered pause
+fn pause_loop(timeline_buf, timeline_head, timeline_len, timeline_index, shader_ctx, just_resumed, first_frame) {
+    if window_should_close() {
+        // Exit game
+        0
+    } else {
+        let idx = deref(timeline_index)
+        let tl_length = timeline_length(timeline_len)
+
+        // Handle mouse input - click/drag on timeline bar
+        let mouse_x = get_mouse_x()
+        let mouse_y = get_mouse_y()
+        let on_timeline = mouse_y >= TIMELINE_BAR_Y - 10 && mouse_y <= TIMELINE_BAR_Y + TIMELINE_BAR_HEIGHT + 10
+
+        // Calculate new index from input
+        let new_idx = if is_mouse_button_down(MOUSE_LEFT_BUTTON) && on_timeline {
+            // Mouse drag on timeline
+            mouse_to_timeline_index(mouse_x, tl_length)
+        } else if is_key_down(KEY_LEFT) {
+            // Hold left to rewind (use key_down for continuous movement)
+            if idx > 0 { idx - 1 } else { idx }
+        } else if is_key_down(KEY_RIGHT) {
+            // Hold right to fast-forward
+            if idx < tl_length - 1 { idx + 1 } else { idx }
+        } else {
+            idx
+        }
+        reset!(timeline_index, new_idx)
+
+        // Get current frame data for rendering
+        let frame_data = timeline_get(timeline_buf, timeline_head, timeline_len, new_idx)
+
+        // Check for resume with SPACE (not P, since P triggered the pause)
+        if is_key_pressed(KEY_SPACE) {
+            println("Resuming from frame " ++ to-string(frame_data.frame_number))
+            // Trim timeline to current position (discard future)
+            reset!(timeline_len, new_idx + 1)
+            // Set flag to skip pause check when we resume
+            reset!(just_resumed, true)
+            // Invoke the continuation to resume
+            let k = frame_data.cont
+            k(null)
+        } else {
+            // Render paused state
+            render_paused(frame_data.state, shader_ctx, frame_data.frame_number, new_idx, tl_length)
+            pause_loop(timeline_buf, timeline_head, timeline_len, timeline_index, shader_ctx, just_resumed, false)
+        }
+    }
+}
+
+// ============================================================
+// Main Loop
+// ============================================================
+
+fn game_loop(state, shader_ctx, frame, timeline_buf, timeline_head, timeline_len, timeline_index, just_resumed) {
+    // Capture this frame's continuation and add to timeline
+    shift(fn(k) {
+        let frame_data = TimelineFrame {
+            state: state,
+            cont: k,
+            frame_number: frame
+        }
+        add_to_timeline(timeline_buf, timeline_head, timeline_len, frame_data)
+        k(null)  // Continue execution
+    })
+
+    // Check if we just resumed - if so, skip pause check this frame
+    if deref(just_resumed) {
+        reset!(just_resumed, false)
+        // Continue with normal game loop
+        if window_should_close() {
+            state.score
+        } else {
+            let new_state = update_game(state)
+            render(new_state, shader_ctx, frame)
+            game_loop(new_state, shader_ctx, frame + 1, timeline_buf, timeline_head, timeline_len, timeline_index, just_resumed)
+        }
+    } else if is_key_pressed(KEY_P) {
+        println("Paused at frame " ++ to-string(frame))
+        // Set timeline index to most recent frame
+        reset!(timeline_index, timeline_length(timeline_len) - 1)
+        // Enter pause loop (first_frame=true to skip immediate resume check)
+        pause_loop(timeline_buf, timeline_head, timeline_len, timeline_index, shader_ctx, just_resumed, true)
+    } else {
+        // Normal game loop
+        if window_should_close() {
+            state.score
+        } else {
+            let new_state = update_game(state)
+            render(new_state, shader_ctx, frame)
+            game_loop(new_state, shader_ctx, frame + 1, timeline_buf, timeline_head, timeline_len, timeline_index, just_resumed)
+        }
+    }
+}
+
+// Shader context holds shader and uniform locations
+struct ShaderCtx {
+    shader
+    frame_loc
+    frame_buffer
+}
+
+fn main() {
+    println("Initializing Breakout...")
+    init_window(SCREEN_WIDTH, SCREEN_HEIGHT, "Breakout - Beagle + Raylib")
+    set_target_fps(60)
+
+    println("Loading shader...")
+    // Load the glow shader (null for vertex shader = use default)
+    let shader = load_shader_from_memory(null, GLOW_FRAGMENT_SHADER)
+    let frame_loc = get_shader_location(shader, "frame")
+    // Allocate a 4-byte buffer for the int frame value
+    let frame_buffer = ffi/allocate(4)
+    println("Shader loaded! Frame uniform location: " ++ to-string(frame_loc))
+
+    let shader_ctx = ShaderCtx {
+        shader: shader,
+        frame_loc: frame_loc,
+        frame_buffer: frame_buffer
+    }
+
+    // Create atoms for timeline system
+    let timeline_buf = arr/new-array(MAX_TIMELINE_FRAMES)
+    let timeline_head = atom(0)     // Oldest frame index
+    let timeline_len = atom(0)      // Number of frames stored
+    let timeline_index = atom(0)    // Current position when paused
+    let just_resumed = atom(false)  // Flag to skip pause check after resume
+
+    println("Starting game...")
+    println("Controls:")
+    println("  LEFT/RIGHT arrows - Move paddle")
+    println("  SPACE - Launch ball")
+    println("  P - Pause (scrub timeline with mouse or arrows)")
+    println("  ESC - Quit")
+    println("")
+    println("Tip: Move paddle while hitting the ball to add 'english'!")
+
+    let initial_state = create_initial_state()
+    // Wrap game loop in reset for continuation capture
+    let final_score = reset {
+        game_loop(initial_state, shader_ctx, 0, timeline_buf, timeline_head, timeline_len, timeline_index, just_resumed)
+    }
+
+    println("Game over! Final score: " ++ to-string(final_score))
+    ffi/deallocate(frame_buffer)
+    unload_shader(shader)
+    close_window()
+    final_score
+}

@@ -706,6 +706,33 @@ impl HeapObject {
         unsafe { std::ptr::copy_nonoverlapping(fields.as_ptr(), pointer, fields.len()) };
     }
 
+    /// Returns the byte length for opaque byte buffers that store length in header.type_data.
+    /// This is intended for non-scanned byte blobs like continuation stack segments.
+    pub fn get_opaque_bytes_len(&self) -> usize {
+        let header = self.get_header();
+        let len = header.type_data as usize;
+        let max = self.fields_size();
+        if len > max { max } else { len }
+    }
+
+    /// Get raw bytes for opaque byte buffers (length stored in header.type_data).
+    pub fn get_opaque_bytes(&self) -> &[u8] {
+        let len = self.get_opaque_bytes_len();
+        let untagged = self.untagged();
+        let pointer = untagged as *const u8;
+        let pointer = unsafe { pointer.add(self.header_size()) };
+        unsafe { std::slice::from_raw_parts(pointer, len) }
+    }
+
+    /// Get mutable raw bytes for opaque byte buffers (length stored in header.type_data).
+    pub fn get_opaque_bytes_mut(&mut self) -> &mut [u8] {
+        let len = self.get_opaque_bytes_len();
+        let untagged = self.untagged();
+        let pointer = untagged as *mut u8;
+        let pointer = unsafe { pointer.add(self.header_size()) };
+        unsafe { std::slice::from_raw_parts_mut(pointer, len) }
+    }
+
     pub fn is_zero_size(&self) -> bool {
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;

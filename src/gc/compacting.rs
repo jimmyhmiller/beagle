@@ -4,7 +4,11 @@ use libc::mprotect;
 
 use super::get_page_size;
 
-use crate::types::{BuiltInTypes, Header, HeapObject, Word};
+use crate::{
+    collections::TYPE_ID_CONTINUATION,
+    runtime::ContinuationObject,
+    types::{BuiltInTypes, Header, HeapObject, Word},
+};
 
 use super::{
     AllocateAction, Allocator, AllocatorOptions, StackMap,
@@ -246,7 +250,7 @@ impl CompactingHeap {
         tagged_new
     }
 
-    unsafe fn copy_all(&mut self, roots: Vec<usize>) -> Vec<usize> {
+    unsafe fn copy_all(&mut self, roots: Vec<usize>, stack_map: &StackMap) -> Vec<usize> {
         unsafe {
             let start_offset = self.to_space.allocation_offset;
             // TODO: Is this vec the best way? Probably not
@@ -259,13 +263,13 @@ impl CompactingHeap {
                 new_roots.push(self.copy_using_cheneys_algorithm(heap_object));
             }
 
-            self.copy_remaining(start_offset);
+            self.copy_remaining(start_offset, stack_map);
 
             new_roots
         }
     }
 
-    unsafe fn copy_remaining(&mut self, start_offset: usize) {
+    unsafe fn copy_remaining(&mut self, start_offset: usize, stack_map: &StackMap) {
         for mut object in self.to_space.object_iter_from_position(start_offset) {
             if object.marked() {
                 panic!("We are copying to this space, nothing should be marked");
@@ -279,32 +283,30 @@ impl CompactingHeap {
                     *datum = self.copy_using_cheneys_algorithm(heap_object);
                 }
             }
+            if object.get_type_id() == TYPE_ID_CONTINUATION as usize
+                && let Some(cont) = ContinuationObject::from_heap_object(object) {
+                    cont.with_segment_bytes_mut(|segment| {
+                        if segment.is_empty() {
+                            return;
+                        }
+                        self.gc_continuation_segment(
+                            segment,
+                            cont.original_sp(),
+                            cont.original_fp(),
+                            cont.prompt_stack_pointer(),
+                            stack_map,
+                        );
+                    });
+                }
         }
     }
 
     fn gc_continuations(&mut self, stack_map: &StackMap) {
         let runtime = crate::get_runtime().get_mut();
 
-        // Fast path: skip if no continuations
-        let mut captured_continuations = runtime.captured_continuations.lock().unwrap();
-        if captured_continuations.is_empty() && runtime.invocation_return_points.is_empty() {
+        // Fast path: skip if no invocation return points
+        if runtime.invocation_return_points.is_empty() {
             return;
-        }
-
-        // Process captured continuations
-        for (_thread_id, conts) in captured_continuations.iter_mut() {
-            for cont in conts.iter_mut() {
-                if cont.stack_segment.is_empty() {
-                    continue;
-                }
-                self.gc_continuation_segment(
-                    &mut cont.stack_segment,
-                    cont.original_sp,
-                    cont.original_fp,
-                    cont.prompt.stack_pointer,
-                    stack_map,
-                );
-            }
         }
 
         // Process InvocationReturnPoint saved frames
@@ -326,7 +328,7 @@ impl CompactingHeap {
 
     fn gc_continuation_segment(
         &mut self,
-        segment: &mut Vec<u8>,
+        segment: &mut [u8],
         original_sp: usize,
         original_fp: usize,
         prompt_sp: usize,
@@ -413,7 +415,8 @@ impl Allocator for CompactingHeap {
                 *gc_return_addr,
                 stack_map,
             );
-            let new_roots = unsafe { self.copy_all(roots.iter().map(|x| x.1).collect()) };
+            let new_roots =
+                unsafe { self.copy_all(roots.iter().map(|x| x.1).collect(), stack_map) };
 
             for (i, (slot_addr, _)) in roots.iter().enumerate() {
                 debug_assert!(
@@ -431,7 +434,7 @@ impl Allocator for CompactingHeap {
 
         let start_offset = self.to_space.allocation_offset;
 
-        unsafe { self.copy_remaining(start_offset) };
+        unsafe { self.copy_remaining(start_offset, stack_map) };
 
         mem::swap(&mut self.from_space, &mut self.to_space);
 

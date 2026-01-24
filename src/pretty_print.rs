@@ -518,8 +518,12 @@ impl PrettyPrint for Instruction {
                     local_index
                 )
             }
-            Instruction::ReturnFromShift(value, _) => {
-                format!("return_from_shift {}", value.pretty_print())
+            Instruction::ReturnFromShift(value, cont_ptr, _) => {
+                format!(
+                    "return_from_shift {}, {}",
+                    value.pretty_print(),
+                    cont_ptr.pretty_print()
+                )
             }
         }
     }

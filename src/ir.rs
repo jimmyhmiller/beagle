@@ -184,7 +184,7 @@ pub enum Instruction {
     PopPromptHandler(Value, usize),         // result_value, builtin_fn_ptr
     LoadLabelAddress(Value, Label), // dest, label - loads the address of a label into a register
     CaptureContinuation(Value, Label, usize, usize), // dest, resume_label, result_local_index, builtin_fn_ptr
-    ReturnFromShift(Value, usize), // value, builtin_fn_ptr - calls return_from_shift with current SP/FP
+    ReturnFromShift(Value, Value, usize), // value, cont_ptr, builtin_fn_ptr - calls return_from_shift with current SP/FP
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -535,8 +535,8 @@ impl Instruction {
             Instruction::CaptureContinuation(dest, _, _, _) => {
                 get_register!(dest)
             }
-            Instruction::ReturnFromShift(value, _) => {
-                get_register!(value)
+            Instruction::ReturnFromShift(value, cont_ptr, _) => {
+                get_registers!(value, cont_ptr)
             }
         }
     }
@@ -680,8 +680,9 @@ impl Instruction {
             Instruction::CaptureContinuation(dest, _, _, _) => {
                 replace_register!(dest, old_register, new_register);
             }
-            Instruction::ReturnFromShift(value, _) => {
+            Instruction::ReturnFromShift(value, cont_ptr, _) => {
                 replace_register!(value, old_register, new_register);
+                replace_register!(cont_ptr, old_register, new_register);
             }
         }
     }
@@ -2342,9 +2343,9 @@ impl Ir {
                         backend.free_temporary_register(dest_reg);
                     }
                 }
-                Instruction::ReturnFromShift(value, builtin_fn) => {
+                Instruction::ReturnFromShift(value, cont_ptr, builtin_fn) => {
                     // Call return_from_shift builtin (does not return)
-                    // Arguments: (stack_pointer, frame_pointer, value)
+                    // Arguments: (stack_pointer, frame_pointer, value, cont_ptr)
 
                     // Get current stack pointer into arg 0
                     backend.get_stack_pointer_imm(backend.arg(0), 0);
@@ -2355,6 +2356,10 @@ impl Ir {
                     // Load value into arg 2
                     let value_reg = self.value_to_register(value, backend);
                     backend.mov_reg(backend.arg(2), value_reg);
+
+                    // Load cont_ptr into arg 3
+                    let cont_reg = self.value_to_register(cont_ptr, backend);
+                    backend.mov_reg(backend.arg(3), cont_reg);
 
                     // Call the builtin (does not return)
                     let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
@@ -2435,9 +2440,9 @@ impl Ir {
         dest.into()
     }
 
-    pub fn return_from_shift(&mut self, value: Value, builtin_fn: usize) {
+    pub fn return_from_shift(&mut self, value: Value, cont_ptr: Value, builtin_fn: usize) {
         self.instructions
-            .push(Instruction::ReturnFromShift(value, builtin_fn));
+            .push(Instruction::ReturnFromShift(value, cont_ptr, builtin_fn));
     }
 
     pub fn load_string_constant(&mut self, string_constant: Value) -> Value {

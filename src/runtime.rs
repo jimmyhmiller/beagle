@@ -31,7 +31,8 @@ use crate::{
 };
 
 use crate::collections::{
-    GcHandle, HandleScope, PersistentMap, PersistentVec, TYPE_ID_ATOM, TYPE_ID_FUNCTION_OBJECT,
+    GcHandle, HandleScope, PersistentMap, PersistentVec, TYPE_ID_ATOM, TYPE_ID_CONTINUATION,
+    TYPE_ID_CONTINUATION_SEGMENT, TYPE_ID_FUNCTION_OBJECT,
 };
 
 use std::cell::RefCell;
@@ -1355,9 +1356,6 @@ pub struct InvocationReturnPoint {
     /// the continuation body may write to stack locations that overlap with
     /// the shift body's frame. We save the frame from FP to SP.
     pub saved_stack_frame: Vec<u8>,
-    /// Index of the continuation that was invoked.
-    /// Used to remove the correct continuation from captured_continuations when returning.
-    pub continuation_index: usize,
     /// Unique ID of the prompt handler that this return point belongs to.
     /// Used to match return points with their corresponding handle blocks.
     /// This distinguishes sequential handlers at the same stack depth.
@@ -1365,22 +1363,171 @@ pub struct InvocationReturnPoint {
 }
 
 /// Captured continuation: a snapshot of the stack between a shift point and its enclosing reset.
-/// This is a heap object that can be invoked to restore the captured computation.
-#[repr(C)]
-#[derive(Debug, Clone)]
-pub struct CapturedContinuation {
-    /// The raw stack bytes from shift's SP to reset's SP
-    pub stack_segment: Vec<u8>,
-    /// The original stack pointer at capture time
-    pub original_sp: usize,
-    /// The original frame pointer at capture time
-    pub original_fp: usize,
-    /// Where to resume when invoked (the after_shift label address)
-    pub resume_address: usize,
-    /// Local offset where the invoked value should be stored
-    pub result_local: isize,
-    /// The prompt handler that was active when captured
-    pub prompt: PromptHandler,
+/// This is stored as a heap object with type_id = TYPE_ID_CONTINUATION.
+pub struct ContinuationObject {
+    heap_obj: HeapObject,
+}
+
+impl ContinuationObject {
+    const FIELD_SEGMENT: usize = 0;
+    const FIELD_ORIGINAL_SP: usize = 1;
+    const FIELD_ORIGINAL_FP: usize = 2;
+    const FIELD_RESUME_ADDRESS: usize = 3;
+    const FIELD_RESULT_LOCAL: usize = 4;
+    const FIELD_HANDLER_ADDRESS: usize = 5;
+    const FIELD_PROMPT_SP: usize = 6;
+    const FIELD_PROMPT_FP: usize = 7;
+    const FIELD_PROMPT_LR: usize = 8;
+    const FIELD_PROMPT_RESULT_LOCAL: usize = 9;
+    const FIELD_PROMPT_ID: usize = 10;
+
+    pub fn from_tagged(tagged: usize) -> Option<Self> {
+        let heap_obj = HeapObject::try_from_tagged(tagged)?;
+        Self::from_heap_object(heap_obj)
+    }
+
+    pub fn from_heap_object(heap_obj: HeapObject) -> Option<Self> {
+        if heap_obj.get_type_id() == TYPE_ID_CONTINUATION as usize {
+            Some(Self { heap_obj })
+        } else {
+            None
+        }
+    }
+
+    pub fn tagged_ptr(&self) -> usize {
+        self.heap_obj.tagged_pointer()
+    }
+
+    pub fn segment_ptr(&self) -> usize {
+        self.heap_obj.get_field(Self::FIELD_SEGMENT)
+    }
+
+    pub fn segment_len(&self) -> usize {
+        let segment_obj = HeapObject::from_tagged(self.segment_ptr());
+        segment_obj.get_opaque_bytes_len()
+    }
+
+    pub fn with_segment_bytes<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
+        let segment_obj = HeapObject::from_tagged(self.segment_ptr());
+        let bytes = segment_obj.get_opaque_bytes();
+        f(bytes)
+    }
+
+    pub fn with_segment_bytes_mut<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
+        let mut segment_obj = HeapObject::from_tagged(self.segment_ptr());
+        let bytes = segment_obj.get_opaque_bytes_mut();
+        f(bytes)
+    }
+
+    pub fn original_sp(&self) -> usize {
+        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_ORIGINAL_SP))
+    }
+
+    pub fn original_fp(&self) -> usize {
+        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_ORIGINAL_FP))
+    }
+
+    pub fn resume_address(&self) -> usize {
+        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_RESUME_ADDRESS))
+    }
+
+    pub fn result_local(&self) -> isize {
+        BuiltInTypes::untag_isize(self.heap_obj.get_field(Self::FIELD_RESULT_LOCAL) as isize)
+    }
+
+    pub fn handler_address(&self) -> usize {
+        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_HANDLER_ADDRESS))
+    }
+
+    pub fn prompt_stack_pointer(&self) -> usize {
+        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_PROMPT_SP))
+    }
+
+    pub fn prompt_frame_pointer(&self) -> usize {
+        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_PROMPT_FP))
+    }
+
+    pub fn prompt_link_register(&self) -> usize {
+        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_PROMPT_LR))
+    }
+
+    pub fn prompt_result_local(&self) -> isize {
+        BuiltInTypes::untag_isize(self.heap_obj.get_field(Self::FIELD_PROMPT_RESULT_LOCAL) as isize)
+    }
+
+    pub fn prompt_id(&self) -> usize {
+        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_PROMPT_ID))
+    }
+
+    pub fn prompt_handler(&self) -> PromptHandler {
+        PromptHandler {
+            handler_address: self.handler_address(),
+            stack_pointer: self.prompt_stack_pointer(),
+            frame_pointer: self.prompt_frame_pointer(),
+            link_register: self.prompt_link_register(),
+            result_local: self.prompt_result_local(),
+            prompt_id: self.prompt_id(),
+        }
+    }
+
+    pub fn initialize(
+        heap_obj: &mut HeapObject,
+        segment_ptr: usize,
+        original_sp: usize,
+        original_fp: usize,
+        resume_address: usize,
+        result_local: isize,
+        prompt: &PromptHandler,
+    ) {
+        heap_obj.write_type_id(TYPE_ID_CONTINUATION as usize);
+        heap_obj.write_field(Self::FIELD_SEGMENT as i32, segment_ptr);
+        heap_obj.write_field(
+            Self::FIELD_ORIGINAL_SP as i32,
+            BuiltInTypes::Int.tag(original_sp as isize) as usize,
+        );
+        heap_obj.write_field(
+            Self::FIELD_ORIGINAL_FP as i32,
+            BuiltInTypes::Int.tag(original_fp as isize) as usize,
+        );
+        heap_obj.write_field(
+            Self::FIELD_RESUME_ADDRESS as i32,
+            BuiltInTypes::Int.tag(resume_address as isize) as usize,
+        );
+        heap_obj.write_field(
+            Self::FIELD_RESULT_LOCAL as i32,
+            BuiltInTypes::Int.tag(result_local) as usize,
+        );
+        heap_obj.write_field(
+            Self::FIELD_HANDLER_ADDRESS as i32,
+            BuiltInTypes::Int.tag(prompt.handler_address as isize) as usize,
+        );
+        heap_obj.write_field(
+            Self::FIELD_PROMPT_SP as i32,
+            BuiltInTypes::Int.tag(prompt.stack_pointer as isize) as usize,
+        );
+        heap_obj.write_field(
+            Self::FIELD_PROMPT_FP as i32,
+            BuiltInTypes::Int.tag(prompt.frame_pointer as isize) as usize,
+        );
+        heap_obj.write_field(
+            Self::FIELD_PROMPT_LR as i32,
+            BuiltInTypes::Int.tag(prompt.link_register as isize) as usize,
+        );
+        heap_obj.write_field(
+            Self::FIELD_PROMPT_RESULT_LOCAL as i32,
+            BuiltInTypes::Int.tag(prompt.result_local) as usize,
+        );
+        heap_obj.write_field(
+            Self::FIELD_PROMPT_ID as i32,
+            BuiltInTypes::Int.tag(prompt.prompt_id as isize) as usize,
+        );
+    }
 }
 
 pub struct Runtime {
@@ -1426,9 +1573,6 @@ pub struct Runtime {
     pub exception_handlers: HashMap<ThreadId, Vec<ExceptionHandler>>,
     // Per-thread prompt handler stacks for delimited continuations
     pub prompt_handlers: HashMap<ThreadId, Vec<PromptHandler>>,
-    // Per-thread captured continuations storage
-    // SAFETY: Protected by Mutex because accessed from both mutator threads and GC thread
-    pub captured_continuations: Mutex<HashMap<ThreadId, Vec<CapturedContinuation>>>,
     // Per-thread invocation return points for multi-shot continuations.
     // When a continuation k is invoked via k(value), we push where to return to here.
     // When the continuation body completes, return_from_shift pops from here.
@@ -1439,11 +1583,11 @@ pub struct Runtime {
     pub skip_return_from_shift: HashMap<ThreadId, usize>,
     // Per-thread flag indicating pop_prompt is calling return_from_shift.
     // When set, return_from_shift should use InvocationReturnPoints.
-    // When not set (handler return case), it should use captured_continuations.
+    // When not set (handler return case), it should use the passed continuation pointer.
     pub return_from_shift_via_pop_prompt: HashMap<ThreadId, bool>,
     // Per-thread flag indicating return_from_shift is being called from handler return
     // (after `call-handler` in perform). When set, return_from_shift should skip
-    // popping InvocationReturnPoints and use captured_continuations instead.
+    // popping InvocationReturnPoints and use the passed continuation pointer instead.
     pub is_handler_return: HashMap<ThreadId, bool>,
     // Counter for generating unique prompt IDs to distinguish sequential handlers
     pub prompt_id_counter: AtomicUsize,
@@ -1565,11 +1709,6 @@ impl Runtime {
                 map.insert(std::thread::current().id(), Vec::new());
                 map
             },
-            captured_continuations: Mutex::new({
-                let mut map = HashMap::new();
-                map.insert(std::thread::current().id(), Vec::new());
-                map
-            }),
             invocation_return_points: {
                 let mut map = HashMap::new();
                 map.insert(std::thread::current().id(), Vec::new());
@@ -1631,11 +1770,6 @@ impl Runtime {
             map.insert(std::thread::current().id(), Vec::new());
             map
         };
-        self.captured_continuations = Mutex::new({
-            let mut map = HashMap::new();
-            map.insert(std::thread::current().id(), Vec::new());
-            map
-        });
         self.invocation_return_points = {
             let mut map = HashMap::new();
             map.insert(std::thread::current().id(), Vec::new());
@@ -2139,25 +2273,6 @@ impl Runtime {
             .unwrap_or(0)
     }
 
-    pub fn store_captured_continuation(&mut self, cont: CapturedContinuation) -> usize {
-        let thread_id = std::thread::current().id();
-        let mut captured_continuations = self.captured_continuations.lock().unwrap();
-        let continuations = captured_continuations.entry(thread_id).or_default();
-        let index = continuations.len();
-        continuations.push(cont);
-        index
-    }
-
-    pub fn get_captured_continuation(&self, index: usize) -> Option<CapturedContinuation> {
-        let thread_id = std::thread::current().id();
-        let captured_continuations = self.captured_continuations.lock().unwrap();
-        captured_continuations.get(&thread_id)?.get(index).cloned()
-    }
-
-    pub fn clone_captured_continuation(&self, index: usize) -> Option<CapturedContinuation> {
-        self.get_captured_continuation(index)
-    }
-
     pub fn cleanup_finished_thread_handlers(&mut self) {
         // Get list of active thread IDs
         let active_thread_ids: std::collections::HashSet<ThreadId> = self
@@ -2181,11 +2296,6 @@ impl Runtime {
             self.thread_exception_handler_fns.remove(&thread_id);
         }
 
-        // Clean up captured continuations for dead threads
-        self.captured_continuations
-            .lock()
-            .unwrap()
-            .retain(|id, _| active_thread_ids.contains(id));
     }
 
     pub fn create_exception(
@@ -3718,6 +3828,8 @@ impl Runtime {
                     22 => "PersistentMap",      // Rust-backed persistent map
                     28 => "PersistentSet",      // Rust-backed persistent set
                     29 => "MultiArityFunction", // Multi-arity function dispatch object
+                    val if val == TYPE_ID_CONTINUATION as usize => "Continuation",
+                    val if val == TYPE_ID_CONTINUATION_SEGMENT as usize => "ContinuationSegment",
                     _ => {
                         // Custom struct (type_id == 0 or other) - use struct_id
                         let struct_type_id = heap_object.get_struct_id();

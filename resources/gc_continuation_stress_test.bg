@@ -1,0 +1,86 @@
+namespace gc_continuation_stress_test
+
+// This test combines continuations with heavy allocation to stress the GC.
+// It uses effect handlers to create continuations while allocating many objects.
+
+import "beagle.effect" as effect
+
+struct Data {
+    value
+    extra
+}
+
+enum Yield {
+    Value { v }
+}
+
+struct YieldHandler {}
+
+extend YieldHandler with effect/Handler(Yield) {
+    fn handle(self, op, resume) {
+        match op {
+            Yield.Value { v } => {
+                // Allocate objects to stress the GC
+                let mut i = 0
+                loop {
+                    if i >= 50 {
+                        break(null)
+                    }
+                    let _ = Data { value: i, extra: v }
+                    i = i + 1
+                }
+                // Resume the continuation
+                resume(v * 2)
+            }
+        }
+    }
+}
+
+fn generator(n, acc) {
+    if n <= 0 {
+        acc
+    } else {
+        let result = perform Yield.Value { v: n }
+        generator(n - 1, acc + result)
+    }
+}
+
+fn run_with_handler(n) {
+    let handler = YieldHandler {}
+    handle effect/Handler(Yield) with handler {
+        generator(n, 0)
+    }
+}
+
+fn stress_loop(iterations, acc) {
+    if iterations <= 0 {
+        acc
+    } else {
+        let result = run_with_handler(20)
+        stress_loop(iterations - 1, acc + result)
+    }
+}
+
+fn main() {
+    println("Starting GC stress test with continuations...")
+
+    // Run many iterations
+    let result = stress_loop(500, 0)
+
+    println("Total result:", result)
+
+    // Each generator(20) produces sum of (n * 2) for n from 1 to 20
+    // = 2 * (1 + 2 + ... + 20) = 2 * 210 = 420
+    // For 500 iterations: 500 * 420 = 210000
+    let expected = 210000
+    if result == expected {
+        println("Success!")
+    } else {
+        println("Error: expected", expected, "got", result)
+    }
+}
+
+// Expect
+// Starting GC stress test with continuations...
+// Total result: 210000
+// Success!

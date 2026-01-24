@@ -1,0 +1,67 @@
+namespace gc_stress_vec_test
+
+// This test stresses the GC by:
+// 1. Creating many objects
+// 2. Using push on vectors repeatedly
+// 3. Doing this in a loop many times
+
+struct Data {
+    value
+    extra
+}
+
+fn make_data(i) {
+    Data { value: i, extra: i * 2 }
+}
+
+fn build_vec(n, acc) {
+    if n <= 0 {
+        acc
+    } else {
+        let item = make_data(n)
+        build_vec(n - 1, push(acc, item))
+    }
+}
+
+fn sum_vec(v, i, acc) {
+    if i >= length(v) {
+        acc
+    } else {
+        sum_vec(v, i + 1, acc + v[i].value)
+    }
+}
+
+fn stress_loop(iterations, acc) {
+    if iterations <= 0 {
+        acc
+    } else {
+        // Build a vector with many elements
+        let v = build_vec(100, [])
+        let sum = sum_vec(v, 0, 0)
+        stress_loop(iterations - 1, acc + sum)
+    }
+}
+
+fn main() {
+    println("Starting GC stress test with vec operations...")
+
+    // Do many iterations of building and summing vectors
+    // Each iteration allocates ~100 Data objects + vector nodes
+    let result = stress_loop(1000, 0)
+
+    println("Total sum:", result)
+
+    // Sum per iteration: 1 + 2 + ... + 100 = 5050
+    // Total for 1000 iterations: 5050000
+    if result == 5050000 {
+        println("Success!")
+    } else {
+        println("Error: unexpected result")
+    }
+    result
+}
+
+// Expect
+// Starting GC stress test with vec operations...
+// Total sum: 5050000
+// Success!

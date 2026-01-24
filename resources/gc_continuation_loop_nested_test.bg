@@ -1,0 +1,69 @@
+namespace gc_continuation_loop_nested_test
+
+// Test: loop calling handlers with nested performs inside
+
+import "beagle.effect" as effect
+
+enum Get {
+    Value {}
+}
+
+struct GetHandler { v }
+
+extend GetHandler with effect/Handler(Get) {
+    fn handle(self, op, resume) {
+        match op {
+            Get.Value {} => {
+                resume(self.v)
+            }
+        }
+    }
+}
+
+fn nested_performs(n, acc) {
+    if n <= 0 {
+        acc
+    } else {
+        let x = perform Get.Value {}
+        nested_performs(n - 1, acc + x)
+    }
+}
+
+fn run_with_handler(v) {
+    let handler = GetHandler { v: v }
+    handle effect/Handler(Get) with handler {
+        nested_performs(5, 0)
+    }
+}
+
+fn loop_test(n, acc) {
+    if n <= 0 {
+        acc
+    } else {
+        let result = run_with_handler(n)
+        loop_test(n - 1, acc + result)
+    }
+}
+
+fn main() {
+    println("Testing loop + nested performs...")
+
+    // Run 20 iterations
+    let result = loop_test(20, 0)
+
+    println("Result:", result)
+
+    // Each run_with_handler(n) returns n * 5
+    // Sum of n*5 for n from 1 to 20 = 5 * (1+2+...+20) = 5 * 210 = 1050
+    let expected = 1050
+    if result == expected {
+        println("Success!")
+    } else {
+        println("Error!")
+    }
+}
+
+// Expect
+// Testing loop + nested performs...
+// Result: 1050
+// Success!

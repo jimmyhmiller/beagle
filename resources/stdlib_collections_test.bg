@@ -137,8 +137,20 @@ fn main() {
     let id-result = identity(42)
     println("identity", id-result)
 
-    // Note: complement, compose, pipe tests removed due to runtime limitation
-    // with closures capturing closures
+    // Test complement
+    let is-not-even = complement(fn(x) { mod(x, 2) == 0 })
+    println("complement:", is-not-even(3))
+
+    // Test compose
+    let double = fn(x) { x * 2 }
+    let add-one = fn(x) { x + 1 }
+    let double-then-add = compose(add-one, double)
+    println("compose:", double-then-add(5))
+
+    // Test partial
+    let add = fn(a, b) { a + b }
+    let add5 = partial(add, 5)
+    println("partial:", add5(10))
 
     // Test not/truthy?/falsy?
     println("not:", not(true))
@@ -192,6 +204,9 @@ fn main() {
 // sort: [1, 1, 2, 3, 4, 5, 6, 9]
 // sort-by: ["a", "bb", "ccc"]
 // identity 42
+// complement: true
+// compose: 11
+// partial: 15
 // not: false
 // truthy?: true
 // falsy?: true

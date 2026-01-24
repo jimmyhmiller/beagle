@@ -1,0 +1,73 @@
+namespace gc_continuation_simple_test
+
+// Simplified test: continuations with less allocation
+
+import "beagle.effect" as effect
+
+struct Data { value }
+
+enum Yield {
+    Value { v }
+}
+
+struct YieldHandler {}
+
+extend YieldHandler with effect/Handler(Yield) {
+    fn handle(self, op, resume) {
+        match op {
+            Yield.Value { v } => {
+                // Just one allocation
+                let _ = Data { value: v }
+                resume(v * 2)
+            }
+        }
+    }
+}
+
+fn generator(n, acc) {
+    if n <= 0 {
+        acc
+    } else {
+        let result = perform Yield.Value { v: n }
+        generator(n - 1, acc + result)
+    }
+}
+
+fn run_with_handler(n) {
+    let handler = YieldHandler {}
+    handle effect/Handler(Yield) with handler {
+        generator(n, 0)
+    }
+}
+
+fn stress_loop(iterations, acc) {
+    if iterations <= 0 {
+        acc
+    } else {
+        let result = run_with_handler(10)
+        stress_loop(iterations - 1, acc + result)
+    }
+}
+
+fn main() {
+    println("Starting simple continuation test...")
+
+    let result = stress_loop(100, 0)
+
+    println("Result:", result)
+
+    // Each generator(10) produces sum of (n * 2) for n from 1 to 10
+    // = 2 * (1 + 2 + ... + 10) = 2 * 55 = 110
+    // For 100 iterations: 100 * 110 = 11000
+    let expected = 11000
+    if result == expected {
+        println("Success!")
+    } else {
+        println("Error: expected", expected)
+    }
+}
+
+// Expect
+// Starting simple continuation test...
+// Result: 11000
+// Success!

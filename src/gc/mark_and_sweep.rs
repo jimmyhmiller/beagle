@@ -4,7 +4,11 @@ use libc::mprotect;
 
 use super::get_page_size;
 
-use crate::types::{Header, HeapObject, Word};
+use crate::{
+    collections::TYPE_ID_CONTINUATION,
+    runtime::ContinuationObject,
+    types::{Header, HeapObject, Word},
+};
 
 use super::{
     AllocateAction, Allocator, AllocatorOptions, StackMap,
@@ -353,6 +357,26 @@ impl MarkAndSweep {
             }
 
             object.mark();
+            if object.get_type_id() == TYPE_ID_CONTINUATION as usize {
+                let tagged = object.tagged_pointer();
+                if let Some(cont) = ContinuationObject::from_tagged(tagged) {
+                    cont.with_segment_bytes(|segment| {
+                        if segment.is_empty() {
+                            return;
+                        }
+                        ContinuationSegmentWalker::walk_segment_roots(
+                            segment,
+                            cont.original_sp(),
+                            cont.original_fp(),
+                            cont.prompt_stack_pointer(),
+                            stack_map,
+                            |_offset, pointer| {
+                                to_mark.push(HeapObject::from_tagged(pointer));
+                            },
+                        );
+                    });
+                }
+            }
             for child in object.get_heap_references() {
                 to_mark.push(child);
             }
@@ -361,32 +385,6 @@ impl MarkAndSweep {
 
     fn mark_continuation_roots(&self, stack_map: &StackMap, to_mark: &mut Vec<HeapObject>) {
         let runtime = crate::get_runtime().get();
-
-        // Fast path: skip if no continuations
-        let captured_continuations = runtime.captured_continuations.lock().unwrap();
-        if captured_continuations.is_empty() {
-            return;
-        }
-
-        // Scan captured continuations
-        for (_thread_id, conts) in captured_continuations.iter() {
-            for cont in conts {
-                if cont.stack_segment.is_empty() {
-                    continue; // Fast path for empty segments
-                }
-
-                ContinuationSegmentWalker::walk_segment_roots(
-                    &cont.stack_segment,
-                    cont.original_sp,
-                    cont.original_fp,
-                    cont.prompt.stack_pointer,
-                    stack_map,
-                    |_offset, pointer| {
-                        to_mark.push(HeapObject::from_tagged(pointer));
-                    },
-                );
-            }
-        }
 
         // Scan InvocationReturnPoint saved frames (for multi-shot continuations)
         for (_thread_id, rps) in runtime.invocation_return_points.iter() {
