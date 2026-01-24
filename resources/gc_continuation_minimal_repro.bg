@@ -72,10 +72,9 @@ fn main() {
     println("Expected: 210000")
 }
 
-// Expected behavior: Should compute 500 * 420 = 210000
-// Actual behavior: Crashes with:
-//   "Handler type does not implement beagle.effect/Handler<...> protocol. Handler: ErrorOpaque"
-//
-// The handler object's header gets corrupted to show:
-//   type_id: 0, type_data: <large_number>, size: ~57377, opaque: true, large: true
-// This header looks like a continuation segment header but with type_id set to 0
+// Behavior note: Should compute 500 * 420 = 210000
+// Expect
+// Running minimal GC corruption test...
+// This should fail with 'Handler: ErrorOpaque' after several GC cycles
+// Result: 210000
+// Expected: 210000

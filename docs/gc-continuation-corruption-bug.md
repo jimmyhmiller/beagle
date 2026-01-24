@@ -2,7 +2,9 @@
 
 ## Summary
 
-The compacting garbage collector corrupts heap object headers when processing continuation segments during GC cycles. After approximately 500 iterations of creating and resuming effect handler continuations with heavy allocation, struct objects (specifically the handler) get their headers overwritten with what appears to be a continuation segment header.
+Root cause: effect handlers were stored in a Rust thread-local `HandlerStack` that the GC never traced. Active handlers could be collected and their memory reused (often by continuation segments), so the handler pointer in the stack pointed at a moved/overwritten object, producing the corrupted header.
+
+Fix: register handler stack entries as GC handle roots (using GlobalObjectBlocks), remove those roots when popping/clearing handlers, and read handler pointers via the updated root slot so moving GCs rewrite them. With this change, the minimal/stress repro now runs cleanly.
 
 ## Reproduction
 
@@ -159,4 +161,4 @@ None currently known. The test consistently fails with the compacting GC. Other 
 
 ## Status
 
-**Unresolved** - The root cause has not been identified. This is a critical bug that prevents reliable use of effect handlers with continuations in production code when using the compacting GC.
+**Resolved** - Handler stack entries are now GC roots, preventing handler objects from being collected or overwritten. Minimal/stress repros complete without corruption.
