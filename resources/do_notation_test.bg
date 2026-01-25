@@ -1,0 +1,448 @@
+namespace do_notation_test
+
+import "beagle.ast" as ast
+
+// =============================================================================
+// HASKELL-STYLE DO NOTATION FOR BEAGLE
+// =============================================================================
+// Implements Maybe monad-style chaining where null short-circuits computation
+
+// =============================================================================
+// FUNDAMENTAL BIND OPERATION
+// =============================================================================
+// bind(expr, body) - evaluates expr, if null returns null, else continues
+// The result is available as __it in body (anaphoric)
+
+macro bind(expr, body) {
+    quote {
+        let __it = ~expr
+        if __it == null { null } else { ~body }
+    }
+}
+
+// =============================================================================
+// DO-NOTATION VARIANTS (fixed arity)
+// =============================================================================
+// do2, do3, do4 - chain multiple bindings with explicit names
+// Uses __1, __2, __3, __4 as anaphoric bindings
+
+macro do2(e1, e2, body) {
+    quote {
+        let __1 = ~e1
+        if __1 == null { null } else {
+            let __2 = ~e2
+            if __2 == null { null } else {
+                ~body
+            }
+        }
+    }
+}
+
+macro do3(e1, e2, e3, body) {
+    quote {
+        let __1 = ~e1
+        if __1 == null { null } else {
+            let __2 = ~e2
+            if __2 == null { null } else {
+                let __3 = ~e3
+                if __3 == null { null } else {
+                    ~body
+                }
+            }
+        }
+    }
+}
+
+macro do4(e1, e2, e3, e4, body) {
+    quote {
+        let __1 = ~e1
+        if __1 == null { null } else {
+            let __2 = ~e2
+            if __2 == null { null } else {
+                let __3 = ~e3
+                if __3 == null { null } else {
+                    let __4 = ~e4
+                    if __4 == null { null } else {
+                        ~body
+                    }
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
+// ALTERNATIVE: NESTED BIND SYNTAX (more Haskell-like)
+// =============================================================================
+// For more explicit control, nest bind calls manually:
+//   bind(getUser(1),
+//     bind(getProfile(__it),
+//       bind(getAvatar(__it),
+//         __it.url)))
+
+// =============================================================================
+// RESULT MONAD (Either-style with errors)
+// =============================================================================
+// For computations that can fail with an error message
+
+struct Result { ok, err }
+
+fn ok(value) { Result { ok: value, err: null } }
+fn err(message) { Result { ok: null, err: message } }
+fn is-ok(r) { r.err == null }
+fn is-err(r) { r.err != null }
+
+macro bind-result(expr, body) {
+    quote {
+        let __result = ~expr
+        if __result.err != null {
+            __result
+        } else {
+            let __it = __result.ok
+            ~body
+        }
+    }
+}
+
+macro do-result2(e1, e2, body) {
+    quote {
+        let __r1 = ~e1
+        if __r1.err != null { __r1 } else {
+            let __1 = __r1.ok
+            let __r2 = ~e2
+            if __r2.err != null { __r2 } else {
+                let __2 = __r2.ok
+                ok(~body)
+            }
+        }
+    }
+}
+
+macro do-result3(e1, e2, e3, body) {
+    quote {
+        let __r1 = ~e1
+        if __r1.err != null { __r1 } else {
+            let __1 = __r1.ok
+            let __r2 = ~e2
+            if __r2.err != null { __r2 } else {
+                let __2 = __r2.ok
+                let __r3 = ~e3
+                if __r3.err != null { __r3 } else {
+                    let __3 = __r3.ok
+                    ok(~body)
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
+// LIST MONAD (flatMap-style)
+// =============================================================================
+// For computations that produce multiple results
+
+macro flat-map(list, body) {
+    quote {
+        let mut __fm_results = []
+        let mut __fm_idx = 0
+        let __fm_list = ~list
+        while __fm_idx < length(__fm_list) {
+            let __it = nth(__fm_list, __fm_idx)
+            let __fm_inner = ~body
+            let mut __fm_j = 0
+            while __fm_j < length(__fm_inner) {
+                __fm_results = push(__fm_results, nth(__fm_inner, __fm_j))
+                __fm_j = __fm_j + 1
+            }
+            __fm_idx = __fm_idx + 1
+        }
+        __fm_results
+    }
+}
+
+macro do-list2(l1, l2, body) {
+    quote {
+        let mut __dl2_results = []
+        let __dl2_l1 = ~l1
+        let __dl2_l2 = ~l2
+        let mut __dl2_i = 0
+        while __dl2_i < length(__dl2_l1) {
+            let __1 = nth(__dl2_l1, __dl2_i)
+            let mut __dl2_j = 0
+            while __dl2_j < length(__dl2_l2) {
+                let __2 = nth(__dl2_l2, __dl2_j)
+                __dl2_results = push(__dl2_results, ~body)
+                __dl2_j = __dl2_j + 1
+            }
+            __dl2_i = __dl2_i + 1
+        }
+        __dl2_results
+    }
+}
+
+macro do-list3(l1, l2, l3, body) {
+    quote {
+        let mut __dl3_results = []
+        let __dl3_l1 = ~l1
+        let __dl3_l2 = ~l2
+        let __dl3_l3 = ~l3
+        let mut __dl3_i = 0
+        while __dl3_i < length(__dl3_l1) {
+            let __1 = nth(__dl3_l1, __dl3_i)
+            let mut __dl3_j = 0
+            while __dl3_j < length(__dl3_l2) {
+                let __2 = nth(__dl3_l2, __dl3_j)
+                let mut __dl3_k = 0
+                while __dl3_k < length(__dl3_l3) {
+                    let __3 = nth(__dl3_l3, __dl3_k)
+                    __dl3_results = push(__dl3_results, ~body)
+                    __dl3_k = __dl3_k + 1
+                }
+                __dl3_j = __dl3_j + 1
+            }
+            __dl3_i = __dl3_i + 1
+        }
+        __dl3_results
+    }
+}
+
+// =============================================================================
+// HELPER FUNCTIONS FOR DEMOS
+// =============================================================================
+
+fn safe-div(a, b) {
+    if b == 0 { null } else { a / b }
+}
+
+fn safe-sqrt(x) {
+    if x < 0 { null } else {
+        // Simple integer sqrt approximation
+        let mut guess = x / 2
+        if guess == 0 { x }
+        else {
+            let mut i = 0
+            while i < 10 {
+                guess = (guess + x / guess) / 2
+                i = i + 1
+            }
+            guess
+        }
+    }
+}
+
+fn lookup(table, key) {
+    // Simple association list lookup (pairs are 2-element arrays)
+    let mut result = null
+    let mut i = 0
+    while i < length(table) {
+        let pair = nth(table, i)
+        if nth(pair, 0) == key {
+            result = nth(pair, 1)
+            break(result)
+        }
+        i = i + 1
+    }
+}
+
+fn parse-int(s) {
+    if s == "1" { 1 }
+    else if s == "2" { 2 }
+    else if s == "42" { 42 }
+    else if s == "100" { 100 }
+    else { null }
+}
+
+fn checked-add(a, b) {
+    if a > 1000000 || b > 1000000 {
+        err("overflow")
+    } else {
+        ok(a + b)
+    }
+}
+
+fn checked-mul(a, b) {
+    if a > 1000 || b > 1000 {
+        err("overflow")
+    } else {
+        ok(a * b)
+    }
+}
+
+// =============================================================================
+// TESTS
+// =============================================================================
+
+fn main() {
+    println("=== MAYBE MONAD (null short-circuits) ===")
+
+    // Basic bind
+    println("-- bind --")
+    let r1 = bind(safe-div(10, 2), __it * 2)
+    println(r1)  // 10
+
+    let r2 = bind(safe-div(10, 0), __it * 2)
+    println(r2)  // null (short-circuited)
+
+    // do2 - chain two computations
+    println("-- do2 --")
+    let r3 = do2(safe-div(100, 2), safe-div(__1, 5), __1 + __2)
+    println(r3)  // 50 + 10 = 60
+
+    let r4 = do2(safe-div(100, 0), safe-div(50, 5), __1 + __2)
+    println(r4)  // null (first failed)
+
+    let r5 = do2(safe-div(100, 2), safe-div(__1, 0), __1 + __2)
+    println(r5)  // null (second failed)
+
+    // do3 - chain three computations
+    println("-- do3 --")
+    let r6 = do3(parse-int("42"), parse-int("2"), safe-div(__1, __2), __3)
+    println(r6)  // 21
+
+    let r7 = do3(parse-int("nope"), parse-int("2"), safe-div(__1, __2), __3)
+    println(r7)  // null
+
+    // Nested bind (more explicit, Haskell-like)
+    println("-- nested bind --")
+    let r8 = bind(parse-int("100"),
+                bind(safe-div(__it, 2),
+                    bind(safe-sqrt(__it),
+                        __it)))
+    println(r8)  // sqrt(50) ~ 7
+
+    println("")
+    println("=== RESULT MONAD (with error messages) ===")
+
+    // bind-result
+    println("-- bind-result --")
+    let r9 = bind-result(checked-add(1, 2), ok(__it * 10))
+    println(r9.ok)   // 30
+    println(r9.err)  // null
+
+    let r10 = bind-result(checked-add(999999999, 1), ok(__it * 10))
+    println(r10.ok)   // null
+    println(r10.err)  // overflow
+
+    // do-result2
+    println("-- do-result2 --")
+    let r11 = do-result2(checked-add(10, 20), checked-mul(__1, 2), __1 + __2)
+    println(r11.ok)   // 30 + 60 = 90
+
+    let r12 = do-result2(checked-add(10, 20), checked-mul(__1, 9999), __1 + __2)
+    println(r12.ok)   // null
+    println(r12.err)  // overflow
+
+    println("")
+    println("=== LIST MONAD (cartesian product) ===")
+
+    // flat-map
+    println("-- flat-map --")
+    let r13 = flat-map([1, 2, 3], [__it, __it * 10])
+    println(r13)  // [1, 10, 2, 20, 3, 30]
+
+    // do-list2 - cartesian product
+    println("-- do-list2 --")
+    let r14 = do-list2([1, 2], [10, 20], __1 + __2)
+    println(r14)  // [11, 21, 12, 22]
+
+    // do-list3 - three-way cartesian
+    println("-- do-list3 --")
+    let r15 = do-list3([1, 2], ["a", "b"], [true], [__1, __2, __3])
+    println(r15)  // [[1, a, true], [1, b, true], [2, a, true], [2, b, true]]
+
+    // Pythagorean triples with list monad!
+    println("-- pythagorean triples --")
+    let nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    // Collect triples where a^2 + b^2 == c^2 and a < b
+    let mut triples = []
+    let all-combos = do-list3(nums, nums, nums, [__1, __2, __3])
+    let mut idx = 0
+    while idx < length(all-combos) {
+        let combo = nth(all-combos, idx)
+        let a = nth(combo, 0)
+        let b = nth(combo, 1)
+        let c = nth(combo, 2)
+        if a * a + b * b == c * c && a < b {
+            triples = push(triples, combo)
+        }
+        idx = idx + 1
+    }
+    println(triples)  // [[3, 4, 5], [6, 8, 10]]
+
+    println("")
+    println("=== PRACTICAL EXAMPLE: Data pipeline ===")
+
+    // Association list: array of [key, value] pairs
+    let users = [
+        ["id", 1],
+        ["name", "Alice"],
+        ["dept", "eng"]
+    ]
+    let depts = [
+        ["eng", "Engineering"],
+        ["sales", "Sales"]
+    ]
+
+    // Chain lookups with do3
+    let result = do3(
+        lookup(users, "dept"),
+        lookup(depts, __1),
+        parse-int("42"),
+        "User in " ++ __2 ++ ", code: " ++ to-string(__3)
+    )
+    println(result)  // "User in Engineering, code: 42"
+
+    // Failing lookup
+    let bad-result = do3(
+        lookup(users, "missing"),
+        lookup(depts, __1),
+        parse-int("42"),
+        "never reached"
+    )
+    println(bad-result)  // null
+
+    println("")
+    println("=== DO NOTATION TESTS PASSED! ===")
+}
+
+// Expect
+// === MAYBE MONAD (null short-circuits) ===
+// -- bind --
+// 10
+// null
+// -- do2 --
+// 60
+// null
+// null
+// -- do3 --
+// 21
+// null
+// -- nested bind --
+// 7
+//
+// === RESULT MONAD (with error messages) ===
+// -- bind-result --
+// 30
+// null
+// null
+// overflow
+// -- do-result2 --
+// 90
+// null
+// overflow
+//
+// === LIST MONAD (cartesian product) ===
+// -- flat-map --
+// [1, 10, 2, 20, 3, 30]
+// -- do-list2 --
+// [11, 21, 12, 22]
+// -- do-list3 --
+// [[1, "a", true], [1, "b", true], [2, "a", true], [2, "b", true]]
+// -- pythagorean triples --
+// [[3, 4, 5], [6, 8, 10]]
+//
+// === PRACTICAL EXAMPLE: Data pipeline ===
+// User in Engineering, code: 42
+// null
+//
+// === DO NOTATION TESTS PASSED! ===

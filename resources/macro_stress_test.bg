@@ -1,0 +1,165 @@
+namespace macro_stress_test
+
+import "beagle.ast" as ast
+
+// =============================================================================
+// DEEPLY NESTED PROCEDURAL MACROS
+// =============================================================================
+
+macro inc(x) {
+    ast/make-add(x, ast/make-integer-literal(1))
+}
+
+macro double(x) {
+    ast/make-add(x, x)
+}
+
+macro square(x) {
+    ast/make-mul(x, x)
+}
+
+// =============================================================================
+// PROCEDURAL MACRO GENERATING IF
+// =============================================================================
+
+// Generate: if cond { then_val } else { null }
+macro when-expr(cond, then_val) {
+    ast/make-if(cond, [then_val], [ast/make-null()])
+}
+
+// Generate: if cond { null } else { else_val }
+macro unless-expr(cond, else_val) {
+    ast/make-if(cond, [ast/make-null()], [else_val])
+}
+
+// =============================================================================
+// PROCEDURAL MACRO WITH CONDITION
+// =============================================================================
+
+// Generate: x == y
+macro is-equal(x, y) {
+    ast/make-condition(ast/ConditionOperator.EqualOp, x, y)
+}
+
+// Generate: x > y
+macro is-greater(x, y) {
+    ast/make-condition(ast/ConditionOperator.GreaterThanOp, x, y)
+}
+
+// =============================================================================
+// TEMPLATE + PROCEDURAL COMPOSITION
+// =============================================================================
+
+// Template that uses procedural results
+macro debug-double(x) {
+    quote {
+        let __val = double(~x)
+        println("doubled: " ++ to-string(__val))
+        __val
+    }
+}
+
+// =============================================================================
+// TESTS
+// =============================================================================
+
+fn main() {
+    println("=== Deep Nesting ===")
+
+    // inc(5) = 6
+    println(inc(5))
+
+    // double(inc(5)) = double(6) = 12
+    println(double(inc(5)))
+
+    // square(inc(2)) = square(3) = 9
+    println(square(inc(2)))
+
+    // inc(double(inc(3))) = inc(double(4)) = inc(8) = 9
+    println(inc(double(inc(3))))
+
+    // double(double(2)) = double(4) = 8
+    println(double(double(2)))
+
+    // square(double(2)) = square(4) = 16
+    println(square(double(2)))
+
+    // Triple nesting: inc(inc(inc(10))) = 13
+    println(inc(inc(inc(10))))
+
+    println("")
+    println("=== Generated If ===")
+
+    // when-expr should generate: if true { 42 } else { null } => 42
+    let w1 = when-expr(true, 42)
+    println(w1)
+
+    // when-expr with false: if false { 42 } else { null } => null
+    let w2 = when-expr(false, 42)
+    println(w2)
+
+    // unless-expr: if true { null } else { 99 } => null
+    let u1 = unless-expr(true, 99)
+    println(u1)
+
+    // unless-expr: if false { null } else { 99 } => 99
+    let u2 = unless-expr(false, 99)
+    println(u2)
+
+    println("")
+    println("=== Generated Conditions ===")
+
+    // is-equal(5, 5) should be true
+    let eq1 = is-equal(5, 5)
+    println(eq1)
+
+    // is-equal(5, 6) should be false
+    let eq2 = is-equal(5, 6)
+    println(eq2)
+
+    // is-greater(10, 5) should be true
+    let gt1 = is-greater(10, 5)
+    println(gt1)
+
+    // is-greater(3, 7) should be false
+    let gt2 = is-greater(3, 7)
+    println(gt2)
+
+    println("")
+    println("=== Template + Procedural ===")
+
+    // debug-double uses template and calls procedural double
+    let dd = debug-double(7)
+    println("final: " ++ to-string(dd))
+
+    println("")
+    println("=== All stress tests passed! ===")
+}
+
+// Expect
+// === Deep Nesting ===
+// 6
+// 12
+// 9
+// 9
+// 8
+// 16
+// 13
+//
+// === Generated If ===
+// 42
+// null
+// null
+// 99
+//
+// === Generated Conditions ===
+// true
+// false
+// true
+// false
+//
+// === Template + Procedural ===
+// doubled: 14
+// final: 14
+//
+// === All stress tests passed! ===

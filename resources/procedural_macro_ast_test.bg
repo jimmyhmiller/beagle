@@ -1,0 +1,61 @@
+namespace procedural_macro_ast_test
+
+import "beagle.ast" as ast
+
+// Procedural macro that returns a true literal
+macro make-true() {
+    ast/make-true()
+}
+
+// Procedural macro that returns a false literal
+macro make-false() {
+    ast/make-false()
+}
+
+// Procedural macro that returns a null literal
+macro make-null() {
+    ast/make-null()
+}
+
+// Procedural macro that returns the argument unchanged (identity)
+// Arguments are already AST nodes, so this just returns the input
+macro identity(x) {
+    x
+}
+
+// Procedural macro that doubles a value by constructing an add AST node
+macro double(x) {
+    ast/make-add(x, x)
+}
+
+fn main() {
+    // Test make-true
+    let t = make-true()
+    println(t)
+
+    // Test make-false
+    let f = make-false()
+    println(f)
+
+    // Test make-null
+    let n = make-null()
+    println(n)
+
+    // Test identity macro - returns input unchanged
+    let i = identity(42)
+    println(i)
+
+    // Test double macro
+    let d = double(5)
+    println(d)
+
+    println("done")
+}
+
+// Expect
+// true
+// false
+// null
+// 42
+// 10
+// done

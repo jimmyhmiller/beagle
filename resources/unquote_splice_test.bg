@@ -1,0 +1,39 @@
+namespace unquote_splice_test
+
+// Test macro with variadic args and unquote-splice
+macro log-all(prefix, items...) {
+    quote {
+        print(~prefix)
+        print(": ")
+        println([~@items])
+    }
+}
+
+// Test macro that wraps multiple expressions
+macro do-both(a, b) {
+    quote {
+        let __r1 = ~a
+        let __r2 = ~b
+        [__r1, __r2]
+    }
+}
+
+fn main() {
+    // Test 1: log-all with multiple items
+    log-all("Numbers", 1, 2, 3)
+
+    // Test 2: log-all with single item
+    log-all("Single", 42)
+
+    // Test 3: do-both macro
+    let result = do-both(10 + 5, 20 * 2)
+    println(result)
+
+    println("done")
+}
+
+// Expect
+// Numbers: [1, 2, 3]
+// Single: [42]
+// [15, 40]
+// done

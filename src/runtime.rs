@@ -19,13 +19,12 @@ use std::{
 use crate::{
     Alloc, CommandLineArguments, Data, Message,
     builtins::{__pause, debugger},
-    compiler::{
-        BlockingSender, CompilerMessage, CompilerResponse, CompilerThread, blocking_channel,
-    },
+    compiler::{CompileError, Compiler, DiagnosticStore},
     gc::{
         AllocateAction, Allocator, AllocatorOptions, STACK_SIZE, StackMap, StackMapDetails,
         usdt_probes,
     },
+    get_runtime,
     ir::StringValue,
     types::{BuiltInTypes, Header, HeapObject, Tagged},
 };
@@ -36,6 +35,16 @@ use crate::collections::{
 };
 
 use std::cell::RefCell;
+
+// ============================================================================
+// Thread-local Compiler Storage
+// ============================================================================
+
+thread_local! {
+    /// Each thread gets its own Compiler instance for thread-safe compilation.
+    /// This follows Chez Scheme's model where multiple threads can compile concurrently.
+    static THREAD_COMPILER: RefCell<Option<Compiler>> = const { RefCell::new(None) };
+}
 
 // ============================================================================
 // GlobalObject: Unified GC roots system
@@ -1554,15 +1563,13 @@ pub struct Runtime {
     pub string_constants: Vec<StringValue>,
     pub keyword_constants: Vec<StringValue>,
     pub keyword_heap_ptrs: Vec<Option<usize>>,
-    pub diagnostic_store: Arc<Mutex<crate::compiler::DiagnosticStore>>,
+    pub diagnostic_store: Arc<Mutex<DiagnosticStore>>,
     // TODO: Do I need anything more than
     // namespace manager? Shouldn't these functions
     // and things be under that?
     pub functions: Vec<Function>,
     pub jump_table: Option<Mmap>,
     pub jump_table_offset: usize,
-    compiler_channel: Option<BlockingSender<CompilerMessage, CompilerResponse>>,
-    compiler_thread: Option<JoinHandle<()>>,
     protocol_info: HashMap<String, Vec<ProtocolMethodInfo>>,
     /// Dispatch tables for O(1) protocol method lookup
     /// Key = "protocol_name/method_name"
@@ -1690,11 +1697,9 @@ impl Runtime {
             ),
             jump_table_offset: 0,
             functions: vec![],
-            compiler_channel: None,
-            compiler_thread: None,
             protocol_info: HashMap::new(),
             dispatch_tables: HashMap::new(),
-            diagnostic_store: Arc::new(Mutex::new(crate::compiler::DiagnosticStore::new())),
+            diagnostic_store: Arc::new(Mutex::new(DiagnosticStore::new())),
             stacks_for_continuation_swapping: vec![ContinuationStack {
                 is_used: AtomicBool::new(false),
                 stack: [0; 512],
@@ -1752,10 +1757,12 @@ impl Runtime {
         self.printer.reset();
         self.ffi_function_info.clear();
         self.ffi_info_by_name.clear();
-        self.compiler_channel
-            .as_mut()
-            .expect("Compiler channel not initialized - this is a fatal error")
-            .send(CompilerMessage::Reset);
+        // Reset thread-local compiler
+        THREAD_COMPILER.with(|tc| {
+            if let Some(ref mut compiler) = *tc.borrow_mut() {
+                let _ = compiler.reset();
+            }
+        });
         self.protocol_info.clear();
         self.dispatch_tables.clear();
 
@@ -1785,22 +1792,19 @@ impl Runtime {
         self.compiled_regexes.clear();
     }
 
-    pub fn start_compiler_thread(&mut self) {
-        if self.compiler_channel.is_none() {
-            let (sender, receiver) = blocking_channel();
-            let args_clone = self.command_line_arguments.clone();
-            let diagnostic_store_clone = Arc::clone(&self.diagnostic_store);
-            let compiler_thread = thread::Builder::new()
-                .name("Beagle Compiler".to_string())
-                .spawn(move || {
-                    CompilerThread::new(receiver, args_clone, diagnostic_store_clone)
-                        .expect("Failed to create compiler thread - this is a fatal error")
-                        .run();
-                })
-                .expect("Failed to spawn compiler thread - this is a fatal error");
-            self.compiler_channel = Some(sender);
-            self.compiler_thread = Some(compiler_thread);
-        }
+    /// Ensure the current thread has a compiler, creating one if needed.
+    /// This is called automatically by compile methods.
+    pub fn ensure_thread_compiler(&self) -> Result<(), CompileError> {
+        THREAD_COMPILER.with(|tc| {
+            let mut compiler_opt = tc.borrow_mut();
+            if compiler_opt.is_none() {
+                *compiler_opt = Some(Compiler::new(
+                    self.command_line_arguments.clone(),
+                    Arc::clone(&self.diagnostic_store),
+                )?);
+            }
+            Ok(())
+        })
     }
 
     pub fn print(&mut self, result: usize) {
@@ -1828,35 +1832,25 @@ impl Runtime {
     }
 
     pub fn compile(&mut self, file_name: &str) -> Result<Vec<String>, Box<dyn Error>> {
-        let response = self
-            .compiler_channel
-            .as_ref()
-            .expect("Compiler channel not initialized - this is a fatal error")
-            .send(CompilerMessage::CompileFile(file_name.to_string()));
-        match response {
-            CompilerResponse::FunctionsToRun(functions) => Ok(functions),
-            CompilerResponse::CompileError(msg) => {
-                eprintln!("Compile error: {}", msg);
-                Err(format!("Error compiling: {}", msg).into())
-            }
-            _ => {
-                eprintln!("Unexpected compiler response");
-                Err("Error compiling".into())
-            }
-        }
+        self.ensure_thread_compiler()?;
+        THREAD_COMPILER.with(|tc| {
+            let mut compiler_opt = tc.borrow_mut();
+            let compiler = compiler_opt
+                .as_mut()
+                .expect("Compiler not initialized - this is a fatal error");
+            compiler.compile(file_name)
+        })
     }
 
-    pub fn compile_string(&mut self, _string: &str) -> Result<usize, Box<dyn Error>> {
-        let response = self
-            .compiler_channel
-            .as_ref()
-            .expect("Compiler channel not initialized - this is a fatal error")
-            .send(CompilerMessage::CompileString(_string.to_string()));
-        match response {
-            CompilerResponse::FunctionPointer(pointer) => Ok(pointer),
-            CompilerResponse::CompileError(msg) => Err(msg.into()),
-            _ => Err("Unexpected compiler response".into()),
-        }
+    pub fn compile_string(&mut self, string: &str) -> Result<usize, Box<dyn Error>> {
+        self.ensure_thread_compiler()?;
+        THREAD_COMPILER.with(|tc| {
+            let mut compiler_opt = tc.borrow_mut();
+            let compiler = compiler_opt
+                .as_mut()
+                .expect("Compiler not initialized - this is a fatal error");
+            compiler.compile_string(string)
+        })
     }
 
     pub fn allocate_string(
@@ -1943,10 +1937,10 @@ impl Runtime {
         // Check Rust-side cache (may be stale after GC but try it as fallback)
         if let Some(ptr) = self.keyword_heap_ptrs[index] {
             // Store in heap-based map for future lookups
-            if let Err(e) = self.set_heap_binding(stack_pointer, self.keyword_namespace, index, ptr)
-            {
-                eprintln!("Warning: failed to set heap binding for keyword: {}", e);
-            }
+            self.set_heap_binding(stack_pointer, self.keyword_namespace, index, ptr)
+                .expect(
+                    "Failed to set heap binding for keyword - namespaces must be initialized first",
+                );
             return Ok(ptr);
         }
 
@@ -1956,9 +1950,10 @@ impl Runtime {
         // Store in heap-based PersistentMap (survives GC)
         // NOTE: set_heap_binding may trigger GC during PersistentMap::assoc,
         // which could move the keyword. We must re-read the correct pointer afterward.
-        if let Err(e) = self.set_heap_binding(stack_pointer, self.keyword_namespace, index, ptr) {
-            eprintln!("Warning: failed to set heap binding for keyword: {}", e);
-        }
+        self.set_heap_binding(stack_pointer, self.keyword_namespace, index, ptr)
+            .expect(
+                "Failed to set heap binding for keyword - namespaces must be initialized first",
+            );
 
         // Re-read the keyword pointer from heap binding.
         // This is critical because GC may have moved the keyword during set_heap_binding.
@@ -2636,13 +2631,15 @@ impl Runtime {
     /// Returns the tagged pointer to the Atom, or null if not initialized.
     pub fn get_namespaces_atom(&self) -> usize {
         let thread_id = std::thread::current().id();
-        self.memory
+        let result = self
+            .memory
             .thread_globals
             .lock()
             .unwrap()
             .get(&thread_id)
             .map(|tg| tg.get_namespaces_atom())
-            .unwrap_or(GLOBAL_BLOCK_FREE_SLOT)
+            .unwrap_or(GLOBAL_BLOCK_FREE_SLOT);
+        result
     }
 
     /// Create a composite key for binding lookup.
@@ -2962,18 +2959,23 @@ impl Runtime {
 
         let trampoline = self.get_trampoline();
         let stack_pointer = self.get_stack_base();
+        let fn_ptr: u64 = function.pointer.into();
 
-        Some((stack_pointer as u64, function.pointer.into(), trampoline))
+        Some((stack_pointer as u64, fn_ptr, trampoline))
     }
 
     pub fn get_function0(&self, name: &str) -> Option<Box<dyn Fn() -> u64>> {
         let (stack_pointer, start, trampoline) = self.get_function_base(name)?;
-        let global_block_ptr = self.get_global_block_ptr();
         Some(Box::new(move || {
+            // Read GlobalObjectBlock pointer fresh each time - it may have moved due to GC
+            let runtime = get_runtime().get();
+            let global_block_ptr = runtime.get_global_block_ptr();
+
             // Write GlobalObjectBlock pointer to stack_base - 8 before calling trampoline
             // GC will find this via stack walking and trace it naturally
+            let write_addr = (stack_pointer - 8) as *mut usize;
             unsafe {
-                *((stack_pointer - 8) as *mut usize) = global_block_ptr;
+                *write_addr = global_block_ptr;
             }
             trampoline(stack_pointer, start)
         }))
@@ -2989,9 +2991,9 @@ impl Runtime {
 
     pub fn get_function1(&self, name: &str) -> Option<Box<dyn Fn(u64) -> u64>> {
         let (stack_pointer, start, trampoline_start) = self.get_function_base(name)?;
-        let global_block_ptr = self.get_global_block_ptr();
         let f: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
         Some(Box::new(move |arg1| {
+            let global_block_ptr = get_runtime().get().get_global_block_ptr();
             unsafe {
                 *((stack_pointer - 8) as *mut usize) = global_block_ptr;
             }
@@ -2999,17 +3001,196 @@ impl Runtime {
         }))
     }
 
-    #[allow(unused)]
-    fn get_function2(&self, name: &str) -> Option<Box<dyn Fn(u64, u64) -> u64>> {
+    pub fn get_function2(&self, name: &str) -> Option<Box<dyn Fn(u64, u64) -> u64>> {
         let (stack_pointer, start, trampoline_start) = self.get_function_base(name)?;
-        let global_block_ptr = self.get_global_block_ptr();
         let f: fn(u64, u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };
         Some(Box::new(move |arg1, arg2| {
+            let global_block_ptr = get_runtime().get().get_global_block_ptr();
             unsafe {
                 *((stack_pointer - 8) as *mut usize) = global_block_ptr;
             }
             f(stack_pointer, start, arg1, arg2)
         }))
+    }
+
+    pub fn get_function3(&self, name: &str) -> Option<Box<dyn Fn(u64, u64, u64) -> u64>> {
+        let (stack_pointer, start, trampoline_start) = self.get_function_base(name)?;
+        let f: fn(u64, u64, u64, u64, u64) -> u64 =
+            unsafe { std::mem::transmute(trampoline_start) };
+        Some(Box::new(move |arg1, arg2, arg3| {
+            let global_block_ptr = get_runtime().get().get_global_block_ptr();
+            unsafe {
+                *((stack_pointer - 8) as *mut usize) = global_block_ptr;
+            }
+            f(stack_pointer, start, arg1, arg2, arg3)
+        }))
+    }
+
+    pub fn get_function4(&self, name: &str) -> Option<Box<dyn Fn(u64, u64, u64, u64) -> u64>> {
+        let (stack_pointer, start, trampoline_start) = self.get_function_base(name)?;
+        let f: fn(u64, u64, u64, u64, u64, u64) -> u64 =
+            unsafe { std::mem::transmute(trampoline_start) };
+        Some(Box::new(move |arg1, arg2, arg3, arg4| {
+            let global_block_ptr = get_runtime().get().get_global_block_ptr();
+            unsafe {
+                *((stack_pointer - 8) as *mut usize) = global_block_ptr;
+            }
+            f(stack_pointer, start, arg1, arg2, arg3, arg4)
+        }))
+    }
+
+    pub fn get_function5(&self, name: &str) -> Option<Box<dyn Fn(u64, u64, u64, u64, u64) -> u64>> {
+        let (stack_pointer, start, trampoline_start) = self.get_function_base(name)?;
+        let f: fn(u64, u64, u64, u64, u64, u64, u64) -> u64 =
+            unsafe { std::mem::transmute(trampoline_start) };
+        Some(Box::new(move |arg1, arg2, arg3, arg4, arg5| {
+            let global_block_ptr = get_runtime().get().get_global_block_ptr();
+            unsafe {
+                *((stack_pointer - 8) as *mut usize) = global_block_ptr;
+            }
+            f(stack_pointer, start, arg1, arg2, arg3, arg4, arg5)
+        }))
+    }
+
+    pub fn get_function6(
+        &self,
+        name: &str,
+    ) -> Option<Box<dyn Fn(u64, u64, u64, u64, u64, u64) -> u64>> {
+        let (stack_pointer, start, trampoline_start) = self.get_function_base(name)?;
+        let f: fn(u64, u64, u64, u64, u64, u64, u64, u64) -> u64 =
+            unsafe { std::mem::transmute(trampoline_start) };
+        Some(Box::new(move |arg1, arg2, arg3, arg4, arg5, arg6| {
+            let global_block_ptr = get_runtime().get().get_global_block_ptr();
+            unsafe {
+                *((stack_pointer - 8) as *mut usize) = global_block_ptr;
+            }
+            f(stack_pointer, start, arg1, arg2, arg3, arg4, arg5, arg6)
+        }))
+    }
+
+    pub fn get_function7(
+        &self,
+        name: &str,
+    ) -> Option<Box<dyn Fn(u64, u64, u64, u64, u64, u64, u64) -> u64>> {
+        let (stack_pointer, start, trampoline_start) = self.get_function_base(name)?;
+        let f: fn(u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64 =
+            unsafe { std::mem::transmute(trampoline_start) };
+        Some(Box::new(move |arg1, arg2, arg3, arg4, arg5, arg6, arg7| {
+            let global_block_ptr = get_runtime().get().get_global_block_ptr();
+            unsafe {
+                *((stack_pointer - 8) as *mut usize) = global_block_ptr;
+            }
+            f(
+                stack_pointer,
+                start,
+                arg1,
+                arg2,
+                arg3,
+                arg4,
+                arg5,
+                arg6,
+                arg7,
+            )
+        }))
+    }
+
+    pub fn get_function8(
+        &self,
+        name: &str,
+    ) -> Option<Box<dyn Fn(u64, u64, u64, u64, u64, u64, u64, u64) -> u64>> {
+        let (stack_pointer, start, trampoline_start) = self.get_function_base(name)?;
+        let f: fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64 =
+            unsafe { std::mem::transmute(trampoline_start) };
+        Some(Box::new(
+            move |arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8| {
+                let global_block_ptr = get_runtime().get().get_global_block_ptr();
+                unsafe {
+                    *((stack_pointer - 8) as *mut usize) = global_block_ptr;
+                }
+                f(
+                    stack_pointer,
+                    start,
+                    arg1,
+                    arg2,
+                    arg3,
+                    arg4,
+                    arg5,
+                    arg6,
+                    arg7,
+                    arg8,
+                )
+            },
+        ))
+    }
+
+    // ========================================================================
+    // Direct builtin call methods for functions that need sp/fp
+    // These bypass the trampoline and call the raw function pointer directly.
+    // Used by macro expansion when calling builtins that allocate.
+    // ========================================================================
+
+    /// Check if a function is a builtin that needs stack/frame pointers
+    pub fn function_needs_sp_fp(&self, name: &str) -> Option<(bool, bool)> {
+        let function = self.functions.iter().find(|f| f.name == name)?;
+        if function.is_builtin {
+            Some((function.needs_stack_pointer, function.needs_frame_pointer))
+        } else {
+            None
+        }
+    }
+
+    /// Call a builtin function that needs sp/fp with 0 user args
+    /// The function signature is: fn(sp, fp) -> result
+    pub fn call_builtin_sp_fp_0(&self, name: &str) -> Option<u64> {
+        let function = self.functions.iter().find(|f| f.name == name)?;
+        if !function.is_builtin || !function.needs_stack_pointer {
+            return None;
+        }
+        let fn_ptr: usize = function.pointer.into();
+        let f: extern "C" fn(usize, usize) -> usize = unsafe { std::mem::transmute(fn_ptr) };
+        let sp = self.get_stack_base();
+        Some(f(sp, sp) as u64)
+    }
+
+    /// Call a builtin function that needs sp/fp with 1 user arg
+    /// The function signature is: fn(sp, fp, arg1) -> result
+    pub fn call_builtin_sp_fp_1(&self, name: &str, arg1: u64) -> Option<u64> {
+        let function = self.functions.iter().find(|f| f.name == name)?;
+        if !function.is_builtin || !function.needs_stack_pointer {
+            return None;
+        }
+        let fn_ptr: usize = function.pointer.into();
+        let f: extern "C" fn(usize, usize, usize) -> usize = unsafe { std::mem::transmute(fn_ptr) };
+        let sp = self.get_stack_base();
+        Some(f(sp, sp, arg1 as usize) as u64)
+    }
+
+    /// Call a builtin function that needs sp/fp with 2 user args
+    /// The function signature is: fn(sp, fp, arg1, arg2) -> result
+    pub fn call_builtin_sp_fp_2(&self, name: &str, arg1: u64, arg2: u64) -> Option<u64> {
+        let function = self.functions.iter().find(|f| f.name == name)?;
+        if !function.is_builtin || !function.needs_stack_pointer {
+            return None;
+        }
+        let fn_ptr: usize = function.pointer.into();
+        let f: extern "C" fn(usize, usize, usize, usize) -> usize =
+            unsafe { std::mem::transmute(fn_ptr) };
+        let sp = self.get_stack_base();
+        Some(f(sp, sp, arg1 as usize, arg2 as usize) as u64)
+    }
+
+    /// Call a builtin function that needs sp/fp with 3 user args
+    /// The function signature is: fn(sp, fp, arg1, arg2, arg3) -> result
+    pub fn call_builtin_sp_fp_3(&self, name: &str, arg1: u64, arg2: u64, arg3: u64) -> Option<u64> {
+        let function = self.functions.iter().find(|f| f.name == name)?;
+        if !function.is_builtin || !function.needs_stack_pointer {
+            return None;
+        }
+        let fn_ptr: usize = function.pointer.into();
+        let f: extern "C" fn(usize, usize, usize, usize, usize) -> usize =
+            unsafe { std::mem::transmute(fn_ptr) };
+        let sp = self.get_stack_base();
+        Some(f(sp, sp, arg1 as usize, arg2 as usize, arg3 as usize) as u64)
     }
 
     pub fn new_thread(&mut self, f: usize, stack_pointer: usize, frame_pointer: usize) {
@@ -4522,7 +4703,8 @@ impl Runtime {
             .jump_table
             .as_ref()
             .ok_or("Jump table not initialized")?;
-        Ok(function.jump_table_offset * 8 + jump_table.as_ptr() as usize)
+        let ptr = function.jump_table_offset * 8 + jump_table.as_ptr() as usize;
+        Ok(ptr)
     }
 
     pub fn add_jump_table_entry(
@@ -4628,20 +4810,27 @@ impl Runtime {
         number_of_locals: i32,
         number_of_args: usize,
     ) -> Result<usize, Box<dyn Error>> {
-        self.compiler_channel
-            .as_ref()
-            .expect("Compiler channel not initialized - this is a fatal error")
-            .send(CompilerMessage::AddFunctionMarkExecutable(
-                name.clone(),
+        let _ = self.ensure_thread_compiler();
+        THREAD_COMPILER.with(|tc| {
+            let mut compiler_opt = tc.borrow_mut();
+            let compiler = compiler_opt
+                .as_mut()
+                .expect("Compiler not initialized - this is a fatal error");
+            compiler.upsert_function_bytes(
+                Some(&name),
                 code.to_vec(),
                 number_of_locals as usize,
                 number_of_args,
-            ));
-        Ok(self
-            .get_function_by_name(&name)
-            .expect("Function not found after compilation - this is a fatal error")
-            .pointer
-            .into())
+                false,
+                number_of_args,
+            )?;
+            compiler.code_allocator.make_executable();
+            Ok(self
+                .get_function_by_name(&name)
+                .expect("Function not found after compilation - this is a fatal error")
+                .pointer
+                .into())
+        })
     }
 
     fn add_binding(&mut self, name: &str, function_pointer: usize) -> usize {
@@ -4652,11 +4841,8 @@ impl Runtime {
         // Store in heap-based PersistentMap if we have a stack,
         // otherwise queue for later processing
         if let Some(stack_pointer) = self.try_get_stack_base() {
-            if let Err(e) =
-                self.set_heap_binding(stack_pointer, namespace_id, slot, function_pointer)
-            {
-                eprintln!("Warning: failed to set heap binding for {}: {}", name, e);
-            }
+            self.set_heap_binding(stack_pointer, namespace_id, slot, function_pointer)
+                .unwrap_or_else(|e| panic!("Failed to set heap binding for {}: {} - namespaces must be initialized first", name, e));
         } else {
             // Queue for later - will be flushed when a thread with a stack accesses bindings
             self.pending_heap_bindings
@@ -4686,6 +4872,18 @@ impl Runtime {
         }
         self.string_constants.push(string_value);
         self.string_constants.len() - 1
+    }
+
+    /// Add a string constant and return a tagged string pointer.
+    /// This is used for compile-time string allocation in macros.
+    pub fn add_string_constant(&mut self, s: &str) -> usize {
+        let index = self.add_string(StringValue { str: s.to_string() });
+        BuiltInTypes::String.tag(index as isize) as usize
+    }
+
+    /// Get a string constant by its index (untagged value).
+    pub fn get_string_constant(&self, index: usize) -> Option<&str> {
+        self.string_constants.get(index).map(|sv| sv.str.as_str())
     }
 
     pub fn add_keyword(&mut self, keyword_text: String) -> usize {
@@ -4775,18 +4973,12 @@ impl Runtime {
         Some(function.pointer.into())
     }
 
-    pub fn set_compiler_channel(
-        &mut self,
-        compiler_channel: BlockingSender<CompilerMessage, CompilerResponse>,
-    ) {
-        self.compiler_channel = Some(compiler_channel);
-    }
-
     pub fn set_pause_atom_ptr(&self, pause_atom_ptr: usize) {
-        self.compiler_channel
-            .as_ref()
-            .expect("Compiler channel not initialized - this is a fatal error")
-            .send(CompilerMessage::SetPauseAtomPointer(pause_atom_ptr));
+        THREAD_COMPILER.with(|tc| {
+            if let Some(ref mut compiler) = *tc.borrow_mut() {
+                compiler.set_pause_atom_ptr(pause_atom_ptr);
+            }
+        });
     }
 
     pub fn add_protocol_info(
@@ -4901,14 +5093,19 @@ impl Runtime {
             .filter(|m| m.method_name == method_name)
             .cloned()
             .collect();
-        self.compiler_channel
-            .as_ref()
-            .expect("Compiler channel not initialized - this is a fatal error")
-            .send(CompilerMessage::CompileProtocolMethod(
+
+        let _ = self.ensure_thread_compiler();
+        THREAD_COMPILER.with(|tc| {
+            let mut compiler_opt = tc.borrow_mut();
+            let compiler = compiler_opt
+                .as_mut()
+                .expect("Compiler not initialized - this is a fatal error");
+            let _ = compiler.compile_protocol_method(
                 protocol_name.to_string(),
                 method_name.to_string(),
                 method_info,
-            ));
+            );
+        });
 
         0
     }

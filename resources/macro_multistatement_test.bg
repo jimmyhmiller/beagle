@@ -1,0 +1,56 @@
+namespace macro_multistatement_test
+
+// Test multi-statement quote blocks
+macro do-three-things() {
+    quote {
+        println("first")
+        println("second")
+        println("third")
+    }
+}
+
+// Multi-statement with return value
+macro compute-and-return() {
+    quote {
+        let a = 10
+        let b = 20
+        a + b
+    }
+}
+
+// Multi-statement with mutation
+macro count-up() {
+    quote {
+        let mut x = 0
+        x = x + 1
+        x = x + 1
+        x = x + 1
+        x
+    }
+}
+
+fn main() {
+    println("=== Multi-statement quotes ===")
+
+    // Should print three lines
+    do-three-things()
+
+    // Should return 30
+    let result = compute-and-return()
+    println(result)
+
+    // Should return 3
+    let count = count-up()
+    println(count)
+
+    println("done")
+}
+
+// Expect
+// === Multi-statement quotes ===
+// first
+// second
+// third
+// 30
+// 3
+// done

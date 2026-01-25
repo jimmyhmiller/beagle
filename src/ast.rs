@@ -348,6 +348,46 @@ pub enum Ast {
         body: Vec<Ast>,
         token_range: TokenRange,
     },
+    /// Macro definition: `macro name(args) { body }`
+    /// Defines a compile-time macro that receives unevaluated AST
+    Macro {
+        name: String,
+        args: Vec<Pattern>,
+        rest_param: Option<String>,
+        body: Vec<Ast>,
+        token_range: TokenRange,
+    },
+    /// Quote expression: `quote { expr }`
+    /// Returns an AST struct representing the expression
+    Quote {
+        body: Box<Ast>,
+        token_range: TokenRange,
+    },
+    /// Unquote expression: `~expr` inside quote
+    /// Splices the evaluated value into the quoted AST
+    Unquote {
+        body: Box<Ast>,
+        token_range: TokenRange,
+    },
+    /// Unquote-splice expression: `~@expr` inside quote
+    /// Splices array elements into the quoted AST
+    UnquoteSplice {
+        body: Box<Ast>,
+        token_range: TokenRange,
+    },
+    /// Arrow pair for macro-friendly syntax: `condition => body`
+    /// Used in blocks passed to macros like cond { x > 0 => "positive" }
+    ArrowPair {
+        left: Box<Ast>,
+        right: Box<Ast>,
+        token_range: TokenRange,
+    },
+    /// Block expression: evaluates statements in sequence, returns last value
+    /// Used in quote { } with multiple statements
+    Block {
+        statements: Vec<Ast>,
+        token_range: TokenRange,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -542,7 +582,13 @@ impl Ast {
             | Ast::Reset { token_range, .. }
             | Ast::Shift { token_range, .. }
             | Ast::Perform { token_range, .. }
-            | Ast::Handle { token_range, .. } => *token_range,
+            | Ast::Handle { token_range, .. }
+            | Ast::Macro { token_range, .. }
+            | Ast::Quote { token_range, .. }
+            | Ast::Unquote { token_range, .. }
+            | Ast::UnquoteSplice { token_range, .. }
+            | Ast::ArrowPair { token_range, .. }
+            | Ast::Block { token_range, .. } => *token_range,
             Ast::IntegerLiteral(_, position)
             | Ast::FloatLiteral(_, position)
             | Ast::Identifier(_, position)
@@ -1882,12 +1928,12 @@ impl AstCompiler<'_> {
                     }
                 }
 
-                let allocate = self
+                let allocate_fn = self
                     .compiler
                     .find_function("beagle.builtin/allocate")
                     .unwrap();
-                let allocate = self.compiler.get_function_pointer(allocate).unwrap();
-                let allocate = self.ir.assign_new(allocate);
+                let allocate_ptr = self.compiler.get_function_pointer(allocate_fn).unwrap();
+                let allocate = self.ir.assign_new(allocate_ptr);
 
                 let size_reg = self.ir.assign_new(size);
                 let stack_pointer = self.ir.get_stack_pointer_imm(0);
@@ -1969,12 +2015,12 @@ impl AstCompiler<'_> {
                     }
                 }
 
-                let allocate = self
+                let allocate_fn = self
                     .compiler
                     .find_function("beagle.builtin/allocate")
                     .unwrap();
-                let allocate = self.compiler.get_function_pointer(allocate).unwrap();
-                let allocate = self.ir.assign_new(allocate);
+                let allocate_ptr = self.compiler.get_function_pointer(allocate_fn).unwrap();
+                let allocate = self.ir.assign_new(allocate_ptr);
 
                 let size_reg = self.ir.assign_new(struct_type.size());
                 let stack_pointer = self.ir.get_stack_pointer_imm(0);
@@ -2288,6 +2334,14 @@ impl AstCompiler<'_> {
                 self.ir.write_label(end_if_label);
 
                 Ok(result_reg.into())
+            }
+            Ast::Block { statements, .. } => {
+                // Block: evaluate statements in sequence, return last value
+                let mut result = Value::TaggedConstant(0);
+                for stmt in statements.iter() {
+                    result = self.call_compile(&Box::new(stmt))?;
+                }
+                Ok(result)
             }
             Ast::And { left, right, .. } => {
                 let result_reg = self.ir.volatile_register();
@@ -3694,6 +3748,59 @@ impl AstCompiler<'_> {
                 self.ir.write_label(after_handle);
                 Ok(result_reg.into())
             }
+            Ast::Macro { .. } => {
+                // Macros are expanded before compilation, so we should never see them here
+                Err(CompileError::Internal(
+                    "Macro not expanded before compilation".to_string(),
+                ))
+            }
+            Ast::Quote { body, token_range } => {
+                // Quote returns an AST struct representing the quoted expression
+                self.compile_quote(&body, token_range)
+            }
+            Ast::Unquote { token_range, .. } => {
+                // Unquote outside of quote is an error
+                Err(CompileError::UnquoteOutsideQuote {
+                    position: token_range.start,
+                })
+            }
+            Ast::UnquoteSplice { token_range, .. } => {
+                // UnquoteSplice outside of quote is an error
+                Err(CompileError::UnquoteSpliceOutsideQuote {
+                    position: token_range.start,
+                })
+            }
+            Ast::ArrowPair { left, right, .. } => {
+                // Arrow pairs are used in macro blocks; outside that context, compile as an array [left, right]
+                // Follow the same pattern as Ast::Array
+                self.not_tail_position();
+                let left_val = self.call_compile(&left)?;
+                let left_reg = self.ir.assign_new(left_val);
+                self.ir.push_to_stack(left_reg.into());
+
+                self.not_tail_position();
+                let right_val = self.call_compile(&right)?;
+                let right_reg = self.ir.assign_new(right_val);
+                self.ir.push_to_stack(right_reg.into());
+
+                let vector_pointer = self.call("beagle.collections/vec", vec![])?;
+                let vector_register = self.ir.assign_new(vector_pointer);
+                let stack_pointer = self.ir.get_current_stack_position();
+
+                // Pop in reverse order (right first, then left)
+                for i in (0..2).rev() {
+                    let value = self.ir.load_from_memory(stack_pointer, i + 1);
+                    let push_result = self.call(
+                        "beagle.collections/vec-push",
+                        vec![vector_register.into(), value],
+                    )?;
+                    self.ir.assign(vector_register, push_result);
+                }
+                self.ir.pop_from_stack();
+                self.ir.pop_from_stack();
+
+                Ok(vector_register.into())
+            }
         }
     }
 
@@ -3768,7 +3875,10 @@ impl AstCompiler<'_> {
             args.insert(0, stack_pointer);
         }
 
-        let jump_table_pointer = self.compiler.get_jump_table_pointer(function).unwrap();
+        let jump_table_pointer = self
+            .compiler
+            .get_jump_table_pointer(function.clone())
+            .unwrap();
         let jump_table_point_reg = self.ir.assign_new(Value::Pointer(jump_table_pointer));
         let function_pointer = self.ir.load_from_memory(jump_table_point_reg.into(), 0);
 
@@ -4329,6 +4439,213 @@ impl AstCompiler<'_> {
         self.call(name, args)
     }
 
+    /// Compiles a quote expression by generating code that constructs an AST struct at runtime
+    fn compile_quote(
+        &mut self,
+        body: &Ast,
+        _token_range: TokenRange,
+    ) -> Result<Value, CompileError> {
+        // For now, quote constructs AST structs at runtime
+        // We'll generate calls to beagle.ast/make-* functions
+        self.compile_quote_body(body)
+    }
+
+    /// Recursively compiles the body of a quote, handling unquote and unquote-splice
+    fn compile_quote_body(&mut self, ast: &Ast) -> Result<Value, CompileError> {
+        match ast {
+            Ast::Unquote { body, .. } => {
+                // Unquote: evaluate the inner expression and return the result
+                self.call_compile(body)
+            }
+            Ast::UnquoteSplice { .. } => {
+                // UnquoteSplice should be handled specially in array contexts
+                // For now, just compile the inner expression
+                Err(CompileError::Internal(
+                    "UnquoteSplice must appear inside an array in quote".to_string(),
+                ))
+            }
+            Ast::IntegerLiteral(n, _) => {
+                // Create Ast.IntegerLiteral { value: n }
+                // Assign constant to register before passing to function
+                let value_const = Value::TaggedConstant(*n as isize);
+                let value_reg = self.ir.assign_new(value_const);
+                self.call("beagle.ast/make-integer-literal", vec![value_reg.into()])
+            }
+            Ast::FloatLiteral(s, _) => {
+                // Create Ast.FloatLiteral { value: s }
+                let str_val = self.string_constant(s.clone());
+                let str_reg = self.ir.assign_new(str_val);
+                self.call("beagle.ast/make-float-literal", vec![str_reg.into()])
+            }
+            Ast::String(s, _) => {
+                // Create Ast.StringLiteral { value: s }
+                let str_val = self.string_constant(s.clone());
+                let str_reg = self.ir.assign_new(str_val);
+                self.call("beagle.ast/make-string-literal", vec![str_reg.into()])
+            }
+            Ast::Identifier(name, _) => {
+                // Create Ast.Identifier { name: name }
+                let name_val = self.string_constant(name.clone());
+                let name_reg = self.ir.assign_new(name_val);
+                self.call("beagle.ast/make-identifier", vec![name_reg.into()])
+            }
+            Ast::Keyword(k, _) => {
+                // Create Ast.Keyword { name: k }
+                let k_val = self.string_constant(k.clone());
+                let k_reg = self.ir.assign_new(k_val);
+                self.call("beagle.ast/make-keyword", vec![k_reg.into()])
+            }
+            Ast::True(_) => self.call("beagle.ast/make-true", vec![]),
+            Ast::False(_) => self.call("beagle.ast/make-false", vec![]),
+            Ast::Null(_) => self.call("beagle.ast/make-null", vec![]),
+            Ast::Add { left, right, .. } => {
+                let left_ast = self.compile_quote_body(left)?;
+                let right_ast = self.compile_quote_body(right)?;
+                self.call("beagle.ast/make-add", vec![left_ast, right_ast])
+            }
+            Ast::Sub { left, right, .. } => {
+                let left_ast = self.compile_quote_body(left)?;
+                let right_ast = self.compile_quote_body(right)?;
+                self.call("beagle.ast/make-sub", vec![left_ast, right_ast])
+            }
+            Ast::Mul { left, right, .. } => {
+                let left_ast = self.compile_quote_body(left)?;
+                let right_ast = self.compile_quote_body(right)?;
+                self.call("beagle.ast/make-mul", vec![left_ast, right_ast])
+            }
+            Ast::Div { left, right, .. } => {
+                let left_ast = self.compile_quote_body(left)?;
+                let right_ast = self.compile_quote_body(right)?;
+                self.call("beagle.ast/make-div", vec![left_ast, right_ast])
+            }
+            Ast::If {
+                condition,
+                then,
+                else_,
+                ..
+            } => {
+                let cond_ast = self.compile_quote_body(condition)?;
+                let then_array = self.compile_quote_body_array(then)?;
+                let else_array = self.compile_quote_body_array(else_)?;
+                self.call("beagle.ast/make-if", vec![cond_ast, then_array, else_array])
+            }
+            Ast::Call { name, args, .. } => {
+                let name_val = self.string_constant(name.clone());
+                let name_reg = self.ir.assign_new(name_val);
+                let args_array = self.compile_quote_args_array(args)?;
+                let args_reg = self.ir.assign_new(args_array);
+                self.call(
+                    "beagle.ast/make-call",
+                    vec![name_reg.into(), args_reg.into()],
+                )
+            }
+            Ast::Let { pattern, value, .. } => {
+                let pattern_ast = self.compile_quote_pattern(pattern)?;
+                let value_ast = self.compile_quote_body(value)?;
+                self.call("beagle.ast/make-let", vec![pattern_ast, value_ast])
+            }
+            Ast::Array { array, .. } => {
+                // Check for unquote-splice in elements
+                let elements_val = self.compile_quote_array_with_splice(array)?;
+                self.call("beagle.ast/make-array", vec![elements_val])
+            }
+            Ast::ArrowPair { left, right, .. } => {
+                let left_ast = self.compile_quote_body(left)?;
+                let right_ast = self.compile_quote_body(right)?;
+                self.call("beagle.ast/make-arrow-pair", vec![left_ast, right_ast])
+            }
+            Ast::Block { statements, .. } => {
+                // Create array of statement ASTs
+                let stmts_array = self.compile_quote_body_array(statements)?;
+                self.call("beagle.ast/make-block", vec![stmts_array])
+            }
+            // For other AST nodes, create a generic representation
+            _ => {
+                // Fallback: create a placeholder that stores the AST kind
+                let kind = self.string_constant(format!("{:?}", std::mem::discriminant(ast)));
+                let kind_reg = self.ir.assign_new(kind);
+                self.call("beagle.ast/make-unknown", vec![kind_reg.into()])
+            }
+        }
+    }
+
+    /// Compile an array of AST nodes for quote, handling unquote-splice
+    fn compile_quote_array_with_splice(&mut self, elements: &[Ast]) -> Result<Value, CompileError> {
+        // Create an empty array and push elements, handling splice
+        let array = self.call("beagle.collections/vec", vec![])?;
+        let array_reg = self.ir.assign_new(array);
+
+        for elem in elements {
+            match elem {
+                Ast::UnquoteSplice { body, .. } => {
+                    // Evaluate the expression (should return an array) and concat
+                    let splice_val = self.call_compile(body)?;
+                    let concat_result = self.call(
+                        "beagle.collections/vec-concat",
+                        vec![array_reg.into(), splice_val],
+                    )?;
+                    self.ir.assign(array_reg, concat_result);
+                }
+                _ => {
+                    // Regular element: quote it and push
+                    let elem_ast = self.compile_quote_body(elem)?;
+                    let push_result = self.call(
+                        "beagle.collections/vec-push",
+                        vec![array_reg.into(), elem_ast],
+                    )?;
+                    self.ir.assign(array_reg, push_result);
+                }
+            }
+        }
+
+        Ok(array_reg.into())
+    }
+
+    /// Helper to compile an array of AST body nodes for quote
+    fn compile_quote_body_array(&mut self, body: &[Ast]) -> Result<Value, CompileError> {
+        let array = self.call("beagle.collections/vec", vec![])?;
+        let array_reg = self.ir.assign_new(array);
+
+        for ast in body {
+            let ast_val = self.compile_quote_body(ast)?;
+            let push_result = self.call(
+                "beagle.collections/vec-push",
+                vec![array_reg.into(), ast_val],
+            )?;
+            self.ir.assign(array_reg, push_result);
+        }
+
+        Ok(array_reg.into())
+    }
+
+    /// Helper to compile an array of AST args for quote (used in Call)
+    fn compile_quote_args_array(&mut self, args: &[Ast]) -> Result<Value, CompileError> {
+        self.compile_quote_array_with_splice(args)
+    }
+
+    /// Helper to compile a pattern for quote
+    fn compile_quote_pattern(&mut self, pattern: &Pattern) -> Result<Value, CompileError> {
+        match pattern {
+            Pattern::Identifier { name, .. } => {
+                let name_const = self.string_constant(name.clone());
+                let name_reg = self.ir.assign_new(name_const);
+                self.call("beagle.ast/make-pattern-identifier", vec![name_reg.into()])
+            }
+            Pattern::Wildcard { .. } => self.call("beagle.ast/make-pattern-wildcard", vec![]),
+            Pattern::Literal { value, .. } => {
+                let val_ast = self.compile_quote_body(value)?;
+                self.call("beagle.ast/make-pattern-literal", vec![val_ast])
+            }
+            _ => {
+                // Fallback for other patterns
+                let kind_const =
+                    self.string_constant(format!("{:?}", std::mem::discriminant(pattern)));
+                let kind_reg = self.ir.assign_new(kind_const);
+                self.call("beagle.ast/make-pattern-unknown", vec![kind_reg.into()])
+            }
+        }
+    }
+
     fn first_pass(&mut self, ast: &Ast) -> Result<(), CompileError> {
         match ast {
             Ast::Program { elements, .. } => {
@@ -4859,6 +5176,11 @@ impl AstCompiler<'_> {
                     self.find_mutable_vars_that_need_boxing(ast);
                 }
             }
+            Ast::Block { statements, .. } => {
+                for stmt in statements.iter() {
+                    self.find_mutable_vars_that_need_boxing(stmt);
+                }
+            }
             Ast::Condition { left, right, .. }
             | Ast::Add { left, right, .. }
             | Ast::Sub { left, right, .. }
@@ -5093,6 +5415,24 @@ impl AstCompiler<'_> {
                 for ast in body.iter() {
                     self.find_mutable_vars_that_need_boxing(ast);
                 }
+            }
+            Ast::Macro { body, .. } => {
+                for ast in body.iter() {
+                    self.find_mutable_vars_that_need_boxing(ast);
+                }
+            }
+            Ast::Quote { body, .. } => {
+                self.find_mutable_vars_that_need_boxing(body);
+            }
+            Ast::Unquote { body, .. } => {
+                self.find_mutable_vars_that_need_boxing(body);
+            }
+            Ast::UnquoteSplice { body, .. } => {
+                self.find_mutable_vars_that_need_boxing(body);
+            }
+            Ast::ArrowPair { left, right, .. } => {
+                self.find_mutable_vars_that_need_boxing(left);
+                self.find_mutable_vars_that_need_boxing(right);
             }
         }
     }

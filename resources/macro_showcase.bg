@@ -1,0 +1,188 @@
+namespace macro_showcase
+
+import "beagle.ast" as ast
+
+// =============================================================================
+// TEMPLATE MACROS
+// =============================================================================
+
+// Classic 'unless' - inverts if condition
+macro unless(cond, body) {
+    quote {
+        if ~cond { null } else { ~body }
+    }
+}
+
+// 'when' - only executes if true, returns null otherwise
+macro when(cond, body) {
+    quote {
+        if ~cond { ~body } else { null }
+    }
+}
+
+// 'dbg' - debug print that shows value and returns it
+macro dbg(expr) {
+    quote {
+        let __val = ~expr
+        println("[DEBUG] " ++ to-string(__val))
+        __val
+    }
+}
+
+// 'with-default' - provide default if expression is null
+macro with-default(expr, default) {
+    quote {
+        let __val = ~expr
+        if __val == null { ~default } else { __val }
+    }
+}
+
+// 'and' - short-circuit logical and
+macro and(a, b) {
+    quote {
+        if ~a { ~b } else { false }
+    }
+}
+
+// 'or' - short-circuit logical or
+macro or(a, b) {
+    quote {
+        if ~a { true } else { ~b }
+    }
+}
+
+// =============================================================================
+// PROCEDURAL MACROS
+// =============================================================================
+
+// 'make-42' - returns integer literal 42
+macro make-42() {
+    ast/make-integer-literal(42)
+}
+
+// 'make-hello' - returns a string literal
+macro make-hello() {
+    ast/make-string-literal("Hello from macro!")
+}
+
+// 'always-true' - returns true literal
+macro always-true() {
+    ast/make-true()
+}
+
+// 'always-false' - returns false literal
+macro always-false() {
+    ast/make-false()
+}
+
+// 'double' - add value to itself
+macro double(x) {
+    ast/make-add(x, x)
+}
+
+// 'triple' - multiply by 3
+macro triple(x) {
+    ast/make-mul(x, ast/make-integer-literal(3))
+}
+
+// 'inc' - increment by 1
+macro inc(x) {
+    ast/make-add(x, ast/make-integer-literal(1))
+}
+
+// 'dec' - decrement by 1
+macro dec(x) {
+    ast/make-sub(x, ast/make-integer-literal(1))
+}
+
+// =============================================================================
+// DEMO
+// =============================================================================
+
+fn main() {
+    println("=== Template Macros ===")
+
+    // unless
+    unless(5 > 10, println("5 is not greater than 10"))
+
+    // when
+    when(5 == 5, println("5 equals 5"))
+
+    // dbg
+    let y = dbg(10 + 20)
+    println("y = " ++ to-string(y))
+
+    // with-default
+    println("with-default(null, 42) = " ++ to-string(with-default(null, 42)))
+    println("with-default(100, 42) = " ++ to-string(with-default(100, 42)))
+
+    // and/or
+    println("and(true, true) = " ++ to-string(and(true, true)))
+    println("and(true, false) = " ++ to-string(and(true, false)))
+    println("or(false, true) = " ++ to-string(or(false, true)))
+    println("or(false, false) = " ++ to-string(or(false, false)))
+
+    println("")
+    println("=== Procedural Macros ===")
+
+    // Simple literals
+    println("make-42() = " ++ to-string(make-42()))
+    println("make-hello() = " ++ make-hello())
+    println("always-true() = " ++ to-string(always-true()))
+    println("always-false() = " ++ to-string(always-false()))
+
+    // Arithmetic
+    println("double(6) = " ++ to-string(double(6)))
+    println("triple(7) = " ++ to-string(triple(7)))
+    println("inc(10) = " ++ to-string(inc(10)))
+    println("dec(10) = " ++ to-string(dec(10)))
+
+    println("")
+    println("=== Macro Composition ===")
+
+    // Composing procedural macros
+    println("double(inc(4)) = " ++ to-string(double(inc(4))))
+    println("triple(dec(10)) = " ++ to-string(triple(dec(10))))
+
+    // Template + procedural
+    when(always-true(), println("always-true works"))
+    unless(always-false(), println("always-false works"))
+
+    // Deep composition
+    println("with-default(null, triple(7)) = " ++ to-string(with-default(null, triple(7))))
+
+    println("")
+    println("=== All tests passed! ===")
+}
+
+// Expect
+// === Template Macros ===
+// 5 is not greater than 10
+// 5 equals 5
+// [DEBUG] 30
+// y = 30
+// with-default(null, 42) = 42
+// with-default(100, 42) = 100
+// and(true, true) = true
+// and(true, false) = false
+// or(false, true) = true
+// or(false, false) = false
+//
+// === Procedural Macros ===
+// make-42() = 42
+// make-hello() = Hello from macro!
+// always-true() = true
+// always-false() = false
+// double(6) = 12
+// triple(7) = 21
+// inc(10) = 11
+// dec(10) = 9
+//
+// === Macro Composition ===
+// double(inc(4)) = 10
+// triple(dec(10)) = 27
+// always-true works
+// always-false works
+// with-default(null, triple(7)) = 21
+//
+// === All tests passed! ===

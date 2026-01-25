@@ -2505,8 +2505,8 @@ pub unsafe extern "C" fn update_binding(namespace_slot: usize, value: usize) -> 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn get_binding(namespace: usize, slot: usize) -> usize {
     let runtime = get_runtime().get_mut();
-    let namespace = BuiltInTypes::untag(namespace);
-    let slot = BuiltInTypes::untag(slot);
+    let ns_untagged = BuiltInTypes::untag(namespace);
+    let slot_untagged = BuiltInTypes::untag(slot);
 
     // TODO: Flush pending bindings at a safer point (not during get_binding)
     // For now, rely on HashMap fallback for bindings added by compiler thread
@@ -2514,13 +2514,13 @@ pub unsafe extern "C" fn get_binding(namespace: usize, slot: usize) -> usize {
     // runtime.flush_pending_heap_bindings(stack_pointer);
 
     // Try heap-based PersistentMap first
-    let result = runtime.get_heap_binding(namespace, slot);
+    let result = runtime.get_heap_binding(ns_untagged, slot_untagged);
     if result != BuiltInTypes::null_value() as usize {
         return result;
     }
 
     // Fall back to Rust-side HashMap during migration
-    runtime.get_binding(namespace, slot)
+    runtime.get_binding(ns_untagged, slot_untagged)
 }
 
 pub unsafe extern "C" fn set_current_namespace(namespace: usize) -> usize {

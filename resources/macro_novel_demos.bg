@@ -1,0 +1,365 @@
+namespace macro_novel_demos
+
+import "beagle.ast" as ast
+
+// =============================================================================
+// 1. COND - Lisp-style multi-branch conditional
+// =============================================================================
+// Instead of nested if-else chains, write:
+//   cond(x < 0, "negative", x == 0, "zero", true, "positive")
+
+macro cond(c1, v1, c2, v2, c3, v3) {
+    quote {
+        if ~c1 { ~v1 }
+        else if ~c2 { ~v2 }
+        else if ~c3 { ~v3 }
+        else { null }
+    }
+}
+
+// =============================================================================
+// 2. ASSERT WITH MESSAGE
+// =============================================================================
+// assert!(condition, "message") - throws if false
+
+macro assert!(condition, message) {
+    quote {
+        if ~condition {
+            true
+        } else {
+            println("ASSERTION FAILED: " ++ ~message)
+            throw("Assertion failed")
+        }
+    }
+}
+
+// =============================================================================
+// 3. TIME - Measure execution (simplified)
+// =============================================================================
+// Wraps expression, prints timing info, returns result
+
+macro timed(label, expr) {
+    quote {
+        println("[START] " ++ ~label)
+        let __result = ~expr
+        println("[END] " ++ ~label)
+        __result
+    }
+}
+
+// =============================================================================
+// 4. DEFAULT - Null coalescing with lazy evaluation
+// =============================================================================
+// default(maybe-null-expr, fallback) - only evaluates fallback if needed
+
+macro default(expr, fallback) {
+    quote {
+        let __val = ~expr
+        if __val == null { ~fallback } else { __val }
+    }
+}
+
+// =============================================================================
+// 5. SWAP - Atomically swap two mutable variables
+// =============================================================================
+
+macro swap(a, b) {
+    quote {
+        let __tmp = ~a
+        ~a = ~b
+        ~b = __tmp
+    }
+}
+
+// =============================================================================
+// 6. REPEAT - Execute N times, collect results
+// =============================================================================
+
+macro repeat(n, body) {
+    quote {
+        let mut __results = []
+        let mut __i = 0
+        while __i < ~n {
+            __results = push(__results, ~body)
+            __i = __i + 1
+        }
+        __results
+    }
+}
+
+// =============================================================================
+// 7. CHAIN COMPARISONS (Python-style)
+// =============================================================================
+// in-range(x, lo, hi) expands to: lo <= x && x < hi
+
+macro in-range(x, lo, hi) {
+    quote {
+        ~lo <= ~x && ~x < ~hi
+    }
+}
+
+// =============================================================================
+// 8. PROCEDURAL: BUILD ARITHMETIC TREE
+// =============================================================================
+// sum3(a, b, c) generates: (a + b) + c at compile time
+
+macro sum3(a, b, c) {
+    let ab = ast/make-add(a, b)
+    ast/make-add(ab, c)
+}
+
+macro product3(a, b, c) {
+    let ab = ast/make-mul(a, b)
+    ast/make-mul(ab, c)
+}
+
+// =============================================================================
+// 9. DEEP NESTED PROCEDURAL
+// =============================================================================
+
+macro quad(x) {
+    // (x + x) + (x + x) = 4x
+    let double = ast/make-add(x, x)
+    ast/make-add(double, double)
+}
+
+macro power-of-two-mul(x) {
+    // ((x * 2) * 2) * 2 = x * 8
+    let x2 = ast/make-mul(x, ast/make-integer-literal(2))
+    let x4 = ast/make-mul(x2, ast/make-integer-literal(2))
+    ast/make-mul(x4, ast/make-integer-literal(2))
+}
+
+// =============================================================================
+// 10. ANAPHORIC IF (aif)
+// =============================================================================
+// Like if, but binds the condition result to `__it` in the then branch
+// Uses __ prefix for hygiene-safe anaphoric capture
+// aif(get-user(id), println("Found: " ++ __it.name), println("Not found"))
+
+macro aif(condition, then_body, else_body) {
+    // __it is anaphoric - double underscore prevents hygiene renaming
+    // Checks for non-null rather than truthiness
+    quote {
+        let __it = ~condition
+        if __it != null {
+            ~then_body
+        } else {
+            ~else_body
+        }
+    }
+}
+
+// =============================================================================
+// 11. DEBUG DUMP - Print expression and its value
+// =============================================================================
+
+macro dump(expr) {
+    quote {
+        let __val = ~expr
+        println("[DUMP] " ++ to-string(__val))
+        __val
+    }
+}
+
+// =============================================================================
+// 12. LOOP WITH EARLY EXIT
+// =============================================================================
+
+macro find-first(collection, predicate_body) {
+    // __it is anaphoric - allows callers to reference current item
+    quote {
+        for __item in ~collection {
+            let __it = __item
+            if ~predicate_body {
+                break(__it)
+            }
+        }
+    }
+}
+
+// =============================================================================
+// 13. PROCEDURAL CONDITION GENERATION
+// =============================================================================
+
+macro equals(a, b) {
+    ast/make-condition(ast/ConditionOperator.EqualOp, a, b)
+}
+
+macro greater(a, b) {
+    ast/make-condition(ast/ConditionOperator.GreaterThanOp, a, b)
+}
+
+macro less-or-equal(a, b) {
+    ast/make-condition(ast/ConditionOperator.LessThanOrEqualOp, a, b)
+}
+
+// =============================================================================
+// 14. COMPOSE TEMPLATE + PROCEDURAL
+// =============================================================================
+
+macro debug-quad(x) {
+    quote {
+        let __input = ~x
+        println("Input: " ++ to-string(__input))
+        let __result = quad(__input)
+        println("Quad: " ++ to-string(__result))
+        __result
+    }
+}
+
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
+
+fn get-value() { 42 }
+fn maybe-null(flag) { if flag { "found" } else { null } }
+
+// =============================================================================
+// DEMO
+// =============================================================================
+
+fn main() {
+    println("=== 1. COND (multi-branch) ===")
+    let x = -5
+    println(cond(x < 0, "negative", x == 0, "zero", true, "positive"))
+    let y = 0
+    println(cond(y < 0, "negative", y == 0, "zero", true, "positive"))
+    let z = 10
+    println(cond(z < 0, "negative", z == 0, "zero", true, "positive"))
+
+    println("")
+    println("=== 2. ASSERT ===")
+    assert!(1 + 1 == 2, "math is broken")
+    println("Assertion passed!")
+
+    println("")
+    println("=== 3. TIMED ===")
+    let result = timed("computation", 10 + 20 + 30)
+    println("Result: " ++ to-string(result))
+
+    println("")
+    println("=== 4. DEFAULT (null coalescing) ===")
+    println(default(maybe-null(true), "fallback"))
+    println(default(maybe-null(false), "fallback"))
+
+    println("")
+    println("=== 5. SWAP ===")
+    let mut a = 1
+    let mut b = 2
+    println("Before: a=" ++ to-string(a) ++ ", b=" ++ to-string(b))
+    swap(a, b)
+    println("After: a=" ++ to-string(a) ++ ", b=" ++ to-string(b))
+
+    println("")
+    println("=== 6. REPEAT ===")
+    let squares = repeat(5, get-value())
+    println(squares)
+
+    println("")
+    println("=== 7. IN-RANGE ===")
+    println(in-range(5, 0, 10))
+    println(in-range(15, 0, 10))
+    println(in-range(0, 0, 10))
+
+    println("")
+    println("=== 8. SUM3 / PRODUCT3 ===")
+    println(sum3(1, 2, 3))
+    println(product3(2, 3, 4))
+
+    println("")
+    println("=== 9. DEEP PROCEDURAL (quad, power-of-two-mul) ===")
+    println(quad(5))
+    println(power-of-two-mul(3))
+
+    println("")
+    println("=== 10. ANAPHORIC IF ===")
+    aif(get-value(), println("Got: " ++ to-string(__it)), println("Nothing"))
+
+    println("")
+    println("=== 11. DUMP ===")
+    let d = dump(7 * 8)
+    println("Returned: " ++ to-string(d))
+
+    println("")
+    println("=== 12. FIND-FIRST ===")
+    let nums = [1, 5, 12, 3, 8]
+    let first-big = find-first(nums, __it > 10)
+    println("First > 10: " ++ to-string(first-big))
+
+    println("")
+    println("=== 13. PROCEDURAL CONDITIONS ===")
+    println(equals(5, 5))
+    println(equals(5, 6))
+    println(greater(10, 5))
+    println(less-or-equal(3, 3))
+
+    println("")
+    println("=== 14. TEMPLATE + PROCEDURAL COMPOSITION ===")
+    let q = debug-quad(3)
+    println("Final: " ++ to-string(q))
+
+    println("")
+    println("=== ALL NOVEL MACRO DEMOS PASSED! ===")
+}
+
+// Expect
+// === 1. COND (multi-branch) ===
+// negative
+// zero
+// positive
+//
+// === 2. ASSERT ===
+// Assertion passed!
+//
+// === 3. TIMED ===
+// [START] computation
+// [END] computation
+// Result: 60
+//
+// === 4. DEFAULT (null coalescing) ===
+// found
+// fallback
+//
+// === 5. SWAP ===
+// Before: a=1, b=2
+// After: a=2, b=1
+//
+// === 6. REPEAT ===
+// [42, 42, 42, 42, 42]
+//
+// === 7. IN-RANGE ===
+// true
+// false
+// true
+//
+// === 8. SUM3 / PRODUCT3 ===
+// 6
+// 24
+//
+// === 9. DEEP PROCEDURAL (quad, power-of-two-mul) ===
+// 20
+// 24
+//
+// === 10. ANAPHORIC IF ===
+// Got: 42
+//
+// === 11. DUMP ===
+// [DUMP] 56
+// Returned: 56
+//
+// === 12. FIND-FIRST ===
+// First > 10: 12
+//
+// === 13. PROCEDURAL CONDITIONS ===
+// true
+// false
+// true
+// true
+//
+// === 14. TEMPLATE + PROCEDURAL COMPOSITION ===
+// Input: 3
+// Quad: 12
+// Final: 12
+//
+// === ALL NOVEL MACRO DEMOS PASSED! ===

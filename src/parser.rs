@@ -208,6 +208,10 @@ pub enum Token {
     Shift,
     Perform,
     Handle,
+    Macro,
+    Quote,
+    Tilde,
+    TildeAt,
 }
 impl Token {
     fn is_binary_operator(&self) -> bool {
@@ -234,7 +238,8 @@ impl Token {
             | Token::Equal
             | Token::Pipe
             | Token::PipeLast
-            | Token::Modulo => true,
+            | Token::Modulo
+            | Token::Arrow => true,
             _ => false,
         }
     }
@@ -311,6 +316,10 @@ impl Token {
             Token::Shift => Ok("shift".to_string()),
             Token::Perform => Ok("perform".to_string()),
             Token::Handle => Ok("handle".to_string()),
+            Token::Macro => Ok("macro".to_string()),
+            Token::Quote => Ok("quote".to_string()),
+            Token::Tilde => Ok("~".to_string()),
+            Token::TildeAt => Ok("~@".to_string()),
             Token::Comment((start, end))
             | Token::Atom((start, end))
             | Token::Keyword((start, end))
@@ -709,6 +718,8 @@ impl Tokenizer {
             b"shift" => Token::Shift,
             b"perform" => Token::Perform,
             b"handle" => Token::Handle,
+            b"macro" => Token::Macro,
+            b"quote" => Token::Quote,
             _ => Token::Atom((start, self.position)),
         }
     }
@@ -824,6 +835,15 @@ impl Tokenizer {
                 }
             } else {
                 Token::BitWiseOr // | at end
+            }
+        } else if self.current_byte(input_bytes) == b'~' {
+            self.consume(input_bytes);
+            // Check for ~@ (unquote-splice)
+            if !self.at_end(input_bytes) && self.current_byte(input_bytes) == b'@' {
+                self.consume(input_bytes);
+                Token::TildeAt
+            } else {
+                Token::Tilde
             }
         } else {
             // println!("identifier");
@@ -996,7 +1016,9 @@ impl Parser {
 
     fn get_precedence(&self) -> (usize, Associativity) {
         match self.current_token() {
-            // Pipe operators have the lowest precedence.
+            // Arrow (=>) for macro pair syntax has the lowest precedence.
+            Token::Arrow => (3, Associativity::Left),
+            // Pipe operators have very low precedence.
             Token::Pipe | Token::PipeLast => (5, Associativity::Left),
             // Logical OR (||) has the lowest precedence among common operators.
             Token::Or => (10, Associativity::Left),
@@ -1184,6 +1206,10 @@ impl Parser {
             Token::Import => Ok(Some(self.parse_import()?)),
             Token::Protocol => Ok(Some(self.parse_protocol()?)),
             Token::Extend => Ok(Some(self.parse_extend()?)),
+            Token::Macro => Ok(Some(self.parse_macro_definition()?)),
+            Token::Quote => Ok(Some(self.parse_quote()?)),
+            Token::Tilde => Ok(Some(self.parse_unquote()?)),
+            Token::TildeAt => Ok(Some(self.parse_unquote_splice()?)),
             Token::Atom((start, end)) => {
                 let start_position = self.position;
                 let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
@@ -2267,8 +2293,8 @@ impl Parser {
     }
 
     fn parse_arg(&mut self) -> ParseResult<(Pattern, bool)> {
-        // Check for rest parameter syntax: ...name
-        let is_rest = if self.current_token() == Token::DotDotDot {
+        // Check for rest parameter syntax: ...name (prefix style)
+        let mut is_rest = if self.current_token() == Token::DotDotDot {
             self.consume();
             self.skip_spaces();
             true
@@ -2278,6 +2304,14 @@ impl Parser {
 
         let pattern = self.parse_binding_pattern()?;
         self.skip_whitespace();
+
+        // Also check for rest parameter syntax: name... (suffix style)
+        if !is_rest && self.current_token() == Token::DotDotDot {
+            self.consume();
+            self.skip_whitespace();
+            is_rest = true;
+        }
+
         if !self.is_close_paren() {
             self.expect_comma()?;
         }
@@ -3287,6 +3321,155 @@ impl Parser {
         })
     }
 
+    /// Parse `macro name(args) { body }` - macro definition
+    fn parse_macro_definition(&mut self) -> ParseResult<Ast> {
+        let start_position = self.position;
+        self.move_to_next_non_whitespace();
+
+        // Parse macro name
+        let name = match self.current_token() {
+            Token::Atom((start, end)) => {
+                String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?
+            }
+            _ => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "macro name".to_string(),
+                    found: self.get_token_repr(),
+                    position: self.position,
+                });
+            }
+        };
+        self.consume();
+        self.skip_whitespace();
+
+        // Parse args (same as function args)
+        self.expect_open_paren()?;
+        let (args, rest_param) = self.parse_args()?;
+        self.expect_close_paren()?;
+
+        // Parse body block
+        self.skip_whitespace();
+        if !matches!(self.current_token(), Token::OpenCurly) {
+            return Err(ParseError::MissingToken {
+                expected: "'{{' for macro body".to_string(),
+                position: self.position,
+            });
+        }
+        let body = self.parse_block()?;
+
+        let end_position = self.position;
+        Ok(Ast::Macro {
+            name,
+            args,
+            rest_param,
+            body,
+            token_range: TokenRange::new(start_position, end_position),
+        })
+    }
+
+    /// Parse `quote { expr }` or `quote { stmt1; stmt2; expr }` - quote expression (code as data)
+    fn parse_quote(&mut self) -> ParseResult<Ast> {
+        let start_position = self.position;
+        self.move_to_next_non_whitespace();
+
+        // Expect '{'
+        if !matches!(self.current_token(), Token::OpenCurly) {
+            return Err(ParseError::MissingToken {
+                expected: "'{{' after 'quote'".to_string(),
+                position: self.position,
+            });
+        }
+
+        // Parse body - can be a single expression or multiple statements
+        self.consume(); // consume '{'
+        self.skip_whitespace();
+
+        // Parse expressions/statements until we hit '}'
+        let mut statements = Vec::new();
+        while !matches!(self.current_token(), Token::CloseCurly) && !self.at_end() {
+            if let Some(stmt) = self.parse_expression(0, true, true)? {
+                statements.push(stmt);
+            }
+            self.skip_whitespace();
+        }
+
+        // Expect '}'
+        if !matches!(self.current_token(), Token::CloseCurly) {
+            return Err(ParseError::MissingToken {
+                expected: "'}' after quote body".to_string(),
+                position: self.position,
+            });
+        }
+        self.consume();
+
+        let end_position = self.position;
+        let token_range = TokenRange::new(start_position, end_position);
+
+        // If there's only one statement, use it directly; otherwise wrap in Block
+        let body = if statements.len() == 1 {
+            statements.pop().unwrap()
+        } else if statements.is_empty() {
+            // Empty quote - return null
+            Ast::Null(start_position)
+        } else {
+            // Wrap multiple statements in a Block expression
+            Ast::Block {
+                statements,
+                token_range,
+            }
+        };
+
+        Ok(Ast::Quote {
+            body: Box::new(body),
+            token_range,
+        })
+    }
+
+    /// Parse `~expr` - unquote (splice value into quote)
+    fn parse_unquote(&mut self) -> ParseResult<Ast> {
+        let start_position = self.position;
+        // Consume the Tilde token
+        self.consume();
+        // Move past whitespace
+        self.skip_whitespace();
+
+        // Parse the expression to unquote
+        let body =
+            self.parse_expression(100, true, true)?
+                .ok_or_else(|| ParseError::UnexpectedEof {
+                    expected: "expression after '~'".to_string(),
+                })?;
+
+        let end_position = self.position;
+        Ok(Ast::Unquote {
+            body: Box::new(body),
+            token_range: TokenRange::new(start_position, end_position),
+        })
+    }
+
+    /// Parse `~@expr` - unquote-splice (splice array elements into quote)
+    fn parse_unquote_splice(&mut self) -> ParseResult<Ast> {
+        let start_position = self.position;
+        // Consume the TildeAt token
+        self.consume();
+        // Move past whitespace
+        self.skip_whitespace();
+
+        // Parse the expression to unquote-splice
+        let body =
+            self.parse_expression(100, true, true)?
+                .ok_or_else(|| ParseError::UnexpectedEof {
+                    expected: "expression after '~@'".to_string(),
+                })?;
+
+        let end_position = self.position;
+        Ok(Ast::UnquoteSplice {
+            body: Box::new(body),
+            token_range: TokenRange::new(start_position, end_position),
+        })
+    }
+
     fn parse_match(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
         self.move_to_next_non_whitespace();
@@ -3961,6 +4144,12 @@ impl Parser {
                         position: start_position,
                     });
                 }
+            },
+            // Arrow (=>) for macro pair syntax: condition => body
+            Token::Arrow => Ast::ArrowPair {
+                left: Box::new(lhs),
+                right: Box::new(rhs),
+                token_range,
             },
             _ => {
                 return Err(ParseError::InvalidExpression {

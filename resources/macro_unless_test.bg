@@ -1,0 +1,27 @@
+namespace macro_unless_test
+
+// Define the unless macro
+// unless(condition, body) expands to: if condition { null } else { body }
+macro unless(cond, body) {
+    quote { if ~cond { null } else { ~body } }
+}
+
+fn main() {
+    let x = 5
+
+    // Test unless - should print "not zero" since x != 0
+    unless(x == 0, println("not zero"))
+
+    // Test with true condition - should print nothing
+    unless(true, println("this should not print"))
+
+    // Test with false condition - should print
+    unless(false, println("condition was false"))
+
+    println("done")
+}
+
+// Expect
+// not zero
+// condition was false
+// done

@@ -41,6 +41,7 @@ mod compiler;
 mod gc;
 pub mod ir;
 pub mod machine_code;
+mod macro_expander;
 pub mod mmap_utils;
 pub mod parser;
 mod pretty_print;
@@ -767,6 +768,7 @@ fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Erro
         "beagle.ffi.bg",
         "beagle.io.bg",
         "beagle.effect.bg",
+        "beagle.ast.bg",
     ];
     let mut all_top_levels = vec![];
 
@@ -919,8 +921,16 @@ fn run_repl(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     let runtime = RUNTIME.get().unwrap().get_mut();
 
-    runtime.start_compiler_thread();
+    let pause_atom_ptr = runtime.pause_atom_ptr();
+    runtime.set_pause_atom_ptr(pause_atom_ptr);
 
+    // Initialize GlobalObject for main thread before any heap allocations that use roots
+    runtime.initialize_thread_global()?;
+
+    // Initialize the namespaces atom in GlobalObject slot 0
+    runtime.initialize_namespaces()?;
+
+    // Now compile low-level builtins (after namespaces are initialized)
     compile_trampoline(runtime);
     // x86-64 has 6 arg registers (0-5), ARM64 has 8 (0-7)
     // The wrapper uses the last arg register for the function pointer
@@ -934,15 +944,6 @@ fn run_repl(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     for i in 0..=max_wrapper_args {
         compile_save_volatile_registers_for(runtime, i);
     }
-
-    let pause_atom_ptr = runtime.pause_atom_ptr();
-    runtime.set_pause_atom_ptr(pause_atom_ptr);
-
-    // Initialize GlobalObject for main thread before any heap allocations that use roots
-    runtime.initialize_thread_global()?;
-
-    // Initialize the namespaces atom in GlobalObject slot 0
-    runtime.initialize_namespaces()?;
 
     runtime.install_builtins()?;
 
@@ -1102,8 +1103,16 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     let runtime = RUNTIME.get().unwrap().get_mut();
 
-    runtime.start_compiler_thread();
+    let pause_atom_ptr = runtime.pause_atom_ptr();
+    runtime.set_pause_atom_ptr(pause_atom_ptr);
 
+    // Initialize GlobalObject for main thread before any heap allocations that use roots
+    runtime.initialize_thread_global()?;
+
+    // Initialize the namespaces atom in GlobalObject slot 0
+    runtime.initialize_namespaces()?;
+
+    // Now compile low-level builtins (after namespaces are initialized)
     compile_trampoline(runtime);
     // x86-64 has 6 arg registers (0-5), ARM64 has 8 (0-7)
     // The wrapper uses the last arg register for the function pointer
@@ -1118,15 +1127,6 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         compile_save_volatile_registers_for(runtime, i);
     }
 
-    let pause_atom_ptr = runtime.pause_atom_ptr();
-    runtime.set_pause_atom_ptr(pause_atom_ptr);
-
-    // Initialize GlobalObject for main thread before any heap allocations that use roots
-    runtime.initialize_thread_global()?;
-
-    // Initialize the namespaces atom in GlobalObject slot 0
-    runtime.initialize_namespaces()?;
-
     runtime.install_builtins()?;
 
     // Generate continuation trampolines using the code generator (x86-64 only)
@@ -1139,16 +1139,22 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     let compile_time = Instant::now();
 
-    let mut top_levels = vec![];
+    // Compile and run stdlib BEFORE user code, so procedural macros can use stdlib types
+    let mut stdlib_top_levels = vec![];
     if !args.no_std {
-        top_levels = load_default_files(runtime)?;
+        stdlib_top_levels = load_default_files(runtime)?;
+        // Run stdlib top-levels immediately so enum bindings are populated
+        // before procedural macros in user code try to access them
+        for top_level in &stdlib_top_levels {
+            if let Some(f) = runtime.get_function0(top_level) {
+                f();
+            }
+        }
     }
 
-    // TODO: Need better name for top_level
-    // It should really be the top level of a namespace
-    let new_top_levels = runtime.compile(&program)?;
+    // Now compile user file (procedural macros can access fully initialized stdlib)
+    let user_top_levels = runtime.compile(&program)?;
     let current_namespace = runtime.current_namespace_id();
-    top_levels.extend(new_top_levels);
 
     runtime.write_functions_to_pid_map();
 
@@ -1159,7 +1165,8 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     let time = Instant::now();
 
-    for top_level in top_levels {
+    // Run user top-levels (stdlib already ran above)
+    for top_level in user_top_levels {
         if let Some(f) = runtime.get_function0(&top_level) {
             f();
         } else {

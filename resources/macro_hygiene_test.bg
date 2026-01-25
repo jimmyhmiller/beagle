@@ -1,0 +1,34 @@
+namespace macro_hygiene_test
+
+// This macro wraps body in an if-then that introduces a temp binding
+// Without hygiene: if user's body references 'temp', it would see macro's temp
+// With hygiene: macro's 'temp' gets renamed to 'temp__gensym__N'
+macro wrap-with-temp(body) {
+    quote { if true { let temp = 42 ~body } else { null } }
+}
+
+fn main() {
+    // Test 1: Basic unless-style macro (no hygiene needed)
+    let x = 5
+    let result1 = if x > 0 { "positive" } else { "non-positive" }
+    println(result1)
+
+    // Test 2: Hygiene test - user has 'temp', macro also defines 'temp'
+    // User's temp should NOT be shadowed by macro's temp
+    let temp = 999
+    let result2 = wrap-with-temp(temp)  // Should return 999, not 42
+    println(result2)
+
+    // Test 3: Hygiene doesn't affect unrelated names
+    let y = 100
+    let result3 = wrap-with-temp(y + 1)  // Should return 101
+    println(result3)
+
+    println("done")
+}
+
+// Expect
+// positive
+// 999
+// 101
+// done

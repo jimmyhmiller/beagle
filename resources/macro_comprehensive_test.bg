@@ -1,0 +1,142 @@
+namespace macro_comprehensive_test
+
+// Test 1: Basic template macro with single argument
+macro log(msg) {
+    quote { println(~msg) }
+}
+
+// Test 2: Multi-argument macro
+macro add-and-print(a, b) {
+    quote { println(~a + ~b) }
+}
+
+// Test 3: Variadic macro with rest parameter
+macro sum-all(items...) {
+    quote {
+        let mut __total = 0
+        for __item in [~@items] {
+            __total = __total + __item
+        }
+        __total
+    }
+}
+
+// Test 4: Macro with hygiene (temp is renamed)
+macro with-temp(body) {
+    quote {
+        let temp = 123
+        ~body
+    }
+}
+
+// Test 5: Anaphoric macro (__ prefix exposes binding)
+macro with-result(expr, body) {
+    quote {
+        let __result = ~expr
+        ~body
+    }
+}
+
+// Test 6: Control flow macro (unless)
+macro unless(condition, body) {
+    quote {
+        if ~condition {
+            null
+        } else {
+            ~body
+        }
+    }
+}
+
+// Test 7: Loop macro with exposed iteration variable
+macro times(n, body) {
+    quote {
+        let mut __i = 0
+        while __i < ~n {
+            ~body
+            __i = __i + 1
+        }
+    }
+}
+
+// Test 8: Macro with logical operators
+macro both(a, b) {
+    quote { ~a && ~b }
+}
+
+// Test 9: Macro generating struct creation
+struct Point { x, y }
+
+macro point(x_val, y_val) {
+    quote { Point { x: ~x_val, y: ~y_val } }
+}
+
+// Test 10: Macro with match
+macro safe-div(num, denom) {
+    quote {
+        match ~denom {
+            0 => null
+            d => ~num / d
+        }
+    }
+}
+
+fn main() {
+    // Test 1: Basic log
+    log("Test 1 passed")
+
+    // Test 2: Multi-argument
+    add-and-print(10, 20)
+
+    // Test 3: Variadic sum
+    let total = sum-all(1, 2, 3, 4, 5)
+    println(total)
+
+    // Test 4: Hygiene - user's temp is NOT shadowed
+    let temp = 999
+    let result4 = with-temp(temp)
+    println(result4)
+
+    // Test 5: Anaphoric - __result IS accessible
+    with-result(42, println(__result))
+
+    // Test 6: Unless
+    unless(false, println("Unless works"))
+
+    // Test 7: Times loop
+    times(3, println("loop"))
+
+    // Test 8: Both (logical operators)
+    let both_result = both(true, true)
+    println(both_result)
+
+    // Test 9: Struct creation
+    let p = point(5, 10)
+    println(p.x)
+    println(p.y)
+
+    // Test 10: Safe division with match
+    let div1 = safe-div(10, 2)
+    println(div1)
+    let div2 = safe-div(10, 0)
+    println(div2)
+
+    println("done")
+}
+
+// Expect
+// Test 1 passed
+// 30
+// 15
+// 999
+// 42
+// Unless works
+// loop
+// loop
+// loop
+// true
+// 5
+// 10
+// 5
+// null
+// done

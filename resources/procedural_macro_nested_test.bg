@@ -1,0 +1,26 @@
+namespace procedural_macro_nested_test
+
+import "beagle.ast" as ast
+
+// Two procedural macros
+macro inc(x) {
+    ast/make-add(x, ast/make-integer-literal(1))
+}
+
+macro double(x) {
+    ast/make-add(x, x)
+}
+
+fn main() {
+    // Simple calls
+    println(inc(4))
+    println(double(5))
+
+    // Nested call
+    println(double(inc(3)))
+}
+
+// Expect
+// 5
+// 10
+// 8

@@ -1,0 +1,25 @@
+namespace quote_test
+
+import "beagle.ast" as ast
+
+fn main() {
+    // Test basic quote - creates an AST representing 1
+    let expr = quote { 1 }
+    println(expr)
+
+    // Test quote with identifier
+    let id_expr = quote { foo }
+    println(id_expr)
+
+    // Test quote with addition
+    let add_expr = quote { 1 + 2 }
+    println(add_expr)
+
+    println("done")
+}
+
+// Expect
+// Ast.IntegerLiteral { value: 1 }
+// Ast.Identifier { name: "foo" }
+// Ast.Add { left: Ast.IntegerLiteral { value: 1 }, right: Ast.IntegerLiteral { value: 2 } }
+// done

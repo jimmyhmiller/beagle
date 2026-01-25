@@ -1,0 +1,28 @@
+namespace procedural_macro_test
+
+// A macro that adds a debug prefix to println
+// This uses the quote/unquote approach which works with template substitution
+macro debug-println(msg) {
+    quote { println("DEBUG: " ++ ~msg) }
+}
+
+// A macro that creates a conditional debug print
+macro debug-if(cond, msg) {
+    quote { if ~cond { println("DEBUG: " ++ ~msg) } else { null } }
+}
+
+fn main() {
+    // Test the debug-println macro
+    debug-println("Hello, world!")
+
+    // Test debug-if
+    debug-if(true, "This should print")
+    debug-if(false, "This should NOT print")
+
+    println("done")
+}
+
+// Expect
+// DEBUG: Hello, world!
+// DEBUG: This should print
+// done

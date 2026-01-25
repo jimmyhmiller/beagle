@@ -1,0 +1,134 @@
+namespace beagle.ast
+
+// AST Enum - All AST node types
+enum Ast {
+    IntegerLiteral { value },
+    FloatLiteral { value },
+    StringLiteral { value },
+    Identifier { name },
+    Keyword { kw_name },
+    True,
+    False,
+    Null,
+    Add { left, right },
+    Sub { left, right },
+    Mul { left, right },
+    Div { left, right },
+    Modulo { left, right },
+    Condition { operator, left, right },
+    AndExpr { left, right },
+    OrExpr { left, right },
+    ShiftLeftExpr { left, right },
+    ShiftRightExpr { left, right },
+    ShiftRightZeroExpr { left, right },
+    BitWiseAndExpr { left, right },
+    BitWiseOrExpr { left, right },
+    BitWiseXorExpr { left, right },
+    FunctionDef { func_name, func_args, func_rest, func_body },
+    FunctionStub { stub_name, stub_args, stub_rest },
+    MultiArityFunction { maf_name, maf_cases },
+    Call { call_target, call_arguments },
+    RecurseExpr { rec_args },
+    TailRecurseExpr { trec_args },
+    IfExpr { if_cond, if_then, if_else },
+    MatchExpr { match_val, match_arms },
+    LoopExpr { loop_body },
+    WhileExpr { while_cond, while_body },
+    ForExpr { for_binding, for_coll, for_body },
+    BreakExpr { brk_value },
+    ContinueExpr,
+    LetExpr { let_pat, let_val },
+    LetMutExpr { letm_pat, letm_val },
+    Assignment { asgn_name, asgn_val },
+    ArrayExpr { arr_elems },
+    MapLiteral { map_pairs },
+    SetLiteral { set_elems },
+    IndexOperator { idx_arr, idx_index },
+    PropertyAccess { pa_obj, pa_prop },
+    StructDef { sd_name, sd_fields },
+    StructField { sf_name, sf_mut },
+    StructCreation { sc_name, sc_fields },
+    EnumDef { ed_name, ed_variants },
+    EnumVariantDef { evd_name, evd_fields },
+    EnumStaticVariantDef { esvd_name },
+    EnumCreation { ec_ename, ec_vname, ec_fields },
+    ProtocolDef { pd_name, pd_tparams, pd_body },
+    ExtendDef { extd_target, extd_proto, extd_args, extd_body },
+    TryExpr { try_body, try_binding, try_catch },
+    ThrowExpr { throw_val },
+    NamespaceDecl { nsd_name },
+    ImportDecl { impd_lib, impd_alias },
+    StringInterpolation { si_parts },
+    QuoteExpr { qe_body },
+    UnquoteExpr { uqe_body },
+    UnquoteSplice { uqs_body },
+    ArrowPair { ap_left, ap_right },
+    MacroDef { md_name, md_args, md_rest, md_body },
+    ResetExpr { rst_body },
+    ShiftExpr { shft_cont, shft_body },
+    PerformExpr { perf_val },
+    HandleExpr { hdl_proto, hdl_args, hdl_inst, hdl_body },
+    Program { prog_elems },
+    BlockExpr { block_stmts },
+    Unknown { kind },
+}
+
+// Pattern Enum
+enum Pattern {
+    Identifier { name },
+    Literal { value },
+    WildcardPat,
+    EnumVariantPat { evp_enum, evp_variant, evp_fields },
+    StructPat { sp_name, sp_fields },
+    ArrayPat { arrp_elems, arrp_rest },
+    MapPat { mapp_fields },
+    Unknown { kind },
+}
+
+// Supporting enums
+enum StringInterpolationPart { Literal { value }, Expression { expr }, }
+enum ConditionOperator { EqualOp, NotEqualOp, LessThanOp, LessThanOrEqualOp, GreaterThanOp, GreaterThanOrEqualOp, }
+
+// Supporting structs
+struct MatchArmDef { arm_pat, arm_grd, arm_bdy, }
+struct ArityCase { ac_args, ac_rest, ac_body, }
+struct FieldPattern { fp_field, fp_binding, }
+struct MapFieldPattern { mfp_key, mfp_binding, }
+
+// Constructor functions for AST nodes
+fn make-integer-literal(value) { Ast.IntegerLiteral { value: value } }
+fn make-float-literal(value) { Ast.FloatLiteral { value: value } }
+fn make-string-literal(value) { Ast.StringLiteral { value: value } }
+fn make-identifier(name) { Ast.Identifier { name: name } }
+fn make-keyword(name) { Ast.Keyword { kw_name: name } }
+fn make-true() { Ast.True }
+fn make-false() { Ast.False }
+fn make-null() { Ast.Null }
+fn make-add(left, right) { Ast.Add { left: left, right: right } }
+fn make-sub(left, right) { Ast.Sub { left: left, right: right } }
+fn make-mul(left, right) { Ast.Mul { left: left, right: right } }
+fn make-div(left, right) { Ast.Div { left: left, right: right } }
+fn make-modulo(left, right) { Ast.Modulo { left: left, right: right } }
+fn make-condition(operator, left, right) { Ast.Condition { operator: operator, left: left, right: right } }
+fn make-and(left, right) { Ast.AndExpr { left: left, right: right } }
+fn make-or(left, right) { Ast.OrExpr { left: left, right: right } }
+fn make-shift-left(left, right) { Ast.ShiftLeftExpr { left: left, right: right } }
+fn make-shift-right(left, right) { Ast.ShiftRightExpr { left: left, right: right } }
+fn make-shift-right-zero(left, right) { Ast.ShiftRightZeroExpr { left: left, right: right } }
+fn make-bitwise-and(left, right) { Ast.BitWiseAndExpr { left: left, right: right } }
+fn make-bitwise-or(left, right) { Ast.BitWiseOrExpr { left: left, right: right } }
+fn make-bitwise-xor(left, right) { Ast.BitWiseXorExpr { left: left, right: right } }
+fn make-function(name, args, body) { Ast.FunctionDef { func_name: name, func_args: args, func_rest: null, func_body: body } }
+fn make-call(target, arguments) { Ast.Call { call_target: target, call_arguments: arguments } }
+fn make-if(cond, then_body, else_body) { Ast.IfExpr { if_cond: cond, if_then: then_body, if_else: else_body } }
+fn make-let(pattern, value) { Ast.LetExpr { let_pat: pattern, let_val: value } }
+fn make-array(elements) { Ast.ArrayExpr { arr_elems: elements } }
+fn make-quote(body) { Ast.QuoteExpr { qe_body: body } }
+fn make-unquote(body) { Ast.UnquoteExpr { uqe_body: body } }
+fn make-unquote-splice(body) { Ast.UnquoteSplice { uqs_body: body } }
+fn make-unknown(kind) { Ast.Unknown { kind: kind } }
+fn make-pattern-identifier(name) { Pattern.Identifier { name: name } }
+fn make-pattern-wildcard() { Pattern.WildcardPat }
+fn make-match-arm(pattern, guard, body) { MatchArmDef { arm_pat: pattern, arm_grd: guard, arm_bdy: body } }
+fn make-arrow-pair(left, right) { Ast.ArrowPair { ap_left: left, ap_right: right } }
+fn make-block(statements) { Ast.BlockExpr { block_stmts: statements } }

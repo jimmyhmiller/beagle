@@ -1,0 +1,32 @@
+namespace macroexpand_test
+
+import "beagle.ast" as ast
+
+// A simple unless macro
+macro unless(cond, body) {
+    quote {
+        if ~cond { null } else { ~body }
+    }
+}
+
+// A procedural double macro
+macro double(x) {
+    ast/make-add(x, x)
+}
+
+fn main() {
+    // Test macroexpand with template macro
+    let x = macroexpand(unless(false, 42))
+    println(x)
+
+    // Test macroexpand with procedural macro
+    let y = macroexpand(double(5))
+    println(y)
+
+    println("done")
+}
+
+// Expect
+// 42
+// 10
+// done

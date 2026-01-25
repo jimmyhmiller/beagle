@@ -7,6 +7,7 @@ use crate::{
     gc::{StackMap, StackMapDetails},
     get_runtime,
     ir::{StringValue, Value},
+    macro_expander::MacroExpander,
     parser::Parser,
     runtime::{Enum, Function, ProtocolMethodInfo, Struct},
     types::BuiltInTypes,
@@ -23,10 +24,7 @@ use std::{
     error::Error,
     fmt,
     path::Path,
-    sync::{
-        Arc, Mutex,
-        mpsc::{self, Receiver, SyncSender},
-    },
+    sync::{Arc, Mutex},
 };
 
 #[derive(Debug, Clone)]
@@ -89,6 +87,37 @@ pub enum CompileError {
         function_name: String,
         arg_count: usize,
         available_arities: Vec<usize>,
+    },
+    Internal(String),
+    UnquoteOutsideQuote {
+        position: usize,
+    },
+    UnquoteSpliceOutsideQuote {
+        position: usize,
+    },
+    MacroNotExpanded {
+        name: String,
+    },
+    /// Macro expansion failed
+    MacroExpansionError {
+        name: String,
+        message: String,
+    },
+    /// Macro returned invalid type
+    MacroInvalidReturn {
+        name: String,
+        expected: String,
+        got: String,
+    },
+    /// Error compiling macro body
+    MacroCompilationError {
+        name: String,
+        inner: String,
+    },
+    /// Runtime error during macro execution
+    MacroRuntimeError {
+        name: String,
+        message: String,
     },
 }
 
@@ -185,6 +214,46 @@ impl fmt::Display for CompileError {
                     arg_count,
                     arities_str.join(", ")
                 )
+            }
+            CompileError::Internal(msg) => {
+                write!(f, "Internal error: {}", msg)
+            }
+            CompileError::UnquoteOutsideQuote { position } => {
+                write!(
+                    f,
+                    "Unquote (~) used outside of quote at position {}",
+                    position
+                )
+            }
+            CompileError::UnquoteSpliceOutsideQuote { position } => {
+                write!(
+                    f,
+                    "Unquote-splice (~@) used outside of quote at position {}",
+                    position
+                )
+            }
+            CompileError::MacroNotExpanded { name } => {
+                write!(f, "Macro '{}' was not expanded before compilation", name)
+            }
+            CompileError::MacroExpansionError { name, message } => {
+                write!(f, "Macro expansion error in '{}': {}", name, message)
+            }
+            CompileError::MacroInvalidReturn {
+                name,
+                expected,
+                got,
+            } => {
+                write!(
+                    f,
+                    "Macro '{}' returned invalid type: expected {}, got {}",
+                    name, expected, got
+                )
+            }
+            CompileError::MacroCompilationError { name, inner } => {
+                write!(f, "Error compiling macro '{}': {}", name, inner)
+            }
+            CompileError::MacroRuntimeError { name, message } => {
+                write!(f, "Runtime error in macro '{}': {}", name, message)
             }
         }
     }
@@ -295,6 +364,40 @@ pub struct Compiler {
 }
 
 impl Compiler {
+    /// Create a new Compiler instance for the current thread.
+    pub fn new(
+        command_line_arguments: CommandLineArguments,
+        diagnostic_store: Arc<Mutex<DiagnosticStore>>,
+    ) -> Result<Self, CompileError> {
+        Ok(Compiler {
+            code_allocator: CodeAllocator::new(),
+            property_look_up_cache: MmapOptions::new(MmapOptions::page_size())
+                .map_err(|e| CompileError::MemoryMapping(format!("Failed to create mmap: {}", e)))?
+                .map_mut()
+                .map_err(|e| CompileError::MemoryMapping(format!("Failed to map mmap: {}", e)))?
+                .make_mut()
+                .map_err(|(_map, e)| {
+                    CompileError::MemoryMapping(format!("Failed to make mutable: {}", e))
+                })?,
+            property_look_up_cache_offset: 0,
+            protocol_dispatch_cache: MmapOptions::new(MmapOptions::page_size())
+                .map_err(|e| CompileError::MemoryMapping(format!("Failed to create mmap: {}", e)))?
+                .map_mut()
+                .map_err(|e| CompileError::MemoryMapping(format!("Failed to map mmap: {}", e)))?
+                .make_mut()
+                .map_err(|(_map, e)| {
+                    CompileError::MemoryMapping(format!("Failed to make mutable: {}", e))
+                })?,
+            protocol_dispatch_cache_offset: 0,
+            command_line_arguments,
+            stack_map: StackMap::new(),
+            pause_atom_ptr: None,
+            compiled_file_cache: HashSet::new(),
+            diagnostic_store,
+            multi_arity_functions: HashMap::new(),
+        })
+    }
+
     pub fn reset(&mut self) -> Result<(), CompileError> {
         self.code_allocator = CodeAllocator::new();
         self.property_look_up_cache = MmapOptions::new(MmapOptions::page_size())
@@ -357,6 +460,18 @@ impl Compiler {
         let mut parser = Parser::new("".to_string(), string.to_string())?;
         let ast = parser.parse()?;
         let token_line_column_map = parser.get_token_line_column_map();
+
+        // Macro expansion phase
+        let mut expander = MacroExpander::new();
+        let ast = expander.collect_macros(&ast);
+        // Compile procedural macros before expansion
+        expander
+            .compile_procedural_macros(self)
+            .map_err(|e| Box::new(e) as Box<dyn Error>)?;
+        let ast = expander
+            .expand(&ast)
+            .map_err(|e| Box::new(e) as Box<dyn Error>)?;
+
         let (top_level, diagnostics) = self.compile_ast(
             ast,
             Some("REPL_FUNCTION".to_string()),
@@ -431,6 +546,17 @@ impl Compiler {
         if self.command_line_arguments.show_times {
             println!("Parse time: {:?}", parse_time.elapsed());
         }
+
+        // Macro expansion phase: collect and expand macros before compilation
+        let mut expander = MacroExpander::new();
+        let ast = expander.collect_macros(&ast);
+        // Compile procedural macros before expansion
+        expander
+            .compile_procedural_macros(self)
+            .map_err(|e| Box::new(e) as Box<dyn Error>)?;
+        let ast = expander
+            .expand(&ast)
+            .map_err(|e| Box::new(e) as Box<dyn Error>)?;
 
         let mut top_levels_to_run = self.compile_dependencies(&ast, file_name)?;
 
@@ -1056,7 +1182,7 @@ impl Compiler {
         })
     }
 
-    fn compile_protocol_method(
+    pub fn compile_protocol_method(
         &mut self,
         protocol_name: String,
         method_name: String,
@@ -1143,208 +1269,7 @@ impl fmt::Debug for Compiler {
     }
 }
 
-pub enum CompilerMessage {
-    CompileString(String),
-    CompileFile(String),
-    AddFunctionMarkExecutable(String, Vec<u8>, usize, usize),
-    CompileProtocolMethod(String, String, Vec<ProtocolMethodInfo>),
-    SetPauseAtomPointer(usize),
-    GetCodeBaseAddress,
-    Reset,
-}
-
-pub enum CompilerResponse {
-    Done,
-    FunctionsToRun(Vec<String>),
-    FunctionPointer(usize),
-    CompileError(String),
-    CodeBaseAddress(usize),
-}
-
-pub struct CompilerThread {
-    compiler: Compiler,
-    channel: BlockingReceiver<CompilerMessage, CompilerResponse>,
-}
-
-impl CompilerThread {
-    pub fn new(
-        channel: BlockingReceiver<CompilerMessage, CompilerResponse>,
-        command_line_arguments: CommandLineArguments,
-        diagnostic_store: Arc<Mutex<DiagnosticStore>>,
-    ) -> Result<Self, CompileError> {
-        Ok(CompilerThread {
-            compiler: Compiler {
-                code_allocator: CodeAllocator::new(),
-                property_look_up_cache: MmapOptions::new(MmapOptions::page_size())
-                    .map_err(|e| {
-                        CompileError::MemoryMapping(format!("Failed to create mmap: {}", e))
-                    })?
-                    .map_mut()
-                    .map_err(|e| CompileError::MemoryMapping(format!("Failed to map mmap: {}", e)))?
-                    .make_mut()
-                    .map_err(|(_map, e)| {
-                        CompileError::MemoryMapping(format!("Failed to make mmap mutable: {}", e))
-                    })?,
-                property_look_up_cache_offset: 0,
-                protocol_dispatch_cache: MmapOptions::new(MmapOptions::page_size())
-                    .map_err(|e| {
-                        CompileError::MemoryMapping(format!("Failed to create mmap: {}", e))
-                    })?
-                    .map_mut()
-                    .map_err(|e| CompileError::MemoryMapping(format!("Failed to map mmap: {}", e)))?
-                    .make_mut()
-                    .map_err(|(_map, e)| {
-                        CompileError::MemoryMapping(format!("Failed to make mmap mutable: {}", e))
-                    })?,
-                protocol_dispatch_cache_offset: 0,
-                command_line_arguments: command_line_arguments.clone(),
-                stack_map: StackMap::new(),
-                pause_atom_ptr: None,
-                compiled_file_cache: HashSet::new(),
-                diagnostic_store,
-                multi_arity_functions: HashMap::new(),
-            },
-            channel,
-        })
-    }
-
-    pub fn run(&mut self) {
-        loop {
-            let result = self.channel.receive();
-            match result {
-                Ok((message, work_done)) => match message {
-                    CompilerMessage::CompileString(string) => {
-                        match self.compiler.compile_string(&string) {
-                            Ok(pointer) => {
-                                work_done.mark_done(CompilerResponse::FunctionPointer(pointer));
-                            }
-                            Err(e) => {
-                                work_done
-                                    .mark_done(CompilerResponse::CompileError(format!("{}", e)));
-                            }
-                        }
-                    }
-                    CompilerMessage::CompileFile(file_name) => {
-                        match self.compiler.compile(&file_name) {
-                            Ok(top_levels) => {
-                                work_done.mark_done(CompilerResponse::FunctionsToRun(top_levels));
-                            }
-                            Err(e) => {
-                                work_done
-                                    .mark_done(CompilerResponse::CompileError(format!("{}", e)));
-                            }
-                        }
-                    }
-                    CompilerMessage::SetPauseAtomPointer(pointer) => {
-                        self.compiler.set_pause_atom_ptr(pointer);
-                        work_done.mark_done(CompilerResponse::Done);
-                    }
-                    CompilerMessage::AddFunctionMarkExecutable(
-                        name,
-                        code,
-                        max_locals,
-                        number_of_args,
-                    ) => {
-                        match self.compiler.upsert_function_bytes(
-                            Some(&name),
-                            code,
-                            max_locals,
-                            number_of_args,
-                            false,
-                            number_of_args,
-                        ) {
-                            Ok(_) => {
-                                self.compiler.code_allocator.make_executable();
-                                work_done.mark_done(CompilerResponse::Done);
-                            }
-                            Err(e) => {
-                                work_done
-                                    .mark_done(CompilerResponse::CompileError(format!("{}", e)));
-                            }
-                        }
-                    }
-                    CompilerMessage::Reset => match self.compiler.reset() {
-                        Ok(_) => {
-                            work_done.mark_done(CompilerResponse::Done);
-                        }
-                        Err(e) => {
-                            work_done.mark_done(CompilerResponse::CompileError(format!("{}", e)));
-                        }
-                    },
-                    CompilerMessage::CompileProtocolMethod(
-                        protocol_name,
-                        method_name,
-                        protocol_methods,
-                    ) => {
-                        match self.compiler.compile_protocol_method(
-                            protocol_name,
-                            method_name,
-                            protocol_methods,
-                        ) {
-                            Ok(_) => {
-                                work_done.mark_done(CompilerResponse::Done);
-                            }
-                            Err(e) => {
-                                work_done
-                                    .mark_done(CompilerResponse::CompileError(format!("{}", e)));
-                            }
-                        }
-                    }
-                    CompilerMessage::GetCodeBaseAddress => {
-                        let base = self.compiler.code_allocator.base_address();
-                        work_done.mark_done(CompilerResponse::CodeBaseAddress(base));
-                    }
-                },
-                Err(_) => {
-                    break;
-                }
-            }
-        }
-    }
-}
-
-pub struct BlockingSender<T, R> {
-    inner: SyncSender<(T, SyncSender<R>)>,
-}
-
-impl<T, R> BlockingSender<T, R> {
-    pub fn send(&self, message: T) -> R {
-        let (done_tx, done_rx) = mpsc::sync_channel(0);
-        self.inner
-            .send((message, done_tx))
-            .expect("Compiler thread has disconnected - this is a fatal error");
-        done_rx
-            .recv()
-            .expect("Compiler thread failed to send response - this is a fatal error")
-    }
-}
-
-pub struct BlockingReceiver<T, R> {
-    inner: Receiver<(T, SyncSender<R>)>,
-}
-
-impl<T, R> BlockingReceiver<T, R> {
-    pub fn receive(&self) -> Result<(T, WorkDone<R>), mpsc::RecvError> {
-        let (message, done_tx) = self.inner.recv()?;
-        Ok((message, WorkDone { done_tx }))
-    }
-}
-
-pub fn blocking_channel<T, R>() -> (BlockingSender<T, R>, BlockingReceiver<T, R>) {
-    let (sender, receiver) = mpsc::sync_channel(0);
-    (
-        BlockingSender { inner: sender },
-        BlockingReceiver { inner: receiver },
-    )
-}
-pub struct WorkDone<R> {
-    done_tx: SyncSender<R>,
-}
-
-impl<R> WorkDone<R> {
-    pub fn mark_done(self, result: R) {
-        self.done_tx
-            .send(result)
-            .expect("Failed to send result back to main thread - this is a fatal error");
-    }
-}
+// Thread-local compiler architecture:
+// Each thread now has its own Compiler instance stored in thread-local storage (see runtime.rs).
+// This follows Chez Scheme's model where multiple threads can compile concurrently.
+// The old CompilerThread, BlockingSender, BlockingReceiver types have been removed.
