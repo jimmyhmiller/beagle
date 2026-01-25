@@ -2350,7 +2350,8 @@ impl Runtime {
             // so there is no need to lock anything
             // The tuple is (stack_base, frame_pointer, gc_return_addr)
             // We pass the saved gc_return_addr to ensure the first Beagle frame is scanned
-            let mut all_stack_pointers = vec![(self.get_stack_base(), frame_pointer, gc_return_addr)];
+            let mut all_stack_pointers =
+                vec![(self.get_stack_base(), frame_pointer, gc_return_addr)];
 
             // Also include all ThreadGlobal stack bases explicitly. This ensures the
             // GlobalObjectBlock head pointers are always traced even if a thread's
