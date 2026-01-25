@@ -1,0 +1,117 @@
+namespace stdlib_new_functions_test
+
+fn mod(a, b) {
+    a - (a / b) * b
+}
+
+fn even?(n) {
+    mod(n, 2) == 0
+}
+
+fn main() {
+    println("=== Testing new stdlib functions ===")
+
+    // ========================================
+    // not-every? tests
+    // ========================================
+    println("--- not-every? ---")
+    println("some fail:", not-every?([1, 2, 3], fn(x) { x < 3 }))
+    println("all pass:", not-every?([1, 2, 3], fn(x) { x < 10 }))
+    println("empty:", not-every?([], fn(x) { x > 0 }))
+
+    // ========================================
+    // zipmap tests (verify values, not order)
+    // ========================================
+    println("--- zipmap ---")
+    let m = zipmap(["a", "b", "c"], [1, 2, 3])
+    println("zipmap a:", get(m, "a"))
+    println("zipmap b:", get(m, "b"))
+    println("zipmap c:", get(m, "c"))
+    println("zipmap length:", length(m))
+
+    let m2 = zipmap(["a", "b", "c"], [1, 2])
+    println("keys longer length:", length(m2))
+    println("keys longer a:", get(m2, "a"))
+
+    println("empty length:", length(zipmap([], [])))
+
+    // ========================================
+    // partition-by tests
+    // ========================================
+    println("--- partition-by ---")
+    println("by even:", partition-by([1, 1, 2, 2, 3, 3], fn(x) { even?(x) }))
+    println("ascending:", partition-by([1, 2, 2, 3, 1, 1], fn(x) { x }))
+    println("empty:", partition-by([], fn(x) { x }))
+    println("single:", partition-by([1], fn(x) { x }))
+
+    // ========================================
+    // dedupe tests
+    // ========================================
+    println("--- dedupe ---")
+    println("with runs:", dedupe([1, 1, 2, 2, 2, 3, 1, 1]))
+    println("no dups:", dedupe([1, 2, 3]))
+    println("all same:", dedupe([1, 1, 1]))
+    println("empty:", dedupe([]))
+    println("single:", dedupe([5]))
+
+    // ========================================
+    // into tests (verify values for maps)
+    // ========================================
+    println("--- into ---")
+    println("into vector:", into([1, 2], [3, 4, 5]))
+    println("into empty vec:", into([], [1, 2, 3]))
+
+    let m3 = into({}, [["a", 1], ["b", 2]])
+    println("into map a:", get(m3, "a"))
+    println("into map b:", get(m3, "b"))
+
+    let m4 = into({"x" 0}, [["a", 1], ["b", 2]])
+    println("existing map x:", get(m4, "x"))
+    println("existing map a:", get(m4, "a"))
+
+    println("into set contains 1:", set-contains?(into(#{1, 2}, [2, 3, 4]), 1))
+    println("into set contains 3:", set-contains?(into(#{1, 2}, [2, 3, 4]), 3))
+    println("into set contains 4:", set-contains?(into(#{1, 2}, [2, 3, 4]), 4))
+
+    println("")
+    println("=== ALL NEW FUNCTION TESTS COMPLETE ===")
+    "done"
+}
+
+// Expect
+// === Testing new stdlib functions ===
+// --- not-every? ---
+// some fail: true
+// all pass: false
+// empty: false
+// --- zipmap ---
+// zipmap a: 1
+// zipmap b: 2
+// zipmap c: 3
+// zipmap length: 3
+// keys longer length: 2
+// keys longer a: 1
+// empty length: 0
+// --- partition-by ---
+// by even: [[1, 1], [2, 2], [3, 3]]
+// ascending: [[1], [2, 2], [3], [1, 1]]
+// empty: []
+// single: [[1]]
+// --- dedupe ---
+// with runs: [1, 2, 3, 1]
+// no dups: [1, 2, 3]
+// all same: [1]
+// empty: []
+// single: [5]
+// --- into ---
+// into vector: [1, 2, 3, 4, 5]
+// into empty vec: [1, 2, 3]
+// into map a: 1
+// into map b: 2
+// existing map x: 0
+// existing map a: 1
+// into set contains 1: true
+// into set contains 3: true
+// into set contains 4: true
+//
+// === ALL NEW FUNCTION TESTS COMPLETE ===
