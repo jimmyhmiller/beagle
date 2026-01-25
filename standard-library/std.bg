@@ -734,6 +734,11 @@ fn none?(coll, pred) {
     none-match
 }
 
+// not-every?: True if at least one element does NOT match predicate
+fn not-every?(coll, pred) {
+    not(all?(coll, pred))
+}
+
 // find: Return first element matching predicate, or null
 fn find(coll, pred) {
     let mut s = seq(coll)
@@ -1065,6 +1070,19 @@ fn zip-with(coll1, coll2, f) {
     acc
 }
 
+// zipmap: Create a map from keys and values collections
+fn zipmap(keys-coll, vals-coll) {
+    let mut ks = seq(keys-coll)
+    let mut vs = seq(vals-coll)
+    let mut acc = {}
+    while ks != null && vs != null {
+        acc = assoc(acc, first(ks), first(vs))
+        ks = next(ks)
+        vs = next(vs)
+    }
+    acc
+}
+
 // interleave: Alternate elements from two collections
 fn interleave(coll1, coll2) {
     let mut s1 = seq(coll1)
@@ -1100,6 +1118,26 @@ fn interpose(coll, sep) {
 // ============================================================================
 // Collection Creation & Transformation
 // ============================================================================
+
+// into: Pour elements from source collection into target collection
+// For vectors: appends elements
+// For maps: source should be pairs [key, value] or a map
+// For sets: adds elements
+fn into(target, source) {
+    if set?(target) {
+        reduce(source, target, fn(acc, elem) { set-add(acc, elem) })
+    } else {
+        if instance-of(target, PersistentMap) {
+            // Source elements should be [key, value] pairs
+            reduce(source, target, fn(acc, pair) {
+                assoc(acc, get(pair, 0), get(pair, 1))
+            })
+        } else {
+            // Assume vector-like target
+            reduce(source, target, fn(acc, elem) { push(acc, elem) })
+        }
+    }
+}
 
 // reverse: Reverse order of elements
 fn reverse(coll) {
@@ -1158,6 +1196,32 @@ fn partition(coll, n) {
     acc
 }
 
+// partition-by: Split collection when f(elem) changes value
+fn partition-by(coll, f) {
+    let mut s = seq(coll)
+    if s == null {
+        []
+    } else {
+        let mut acc = []
+        let mut current-group = []
+        let mut current-key = f(first(s))
+        while s != null {
+            let elem = first(s)
+            let key = f(elem)
+            if key == current-key {
+                current-group = push(current-group, elem)
+            } else {
+                acc = push(acc, current-group)
+                current-group = [elem]
+                current-key = key
+            }
+            s = next(s)
+        }
+        // Don't forget the last group
+        push(acc, current-group)
+    }
+}
+
 // group-by: Group elements by result of key function
 fn group-by(coll, f) {
     let mut s = seq(coll)
@@ -1210,6 +1274,27 @@ fn distinct(coll) {
         s = next(s)
     }
     acc
+}
+
+// dedupe: Remove consecutive duplicates (keeps first of each run)
+fn dedupe(coll) {
+    let mut s = seq(coll)
+    if s == null {
+        []
+    } else {
+        let mut acc = [first(s)]
+        let mut prev = first(s)
+        s = next(s)
+        while s != null {
+            let elem = first(s)
+            if elem != prev {
+                acc = push(acc, elem)
+                prev = elem
+            }
+            s = next(s)
+        }
+        acc
+    }
 }
 
 // ============================================================================
