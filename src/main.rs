@@ -319,6 +319,196 @@ fn compile_save_volatile_registers_for(runtime: &mut Runtime, register_num: usiz
     function.is_builtin = true;
 }
 
+/// Generate apply call trampolines that set X9/R10 (arg count) before calling.
+/// This is needed for calling variadic functions from Rust.
+///
+/// Signature: apply_call_N(fn_ptr, arg0, arg1, ..., argN-1) -> result
+/// Where N is the number of arguments to pass.
+///
+/// The trampoline:
+/// 1. Sets X9/R10 to N (tagged)
+/// 2. Moves fn_ptr to a temp register
+/// 3. Shifts args down (arg0 -> X0, arg1 -> X1, etc.)
+/// 4. Calls the function via the temp register
+/// 5. Returns the result
+fn compile_apply_call_trampolines(runtime: &mut Runtime) {
+    cfg_if::cfg_if! {
+        if #[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))] {
+            // x86-64: 6 arg registers (RDI, RSI, RDX, RCX, R8, R9)
+            // We use last register (R9) for fn_ptr, so max 5 actual args
+            // Plus we need to handle stack args for more
+            compile_apply_call_trampolines_x86_64(runtime);
+        } else {
+            // ARM64: 8 arg registers (X0-X7)
+            // We reserve X9 for arg count, use X10 for fn_ptr temporarily
+            // So we can pass up to 8 args in registers
+            compile_apply_call_trampolines_arm64(runtime);
+        }
+    }
+}
+
+#[cfg(not(any(
+    feature = "backend-x86-64",
+    all(target_arch = "x86_64", not(feature = "backend-arm64"))
+)))]
+fn compile_apply_call_trampolines_arm64(runtime: &mut Runtime) {
+    use crate::machine_code::arm_codegen::{X0, X1, X2, X3, X4, X5, X6, X7, X9, X10, X11};
+    use crate::types::BuiltInTypes;
+
+    // Generate trampolines for 0-16 args
+    // For 0-8 args: all in registers
+    // For 9-16 args: first 8 in registers, rest on stack
+    for num_args in 0..=16 {
+        let function_name = format!("beagle.builtin/apply_call_{}", num_args);
+
+        let mut lang = arm::LowLevelArm::new();
+
+        // Function receives: fn_ptr in X0, then arg0..argN-1 in X1..X(N)
+        // For N > 7: X0-X7 have fn_ptr and args[0-6], stack has args[7+]
+        //
+        // Target function expects:
+        // - args[0-7] in X0-X7
+        // - args[8+] on stack
+        //
+        // So we need to:
+        // 1. Save fn_ptr from X0
+        // 2. Shuffle X1-X7 -> X0-X6
+        // 3. Load our stack args into X7 and push extras for target
+
+        lang.prelude();
+
+        // Save fn_ptr from X0 to X10 before we shuffle args
+        lang.mov_reg(X10, X0);
+
+        // Set X9 = num_args (tagged)
+        let arg_count_tagged = (num_args << BuiltInTypes::tag_size()) as i64;
+        lang.mov_64(X9, arg_count_tagged as isize);
+
+        // Handle stack args for target function (args[8+])
+        // Our args[8+] are at [FP+24], [FP+32], etc.
+        // (FP+0 = saved FP, FP+8 = saved LR, FP+16 = our arg[7], FP+24 = our arg[8], ...)
+        // Target expects them at [SP+0], [SP+8], etc.
+        if num_args > 8 {
+            for i in 8..num_args {
+                // Our arg[i] is at offset (i - 7 + 2) from FP in 8-byte units
+                // i=8 -> offset 3 (FP+24)
+                // i=9 -> offset 4 (FP+32), etc.
+                let load_offset = (i as i32) - 7 + 2;
+                lang.load_from_stack(X11, load_offset);
+                // Target expects arg[i] at [SP + (i-8)*8]
+                let store_offset = (i as i32) - 8;
+                lang.push_to_end_of_stack(X11, store_offset);
+            }
+        }
+
+        // Shuffle register args: X1->X0, X2->X1, ..., X7->X6
+        let regs = [X0, X1, X2, X3, X4, X5, X6, X7];
+        for i in 0..num_args.min(7) {
+            lang.mov_reg(regs[i], regs[i + 1]);
+        }
+
+        // If we have 8+ args, X7 needs to come from our stack
+        // Our arg[7] (8th arg to target) is at FP+16
+        if num_args >= 8 {
+            lang.load_from_stack(X7, 2); // offset 2 = FP+16
+        }
+
+        // Call the function via X10
+        lang.call(X10);
+
+        // No stack cleanup needed - push_to_end_of_stack uses pre-allocated frame space
+
+        lang.epilogue();
+        lang.ret();
+
+        runtime
+            .add_function_mark_executable(
+                function_name.clone(),
+                &lang.compile_directly(),
+                0,
+                num_args + 1, // fn_ptr + num_args
+            )
+            .unwrap();
+
+        let function = runtime.get_function_by_name_mut(&function_name).unwrap();
+        function.is_builtin = true;
+    }
+}
+
+#[cfg(any(
+    feature = "backend-x86-64",
+    all(target_arch = "x86_64", not(feature = "backend-arm64"))
+))]
+fn compile_apply_call_trampolines_x86_64(runtime: &mut Runtime) {
+    use crate::machine_code::x86_codegen::{R8, R9, R10, R11, RAX, RCX, RDI, RDX, RSI};
+    use crate::types::BuiltInTypes;
+
+    // Generate trampolines for 0-16 args
+    // For 0-6 args: all in registers
+    // For 7-16 args: first 6 in registers, rest on stack
+    for num_args in 0..=16 {
+        let function_name = format!("beagle.builtin/apply_call_{}", num_args);
+
+        let mut lang = x86::LowLevelX86::new();
+
+        // Function receives: fn_ptr in RDI, then arg0..argN-1 in RSI, RDX, RCX, R8, R9, stack...
+
+        // Standard prologue
+        lang.instructions.push(X86Asm::Push { reg: RBP });
+        lang.instructions.push(X86Asm::MovRR {
+            dest: RBP,
+            src: RSP,
+        });
+
+        // Save fn_ptr from RDI to R11 before we shuffle args
+        lang.mov_reg(R11, RDI);
+
+        // Set R10 = num_args (tagged)
+        let arg_count_tagged = (num_args << BuiltInTypes::tag_size()) as i64;
+        lang.mov_64(R10, arg_count_tagged as isize);
+
+        // Shuffle args: RSI->RDI, RDX->RSI, RCX->RDX, R8->RCX, R9->R8
+        // For args beyond 5, they stay on stack
+        let regs = [RDI, RSI, RDX, RCX, R8, R9];
+
+        // Move register args down by 1
+        for i in 0..num_args.min(5) {
+            // Move regs[i+1] -> regs[i]
+            lang.mov_reg(regs[i], regs[i + 1]);
+        }
+
+        // If we have exactly 6 args, R9 needs to come from what was the first stack arg
+        if num_args >= 6 {
+            // Load the 6th arg from stack
+            // After our prologue (push RBP; mov RBP, RSP), stack args start at [RBP+16]
+            lang.instructions.push(X86Asm::MovRM {
+                dest: R9,
+                base: RBP,
+                offset: 16,
+            });
+        }
+
+        // Call the function via R11
+        lang.call(R11);
+
+        // Epilogue
+        lang.instructions.push(X86Asm::Pop { reg: RBP });
+        lang.ret();
+
+        runtime
+            .add_function_mark_executable(
+                function_name.clone(),
+                &lang.compile_to_bytes(),
+                0,
+                num_args + 1, // fn_ptr + num_args
+            )
+            .unwrap();
+
+        let function = runtime.get_function_by_name_mut(&function_name).unwrap();
+        function.is_builtin = true;
+    }
+}
+
 /// Generate the continuation trampoline and return jump functions using the code generator.
 /// This avoids inline assembly which gets broken by LLVM optimizer in release builds.
 #[cfg(any(
@@ -922,6 +1112,7 @@ fn run_repl(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     runtime.start_compiler_thread();
 
     compile_trampoline(runtime);
+    compile_apply_call_trampolines(runtime);
     // x86-64 has 6 arg registers (0-5), ARM64 has 8 (0-7)
     // The wrapper uses the last arg register for the function pointer
     cfg_if::cfg_if! {
@@ -1105,6 +1296,7 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     runtime.start_compiler_thread();
 
     compile_trampoline(runtime);
+    compile_apply_call_trampolines(runtime);
     // x86-64 has 6 arg registers (0-5), ARM64 has 8 (0-7)
     // The wrapper uses the last arg register for the function pointer
     cfg_if::cfg_if! {
