@@ -1,0 +1,122 @@
+namespace apply_test
+
+fn add0() { 0 }
+fn add1(a) { a }
+fn add2(a, b) { a + b }
+fn add3(a, b, c) { a + b + c }
+fn add4(a, b, c, d) { a + b + c + d }
+fn add5(a, b, c, d, e) { a + b + c + d + e }
+fn add6(a, b, c, d, e, f) { a + b + c + d + e + f }
+fn add7(a, b, c, d, e, f, g) { a + b + c + d + e + f + g }
+fn add8(a, b, c, d, e, f, g, h) { a + b + c + d + e + f + g + h }
+fn add9(a, b, c, d, e, f, g, h, i) { a + b + c + d + e + f + g + h + i }
+fn add10(a, b, c, d, e, f, g, h, i, j) { a + b + c + d + e + f + g + h + i + j }
+
+// Variadic function
+fn sum_all(...nums) {
+    let mut total = 0
+    let mut i = 0
+    let len = length(nums)
+    while i < len {
+        total = total + get(nums, i)
+        i = i + 1
+    }
+    total
+}
+
+// Variadic with fixed args
+fn sum_with_base(base, ...nums) {
+    let mut total = base
+    let mut i = 0
+    let len = length(nums)
+    while i < len {
+        total = total + get(nums, i)
+        i = i + 1
+    }
+    total
+}
+
+// Multi-arity function
+fn multi {
+    () => 100
+    (x) => x + 100
+    (x, y) => x + y + 100
+}
+
+fn main() {
+    // Test with regular functions (0-10 args)
+    println(apply(add0, []))
+    println(apply(add1, [1]))
+    println(apply(add2, [1, 2]))
+    println(apply(add3, [1, 2, 3]))
+    println(apply(add4, [1, 2, 3, 4]))
+    println(apply(add5, [1, 2, 3, 4, 5]))
+    println(apply(add6, [1, 2, 3, 4, 5, 6]))
+    println(apply(add7, [1, 2, 3, 4, 5, 6, 7]))
+    println(apply(add8, [1, 2, 3, 4, 5, 6, 7, 8]))
+    println(apply(add9, [1, 2, 3, 4, 5, 6, 7, 8, 9]))
+    println(apply(add10, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))
+
+    // Test with closure (1 arg + captured var)
+    let x = 10
+    let adder = fn(a) { a + x }
+    println(apply(adder, [5]))
+
+    // Test with closure that takes multiple args
+    let multiplier = fn(a, b) { (a + b) * x }
+    println(apply(multiplier, [2, 3]))
+
+    // Test closures with more args (edge cases near 8 arg limit)
+    // Closure takes 7 args + 1 captured = 8 total args passed
+    let closure7 = fn(a, b, c, d, e, f, g) { a + b + c + d + e + f + g + x }
+    println(apply(closure7, [1, 2, 3, 4, 5, 6, 7]))
+
+    // Test with multi-arity function
+    println(apply(multi, []))
+    println(apply(multi, [5]))
+    println(apply(multi, [5, 10]))
+
+    // Test with vector created dynamically using push
+    let v = []
+    let v = push(v, 100)
+    let v = push(v, 200)
+    println(apply(add2, v))
+
+    // Test variadic functions (limited to 8 args for register-only calling)
+    println(apply(sum_all, []))
+    println(apply(sum_all, [1, 2, 3]))
+    println(apply(sum_all, [1, 2, 3, 4, 5, 6, 7, 8]))
+
+    // Test variadic with fixed args
+    println(apply(sum_with_base, [100]))
+    println(apply(sum_with_base, [100, 1, 2, 3]))
+    println(apply(sum_with_base, [100, 1, 2, 3, 4, 5, 6]))
+
+    "done"
+}
+
+// Expect
+// 0
+// 1
+// 3
+// 6
+// 10
+// 15
+// 21
+// 28
+// 36
+// 45
+// 55
+// 15
+// 50
+// 38
+// 100
+// 105
+// 115
+// 300
+// 0
+// 6
+// 36
+// 100
+// 106
+// 121

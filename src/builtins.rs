@@ -11,7 +11,7 @@ use std::{
 
 use crate::{
     Message,
-    collections::TYPE_ID_CONTINUATION_SEGMENT,
+    collections::{TYPE_ID_CONTINUATION_SEGMENT, TYPE_ID_MULTI_ARITY_FUNCTION},
     gc::STACK_SIZE,
     get_runtime,
     runtime::{ContinuationObject, DispatchTable, FFIInfo, FFIType, RawPtr, Runtime},
@@ -1223,18 +1223,30 @@ pub unsafe extern "C" fn build_rest_array_from_locals(
     // Since first_arg_index is typically 0 for top-level functions, this simplifies to min..total
     // But for closures, first_arg_index = 1, so we want (min - 1)..(total - 1)
 
-    // Actually, let's simplify: the caller passes min_args correctly adjusted
-    // So we just read from saved_local[min]..saved_local[total]
+    // Read args from either saved locals (for register args 0-7) or stack (for args 8+).
+    // The prologue saves register args to locals, but stack args are at positive FP offsets.
+    const NUM_ARG_REGISTERS: usize = 8; // ARM64 uses X0-X7
+
     for i in 0..num_extra {
-        let local_index = first_local_index + min + i;
-        // Local address = FP - (local_index + 1) * 8
-        let local_addr = frame_pointer.wrapping_sub((local_index + 1) * 8);
-        // SAFETY: local_addr points to a valid stack slot that was written by the caller
-        unsafe {
-            let arg = *(local_addr as *const usize);
-            // Write to array field i (offset 1 to skip header)
-            *array_data.add(i + 1) = arg;
-        }
+        let arg_index = min + i; // The actual argument index we need
+
+        let arg = if arg_index < NUM_ARG_REGISTERS {
+            // Register arg (0-7): read from saved local
+            let local_index = first_local_index + arg_index;
+            let local_addr = frame_pointer.wrapping_sub((local_index + 1) * 8);
+            // SAFETY: local_addr points to a valid stack slot written by the prologue
+            unsafe { *(local_addr as *const usize) }
+        } else {
+            // Stack arg (8+): read from caller's stack frame
+            // Stack args are at [FP + (arg_index - 8 + 2) * 8] = [FP + 16], [FP + 24], etc.
+            let stack_offset = (arg_index - NUM_ARG_REGISTERS + 2) * 8;
+            let stack_addr = frame_pointer.wrapping_add(stack_offset);
+            // SAFETY: stack_addr points to a valid stack arg passed by the caller
+            unsafe { *(stack_addr as *const usize) }
+        };
+
+        // Write to array field i (offset 1 to skip header)
+        unsafe { *array_data.add(i + 1) = arg };
     }
 
     array_ptr
@@ -1504,6 +1516,719 @@ pub unsafe extern "C" fn call_variadic_function_value(
             _ => panic!(
                 "Unsupported min_args value {} for variadic function call through function value",
                 min_args
+            ),
+        }
+    }
+}
+
+/// Apply a function to an array of arguments.
+/// Signature: (stack_pointer, frame_pointer, function, args_array) -> result
+///
+/// Supports:
+/// - Regular functions (tagged as Function)
+/// - Closures (tagged as Closure) - closure prepended as first arg
+/// - Multi-arity functions (HeapObject with type_id=29) - dispatches to correct arity
+/// - Variadic functions - bundles extra args into rest array
+///
+/// Args 0-10: Direct transmute calls
+pub unsafe extern "C" fn apply_function(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    function: usize,
+    args_array: usize,
+) -> usize {
+    use crate::collections::{GcHandle, PersistentVec};
+
+    save_gc_context!(stack_pointer, frame_pointer);
+
+    let runtime = get_runtime().get();
+
+    // Determine the function type from the tag
+    let tag = BuiltInTypes::get_kind(function);
+
+    // Get arguments from the array
+    // Could be a HeapObject (raw array, type_id=1) or PersistentVec (type_id=20)
+    let (args, arg_count): (Vec<usize>, usize) =
+        if BuiltInTypes::get_kind(args_array) == BuiltInTypes::HeapObject {
+            let heap_obj = HeapObject::from_tagged(args_array);
+            let type_id = heap_obj.get_type_id();
+            if type_id == 20 {
+                // PersistentVec
+                let vec_handle = GcHandle::from_tagged(args_array);
+                let count = PersistentVec::count(vec_handle);
+                let mut v = Vec::with_capacity(count);
+                for i in 0..count {
+                    v.push(PersistentVec::get(vec_handle, i));
+                }
+                (v, count)
+            } else {
+                // Raw array (type_id=1) or other heap object with fields
+                let fields = heap_obj.get_fields();
+                (fields.to_vec(), fields.len())
+            }
+        } else {
+            panic!("apply: expected array or vector as second argument");
+        };
+
+    unsafe {
+        match tag {
+            BuiltInTypes::Function => {
+                // Regular function - look up metadata to check if variadic
+                let fn_ptr = (function >> BuiltInTypes::tag_size()) as *const u8;
+
+                if let Some(func_info) = runtime.get_function_by_pointer(fn_ptr) {
+                    if func_info.is_variadic {
+                        // Variadic function - bundle extra args into rest array
+                        call_variadic_with_args(
+                            stack_pointer,
+                            fn_ptr,
+                            &args,
+                            arg_count,
+                            func_info.min_args,
+                            false,
+                            0,
+                        )
+                    } else {
+                        call_with_args(fn_ptr, &args, arg_count, false, 0)
+                    }
+                } else {
+                    // Unknown function, try direct call
+                    call_with_args(fn_ptr, &args, arg_count, false, 0)
+                }
+            }
+            BuiltInTypes::Closure => {
+                // Closure - extract function pointer, prepend closure as first arg
+                let heap_obj = HeapObject::from_tagged(function);
+                let fn_ptr_tagged = heap_obj.get_field(0);
+                let fn_ptr = BuiltInTypes::untag(fn_ptr_tagged) as *const u8;
+
+                if let Some(func_info) = runtime.get_function_by_pointer(fn_ptr) {
+                    if func_info.is_variadic {
+                        // Variadic closure - bundle extra args into rest array
+                        call_variadic_with_args(
+                            stack_pointer,
+                            fn_ptr,
+                            &args,
+                            arg_count,
+                            func_info.min_args,
+                            true,
+                            function,
+                        )
+                    } else {
+                        call_with_args(fn_ptr, &args, arg_count, true, function)
+                    }
+                } else {
+                    call_with_args(fn_ptr, &args, arg_count, true, function)
+                }
+            }
+            BuiltInTypes::HeapObject => {
+                // Could be MultiArityFunction or FunctionObject
+                let heap_obj = HeapObject::from_tagged(function);
+                let type_id = heap_obj.get_type_id();
+
+                if type_id == TYPE_ID_MULTI_ARITY_FUNCTION as usize {
+                    // MultiArityFunction - dispatch to correct arity
+                    let tagged_arg_count = BuiltInTypes::construct_int(arg_count as isize) as usize;
+                    let fn_ptr_tagged = dispatch_multi_arity(
+                        stack_pointer,
+                        frame_pointer,
+                        function,
+                        tagged_arg_count,
+                    );
+
+                    // The returned fn_ptr is tagged as Function
+                    let fn_ptr = (fn_ptr_tagged >> BuiltInTypes::tag_size()) as *const u8;
+
+                    // Check if the dispatched function is variadic
+                    if let Some(func_info) = runtime.get_function_by_pointer(fn_ptr) {
+                        if func_info.is_variadic {
+                            call_variadic_with_args(
+                                stack_pointer,
+                                fn_ptr,
+                                &args,
+                                arg_count,
+                                func_info.min_args,
+                                false,
+                                0,
+                            )
+                        } else {
+                            call_with_args(fn_ptr, &args, arg_count, false, 0)
+                        }
+                    } else {
+                        call_with_args(fn_ptr, &args, arg_count, false, 0)
+                    }
+                } else if type_id == 10 {
+                    // FunctionObject (TYPE_ID_FUNCTION_OBJECT = 10)
+                    let fn_ptr_tagged = heap_obj.get_field(0);
+                    let fn_ptr = BuiltInTypes::untag(fn_ptr_tagged) as *const u8;
+
+                    if let Some(func_info) = runtime.get_function_by_pointer(fn_ptr) {
+                        if func_info.is_variadic {
+                            call_variadic_with_args(
+                                stack_pointer,
+                                fn_ptr,
+                                &args,
+                                arg_count,
+                                func_info.min_args,
+                                false,
+                                0,
+                            )
+                        } else {
+                            call_with_args(fn_ptr, &args, arg_count, false, 0)
+                        }
+                    } else {
+                        call_with_args(fn_ptr, &args, arg_count, false, 0)
+                    }
+                } else {
+                    panic!(
+                        "apply: expected function, closure, or multi-arity function, got HeapObject with type_id={}",
+                        type_id
+                    );
+                }
+            }
+            _ => {
+                panic!(
+                    "apply: expected function, closure, or multi-arity function, got {:?}",
+                    tag
+                );
+            }
+        }
+    }
+}
+
+/// Helper function to call a variadic function with individual args.
+/// Uses JIT-compiled trampolines that set X9 (ARM64) or R10 (x86-64) to the arg count.
+#[inline(always)]
+unsafe fn call_variadic_with_args(
+    _stack_pointer: usize,
+    fn_ptr: *const u8,
+    args: &[usize],
+    arg_count: usize,
+    _min_args: usize,
+    is_closure: bool,
+    closure_ptr: usize,
+) -> usize {
+    // The variadic calling convention:
+    // 1. Pass all args individually in registers X0-X7 (ARM64) or RDI, RSI, etc (x86-64)
+    // 2. Set X9 (ARM64) or R10 (x86-64) to the arg count (tagged)
+    // 3. The function prologue reads X9 and builds the rest array from the args
+    //
+    // For closures, the closure pointer is prepended as arg0.
+    //
+    // We use JIT-compiled trampolines (apply_call_N) that handle the X9 setup.
+    // Trampoline signature: apply_call_N(fn_ptr, arg0, arg1, ..., argN-1) -> result
+
+    let effective_arg_count = if is_closure { arg_count + 1 } else { arg_count };
+
+    // Look up the appropriate trampoline
+    let trampoline_name = format!("beagle.builtin/apply_call_{}", effective_arg_count);
+    let runtime = get_runtime().get();
+    let trampoline = runtime
+        .get_function_by_name(&trampoline_name)
+        .unwrap_or_else(|| panic!("apply: trampoline {} not found", trampoline_name));
+    let trampoline_ptr = usize::from(trampoline.pointer) as *const u8;
+
+    // Build args array: [fn_ptr, arg0, arg1, ...]
+    // For closures: [fn_ptr, closure_ptr, arg0, arg1, ...]
+    unsafe {
+        if is_closure {
+            call_trampoline_with_closure(trampoline_ptr, fn_ptr, closure_ptr, args, arg_count)
+        } else {
+            call_trampoline(trampoline_ptr, fn_ptr, args, arg_count)
+        }
+    }
+}
+
+/// Call a trampoline with the given function pointer and args.
+/// The trampoline expects: (fn_ptr, arg0, arg1, ..., argN-1)
+#[inline(always)]
+unsafe fn call_trampoline(
+    trampoline_ptr: *const u8,
+    fn_ptr: *const u8,
+    args: &[usize],
+    arg_count: usize,
+) -> usize {
+    // Dispatch based on arg count
+    unsafe {
+        match arg_count {
+            0 => {
+                let f: fn(usize) -> usize = transmute(trampoline_ptr);
+                f(fn_ptr as usize)
+            }
+            1 => {
+                let f: fn(usize, usize) -> usize = transmute(trampoline_ptr);
+                f(fn_ptr as usize, args[0])
+            }
+            2 => {
+                let f: fn(usize, usize, usize) -> usize = transmute(trampoline_ptr);
+                f(fn_ptr as usize, args[0], args[1])
+            }
+            3 => {
+                let f: fn(usize, usize, usize, usize) -> usize = transmute(trampoline_ptr);
+                f(fn_ptr as usize, args[0], args[1], args[2])
+            }
+            4 => {
+                let f: fn(usize, usize, usize, usize, usize) -> usize = transmute(trampoline_ptr);
+                f(fn_ptr as usize, args[0], args[1], args[2], args[3])
+            }
+            5 => {
+                let f: fn(usize, usize, usize, usize, usize, usize) -> usize =
+                    transmute(trampoline_ptr);
+                f(fn_ptr as usize, args[0], args[1], args[2], args[3], args[4])
+            }
+            6 => {
+                let f: fn(usize, usize, usize, usize, usize, usize, usize) -> usize =
+                    transmute(trampoline_ptr);
+                f(
+                    fn_ptr as usize,
+                    args[0],
+                    args[1],
+                    args[2],
+                    args[3],
+                    args[4],
+                    args[5],
+                )
+            }
+            7 => {
+                let f: fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize =
+                    transmute(trampoline_ptr);
+                f(
+                    fn_ptr as usize,
+                    args[0],
+                    args[1],
+                    args[2],
+                    args[3],
+                    args[4],
+                    args[5],
+                    args[6],
+                )
+            }
+            8 => {
+                let f: fn(usize, usize, usize, usize, usize, usize, usize, usize, usize) -> usize =
+                    transmute(trampoline_ptr);
+                f(
+                    fn_ptr as usize,
+                    args[0],
+                    args[1],
+                    args[2],
+                    args[3],
+                    args[4],
+                    args[5],
+                    args[6],
+                    args[7],
+                )
+            }
+            9 => {
+                let f: fn(
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                ) -> usize = transmute(trampoline_ptr);
+                f(
+                    fn_ptr as usize,
+                    args[0],
+                    args[1],
+                    args[2],
+                    args[3],
+                    args[4],
+                    args[5],
+                    args[6],
+                    args[7],
+                    args[8],
+                )
+            }
+            10 => {
+                let f: fn(
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                ) -> usize = transmute(trampoline_ptr);
+                f(
+                    fn_ptr as usize,
+                    args[0],
+                    args[1],
+                    args[2],
+                    args[3],
+                    args[4],
+                    args[5],
+                    args[6],
+                    args[7],
+                    args[8],
+                    args[9],
+                )
+            }
+            _ => panic!(
+                "apply: too many arguments ({}), max supported is 10",
+                arg_count
+            ),
+        }
+    }
+}
+
+/// Call a trampoline with closure pointer prepended.
+/// The trampoline expects: (fn_ptr, closure_ptr, arg0, arg1, ..., argN-1)
+#[inline(always)]
+unsafe fn call_trampoline_with_closure(
+    trampoline_ptr: *const u8,
+    fn_ptr: *const u8,
+    closure_ptr: usize,
+    args: &[usize],
+    arg_count: usize,
+) -> usize {
+    // Dispatch based on arg count (closure is prepended, so effective count is arg_count + 1)
+    unsafe {
+        match arg_count {
+            0 => {
+                let f: fn(usize, usize) -> usize = transmute(trampoline_ptr);
+                f(fn_ptr as usize, closure_ptr)
+            }
+            1 => {
+                let f: fn(usize, usize, usize) -> usize = transmute(trampoline_ptr);
+                f(fn_ptr as usize, closure_ptr, args[0])
+            }
+            2 => {
+                let f: fn(usize, usize, usize, usize) -> usize = transmute(trampoline_ptr);
+                f(fn_ptr as usize, closure_ptr, args[0], args[1])
+            }
+            3 => {
+                let f: fn(usize, usize, usize, usize, usize) -> usize = transmute(trampoline_ptr);
+                f(fn_ptr as usize, closure_ptr, args[0], args[1], args[2])
+            }
+            4 => {
+                let f: fn(usize, usize, usize, usize, usize, usize) -> usize =
+                    transmute(trampoline_ptr);
+                f(
+                    fn_ptr as usize,
+                    closure_ptr,
+                    args[0],
+                    args[1],
+                    args[2],
+                    args[3],
+                )
+            }
+            5 => {
+                let f: fn(usize, usize, usize, usize, usize, usize, usize) -> usize =
+                    transmute(trampoline_ptr);
+                f(
+                    fn_ptr as usize,
+                    closure_ptr,
+                    args[0],
+                    args[1],
+                    args[2],
+                    args[3],
+                    args[4],
+                )
+            }
+            6 => {
+                let f: fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize =
+                    transmute(trampoline_ptr);
+                f(
+                    fn_ptr as usize,
+                    closure_ptr,
+                    args[0],
+                    args[1],
+                    args[2],
+                    args[3],
+                    args[4],
+                    args[5],
+                )
+            }
+            7 => {
+                let f: fn(usize, usize, usize, usize, usize, usize, usize, usize, usize) -> usize =
+                    transmute(trampoline_ptr);
+                f(
+                    fn_ptr as usize,
+                    closure_ptr,
+                    args[0],
+                    args[1],
+                    args[2],
+                    args[3],
+                    args[4],
+                    args[5],
+                    args[6],
+                )
+            }
+            8 => {
+                let f: fn(
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                ) -> usize = transmute(trampoline_ptr);
+                f(
+                    fn_ptr as usize,
+                    closure_ptr,
+                    args[0],
+                    args[1],
+                    args[2],
+                    args[3],
+                    args[4],
+                    args[5],
+                    args[6],
+                    args[7],
+                )
+            }
+            9 => {
+                let f: fn(
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                ) -> usize = transmute(trampoline_ptr);
+                f(
+                    fn_ptr as usize,
+                    closure_ptr,
+                    args[0],
+                    args[1],
+                    args[2],
+                    args[3],
+                    args[4],
+                    args[5],
+                    args[6],
+                    args[7],
+                    args[8],
+                )
+            }
+            _ => panic!(
+                "apply: too many arguments ({}) for closure, max supported is 9",
+                arg_count
+            ),
+        }
+    }
+}
+
+/// Helper function to call a function pointer with the given arguments.
+/// Handles both regular functions and closures (closure_ptr prepended as first arg).
+#[inline(always)]
+unsafe fn call_with_args(
+    fn_ptr: *const u8,
+    args: &[usize],
+    arg_count: usize,
+    is_closure: bool,
+    closure_ptr: usize,
+) -> usize {
+    // SAFETY: We're transmuting function pointers to call them with the correct number of arguments.
+    // The function pointer comes from a known function in the runtime.
+    unsafe {
+        match (arg_count, is_closure) {
+            (0, false) => {
+                let f: fn() -> usize = transmute(fn_ptr);
+                f()
+            }
+            (0, true) => {
+                let f: fn(usize) -> usize = transmute(fn_ptr);
+                f(closure_ptr)
+            }
+            (1, false) => {
+                let f: fn(usize) -> usize = transmute(fn_ptr);
+                f(args[0])
+            }
+            (1, true) => {
+                let f: fn(usize, usize) -> usize = transmute(fn_ptr);
+                f(closure_ptr, args[0])
+            }
+            (2, false) => {
+                let f: fn(usize, usize) -> usize = transmute(fn_ptr);
+                f(args[0], args[1])
+            }
+            (2, true) => {
+                let f: fn(usize, usize, usize) -> usize = transmute(fn_ptr);
+                f(closure_ptr, args[0], args[1])
+            }
+            (3, false) => {
+                let f: fn(usize, usize, usize) -> usize = transmute(fn_ptr);
+                f(args[0], args[1], args[2])
+            }
+            (3, true) => {
+                let f: fn(usize, usize, usize, usize) -> usize = transmute(fn_ptr);
+                f(closure_ptr, args[0], args[1], args[2])
+            }
+            (4, false) => {
+                let f: fn(usize, usize, usize, usize) -> usize = transmute(fn_ptr);
+                f(args[0], args[1], args[2], args[3])
+            }
+            (4, true) => {
+                let f: fn(usize, usize, usize, usize, usize) -> usize = transmute(fn_ptr);
+                f(closure_ptr, args[0], args[1], args[2], args[3])
+            }
+            (5, false) => {
+                let f: fn(usize, usize, usize, usize, usize) -> usize = transmute(fn_ptr);
+                f(args[0], args[1], args[2], args[3], args[4])
+            }
+            (5, true) => {
+                let f: fn(usize, usize, usize, usize, usize, usize) -> usize = transmute(fn_ptr);
+                f(closure_ptr, args[0], args[1], args[2], args[3], args[4])
+            }
+            (6, false) => {
+                let f: fn(usize, usize, usize, usize, usize, usize) -> usize = transmute(fn_ptr);
+                f(args[0], args[1], args[2], args[3], args[4], args[5])
+            }
+            (6, true) => {
+                let f: fn(usize, usize, usize, usize, usize, usize, usize) -> usize =
+                    transmute(fn_ptr);
+                f(
+                    closure_ptr,
+                    args[0],
+                    args[1],
+                    args[2],
+                    args[3],
+                    args[4],
+                    args[5],
+                )
+            }
+            (7, false) => {
+                let f: fn(usize, usize, usize, usize, usize, usize, usize) -> usize =
+                    transmute(fn_ptr);
+                f(
+                    args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+                )
+            }
+            (7, true) => {
+                let f: fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize =
+                    transmute(fn_ptr);
+                f(
+                    closure_ptr,
+                    args[0],
+                    args[1],
+                    args[2],
+                    args[3],
+                    args[4],
+                    args[5],
+                    args[6],
+                )
+            }
+            (8, false) => {
+                let f: fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize =
+                    transmute(fn_ptr);
+                f(
+                    args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
+                )
+            }
+            (8, true) => {
+                let f: fn(usize, usize, usize, usize, usize, usize, usize, usize, usize) -> usize =
+                    transmute(fn_ptr);
+                f(
+                    closure_ptr,
+                    args[0],
+                    args[1],
+                    args[2],
+                    args[3],
+                    args[4],
+                    args[5],
+                    args[6],
+                    args[7],
+                )
+            }
+            (9, false) => {
+                let f: fn(usize, usize, usize, usize, usize, usize, usize, usize, usize) -> usize =
+                    transmute(fn_ptr);
+                f(
+                    args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8],
+                )
+            }
+            (9, true) => {
+                let f: fn(
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                ) -> usize = transmute(fn_ptr);
+                f(
+                    closure_ptr,
+                    args[0],
+                    args[1],
+                    args[2],
+                    args[3],
+                    args[4],
+                    args[5],
+                    args[6],
+                    args[7],
+                    args[8],
+                )
+            }
+            (10, false) => {
+                let f: fn(
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                ) -> usize = transmute(fn_ptr);
+                f(
+                    args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
+                    args[8], args[9],
+                )
+            }
+            (10, true) => {
+                let f: fn(
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                ) -> usize = transmute(fn_ptr);
+                f(
+                    closure_ptr,
+                    args[0],
+                    args[1],
+                    args[2],
+                    args[3],
+                    args[4],
+                    args[5],
+                    args[6],
+                    args[7],
+                    args[8],
+                    args[9],
+                )
+            }
+            _ => panic!(
+                "apply: too many arguments ({}), max supported is 10",
+                arg_count
             ),
         }
     }
@@ -6073,6 +6798,15 @@ impl Runtime {
             true,
             true,
             6,
+        )?;
+
+        // apply takes (stack_pointer, frame_pointer, function, args_array)
+        self.add_builtin_function_with_fp(
+            "beagle.core/apply",
+            apply_function as *const u8,
+            true,
+            true,
+            4, // stack_pointer + frame_pointer + function + args_array
         )?;
 
         self.add_builtin_function(
