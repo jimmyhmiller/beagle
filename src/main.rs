@@ -440,7 +440,7 @@ fn compile_apply_call_trampolines_arm64(runtime: &mut Runtime) {
     all(target_arch = "x86_64", not(feature = "backend-arm64"))
 ))]
 fn compile_apply_call_trampolines_x86_64(runtime: &mut Runtime) {
-    use crate::machine_code::x86_codegen::{R8, R9, R10, R11, RAX, RCX, RDI, RDX, RSI};
+    use crate::machine_code::x86_codegen::{R8, R9, R10, R11, RBP, RCX, RDI, RDX, RSI, RSP};
     use crate::types::BuiltInTypes;
 
     // Generate trampolines for 0-16 args
