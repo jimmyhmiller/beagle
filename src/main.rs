@@ -452,6 +452,19 @@ fn compile_apply_call_trampolines_x86_64(runtime: &mut Runtime) {
         let mut lang = x86::LowLevelX86::new();
 
         // Function receives: fn_ptr in RDI, then arg0..argN-1 in RSI, RDX, RCX, R8, R9, stack...
+        // Our stack args start at [RBP+16] (after push RBP; mov RBP, RSP)
+        // arg5 = [RBP+16], arg6 = [RBP+24], arg7 = [RBP+32], etc.
+        //
+        // Target function expects:
+        // - args 0-5 in RDI, RSI, RDX, RCX, R8, R9
+        // - args 6+ on stack at [RSP], [RSP+8], ...
+        //
+        // So we need to:
+        // 1. Save fn_ptr from RDI to R11
+        // 2. Push stack args for target (args 6+) in REVERSE order
+        // 3. Shuffle register args down by 1
+        // 4. Load arg5 from our stack into R9 (if num_args >= 6)
+        // 5. Call via R11
 
         // Standard prologue
         lang.instructions.push(X86Asm::Push { reg: RBP });
@@ -467,8 +480,31 @@ fn compile_apply_call_trampolines_x86_64(runtime: &mut Runtime) {
         let arg_count_tagged = (num_args << BuiltInTypes::tag_size()) as i64;
         lang.mov_64(R10, arg_count_tagged as isize);
 
+        // Handle stack args for target function (args 6+)
+        // We need to push them in reverse order so they appear correctly on stack
+        // Our arg[i] is at [RBP + 16 + (i-5)*8] for i >= 5
+        // arg5 = [RBP+16], arg6 = [RBP+24], arg7 = [RBP+32], etc.
+        if num_args > 6 {
+            // Push args in reverse order: argN-1, argN-2, ..., arg6
+            for i in (6..num_args).rev() {
+                // Our arg[i] is at [RBP + 16 + (i-5)*8]
+                let offset = 16 + ((i as i32) - 5) * 8;
+                // Load into R11 temporarily (we've saved fn_ptr already)
+                // Actually we need a temp register that won't be clobbered
+                // Use RDI since we'll overwrite it anyway in the shuffle
+                lang.instructions.push(X86Asm::MovRM {
+                    dest: RDI,
+                    base: RBP,
+                    offset,
+                });
+                lang.instructions.push(X86Asm::Push { reg: RDI });
+            }
+            // Reload fn_ptr into R11 since we clobbered RDI
+            // Actually wait - we saved fn_ptr first, so R11 still has it
+            // But we used RDI as temp, so we need to restore the shuffle logic
+        }
+
         // Shuffle args: RSI->RDI, RDX->RSI, RCX->RDX, R8->RCX, R9->R8
-        // For args beyond 5, they stay on stack
         let regs = [RDI, RSI, RDX, RCX, R8, R9];
 
         // Move register args down by 1
@@ -477,10 +513,9 @@ fn compile_apply_call_trampolines_x86_64(runtime: &mut Runtime) {
             lang.mov_reg(regs[i], regs[i + 1]);
         }
 
-        // If we have exactly 6 args, R9 needs to come from what was the first stack arg
+        // If we have 6+ args, R9 needs to come from our stack
+        // arg5 = [RBP+16]
         if num_args >= 6 {
-            // Load the 6th arg from stack
-            // After our prologue (push RBP; mov RBP, RSP), stack args start at [RBP+16]
             lang.instructions.push(X86Asm::MovRM {
                 dest: R9,
                 base: RBP,
@@ -490,6 +525,15 @@ fn compile_apply_call_trampolines_x86_64(runtime: &mut Runtime) {
 
         // Call the function via R11
         lang.call(R11);
+
+        // Clean up stack args we pushed (if any)
+        if num_args > 6 {
+            let stack_cleanup = ((num_args - 6) * 8) as i32;
+            lang.instructions.push(X86Asm::AddRI {
+                dest: RSP,
+                imm: stack_cleanup,
+            });
+        }
 
         // Epilogue
         lang.instructions.push(X86Asm::Pop { reg: RBP });
