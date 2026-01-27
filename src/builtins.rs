@@ -2398,7 +2398,7 @@ pub unsafe extern "C" fn ceil_builtin(
     }
 }
 
-/// abs builtin - computes absolute value of a float
+/// abs builtin - computes absolute value of a number (int or float)
 pub unsafe extern "C" fn abs_builtin(
     stack_pointer: usize,
     frame_pointer: usize,
@@ -2406,23 +2406,44 @@ pub unsafe extern "C" fn abs_builtin(
 ) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     unsafe {
-        let runtime = get_runtime().get_mut();
+        let kind = BuiltInTypes::get_kind(value);
 
-        let untagged = BuiltInTypes::untag(value);
-        let float_ptr = untagged as *const f64;
-        let float_value = *float_ptr.add(1);
+        match kind {
+            BuiltInTypes::Int => {
+                // For integers, the value is stored directly in the tagged value
+                let int_value = BuiltInTypes::untag_isize(value as isize);
+                let result = int_value.abs();
+                BuiltInTypes::construct_int(result) as usize
+            }
+            BuiltInTypes::Float => {
+                // For floats, we need to read from the heap
+                let runtime = get_runtime().get_mut();
 
-        let result = float_value.abs();
+                let untagged = BuiltInTypes::untag(value);
+                let float_ptr = untagged as *const f64;
+                let float_value = *float_ptr.add(1);
 
-        let new_float_ptr = runtime
-            .allocate(1, stack_pointer, BuiltInTypes::Float)
-            .unwrap();
+                let result = float_value.abs();
 
-        let untagged_result = BuiltInTypes::untag(new_float_ptr);
-        let result_ptr = untagged_result as *mut f64;
-        *result_ptr.add(1) = result;
+                let new_float_ptr = runtime
+                    .allocate(1, stack_pointer, BuiltInTypes::Float)
+                    .unwrap();
 
-        new_float_ptr
+                let untagged_result = BuiltInTypes::untag(new_float_ptr);
+                let result_ptr = untagged_result as *mut f64;
+                *result_ptr.add(1) = result;
+
+                new_float_ptr
+            }
+            _ => {
+                // For other types, throw a type error
+                throw_runtime_error(
+                    stack_pointer,
+                    "TypeError",
+                    "abs requires a number (int or float)".to_string(),
+                );
+            }
+        }
     }
 }
 
