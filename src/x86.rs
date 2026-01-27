@@ -624,6 +624,10 @@ impl LowLevelX86 {
     }
 
     pub fn load_local(&mut self, dest: X86Register, offset: i32) {
+        if std::env::var("DEBUG_SPILL").is_ok() && offset == 7 {
+            eprintln!("[DEBUG_SPILL] load_local: offset={}, RBP_offset={}, dest={:?}, function={:?}",
+                      offset, -(offset + 1) * 8, dest, self.current_function_name);
+        }
         self.instructions.push(X86Asm::MovRM {
             dest,
             base: RBP,
@@ -632,6 +636,10 @@ impl LowLevelX86 {
     }
 
     pub fn store_local(&mut self, src: X86Register, offset: i32) {
+        if std::env::var("DEBUG_SPILL").is_ok() && offset == 7 {
+            eprintln!("[DEBUG_SPILL] store_local: offset={}, RBP_offset={}, src={:?}, function={:?}",
+                      offset, -(offset + 1) * 8, src, self.current_function_name);
+        }
         self.instructions.push(X86Asm::MovMR {
             base: RBP,
             offset: -Self::CALLEE_SAVED_SIZE - (offset + 1) * 8,
@@ -669,9 +677,12 @@ impl LowLevelX86 {
 
     pub fn push_to_end_of_stack(&mut self, reg: X86Register, offset: i32) {
         // Ensure frame has space for outgoing stack arguments.
-        // Like ARM64, we track this in max_stack_size so the prologue
-        // allocates enough space below RSP.
-        self.max_stack_size += 1;
+        // CRITICAL: saves (stack_size) and outgoing args are live at the same time.
+        // We must size for their sum, not just the outgoing args alone.
+        let needed = self.stack_size + offset + 1;
+        if needed > self.max_stack_size {
+            self.max_stack_size = needed;
+        }
 
         // Store to stack at offset from current position
         self.instructions.push(X86Asm::MovMR {

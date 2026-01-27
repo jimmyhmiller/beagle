@@ -330,6 +330,7 @@ impl Token {
 
 enum Associativity {
     Left,
+    Right,
 }
 
 static ZERO: u8 = b'0';
@@ -996,6 +997,8 @@ impl Parser {
 
     fn get_precedence(&self) -> (usize, Associativity) {
         match self.current_token() {
+            // Assignment should have the lowest precedence and be right-associative.
+            Token::Equal => (1, Associativity::Right),
             // Pipe operators have the lowest precedence.
             Token::Pipe | Token::PipeLast => (5, Associativity::Left),
             // Logical OR (||) has the lowest precedence among common operators.
@@ -1009,8 +1012,8 @@ impl Parser {
             | Token::NotEqual
             | Token::GreaterThan
             | Token::GreaterThanOrEqual => (30, Associativity::Left),
-            // Addition and subtraction.
-            Token::Plus | Token::Minus => (40, Associativity::Left),
+            // Addition, subtraction, and string concatenation.
+            Token::Plus | Token::Minus | Token::Concat => (40, Associativity::Left),
             // Multiplication, division, modulo.
             Token::Mul | Token::Div | Token::Modulo => (50, Associativity::Left),
             // Bitwise operations (lower precedence than arithmetic).
@@ -4512,4 +4515,103 @@ fn parse_expression() {
                          current_state.rect_y + current_state.dy + 180 >= screen_height"
     };
     println!("{:#?}", ast);
+}
+
+#[test]
+fn assignment_has_lower_precedence_than_concat() {
+    let ast = parse! {
+        "result = temp ++ \"world\""
+    };
+
+    let ast = match ast {
+        Ast::Program { mut elements, .. } => elements.remove(0),
+        other => other,
+    };
+
+    match ast {
+        Ast::Assignment { name, value, .. } => {
+            match *name {
+                Ast::Identifier(ref n, _) => assert_eq!(n, "result"),
+                other => panic!("expected identifier on lhs, got: {:?}", other),
+            }
+
+            match *value {
+                Ast::Call { name, args, .. } => {
+                    assert_eq!(name, "beagle.core/string-concat");
+                    assert!(matches!(args.first(), Some(Ast::Identifier(n, _)) if n == "temp"));
+                    assert!(matches!(args.get(1), Some(Ast::String(s, _)) if s == "world"));
+                }
+                other => panic!("expected concat call on rhs, got: {:?}", other),
+            }
+        }
+        other => panic!("expected assignment ast, got: {:?}", other),
+    }
+}
+
+#[test]
+fn assignment_is_right_associative() {
+    let ast = parse! {
+        "a = b = c"
+    };
+
+    let ast = match ast {
+        Ast::Program { mut elements, .. } => elements.remove(0),
+        other => other,
+    };
+
+    match ast {
+        Ast::Assignment { name, value, .. } => {
+            assert!(matches!(*name, Ast::Identifier(ref n, _) if n == "a"));
+            match *value {
+                Ast::Assignment {
+                    name: inner_name,
+                    value: inner_value,
+                    ..
+                } => {
+                    assert!(matches!(*inner_name, Ast::Identifier(ref n, _) if n == "b"));
+                    assert!(matches!(*inner_value, Ast::Identifier(ref n, _) if n == "c"));
+                }
+                other => panic!("expected nested assignment on rhs, got: {:?}", other),
+            }
+        }
+        other => panic!("expected assignment ast, got: {:?}", other),
+    }
+}
+
+#[test]
+fn assignment_with_multiple_concats_groups_on_rhs() {
+    let ast = parse! {
+        "result = temp ++ \"world\" ++ \"!\""
+    };
+
+    let ast = match ast {
+        Ast::Program { mut elements, .. } => elements.remove(0),
+        other => other,
+    };
+
+    match ast {
+        Ast::Assignment { value, .. } => match *value {
+            Ast::Call { name, args, .. } => {
+                assert_eq!(name, "beagle.core/string-concat");
+                // Left-associative concat: (temp ++ "world") ++ "!"
+                let lhs = args.first().expect("missing lhs").clone();
+                let rhs = args.get(1).expect("missing rhs");
+                assert!(matches!(rhs, Ast::String(s, _) if s == "!"));
+                match lhs {
+                    Ast::Call {
+                        name: inner_name,
+                        args: inner_args,
+                        ..
+                    } => {
+                        assert_eq!(inner_name, "beagle.core/string-concat");
+                        assert!(matches!(inner_args.first(), Some(Ast::Identifier(n, _)) if n == "temp"));
+                        assert!(matches!(inner_args.get(1), Some(Ast::String(s, _)) if s == "world"));
+                    }
+                    other => panic!("expected concat on lhs, got: {:?}", other),
+                }
+            }
+            other => panic!("expected concat call on rhs, got: {:?}", other),
+        },
+        other => panic!("expected assignment ast, got: {:?}", other),
+    }
 }

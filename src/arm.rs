@@ -869,7 +869,12 @@ impl LowLevelArm {
         const MAX_IMM9: i32 = 255;
         const MIN_IMM9: i32 = -256;
 
-        self.max_stack_size += 1;
+        // Saves (stack_size) and outgoing args are live at the same time.
+        // Size for their sum, not just the outgoing args alone.
+        let needed = self.stack_size + offset + 1;
+        if needed > self.max_stack_size {
+            self.max_stack_size = needed;
+        }
 
         let byte_offset = offset * 8;
 
