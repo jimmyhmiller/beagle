@@ -503,8 +503,16 @@ impl Compiler {
             let mut backend = ir.compile(backend, error_fn_pointer);
             let _token_map = ir.ir_range_to_token_range.clone();
             let max_locals = backend.max_locals() as usize;
-            let _function_pointer =
-                self.upsert_function(Some(&top_level_name), &mut backend, max_locals, 0, false, 0)?;
+            let _function_pointer = self.upsert_function(
+                Some(&top_level_name),
+                &mut backend,
+                max_locals,
+                0,
+                false,
+                0,
+                None,
+                vec![],
+            )?;
             debug_only! {
                 debugger(Message {
                     kind: "ir".to_string(),
@@ -815,6 +823,8 @@ impl Compiler {
         number_of_args: usize,
         is_variadic: bool,
         min_args: usize,
+        docstring: Option<String>,
+        arg_names: Vec<String>,
     ) -> Result<usize, Box<dyn Error>> {
         if let Some(name) = function_name {
             backend.set_function_name(name);
@@ -848,6 +858,8 @@ impl Compiler {
             number_of_args,
             is_variadic,
             min_args,
+            docstring,
+            arg_names,
         )
     }
 
@@ -872,6 +884,8 @@ impl Compiler {
             number_of_args,
             is_variadic,
             min_args,
+            None, // No docstring for this path
+            vec![],
         )
     }
 
@@ -889,6 +903,8 @@ impl Compiler {
             function.number_of_args,
             function.is_variadic,
             function.min_args,
+            function.docstring.clone(),
+            function.arg_names.clone(),
         )?;
         Ok(())
     }
@@ -1129,6 +1145,7 @@ impl Compiler {
                 rest_param: None,
                 body,
                 token_range: TokenRange::new(0, 0),
+                docstring: None,
             }],
             token_range: TokenRange::new(0, 0),
         };

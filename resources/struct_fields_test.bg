@@ -1,0 +1,35 @@
+namespace struct_fields_test
+
+struct Point { x, y }
+struct Person { name, age, email }
+struct Empty {}
+
+fn main() {
+    // Test struct with 2 fields
+    let p = Point { x: 1, y: 2 }
+    let point_fields = struct-fields(p)
+    println(point_fields)
+
+    // Test struct with 3 fields
+    let person = Person { name: "Alice", age: 30, email: "alice@example.com" }
+    let person_fields = struct-fields(person)
+    println(person_fields)
+
+    // Test empty struct
+    let empty = Empty {}
+    let empty_fields = struct-fields(empty)
+    println(empty_fields)
+
+    // Verify field count
+    println(length(point_fields))
+    println(length(person_fields))
+    println(length(empty_fields))
+}
+
+// Expect
+// ["x", "y"]
+// ["name", "age", "email"]
+// []
+// 2
+// 3
+// 0

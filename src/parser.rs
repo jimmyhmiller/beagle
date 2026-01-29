@@ -172,6 +172,8 @@ pub enum Token {
     Struct,
     Enum,
     Comment((usize, usize)),
+    /// Doc comment (triple-slash ///): (start, end) of comment content
+    DocComment((usize, usize)),
     Spaces((usize, usize)),
     String((usize, usize)),
     /// Interpolated string: contains segments that are either string literals or expressions
@@ -312,6 +314,7 @@ impl Token {
             Token::Perform => Ok("perform".to_string()),
             Token::Handle => Ok("handle".to_string()),
             Token::Comment((start, end))
+            | Token::DocComment((start, end))
             | Token::Atom((start, end))
             | Token::Keyword((start, end))
             | Token::Spaces((start, end))
@@ -407,10 +410,23 @@ impl Tokenizer {
 
     fn parse_comment(&mut self, input_bytes: &[u8]) -> Token {
         let start = self.position;
+        // Check if this is a doc comment (///)
+        // We're at the first '/', check if we have '///' pattern
+        let is_doc_comment = self.position + 2 < input_bytes.len()
+            && input_bytes[self.position] == b'/'
+            && input_bytes[self.position + 1] == b'/'
+            && input_bytes[self.position + 2] == b'/'
+            // Make sure it's not //// (which is a regular comment)
+            && (self.position + 3 >= input_bytes.len() || input_bytes[self.position + 3] != b'/');
+
         while !self.at_end(input_bytes) && !self.is_newline(input_bytes) {
             self.consume(input_bytes);
         }
-        Token::Comment((start, self.position))
+        if is_doc_comment {
+            Token::DocComment((start, self.position))
+        } else {
+            Token::Comment((start, self.position))
+        }
     }
 
     pub fn consume(&mut self, input_bytes: &[u8]) {
@@ -897,6 +913,9 @@ pub struct Parser {
     position: usize,
     tokens: Vec<Token>,
     token_line_column_map: Vec<(usize, usize)>,
+    /// Accumulated doc comments (///) seen during whitespace skipping.
+    /// These are collected and assigned to the next fn/struct/enum definition.
+    pending_docstring: Option<String>,
 }
 
 impl Parser {
@@ -925,6 +944,7 @@ impl Parser {
             position: 0,
             tokens,
             token_line_column_map,
+            pending_docstring: None,
         })
     }
 
@@ -1398,6 +1418,7 @@ impl Parser {
 
     fn parse_function(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
+        let docstring = self.take_pending_docstring();
         self.move_to_next_non_whitespace();
         // Allow keywords like "handle" and "perform" to be used as function names
         let name = match self.current_token() {
@@ -1421,7 +1442,7 @@ impl Parser {
 
         // Check if this is a multi-arity function (fn name { ... })
         if self.current_token() == Token::OpenCurly {
-            return self.parse_multi_arity_function(name, start_position);
+            return self.parse_multi_arity_function(name, start_position, docstring);
         }
 
         self.expect_open_paren()?;
@@ -1435,6 +1456,7 @@ impl Parser {
             rest_param,
             body,
             token_range: TokenRange::new(start_position, end_position),
+            docstring,
         })
     }
 
@@ -1443,6 +1465,7 @@ impl Parser {
         &mut self,
         name: Option<String>,
         start_position: usize,
+        docstring: Option<String>,
     ) -> ParseResult<Ast> {
         // We're at the opening {
         self.move_to_next_non_whitespace();
@@ -1456,7 +1479,7 @@ impl Parser {
             // Skip whitespace/newlines between cases
             while matches!(
                 self.current_token(),
-                Token::NewLine | Token::Spaces(_) | Token::Comment(_)
+                Token::NewLine | Token::Spaces(_) | Token::Comment(_) | Token::DocComment(_)
             ) {
                 self.consume();
             }
@@ -1470,6 +1493,7 @@ impl Parser {
             name,
             cases,
             token_range: TokenRange::new(start_position, end_position),
+            docstring,
         })
     }
 
@@ -1666,6 +1690,7 @@ impl Parser {
 
     fn parse_struct(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
+        let docstring = self.take_pending_docstring();
         self.move_to_next_atom();
         let name = match self.current_token() {
             Token::Atom((start, end)) => {
@@ -1689,6 +1714,7 @@ impl Parser {
             name,
             fields,
             token_range: TokenRange::new(start_position, end_position),
+            docstring,
         })
     }
 
@@ -1807,6 +1833,7 @@ impl Parser {
                         rest_param,
                         body,
                         token_range: TokenRange::new(self.position, end_position),
+                        docstring: None,
                     })
                 } else {
                     let end_position = self.position;
@@ -1930,6 +1957,7 @@ impl Parser {
 
     fn parse_enum(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
+        let docstring = self.take_pending_docstring();
         self.move_to_next_atom();
         let name = match self.current_token() {
             Token::Atom((start, end)) => {
@@ -1953,6 +1981,7 @@ impl Parser {
             name,
             variants,
             token_range: TokenRange::new(start_position, end_position),
+            docstring,
         })
     }
 
@@ -1989,9 +2018,39 @@ impl Parser {
     }
 
     fn skip_whitespace(&mut self) {
+        let mut doc_lines: Vec<String> = Vec::new();
         while !self.at_end() && self.is_whitespace() {
+            // Collect doc comments (///) into pending_docstring
+            if let Token::DocComment((start, end)) = self.current_token() {
+                // Extract the comment content, stripping the leading "///" and any single leading space
+                let content = &self.source.as_bytes()[start..end];
+                let content_str = String::from_utf8_lossy(content);
+                // Strip "///" prefix and optional leading space
+                let stripped = content_str
+                    .strip_prefix("///")
+                    .unwrap_or(&content_str)
+                    .strip_prefix(' ')
+                    .unwrap_or(content_str.strip_prefix("///").unwrap_or(&content_str));
+                doc_lines.push(stripped.to_string());
+            } else if !doc_lines.is_empty() {
+                // If we encounter a non-doc-comment whitespace after collecting doc comments,
+                // only reset if it's not just a newline (newlines between doc comment lines are ok)
+                if !matches!(self.current_token(), Token::NewLine) {
+                    // Non-doc-comment, non-newline whitespace resets accumulated doc comments
+                    doc_lines.clear();
+                }
+            }
             self.consume();
         }
+        // If we collected any doc comments, set them as pending
+        if !doc_lines.is_empty() {
+            self.pending_docstring = Some(doc_lines.join("\n"));
+        }
+    }
+
+    /// Takes the pending docstring if any, clearing it after retrieval.
+    fn take_pending_docstring(&mut self) -> Option<String> {
+        self.pending_docstring.take()
     }
 
     fn expect_open_paren(&mut self) -> ParseResult<()> {
@@ -2112,7 +2171,7 @@ impl Parser {
         let mut result = Vec::new();
         self.skip_whitespace();
         while !self.at_end() && !self.is_close_curly() {
-            self.skip_spaces();
+            self.skip_whitespace(); // Use skip_whitespace to capture field docstrings
             result.push(self.parse_struct_field()?);
             self.skip_spaces();
             if !self.is_close_curly() {
@@ -2125,6 +2184,7 @@ impl Parser {
 
     fn parse_struct_field(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
+        let docstring = self.take_pending_docstring();
 
         // Check for 'mut' keyword
         let mutable = if self.current_token() == Token::Mut {
@@ -2144,6 +2204,7 @@ impl Parser {
                     name,
                     mutable,
                     token_range: TokenRange::new(start_position, end_position),
+                    docstring,
                 })
             }
             // Allow 'shift' and 'reset' as field names (they're only keywords in expression context)
@@ -2153,6 +2214,7 @@ impl Parser {
                     name: "shift".to_string(),
                     mutable,
                     token_range: TokenRange::new(start_position, end_position),
+                    docstring,
                 })
             }
             Token::Reset => {
@@ -2161,6 +2223,7 @@ impl Parser {
                     name: "reset".to_string(),
                     mutable,
                     token_range: TokenRange::new(start_position, end_position),
+                    docstring,
                 })
             }
             Token::Perform => {
@@ -2169,6 +2232,7 @@ impl Parser {
                     name: "perform".to_string(),
                     mutable,
                     token_range: TokenRange::new(start_position, end_position),
+                    docstring,
                 })
             }
             Token::Handle => {
@@ -2177,6 +2241,7 @@ impl Parser {
                     name: "handle".to_string(),
                     mutable,
                     token_range: TokenRange::new(start_position, end_position),
+                    docstring,
                 })
             }
             Token::NewLine => Err(ParseError::InvalidExpression {
@@ -2911,7 +2976,11 @@ impl Parser {
 
     fn is_whitespace(&self) -> bool {
         match self.current_token() {
-            Token::Spaces(_) | Token::NewLine | Token::Comment(_) | Token::SemiColon => true,
+            Token::Spaces(_)
+            | Token::NewLine
+            | Token::Comment(_)
+            | Token::DocComment(_)
+            | Token::SemiColon => true,
             _ => false,
         }
     }

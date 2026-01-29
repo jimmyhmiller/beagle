@@ -745,12 +745,20 @@ impl HeapObject {
 
 impl Ir {
     pub fn write_struct_id(&mut self, struct_pointer: Value, type_id: usize) {
-        // I need to understand this stuff better.
-        // I really need to actually study some bit wise operations
-        let mask = 0x000000FFFFFFFF;
+        // Header layout (8 bytes, little-endian):
+        // - Byte 0: flags (bits 0-7)
+        // - Bytes 1-2: size (bits 8-23)
+        // - Bytes 3-6: type_data/struct_id (bits 24-55)
+        // - Byte 7: type_id (bits 56-63)
+        //
+        // Mask should preserve bytes 0-2 (flags+size) and byte 7 (type_id),
+        // while clearing bytes 3-6 (type_data) so we can write the struct_id.
+        let mask = 0xFF00_0000_00FF_FFFF_usize; // Preserve byte 7 and bytes 0-2
+        // Use RawValue to avoid automatic tagging - the struct_id is a raw value,
+        // not a tagged integer, and should be written as-is to the header.
         self.heap_store_byte_offset_masked(
             struct_pointer,
-            type_id,
+            Value::RawValue(type_id),
             0,
             Header::type_data_offset(),
             mask,

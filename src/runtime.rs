@@ -375,6 +375,10 @@ pub struct Struct {
     pub name: String,
     pub fields: Vec<String>,
     pub mutable_fields: Vec<bool>,
+    /// Docstring for the struct (from /// comments in source)
+    pub docstring: Option<String>,
+    /// Docstrings for each field (in same order as fields)
+    pub field_docstrings: Vec<Option<String>>,
 }
 
 impl Struct {
@@ -418,6 +422,11 @@ impl StructManager {
 
     pub fn get_by_id(&self, type_id: usize) -> Option<&Struct> {
         self.structs.get(type_id)
+    }
+
+    /// Iterate over all structs
+    pub fn iter(&self) -> impl Iterator<Item = &Struct> {
+        self.structs.iter()
     }
 }
 
@@ -621,6 +630,16 @@ pub struct Function {
     pub number_of_args: usize,
     pub is_variadic: bool,
     pub min_args: usize,
+    /// Docstring for the function (from /// comments in source)
+    pub docstring: Option<String>,
+    /// Argument names for reflection
+    pub arg_names: Vec<String>,
+    /// Source file where the function was defined
+    pub source_file: Option<String>,
+    /// Source line number where the function was defined
+    pub source_line: Option<usize>,
+    /// Source column number where the function was defined
+    pub source_column: Option<usize>,
 }
 
 pub struct MMapMutWithOffset {
@@ -1090,6 +1109,8 @@ pub enum EnumVariant {
 pub struct Enum {
     pub name: String,
     pub variants: Vec<EnumVariant>,
+    /// Docstring for the enum (from /// comments in source)
+    pub docstring: Option<String>,
 }
 
 pub struct EnumManager {
@@ -1120,6 +1141,11 @@ impl EnumManager {
     pub fn get(&self, name: &str) -> Option<&Enum> {
         let id = self.name_to_id.get(name)?;
         self.enums.get(*id)
+    }
+
+    /// Iterate over all enums
+    pub fn iter(&self) -> impl Iterator<Item = &Enum> {
+        self.enums.iter()
     }
 }
 
@@ -1909,7 +1935,10 @@ impl Runtime {
         Ok(array_ptr)
     }
 
-    pub fn allocate_keyword(
+    /// Low-level keyword allocation. Private because keywords must be interned
+    /// for equality to work correctly (keywords compare by pointer identity).
+    /// Use `intern_keyword` instead.
+    fn allocate_keyword_raw(
         &mut self,
         stack_pointer: usize,
         keyword_text: String,
@@ -1967,7 +1996,9 @@ impl Runtime {
         }
 
         // Allocate the keyword
-        let ptr = self.allocate_keyword(stack_pointer, keyword_text)?.into();
+        let ptr = self
+            .allocate_keyword_raw(stack_pointer, keyword_text)?
+            .into();
 
         // Store in heap-based PersistentMap (survives GC)
         // NOTE: set_heap_binding may trigger GC during PersistentMap::assoc,
@@ -2168,9 +2199,8 @@ impl Runtime {
         let header_ptr = untagged as *mut usize;
         unsafe {
             let mut header = Header::from_usize(*header_ptr);
-            // struct_id must be tagged (shifted left by 3 bits) before storing in type_data
-            let tagged_struct_id = BuiltInTypes::Int.tag(actual_struct_id as isize) as usize;
-            header.type_data = tagged_struct_id as u32;
+            // struct_id is stored as raw value (not tagged)
+            header.type_data = actual_struct_id as u32;
             *header_ptr = header.to_usize();
         }
 
@@ -3100,15 +3130,12 @@ impl Runtime {
                                         BuiltInTypes::HeapObject.tag(ptr as isize) as usize;
                                     let heap_obj = HeapObject::from_tagged(tagged);
 
-                                    // Write struct_id to header using Header API.
+                                    // Write struct_id to header using Header API (as raw value).
                                     let untagged = heap_obj.untagged();
                                     let header_ptr = untagged as *mut usize;
                                     unsafe {
                                         let mut header = Header::from_usize(*header_ptr);
-                                        let tagged_struct_id = BuiltInTypes::Int
-                                            .tag(actual_struct_id as isize)
-                                            as usize;
-                                        header.type_data = tagged_struct_id as u32;
+                                        header.type_data = actual_struct_id as u32;
                                         *header_ptr = header.to_usize();
                                     }
 
@@ -3630,7 +3657,7 @@ impl Runtime {
                             println!("=====================");
                             return Some("ErrorOpaque".to_string());
                         }
-                        let struct_id = BuiltInTypes::untag(object.get_struct_id());
+                        let struct_id = object.get_struct_id();
                         let struct_value = self.get_struct_by_id(struct_id);
                         Some(self.get_struct_repr(struct_value?, object.get_fields(), depth + 1)?)
                     }
@@ -3807,7 +3834,6 @@ impl Runtime {
         let string_value = &self.string_constants[str_constant_ptr];
         let string = &string_value.str;
         let struct_type_id = heap_object.get_struct_id();
-        let struct_type_id = BuiltInTypes::untag(struct_type_id);
         let struct_value = self.get_struct_by_id(struct_type_id);
         if struct_value.is_none() {
             let untagged = heap_object.untagged();
@@ -3872,7 +3898,6 @@ impl Runtime {
                     _ => {
                         // Custom struct (type_id == 0 or other) - use struct_id
                         let struct_type_id = heap_object.get_struct_id();
-                        let struct_type_id = BuiltInTypes::untag(struct_type_id);
                         let struct_value = self
                             .get_struct_by_id(struct_type_id)
                             .ok_or("Struct type not found")?;
@@ -4007,7 +4032,6 @@ impl Runtime {
         let string_value = &self.string_constants[str_constant_ptr];
         let string = &string_value.str;
         let struct_type_id = heap_object.get_struct_id();
-        let struct_type_id = BuiltInTypes::untag(struct_type_id);
         let struct_value = self
             .get_struct_by_id(struct_type_id)
             .expect("Struct not found by ID - this is a fatal error");
@@ -4255,6 +4279,11 @@ impl Runtime {
             number_of_args,
             is_variadic: false,
             min_args: number_of_args,
+            docstring: None,
+            arg_names: vec![],
+            source_file: None,
+            source_line: None,
+            source_column: None,
         });
         debugger(Message {
             kind: "foreign_function".to_string(),
@@ -4332,6 +4361,11 @@ impl Runtime {
             number_of_args,
             is_variadic: false,
             min_args: number_of_args,
+            docstring: None,
+            arg_names: vec![],
+            source_file: None,
+            source_line: None,
+            source_column: None,
         });
         let pointer = Self::get_function_pointer(
             self,
@@ -4399,6 +4433,8 @@ impl Runtime {
         number_of_args: usize,
         is_variadic: bool,
         min_args: usize,
+        docstring: Option<String>,
+        arg_names: Vec<String>,
     ) -> Result<usize, Box<dyn Error>> {
         let mut already_defined = false;
         let mut function_pointer = 0;
@@ -4409,6 +4445,13 @@ impl Runtime {
                     // Update variadic info on existing function
                     self.functions[index].is_variadic = is_variadic;
                     self.functions[index].min_args = min_args;
+                    // Update docstring and arg_names if provided
+                    if docstring.is_some() {
+                        self.functions[index].docstring = docstring.clone();
+                    }
+                    if !arg_names.is_empty() {
+                        self.functions[index].arg_names = arg_names.clone();
+                    }
                     // Tag and add the binding for reserved functions that are now being defined
                     let tagged_fn = BuiltInTypes::Function.tag(function_pointer as isize) as usize;
                     self.add_binding(n, tagged_fn);
@@ -4426,6 +4469,8 @@ impl Runtime {
                 number_of_args,
                 is_variadic,
                 min_args,
+                docstring,
+                arg_names,
             )?;
         }
         assert!(function_pointer != 0);
@@ -4475,6 +4520,11 @@ impl Runtime {
             number_of_args,
             is_variadic,
             min_args,
+            docstring: None,
+            arg_names: vec![],
+            source_file: None,
+            source_line: None,
+            source_column: None,
         };
         self.functions.push(function.clone());
         Ok(function)
@@ -4490,6 +4540,8 @@ impl Runtime {
         number_of_args: usize,
         is_variadic: bool,
         min_args: usize,
+        docstring: Option<String>,
+        arg_names: Vec<String>,
     ) -> Result<usize, Box<dyn Error>> {
         let index = self.functions.len();
         self.functions.push(Function {
@@ -4506,6 +4558,11 @@ impl Runtime {
             number_of_args,
             is_variadic,
             min_args,
+            docstring,
+            arg_names,
+            source_file: None,
+            source_line: None,
+            source_column: None,
         });
         let function_pointer = Self::get_function_pointer(
             self,

@@ -57,21 +57,25 @@ pub enum Ast {
         rest_param: Option<String>,
         body: Vec<Ast>,
         token_range: TokenRange,
+        docstring: Option<String>,
     },
     Struct {
         name: String,
         fields: Vec<Ast>,
         token_range: TokenRange,
+        docstring: Option<String>,
     },
     StructField {
         name: String,
         mutable: bool,
         token_range: TokenRange,
+        docstring: Option<String>,
     },
     Enum {
         name: String,
         variants: Vec<Ast>,
         token_range: TokenRange,
+        docstring: Option<String>,
     },
     EnumVariant {
         name: String,
@@ -319,6 +323,7 @@ pub enum Ast {
         name: Option<String>,
         cases: Vec<ArityCase>,
         token_range: TokenRange,
+        docstring: Option<String>,
     },
     /// Delimited continuation reset/prompt: `reset { body }`
     /// Establishes a delimiter for continuation capture
@@ -806,6 +811,7 @@ impl AstCompiler<'_> {
                 args,
                 rest_param,
                 body,
+                docstring,
                 ..
             } => {
                 // Check if this is a nested function BEFORE creating new environment
@@ -1042,6 +1048,11 @@ impl AstCompiler<'_> {
                     .clone()
                     .map(|name| self.compiler.current_namespace_name() + "/" + &name);
 
+                // Extract argument names from patterns for reflection
+                let arg_names: Vec<String> = args.iter()
+                    .flat_map(|pattern| pattern.binding_names())
+                    .collect();
+
                 let function_pointer = self
                     .compiler
                     .upsert_function(
@@ -1051,6 +1062,8 @@ impl AstCompiler<'_> {
                         actual_arity,
                         is_variadic,
                         min_args,
+                        docstring,
+                        arg_names,
                     )
                     .unwrap();
 
@@ -1595,6 +1608,7 @@ impl AstCompiler<'_> {
                 name,
                 variants,
                 token_range,
+                docstring: _,
             } => {
                 let mut struct_fields: Vec<(String, Ast)> = vec![];
                 for variant in variants.iter() {
@@ -1732,6 +1746,7 @@ impl AstCompiler<'_> {
                         token_range,
                     }],
                     token_range,
+                    docstring: None,
                 })?;
                 Ok(Value::Null)
             }
@@ -1760,6 +1775,7 @@ impl AstCompiler<'_> {
                             rest_param: rest_param.clone(),
                             body: body.clone(),
                             token_range: ast.token_range(),
+                            docstring: None,
                         })?;
                         let fully_qualified_name =
                             format!("{}/{}", self.compiler.current_namespace_name(), new_name);
@@ -3022,6 +3038,7 @@ impl AstCompiler<'_> {
                 name,
                 cases,
                 token_range: _,
+                docstring: _,
             } => {
                 // Compile each arity case as a distinct function with name suffixed by $N
                 // where N is the number of fixed args for that arity.
@@ -3057,6 +3074,7 @@ impl AstCompiler<'_> {
                         rest_param: case.rest_param.clone(),
                         body: case.body.clone(),
                         token_range: case.token_range,
+                        docstring: None,
                     };
 
                     // Compile the arity function
@@ -4357,20 +4375,33 @@ impl AstCompiler<'_> {
                     });
                 }
             }
-            Ast::Struct { name, fields, .. } => {
+            Ast::Struct {
+                name,
+                fields,
+                docstring,
+                ..
+            } => {
                 let (namespace, name) = self.get_namespace_name_and_name(name)?;
                 let mut field_names = Vec::new();
                 let mut mutable_fields = Vec::new();
+                let mut field_docstrings = Vec::new();
                 for field in fields.iter() {
                     match field {
-                        Ast::StructField { name, mutable, .. } => {
+                        Ast::StructField {
+                            name,
+                            mutable,
+                            docstring: field_doc,
+                            ..
+                        } => {
                             field_names.push(name.clone());
                             mutable_fields.push(*mutable);
+                            field_docstrings.push(field_doc.clone());
                         }
                         Ast::Identifier(name, _) => {
                             // Backwards compatibility: identifiers are immutable by default
                             field_names.push(name.clone());
                             mutable_fields.push(false);
+                            field_docstrings.push(None);
                         }
                         _ => {
                             return Err(CompileError::InternalError {
@@ -4386,9 +4417,16 @@ impl AstCompiler<'_> {
                     name: format!("{}/{}", namespace, name),
                     fields: field_names,
                     mutable_fields,
+                    docstring: docstring.clone(),
+                    field_docstrings,
                 });
             }
-            Ast::Enum { name, variants, .. } => {
+            Ast::Enum {
+                name,
+                variants,
+                docstring,
+                ..
+            } => {
                 let (namespace, enum_name) = self.get_namespace_name_and_name(name)?;
 
                 // Build variants list
@@ -4434,6 +4472,7 @@ impl AstCompiler<'_> {
                 let enum_repr = Enum {
                     name: format!("{}/{}", namespace, enum_name),
                     variants: enum_variants,
+                    docstring: docstring.clone(),
                 };
 
                 // Build variant_names for the enum struct
@@ -4451,10 +4490,13 @@ impl AstCompiler<'_> {
                 }
 
                 let mutable_fields = vec![false; variant_names.len()];
+                let field_docstrings = vec![None; variant_names.len()];
                 self.compiler.add_struct(Struct {
                     name: format!("{}/{}", namespace, enum_name),
                     fields: variant_names,
                     mutable_fields,
+                    docstring: None, // Enums don't have struct docstrings
+                    field_docstrings,
                 });
 
                 self.compiler.add_enum(enum_repr);
@@ -4485,12 +4527,15 @@ impl AstCompiler<'_> {
                             }
                             // Enum variant fields are always immutable
                             let mutable_fields = vec![false; field_names.len()];
+                            let field_docstrings = vec![None; field_names.len()];
                             let variant_struct_name =
                                 format!("{}/{}.{}", namespace, enum_name, variant_name);
                             self.compiler.add_struct(Struct {
                                 name: variant_struct_name.clone(),
                                 fields: field_names,
                                 mutable_fields,
+                                docstring: None,
+                                field_docstrings,
                             });
                             // Register variant-to-enum mapping for effect handlers
                             if let Some((struct_id, _)) =
@@ -4509,6 +4554,8 @@ impl AstCompiler<'_> {
                                 name: variant_struct_name.clone(),
                                 fields: vec![],
                                 mutable_fields: vec![],
+                                docstring: None,
+                                field_docstrings: vec![],
                             });
                             // Register variant-to-enum mapping for effect handlers
                             if let Some((struct_id, _)) =
@@ -4566,6 +4613,7 @@ impl AstCompiler<'_> {
                 name: Some(fn_name),
                 cases,
                 token_range: _,
+                docstring: _,
             } => {
                 // Reserve function slots for all arity variants so inter-arity calls work
                 // Register multi-arity info for resolution
@@ -4774,6 +4822,7 @@ impl AstCompiler<'_> {
                 rest_param: _,
                 body,
                 token_range: _,
+                docstring: _,
             } => {
                 if let Some(name) = name {
                     self.add_variable_for_mutable_pass(name);
@@ -5040,6 +5089,7 @@ impl AstCompiler<'_> {
                 name,
                 cases,
                 token_range: _,
+                docstring: _,
             } => {
                 if let Some(name) = name {
                     self.add_variable_for_mutable_pass(name);
@@ -5210,9 +5260,9 @@ impl AstCompiler<'_> {
                 // Tag the struct ID before comparison (as Int)
                 let tagged_struct_id = self.ir.tag(struct_id_reg, BuiltInTypes::Int.get_tag());
 
-                // Create expected value as tagged int
-                let expected_value = BuiltInTypes::Int.tag(expected_struct_id as isize);
-                let expected_reg = self.ir.assign_new(Value::TaggedConstant(expected_value));
+                // Create expected value - will be tagged by codegen via TaggedConstant
+                // (don't pre-tag, TaggedConstant already applies construct_int which tags)
+                let expected_reg = self.ir.assign_new(expected_struct_id);
 
                 // Compare and jump if not equal (both values are tagged ints)
                 self.ir.jump_if(
@@ -5242,9 +5292,9 @@ impl AstCompiler<'_> {
                 // Tag the struct ID before comparison (as Int)
                 let tagged_struct_id = self.ir.tag(struct_id_reg, BuiltInTypes::Int.get_tag());
 
-                // Create expected value as tagged int
-                let expected_value = BuiltInTypes::Int.tag(expected_struct_id as isize);
-                let expected_reg = self.ir.assign_new(Value::TaggedConstant(expected_value));
+                // Create expected value - will be tagged by codegen via TaggedConstant
+                // (don't pre-tag, TaggedConstant already applies construct_int which tags)
+                let expected_reg = self.ir.assign_new(expected_struct_id);
 
                 // Compare and jump if not equal
                 self.ir.jump_if(
