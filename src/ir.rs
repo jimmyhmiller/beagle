@@ -859,102 +859,112 @@ impl Ir {
         let a: VirtualRegister = self.assign_new(a.into());
         let b: VirtualRegister = self.assign_new(b.into());
 
-        let check_a_float: Label = self.label("check_a_float");
-        let b_is_float_a_is_int: Label = self.label("b_is_float_a_is_int");
-        let both_floats: Label = self.label("both_floats");
-        let do_float_op: Label = self.label("do_float_op");
+        let slow_path: Label = self.label("slow_path");
         let after_op = self.label("after_op");
 
-        // Check if a is an int
-        self.guard_int(a.into(), check_a_float);
+        // Fast path: Check if both are ints (most common case)
+        self.guard_int(a.into(), slow_path);
+        self.guard_int(b.into(), slow_path);
 
-        // a is int - check if b is int
-        self.guard_int(b.into(), b_is_float_a_is_int);
-
-        // Case 1: Both are ints - do integer operation
+        // Both are ints - do integer operation (fast path)
         let result = op_int(self, a.into(), b.into());
         self.assign(result_register, result);
         self.jump(after_op);
 
-        // a is int, b is not int - check if b is float
-        self.write_label(b_is_float_a_is_int);
+        // Slow path: handle floats and mixed types
+        self.write_label(slow_path);
+        let float_result = self.math_any_slow_path(a, b, &op_float);
+        self.assign(result_register, float_result);
+
+        self.write_label(after_op);
+        Value::Register(result_register)
+    }
+
+    /// Slow path for math operations involving floats.
+    /// Handles: float+float, int+float, float+int
+    fn math_any_slow_path<G>(&mut self, a: VirtualRegister, b: VirtualRegister, op_float: &G) -> Value
+    where
+        G: Fn(&mut Ir, Value, Value) -> Value,
+    {
+        let result_register = self.assign_new(Value::TaggedConstant(0));
+        let a_is_float: Label = self.label("a_is_float");
+        let both_floats: Label = self.label("both_floats");
+        let after_slow: Label = self.label("after_slow");
+
+        // Check if a is an int (we know at least one operand is not an int from fast path)
+        self.guard_int(a.into(), a_is_float);
+
+        // a is int, so b must be float (since we failed the fast path)
         self.guard_float(b.into(), self.after_return);
 
-        // Case 3: a is int, b is float - convert a to float
-        // Untag the integer (shift right by 3 since integers are tagged with 3-bit tag)
-        // Use raw version since we already verified a is an int
-        let a_untagged = self.shift_right_imm_raw(a.into(), 3);
-        // Convert to float
-        let a_float = self.int_to_float(a_untagged);
-        // Get b's float value
-        let b_untagged = self.untag(b.into());
-        let b_val = self.load_from_heap(b_untagged, 1);
-        let b_float = self.fmov_general_to_float(b_val);
-        self.jump(do_float_op);
+        // Case: a is int, b is float - convert a to float
+        {
+            let a_untagged = self.shift_right_imm_raw(a.into(), 3);
+            let a_float = self.int_to_float(a_untagged);
+            let b_untagged = self.untag(b.into());
+            let b_val = self.load_from_heap(b_untagged, 1);
+            let b_float = self.fmov_general_to_float(b_val);
+            let float_result = op_float(self, a_float, b_float);
+            let float_result_general = self.fmov_float_to_general(float_result);
+            let size_reg = self.assign_new(1);
+            let float_pointer = self.allocate(size_reg.into());
+            let float_pointer_untagged = self.untag(float_pointer);
+            self.write_small_object_header(float_pointer_untagged);
+            self.heap_store_offset(float_pointer_untagged, float_result_general, 1);
+            let tagged = self.tag(float_pointer_untagged, BuiltInTypes::Float.get_tag());
+            self.assign(result_register, tagged);
+            self.jump(after_slow);
+        }
 
         // a is not int - check if a is float
-        self.write_label(check_a_float);
+        self.write_label(a_is_float);
         self.guard_float(a.into(), self.after_return);
 
         // a is float - check if b is int or float
         self.guard_int(b.into(), both_floats);
 
-        // Case 4: a is float, b is int - convert b to float
-        // Get a's float value
-        let a_untagged2 = self.untag(a.into());
-        let a_val2 = self.load_from_heap(a_untagged2, 1);
-        let a_float2 = self.fmov_general_to_float(a_val2);
-        // Untag and convert b (shift right by 3 since integers are tagged with 3-bit tag)
-        // Use raw version since we already verified b is an int
-        let b_untagged2 = self.shift_right_imm_raw(b.into(), 3);
-        let b_float2 = self.int_to_float(b_untagged2);
-        // Do float operation with swapped order (a_float2, b_float2)
-        let float_result2 = op_float(self, a_float2, b_float2);
-        let float_result_general2 = self.fmov_float_to_general(float_result2);
-        // Allocate and store result
-        let size_reg2 = self.assign_new(1);
-        let float_pointer2 = self.allocate(size_reg2.into());
-        let float_pointer2_untagged = self.untag(float_pointer2);
-        self.write_small_object_header(float_pointer2_untagged);
-        self.heap_store_offset(float_pointer2_untagged, float_result_general2, 1);
-        let tagged2 = self.tag(float_pointer2_untagged, BuiltInTypes::Float.get_tag());
-        self.assign(result_register, tagged2);
-        self.jump(after_op);
+        // Case: a is float, b is int - convert b to float
+        {
+            let a_untagged = self.untag(a.into());
+            let a_val = self.load_from_heap(a_untagged, 1);
+            let a_float = self.fmov_general_to_float(a_val);
+            let b_untagged = self.shift_right_imm_raw(b.into(), 3);
+            let b_float = self.int_to_float(b_untagged);
+            let float_result = op_float(self, a_float, b_float);
+            let float_result_general = self.fmov_float_to_general(float_result);
+            let size_reg = self.assign_new(1);
+            let float_pointer = self.allocate(size_reg.into());
+            let float_pointer_untagged = self.untag(float_pointer);
+            self.write_small_object_header(float_pointer_untagged);
+            self.heap_store_offset(float_pointer_untagged, float_result_general, 1);
+            let tagged = self.tag(float_pointer_untagged, BuiltInTypes::Float.get_tag());
+            self.assign(result_register, tagged);
+            self.jump(after_slow);
+        }
 
-        // Case 2: Both are floats
+        // Case: Both are floats
         self.write_label(both_floats);
         self.guard_float(b.into(), self.after_return);
 
-        let a_untagged3 = self.untag(a.into());
-        let b_untagged3 = self.untag(b.into());
-        let a_val3 = self.load_from_heap(a_untagged3, 1);
-        let b_val3 = self.load_from_heap(b_untagged3, 1);
-        let a_float3 = self.fmov_general_to_float(a_val3);
-        let b_float3 = self.fmov_general_to_float(b_val3);
-        let float_result3 = op_float(self, a_float3, b_float3);
-        let float_result_general3 = self.fmov_float_to_general(float_result3);
-        let size_reg3 = self.assign_new(1);
-        let float_pointer3 = self.allocate(size_reg3.into());
-        let float_pointer3_untagged = self.untag(float_pointer3);
-        self.write_small_object_header(float_pointer3_untagged);
-        self.heap_store_offset(float_pointer3_untagged, float_result_general3, 1);
-        let tagged3 = self.tag(float_pointer3_untagged, BuiltInTypes::Float.get_tag());
-        self.assign(result_register, tagged3);
-        self.jump(after_op);
+        {
+            let a_untagged = self.untag(a.into());
+            let b_untagged = self.untag(b.into());
+            let a_val = self.load_from_heap(a_untagged, 1);
+            let b_val = self.load_from_heap(b_untagged, 1);
+            let a_float = self.fmov_general_to_float(a_val);
+            let b_float = self.fmov_general_to_float(b_val);
+            let float_result = op_float(self, a_float, b_float);
+            let float_result_general = self.fmov_float_to_general(float_result);
+            let size_reg = self.assign_new(1);
+            let float_pointer = self.allocate(size_reg.into());
+            let float_pointer_untagged = self.untag(float_pointer);
+            self.write_small_object_header(float_pointer_untagged);
+            self.heap_store_offset(float_pointer_untagged, float_result_general, 1);
+            let tagged = self.tag(float_pointer_untagged, BuiltInTypes::Float.get_tag());
+            self.assign(result_register, tagged);
+        }
 
-        // Common float operation for case 3 (a int, b float)
-        self.write_label(do_float_op);
-        let float_result = op_float(self, a_float, b_float);
-        let float_result_general = self.fmov_float_to_general(float_result);
-        let size_reg = self.assign_new(1);
-        let float_pointer = self.allocate(size_reg.into());
-        let float_pointer_untagged = self.untag(float_pointer);
-        self.write_small_object_header(float_pointer_untagged);
-        self.heap_store_offset(float_pointer_untagged, float_result_general, 1);
-        let tagged = self.tag(float_pointer_untagged, BuiltInTypes::Float.get_tag());
-        self.assign(result_register, tagged);
-
-        self.write_label(after_op);
+        self.write_label(after_slow);
         Value::Register(result_register)
     }
 
