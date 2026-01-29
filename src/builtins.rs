@@ -869,7 +869,7 @@ extern "C" fn property_access(
 /// Type identification for dispatch:
 /// - Tagged primitives (Int, Float, Bool): high bit marker + (tag + 16)
 /// - Heap objects with type_id > 0 (Array=1, String=2, Keyword=3): high bit marker + type_id
-/// - Heap objects with type_id = 0 (structs): struct_id from type_data (tagged)
+/// - Heap objects with type_id = 0 (structs): struct_id from type_data (raw value)
 extern "C" fn protocol_dispatch(
     stack_pointer: usize,
     frame_pointer: usize,
@@ -883,7 +883,7 @@ extern "C" fn protocol_dispatch(
         let header_type_id = heap_obj.get_type_id();
 
         if header_type_id == 0 {
-            // Custom struct - use struct_id from type_data (tagged)
+            // Custom struct - use struct_id from type_data (raw value)
             heap_obj.get_struct_id()
         } else {
             // Built-in heap type (Array=1, String=2, Keyword=3)
@@ -914,9 +914,8 @@ extern "C" fn protocol_dispatch(
         let primitive_index = type_id & 0x7FFF_FFFF_FFFF_FFFF;
         dispatch_table.lookup_primitive(primitive_index)
     } else {
-        // Struct type - struct_id is tagged in header, need to untag
-        let struct_id = BuiltInTypes::untag(type_id);
-        dispatch_table.lookup_struct(struct_id)
+        // Struct type - struct_id is stored as raw value in header
+        dispatch_table.lookup_struct(type_id)
     };
 
     if fn_ptr == 0 {
@@ -3708,7 +3707,7 @@ pub unsafe extern "C" fn load_library(name: usize) -> usize {
 
 pub fn map_beagle_type_to_ffi_type(runtime: &Runtime, value: usize) -> Result<FFIType, String> {
     let heap_object = HeapObject::from_tagged(value);
-    let struct_id = BuiltInTypes::untag(heap_object.get_struct_id());
+    let struct_id = heap_object.get_struct_id();
     let struct_info = runtime.get_struct_by_id(struct_id);
 
     if struct_info.is_none() {
@@ -7656,8 +7655,664 @@ impl Runtime {
             6, // stack_pointer, frame_pointer, handler, enum_type_ptr, op_value, resume
         )?;
 
+        // ====================================================================
+        // Reflection builtins for docstrings and namespace introspection
+        // ====================================================================
+
+        // fn-doc(f) - Get function docstring
+        self.add_builtin_function_with_fp(
+            "beagle.core/fn-doc",
+            fn_doc as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, function
+        )?;
+
+        // fn-meta(f) - Get function metadata (name, doc, args, variadic?)
+        self.add_builtin_function_with_fp(
+            "beagle.core/fn-meta",
+            fn_meta as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, function
+        )?;
+
+        // struct-doc(s) - Get struct docstring
+        self.add_builtin_function_with_fp(
+            "beagle.core/struct-doc",
+            struct_doc as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, struct_instance
+        )?;
+
+        // struct-fields(s) - Get struct field info
+        self.add_builtin_function_with_fp(
+            "beagle.core/struct-fields",
+            struct_fields as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, struct_instance
+        )?;
+
+        // namespace-members(ns) - List all members in a namespace
+        self.add_builtin_function_with_fp(
+            "beagle.core/namespace-members",
+            namespace_members as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, namespace_name
+        )?;
+
+        // all-namespaces() - List all namespace names
+        self.add_builtin_function_with_fp(
+            "beagle.core/all-namespaces",
+            all_namespaces as *const u8,
+            true,
+            true,
+            2, // stack_pointer, frame_pointer
+        )?;
+
+        // apropos(query) - Search functions by name/doc substring
+        self.add_builtin_function_with_fp(
+            "beagle.core/apropos",
+            apropos as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, query
+        )?;
+
+        // namespace-info(ns) - Get detailed info about a namespace
+        self.add_builtin_function_with_fp(
+            "beagle.core/namespace-info",
+            namespace_info as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, namespace_name
+        )?;
+
         Ok(())
     }
+}
+
+// ============================================================================
+// Reflection Builtins (docstrings, namespace introspection)
+// ============================================================================
+
+/// fn-doc(f) - Get function docstring
+/// Returns the docstring or null if none
+extern "C" fn fn_doc(stack_pointer: usize, frame_pointer: usize, function: usize) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+
+    // Get the function pointer from the value
+    let fn_ptr = match BuiltInTypes::get_kind(function) {
+        BuiltInTypes::Function => BuiltInTypes::untag(function) as *const u8,
+        BuiltInTypes::HeapObject | BuiltInTypes::Closure => {
+            // Could be a closure or function object
+            let heap_obj = HeapObject::from_tagged(function);
+            let type_id = heap_obj.get_struct_id() as u8;
+            if type_id == crate::collections::TYPE_ID_FUNCTION_OBJECT {
+                // Function object: first field is the function pointer
+                heap_obj.get_field(0) as *const u8
+            } else {
+                // Closure: first field is the function pointer
+                BuiltInTypes::untag(heap_obj.get_field(0)) as *const u8
+            }
+        }
+        _ => return BuiltInTypes::null_value() as usize,
+    };
+
+    // Get docstring first, then allocate
+    let docstring = runtime
+        .get_function_by_pointer(fn_ptr)
+        .and_then(|func| func.docstring.clone());
+
+    if let Some(doc) = docstring {
+        runtime
+            .allocate_string(stack_pointer, doc)
+            .map(|s| s.into())
+            .unwrap_or(BuiltInTypes::null_value() as usize)
+    } else {
+        BuiltInTypes::null_value() as usize
+    }
+}
+
+/// fn-meta(f) - Get function metadata as a map
+/// Returns {:name, :doc, :args, :variadic?}
+extern "C" fn fn_meta(stack_pointer: usize, frame_pointer: usize, function: usize) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+
+    // Get the function pointer from the value
+    let fn_ptr = match BuiltInTypes::get_kind(function) {
+        BuiltInTypes::Function => BuiltInTypes::untag(function) as *const u8,
+        BuiltInTypes::HeapObject | BuiltInTypes::Closure => {
+            // Could be a closure or function object
+            let heap_obj = HeapObject::from_tagged(function);
+            let type_id = heap_obj.get_struct_id() as u8;
+            if type_id == crate::collections::TYPE_ID_FUNCTION_OBJECT {
+                // Function object: first field is the function pointer
+                heap_obj.get_field(0) as *const u8
+            } else {
+                // Closure: first field is the function pointer
+                BuiltInTypes::untag(heap_obj.get_field(0)) as *const u8
+            }
+        }
+        _ => return BuiltInTypes::null_value() as usize,
+    };
+
+    // Get function name first to avoid borrow issues
+    let func_name = runtime
+        .get_function_by_pointer(fn_ptr)
+        .map(|func| func.name.clone());
+
+    if let Some(name) = func_name {
+        // Build a map with metadata
+        // For now, return a simple result with just the name
+        // Full map support would need PersistentMap creation
+        runtime
+            .allocate_string(stack_pointer, name)
+            .map(|s| s.into())
+            .unwrap_or(BuiltInTypes::null_value() as usize)
+    } else {
+        BuiltInTypes::null_value() as usize
+    }
+}
+
+/// struct-doc(s) - Get struct docstring
+extern "C" fn struct_doc(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    struct_instance: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+
+    // Check if it's a heap object (struct)
+    if !matches!(
+        BuiltInTypes::get_kind(struct_instance),
+        BuiltInTypes::HeapObject
+    ) {
+        return BuiltInTypes::null_value() as usize;
+    }
+
+    let heap_obj = HeapObject::from_tagged(struct_instance);
+    let type_id = heap_obj.get_struct_id();
+
+    // Get docstring first to avoid borrow issues
+    let docstring = runtime
+        .get_struct_by_id(type_id)
+        .and_then(|s| s.docstring.clone());
+
+    if let Some(doc) = docstring {
+        runtime
+            .allocate_string(stack_pointer, doc)
+            .map(|s| s.into())
+            .unwrap_or(BuiltInTypes::null_value() as usize)
+    } else {
+        BuiltInTypes::null_value() as usize
+    }
+}
+
+/// struct-fields(s) - Get struct field info as a vector
+/// Returns vector of field names
+extern "C" fn struct_fields(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    struct_instance: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+
+    // Check if it's a heap object (struct)
+    if !matches!(
+        BuiltInTypes::get_kind(struct_instance),
+        BuiltInTypes::HeapObject
+    ) {
+        eprintln!("struct_fields: not a heap object");
+        return BuiltInTypes::null_value() as usize;
+    }
+
+    let heap_obj = HeapObject::from_tagged(struct_instance);
+    let type_id = heap_obj.get_struct_id();
+
+    // Get field names first to avoid borrow issues
+    let field_names: Option<Vec<String>> =
+        runtime.get_struct_by_id(type_id).map(|s| s.fields.clone());
+
+    if let Some(fields) = field_names {
+        // Build a vector of field names
+        use crate::collections::PersistentVec;
+
+        match PersistentVec::empty(runtime, stack_pointer) {
+            Ok(vec_handle) => {
+                let mut current_vec = vec_handle.as_tagged();
+                for field_name in fields.iter() {
+                    let field_str = match runtime.allocate_string(stack_pointer, field_name.clone())
+                    {
+                        Ok(s) => s.into(),
+                        Err(_) => return BuiltInTypes::null_value() as usize,
+                    };
+                    let vec_gc = crate::collections::GcHandle::from_tagged(current_vec);
+                    match PersistentVec::push(runtime, stack_pointer, vec_gc, field_str) {
+                        Ok(new_vec) => current_vec = new_vec.as_tagged(),
+                        Err(_) => return BuiltInTypes::null_value() as usize,
+                    }
+                }
+                current_vec
+            }
+            Err(_) => BuiltInTypes::null_value() as usize,
+        }
+    } else {
+        BuiltInTypes::null_value() as usize
+    }
+}
+
+/// namespace-members(ns) - List all members in a namespace
+extern "C" fn namespace_members(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    namespace_name: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+
+    // Get the namespace name string
+    let ns_name = runtime.get_string(stack_pointer, namespace_name);
+
+    // Collect matching local names first to avoid borrow issues
+    let prefix = format!("{}/", ns_name);
+    let local_names: Vec<String> = runtime
+        .functions
+        .iter()
+        .filter(|func| func.name.starts_with(&prefix))
+        .map(|func| {
+            func.name
+                .split('/')
+                .next_back()
+                .unwrap_or(&func.name)
+                .to_string()
+        })
+        .collect();
+
+    // Now build the result vector
+    use crate::collections::PersistentVec;
+
+    match PersistentVec::empty(runtime, stack_pointer) {
+        Ok(vec_handle) => {
+            let mut current_vec = vec_handle.as_tagged();
+
+            for local_name in local_names {
+                let name_str = match runtime.allocate_string(stack_pointer, local_name) {
+                    Ok(s) => s.into(),
+                    Err(_) => continue,
+                };
+                let vec_gc = crate::collections::GcHandle::from_tagged(current_vec);
+                match PersistentVec::push(runtime, stack_pointer, vec_gc, name_str) {
+                    Ok(new_vec) => current_vec = new_vec.as_tagged(),
+                    Err(_) => continue,
+                }
+            }
+            current_vec
+        }
+        Err(_) => BuiltInTypes::null_value() as usize,
+    }
+}
+
+/// all-namespaces() - List all namespace names
+extern "C" fn all_namespaces(stack_pointer: usize, frame_pointer: usize) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+
+    use crate::collections::PersistentVec;
+    use std::collections::HashSet;
+
+    // Collect unique namespace names from functions
+    let mut namespaces: HashSet<String> = HashSet::new();
+    for func in runtime.functions.iter() {
+        if let Some(ns) = func.name.split('/').next()
+            && !ns.is_empty()
+            && ns != func.name
+        {
+            namespaces.insert(ns.to_string());
+        }
+    }
+
+    match PersistentVec::empty(runtime, stack_pointer) {
+        Ok(vec_handle) => {
+            let mut current_vec = vec_handle.as_tagged();
+            for ns in namespaces {
+                let ns_str = match runtime.allocate_string(stack_pointer, ns) {
+                    Ok(s) => s.into(),
+                    Err(_) => continue,
+                };
+                let vec_gc = crate::collections::GcHandle::from_tagged(current_vec);
+                match PersistentVec::push(runtime, stack_pointer, vec_gc, ns_str) {
+                    Ok(new_vec) => current_vec = new_vec.as_tagged(),
+                    Err(_) => continue,
+                }
+            }
+            current_vec
+        }
+        Err(_) => BuiltInTypes::null_value() as usize,
+    }
+}
+
+/// apropos(query) - Search functions by name/doc substring
+extern "C" fn apropos(stack_pointer: usize, frame_pointer: usize, query: usize) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+
+    // Get the query string
+    let query_str = runtime.get_string(stack_pointer, query).to_lowercase();
+
+    // Collect matching function names first to avoid borrow issues
+    let matching_names: Vec<String> = runtime
+        .functions
+        .iter()
+        .filter(|func| {
+            let name_lower = func.name.to_lowercase();
+            name_lower.contains(&query_str)
+                || func
+                    .docstring
+                    .as_ref()
+                    .is_some_and(|d| d.to_lowercase().contains(&query_str))
+        })
+        .map(|func| func.name.clone())
+        .collect();
+
+    // Now build the result vector
+    use crate::collections::PersistentVec;
+
+    match PersistentVec::empty(runtime, stack_pointer) {
+        Ok(vec_handle) => {
+            let mut current_vec = vec_handle.as_tagged();
+
+            for name in matching_names {
+                let name_str = match runtime.allocate_string(stack_pointer, name) {
+                    Ok(s) => s.into(),
+                    Err(_) => continue,
+                };
+                let vec_gc = crate::collections::GcHandle::from_tagged(current_vec);
+                match PersistentVec::push(runtime, stack_pointer, vec_gc, name_str) {
+                    Ok(new_vec) => current_vec = new_vec.as_tagged(),
+                    Err(_) => continue,
+                }
+            }
+            current_vec
+        }
+        Err(_) => BuiltInTypes::null_value() as usize,
+    }
+}
+
+/// namespace-info(ns) - Get detailed info about a namespace
+/// Returns a map with :name, :functions, :structs, :enums
+/// Each function entry has :name, :doc, :args, :variadic?
+/// Each struct entry has :name, :doc, :fields
+/// Each enum entry has :name, :doc, :variants
+extern "C" fn namespace_info(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    namespace_name: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+
+    // Get the namespace name string
+    let ns_name = runtime.get_string(stack_pointer, namespace_name);
+    let prefix = format!("{}/", ns_name);
+
+    use crate::collections::{PersistentMap, PersistentVec};
+
+    // Helper to intern a keyword (must use intern_keyword so equality works by pointer identity)
+    let alloc_keyword = |runtime: &mut Runtime, sp: usize, name: &str| -> Result<usize, ()> {
+        runtime.intern_keyword(sp, name.to_string()).map_err(|_| ())
+    };
+
+    // Helper to allocate a string
+    let alloc_string = |runtime: &mut Runtime, sp: usize, s: String| -> Result<usize, ()> {
+        runtime
+            .allocate_string(sp, s)
+            .map(|s| s.into())
+            .map_err(|_| ())
+    };
+
+    // Collect function info
+    let function_info: Vec<_> = runtime
+        .functions
+        .iter()
+        .filter(|func| func.name.starts_with(&prefix))
+        .map(|func| {
+            let local_name = func
+                .name
+                .split('/')
+                .next_back()
+                .unwrap_or(&func.name)
+                .to_string();
+            (
+                local_name,
+                func.docstring.clone(),
+                func.arg_names.clone(),
+                func.is_variadic,
+            )
+        })
+        .collect();
+
+    // Collect struct info (excluding enum variants which have '.' in their name after namespace)
+    let struct_info: Vec<_> = runtime
+        .structs
+        .iter()
+        .filter(|s| {
+            s.name.starts_with(&prefix) && {
+                let local = s.name.strip_prefix(&prefix).unwrap_or(&s.name);
+                !local.contains('.')
+            }
+        })
+        .map(|s| {
+            let local_name = s.name.split('/').next_back().unwrap_or(&s.name).to_string();
+            (local_name, s.docstring.clone(), s.fields.clone())
+        })
+        .collect();
+
+    // Collect enum info
+    let enum_info: Vec<_> = runtime
+        .enums
+        .iter()
+        .filter(|e| e.name.starts_with(&prefix))
+        .map(|e| {
+            let local_name = e.name.split('/').next_back().unwrap_or(&e.name).to_string();
+            let variant_names: Vec<String> = e
+                .variants
+                .iter()
+                .map(|v| match v {
+                    crate::runtime::EnumVariant::StructVariant { name, .. } => name.clone(),
+                    crate::runtime::EnumVariant::StaticVariant { name } => name.clone(),
+                })
+                .collect();
+            (local_name, e.docstring.clone(), variant_names)
+        })
+        .collect();
+
+    // Build the result map
+    let result = (|| -> Result<usize, ()> {
+        // Create the main map
+        let mut map = PersistentMap::empty(runtime, stack_pointer).map_err(|_| ())?;
+
+        // Add :name
+        let name_key = alloc_keyword(runtime, stack_pointer, "name")?;
+        let name_val = alloc_string(runtime, stack_pointer, ns_name.to_string())?;
+        map = PersistentMap::assoc(runtime, stack_pointer, map.as_tagged(), name_key, name_val)
+            .map_err(|_| ())?;
+
+        // Build :functions vector
+        let funcs_key = alloc_keyword(runtime, stack_pointer, "functions")?;
+        let mut funcs_vec = PersistentVec::empty(runtime, stack_pointer).map_err(|_| ())?;
+
+        for (name, doc, args, variadic) in function_info {
+            // Create function info map
+            let mut func_map = PersistentMap::empty(runtime, stack_pointer).map_err(|_| ())?;
+
+            let k = alloc_keyword(runtime, stack_pointer, "name")?;
+            let v = alloc_string(runtime, stack_pointer, name)?;
+            func_map = PersistentMap::assoc(runtime, stack_pointer, func_map.as_tagged(), k, v)
+                .map_err(|_| ())?;
+
+            let k = alloc_keyword(runtime, stack_pointer, "doc")?;
+            let v = match doc {
+                Some(d) => alloc_string(runtime, stack_pointer, d)?,
+                None => BuiltInTypes::null_value() as usize,
+            };
+            func_map = PersistentMap::assoc(runtime, stack_pointer, func_map.as_tagged(), k, v)
+                .map_err(|_| ())?;
+
+            // Build args vector
+            let k = alloc_keyword(runtime, stack_pointer, "args")?;
+            let mut args_vec = PersistentVec::empty(runtime, stack_pointer).map_err(|_| ())?;
+            for arg in args {
+                let arg_str = alloc_string(runtime, stack_pointer, arg)?;
+                args_vec = PersistentVec::push(runtime, stack_pointer, args_vec, arg_str)
+                    .map_err(|_| ())?;
+            }
+            func_map = PersistentMap::assoc(
+                runtime,
+                stack_pointer,
+                func_map.as_tagged(),
+                k,
+                args_vec.as_tagged(),
+            )
+            .map_err(|_| ())?;
+
+            let k = alloc_keyword(runtime, stack_pointer, "variadic?")?;
+            let v = if variadic {
+                BuiltInTypes::true_value() as usize
+            } else {
+                BuiltInTypes::false_value() as usize
+            };
+            func_map = PersistentMap::assoc(runtime, stack_pointer, func_map.as_tagged(), k, v)
+                .map_err(|_| ())?;
+
+            funcs_vec =
+                PersistentVec::push(runtime, stack_pointer, funcs_vec, func_map.as_tagged())
+                    .map_err(|_| ())?;
+        }
+
+        map = PersistentMap::assoc(
+            runtime,
+            stack_pointer,
+            map.as_tagged(),
+            funcs_key,
+            funcs_vec.as_tagged(),
+        )
+        .map_err(|_| ())?;
+
+        // Build :structs vector
+        let structs_key = alloc_keyword(runtime, stack_pointer, "structs")?;
+        let mut structs_vec = PersistentVec::empty(runtime, stack_pointer).map_err(|_| ())?;
+
+        for (name, doc, fields) in struct_info {
+            let mut struct_map = PersistentMap::empty(runtime, stack_pointer).map_err(|_| ())?;
+
+            let k = alloc_keyword(runtime, stack_pointer, "name")?;
+            let v = alloc_string(runtime, stack_pointer, name)?;
+            struct_map = PersistentMap::assoc(runtime, stack_pointer, struct_map.as_tagged(), k, v)
+                .map_err(|_| ())?;
+
+            let k = alloc_keyword(runtime, stack_pointer, "doc")?;
+            let v = match doc {
+                Some(d) => alloc_string(runtime, stack_pointer, d)?,
+                None => BuiltInTypes::null_value() as usize,
+            };
+            struct_map = PersistentMap::assoc(runtime, stack_pointer, struct_map.as_tagged(), k, v)
+                .map_err(|_| ())?;
+
+            // Build fields vector
+            let k = alloc_keyword(runtime, stack_pointer, "fields")?;
+            let mut fields_vec = PersistentVec::empty(runtime, stack_pointer).map_err(|_| ())?;
+            for field in fields {
+                let field_str = alloc_string(runtime, stack_pointer, field)?;
+                fields_vec = PersistentVec::push(runtime, stack_pointer, fields_vec, field_str)
+                    .map_err(|_| ())?;
+            }
+            struct_map = PersistentMap::assoc(
+                runtime,
+                stack_pointer,
+                struct_map.as_tagged(),
+                k,
+                fields_vec.as_tagged(),
+            )
+            .map_err(|_| ())?;
+
+            structs_vec =
+                PersistentVec::push(runtime, stack_pointer, structs_vec, struct_map.as_tagged())
+                    .map_err(|_| ())?;
+        }
+
+        map = PersistentMap::assoc(
+            runtime,
+            stack_pointer,
+            map.as_tagged(),
+            structs_key,
+            structs_vec.as_tagged(),
+        )
+        .map_err(|_| ())?;
+
+        // Build :enums vector
+        let enums_key = alloc_keyword(runtime, stack_pointer, "enums")?;
+        let mut enums_vec = PersistentVec::empty(runtime, stack_pointer).map_err(|_| ())?;
+
+        for (name, doc, variants) in enum_info {
+            let mut enum_map = PersistentMap::empty(runtime, stack_pointer).map_err(|_| ())?;
+
+            let k = alloc_keyword(runtime, stack_pointer, "name")?;
+            let v = alloc_string(runtime, stack_pointer, name)?;
+            enum_map = PersistentMap::assoc(runtime, stack_pointer, enum_map.as_tagged(), k, v)
+                .map_err(|_| ())?;
+
+            let k = alloc_keyword(runtime, stack_pointer, "doc")?;
+            let v = match doc {
+                Some(d) => alloc_string(runtime, stack_pointer, d)?,
+                None => BuiltInTypes::null_value() as usize,
+            };
+            enum_map = PersistentMap::assoc(runtime, stack_pointer, enum_map.as_tagged(), k, v)
+                .map_err(|_| ())?;
+
+            // Build variants vector
+            let k = alloc_keyword(runtime, stack_pointer, "variants")?;
+            let mut variants_vec = PersistentVec::empty(runtime, stack_pointer).map_err(|_| ())?;
+            for variant in variants {
+                let variant_str = alloc_string(runtime, stack_pointer, variant)?;
+                variants_vec =
+                    PersistentVec::push(runtime, stack_pointer, variants_vec, variant_str)
+                        .map_err(|_| ())?;
+            }
+            enum_map = PersistentMap::assoc(
+                runtime,
+                stack_pointer,
+                enum_map.as_tagged(),
+                k,
+                variants_vec.as_tagged(),
+            )
+            .map_err(|_| ())?;
+
+            enums_vec =
+                PersistentVec::push(runtime, stack_pointer, enums_vec, enum_map.as_tagged())
+                    .map_err(|_| ())?;
+        }
+
+        map = PersistentMap::assoc(
+            runtime,
+            stack_pointer,
+            map.as_tagged(),
+            enums_key,
+            enums_vec.as_tagged(),
+        )
+        .map_err(|_| ())?;
+
+        Ok(map.as_tagged())
+    })();
+
+    result.unwrap_or(BuiltInTypes::null_value() as usize)
 }
 
 // ============================================================================
@@ -7724,9 +8379,8 @@ pub extern "C" fn get_enum_type_builtin(
         return BuiltInTypes::null_value() as usize;
     }
 
-    // Get struct_id - it's tagged, need to untag it
-    let struct_id_tagged = heap_obj.get_struct_id();
-    let struct_id = BuiltInTypes::untag(struct_id_tagged);
+    // Get struct_id directly (stored as raw value in header)
+    let struct_id = heap_obj.get_struct_id();
 
     // Look up the enum name for this struct_id
     let runtime = get_runtime().get_mut();
@@ -7819,7 +8473,7 @@ pub extern "C" fn call_handler_builtin(
         let header_type_id = heap_obj.get_type_id();
 
         if header_type_id == 0 {
-            // Custom struct - use struct_id from type_data (tagged)
+            // Custom struct - use struct_id from type_data (raw value)
             heap_obj.get_struct_id()
         } else {
             // Built-in heap type
@@ -7838,8 +8492,8 @@ pub extern "C" fn call_handler_builtin(
         let primitive_index = type_id & 0x7FFF_FFFF_FFFF_FFFF;
         dispatch_table.lookup_primitive(primitive_index)
     } else {
-        let struct_id = BuiltInTypes::untag(type_id);
-        dispatch_table.lookup_struct(struct_id)
+        // struct_id is already a raw value from get_struct_id()
+        dispatch_table.lookup_struct(type_id)
     };
 
     if fn_ptr == 0 {
@@ -7894,7 +8548,7 @@ unsafe fn allocate_struct(
         .get_struct(struct_name)
         .ok_or_else(|| format!("Struct {} not found", struct_name))?;
 
-    let struct_id = BuiltInTypes::Int.tag(struct_id as isize) as usize;
+    // struct_id is stored as raw value in header (not tagged)
 
     // Validate field count matches struct definition
     if fields.len() != struct_def.fields.len() {
@@ -8083,22 +8737,20 @@ unsafe fn diagnostic_to_struct_impl(
             ));
         }
 
-        let struct_id_tagged = BuiltInTypes::Int.tag(struct_id as isize) as usize;
-
         // Allocate the struct - this can trigger GC!
         let obj_ptr = runtime
             .allocate(8, stack_pointer, BuiltInTypes::HeapObject)
             .map_err(|e| format!("Allocation failed: {}", e))?;
 
-        // Write struct_id to header
+        // Write struct_id to header (as raw value, not tagged)
         let heap_obj = HeapObject::from_tagged(obj_ptr);
         let untagged = heap_obj.untagged();
         let header_ptr = untagged as *mut usize;
         unsafe {
             let current_header = *header_ptr;
             let mask = 0x00FFFFFFFF000000;
-            let shifted_type_id = struct_id_tagged << 24;
-            let new_header = (current_header & !mask) | shifted_type_id;
+            let shifted_struct_id = struct_id << 24;
+            let new_header = (current_header & !mask) | shifted_struct_id;
             *header_ptr = new_header;
         }
 
