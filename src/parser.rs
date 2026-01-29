@@ -2263,6 +2263,9 @@ impl Parser {
         self.skip_spaces();
         if self.is_comma() || self.is_newline() {
             self.consume();
+            // Skip any whitespace (including newlines) after the delimiter
+            // This allows comma-separated items across multiple lines
+            self.skip_whitespace();
             Ok(())
         } else {
             Err(ParseError::UnexpectedToken {
