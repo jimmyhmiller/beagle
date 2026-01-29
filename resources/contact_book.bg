@@ -1,0 +1,290 @@
+namespace contact_book
+
+import "beagle.io" as io
+import "beagle.builtin" as builtin
+import "beagle.core" as core
+
+// A simple Contact Book Manager
+// Features: Add, List, Search, Delete contacts
+
+struct Contact {
+    name
+    phone
+    email
+}
+
+let CONTACTS_FILE = "/tmp/beagle_contacts.txt"
+
+// Serialize a contact to a line: name|phone|email
+fn serialize-contact(contact) {
+    contact.name ++ "|" ++ contact.phone ++ "|" ++ contact.email
+}
+
+// Deserialize a line to a Contact
+fn deserialize-contact(line) {
+    let parts = split(line, "|")
+    if length(parts) >= 3 {
+        Contact {
+            name: get(parts, 0)
+            phone: get(parts, 1)
+            email: get(parts, 2)
+        }
+    } else {
+        null
+    }
+}
+
+// Save contacts to file
+fn save-contacts(contacts) {
+    let file-result = io/open(CONTACTS_FILE, "w")
+    match file-result {
+        io/Result.Ok { value } => {
+            let file = value
+            save-contacts-loop(file, contacts, 0)
+            io/close(file)
+            true
+        },
+        io/Result.Err { code, message } => {
+            println("Error saving: " ++ message)
+            false
+        }
+    }
+}
+
+fn save-contacts-loop(file, contacts, idx) {
+    if idx >= length(contacts) {
+        null
+    } else {
+        let contact = get(contacts, idx)
+        let line = serialize-contact(contact) ++ "\n"
+        io/write-string(file, line)
+        save-contacts-loop(file, contacts, idx + 1)
+    }
+}
+
+// Load contacts from file
+fn load-contacts() {
+    let file-result = io/open(CONTACTS_FILE, "r")
+    match file-result {
+        io/Result.Ok { value } => {
+            let file = value
+            let contacts = load-contacts-loop(file, [])
+            io/close(file)
+            contacts
+        },
+        io/Result.Err { code, message } => {
+            // File doesn't exist or can't be read - start fresh
+            []
+        }
+    }
+}
+
+fn load-contacts-loop(file, acc) {
+    let line-result = io/read-line(file, 1024)
+    match line-result {
+        io/Result.Ok { value } => {
+            let line = trim(value)
+            if length(line) > 0 {
+                let contact = deserialize-contact(line)
+                if contact != null {
+                    load-contacts-loop(file, push(acc, contact))
+                } else {
+                    load-contacts-loop(file, acc)
+                }
+            } else {
+                load-contacts-loop(file, acc)
+            }
+        },
+        io/Result.Err { code, message } => {
+            // EOF or error - return what we have
+            acc
+        }
+    }
+}
+
+fn print-contact(contact) {
+    println("  Name:  " ++ contact.name)
+    println("  Phone: " ++ contact.phone)
+    println("  Email: " ++ contact.email)
+}
+
+fn print-menu() {
+    println("")
+    println("=== Contact Book ===")
+    println("1. Add contact")
+    println("2. List all contacts")
+    println("3. Search by name")
+    println("4. Delete contact")
+    println("5. Exit")
+    print("Choice: ")
+}
+
+fn read-input() {
+    let result = io/read-stdin-line(256)
+    match result {
+        io/Result.Ok { value } => trim(value),
+        io/Result.Err { code, message } => ""
+    }
+}
+
+fn prompt(msg) {
+    print(msg)
+    read-input()
+}
+
+fn add-contact(contacts) {
+    println("")
+    let name = prompt("Name: ")
+    let phone = prompt("Phone: ")
+    let email = prompt("Email: ")
+
+    if length(name) == 0 {
+        println("Name is required!")
+        contacts
+    } else {
+        let contact = Contact { name: name, phone: phone, email: email }
+        let new-contacts = push(contacts, contact)
+        println("Contact added!")
+        new-contacts
+    }
+}
+
+fn list-contacts(contacts) {
+    println("")
+    if length(contacts) == 0 {
+        println("No contacts yet.")
+    } else {
+        println("All contacts:")
+        println("--------------")
+        list-contacts-loop(contacts, 0)
+    }
+    contacts
+}
+
+fn list-contacts-loop(contacts, _start-idx) {
+    let mut idx = 0
+    for contact in contacts {
+        println("")
+        println("[" ++ to-string(idx + 1) ++ "]")
+        print-contact(contact)
+        idx = idx + 1
+    }
+}
+
+fn search-contacts(contacts) {
+    println("")
+    let query = prompt("Search name: ")
+    let query-lower = lowercase(query)
+
+    // Use filter from beagle.core
+    let found = core/filter(contacts, fn(contact) {
+        let name-lower = lowercase(contact.name)
+        contains?(name-lower, query-lower)
+    })
+
+    if length(found) == 0 {
+        println("No matches found.")
+    } else {
+        println("Found " ++ to-string(length(found)) ++ " match(es):")
+        list-contacts-loop(found, 0)
+    }
+    contacts
+}
+
+fn delete-contact(contacts) {
+    println("")
+    if length(contacts) == 0 {
+        println("No contacts to delete.")
+        contacts
+    } else {
+        list-contacts(contacts)
+        println("")
+        let input = prompt("Enter contact number to delete (or 0 to cancel): ")
+        let num = parse-int(input)
+
+        if num == null {
+            println("Invalid number.")
+            contacts
+        } else if num == 0 {
+            println("Cancelled.")
+            contacts
+        } else if num < 1 || num > length(contacts) {
+            println("Invalid contact number.")
+            contacts
+        } else {
+            let deleted = get(contacts, num - 1)
+            let new-contacts = remove-at(contacts, num - 1)
+            println("Deleted: " ++ deleted.name)
+            new-contacts
+        }
+    }
+}
+
+fn remove-at(arr, idx) {
+    remove-at-loop(arr, idx, 0, [])
+}
+
+fn remove-at-loop(arr, skip-idx, idx, acc) {
+    if idx >= length(arr) {
+        acc
+    } else if idx == skip-idx {
+        remove-at-loop(arr, skip-idx, idx + 1, acc)
+    } else {
+        remove-at-loop(arr, skip-idx, idx + 1, push(acc, get(arr, idx)))
+    }
+}
+
+fn parse-int(s) {
+    // Simple integer parser
+    if length(s) == 0 {
+        null
+    } else {
+        parse-int-loop(s, 0, 0)
+    }
+}
+
+fn parse-int-loop(s, idx, acc) {
+    if idx >= length(s) {
+        acc
+    } else {
+        let c = get(s, idx)
+        let code = builtin/char-code(c)
+        // '0' = 48, '9' = 57
+        if code >= 48 && code <= 57 {
+            let digit = code - 48
+            parse-int-loop(s, idx + 1, acc * 10 + digit)
+        } else {
+            null
+        }
+    }
+}
+
+fn main-loop(contacts) {
+    print-menu()
+    let choice = read-input()
+
+    match choice {
+        "1" => main-loop(add-contact(contacts)),
+        "2" => main-loop(list-contacts(contacts)),
+        "3" => main-loop(search-contacts(contacts)),
+        "4" => main-loop(delete-contact(contacts)),
+        "5" => {
+            save-contacts(contacts)
+            println("Contacts saved. Goodbye!")
+            contacts
+        },
+        _ => {
+            println("Invalid choice, try again.")
+            main-loop(contacts)
+        }
+    }
+}
+
+fn main() {
+    println("Welcome to Contact Book!")
+    let contacts = load-contacts()
+    if length(contacts) > 0 {
+        println("Loaded " ++ to-string(length(contacts)) ++ " contact(s).")
+    }
+    main-loop(contacts)
+}
