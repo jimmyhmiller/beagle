@@ -501,6 +501,50 @@ fn join-helper(coll, sep, idx, acc) {
     }
 }
 
+// parse-int: Parse a string into an integer
+// Returns null if the string is not a valid integer
+fn parse-int(s) {
+    let len = length(s)
+    if len == 0 {
+        null
+    } else {
+        // Check for negative sign
+        let first-char = get(s, 0)
+        let first-code = builtin/char-code(first-char)
+        if first-code == 45 {
+            // '-' sign
+            if len == 1 {
+                null
+            } else {
+                let result = parse-int-helper(s, 1, 0)
+                if result == null {
+                    null
+                } else {
+                    0 - result
+                }
+            }
+        } else {
+            parse-int-helper(s, 0, 0)
+        }
+    }
+}
+
+fn parse-int-helper(s, idx, acc) {
+    if idx >= length(s) {
+        acc
+    } else {
+        let c = get(s, idx)
+        let code = builtin/char-code(c)
+        // '0' is 48, '9' is 57
+        if code >= 48 && code <= 57 {
+            let digit = code - 48
+            parse-int-helper(s, idx + 1, acc * 10 + digit)
+        } else {
+            null
+        }
+    }
+}
+
 // // TODO: Need a way to re-export rather than wrap
 // fn get(coll, i) {
 //     persistent-vector/get(coll, i)
@@ -861,6 +905,29 @@ fn drop-while(coll, pred) {
 // slice: Get sub-collection from start (inclusive) to end (exclusive)
 fn slice(coll, start, end) {
     take(drop(coll, start), end - start)
+}
+
+// enumerate: Return pairs of [index, element] for each element
+fn enumerate(coll) {
+    let mut s = seq(coll)
+    let mut idx = 0
+    let mut acc = []
+    while s != null {
+        acc = push(acc, [idx, first(s)])
+        s = next(s)
+        idx = idx + 1
+    }
+    acc
+}
+
+// remove-at: Remove element at the specified index
+fn remove-at(coll, idx) {
+    let len = length(coll)
+    if idx < 0 || idx >= len {
+        coll
+    } else {
+        concat(take(coll, idx), drop(coll, idx + 1))
+    }
 }
 
 // ============================================================================

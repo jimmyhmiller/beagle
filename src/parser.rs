@@ -2179,6 +2179,10 @@ impl Parser {
                     token_range: TokenRange::new(start_position, end_position),
                 })
             }
+            Token::NewLine => Err(ParseError::InvalidExpression {
+                message: "Expected field name but found newline. Note: struct fields should be separated by newlines, not commas. Use:\nstruct Foo {\n    field1\n    field2\n}".to_string(),
+                position: self.position,
+            }),
             _ => Err(ParseError::UnexpectedToken {
                 expected: "field name".to_string(),
                 found: self.get_token_repr(),
