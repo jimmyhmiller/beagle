@@ -442,32 +442,7 @@ extern "C" fn split(
     runtime.create_string_array(stack_pointer, &parts).unwrap()
 }
 
-extern "C" fn join(
-    stack_pointer: usize,
-    frame_pointer: usize,
-    array: usize,
-    separator: usize,
-) -> usize {
-    save_gc_context!(stack_pointer, frame_pointer);
-    print_call_builtin(get_runtime().get(), "join");
-    let runtime = get_runtime().get_mut();
-    let separator_value = runtime.get_string(stack_pointer, separator);
-
-    let array_obj = HeapObject::from_tagged(array);
-    let fields = array_obj.get_fields();
-
-    let strings: Vec<String> = fields
-        .iter()
-        .map(|&field| runtime.get_string(stack_pointer, field))
-        .collect();
-
-    let joined = strings.join(&separator_value);
-
-    runtime
-        .allocate_string(stack_pointer, joined)
-        .unwrap()
-        .into()
-}
+// join() is now implemented in std.bg using Indexed and Length protocols
 
 extern "C" fn trim(stack_pointer: usize, frame_pointer: usize, string: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
@@ -1064,7 +1039,7 @@ pub unsafe extern "C" fn throw_type_error(stack_pointer: usize, frame_pointer: u
         let msg = runtime
             .allocate_string(
                 stack_pointer,
-                "Type mismatch in arithmetic operation".to_string(),
+                "Type mismatch in arithmetic operation. To mix integers and floats, use to-float() to convert integers: e.g., 3.14 * to-float(2)".to_string(),
             )
             .expect("Failed to allocate message string")
             .into();
@@ -7417,8 +7392,7 @@ impl Runtime {
         // split now takes (stack_pointer, frame_pointer, string, delimiter)
         self.add_builtin_function_with_fp("beagle.core/split", split as *const u8, true, true, 4)?;
 
-        // join now takes (stack_pointer, frame_pointer, array, separator)
-        self.add_builtin_function_with_fp("beagle.core/join", join as *const u8, true, true, 4)?;
+        // join is now implemented in std.bg using Indexed and Length protocols
 
         // trim now takes (stack_pointer, frame_pointer, string)
         self.add_builtin_function_with_fp("beagle.core/trim", trim as *const u8, true, true, 3)?;

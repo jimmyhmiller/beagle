@@ -100,7 +100,11 @@ impl fmt::Display for CompileError {
             }
             CompileError::LabelLookup { label } => write!(f, "Could not find label: {}", label),
             CompileError::StructResolution { struct_name } => {
-                write!(f, "Cannot resolve struct: {}", struct_name)
+                write!(
+                    f,
+                    "Cannot resolve struct '{}'. Note: struct definitions must be at the top level of a namespace, not inside functions.",
+                    struct_name
+                )
             }
             CompileError::PropertyCacheFull => write!(f, "Property look up cache is full"),
             CompileError::MemoryMapping(msg) => write!(f, "Memory mapping error: {}", msg),
