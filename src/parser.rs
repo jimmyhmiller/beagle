@@ -2781,16 +2781,25 @@ impl Parser {
             Token::Atom((start, end)) => {
                 let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
                     .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
+                let name_start = start;
+                let _ = end; // token end position not needed for Ast::Identifier
                 self.consume();
                 self.skip_spaces();
-                self.expect_colon()?;
-                self.skip_spaces();
-                let value = self.parse_expression(0, false, true)?.ok_or_else(|| {
-                    ParseError::InvalidExpression {
-                        message: "Expected value for struct field".to_string(),
-                        position: self.position,
-                    }
-                })?;
+                // Support shorthand: { name } instead of { name: name }
+                let value = if self.is_colon() {
+                    // Explicit value: { name: expr }
+                    self.consume(); // consume the colon
+                    self.skip_spaces();
+                    self.parse_expression(0, false, true)?.ok_or_else(|| {
+                        ParseError::InvalidExpression {
+                            message: "Expected value for struct field".to_string(),
+                            position: self.position,
+                        }
+                    })?
+                } else {
+                    // Shorthand: { name } -> creates Identifier(name)
+                    Ast::Identifier(name.clone(), name_start)
+                };
                 if !self.is_close_curly() {
                     self.data_delimiter()?;
                 }
@@ -2798,64 +2807,84 @@ impl Parser {
             }
             // Allow 'shift' and 'reset' as struct field names
             Token::Shift => {
+                let keyword_start = self.position;
                 self.consume();
                 self.skip_spaces();
-                self.expect_colon()?;
-                self.skip_spaces();
-                let value = self.parse_expression(0, false, true)?.ok_or_else(|| {
-                    ParseError::InvalidExpression {
-                        message: "Expected value for struct field".to_string(),
-                        position: self.position,
-                    }
-                })?;
+                let value = if self.is_colon() {
+                    self.consume();
+                    self.skip_spaces();
+                    self.parse_expression(0, false, true)?.ok_or_else(|| {
+                        ParseError::InvalidExpression {
+                            message: "Expected value for struct field".to_string(),
+                            position: self.position,
+                        }
+                    })?
+                } else {
+                    Ast::Identifier("shift".to_string(), keyword_start)
+                };
                 if !self.is_close_curly() {
                     self.data_delimiter()?;
                 }
                 Ok(Some(("shift".to_string(), value)))
             }
             Token::Reset => {
+                let keyword_start = self.position;
                 self.consume();
                 self.skip_spaces();
-                self.expect_colon()?;
-                self.skip_spaces();
-                let value = self.parse_expression(0, false, true)?.ok_or_else(|| {
-                    ParseError::InvalidExpression {
-                        message: "Expected value for struct field".to_string(),
-                        position: self.position,
-                    }
-                })?;
+                let value = if self.is_colon() {
+                    self.consume();
+                    self.skip_spaces();
+                    self.parse_expression(0, false, true)?.ok_or_else(|| {
+                        ParseError::InvalidExpression {
+                            message: "Expected value for struct field".to_string(),
+                            position: self.position,
+                        }
+                    })?
+                } else {
+                    Ast::Identifier("reset".to_string(), keyword_start)
+                };
                 if !self.is_close_curly() {
                     self.data_delimiter()?;
                 }
                 Ok(Some(("reset".to_string(), value)))
             }
             Token::Perform => {
+                let keyword_start = self.position;
                 self.consume();
                 self.skip_spaces();
-                self.expect_colon()?;
-                self.skip_spaces();
-                let value = self.parse_expression(0, false, true)?.ok_or_else(|| {
-                    ParseError::InvalidExpression {
-                        message: "Expected value for struct field".to_string(),
-                        position: self.position,
-                    }
-                })?;
+                let value = if self.is_colon() {
+                    self.consume();
+                    self.skip_spaces();
+                    self.parse_expression(0, false, true)?.ok_or_else(|| {
+                        ParseError::InvalidExpression {
+                            message: "Expected value for struct field".to_string(),
+                            position: self.position,
+                        }
+                    })?
+                } else {
+                    Ast::Identifier("perform".to_string(), keyword_start)
+                };
                 if !self.is_close_curly() {
                     self.data_delimiter()?;
                 }
                 Ok(Some(("perform".to_string(), value)))
             }
             Token::Handle => {
+                let keyword_start = self.position;
                 self.consume();
                 self.skip_spaces();
-                self.expect_colon()?;
-                self.skip_spaces();
-                let value = self.parse_expression(0, false, true)?.ok_or_else(|| {
-                    ParseError::InvalidExpression {
-                        message: "Expected value for struct field".to_string(),
-                        position: self.position,
-                    }
-                })?;
+                let value = if self.is_colon() {
+                    self.consume();
+                    self.skip_spaces();
+                    self.parse_expression(0, false, true)?.ok_or_else(|| {
+                        ParseError::InvalidExpression {
+                            message: "Expected value for struct field".to_string(),
+                            position: self.position,
+                        }
+                    })?
+                } else {
+                    Ast::Identifier("handle".to_string(), keyword_start)
+                };
                 if !self.is_close_curly() {
                     self.data_delimiter()?;
                 }
@@ -3997,20 +4026,6 @@ impl Parser {
 
     fn is_equal(&self) -> bool {
         self.current_token() == Token::Equal
-    }
-
-    fn expect_colon(&mut self) -> ParseResult<()> {
-        self.skip_whitespace();
-        if self.is_colon() {
-            self.consume();
-            Ok(())
-        } else {
-            Err(ParseError::UnexpectedToken {
-                expected: "colon ':'".to_string(),
-                found: self.get_token_repr(),
-                position: self.position,
-            })
-        }
     }
 
     fn is_colon(&self) -> bool {

@@ -1,0 +1,38 @@
+namespace struct_shorthand_test
+
+struct Point { x, y }
+
+fn main() {
+    // Test basic shorthand
+    let x = 10
+    let y = 20
+    let p = Point { x, y }
+    println(p.x)
+    println(p.y)
+
+    // Test mixed (shorthand and explicit)
+    let p2 = Point { x: 5, y }
+    println(p2.x)
+    println(p2.y)
+
+    // Test all explicit (still works)
+    let a = 100
+    let b = 200
+    let p3 = Point { x: a, y: b }
+    println(p3.x)
+    println(p3.y)
+
+    // Test char-code global (no import needed)
+    println(char-code("A"))
+    println(char-from-code(66))
+}
+
+// Expect
+// 10
+// 20
+// 5
+// 20
+// 100
+// 200
+// 65
+// B

@@ -1960,3 +1960,17 @@ extend Regex with Format {
         "#regex"
     }
 }
+
+// ============================================================================
+// Character Code Functions
+// ============================================================================
+
+// char-code: Get the Unicode code point of the first character in a string
+fn char-code(s) {
+    builtin/char-code(s)
+}
+
+// char-from-code: Create a single-character string from a Unicode code point
+fn char-from-code(code) {
+    builtin/char-from-code(code)
+}
