@@ -490,6 +490,11 @@ pub enum X86Asm {
         dest: X86Register,
         src: X86Register,
     },
+    /// CVTSI2SD xmm, r64 (convert signed 64-bit integer to double)
+    Cvtsi2sd {
+        dest: X86Register,
+        src: X86Register,
+    },
     /// UCOMISD xmm, xmm (unordered compare scalar double)
     Ucomisd {
         a: X86Register,
@@ -983,6 +988,17 @@ impl X86Asm {
                     rex_w(dest.index, src.index),
                     0x0F,
                     0x6E,
+                    modrm(0b11, dest.index, src.index),
+                ]
+            }
+
+            X86Asm::Cvtsi2sd { dest, src } => {
+                // CVTSI2SD xmm, r64: F2 REX.W 0F 2A /r
+                vec![
+                    0xF2,
+                    rex_w(dest.index, src.index),
+                    0x0F,
+                    0x2A,
                     modrm(0b11, dest.index, src.index),
                 ]
             }

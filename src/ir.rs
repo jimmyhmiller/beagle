@@ -160,6 +160,7 @@ pub enum Instruction {
     GuardFloat(Value, Value, Label),
     FmovGeneralToFloat(Value, Value),
     FmovFloatToGeneral(Value, Value),
+    IntToFloat(Value, Value), // Convert tagged int to float register (SCVTF/CVTSI2SD)
     AddFloat(Value, Value, Value),
     SubFloat(Value, Value, Value),
     MulFloat(Value, Value, Value),
@@ -332,6 +333,9 @@ impl Instruction {
                 get_registers!(a, b)
             }
             Instruction::FmovFloatToGeneral(a, b) => {
+                get_registers!(a, b)
+            }
+            Instruction::IntToFloat(a, b) => {
                 get_registers!(a, b)
             }
             Instruction::AddFloat(a, b, c) => {
@@ -594,6 +598,7 @@ impl Instruction {
             | Instruction::LoadConstant(value, value1)
             | Instruction::FmovGeneralToFloat(value, value1)
             | Instruction::FmovFloatToGeneral(value, value1)
+            | Instruction::IntToFloat(value, value1)
             | Instruction::ShiftRightImm(value, value1, _)
             | Instruction::ShiftRightImmRaw(value, value1, _)
             | Instruction::AndImm(value, value1, _)
@@ -848,45 +853,108 @@ impl Ir {
         A: Into<Value>,
         B: Into<Value>,
         F: FnOnce(&mut Ir, Value, Value) -> Value,
-        G: FnOnce(&mut Ir, Value, Value) -> Value,
+        G: Fn(&mut Ir, Value, Value) -> Value,
     {
-        // TODO: result registers like this can cause problems if not assigned
-        // Need to think about this more
         let result_register = self.assign_new(Value::TaggedConstant(0));
         let a: VirtualRegister = self.assign_new(a.into());
         let b: VirtualRegister = self.assign_new(b.into());
-        let add_float: Label = self.label("add_float");
-        let after_add = self.label("after_add");
-        // self.breakpoint();
-        self.guard_int(a.into(), add_float);
-        self.guard_int(b.into(), add_float);
+
+        let check_a_float: Label = self.label("check_a_float");
+        let b_is_float_a_is_int: Label = self.label("b_is_float_a_is_int");
+        let both_floats: Label = self.label("both_floats");
+        let do_float_op: Label = self.label("do_float_op");
+        let after_op = self.label("after_op");
+
+        // Check if a is an int
+        self.guard_int(a.into(), check_a_float);
+
+        // a is int - check if b is int
+        self.guard_int(b.into(), b_is_float_a_is_int);
+
+        // Case 1: Both are ints - do integer operation
         let result = op_int(self, a.into(), b.into());
         self.assign(result_register, result);
-        self.jump(after_add);
-        self.write_label(add_float);
+        self.jump(after_op);
 
-        self.guard_float(a.into(), self.after_return);
+        // a is int, b is not int - check if b is float
+        self.write_label(b_is_float_a_is_int);
         self.guard_float(b.into(), self.after_return);
 
+        // Case 3: a is int, b is float - convert a to float
+        // Untag the integer (shift right by 3 since integers are tagged with 3-bit tag)
+        // Use raw version since we already verified a is an int
+        let a_untagged = self.shift_right_imm_raw(a.into(), 3);
+        // Convert to float
+        let a_float = self.int_to_float(a_untagged);
+        // Get b's float value
+        let b_untagged = self.untag(b.into());
+        let b_val = self.load_from_heap(b_untagged, 1);
+        let b_float = self.fmov_general_to_float(b_val);
+        self.jump(do_float_op);
+
+        // a is not int - check if a is float
+        self.write_label(check_a_float);
+        self.guard_float(a.into(), self.after_return);
+
+        // a is float - check if b is int or float
+        self.guard_int(b.into(), both_floats);
+
+        // Case 4: a is float, b is int - convert b to float
+        // Get a's float value
+        let a_untagged2 = self.untag(a.into());
+        let a_val2 = self.load_from_heap(a_untagged2, 1);
+        let a_float2 = self.fmov_general_to_float(a_val2);
+        // Untag and convert b (shift right by 3 since integers are tagged with 3-bit tag)
+        // Use raw version since we already verified b is an int
+        let b_untagged2 = self.shift_right_imm_raw(b.into(), 3);
+        let b_float2 = self.int_to_float(b_untagged2);
+        // Do float operation with swapped order (a_float2, b_float2)
+        let float_result2 = op_float(self, a_float2, b_float2);
+        let float_result_general2 = self.fmov_float_to_general(float_result2);
+        // Allocate and store result
+        let size_reg2 = self.assign_new(1);
+        let float_pointer2 = self.allocate(size_reg2.into());
+        let float_pointer2_untagged = self.untag(float_pointer2);
+        self.write_small_object_header(float_pointer2_untagged);
+        self.heap_store_offset(float_pointer2_untagged, float_result_general2, 1);
+        let tagged2 = self.tag(float_pointer2_untagged, BuiltInTypes::Float.get_tag());
+        self.assign(result_register, tagged2);
+        self.jump(after_op);
+
+        // Case 2: Both are floats
+        self.write_label(both_floats);
+        self.guard_float(b.into(), self.after_return);
+
+        let a_untagged3 = self.untag(a.into());
+        let b_untagged3 = self.untag(b.into());
+        let a_val3 = self.load_from_heap(a_untagged3, 1);
+        let b_val3 = self.load_from_heap(b_untagged3, 1);
+        let a_float3 = self.fmov_general_to_float(a_val3);
+        let b_float3 = self.fmov_general_to_float(b_val3);
+        let float_result3 = op_float(self, a_float3, b_float3);
+        let float_result_general3 = self.fmov_float_to_general(float_result3);
+        let size_reg3 = self.assign_new(1);
+        let float_pointer3 = self.allocate(size_reg3.into());
+        let float_pointer3_untagged = self.untag(float_pointer3);
+        self.write_small_object_header(float_pointer3_untagged);
+        self.heap_store_offset(float_pointer3_untagged, float_result_general3, 1);
+        let tagged3 = self.tag(float_pointer3_untagged, BuiltInTypes::Float.get_tag());
+        self.assign(result_register, tagged3);
+        self.jump(after_op);
+
+        // Common float operation for case 3 (a int, b float)
+        self.write_label(do_float_op);
+        let float_result = op_float(self, a_float, b_float);
+        let float_result_general = self.fmov_float_to_general(float_result);
         let size_reg = self.assign_new(1);
         let float_pointer = self.allocate(size_reg.into());
-        let float_pointer = self.untag(float_pointer);
-
-        let a = self.untag(a.into());
-        let b = self.untag(b.into());
-        let a = self.load_from_heap(a, 1);
-        let b = self.load_from_heap(b, 1);
-        let a = self.fmov_general_to_float(a);
-        let b = self.fmov_general_to_float(b);
-        let result = op_float(self, a, b);
-        let result = self.fmov_float_to_general(result);
-        // Allocate and store
-        self.write_small_object_header(float_pointer);
-        self.heap_store_offset(float_pointer, result, 1);
-        let tagged = self.tag(float_pointer, BuiltInTypes::Float.get_tag());
+        let float_pointer_untagged = self.untag(float_pointer);
+        self.write_small_object_header(float_pointer_untagged);
+        self.heap_store_offset(float_pointer_untagged, float_result_general, 1);
+        let tagged = self.tag(float_pointer_untagged, BuiltInTypes::Float.get_tag());
         self.assign(result_register, tagged);
 
-        self.write_label(after_add);
+        self.write_label(after_op);
         Value::Register(result_register)
     }
 
@@ -1589,6 +1657,13 @@ impl Ir {
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, backend);
                     backend.fmov_from_float(dest, src);
+                    self.store_spill(dest, dest_spill, backend);
+                }
+                Instruction::IntToFloat(dest, src) => {
+                    let src = self.value_to_register(src, backend);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.int_to_float(dest, src);
                     self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::AddFloat(dest, a, b) => {
@@ -2715,6 +2790,15 @@ impl Ir {
         let dest = self.volatile_register().into();
         self.instructions
             .push(Instruction::FmovFloatToGeneral(dest, source));
+        dest
+    }
+
+    /// Convert a tagged integer to a float register.
+    /// The integer should already be untagged (shifted right).
+    fn int_to_float(&mut self, source: Value) -> Value {
+        let dest = self.volatile_register().into();
+        self.instructions
+            .push(Instruction::IntToFloat(dest, source));
         dest
     }
 

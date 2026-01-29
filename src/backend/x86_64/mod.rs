@@ -186,6 +186,10 @@ impl CodegenBackend for X86_64Backend {
         self.inner.fmov_from_float(dest, src);
     }
 
+    fn int_to_float(&mut self, dest: Self::Register, src: Self::Register) {
+        self.inner.cvtsi2sd(dest, src);
+    }
+
     // === Memory operations - Heap ===
 
     fn load_from_heap(&mut self, dest: Self::Register, src: Self::Register, offset: i32) {

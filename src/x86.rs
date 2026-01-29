@@ -940,6 +940,12 @@ impl LowLevelX86 {
         self.instructions.push(X86Asm::MovqRX { dest, src });
     }
 
+    /// Convert signed 64-bit integer to double-precision floating-point.
+    /// CVTSI2SD xmm, r64
+    pub fn cvtsi2sd(&mut self, dest: X86Register, src: X86Register) {
+        self.instructions.push(X86Asm::Cvtsi2sd { dest, src });
+    }
+
     // === Tagged value operations ===
 
     pub fn tag_value(&mut self, dest: X86Register, value: X86Register, tag: X86Register) {
