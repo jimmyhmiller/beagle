@@ -475,6 +475,32 @@ extend PersistentVector with Format {
     }
 }
 
+// ============================================================================
+// String Operations (Protocol-based)
+// ============================================================================
+
+// join: Joins elements of a collection into a string with a separator.
+// Works with any collection that implements Indexed and Length protocols.
+fn join(coll, sep) {
+    join-helper(coll, sep, 0, "")
+}
+
+fn join-helper(coll, sep, idx, acc) {
+    let len = length(coll)
+    if idx >= len {
+        acc
+    } else {
+        let elem = get(coll, idx)
+        let elem-str = to-string(elem)
+        let new-acc = if idx == 0 {
+            acc ++ elem-str
+        } else {
+            acc ++ sep ++ elem-str
+        }
+        join-helper(coll, sep, idx + 1, new-acc)
+    }
+}
+
 // // TODO: Need a way to re-export rather than wrap
 // fn get(coll, i) {
 //     persistent-vector/get(coll, i)

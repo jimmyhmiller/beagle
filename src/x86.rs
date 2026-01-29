@@ -625,8 +625,13 @@ impl LowLevelX86 {
 
     pub fn load_local(&mut self, dest: X86Register, offset: i32) {
         if std::env::var("DEBUG_SPILL").is_ok() && offset == 7 {
-            eprintln!("[DEBUG_SPILL] load_local: offset={}, RBP_offset={}, dest={:?}, function={:?}",
-                      offset, -(offset + 1) * 8, dest, self.current_function_name);
+            eprintln!(
+                "[DEBUG_SPILL] load_local: offset={}, RBP_offset={}, dest={:?}, function={:?}",
+                offset,
+                -(offset + 1) * 8,
+                dest,
+                self.current_function_name
+            );
         }
         self.instructions.push(X86Asm::MovRM {
             dest,
@@ -637,8 +642,13 @@ impl LowLevelX86 {
 
     pub fn store_local(&mut self, src: X86Register, offset: i32) {
         if std::env::var("DEBUG_SPILL").is_ok() && offset == 7 {
-            eprintln!("[DEBUG_SPILL] store_local: offset={}, RBP_offset={}, src={:?}, function={:?}",
-                      offset, -(offset + 1) * 8, src, self.current_function_name);
+            eprintln!(
+                "[DEBUG_SPILL] store_local: offset={}, RBP_offset={}, src={:?}, function={:?}",
+                offset,
+                -(offset + 1) * 8,
+                src,
+                self.current_function_name
+            );
         }
         self.instructions.push(X86Asm::MovMR {
             base: RBP,

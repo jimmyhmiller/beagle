@@ -4604,8 +4604,12 @@ fn assignment_with_multiple_concats_groups_on_rhs() {
                         ..
                     } => {
                         assert_eq!(inner_name, "beagle.core/string-concat");
-                        assert!(matches!(inner_args.first(), Some(Ast::Identifier(n, _)) if n == "temp"));
-                        assert!(matches!(inner_args.get(1), Some(Ast::String(s, _)) if s == "world"));
+                        assert!(
+                            matches!(inner_args.first(), Some(Ast::Identifier(n, _)) if n == "temp")
+                        );
+                        assert!(
+                            matches!(inner_args.get(1), Some(Ast::String(s, _)) if s == "world")
+                        );
                     }
                     other => panic!("expected concat on lhs, got: {:?}", other),
                 }
