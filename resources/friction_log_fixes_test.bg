@@ -1,0 +1,45 @@
+namespace friction_log_fixes_test
+
+// Test the new functions added from friction log feedback
+
+fn main() {
+    // Test enumerate
+    let pairs = enumerate(["a", "b", "c"])
+    println("enumerate:", pairs)
+
+    // Test remove-at
+    let removed = remove-at([1, 2, 3, 4, 5], 2)
+    println("remove-at:", removed)
+
+    // Test remove-at edge cases
+    let first-removed = remove-at([1, 2, 3], 0)
+    println("remove-at first:", first-removed)
+    let last-removed = remove-at([1, 2, 3], 2)
+    println("remove-at last:", last-removed)
+
+    // Test parse-int
+    let num = parse-int("42")
+    println("parse-int:", num)
+
+    let negative = parse-int("-123")
+    println("parse-int negative:", negative)
+
+    let invalid = parse-int("abc")
+    println("parse-int invalid:", invalid)
+
+    let zero = parse-int("0")
+    println("parse-int zero:", zero)
+
+    println("done")
+}
+
+// Expect
+// enumerate: [[0, "a"], [1, "b"], [2, "c"]]
+// remove-at: [1, 2, 4, 5]
+// remove-at first: [2, 3]
+// remove-at last: [1, 2]
+// parse-int: 42
+// parse-int negative: -123
+// parse-int invalid: null
+// parse-int zero: 0
+// done

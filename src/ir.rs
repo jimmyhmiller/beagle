@@ -882,7 +882,12 @@ impl Ir {
 
     /// Slow path for math operations involving floats.
     /// Handles: float+float, int+float, float+int
-    fn math_any_slow_path<G>(&mut self, a: VirtualRegister, b: VirtualRegister, op_float: &G) -> Value
+    fn math_any_slow_path<G>(
+        &mut self,
+        a: VirtualRegister,
+        b: VirtualRegister,
+        op_float: &G,
+    ) -> Value
     where
         G: Fn(&mut Ir, Value, Value) -> Value,
     {
