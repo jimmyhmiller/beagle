@@ -1712,6 +1712,20 @@ impl LowLevelArm {
         });
     }
 
+    /// Convert signed 64-bit integer to double-precision floating-point.
+    /// SCVTF Dd, Xn
+    pub fn scvtf(&mut self, dest: Register, src: Register) {
+        // Uses same encoding as FMOV but with opcode=010 for SCVTF
+        self.instructions.push(ArmAsm::FmovFloatGen {
+            sf: 1,       // 64-bit source
+            ftype: 0b01, // Double precision
+            rmode: 0b00,
+            opcode: 0b010, // SCVTF signed int to float
+            rn: src,
+            rd: dest,
+        });
+    }
+
     pub fn fadd(&mut self, dest: Register, a: Register, b: Register) {
         self.instructions.push(ArmAsm::FaddFloat {
             ftype: 0b01,

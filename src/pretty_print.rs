@@ -375,6 +375,13 @@ impl PrettyPrint for Instruction {
                     value1.pretty_print()
                 )
             }
+            Instruction::IntToFloat(value, value1) => {
+                format!(
+                    "int_to_float {}, {}",
+                    value.pretty_print(),
+                    value1.pretty_print()
+                )
+            }
             Instruction::AddFloat(value, value1, value2) => {
                 format!(
                     "add_float {}, {}, {}",
@@ -1197,6 +1204,8 @@ impl PrettyPrint for ArmAsm {
                     "FromGeneralToFloat"
                 } else if *opcode == 0b110 {
                     "FromFloatToGeneral"
+                } else if *opcode == 0b010 {
+                    "SCVTF" // Signed convert to float
                 } else {
                     panic!("Need to deal with opcode since I'm using it now");
                 };

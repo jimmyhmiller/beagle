@@ -188,6 +188,10 @@ impl CodegenBackend for Arm64Backend {
             .fmov(dest, src, FmovDirection::FromFloatToGeneral);
     }
 
+    fn int_to_float(&mut self, dest: Self::Register, src: Self::Register) {
+        self.inner.scvtf(dest, src);
+    }
+
     // === Memory operations - Heap ===
 
     fn load_from_heap(&mut self, dest: Self::Register, src: Self::Register, offset: i32) {

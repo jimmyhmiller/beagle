@@ -131,6 +131,9 @@ pub trait CodegenBackend: Sized {
     /// Move value from floating-point register to general-purpose register.
     fn fmov_from_float(&mut self, dest: Self::Register, src: Self::Register);
 
+    /// Convert signed integer to floating-point (SCVTF on ARM64, CVTSI2SD on x86-64).
+    fn int_to_float(&mut self, dest: Self::Register, src: Self::Register);
+
     // === Memory operations - Heap ===
 
     fn load_from_heap(&mut self, dest: Self::Register, src: Self::Register, offset: i32);
