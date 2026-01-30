@@ -1,6 +1,6 @@
 namespace handler_nested_test
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 // Test nested handlers - handlers within handlers
 // This tests that the effect system properly handles:

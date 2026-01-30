@@ -463,15 +463,17 @@ impl Compiler {
         source_file: &str,
     ) -> Result<Vec<String>, Box<dyn Error>> {
         let mut top_levels_to_run = vec![];
-        for import in ast.imports() {
-            let (name, _alias) = self.extract_import(&import)?;
-            if name.starts_with("beagle.") {
+
+        for use_stmt in ast.uses() {
+            let (namespace_name, _alias) = self.extract_use(&use_stmt)?;
+            if namespace_name.starts_with("beagle.") {
                 continue;
             }
-            let file_name = self.get_file_name_from_import(name, source_file)?;
+            let file_name = self.resolve_namespace_to_file(&namespace_name, source_file)?;
             let top_level = self.compile(&file_name)?;
             top_levels_to_run.extend(top_level);
         }
+
         Ok(top_levels_to_run)
     }
 
@@ -631,122 +633,155 @@ impl Compiler {
         name.starts_with("beagle.primitive/")
     }
 
-    pub fn get_file_name_from_import(
+    pub fn extract_use(
         &self,
-        import_name: String,
-        source_file: &str,
-    ) -> Result<String, Box<dyn Error>> {
-        // 1. Try relative to source file (PRIORITY 1)
-        let source_dir = Path::new(source_file)
-            .parent()
-            .ok_or("Invalid source file path")?;
-
-        let relative_path = source_dir.join(format!("{}.bg", import_name));
-        if relative_path.exists() {
-            return relative_path
-                .to_str()
-                .ok_or_else(|| CompileError::PathConversion {
-                    path: format!("{:?}", relative_path),
-                })
-                .map(|s| s.to_string())
-                .map_err(|e| e.into());
-        }
-
-        // 2. Try standard library (PRIORITY 2)
-        let mut exe_path = env::current_exe()?;
-        exe_path = exe_path
-            .parent()
-            .ok_or("Cannot get parent of executable path")?
-            .to_path_buf();
-
-        let stdlib_path = exe_path.join(format!("standard-library/{}.bg", import_name));
-        if stdlib_path.exists() {
-            return stdlib_path
-                .to_str()
-                .ok_or_else(|| CompileError::PathConversion {
-                    path: format!("{:?}", stdlib_path),
-                })
-                .map(|s| s.to_string())
-                .map_err(|e| e.into());
-        }
-
-        // Try one level up (for development - cargo run from project root)
-        if let Some(parent) = exe_path.parent() {
-            let parent_stdlib_path = parent.join(format!("standard-library/{}.bg", import_name));
-            if parent_stdlib_path.exists() {
-                return parent_stdlib_path
-                    .to_str()
-                    .ok_or_else(|| CompileError::PathConversion {
-                        path: format!("{:?}", parent_stdlib_path),
-                    })
-                    .map(|s| s.to_string())
-                    .map_err(|e| e.into());
-            }
-        }
-
-        // Try two levels up (for cargo run - target/debug -> target -> root)
-        if let Some(parent) = exe_path.parent()
-            && let Some(grandparent) = parent.parent()
-        {
-            let grandparent_stdlib_path =
-                grandparent.join(format!("standard-library/{}.bg", import_name));
-            if grandparent_stdlib_path.exists() {
-                return grandparent_stdlib_path
-                    .to_str()
-                    .ok_or_else(|| CompileError::PathConversion {
-                        path: format!("{:?}", grandparent_stdlib_path),
-                    })
-                    .map(|s| s.to_string())
-                    .map_err(|e| e.into());
-            }
-        }
-
-        // Try three levels up (for cargo test - target/debug/deps -> target/debug -> target -> root)
-        if let Some(parent) = exe_path.parent()
-            && let Some(grandparent) = parent.parent()
-            && let Some(great_grandparent) = grandparent.parent()
-        {
-            let great_grandparent_stdlib_path =
-                great_grandparent.join(format!("standard-library/{}.bg", import_name));
-            if great_grandparent_stdlib_path.exists() {
-                return great_grandparent_stdlib_path
-                    .to_str()
-                    .ok_or_else(|| CompileError::PathConversion {
-                        path: format!("{:?}", great_grandparent_stdlib_path),
-                    })
-                    .map(|s| s.to_string())
-                    .map_err(|e| e.into());
-            }
-        }
-
-        Err(format!(
-            "Could not find module '{}' (searched: relative to {}, standard-library/)",
-            import_name, source_file
-        )
-        .into())
-    }
-
-    pub fn extract_import(
-        &self,
-        import: &crate::ast::Ast,
+        use_stmt: &crate::ast::Ast,
     ) -> Result<(String, String), CompileError> {
-        match import {
-            crate::ast::Ast::Import {
-                library_name,
+        match use_stmt {
+            crate::ast::Ast::Use {
+                namespace_name,
                 alias,
                 ..
             } => {
-                let library_name = library_name.to_string().replace("\"", "");
                 let alias = alias.as_ref().get_string();
-                Ok((library_name, alias))
+                Ok((namespace_name.clone(), alias))
             }
             _ => Err(CompileError::ParseError(
                 crate::parser::ParseError::InvalidDeclaration {
-                    message: "Expected import AST node".to_string(),
+                    message: "Expected use AST node".to_string(),
                     position: 0,
                 },
             )),
         }
+    }
+
+    /// Resolve a dotted namespace name to a file path.
+    ///
+    /// For `com.foo.bar`, tries in order:
+    /// 1. `com/foo/bar.bg` (dots → slashes)
+    /// 2. `foo/bar.bg` (drop first segment)
+    /// 3. `bar.bg` (just last segment)
+    ///
+    /// Each path is tried:
+    /// 1. Relative to source file
+    /// 2. In standard library paths
+    pub fn resolve_namespace_to_file(
+        &self,
+        namespace_name: &str,
+        source_file: &str,
+    ) -> Result<String, Box<dyn Error>> {
+        let source_dir = Path::new(source_file)
+            .parent()
+            .ok_or("Invalid source file path")?;
+
+        // Get the parts of the namespace
+        let parts: Vec<&str> = namespace_name.split('.').collect();
+
+        // Generate candidate paths in order of preference
+        let mut candidates: Vec<String> = vec![];
+
+        // 1. Full path: com/foo/bar.bg
+        candidates.push(format!("{}.bg", parts.join("/")));
+
+        // 2. Drop first segment: foo/bar.bg (if there are at least 2 parts)
+        if parts.len() >= 2 {
+            candidates.push(format!("{}.bg", parts[1..].join("/")));
+        }
+
+        // 3. Just last segment: bar.bg
+        if let Some(last) = parts.last() {
+            candidates.push(format!("{}.bg", last));
+        }
+
+        // Try each candidate in each search location
+        for candidate in &candidates {
+            // Try relative to source file
+            let relative_path = source_dir.join(candidate);
+            if relative_path.exists() {
+                return relative_path
+                    .to_str()
+                    .ok_or_else(|| CompileError::PathConversion {
+                        path: format!("{:?}", relative_path),
+                    })
+                    .map(|s| s.to_string())
+                    .map_err(|e| e.into());
+            }
+
+            // Try standard library paths
+            let mut exe_path = env::current_exe()?;
+            exe_path = exe_path
+                .parent()
+                .ok_or("Cannot get parent of executable path")?
+                .to_path_buf();
+
+            let stdlib_path = exe_path.join(format!("standard-library/{}", candidate));
+            if stdlib_path.exists() {
+                return stdlib_path
+                    .to_str()
+                    .ok_or_else(|| CompileError::PathConversion {
+                        path: format!("{:?}", stdlib_path),
+                    })
+                    .map(|s| s.to_string())
+                    .map_err(|e| e.into());
+            }
+
+            // Try one level up (for development - cargo run from project root)
+            if let Some(parent) = exe_path.parent() {
+                let parent_stdlib_path = parent.join(format!("standard-library/{}", candidate));
+                if parent_stdlib_path.exists() {
+                    return parent_stdlib_path
+                        .to_str()
+                        .ok_or_else(|| CompileError::PathConversion {
+                            path: format!("{:?}", parent_stdlib_path),
+                        })
+                        .map(|s| s.to_string())
+                        .map_err(|e| e.into());
+                }
+            }
+
+            // Try two levels up (for cargo run - target/debug -> target -> root)
+            if let Some(parent) = exe_path.parent()
+                && let Some(grandparent) = parent.parent()
+            {
+                let grandparent_stdlib_path =
+                    grandparent.join(format!("standard-library/{}", candidate));
+                if grandparent_stdlib_path.exists() {
+                    return grandparent_stdlib_path
+                        .to_str()
+                        .ok_or_else(|| CompileError::PathConversion {
+                            path: format!("{:?}", grandparent_stdlib_path),
+                        })
+                        .map(|s| s.to_string())
+                        .map_err(|e| e.into());
+                }
+            }
+
+            // Try three levels up (for cargo test)
+            if let Some(parent) = exe_path.parent()
+                && let Some(grandparent) = parent.parent()
+                && let Some(great_grandparent) = grandparent.parent()
+            {
+                let great_grandparent_stdlib_path =
+                    great_grandparent.join(format!("standard-library/{}", candidate));
+                if great_grandparent_stdlib_path.exists() {
+                    return great_grandparent_stdlib_path
+                        .to_str()
+                        .ok_or_else(|| CompileError::PathConversion {
+                            path: format!("{:?}", great_grandparent_stdlib_path),
+                        })
+                        .map(|s| s.to_string())
+                        .map_err(|e| e.into());
+                }
+            }
+        }
+
+        Err(format!(
+            "Could not find namespace '{}' (tried: {}, relative to {}, and standard-library/)",
+            namespace_name,
+            candidates.join(", "),
+            source_file
+        )
+        .into())
     }
 
     pub fn get_struct_by_id(&self, struct_id: usize) -> Option<&Struct> {

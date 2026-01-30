@@ -1,7 +1,6 @@
 namespace test_color_match
 
-import "other_types" as other
-
+use other_types as other
 fn test-color-match() {
     let red = other/make-red()
     let blue = other/make-blue(255)

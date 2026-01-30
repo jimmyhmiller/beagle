@@ -1,0 +1,10 @@
+namespace use_test
+
+use fib as f
+
+fn main() {
+    println(f/fib(10))
+}
+
+// Expect
+// 55

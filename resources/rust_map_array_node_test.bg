@@ -1,5 +1,5 @@
 namespace rust-map-array-node-test
-import "beagle.collections" as rmap
+use beagle.collections as rmap
 
 // Test that builds a map with 20+ entries at the root level
 // This should trigger promotion from BitmapNode to ArrayNode

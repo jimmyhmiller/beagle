@@ -1,8 +1,7 @@
 namespace bounds_checking_test
 
 
-import "raw-mutable-array" as raw
-
+use raw-mutable-array as raw
 struct Point {
     x
     y

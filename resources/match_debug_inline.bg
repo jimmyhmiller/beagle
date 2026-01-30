@@ -1,6 +1,6 @@
 namespace match_debug_inline
 
-import "beagle.collections" as coll
+use beagle.collections as coll
 
 fn main() {
     let arr = [42]

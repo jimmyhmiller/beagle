@@ -1,7 +1,6 @@
 namespace test_multi_main
 
-import "test_multi_a" as a
-
+use test_multi_a as a
 enum ColorB {
     RedB,
     GreenB,

@@ -1,6 +1,6 @@
 namespace handler_inline_test
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 enum Log {
     Info { message }

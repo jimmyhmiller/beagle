@@ -1,6 +1,6 @@
 namespace handler_generator_test
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 // Test generator/yield pattern using effects
 // This test exposes a bug: effects in loops through nested functions crash

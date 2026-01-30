@@ -1,6 +1,6 @@
 namespace handler_post_nested_test
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 // Test performing effects after a nested handler completes
 // This test exposes a bug: effects after nested handlers don't execute

@@ -1,12 +1,9 @@
 namespace ffi_test
 
-import "beagle.ffi" as ffi
-import "beagle.primitive" as primitive
-import "repl_test" as repl
-import "socket_test" as socket
-
-
-
+use beagle.ffi as ffi
+use beagle.primitive as primitive
+use repl_test as repl
+use socket_test as socket
 struct State {
     rect_x
     rect_y

@@ -1,7 +1,7 @@
 namespace socket_test
 
-import "beagle.ffi" as ffi
-import "beagle.primitive" as primitive
+use beagle.ffi as ffi
+use beagle.primitive as primitive
 
 let libc = ffi/load_library("/usr/lib/libSystem.dylib")
 

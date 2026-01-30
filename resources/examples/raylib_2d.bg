@@ -3,7 +3,7 @@ namespace raylib_2d
 // A 2D graphics example using raylib via FFI
 // Demonstrates: window creation, input handling, drawing shapes, animation
 
-import "beagle.ffi" as ffi
+use beagle.ffi as ffi
 
 // ============================================================
 // Raylib Library Setup

@@ -1,6 +1,6 @@
 namespace rust-vec-test
-import "beagle.collections" as rvec
-import "beagle.primitive" as primitive
+use beagle.collections as rvec
+use beagle.primitive as primitive
 
 fn fill-vec-helper(v, i, n) {
     if i == n {

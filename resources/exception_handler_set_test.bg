@@ -1,6 +1,6 @@
 namespace exception_handler_set_test
 
-import "beagle.core" as core
+use beagle.core as core
 
 fn main() {
     // Test that we can set handlers without crashing

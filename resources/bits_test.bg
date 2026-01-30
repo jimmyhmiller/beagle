@@ -1,5 +1,5 @@
 namespace bits_test
-import "beagle.primitive" as primitive
+use beagle.primitive as primitive
 
 fn main() {
     println(5 & 3);

@@ -1,8 +1,6 @@
 namespace grab_bag
 
-import "binary_tree" as binary_tree
-
-
+use binary_tree as binary_tree
 // Intentionally after to make sure
 // declaration order doesn't matter
 struct TreeNode {

@@ -1,6 +1,6 @@
 namespace handler_multishot_test
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 // Test multi-shot continuations - calling resume multiple times
 

@@ -4,7 +4,7 @@ namespace gc_continuation_minimal_repro
 // This test reliably triggers heap corruption after ~500 iterations
 // when using the compacting GC with effect handlers and continuations.
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 struct Data {
     value

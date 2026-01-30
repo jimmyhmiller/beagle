@@ -1,6 +1,6 @@
 namespace exception_default_handler_test
 
-import "beagle.core" as core
+use beagle.core as core
 
 fn main() {
     // Set a default uncaught exception handler

@@ -1,6 +1,6 @@
 namespace handler_reader_test
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 // Test Reader effect - reading from an environment/config
 

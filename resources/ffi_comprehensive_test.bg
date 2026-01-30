@@ -1,7 +1,7 @@
 namespace ffi_comprehensive_test
 
-import "beagle.ffi" as ffi
-import "beagle.primitive" as primitive
+use beagle.ffi as ffi
+use beagle.primitive as primitive
 
 // Load libc based on platform
 fn get_libc_path() {

@@ -1,7 +1,6 @@
 namespace test_match_import
 
-import "other_types" as other
-
+use other_types as other
 fn main() {
     let color = other/Color.Red
 

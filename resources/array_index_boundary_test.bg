@@ -1,7 +1,6 @@
 namespace array_index_boundary_test
 
-import "raw-mutable-array" as arr
-
+use raw-mutable-array as arr
 fn test_index(a, idx) {
     arr/write-field(a, idx, "test")
     let v = arr/read-field(a, idx)

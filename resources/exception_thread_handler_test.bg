@@ -1,6 +1,6 @@
 namespace exception_thread_handler_test
 
-import "beagle.core" as core
+use beagle.core as core
 
 fn main() {
     // Set a per-thread uncaught exception handler

@@ -1,9 +1,9 @@
 namespace lldb_wrapper
 
-import "beagle.builtin" as builtin
-import "lib_lldb" as lldb
-import "slow_json_parser" as json
-import "beagle.ffi" as ffi
+use beagle.builtin as builtin
+use lib_lldb as lldb
+use slow_json_parser as json
+use beagle.ffi as ffi
 
 // TODO: Thist code fails in lib_lldb with an update binding
 // unsure of the cause right now

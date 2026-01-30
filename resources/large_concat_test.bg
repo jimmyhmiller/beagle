@@ -1,8 +1,7 @@
 namespace large_concat_test
 
-import "beagle.builtin" as builtin
-import "raw-mutable-array" as arr
-
+use beagle.builtin as builtin
+use raw-mutable-array as arr
 fn build_string(n, acc) {
     if n <= 0 {
         acc

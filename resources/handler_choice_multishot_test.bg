@@ -1,6 +1,6 @@
 namespace handler_choice_multishot_test
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 // Test multishot continuations with a Choice effect
 // The handler calls resume multiple times to explore all choices

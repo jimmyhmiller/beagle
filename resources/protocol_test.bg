@@ -1,8 +1,8 @@
 namespace protocol-test
 
-import "beagle.builtin" as builtin
-import "beagle.primitive" as primitive
-import "beagle.core" as core
+use beagle.builtin as builtin
+use beagle.primitive as primitive
+use beagle.core as core
 
 
 struct Point {

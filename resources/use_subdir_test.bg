@@ -1,0 +1,10 @@
+namespace use_subdir_test
+
+use mylib.utils as u
+
+fn main() {
+    println(u/helper())
+}
+
+// Expect
+// helped

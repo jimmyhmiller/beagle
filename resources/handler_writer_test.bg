@@ -1,6 +1,6 @@
 namespace handler_writer_test
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 // Test Writer effect - logging/output accumulation
 // This test exposes a bug: performing effects through nested function calls crashes

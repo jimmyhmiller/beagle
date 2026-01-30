@@ -2,7 +2,7 @@ namespace gc_continuation_loop_test
 
 // Test repeatedly using effect handlers in a loop
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 struct Data { value }
 

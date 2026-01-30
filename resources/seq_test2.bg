@@ -1,6 +1,6 @@
 namespace seq_test2
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 // Even simpler sequential effects test
 

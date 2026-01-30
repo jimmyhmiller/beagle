@@ -2,7 +2,7 @@ namespace gc_continuation_nested_test
 
 // Test: nested perform calls within a single handler block
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 enum Get {
     Value {}

@@ -1,6 +1,6 @@
 namespace string
 
-import "beagle.builtin" as builtin
+use beagle.builtin as builtin
 
 
 

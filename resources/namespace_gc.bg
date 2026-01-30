@@ -1,7 +1,6 @@
 namespace test.gc.in.namespaces
 
-import "raw-mutable-array" as array
-
+use raw-mutable-array as array
 struct HeapThing {
     x
     y

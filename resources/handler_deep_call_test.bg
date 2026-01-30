@@ -1,6 +1,6 @@
 namespace handler_deep_call_test
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 // Test effects through deep call stacks
 // This test exposes a bug: effects through multiple call levels crash

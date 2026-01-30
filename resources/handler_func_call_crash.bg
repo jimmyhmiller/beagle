@@ -1,6 +1,6 @@
 namespace handler_func_call_crash
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 enum Logger {
     Log { message }

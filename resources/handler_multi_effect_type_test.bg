@@ -1,6 +1,6 @@
 namespace handler_multi_effect_type_test
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 // Test multiple different effect types with different handlers
 // This verifies that:

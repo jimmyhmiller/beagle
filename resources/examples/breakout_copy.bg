@@ -3,9 +3,8 @@ namespace breakout_copy
 // Breakout game using raylib via FFI
 // Classic arcade game: destroy all bricks with the bouncing ball!
 
-import "beagle.ffi" as ffi
-import "raw-mutable-array" as arr
-
+use beagle.ffi as ffi
+use raw-mutable-array as arr
 // ============================================================
 // Raylib Library Setup
 // ============================================================

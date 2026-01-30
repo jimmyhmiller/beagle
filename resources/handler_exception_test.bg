@@ -1,6 +1,6 @@
 namespace handler_exception_test
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 // Test Exception-like effects that abort computation
 // Handler can choose NOT to call resume, effectively aborting

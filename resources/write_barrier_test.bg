@@ -1,7 +1,7 @@
 namespace write_barrier_test
 // gc-always
 
-import "beagle.primitive" as primitive
+use beagle.primitive as primitive
 
 // Test that write barriers are called for set! operations on mutable struct fields.
 //
