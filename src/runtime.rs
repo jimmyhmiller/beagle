@@ -4,12 +4,12 @@ use regex::Regex;
 use std::{
     collections::HashMap,
     error::Error,
-    ffi::{CString, c_void},
+    ffi::{c_void, CString},
     io::Write,
     slice::{self},
     sync::{
-        Arc, Condvar, Mutex, TryLockError,
         atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Condvar, Mutex, TryLockError,
     },
     thread::{self, JoinHandle, Thread, ThreadId},
     time::Duration,
@@ -17,17 +17,17 @@ use std::{
 };
 
 use crate::{
-    Alloc, CommandLineArguments, Data, Message,
     builtins::{__pause, debugger},
     compiler::{
-        BlockingSender, CompilerMessage, CompilerResponse, CompilerThread, blocking_channel,
+        blocking_channel, BlockingSender, CompilerMessage, CompilerResponse, CompilerThread,
     },
     gc::{
-        AllocateAction, Allocator, AllocatorOptions, STACK_SIZE, StackMap, StackMapDetails,
-        usdt_probes,
+        usdt_probes, AllocateAction, Allocator, AllocatorOptions, StackMap, StackMapDetails,
+        STACK_SIZE,
     },
     ir::StringValue,
     types::{BuiltInTypes, Header, HeapObject, Tagged},
+    Alloc, CommandLineArguments, Data, Message,
 };
 
 use crate::collections::{
@@ -1173,6 +1173,7 @@ impl NamespaceManager {
         s.add_namespace("beagle.builtin");
         s.add_namespace("beagle.__internal_test__");
         s.add_namespace("beagle.debug");
+        s.add_namespace("beagle.reflect");
         s
     }
 
@@ -3885,6 +3886,21 @@ impl Runtime {
                 // Check HeapObject type_id to distinguish heap-based types
                 let heap_object = HeapObject::from_tagged(value);
                 let type_id = heap_object.get_type_id();
+
+                // Check if this is a type descriptor (negative id_field at index 1)
+                // Type descriptors have struct_id=1 (Struct base type) and id_field < 0
+                let fields_size = heap_object.fields_size() / 8;
+                if fields_size >= 2 {
+                    let id_field = heap_object.get_field(1);
+                    if BuiltInTypes::get_kind(id_field) == BuiltInTypes::Int {
+                        let id_value = BuiltInTypes::untag_isize(id_field as isize);
+                        if id_value < 0 {
+                            // This is a type descriptor - return it as-is
+                            return Ok(value);
+                        }
+                    }
+                }
+
                 match type_id {
                     1 => "Array",               // Raw mutable array (type_id == 1)
                     2 => "String",              // HeapObject string (type_id == 2)

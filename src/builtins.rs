@@ -7659,73 +7659,160 @@ impl Runtime {
         // Reflection builtins for docstrings and namespace introspection
         // ====================================================================
 
-        // fn-doc(f) - Get function docstring
+
+
+        // ============================================================================
+        // Reflect API - Type-centric Introspection (beagle.reflect namespace)
+        // ============================================================================
+
+        // reflect/type-of(value) - Get type descriptor for any value
         self.add_builtin_function_with_fp(
-            "beagle.core/fn-doc",
-            fn_doc as *const u8,
+            "beagle.reflect/type-of",
+            reflect_type_of as *const u8,
             true,
             true,
-            3, // stack_pointer, frame_pointer, function
+            3, // stack_pointer, frame_pointer, value
         )?;
 
-        // fn-meta(f) - Get function metadata (name, doc, args, variadic?)
+        // reflect/kind(descriptor) - Get type kind as keyword (:struct, :enum, :function, :primitive)
         self.add_builtin_function_with_fp(
-            "beagle.core/fn-meta",
-            fn_meta as *const u8,
+            "beagle.reflect/kind",
+            reflect_kind as *const u8,
             true,
             true,
-            3, // stack_pointer, frame_pointer, function
+            3, // stack_pointer, frame_pointer, descriptor
         )?;
 
-        // struct-doc(s) - Get struct docstring
+        // reflect/name(descriptor) - Get type name as string
         self.add_builtin_function_with_fp(
-            "beagle.core/struct-doc",
-            struct_doc as *const u8,
+            "beagle.reflect/name",
+            reflect_name as *const u8,
             true,
             true,
-            3, // stack_pointer, frame_pointer, struct_instance
+            3, // stack_pointer, frame_pointer, descriptor
         )?;
 
-        // struct-fields(s) - Get struct field info
+        // reflect/doc(descriptor) - Get docstring for type
         self.add_builtin_function_with_fp(
-            "beagle.core/struct-fields",
-            struct_fields as *const u8,
+            "beagle.reflect/doc",
+            reflect_doc as *const u8,
             true,
             true,
-            3, // stack_pointer, frame_pointer, struct_instance
+            3, // stack_pointer, frame_pointer, descriptor
         )?;
 
-        // namespace-members(ns) - List all members in a namespace
+        // reflect/fields(descriptor) - Get field names for struct types
         self.add_builtin_function_with_fp(
-            "beagle.core/namespace-members",
-            namespace_members as *const u8,
+            "beagle.reflect/fields",
+            reflect_fields as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, descriptor
+        )?;
+
+        // reflect/variants(descriptor) - Get variant names for enum types
+        self.add_builtin_function_with_fp(
+            "beagle.reflect/variants",
+            reflect_variants as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, descriptor
+        )?;
+
+        // reflect/args(descriptor) - Get argument names for function types
+        self.add_builtin_function_with_fp(
+            "beagle.reflect/args",
+            reflect_args as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, descriptor
+        )?;
+
+        // reflect/variadic?(descriptor) - Check if function is variadic
+        self.add_builtin_function_with_fp(
+            "beagle.reflect/variadic?",
+            reflect_variadic as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, descriptor
+        )?;
+
+        // reflect/info(descriptor) - Get complete type info as a map
+        self.add_builtin_function_with_fp(
+            "beagle.reflect/info",
+            reflect_info as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, descriptor
+        )?;
+
+        // reflect/struct?(value) - Check if value is a struct type or instance
+        self.add_builtin_function_with_fp(
+            "beagle.reflect/struct?",
+            reflect_is_struct as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, value
+        )?;
+
+        // reflect/enum?(value) - Check if value is an enum type or variant
+        self.add_builtin_function_with_fp(
+            "beagle.reflect/enum?",
+            reflect_is_enum as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, value
+        )?;
+
+        // reflect/function?(value) - Check if value is a function type or instance
+        self.add_builtin_function_with_fp(
+            "beagle.reflect/function?",
+            reflect_is_function as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, value
+        )?;
+
+        // reflect/primitive?(value) - Check if value is a primitive type or instance
+        self.add_builtin_function_with_fp(
+            "beagle.reflect/primitive?",
+            reflect_is_primitive as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, value
+        )?;
+
+        // reflect/namespace-members(ns) - List all members in a namespace
+        self.add_builtin_function_with_fp(
+            "beagle.reflect/namespace-members",
+            reflect_namespace_members as *const u8,
             true,
             true,
             3, // stack_pointer, frame_pointer, namespace_name
         )?;
 
-        // all-namespaces() - List all namespace names
+        // reflect/all-namespaces() - List all namespace names
         self.add_builtin_function_with_fp(
-            "beagle.core/all-namespaces",
-            all_namespaces as *const u8,
+            "beagle.reflect/all-namespaces",
+            reflect_all_namespaces as *const u8,
             true,
             true,
             2, // stack_pointer, frame_pointer
         )?;
 
-        // apropos(query) - Search functions by name/doc substring
+        // reflect/apropos(query) - Search functions by name/doc substring
         self.add_builtin_function_with_fp(
-            "beagle.core/apropos",
-            apropos as *const u8,
+            "beagle.reflect/apropos",
+            reflect_apropos as *const u8,
             true,
             true,
             3, // stack_pointer, frame_pointer, query
         )?;
 
-        // namespace-info(ns) - Get detailed info about a namespace
+        // reflect/namespace-info(ns) - Get detailed info about a namespace
         self.add_builtin_function_with_fp(
-            "beagle.core/namespace-info",
-            namespace_info as *const u8,
+            "beagle.reflect/namespace-info",
+            reflect_namespace_info as *const u8,
             true,
             true,
             3, // stack_pointer, frame_pointer, namespace_name
@@ -7736,181 +7823,434 @@ impl Runtime {
 }
 
 // ============================================================================
-// Reflection Builtins (docstrings, namespace introspection)
+// Reflect API - Type Introspection
+// 
+// DESIGN: Keep it simple. Type descriptors are just values. To get info:
+// 1. For primitives: type descriptors are Struct instances with name/id fields
+// 2. For user types: look up struct/enum definitions directly from runtime
+// 
+// No complex type descriptor detection needed - just work with what type_of returns.
 // ============================================================================
 
-/// fn-doc(f) - Get function docstring
-/// Returns the docstring or null if none
-extern "C" fn fn_doc(stack_pointer: usize, frame_pointer: usize, function: usize) -> usize {
-    save_gc_context!(stack_pointer, frame_pointer);
-    let runtime = get_runtime().get_mut();
-
-    // Get the function pointer from the value
-    let fn_ptr = match BuiltInTypes::get_kind(function) {
-        BuiltInTypes::Function => BuiltInTypes::untag(function) as *const u8,
-        BuiltInTypes::HeapObject | BuiltInTypes::Closure => {
-            // Could be a closure or function object
-            let heap_obj = HeapObject::from_tagged(function);
-            let type_id = heap_obj.get_struct_id() as u8;
-            if type_id == crate::collections::TYPE_ID_FUNCTION_OBJECT {
-                // Function object: first field is the function pointer
-                heap_obj.get_field(0) as *const u8
+/// Helper: Get type info directly from runtime without type descriptor detection
+/// Returns (kind, name, doc, fields/variants/args, variadic) based on the value's type
+fn get_type_info(
+    runtime: &mut Runtime,
+    stack_pointer: usize,
+    value: usize,
+) -> (String, String, Option<String>, Vec<String>, bool) {
+    let tag = BuiltInTypes::get_kind(value);
+    
+    match tag {
+        BuiltInTypes::Null => ("primitive".to_string(), "Null".to_string(), None, vec![], false),
+        BuiltInTypes::Int => ("primitive".to_string(), "Int".to_string(), None, vec![], false),
+        BuiltInTypes::Float => ("primitive".to_string(), "Float".to_string(), None, vec![], false),
+        BuiltInTypes::Bool => ("primitive".to_string(), "Bool".to_string(), None, vec![], false),
+        BuiltInTypes::String => ("primitive".to_string(), "String".to_string(), None, vec![], false),
+        BuiltInTypes::Function => {
+            let fn_ptr = BuiltInTypes::untag(value) as *const u8;
+            if let Some(func) = runtime.get_function_by_pointer(fn_ptr) {
+                (
+                    "function".to_string(),
+                    func.name.clone(),
+                    func.docstring.clone(),
+                    func.arg_names.clone(),
+                    func.is_variadic,
+                )
             } else {
-                // Closure: first field is the function pointer
-                BuiltInTypes::untag(heap_obj.get_field(0)) as *const u8
+                ("function".to_string(), "<unknown>".to_string(), None, vec![], false)
             }
         }
-        _ => return BuiltInTypes::null_value() as usize,
-    };
-
-    // Get docstring first, then allocate
-    let docstring = runtime
-        .get_function_by_pointer(fn_ptr)
-        .and_then(|func| func.docstring.clone());
-
-    if let Some(doc) = docstring {
-        runtime
-            .allocate_string(stack_pointer, doc)
-            .map(|s| s.into())
-            .unwrap_or(BuiltInTypes::null_value() as usize)
-    } else {
-        BuiltInTypes::null_value() as usize
-    }
-}
-
-/// fn-meta(f) - Get function metadata as a map
-/// Returns {:name, :doc, :args, :variadic?}
-extern "C" fn fn_meta(stack_pointer: usize, frame_pointer: usize, function: usize) -> usize {
-    save_gc_context!(stack_pointer, frame_pointer);
-    let runtime = get_runtime().get_mut();
-
-    // Get the function pointer from the value
-    let fn_ptr = match BuiltInTypes::get_kind(function) {
-        BuiltInTypes::Function => BuiltInTypes::untag(function) as *const u8,
-        BuiltInTypes::HeapObject | BuiltInTypes::Closure => {
-            // Could be a closure or function object
-            let heap_obj = HeapObject::from_tagged(function);
-            let type_id = heap_obj.get_struct_id() as u8;
-            if type_id == crate::collections::TYPE_ID_FUNCTION_OBJECT {
-                // Function object: first field is the function pointer
-                heap_obj.get_field(0) as *const u8
+        BuiltInTypes::Closure => {
+            // Closures wrap a function pointer in field 0
+            if BuiltInTypes::is_heap_pointer(value) {
+                let heap_obj = HeapObject::from_tagged(value);
+                let fn_ptr = BuiltInTypes::untag(heap_obj.get_field(0)) as *const u8;
+                if let Some(func) = runtime.get_function_by_pointer(fn_ptr) {
+                    (
+                        "function".to_string(),
+                        func.name.clone(),
+                        func.docstring.clone(),
+                        func.arg_names.clone(),
+                        func.is_variadic,
+                    )
+                } else {
+                    ("function".to_string(), "<closure>".to_string(), None, vec![], false)
+                }
             } else {
-                // Closure: first field is the function pointer
-                BuiltInTypes::untag(heap_obj.get_field(0)) as *const u8
+                ("function".to_string(), "<closure>".to_string(), None, vec![], false)
             }
         }
-        _ => return BuiltInTypes::null_value() as usize,
-    };
-
-    // Get function name first to avoid borrow issues
-    let func_name = runtime
-        .get_function_by_pointer(fn_ptr)
-        .map(|func| func.name.clone());
-
-    if let Some(name) = func_name {
-        // Build a map with metadata
-        // For now, return a simple result with just the name
-        // Full map support would need PersistentMap creation
-        runtime
-            .allocate_string(stack_pointer, name)
-            .map(|s| s.into())
-            .unwrap_or(BuiltInTypes::null_value() as usize)
-    } else {
-        BuiltInTypes::null_value() as usize
-    }
-}
-
-/// struct-doc(s) - Get struct docstring
-extern "C" fn struct_doc(
-    stack_pointer: usize,
-    frame_pointer: usize,
-    struct_instance: usize,
-) -> usize {
-    save_gc_context!(stack_pointer, frame_pointer);
-    let runtime = get_runtime().get_mut();
-
-    // Check if it's a heap object (struct)
-    if !matches!(
-        BuiltInTypes::get_kind(struct_instance),
-        BuiltInTypes::HeapObject
-    ) {
-        return BuiltInTypes::null_value() as usize;
-    }
-
-    let heap_obj = HeapObject::from_tagged(struct_instance);
-    let type_id = heap_obj.get_struct_id();
-
-    // Get docstring first to avoid borrow issues
-    let docstring = runtime
-        .get_struct_by_id(type_id)
-        .and_then(|s| s.docstring.clone());
-
-    if let Some(doc) = docstring {
-        runtime
-            .allocate_string(stack_pointer, doc)
-            .map(|s| s.into())
-            .unwrap_or(BuiltInTypes::null_value() as usize)
-    } else {
-        BuiltInTypes::null_value() as usize
-    }
-}
-
-/// struct-fields(s) - Get struct field info as a vector
-/// Returns vector of field names
-extern "C" fn struct_fields(
-    stack_pointer: usize,
-    frame_pointer: usize,
-    struct_instance: usize,
-) -> usize {
-    save_gc_context!(stack_pointer, frame_pointer);
-    let runtime = get_runtime().get_mut();
-
-    // Check if it's a heap object (struct)
-    if !matches!(
-        BuiltInTypes::get_kind(struct_instance),
-        BuiltInTypes::HeapObject
-    ) {
-        eprintln!("struct_fields: not a heap object");
-        return BuiltInTypes::null_value() as usize;
-    }
-
-    let heap_obj = HeapObject::from_tagged(struct_instance);
-    let type_id = heap_obj.get_struct_id();
-
-    // Get field names first to avoid borrow issues
-    let field_names: Option<Vec<String>> =
-        runtime.get_struct_by_id(type_id).map(|s| s.fields.clone());
-
-    if let Some(fields) = field_names {
-        // Build a vector of field names
-        use crate::collections::PersistentVec;
-
-        match PersistentVec::empty(runtime, stack_pointer) {
-            Ok(vec_handle) => {
-                let mut current_vec = vec_handle.as_tagged();
-                for field_name in fields.iter() {
-                    let field_str = match runtime.allocate_string(stack_pointer, field_name.clone())
-                    {
-                        Ok(s) => s.into(),
-                        Err(_) => return BuiltInTypes::null_value() as usize,
-                    };
-                    let vec_gc = crate::collections::GcHandle::from_tagged(current_vec);
-                    match PersistentVec::push(runtime, stack_pointer, vec_gc, field_str) {
-                        Ok(new_vec) => current_vec = new_vec.as_tagged(),
-                        Err(_) => return BuiltInTypes::null_value() as usize,
+        BuiltInTypes::HeapObject => {
+            let heap_obj = HeapObject::from_tagged(value);
+            let type_id = heap_obj.get_type_id();
+            let struct_id = heap_obj.get_struct_id();
+            
+            // Check for built-in heap types (Array, Keyword, PersistentVector, etc.)
+            match type_id {
+                1 => ("primitive".to_string(), "Array".to_string(), None, vec![], false),
+                2 => ("primitive".to_string(), "String".to_string(), None, vec![], false),
+                3 => {
+                    // Keyword - extract the actual keyword text (e.g., "struct" from :struct)
+                    let keyword_bytes = heap_obj.get_keyword_bytes();
+                    let keyword_text = unsafe { std::str::from_utf8_unchecked(keyword_bytes) };
+                    ("keyword".to_string(), keyword_text.to_string(), None, vec![], false)
+                }
+                20 => ("primitive".to_string(), "PersistentVector".to_string(), None, vec![], false),
+                22 => ("primitive".to_string(), "PersistentMap".to_string(), None, vec![], false),
+                28 => ("primitive".to_string(), "PersistentSet".to_string(), None, vec![], false),
+                29 => ("primitive".to_string(), "MultiArityFunction".to_string(), None, vec![], false),
+                30 => ("primitive".to_string(), "Regex".to_string(), None, vec![], false),
+                _ => {
+                    // Check if this is a type descriptor (Struct instance with id field at index 1)
+                    // Type descriptors have struct_id=1 (base Struct type) and field 1 contains the type id:
+                    // - Negative id_field: primitive type (e.g., Int=-3, Float=-4)
+                    // - Positive id_field: user-defined struct (e.g., Point=50)
+                    let fields_size = heap_obj.fields_size() / 8; // number of fields
+                    if struct_id == 1 && fields_size >= 2 {
+                        let id_field = heap_obj.get_field(1);
+                        if BuiltInTypes::get_kind(id_field) == BuiltInTypes::Int {
+                            // This is a type descriptor - extract name from field 0
+                            let name_ptr = heap_obj.get_field(0);
+                            let full_name = runtime.get_string(stack_pointer, name_ptr);
+                            // Extract local name (after / if present)
+                            let name = full_name.split('/').next_back().unwrap_or(&full_name).to_string();
+                            let id_value = BuiltInTypes::untag_isize(id_field as isize);
+                            // Determine kind: negative id = primitive, positive id = user struct
+                            let kind = if id_value < 0 { "primitive" } else { "struct" };
+                            // For user-defined structs, look up the struct definition to get fields
+                            let fields = if id_value > 0 {
+                                runtime.get_struct_by_id(id_value as usize)
+                                    .map(|s| s.fields.clone())
+                                    .unwrap_or_default()
+                            } else {
+                                vec![]
+                            };
+                            return (kind.to_string(), name, None, fields, false);
+                        }
+                    }
+                    
+                    // Custom struct (type_id == 0) - look up the struct definition
+                    if let Some(struct_def) = runtime.get_struct_by_id(struct_id) {
+                        let name = struct_def.name.clone();
+                        let local_name = name.split('/').next_back().unwrap_or(&name).to_string();
+                        let doc = struct_def.docstring.clone();
+                        let fields = struct_def.fields.clone();
+                        
+                        // Check if this is actually an enum variant
+                        if let Some(enum_name) = runtime.get_enum_name_for_variant(struct_id) {
+                            // It's an enum variant - get the enum's info
+                            if let Some(enum_def) = runtime.enums.get(&enum_name) {
+                                let variant_names: Vec<String> = enum_def.variants.iter()
+                                    .map(|v| match v {
+                                        crate::runtime::EnumVariant::StructVariant { name, .. } => name.clone(),
+                                        crate::runtime::EnumVariant::StaticVariant { name } => name.clone(),
+                                    })
+                                    .collect();
+                                let enum_local_name = enum_name.split('/').next_back().unwrap_or(&enum_name).to_string();
+                                return ("enum".to_string(), enum_local_name, enum_def.docstring.clone(), variant_names, false);
+                            }
+                        }
+                        
+                        ("struct".to_string(), local_name, doc, fields, false)
+                    } else {
+                        ("struct".to_string(), "<unknown>".to_string(), None, vec![], false)
                     }
                 }
-                current_vec
             }
-            Err(_) => BuiltInTypes::null_value() as usize,
         }
-    } else {
-        BuiltInTypes::null_value() as usize
     }
 }
 
-/// namespace-members(ns) - List all members in a namespace
-extern "C" fn namespace_members(
+/// reflect/type-of(value) - Get the type descriptor for any value
+/// Uses runtime.type_of which returns proper type descriptors from beagle.core
+extern "C" fn reflect_type_of(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    match runtime.type_of(stack_pointer, value) {
+        Ok(descriptor) => descriptor,
+        Err(_) => BuiltInTypes::null_value() as usize,
+    }
+}
+
+/// reflect/kind(value) - Get the kind of type as a keyword
+/// Works on values OR type descriptors - both give the same answer
+extern "C" fn reflect_kind(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let (kind, _, _, _, _) = get_type_info(runtime, stack_pointer, value);
+    runtime.intern_keyword(stack_pointer, kind).unwrap_or(BuiltInTypes::null_value() as usize)
+}
+
+/// reflect/name(value) - Get the type name as a string
+/// Works on values OR type descriptors
+extern "C" fn reflect_name(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let (_, name, _, _, _) = get_type_info(runtime, stack_pointer, value);
+    runtime.allocate_string(stack_pointer, name).map(|s| s.into()).unwrap_or(BuiltInTypes::null_value() as usize)
+}
+
+/// reflect/doc(value) - Get the docstring for a type (or null)
+extern "C" fn reflect_doc(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let (_, _, doc, _, _) = get_type_info(runtime, stack_pointer, value);
+    match doc {
+        Some(d) => runtime.allocate_string(stack_pointer, d).map(|s| s.into()).unwrap_or(BuiltInTypes::null_value() as usize),
+        None => BuiltInTypes::null_value() as usize,
+    }
+}
+
+/// reflect/fields(value) - Get field names for struct types
+extern "C" fn reflect_fields(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let (_, _, _, fields, _) = get_type_info(runtime, stack_pointer, value);
+    
+    use crate::collections::PersistentVec;
+    match PersistentVec::empty(runtime, stack_pointer) {
+        Ok(vec_handle) => {
+            let mut current_vec = vec_handle.as_tagged();
+            for field_name in fields.iter() {
+                let field_str = match runtime.allocate_string(stack_pointer, field_name.clone()) {
+                    Ok(s) => s.into(),
+                    Err(_) => return BuiltInTypes::null_value() as usize,
+                };
+                let vec_gc = crate::collections::GcHandle::from_tagged(current_vec);
+                match PersistentVec::push(runtime, stack_pointer, vec_gc, field_str) {
+                    Ok(new_vec) => current_vec = new_vec.as_tagged(),
+                    Err(_) => return BuiltInTypes::null_value() as usize,
+                }
+            }
+            current_vec
+        }
+        Err(_) => BuiltInTypes::null_value() as usize,
+    }
+}
+
+/// reflect/variants(value) - Get variant names for enum types
+extern "C" fn reflect_variants(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let (_, _, _, variants, _) = get_type_info(runtime, stack_pointer, value);
+    
+    use crate::collections::PersistentVec;
+    match PersistentVec::empty(runtime, stack_pointer) {
+        Ok(vec_handle) => {
+            let mut current_vec = vec_handle.as_tagged();
+            for variant_name in variants.iter() {
+                let variant_str = match runtime.allocate_string(stack_pointer, variant_name.clone()) {
+                    Ok(s) => s.into(),
+                    Err(_) => return BuiltInTypes::null_value() as usize,
+                };
+                let vec_gc = crate::collections::GcHandle::from_tagged(current_vec);
+                match PersistentVec::push(runtime, stack_pointer, vec_gc, variant_str) {
+                    Ok(new_vec) => current_vec = new_vec.as_tagged(),
+                    Err(_) => return BuiltInTypes::null_value() as usize,
+                }
+            }
+            current_vec
+        }
+        Err(_) => BuiltInTypes::null_value() as usize,
+    }
+}
+
+/// reflect/args(value) - Get argument names for function types
+extern "C" fn reflect_args(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let (_, _, _, args, _) = get_type_info(runtime, stack_pointer, value);
+    
+    use crate::collections::PersistentVec;
+    match PersistentVec::empty(runtime, stack_pointer) {
+        Ok(vec_handle) => {
+            let mut current_vec = vec_handle.as_tagged();
+            for arg_name in args.iter() {
+                let arg_str = match runtime.allocate_string(stack_pointer, arg_name.clone()) {
+                    Ok(s) => s.into(),
+                    Err(_) => return BuiltInTypes::null_value() as usize,
+                };
+                let vec_gc = crate::collections::GcHandle::from_tagged(current_vec);
+                match PersistentVec::push(runtime, stack_pointer, vec_gc, arg_str) {
+                    Ok(new_vec) => current_vec = new_vec.as_tagged(),
+                    Err(_) => return BuiltInTypes::null_value() as usize,
+                }
+            }
+            current_vec
+        }
+        Err(_) => BuiltInTypes::null_value() as usize,
+    }
+}
+
+/// reflect/variadic?(value) - Check if function is variadic
+extern "C" fn reflect_variadic(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let (_, _, _, _, is_variadic) = get_type_info(runtime, stack_pointer, value);
+    BuiltInTypes::construct_boolean(is_variadic) as usize
+}
+
+/// reflect/info(value) - Get complete type info as a map
+extern "C" fn reflect_info(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let (kind, name, doc, _extra, is_variadic) = get_type_info(runtime, stack_pointer, value);
+    
+    use crate::collections::PersistentMap;
+    
+    let result = (|| -> Result<usize, ()> {
+        let mut map = PersistentMap::empty(runtime, stack_pointer).map_err(|_| ())?;
+
+        // Add :name
+        let name_key = runtime.intern_keyword(stack_pointer, "name".to_string()).map_err(|_| ())?;
+        let name_str = runtime.allocate_string(stack_pointer, name).map_err(|_| ())?;
+        map = PersistentMap::assoc(runtime, stack_pointer, map.as_tagged(), name_key, name_str.into()).map_err(|_| ())?;
+
+        // Add :kind
+        let kind_key = runtime.intern_keyword(stack_pointer, "kind".to_string()).map_err(|_| ())?;
+        let kind_kw = runtime.intern_keyword(stack_pointer, kind.clone()).map_err(|_| ())?;
+        map = PersistentMap::assoc(runtime, stack_pointer, map.as_tagged(), kind_key, kind_kw).map_err(|_| ())?;
+
+        // Add :doc if present
+        if let Some(d) = doc {
+            let doc_key = runtime.intern_keyword(stack_pointer, "doc".to_string()).map_err(|_| ())?;
+            let doc_str = runtime.allocate_string(stack_pointer, d).map_err(|_| ())?;
+            map = PersistentMap::assoc(runtime, stack_pointer, map.as_tagged(), doc_key, doc_str.into()).map_err(|_| ())?;
+        }
+
+        // Add kind-specific fields
+        if kind == "struct" || kind == "enum" {
+            // Add :fields as vector
+            let fields_key = runtime.intern_keyword(stack_pointer, "fields".to_string()).map_err(|_| ())?;
+            let fields_val = reflect_fields(stack_pointer, frame_pointer, value);
+            map = PersistentMap::assoc(runtime, stack_pointer, map.as_tagged(), fields_key, fields_val).map_err(|_| ())?;
+        }
+
+        if kind == "enum" {
+            // Add :variants as vector
+            let variants_key = runtime.intern_keyword(stack_pointer, "variants".to_string()).map_err(|_| ())?;
+            let variants_val = reflect_variants(stack_pointer, frame_pointer, value);
+            map = PersistentMap::assoc(runtime, stack_pointer, map.as_tagged(), variants_key, variants_val).map_err(|_| ())?;
+        }
+
+        if kind == "function" {
+            // Add :args and :variadic?
+            let args_key = runtime.intern_keyword(stack_pointer, "args".to_string()).map_err(|_| ())?;
+            let args_val = reflect_args(stack_pointer, frame_pointer, value);
+            map = PersistentMap::assoc(runtime, stack_pointer, map.as_tagged(), args_key, args_val).map_err(|_| ())?;
+
+            let variadic_key = runtime.intern_keyword(stack_pointer, "variadic?".to_string()).map_err(|_| ())?;
+            let variadic_val = BuiltInTypes::construct_boolean(is_variadic) as usize;
+            map = PersistentMap::assoc(runtime, stack_pointer, map.as_tagged(), variadic_key, variadic_val).map_err(|_| ())?;
+        }
+
+        Ok(map.as_tagged())
+    })();
+
+    result.unwrap_or(BuiltInTypes::null_value() as usize)
+}
+
+/// reflect/struct?(value) - Check if value is a struct instance
+extern "C" fn reflect_is_struct(_stack_pointer: usize, _frame_pointer: usize, value: usize) -> usize {
+    // A struct is a HeapObject with type_id == 0 (custom struct) and NOT an enum variant
+    if !matches!(BuiltInTypes::get_kind(value), BuiltInTypes::HeapObject) {
+        return BuiltInTypes::false_value() as usize;
+    }
+    let heap_obj = HeapObject::from_tagged(value);
+    let type_id = heap_obj.get_type_id();
+    let struct_id = heap_obj.get_struct_id();
+    let runtime = get_runtime().get();
+    // Custom struct (type_id == 0) that is NOT an enum variant
+    let is_struct = type_id == 0 && runtime.get_enum_name_for_variant(struct_id).is_none();
+    BuiltInTypes::construct_boolean(is_struct) as usize
+}
+
+/// reflect/enum?(value) - Check if value is an enum variant
+extern "C" fn reflect_is_enum(_stack_pointer: usize, _frame_pointer: usize, value: usize) -> usize {
+    // An enum variant is a HeapObject with type_id == 0 that IS registered as an enum variant
+    if !matches!(BuiltInTypes::get_kind(value), BuiltInTypes::HeapObject) {
+        return BuiltInTypes::false_value() as usize;
+    }
+    let heap_obj = HeapObject::from_tagged(value);
+    let type_id = heap_obj.get_type_id();
+    let struct_id = heap_obj.get_struct_id();
+    let runtime = get_runtime().get();
+    // Custom struct (type_id == 0) that IS an enum variant
+    let is_enum = type_id == 0 && runtime.get_enum_name_for_variant(struct_id).is_some();
+    BuiltInTypes::construct_boolean(is_enum) as usize
+}
+
+/// reflect/function?(value) - Check if value is a function
+extern "C" fn reflect_is_function(_stack_pointer: usize, _frame_pointer: usize, value: usize) -> usize {
+    let kind = BuiltInTypes::get_kind(value);
+    let is_fn = matches!(kind, BuiltInTypes::Function | BuiltInTypes::Closure);
+    if !is_fn && matches!(kind, BuiltInTypes::HeapObject) {
+        let heap_obj = HeapObject::from_tagged(value);
+        let type_id = heap_obj.get_struct_id() as u8;
+        if type_id == crate::collections::TYPE_ID_FUNCTION_OBJECT
+            || type_id == TYPE_ID_MULTI_ARITY_FUNCTION
+        {
+            return BuiltInTypes::true_value() as usize;
+        }
+    }
+    BuiltInTypes::construct_boolean(is_fn) as usize
+}
+
+/// reflect/primitive?(value) - Check if value is a primitive type instance
+extern "C" fn reflect_is_primitive(_stack_pointer: usize, _frame_pointer: usize, value: usize) -> usize {
+    let kind = BuiltInTypes::get_kind(value);
+    let is_primitive = matches!(
+        kind,
+        BuiltInTypes::Int | BuiltInTypes::Float | BuiltInTypes::Bool | BuiltInTypes::Null
+    ) || (matches!(kind, BuiltInTypes::HeapObject) && {
+        let heap_obj = HeapObject::from_tagged(value);
+        matches!(
+            heap_obj.get_type_id(),
+            1 | 2 | 3 | 20 | 22 | 28 | 29 | 30 // Array, String, Keyword, PersistentVector, PersistentMap, PersistentSet, MultiArityFunction, Regex
+        )
+    });
+    BuiltInTypes::construct_boolean(is_primitive) as usize
+}
+
+/// reflect/namespace-members(ns) - List all members in a namespace
+extern "C" fn reflect_namespace_members(
     stack_pointer: usize,
     frame_pointer: usize,
     namespace_name: usize,
@@ -7960,8 +8300,8 @@ extern "C" fn namespace_members(
     }
 }
 
-/// all-namespaces() - List all namespace names
-extern "C" fn all_namespaces(stack_pointer: usize, frame_pointer: usize) -> usize {
+/// reflect/all-namespaces() - List all namespace names
+extern "C" fn reflect_all_namespaces(stack_pointer: usize, frame_pointer: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
 
@@ -7999,8 +8339,8 @@ extern "C" fn all_namespaces(stack_pointer: usize, frame_pointer: usize) -> usiz
     }
 }
 
-/// apropos(query) - Search functions by name/doc substring
-extern "C" fn apropos(stack_pointer: usize, frame_pointer: usize, query: usize) -> usize {
+/// reflect/apropos(query) - Search functions by name/doc substring
+extern "C" fn reflect_apropos(stack_pointer: usize, frame_pointer: usize, query: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
 
@@ -8046,12 +8386,8 @@ extern "C" fn apropos(stack_pointer: usize, frame_pointer: usize, query: usize) 
     }
 }
 
-/// namespace-info(ns) - Get detailed info about a namespace
-/// Returns a map with :name, :functions, :structs, :enums
-/// Each function entry has :name, :doc, :args, :variadic?
-/// Each struct entry has :name, :doc, :fields
-/// Each enum entry has :name, :doc, :variants
-extern "C" fn namespace_info(
+/// reflect/namespace-info(ns) - Get detailed info about a namespace
+extern "C" fn reflect_namespace_info(
     stack_pointer: usize,
     frame_pointer: usize,
     namespace_name: usize,
@@ -8065,7 +8401,7 @@ extern "C" fn namespace_info(
 
     use crate::collections::{PersistentMap, PersistentVec};
 
-    // Helper to intern a keyword (must use intern_keyword so equality works by pointer identity)
+    // Helper to intern a keyword
     let alloc_keyword = |runtime: &mut Runtime, sp: usize, name: &str| -> Result<usize, ()> {
         runtime.intern_keyword(sp, name.to_string()).map_err(|_| ())
     };
@@ -8099,7 +8435,7 @@ extern "C" fn namespace_info(
         })
         .collect();
 
-    // Collect struct info (excluding enum variants which have '.' in their name after namespace)
+    // Collect struct info
     let struct_info: Vec<_> = runtime
         .structs
         .iter()
