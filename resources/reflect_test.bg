@@ -1,0 +1,114 @@
+namespace reflect_test
+
+import "beagle.reflect" as reflect
+
+struct Point { x, y }
+struct Person { name, age, email }
+struct Empty {}
+
+enum Color {
+    Red,
+    Green,
+    Blue
+}
+
+/// A greeting function
+fn greet(name) {
+    println("Hello, " + name)
+}
+
+/// A variadic sum function
+fn sum(...args) {
+    let mut total = 0
+    for arg in args {
+        total = total + arg
+    }
+    total
+}
+
+fn main() {
+    // Test reflect/type-of on primitive types
+    println(reflect/name(reflect/type-of(42)))
+    println(reflect/name(reflect/type-of(3.14)))
+    println(reflect/name(reflect/type-of(true)))
+    println(reflect/name(reflect/type-of("hello")))
+    println(reflect/name(reflect/type-of(null)))
+
+    // Test reflect/type-of on custom structs
+    let p = Point { x: 1, y: 2 }
+    println(reflect/name(reflect/type-of(p)))
+
+    // Test reflect/kind
+    println(reflect/name(reflect/kind(p)))
+    println(reflect/name(reflect/kind(42)))
+    println(reflect/name(reflect/kind(greet)))
+
+    // Test reflect/name on instances
+    println(reflect/name(p))
+
+    // Test reflect/fields
+    println(reflect/fields(Point))
+    println(reflect/fields(p))
+    println(reflect/fields(Person))
+    println(length(reflect/fields(Empty)))
+
+    // Test reflect/primitive?
+    println(reflect/primitive?(42))
+    println(reflect/primitive?(p))
+
+    // Test reflect/struct?
+    println(reflect/struct?(p))
+    println(reflect/struct?(42))
+
+    // Test reflect/function?
+    println(reflect/function?(greet))
+    println(reflect/function?(p))
+
+    // Test reflect/enum? and reflect/variants
+    let c = Color.Red
+    println(reflect/enum?(c))
+    println(reflect/variants(Color))
+
+    // Test reflect/args and reflect/variadic?
+    println(reflect/args(greet))
+    println(reflect/variadic?(greet))
+    println(reflect/variadic?(sum))
+
+    // Test reflect/info
+    let info = reflect/info(Point)
+    println(get(info, :name))
+    println(get(info, :kind))
+    println(length(get(info, :fields)))
+
+    "done"
+}
+
+// Expect
+// Int
+// Float
+// Bool
+// String
+// Null
+// Point
+// struct
+// primitive
+// function
+// Point
+// ["x", "y"]
+// ["x", "y"]
+// ["name", "age", "email"]
+// 0
+// true
+// false
+// true
+// false
+// true
+// false
+// true
+// ["Red", "Green", "Blue"]
+// ["name"]
+// false
+// true
+// Point
+// :struct
+// 2

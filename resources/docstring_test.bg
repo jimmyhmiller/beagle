@@ -1,5 +1,7 @@
 namespace docstring_test
 
+import "beagle.reflect" as reflect
+
 /// This is a test function that adds two numbers.
 /// It demonstrates multi-line docstrings.
 fn add(x, y) {
@@ -24,26 +26,26 @@ fn no_doc_function() {
 }
 
 fn main() {
-    // Test fn-doc
-    let doc = fn-doc(add)
+    // Test reflect/doc on function
+    let doc = reflect/doc(add)
     println(doc)
 
-    // Test fn-doc on function with no docstring
-    let no_doc = fn-doc(no_doc_function)
+    // Test reflect/doc on function with no docstring
+    let no_doc = reflect/doc(no_doc_function)
     println(no_doc == null)
 
-    // Test namespace-members
-    let members = namespace-members("docstring_test")
+    // Test reflect/namespace-members
+    let members = reflect/namespace-members("docstring_test")
     // Sort for deterministic output
     let sorted = sort(members)
     println(sorted)
 
-    // Test all-namespaces returns something (just check length > 0)
-    let namespaces = all-namespaces()
+    // Test reflect/all-namespaces returns something (just check length > 0)
+    let namespaces = reflect/all-namespaces()
     println(length(namespaces) > 0)
 
-    // Test apropos - just verify it returns results
-    let matches = apropos("add_three")
+    // Test reflect/apropos - just verify it returns results
+    let matches = reflect/apropos("add_three")
     // Just print the count since filtering has protocol issues with closures
     println(length(matches) >= 1)
 
@@ -54,6 +56,6 @@ fn main() {
 // This is a test function that adds two numbers.
 // It demonstrates multi-line docstrings.
 // true
-// ["add", "add_three", "no_doc_function", "main"]
+// ["add", "add_three", "no_doc_function", "main", "__top_level"]
 // true
 // true
