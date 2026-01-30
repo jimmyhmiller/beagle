@@ -1,6 +1,6 @@
 namespace continuation_gc_pointer_update_test
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 struct Box { data }
 

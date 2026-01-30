@@ -1,6 +1,6 @@
 namespace seq_test6
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 // Test: return r2 after two performs (should work like seq_test3)
 

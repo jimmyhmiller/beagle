@@ -1,6 +1,6 @@
 namespace exception_handler_automated_test
 
-import "beagle.core" as core
+use beagle.core as core
 
 fn main() {
     let result = atom("none")

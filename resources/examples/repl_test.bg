@@ -1,6 +1,6 @@
 namespace repl_test
 
-import "beagle.builtin" as builtin
+use beagle.builtin as builtin
 
 fn repl() {
     let x = builtin/wait_for_input()

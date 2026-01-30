@@ -2,7 +2,7 @@ namespace gc_continuation_simple_test
 
 // Simplified test: continuations with less allocation
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 struct Data { value }
 

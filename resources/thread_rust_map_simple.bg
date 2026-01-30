@@ -1,6 +1,6 @@
 namespace thread_rust_map_simple
 
-import "beagle.collections" as rc
+use beagle.collections as rc
 
 fn main() {
     println("Starting test")

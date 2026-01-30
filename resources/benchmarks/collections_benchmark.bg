@@ -1,6 +1,6 @@
 namespace collections-benchmark
-import "beagle.core" as core
-import "beagle.collections" as rust
+use beagle.core as core
+use beagle.collections as rust
 
 // NOTE: This benchmark previously compared Beagle-native implementations to Rust-native.
 // Since Beagle implementations have been removed, both "beagle" and "rust" paths now

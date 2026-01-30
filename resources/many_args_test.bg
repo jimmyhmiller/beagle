@@ -1,6 +1,6 @@
 namespace many_args_test
 
-import "beagle.__internal_test__" as test
+use beagle.__internal_test__ as test
 
 fn f(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10) {
     a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10

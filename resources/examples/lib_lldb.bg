@@ -1,7 +1,7 @@
 namespace lib_lldb
 
-import "beagle.ffi" as ffi
-import "beagle.primitive" as primitive
+use beagle.ffi as ffi
+use beagle.primitive as primitive
 
 
 let _lldb = ffi/load_library("/Users/jimmyhmiller/Documents/Code/open-source/lldb-sys.rs/src/liblldb_bindings.dylib")

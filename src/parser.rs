@@ -188,7 +188,6 @@ pub enum Token {
     Keyword((usize, usize)),
     Never,
     Namespace,
-    Import,
     As,
     And,
     Protocol,
@@ -210,6 +209,7 @@ pub enum Token {
     Shift,
     Perform,
     Handle,
+    Use,
 }
 impl Token {
     fn is_binary_operator(&self) -> bool {
@@ -293,7 +293,6 @@ impl Token {
             Token::Struct => Ok("struct".to_string()),
             Token::Enum => Ok("enum".to_string()),
             Token::Namespace => Ok("namespace".to_string()),
-            Token::Import => Ok("import".to_string()),
             Token::Protocol => Ok("protocol".to_string()),
             Token::Extend => Ok("extend".to_string()),
             Token::As => Ok("as".to_string()),
@@ -313,6 +312,7 @@ impl Token {
             Token::Shift => Ok("shift".to_string()),
             Token::Perform => Ok("perform".to_string()),
             Token::Handle => Ok("handle".to_string()),
+            Token::Use => Ok("use".to_string()),
             Token::Comment((start, end))
             | Token::DocComment((start, end))
             | Token::Atom((start, end))
@@ -711,7 +711,6 @@ impl Tokenizer {
             b"enum" => Token::Enum,
             b"." => Token::Dot,
             b"namespace" => Token::Namespace,
-            b"import" => Token::Import,
             b"protocol" => Token::Protocol,
             b"extend" => Token::Extend,
             b"with" => Token::With,
@@ -726,6 +725,7 @@ impl Tokenizer {
             b"shift" => Token::Shift,
             b"perform" => Token::Perform,
             b"handle" => Token::Handle,
+            b"use" => Token::Use,
             _ => Token::Atom((start, self.position)),
         }
     }
@@ -978,20 +978,6 @@ impl Parser {
         }
     }
 
-    fn expect_string(&self) -> ParseResult<String> {
-        match self.current_token() {
-            Token::String((start, end)) => {
-                String::from_utf8(self.source.as_bytes()[start + 1..end - 1].to_vec())
-                    .map_err(|_| ParseError::InvalidUtf8 { position: start })
-            }
-            _ => Err(ParseError::UnexpectedToken {
-                expected: "string".to_string(),
-                found: self.get_token_repr(),
-                position: self.position,
-            }),
-        }
-    }
-
     pub fn parse(&mut self) -> ParseResult<Ast> {
         Ok(Ast::Program {
             elements: self.parse_elements()?,
@@ -1204,7 +1190,7 @@ impl Parser {
             }
             Token::Match => Ok(Some(self.parse_match()?)),
             Token::Namespace => Ok(Some(self.parse_namespace()?)),
-            Token::Import => Ok(Some(self.parse_import()?)),
+            Token::Use => Ok(Some(self.parse_use()?)),
             Token::Protocol => Ok(Some(self.parse_protocol()?)),
             Token::Extend => Ok(Some(self.parse_extend()?)),
             Token::Atom((start, end)) => {
@@ -2732,12 +2718,8 @@ impl Parser {
         }
     }
 
-    fn parse_namespace(&mut self) -> ParseResult<Ast> {
-        // TODO: Reconsider this design
-        // namespaces can be names with dots
-        // so beagle.core is a valid namespace
-
-        let start_position = self.position;
+    /// Parse a dotted identifier like "myproject.utils" or "beagle.core"
+    fn parse_dotted_identifier(&mut self) -> ParseResult<String> {
         self.move_to_next_non_whitespace();
         let mut name = String::new();
         while !self.at_end() && (self.is_atom() || self.is_dot()) {
@@ -2750,7 +2732,7 @@ impl Parser {
                 }
                 _ => {
                     return Err(ParseError::UnexpectedToken {
-                        expected: "namespace identifier".to_string(),
+                        expected: "dotted identifier".to_string(),
                         found: self.get_token_repr(),
                         position: self.position,
                     });
@@ -2760,11 +2742,17 @@ impl Parser {
         }
         if name.is_empty() {
             return Err(ParseError::UnexpectedToken {
-                expected: "namespace name".to_string(),
+                expected: "dotted identifier".to_string(),
                 found: self.get_token_repr(),
                 position: self.position,
             });
         }
+        Ok(name)
+    }
+
+    fn parse_namespace(&mut self) -> ParseResult<Ast> {
+        let start_position = self.position;
+        let name = self.parse_dotted_identifier()?;
         self.consume();
         let end_position = self.position;
         Ok(Ast::Namespace {
@@ -2773,19 +2761,17 @@ impl Parser {
         })
     }
 
-    fn parse_import(&mut self) -> ParseResult<Ast> {
+    fn parse_use(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
-        self.move_to_next_non_whitespace();
-        let library_name = self.expect_string()?;
-        self.consume();
+        let namespace_name = self.parse_dotted_identifier()?;
         self.expect_as()?;
         self.move_to_next_non_whitespace();
         let name_position = self.position;
         let alias = Box::new(Ast::Identifier(self.expect_atom()?, name_position));
         self.consume();
         let end_position = self.position;
-        Ok(Ast::Import {
-            library_name,
+        Ok(Ast::Use {
+            namespace_name,
             alias,
             token_range: TokenRange::new(start_position, end_position),
         })

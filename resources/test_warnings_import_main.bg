@@ -1,7 +1,6 @@
 namespace test_warnings_import_main
 
-import "test_warnings_import_dependency" as dep
-
+use test_warnings_import_dependency as dep
 enum Shape {
     Circle,
     Square,

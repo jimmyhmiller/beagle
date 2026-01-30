@@ -1,6 +1,6 @@
 namespace continuation_gc_stress_test
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 struct Node { value, next }
 

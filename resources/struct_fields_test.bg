@@ -1,6 +1,6 @@
 namespace struct_fields_test
 
-import "beagle.reflect" as reflect
+use beagle.reflect as reflect
 
 struct Point { x, y }
 struct Person { name, age, email }

@@ -1,8 +1,7 @@
 namespace hash_table_uppercase_test
 
-import "beagle.builtin" as builtin
-import "raw-mutable-array" as arr
-
+use beagle.builtin as builtin
+use raw-mutable-array as arr
 let HT_KEYS = 0
 let HT_COUNTS = 1
 let HT_SIZE = 2

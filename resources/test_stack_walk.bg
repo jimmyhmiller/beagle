@@ -1,6 +1,6 @@
 namespace test_stack_walk
 
-import "beagle.builtin" as builtin
+use beagle.builtin as builtin
 
 fn level10() {
     println("About to throw error")

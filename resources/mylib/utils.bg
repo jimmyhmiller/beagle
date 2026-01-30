@@ -1,0 +1,5 @@
+namespace mylib.utils
+
+fn helper() {
+    "helped"
+}

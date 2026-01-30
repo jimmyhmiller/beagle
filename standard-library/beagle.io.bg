@@ -1,7 +1,7 @@
 namespace beagle.io
 
-import "beagle.ffi" as ffi
-import "beagle.builtin" as builtin
+use beagle.ffi as ffi
+use beagle.builtin as builtin
 
 // Load libc (platform-specific path)
 fn get-libc-path() {

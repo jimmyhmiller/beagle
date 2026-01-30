@@ -1,8 +1,7 @@
 namespace namespace_resolution_test
 
-import "top_level" as top_level
-import "enum_test" as enum_test
-
+use top_level as top_level
+use enum_test as enum_test
 fn main() {
     println(top_level/x)
     println(enum_test/Action.run { speed: 2 })

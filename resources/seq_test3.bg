@@ -1,6 +1,6 @@
 namespace seq_test3
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 // Simplest sequential effects test - just get the value
 

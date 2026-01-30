@@ -1,5 +1,5 @@
 namespace rust-map-stress-test
-import "beagle.collections" as rmap
+use beagle.collections as rmap
 
 // Helper to build map with many integer keys
 fn build-map(n, m) {

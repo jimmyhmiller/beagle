@@ -1,6 +1,6 @@
 namespace handler_sequential_blocks_test
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 // Test multiple sequential handler blocks in main
 // This test exposes a bug: sequential handle blocks cause infinite loops

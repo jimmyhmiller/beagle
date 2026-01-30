@@ -1,6 +1,6 @@
 namespace handler_stateful_test
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 // Test stateful handlers with field mutation
 // This test exposes a bug: self.field = value in handler causes compiler panic

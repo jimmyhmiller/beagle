@@ -1,7 +1,7 @@
 namespace array_size_overflow_bug
 
-import "raw-mutable-array" as arr
-import "beagle.primitive" as primitive
+use raw-mutable-array as arr
+use beagle.primitive as primitive
 
 fn main() {
     // Request an array of 125000 elements

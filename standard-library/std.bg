@@ -1,7 +1,7 @@
 namespace beagle.core;
-import "beagle.primitive" as primitive
-import "beagle.builtin" as builtin
-import "beagle.collections" as rust-coll
+use beagle.primitive as primitive
+use beagle.builtin as builtin
+use beagle.collections as rust-coll
 // TODO: I need to figure out how I deal with the circular nature
 // of having persistent vector not be in this namespace
 // One answer is to have dynamic imports

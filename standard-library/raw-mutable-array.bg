@@ -1,6 +1,6 @@
 namespace raw-mutable-array
-import "beagle.builtin" as builtin
-import "beagle.primitive" as primitive
+use beagle.builtin as builtin
+use beagle.primitive as primitive
 
 
 fn allocate-array-unsafe(size) {

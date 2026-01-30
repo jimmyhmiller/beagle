@@ -1,6 +1,6 @@
 namespace slow_json_parser
 
-import "beagle.primitive" as primitive
+use beagle.primitive as primitive
 
 struct Tokenizer {
     input

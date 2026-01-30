@@ -1,7 +1,6 @@
 namespace array_narrow_test
 
-import "raw-mutable-array" as arr
-
+use raw-mutable-array as arr
 fn main() {
     let a = arr/new-array(125000)
 

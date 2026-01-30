@@ -1,6 +1,6 @@
 namespace handler_cross_file_test
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 // Test cross-file effect handling using the standard beagle.effect module
 // This verifies that effects can use the Handler protocol from beagle.effect

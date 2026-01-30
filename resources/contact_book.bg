@@ -1,8 +1,8 @@
 namespace contact_book
 
-import "beagle.io" as io
-import "beagle.builtin" as builtin
-import "beagle.core" as core
+use beagle.io as io
+use beagle.builtin as builtin
+use beagle.core as core
 
 // A simple Contact Book Manager
 // Features: Add, List, Search, Delete contacts

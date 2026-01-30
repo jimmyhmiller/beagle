@@ -1,6 +1,6 @@
 namespace io-test
 
-import "beagle.io" as io
+use beagle.io as io
 
 fn test_file_write_read() {
     println("Testing file write/read...")

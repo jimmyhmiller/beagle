@@ -4,7 +4,7 @@ namespace async_test
 // that are not yet implemented in src/builtins.rs
 // TODO: Implement missing builtins or remove dependencies
 
-import "beagle.async" as async
+use beagle.async as async
 
 // Test basic async file operations with effect handlers
 

@@ -1,6 +1,6 @@
 namespace test
 
-import "beagle.core" as core
+use beagle.core as core
 
 fn main() {
     println("Diagnostic.id:")

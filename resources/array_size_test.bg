@@ -1,7 +1,7 @@
 namespace array_size_test
 
-import "raw-mutable-array" as arr
-import "beagle.primitive" as primitive
+use raw-mutable-array as arr
+use beagle.primitive as primitive
 
 fn main() {
     let a = arr/new-array(125000)

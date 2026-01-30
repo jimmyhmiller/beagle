@@ -3,7 +3,7 @@ namespace gc_continuation_stress_test
 // This test combines continuations with heavy allocation to stress the GC.
 // It uses effect handlers to create continuations while allocating many objects.
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 struct Data {
     value

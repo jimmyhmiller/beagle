@@ -1,5 +1,5 @@
 namespace equal_test
-import "beagle.primitive" as primitive
+use beagle.primitive as primitive
 
 struct Thing {
     x

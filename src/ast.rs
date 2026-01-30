@@ -198,8 +198,9 @@ pub enum Ast {
         name: String,
         token_range: TokenRange,
     },
-    Import {
-        library_name: String,
+    /// Namespace-based import: `use myproject.utils as utils`
+    Use {
+        namespace_name: String,
         alias: Box<Ast>,
         token_range: TokenRange,
     },
@@ -516,7 +517,7 @@ impl Ast {
             | Ast::LetMut { token_range, .. }
             | Ast::Assignment { token_range, .. }
             | Ast::Namespace { token_range, .. }
-            | Ast::Import { token_range, .. }
+            | Ast::Use { token_range, .. }
             | Ast::ShiftLeft { token_range, .. }
             | Ast::ShiftRight { token_range, .. }
             | Ast::ShiftRightZero { token_range, .. }
@@ -638,10 +639,10 @@ impl Ast {
         }
     }
 
-    pub fn imports(&self) -> Vec<Ast> {
+    pub fn uses(&self) -> Vec<Ast> {
         self.nodes()
             .iter()
-            .filter(|node| matches!(node, Ast::Import { .. }))
+            .filter(|node| matches!(node, Ast::Use { .. }))
             .cloned()
             .collect()
     }
@@ -2203,13 +2204,13 @@ impl AstCompiler<'_> {
                     vec![namespace_id.into()],
                 )
             }
-            Ast::Import {
-                library_name,
+            Ast::Use {
+                namespace_name,
                 alias,
                 ..
             } => {
                 self.compiler
-                    .add_alias(library_name, (*alias).get_string().to_string());
+                    .add_alias(namespace_name.clone(), (*alias).get_string().to_string());
                 Ok(Value::Null)
             }
             Ast::PropertyAccess {
@@ -4877,7 +4878,7 @@ impl AstCompiler<'_> {
             | Ast::False(_)
             | Ast::Null(_)
             | Ast::Namespace { .. }
-            | Ast::Import { .. } => {
+            | Ast::Use { .. } => {
                 // I shouldn't need to do anything here
             }
 

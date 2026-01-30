@@ -1,6 +1,6 @@
 namespace docstring_test
 
-import "beagle.reflect" as reflect
+use beagle.reflect as reflect
 
 /// This is a test function that adds two numbers.
 /// It demonstrates multi-line docstrings.

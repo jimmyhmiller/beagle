@@ -1,6 +1,6 @@
 namespace async_blocking_test
 
-import "beagle.async" as async
+use beagle.async as async
 
 // Test the blocking convenience functions
 

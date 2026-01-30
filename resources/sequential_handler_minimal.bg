@@ -1,6 +1,6 @@
 namespace sequential_handler_minimal
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 // Minimal reproducer for sequential handler bug
 

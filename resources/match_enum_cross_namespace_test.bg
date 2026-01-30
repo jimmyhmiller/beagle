@@ -1,7 +1,6 @@
 namespace test_match_cross_ns
 
-import "other_types" as colors
-
+use other_types as colors
 fn test-imported-enum() {
     let red = colors/Color.Red
     let blue = colors/Color.Blue { value: 128 }

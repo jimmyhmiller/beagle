@@ -2,7 +2,7 @@ namespace gc_continuation_minimal_crash
 
 // MINIMAL REPRODUCTION: 2 nested performs in a handler called from tail-recursive loop
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 enum Get {
     Value {}

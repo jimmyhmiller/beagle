@@ -1,9 +1,9 @@
 namespace beagle.async
 
-import "beagle.io" as io
-import "beagle.ffi" as ffi
-import "beagle.builtin" as builtin
-import "beagle.effect" as effect
+use beagle.io as io
+use beagle.ffi as ffi
+use beagle.builtin as builtin
+use beagle.effect as effect
 
 // ============================================================================
 // FFI Wrappers for File System Builtins

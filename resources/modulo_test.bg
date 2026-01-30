@@ -1,6 +1,6 @@
 namespace modulo_test
 
-import "beagle.builtin" as builtin
+use beagle.builtin as builtin
 
 fn hash_string_v1(s, capacity) {
     let h = builtin/hash(s)

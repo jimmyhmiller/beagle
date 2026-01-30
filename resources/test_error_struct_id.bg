@@ -1,7 +1,7 @@
 namespace test_error_id
 
-import "beagle.primitive" as primitive
-import "beagle.core" as core
+use beagle.primitive as primitive
+use beagle.core as core
 
 fn main() {
     let err = core/Error { kind: "TestError", message: "test", location: null }

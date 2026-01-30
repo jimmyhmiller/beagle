@@ -1,7 +1,6 @@
 namespace large_array_test
 
-import "raw-mutable-array" as arr
-
+use raw-mutable-array as arr
 fn main() {
     let capacity = 125000
     let a = arr/new-array(capacity)

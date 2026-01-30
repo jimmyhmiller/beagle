@@ -1,7 +1,7 @@
 namespace test_warning_debug
 
-import "beagle.primitive" as primitive
-import "beagle.core" as core
+use beagle.primitive as primitive
+use beagle.core as core
 
 fn main() {
     // Trigger a diagnostic by evaling code with non-exhaustive match

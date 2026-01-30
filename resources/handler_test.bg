@@ -1,6 +1,6 @@
 namespace handler_test
 
-import "beagle.effect" as effect
+use beagle.effect as effect
 
 // Test basic effect handlers with parameterized protocols
 

@@ -1,6 +1,6 @@
 namespace async_multi_effect_test
 
-import "beagle.async" as async
+use beagle.async as async
 
 // Test multiple sequential effects
 

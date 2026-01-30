@@ -1,6 +1,6 @@
 namespace test_stack_no_tco
 
-import "beagle.builtin" as builtin
+use beagle.builtin as builtin
 
 fn bottom() {
     println("About to throw error")

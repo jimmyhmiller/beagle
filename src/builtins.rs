@@ -7659,8 +7659,6 @@ impl Runtime {
         // Reflection builtins for docstrings and namespace introspection
         // ====================================================================
 
-
-
         // ============================================================================
         // Reflect API - Type-centric Introspection (beagle.reflect namespace)
         // ============================================================================
@@ -7824,11 +7822,11 @@ impl Runtime {
 
 // ============================================================================
 // Reflect API - Type Introspection
-// 
+//
 // DESIGN: Keep it simple. Type descriptors are just values. To get info:
 // 1. For primitives: type descriptors are Struct instances with name/id fields
 // 2. For user types: look up struct/enum definitions directly from runtime
-// 
+//
 // No complex type descriptor detection needed - just work with what type_of returns.
 // ============================================================================
 
@@ -7840,13 +7838,43 @@ fn get_type_info(
     value: usize,
 ) -> (String, String, Option<String>, Vec<String>, bool) {
     let tag = BuiltInTypes::get_kind(value);
-    
+
     match tag {
-        BuiltInTypes::Null => ("primitive".to_string(), "Null".to_string(), None, vec![], false),
-        BuiltInTypes::Int => ("primitive".to_string(), "Int".to_string(), None, vec![], false),
-        BuiltInTypes::Float => ("primitive".to_string(), "Float".to_string(), None, vec![], false),
-        BuiltInTypes::Bool => ("primitive".to_string(), "Bool".to_string(), None, vec![], false),
-        BuiltInTypes::String => ("primitive".to_string(), "String".to_string(), None, vec![], false),
+        BuiltInTypes::Null => (
+            "primitive".to_string(),
+            "Null".to_string(),
+            None,
+            vec![],
+            false,
+        ),
+        BuiltInTypes::Int => (
+            "primitive".to_string(),
+            "Int".to_string(),
+            None,
+            vec![],
+            false,
+        ),
+        BuiltInTypes::Float => (
+            "primitive".to_string(),
+            "Float".to_string(),
+            None,
+            vec![],
+            false,
+        ),
+        BuiltInTypes::Bool => (
+            "primitive".to_string(),
+            "Bool".to_string(),
+            None,
+            vec![],
+            false,
+        ),
+        BuiltInTypes::String => (
+            "primitive".to_string(),
+            "String".to_string(),
+            None,
+            vec![],
+            false,
+        ),
         BuiltInTypes::Function => {
             let fn_ptr = BuiltInTypes::untag(value) as *const u8;
             if let Some(func) = runtime.get_function_by_pointer(fn_ptr) {
@@ -7858,7 +7886,13 @@ fn get_type_info(
                     func.is_variadic,
                 )
             } else {
-                ("function".to_string(), "<unknown>".to_string(), None, vec![], false)
+                (
+                    "function".to_string(),
+                    "<unknown>".to_string(),
+                    None,
+                    vec![],
+                    false,
+                )
             }
         }
         BuiltInTypes::Closure => {
@@ -7875,32 +7909,92 @@ fn get_type_info(
                         func.is_variadic,
                     )
                 } else {
-                    ("function".to_string(), "<closure>".to_string(), None, vec![], false)
+                    (
+                        "function".to_string(),
+                        "<closure>".to_string(),
+                        None,
+                        vec![],
+                        false,
+                    )
                 }
             } else {
-                ("function".to_string(), "<closure>".to_string(), None, vec![], false)
+                (
+                    "function".to_string(),
+                    "<closure>".to_string(),
+                    None,
+                    vec![],
+                    false,
+                )
             }
         }
         BuiltInTypes::HeapObject => {
             let heap_obj = HeapObject::from_tagged(value);
             let type_id = heap_obj.get_type_id();
             let struct_id = heap_obj.get_struct_id();
-            
+
             // Check for built-in heap types (Array, Keyword, PersistentVector, etc.)
             match type_id {
-                1 => ("primitive".to_string(), "Array".to_string(), None, vec![], false),
-                2 => ("primitive".to_string(), "String".to_string(), None, vec![], false),
+                1 => (
+                    "primitive".to_string(),
+                    "Array".to_string(),
+                    None,
+                    vec![],
+                    false,
+                ),
+                2 => (
+                    "primitive".to_string(),
+                    "String".to_string(),
+                    None,
+                    vec![],
+                    false,
+                ),
                 3 => {
                     // Keyword - extract the actual keyword text (e.g., "struct" from :struct)
                     let keyword_bytes = heap_obj.get_keyword_bytes();
                     let keyword_text = unsafe { std::str::from_utf8_unchecked(keyword_bytes) };
-                    ("keyword".to_string(), keyword_text.to_string(), None, vec![], false)
+                    (
+                        "keyword".to_string(),
+                        keyword_text.to_string(),
+                        None,
+                        vec![],
+                        false,
+                    )
                 }
-                20 => ("primitive".to_string(), "PersistentVector".to_string(), None, vec![], false),
-                22 => ("primitive".to_string(), "PersistentMap".to_string(), None, vec![], false),
-                28 => ("primitive".to_string(), "PersistentSet".to_string(), None, vec![], false),
-                29 => ("primitive".to_string(), "MultiArityFunction".to_string(), None, vec![], false),
-                30 => ("primitive".to_string(), "Regex".to_string(), None, vec![], false),
+                20 => (
+                    "primitive".to_string(),
+                    "PersistentVector".to_string(),
+                    None,
+                    vec![],
+                    false,
+                ),
+                22 => (
+                    "primitive".to_string(),
+                    "PersistentMap".to_string(),
+                    None,
+                    vec![],
+                    false,
+                ),
+                28 => (
+                    "primitive".to_string(),
+                    "PersistentSet".to_string(),
+                    None,
+                    vec![],
+                    false,
+                ),
+                29 => (
+                    "primitive".to_string(),
+                    "MultiArityFunction".to_string(),
+                    None,
+                    vec![],
+                    false,
+                ),
+                30 => (
+                    "primitive".to_string(),
+                    "Regex".to_string(),
+                    None,
+                    vec![],
+                    false,
+                ),
                 _ => {
                     // Check if this is a type descriptor (Struct instance with id field at index 1)
                     // Type descriptors have struct_id=1 (base Struct type) and field 1 contains the type id:
@@ -7914,13 +8008,18 @@ fn get_type_info(
                             let name_ptr = heap_obj.get_field(0);
                             let full_name = runtime.get_string(stack_pointer, name_ptr);
                             // Extract local name (after / if present)
-                            let name = full_name.split('/').next_back().unwrap_or(&full_name).to_string();
+                            let name = full_name
+                                .split('/')
+                                .next_back()
+                                .unwrap_or(&full_name)
+                                .to_string();
                             let id_value = BuiltInTypes::untag_isize(id_field as isize);
                             // Determine kind: negative id = primitive, positive id = user struct
                             let kind = if id_value < 0 { "primitive" } else { "struct" };
                             // For user-defined structs, look up the struct definition to get fields
                             let fields = if id_value > 0 {
-                                runtime.get_struct_by_id(id_value as usize)
+                                runtime
+                                    .get_struct_by_id(id_value as usize)
                                     .map(|s| s.fields.clone())
                                     .unwrap_or_default()
                             } else {
@@ -7929,32 +8028,54 @@ fn get_type_info(
                             return (kind.to_string(), name, None, fields, false);
                         }
                     }
-                    
+
                     // Custom struct (type_id == 0) - look up the struct definition
                     if let Some(struct_def) = runtime.get_struct_by_id(struct_id) {
                         let name = struct_def.name.clone();
                         let local_name = name.split('/').next_back().unwrap_or(&name).to_string();
                         let doc = struct_def.docstring.clone();
                         let fields = struct_def.fields.clone();
-                        
+
                         // Check if this is actually an enum variant
                         if let Some(enum_name) = runtime.get_enum_name_for_variant(struct_id) {
                             // It's an enum variant - get the enum's info
                             if let Some(enum_def) = runtime.enums.get(&enum_name) {
-                                let variant_names: Vec<String> = enum_def.variants.iter()
+                                let variant_names: Vec<String> = enum_def
+                                    .variants
+                                    .iter()
                                     .map(|v| match v {
-                                        crate::runtime::EnumVariant::StructVariant { name, .. } => name.clone(),
-                                        crate::runtime::EnumVariant::StaticVariant { name } => name.clone(),
+                                        crate::runtime::EnumVariant::StructVariant {
+                                            name, ..
+                                        } => name.clone(),
+                                        crate::runtime::EnumVariant::StaticVariant { name } => {
+                                            name.clone()
+                                        }
                                     })
                                     .collect();
-                                let enum_local_name = enum_name.split('/').next_back().unwrap_or(&enum_name).to_string();
-                                return ("enum".to_string(), enum_local_name, enum_def.docstring.clone(), variant_names, false);
+                                let enum_local_name = enum_name
+                                    .split('/')
+                                    .next_back()
+                                    .unwrap_or(&enum_name)
+                                    .to_string();
+                                return (
+                                    "enum".to_string(),
+                                    enum_local_name,
+                                    enum_def.docstring.clone(),
+                                    variant_names,
+                                    false,
+                                );
                             }
                         }
-                        
+
                         ("struct".to_string(), local_name, doc, fields, false)
                     } else {
-                        ("struct".to_string(), "<unknown>".to_string(), None, vec![], false)
+                        (
+                            "struct".to_string(),
+                            "<unknown>".to_string(),
+                            None,
+                            vec![],
+                            false,
+                        )
                     }
                 }
             }
@@ -7964,11 +8085,7 @@ fn get_type_info(
 
 /// reflect/type-of(value) - Get the type descriptor for any value
 /// Uses runtime.type_of which returns proper type descriptors from beagle.core
-extern "C" fn reflect_type_of(
-    stack_pointer: usize,
-    frame_pointer: usize,
-    value: usize,
-) -> usize {
+extern "C" fn reflect_type_of(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     match runtime.type_of(stack_pointer, value) {
@@ -7979,55 +8096,47 @@ extern "C" fn reflect_type_of(
 
 /// reflect/kind(value) - Get the kind of type as a keyword
 /// Works on values OR type descriptors - both give the same answer
-extern "C" fn reflect_kind(
-    stack_pointer: usize,
-    frame_pointer: usize,
-    value: usize,
-) -> usize {
+extern "C" fn reflect_kind(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let (kind, _, _, _, _) = get_type_info(runtime, stack_pointer, value);
-    runtime.intern_keyword(stack_pointer, kind).unwrap_or(BuiltInTypes::null_value() as usize)
+    runtime
+        .intern_keyword(stack_pointer, kind)
+        .unwrap_or(BuiltInTypes::null_value() as usize)
 }
 
 /// reflect/name(value) - Get the type name as a string
 /// Works on values OR type descriptors
-extern "C" fn reflect_name(
-    stack_pointer: usize,
-    frame_pointer: usize,
-    value: usize,
-) -> usize {
+extern "C" fn reflect_name(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let (_, name, _, _, _) = get_type_info(runtime, stack_pointer, value);
-    runtime.allocate_string(stack_pointer, name).map(|s| s.into()).unwrap_or(BuiltInTypes::null_value() as usize)
+    runtime
+        .allocate_string(stack_pointer, name)
+        .map(|s| s.into())
+        .unwrap_or(BuiltInTypes::null_value() as usize)
 }
 
 /// reflect/doc(value) - Get the docstring for a type (or null)
-extern "C" fn reflect_doc(
-    stack_pointer: usize,
-    frame_pointer: usize,
-    value: usize,
-) -> usize {
+extern "C" fn reflect_doc(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let (_, _, doc, _, _) = get_type_info(runtime, stack_pointer, value);
     match doc {
-        Some(d) => runtime.allocate_string(stack_pointer, d).map(|s| s.into()).unwrap_or(BuiltInTypes::null_value() as usize),
+        Some(d) => runtime
+            .allocate_string(stack_pointer, d)
+            .map(|s| s.into())
+            .unwrap_or(BuiltInTypes::null_value() as usize),
         None => BuiltInTypes::null_value() as usize,
     }
 }
 
 /// reflect/fields(value) - Get field names for struct types
-extern "C" fn reflect_fields(
-    stack_pointer: usize,
-    frame_pointer: usize,
-    value: usize,
-) -> usize {
+extern "C" fn reflect_fields(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let (_, _, _, fields, _) = get_type_info(runtime, stack_pointer, value);
-    
+
     use crate::collections::PersistentVec;
     match PersistentVec::empty(runtime, stack_pointer) {
         Ok(vec_handle) => {
@@ -8050,21 +8159,18 @@ extern "C" fn reflect_fields(
 }
 
 /// reflect/variants(value) - Get variant names for enum types
-extern "C" fn reflect_variants(
-    stack_pointer: usize,
-    frame_pointer: usize,
-    value: usize,
-) -> usize {
+extern "C" fn reflect_variants(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let (_, _, _, variants, _) = get_type_info(runtime, stack_pointer, value);
-    
+
     use crate::collections::PersistentVec;
     match PersistentVec::empty(runtime, stack_pointer) {
         Ok(vec_handle) => {
             let mut current_vec = vec_handle.as_tagged();
             for variant_name in variants.iter() {
-                let variant_str = match runtime.allocate_string(stack_pointer, variant_name.clone()) {
+                let variant_str = match runtime.allocate_string(stack_pointer, variant_name.clone())
+                {
                     Ok(s) => s.into(),
                     Err(_) => return BuiltInTypes::null_value() as usize,
                 };
@@ -8081,15 +8187,11 @@ extern "C" fn reflect_variants(
 }
 
 /// reflect/args(value) - Get argument names for function types
-extern "C" fn reflect_args(
-    stack_pointer: usize,
-    frame_pointer: usize,
-    value: usize,
-) -> usize {
+extern "C" fn reflect_args(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let (_, _, _, args, _) = get_type_info(runtime, stack_pointer, value);
-    
+
     use crate::collections::PersistentVec;
     match PersistentVec::empty(runtime, stack_pointer) {
         Ok(vec_handle) => {
@@ -8112,11 +8214,7 @@ extern "C" fn reflect_args(
 }
 
 /// reflect/variadic?(value) - Check if function is variadic
-extern "C" fn reflect_variadic(
-    stack_pointer: usize,
-    frame_pointer: usize,
-    value: usize,
-) -> usize {
+extern "C" fn reflect_variadic(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let (_, _, _, _, is_variadic) = get_type_info(runtime, stack_pointer, value);
@@ -8124,61 +8222,112 @@ extern "C" fn reflect_variadic(
 }
 
 /// reflect/info(value) - Get complete type info as a map
-extern "C" fn reflect_info(
-    stack_pointer: usize,
-    frame_pointer: usize,
-    value: usize,
-) -> usize {
+extern "C" fn reflect_info(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let (kind, name, doc, _extra, is_variadic) = get_type_info(runtime, stack_pointer, value);
-    
+
     use crate::collections::PersistentMap;
-    
+
     let result = (|| -> Result<usize, ()> {
         let mut map = PersistentMap::empty(runtime, stack_pointer).map_err(|_| ())?;
 
         // Add :name
-        let name_key = runtime.intern_keyword(stack_pointer, "name".to_string()).map_err(|_| ())?;
-        let name_str = runtime.allocate_string(stack_pointer, name).map_err(|_| ())?;
-        map = PersistentMap::assoc(runtime, stack_pointer, map.as_tagged(), name_key, name_str.into()).map_err(|_| ())?;
+        let name_key = runtime
+            .intern_keyword(stack_pointer, "name".to_string())
+            .map_err(|_| ())?;
+        let name_str = runtime
+            .allocate_string(stack_pointer, name)
+            .map_err(|_| ())?;
+        map = PersistentMap::assoc(
+            runtime,
+            stack_pointer,
+            map.as_tagged(),
+            name_key,
+            name_str.into(),
+        )
+        .map_err(|_| ())?;
 
         // Add :kind
-        let kind_key = runtime.intern_keyword(stack_pointer, "kind".to_string()).map_err(|_| ())?;
-        let kind_kw = runtime.intern_keyword(stack_pointer, kind.clone()).map_err(|_| ())?;
-        map = PersistentMap::assoc(runtime, stack_pointer, map.as_tagged(), kind_key, kind_kw).map_err(|_| ())?;
+        let kind_key = runtime
+            .intern_keyword(stack_pointer, "kind".to_string())
+            .map_err(|_| ())?;
+        let kind_kw = runtime
+            .intern_keyword(stack_pointer, kind.clone())
+            .map_err(|_| ())?;
+        map = PersistentMap::assoc(runtime, stack_pointer, map.as_tagged(), kind_key, kind_kw)
+            .map_err(|_| ())?;
 
         // Add :doc if present
         if let Some(d) = doc {
-            let doc_key = runtime.intern_keyword(stack_pointer, "doc".to_string()).map_err(|_| ())?;
+            let doc_key = runtime
+                .intern_keyword(stack_pointer, "doc".to_string())
+                .map_err(|_| ())?;
             let doc_str = runtime.allocate_string(stack_pointer, d).map_err(|_| ())?;
-            map = PersistentMap::assoc(runtime, stack_pointer, map.as_tagged(), doc_key, doc_str.into()).map_err(|_| ())?;
+            map = PersistentMap::assoc(
+                runtime,
+                stack_pointer,
+                map.as_tagged(),
+                doc_key,
+                doc_str.into(),
+            )
+            .map_err(|_| ())?;
         }
 
         // Add kind-specific fields
         if kind == "struct" || kind == "enum" {
             // Add :fields as vector
-            let fields_key = runtime.intern_keyword(stack_pointer, "fields".to_string()).map_err(|_| ())?;
+            let fields_key = runtime
+                .intern_keyword(stack_pointer, "fields".to_string())
+                .map_err(|_| ())?;
             let fields_val = reflect_fields(stack_pointer, frame_pointer, value);
-            map = PersistentMap::assoc(runtime, stack_pointer, map.as_tagged(), fields_key, fields_val).map_err(|_| ())?;
+            map = PersistentMap::assoc(
+                runtime,
+                stack_pointer,
+                map.as_tagged(),
+                fields_key,
+                fields_val,
+            )
+            .map_err(|_| ())?;
         }
 
         if kind == "enum" {
             // Add :variants as vector
-            let variants_key = runtime.intern_keyword(stack_pointer, "variants".to_string()).map_err(|_| ())?;
+            let variants_key = runtime
+                .intern_keyword(stack_pointer, "variants".to_string())
+                .map_err(|_| ())?;
             let variants_val = reflect_variants(stack_pointer, frame_pointer, value);
-            map = PersistentMap::assoc(runtime, stack_pointer, map.as_tagged(), variants_key, variants_val).map_err(|_| ())?;
+            map = PersistentMap::assoc(
+                runtime,
+                stack_pointer,
+                map.as_tagged(),
+                variants_key,
+                variants_val,
+            )
+            .map_err(|_| ())?;
         }
 
         if kind == "function" {
             // Add :args and :variadic?
-            let args_key = runtime.intern_keyword(stack_pointer, "args".to_string()).map_err(|_| ())?;
+            let args_key = runtime
+                .intern_keyword(stack_pointer, "args".to_string())
+                .map_err(|_| ())?;
             let args_val = reflect_args(stack_pointer, frame_pointer, value);
-            map = PersistentMap::assoc(runtime, stack_pointer, map.as_tagged(), args_key, args_val).map_err(|_| ())?;
+            map = PersistentMap::assoc(runtime, stack_pointer, map.as_tagged(), args_key, args_val)
+                .map_err(|_| ())?;
 
-            let variadic_key = runtime.intern_keyword(stack_pointer, "variadic?".to_string()).map_err(|_| ())?;
+            let variadic_key = runtime
+                .intern_keyword(stack_pointer, "variadic?".to_string())
+                .map_err(|_| ())?;
             let variadic_val = BuiltInTypes::construct_boolean(is_variadic) as usize;
-            map = PersistentMap::assoc(runtime, stack_pointer, map.as_tagged(), variadic_key, variadic_val).map_err(|_| ())?;
+            map = PersistentMap::assoc(
+                runtime,
+                stack_pointer,
+                map.as_tagged(),
+                variadic_key,
+                variadic_val,
+            )
+            .map_err(|_| ())?;
         }
 
         Ok(map.as_tagged())
@@ -8188,7 +8337,11 @@ extern "C" fn reflect_info(
 }
 
 /// reflect/struct?(value) - Check if value is a struct instance
-extern "C" fn reflect_is_struct(_stack_pointer: usize, _frame_pointer: usize, value: usize) -> usize {
+extern "C" fn reflect_is_struct(
+    _stack_pointer: usize,
+    _frame_pointer: usize,
+    value: usize,
+) -> usize {
     // A struct is a HeapObject with type_id == 0 (custom struct) and NOT an enum variant
     if !matches!(BuiltInTypes::get_kind(value), BuiltInTypes::HeapObject) {
         return BuiltInTypes::false_value() as usize;
@@ -8218,7 +8371,11 @@ extern "C" fn reflect_is_enum(_stack_pointer: usize, _frame_pointer: usize, valu
 }
 
 /// reflect/function?(value) - Check if value is a function
-extern "C" fn reflect_is_function(_stack_pointer: usize, _frame_pointer: usize, value: usize) -> usize {
+extern "C" fn reflect_is_function(
+    _stack_pointer: usize,
+    _frame_pointer: usize,
+    value: usize,
+) -> usize {
     let kind = BuiltInTypes::get_kind(value);
     let is_fn = matches!(kind, BuiltInTypes::Function | BuiltInTypes::Closure);
     if !is_fn && matches!(kind, BuiltInTypes::HeapObject) {
@@ -8234,7 +8391,11 @@ extern "C" fn reflect_is_function(_stack_pointer: usize, _frame_pointer: usize, 
 }
 
 /// reflect/primitive?(value) - Check if value is a primitive type instance
-extern "C" fn reflect_is_primitive(_stack_pointer: usize, _frame_pointer: usize, value: usize) -> usize {
+extern "C" fn reflect_is_primitive(
+    _stack_pointer: usize,
+    _frame_pointer: usize,
+    value: usize,
+) -> usize {
     let kind = BuiltInTypes::get_kind(value);
     let is_primitive = matches!(
         kind,

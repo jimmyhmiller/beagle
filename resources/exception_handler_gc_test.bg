@@ -1,6 +1,6 @@
 namespace exception_handler_gc_test
 
-import "beagle.core" as core
+use beagle.core as core
 
 fn main() {
     let captured = "captured value"

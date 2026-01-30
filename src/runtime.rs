@@ -4,12 +4,12 @@ use regex::Regex;
 use std::{
     collections::HashMap,
     error::Error,
-    ffi::{c_void, CString},
+    ffi::{CString, c_void},
     io::Write,
     slice::{self},
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Condvar, Mutex, TryLockError,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle, Thread, ThreadId},
     time::Duration,
@@ -17,17 +17,17 @@ use std::{
 };
 
 use crate::{
+    Alloc, CommandLineArguments, Data, Message,
     builtins::{__pause, debugger},
     compiler::{
-        blocking_channel, BlockingSender, CompilerMessage, CompilerResponse, CompilerThread,
+        BlockingSender, CompilerMessage, CompilerResponse, CompilerThread, blocking_channel,
     },
     gc::{
-        usdt_probes, AllocateAction, Allocator, AllocatorOptions, StackMap, StackMapDetails,
-        STACK_SIZE,
+        AllocateAction, Allocator, AllocatorOptions, STACK_SIZE, StackMap, StackMapDetails,
+        usdt_probes,
     },
     ir::StringValue,
     types::{BuiltInTypes, Header, HeapObject, Tagged},
-    Alloc, CommandLineArguments, Data, Message,
 };
 
 use crate::collections::{

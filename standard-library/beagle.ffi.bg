@@ -1,6 +1,6 @@
 namespace beagle.ffi
 
-import "beagle.builtin" as builtin
+use beagle.builtin as builtin
 
 
 // Probably should move this stuff to an ffi namespace

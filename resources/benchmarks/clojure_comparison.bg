@@ -1,6 +1,6 @@
 namespace clojure-comparison
-import "beagle.core" as core
-import "beagle.collections" as coll
+use beagle.core as core
+use beagle.collections as coll
 
 // ============================================================================
 // Utility functions
