@@ -440,20 +440,12 @@ fn handle-read-file(path) {
 }
 
 fn handle-write-file(path, content) {
-    let file-result = io/open(path, "w")
-    match file-result {
-        io/Result.Ok { value } => {
-            let file = value
-            let write-result = io/write-string(file, content)
-            io/close(file)
-            match write-result {
-                io/Result.Ok { value } => async-ok(value),
-                io/Result.Err { code, message } => async-err(code, message)
-            }
-        },
-        io/Result.Err { code, message } => {
-            async-err(code, message)
-        }
+    // Use the built-in write-full-file which is faster
+    let result = core/write-full-file(path, content)
+    if result >= 0 {
+        async-ok(result)
+    } else {
+        async-err(result, "Failed to write file: " ++ path)
     }
 }
 
