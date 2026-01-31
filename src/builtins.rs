@@ -4953,6 +4953,25 @@ extern "C" fn read_full_file(
     string.unwrap().into()
 }
 
+/// Write string content directly to a file (fast path)
+/// Returns the number of bytes written, or -1 on error
+extern "C" fn write_full_file(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    file_name: usize,
+    content: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let file_name = runtime.get_string(stack_pointer, file_name);
+    let content_str = runtime.get_string(stack_pointer, content);
+
+    match std::fs::write(&file_name, &content_str) {
+        Ok(()) => BuiltInTypes::construct_int(content_str.len() as isize) as usize,
+        Err(_) => BuiltInTypes::construct_int(-1) as usize,
+    }
+}
+
 // ============================================================================
 // Filesystem builtins for async I/O operations
 // ============================================================================
@@ -8878,6 +8897,15 @@ impl Runtime {
             true,
             true,
             3,
+        )?;
+
+        // write_full_file: write string to file directly (fast path)
+        self.add_builtin_function_with_fp(
+            "beagle.core/write-full-file",
+            write_full_file as *const u8,
+            true,
+            true,
+            4, // stack_pointer, frame_pointer, file_name, content
         )?;
 
         // ============================================================================

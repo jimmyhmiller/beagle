@@ -2278,7 +2278,10 @@ impl Parser {
                         token_range: TokenRange::new(position, position),
                     }
                 };
-                self.data_delimiter()?;
+                // Only require delimiter if there are more variants (not at closing brace)
+                if !self.is_close_curly() && self.peek_next_non_whitespace() != Token::CloseCurly {
+                    self.data_delimiter()?;
+                }
                 Ok(result)
             }
             _ => Err(ParseError::UnexpectedToken {
