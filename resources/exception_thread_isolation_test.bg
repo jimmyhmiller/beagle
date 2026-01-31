@@ -1,5 +1,4 @@
 namespace exception_thread_isolation_test
-// thread-safe
 
 fn main() {
     let result1 = atom("unset")

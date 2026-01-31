@@ -4,6 +4,7 @@ use beagle.io as io
 use beagle.ffi as ffi
 use beagle.builtin as builtin
 use beagle.effect as effect
+use beagle.core as core
 
 // ============================================================================
 // FFI Wrappers for File System Builtins
@@ -11,27 +12,27 @@ use beagle.effect as effect
 // These wrap the Rust builtins for file system operations
 
 fn unlink(path) {
-    builtin/unlink(path)
+    core/fs-unlink(path)
 }
 
 fn access(path, mode) {
-    builtin/access(path, mode)
+    core/fs-access(path, mode)
 }
 
 fn mkdir(path, mode) {
-    builtin/mkdir(path, mode)
+    core/fs-mkdir(path, mode)
 }
 
 fn rmdir(path) {
-    builtin/rmdir(path)
+    core/fs-rmdir(path)
 }
 
 fn readdir(path) {
-    builtin/readdir(path)
+    core/fs-readdir(path)
 }
 
 fn file-size-raw(path) {
-    builtin/file-size(path)
+    core/fs-file-size(path)
 }
 
 // ============================================================================
@@ -40,6 +41,188 @@ fn file-size-raw(path) {
 // This module provides an effect-based async system for file I/O operations.
 // The Async effect allows code to be written in a direct style while
 // supporting different execution strategies (blocking, event-loop, etc.)
+
+// ============================================================================
+// Future Data Types
+// ============================================================================
+// Futures represent values that may not be available yet. They are created
+// by async() and resolved by the async runtime.
+
+enum FutureState {
+    Pending {},
+    Running {},
+    Resolved { value },
+    Rejected { error },
+    Cancelled {}
+}
+
+// Future struct - holds state as an atom for thread-safe access
+// The state_atom contains a FutureState value
+struct Future {
+    state_atom
+}
+
+// Helper to create a future with initial state
+fn make-future(initial_state) {
+    Future { state_atom: atom(initial_state) }
+}
+
+// Helper to get current state of a future
+fn future-state(future) {
+    deref(future.state_atom)
+}
+
+// Helper to resolve a future
+fn resolve-future!(future, value) {
+    reset!(future.state_atom, FutureState.Resolved { value: value })
+    // Notify any threads waiting on futures
+    core/future-notify()
+}
+
+// Helper to reject a future
+fn reject-future!(future, error) {
+    reset!(future.state_atom, FutureState.Rejected { error: error })
+    // Notify any threads waiting on futures
+    core/future-notify()
+}
+
+// Helper to cancel a future
+fn cancel-future!(future) {
+    reset!(future.state_atom, FutureState.Cancelled {})
+    // Notify any threads waiting on futures
+    core/future-notify()
+}
+
+// Check if a future is cancelled
+fn future-cancelled?(future) {
+    let state = future-state(future)
+    match state {
+        FutureState.Cancelled {} => true,
+        _ => false
+    }
+}
+
+// ============================================================================
+// Cancellation Token
+// ============================================================================
+// CancellationToken provides a cooperative cancellation mechanism.
+// Tasks check the token periodically and exit early if cancelled.
+
+struct CancellationToken {
+    cancelled_atom
+}
+
+// Create a new cancellation token
+fn make-cancellation-token() {
+    CancellationToken { cancelled_atom: atom(false) }
+}
+
+// Cancel a token - all tasks watching this token should stop
+fn cancel!(token) {
+    reset!(token.cancelled_atom, true)
+    // Notify waiters so they can check cancellation
+    core/future-notify()
+}
+
+// Check if a token has been cancelled
+fn cancelled?(token) {
+    deref(token.cancelled_atom)
+}
+
+// ============================================================================
+// Task Scope for Structured Concurrency
+// ============================================================================
+// TaskScope ensures that all spawned tasks complete before the scope exits.
+// If the scope exits early (error or cancellation), all child tasks are cancelled.
+
+struct TaskScope {
+    token
+    children_atom
+}
+
+// Create a new task scope
+fn make-scope() {
+    TaskScope {
+        token: make-cancellation-token()
+        children_atom: atom([])
+    }
+}
+
+// Add a child future to a scope
+fn scope-add-child!(scope, future) {
+    let children = deref(scope.children_atom)
+    reset!(scope.children_atom, push(children, future))
+}
+
+// Get all children from a scope
+fn scope-children(scope) {
+    deref(scope.children_atom)
+}
+
+// Cancel all children in a scope
+fn scope-cancel-all!(scope) {
+    cancel!(scope.token)
+    let children = scope-children(scope)
+    let mut s = seq(children)
+    while s != null {
+        let child = first(s)
+        cancel-future!(child)
+        s = next(s)
+    }
+}
+
+// Wait for all children to complete (or be cancelled)
+fn scope-await-all-children(scope) {
+    let children = scope-children(scope)
+    let mut s = seq(children)
+    while s != null {
+        let child = first(s)
+        // Wait for child to reach a terminal state
+        loop {
+            let state = future-state(child)
+            match state {
+                FutureState.Resolved { value } => break(null),
+                FutureState.Rejected { error } => break(null),
+                FutureState.Cancelled {} => break(null),
+                _ => {
+                    // Wait a bit and check again
+                    core/future-wait(10)
+                }
+            }
+        }
+        s = next(s)
+    }
+}
+
+// Run a block with a scope - ensures cleanup on exit
+// Usage: with-scope(fn(scope) { ... spawn tasks using scope ... })
+fn with-scope(body) {
+    let scope = make-scope()
+    let result = try {
+        let r = body(scope)
+        // Normal exit - wait for children
+        scope-await-all-children(scope)
+        r
+    } catch (e) {
+        // On error, cancel all children and wait for cleanup
+        scope-cancel-all!(scope)
+        scope-await-all-children(scope)
+        throw(e)
+    }
+    result
+}
+
+// Result types for await-first
+enum RaceResult {
+    Ok { value, index },
+    AllFailed { errors }
+}
+
+// Result types for await-timeout
+enum TimeoutResult {
+    Ok { value },
+    TimedOut {}
+}
 
 // ============================================================================
 // Async Effect Enum
@@ -76,8 +259,15 @@ enum Async {
     // Timing
     Sleep { ms },
 
-    // Utility
-    Spawn { thunk }
+    // Future operations
+    Spawn { thunk },
+    Await { future },
+    AwaitAll { futures },
+    AwaitFirst { futures },
+
+    // Cancellation operations
+    SpawnWithToken { thunk, token },
+    Cancel { future }
 }
 
 // Handler is imported from beagle.effect
@@ -185,7 +375,22 @@ extend BlockingHandler with effect/Handler(Async) {
                 handle-sleep(ms)
             },
             Async.Spawn { thunk } => {
-                handle-spawn(thunk)
+                handle-spawn-blocking(thunk)
+            },
+            Async.Await { future } => {
+                handle-await-blocking(future)
+            },
+            Async.AwaitAll { futures } => {
+                handle-await-all-blocking(futures)
+            },
+            Async.AwaitFirst { futures } => {
+                handle-await-first-blocking(futures)
+            },
+            Async.SpawnWithToken { thunk, token } => {
+                handle-spawn-with-token-blocking(thunk, token)
+            },
+            Async.Cancel { future } => {
+                handle-cancel(future)
             }
         }
         resume(result)
@@ -365,15 +570,969 @@ fn handle-flush(file) {
 }
 
 fn handle-sleep(ms) {
-    // Use the builtin sleep, not the effect-based one
-    builtin/sleep-ms(ms)
+    // Use the builtin sleep from beagle.core
+    core/sleep(ms)
     async-ok(null)
 }
 
-fn handle-spawn(thunk) {
-    // For blocking handler, just run the thunk synchronously
-    let result = thunk()
-    async-ok(result)
+// ============================================================================
+// Blocking Handler Implementations for Futures
+// ============================================================================
+// For the blocking handler, futures execute synchronously (eager but blocking).
+
+fn handle-spawn-blocking(thunk) {
+    // Create a future and immediately execute the thunk synchronously
+    let future = make-future(FutureState.Running {})
+    try {
+        let result = thunk()
+        resolve-future!(future, result)
+    } catch (e) {
+        reject-future!(future, e)
+    }
+    future
+}
+
+fn handle-await-blocking(future) {
+    // For blocking handler, futures are already resolved when we get here
+    let state = future-state(future)
+    match state {
+        FutureState.Resolved { value } => value,
+        FutureState.Rejected { error } => {
+            throw(error)
+        },
+        FutureState.Cancelled {} => {
+            throw("Future was cancelled")
+        },
+        FutureState.Pending {} => {
+            throw("Attempted to await a pending future in blocking mode")
+        },
+        FutureState.Running {} => {
+            throw("Attempted to await a running future in blocking mode")
+        }
+    }
+}
+
+fn handle-await-all-blocking(futures) {
+    let mut results = []
+    let mut s = seq(futures)
+    while s != null {
+        let f = first(s)
+        let value = handle-await-blocking(f)
+        results = push(results, value)
+        s = next(s)
+    }
+    results
+}
+
+fn handle-await-first-blocking(futures) {
+    // In blocking mode, all futures are already resolved
+    // Just return the first resolved one's result
+    let mut s = seq(futures)
+    let mut index = 0
+    let mut result = null
+    let mut found = false
+    while s != null && found == false {
+        let f = first(s)
+        let state = future-state(f)
+        match state {
+            FutureState.Resolved { value } => {
+                result = RaceResult.Ok { value: value, index: index }
+                found = true
+            },
+            FutureState.Rejected { error } => {
+                // Skip rejected, try next
+            },
+            _ => {}
+        }
+        index = index + 1
+        s = next(s)
+    }
+    if found {
+        result
+    } else {
+        // All failed - collect errors
+        let mut errors = []
+        let mut s2 = seq(futures)
+        while s2 != null {
+            let f = first(s2)
+            let state = future-state(f)
+            match state {
+                FutureState.Rejected { error } => {
+                    errors = push(errors, error)
+                },
+                FutureState.Cancelled {} => {
+                    errors = push(errors, "Cancelled")
+                },
+                FutureState.Pending {} => {
+                    errors = push(errors, "Pending")
+                },
+                FutureState.Running {} => {
+                    errors = push(errors, "Running")
+                },
+                FutureState.Resolved { value } => {
+                    // Shouldn't happen if we didn't find a resolved one above
+                    errors = push(errors, "Unexpected resolved state")
+                }
+            }
+            s2 = next(s2)
+        }
+        RaceResult.AllFailed { errors: errors }
+    }
+}
+
+// Spawn with cancellation token (blocking version)
+fn handle-spawn-with-token-blocking(thunk, token) {
+    // Create a future and immediately execute the thunk synchronously
+    let future = make-future(FutureState.Running {})
+    try {
+        // Check if already cancelled before starting
+        if cancelled?(token) {
+            cancel-future!(future)
+        } else {
+            let result = thunk()
+            // Check again after completion (cooperative cancellation)
+            if cancelled?(token) {
+                cancel-future!(future)
+            } else {
+                resolve-future!(future, result)
+            }
+        }
+    } catch (e) {
+        reject-future!(future, e)
+    }
+    future
+}
+
+// Cancel a future
+fn handle-cancel(future) {
+    cancel-future!(future)
+    null
+}
+
+// ============================================================================
+// Threaded Async Handler
+// ============================================================================
+// This handler spawns actual threads for parallel execution.
+
+struct ThreadedAsyncHandler {}
+
+extend ThreadedAsyncHandler with effect/Handler(Async) {
+    fn handle(self, op, resume) {
+        let result = match op {
+            Async.ReadFile { path } => {
+                handle-read-file(path)
+            },
+            Async.WriteFile { path, content } => {
+                handle-write-file(path, content)
+            },
+            Async.AppendFile { path, content } => {
+                handle-append-file(path, content)
+            },
+            Async.DeleteFile { path } => {
+                handle-delete-file(path)
+            },
+            Async.FileExists { path } => {
+                handle-file-exists(path)
+            },
+            Async.ReadDir { path } => {
+                handle-read-dir(path)
+            },
+            Async.CreateDir { path } => {
+                handle-create-dir(path)
+            },
+            Async.CreateDirAll { path } => {
+                handle-create-dir-all(path)
+            },
+            Async.RemoveDir { path } => {
+                handle-remove-dir(path)
+            },
+            Async.RemoveDirAll { path } => {
+                handle-remove-dir-all(path)
+            },
+            Async.FileSize { path } => {
+                handle-file-size(path)
+            },
+            Async.Open { path, mode } => {
+                handle-open(path, mode)
+            },
+            Async.Close { file } => {
+                handle-close(file)
+            },
+            Async.Read { file, n } => {
+                handle-read(file, n)
+            },
+            Async.Write { file, content } => {
+                handle-write(file, content)
+            },
+            Async.ReadLine { file } => {
+                handle-read-line(file)
+            },
+            Async.Flush { file } => {
+                handle-flush(file)
+            },
+            Async.Sleep { ms } => {
+                handle-sleep(ms)
+            },
+            Async.Spawn { thunk } => {
+                handle-spawn-threaded(thunk)
+            },
+            Async.Await { future } => {
+                handle-await-threaded(future)
+            },
+            Async.AwaitAll { futures } => {
+                handle-await-all-threaded(futures)
+            },
+            Async.AwaitFirst { futures } => {
+                handle-await-first-threaded(futures)
+            },
+            Async.SpawnWithToken { thunk, token } => {
+                handle-spawn-with-token-threaded(thunk, token)
+            },
+            Async.Cancel { future } => {
+                handle-cancel(future)
+            }
+        }
+        resume(result)
+    }
+}
+
+// Spawn a thread to execute the thunk
+fn handle-spawn-threaded(thunk) {
+    let future = make-future(FutureState.Running {})
+    // Capture the atom for the closure
+    let state_atom = future.state_atom
+
+    // Spawn a thread that executes the thunk and updates the future
+    thread(fn() {
+        try {
+            let result = thunk()
+            reset!(state_atom, FutureState.Resolved { value: result })
+        } catch (e) {
+            reset!(state_atom, FutureState.Rejected { error: e })
+        }
+    })
+
+    future
+}
+
+// Spawn a thread with cancellation token
+fn handle-spawn-with-token-threaded(thunk, token) {
+    let future = make-future(FutureState.Running {})
+    let state_atom = future.state_atom
+    let cancelled_atom = token.cancelled_atom
+
+    // Spawn a thread that checks cancellation periodically
+    thread(fn() {
+        // Check if cancelled before starting
+        if deref(cancelled_atom) {
+            reset!(state_atom, FutureState.Cancelled {})
+            core/future-notify()
+        } else {
+            try {
+                let result = thunk()
+                // Check if cancelled after completion
+                if deref(cancelled_atom) {
+                    reset!(state_atom, FutureState.Cancelled {})
+                } else {
+                    reset!(state_atom, FutureState.Resolved { value: result })
+                }
+            } catch (e) {
+                reset!(state_atom, FutureState.Rejected { error: e })
+            }
+            core/future-notify()
+        }
+    })
+
+    future
+}
+
+// Wait for a future by polling its state
+fn handle-await-threaded(future) {
+    poll-until-resolved(future)
+}
+
+// Poll a future until it resolves, using efficient condition variable waiting
+fn poll-until-resolved(future) {
+    let wait_timeout = 50  // Wait up to 50ms per iteration for notifications
+    loop {
+        let state = future-state(future)
+        match state {
+            FutureState.Resolved { value } => {
+                break(value)
+            },
+            FutureState.Rejected { error } => {
+                throw(error)
+            },
+            FutureState.Cancelled {} => {
+                throw("Future was cancelled")
+            },
+            _ => {
+                // Wait for notification that a future completed (or timeout)
+                // This is more efficient than pure sleep because we wake immediately
+                // when any future completes instead of waiting the full sleep time.
+                core/future-wait(wait_timeout)
+            }
+        }
+    }
+}
+
+// Wait for all futures (they run in parallel already)
+fn handle-await-all-threaded(futures) {
+    let mut results = []
+    let mut s = seq(futures)
+    while s != null {
+        let f = first(s)
+        let value = handle-await-threaded(f)
+        results = push(results, value)
+        s = next(s)
+    }
+    results
+}
+
+// Wait for first future to resolve
+fn handle-await-first-threaded(futures) {
+    let len = length(futures)
+    if len == 0 {
+        RaceResult.AllFailed { errors: [] }
+    } else {
+        let wait_timeout = 50  // Wait up to 50ms for notifications
+
+        loop {
+            // Check all futures for resolved
+            let mut i = 0
+            let mut found_resolved = false
+            let mut resolved_value = null
+            let mut resolved_index = 0
+            while i < len && found_resolved == false {
+                let f = get(futures, i)
+                let state = future-state(f)
+                match state {
+                    FutureState.Resolved { value } => {
+                        found_resolved = true
+                        resolved_value = value
+                        resolved_index = i
+                    },
+                    _ => {}
+                }
+                i = i + 1
+            }
+
+            if found_resolved {
+                break(RaceResult.Ok { value: resolved_value, index: resolved_index })
+            }
+
+            // Check if all are rejected/failed/cancelled
+            let mut all_done = true
+            let mut all_failed = true
+            let mut j = 0
+            while j < len {
+                let f = get(futures, j)
+                let state = future-state(f)
+                match state {
+                    FutureState.Running {} => {
+                        all_done = false
+                        all_failed = false
+                    },
+                    FutureState.Pending {} => {
+                        all_done = false
+                        all_failed = false
+                    },
+                    FutureState.Resolved { value } => {
+                        all_failed = false
+                    },
+                    FutureState.Rejected { error } => {},
+                    FutureState.Cancelled {} => {}
+                }
+                j = j + 1
+            }
+
+            if all_done && all_failed {
+                // Collect all errors
+                let mut errors = []
+                let mut k = 0
+                while k < len {
+                    let f = get(futures, k)
+                    let state = future-state(f)
+                    match state {
+                        FutureState.Rejected { error } => {
+                            errors = push(errors, error)
+                        },
+                        FutureState.Cancelled {} => {
+                            errors = push(errors, "Cancelled")
+                        },
+                        FutureState.Pending {} => {},
+                        FutureState.Running {} => {},
+                        FutureState.Resolved { value } => {}
+                    }
+                    k = k + 1
+                }
+                break(RaceResult.AllFailed { errors: errors })
+            }
+
+            // Wait for notification or timeout
+            core/future-wait(wait_timeout)
+        }
+    }
+}
+
+// ============================================================================
+// EventLoopHandler - mio-based async handler
+// ============================================================================
+// This handler uses the mio-based event loop for efficient async I/O.
+// It uses non-blocking operations with the OS event notification system
+// instead of spawning threads for each operation.
+
+struct EventLoopHandler {
+    event_loop_id
+}
+
+// Create an EventLoopHandler with a given thread pool size for file I/O
+fn create-event-loop-handler(pool_size) {
+    let loop_id = core/event-loop-create(pool_size)
+    if loop_id < 0 {
+        throw("Failed to create event loop")
+    }
+    EventLoopHandler { event_loop_id: loop_id }
+}
+
+// Create an EventLoopHandler with default pool size (based on CPU count)
+fn create-event-loop-handler-default() {
+    let cpu_count = core/get-cpu-count()
+    create-event-loop-handler(cpu_count)
+}
+
+extend EventLoopHandler with effect/Handler(Async) {
+    fn handle(self, op, resume) {
+        let loop_id = self.event_loop_id
+        let result = match op {
+            // File operations - use async thread pool I/O
+            Async.ReadFile { path } => {
+                handle-read-file-async(loop_id, path)
+            },
+            Async.WriteFile { path, content } => {
+                handle-write-file-async(loop_id, path, content)
+            },
+            Async.AppendFile { path, content } => {
+                // Append not yet implemented in async - fall back to blocking
+                handle-append-file(path, content)
+            },
+            Async.DeleteFile { path } => {
+                handle-delete-file-async(loop_id, path)
+            },
+            Async.FileExists { path } => {
+                // FileExists uses stat internally - fall back for now
+                handle-file-exists(path)
+            },
+            Async.ReadDir { path } => {
+                handle-read-dir-async(loop_id, path)
+            },
+            Async.CreateDir { path } => {
+                // Not yet implemented in async - fall back to blocking
+                handle-create-dir(path)
+            },
+            Async.CreateDirAll { path } => {
+                // Not yet implemented in async - fall back to blocking
+                handle-create-dir-all(path)
+            },
+            Async.RemoveDir { path } => {
+                // Not yet implemented in async - fall back to blocking
+                handle-remove-dir(path)
+            },
+            Async.RemoveDirAll { path } => {
+                // Not yet implemented in async - fall back to blocking
+                handle-remove-dir-all(path)
+            },
+            Async.FileSize { path } => {
+                handle-file-size-async(loop_id, path)
+            },
+            Async.Open { path, mode } => {
+                // Low-level file handle - fall back to blocking
+                handle-open(path, mode)
+            },
+            Async.Close { file } => {
+                handle-close(file)
+            },
+            Async.Read { file, n } => {
+                handle-read(file, n)
+            },
+            Async.Write { file, content } => {
+                handle-write(file, content)
+            },
+            Async.ReadLine { file } => {
+                handle-read-line(file)
+            },
+            Async.Flush { file } => {
+                handle-flush(file)
+            },
+            // Sleep uses event loop timers
+            Async.Sleep { ms } => {
+                handle-sleep-event-loop(loop_id, ms)
+            },
+            // Spawn creates a future but doesn't use threads
+            Async.Spawn { thunk } => {
+                handle-spawn-event-loop(loop_id, thunk)
+            },
+            // Await polls the event loop
+            Async.Await { future } => {
+                handle-await-event-loop(loop_id, future)
+            },
+            Async.AwaitAll { futures } => {
+                handle-await-all-event-loop(loop_id, futures)
+            },
+            Async.AwaitFirst { futures } => {
+                handle-await-first-event-loop(loop_id, futures)
+            },
+            Async.SpawnWithToken { thunk, token } => {
+                handle-spawn-with-token-threaded(thunk, token)
+            },
+            Async.Cancel { future } => {
+                handle-cancel(future)
+            }
+        }
+        resume(result)
+    }
+}
+
+// Sleep using event loop timers
+fn handle-sleep-event-loop(loop_id, ms) {
+    // Use a unique marker value for this timer
+    let marker = core/time-now()
+
+    // Set a timer that will complete after ms
+    let timer_id = core/timer-set(loop_id, ms, marker)
+    if timer_id < 0 {
+        throw("Failed to set timer")
+    }
+
+    // Poll until the timer completes
+    loop {
+        // Process events with timeout slightly less than remaining time
+        core/event-loop-run-once(loop_id, 10)
+
+        // Check for completed timers
+        let completed_marker = core/timer-pop-completed(loop_id)
+        if completed_marker == marker {
+            // Our timer completed
+            break(null)
+        }
+
+        // If we got a different marker, it's for another timer - ignore
+        // (in a full implementation we'd queue it for later)
+    }
+}
+
+// Spawn using event loop (currently still uses threads for compute tasks)
+// For truly non-blocking spawn, we'd need cooperative scheduling
+fn handle-spawn-event-loop(loop_id, thunk) {
+    // For compute tasks, we still use threads
+    // The event loop is for I/O operations
+    handle-spawn-threaded(thunk)
+}
+
+// Await using event loop polling
+fn handle-await-event-loop(loop_id, future) {
+    loop {
+        // Process events (network I/O, timers, etc.)
+        core/event-loop-run-once(loop_id, 50)
+
+        // Process any completed TCP results
+        process-tcp-results(loop_id)
+
+        // Process any completed file results
+        process-file-results(loop_id)
+
+        // Process any completed timers
+        process-timer-results(loop_id)
+
+        // Check if our future is resolved
+        let state = future-state(future)
+        match state {
+            FutureState.Resolved { value } => break(value),
+            FutureState.Rejected { error } => throw(error),
+            FutureState.Cancelled {} => throw("Future was cancelled"),
+            _ => {}
+        }
+    }
+}
+
+// Process completed TCP results (placeholder for future implementation)
+// In a full implementation, this would resolve futures based on their atom addresses
+fn process-tcp-results(loop_id) {
+    // Just drain completed results for now
+    loop {
+        let result_type = core/tcp-result-pop(loop_id)
+        if result_type == 0 {
+            break(null)
+        }
+        // Results are discarded - proper implementation would resolve futures
+    }
+}
+
+// ============================================================================
+// Async File I/O Functions (using thread pool)
+// ============================================================================
+// These functions submit file operations to the event loop's thread pool
+// and return immediately with a Future that will be resolved when complete.
+
+// Internal: Map from future_atom addresses to Future objects
+// This allows us to resolve futures when we process completed results
+// We use a mutable vector of [atom_addr, future] pairs
+
+// Global registry for pending file operation futures
+// Each entry is [atom_addr, future]
+let pending-file-futures-atom = atom([])
+
+fn register-pending-future(atom_addr, future) {
+    let pending = deref(pending-file-futures-atom)
+    reset!(pending-file-futures-atom, push(pending, [atom_addr, future]))
+}
+
+fn find-and-remove-pending-future(atom_addr) {
+    let pending = deref(pending-file-futures-atom)
+    let mut result_future = null
+    let mut new_pending = []
+    let mut s = seq(pending)
+    while s != null {
+        let entry = first(s)
+        let entry_addr = get(entry, 0)
+        let entry_future = get(entry, 1)
+        if entry_addr == atom_addr {
+            result_future = entry_future
+        } else {
+            new_pending = push(new_pending, entry)
+        }
+        s = next(s)
+    }
+    reset!(pending-file-futures-atom, new_pending)
+    result_future
+}
+
+// Process completed file results and resolve corresponding futures
+fn process-file-results(loop_id) {
+    loop {
+        // Pop next completed result (returns type code: 0=none, 1=ReadOk, 2=ReadErr, etc.)
+        let result_type = core/file-result-pop(loop_id)
+        if result_type == 0 {
+            break(null)
+        }
+
+        // Get the future_atom for this result
+        let future_atom = core/file-result-future-atom(loop_id)
+
+        // Find the corresponding future
+        let future = find-and-remove-pending-future(future_atom)
+        if future == null {
+            // No future registered for this atom - skip
+            // (This shouldn't happen in normal operation)
+        } else {
+            // Resolve or reject based on result type
+            // Type codes:
+            // 1=ReadOk, 2=ReadErr, 3=WriteOk, 4=WriteErr,
+            // 5=DeleteOk, 6=DeleteErr, 7=StatOk, 8=StatErr,
+            // 9=ReadDirOk, 10=ReadDirErr
+            if result_type == 1 {
+                // ReadOk - get content string
+                let content = core/file-result-data(loop_id)
+                resolve-future!(future, async-ok(content))
+            } else if result_type == 2 {
+                // ReadErr - get error message
+                let error_msg = core/file-result-data(loop_id)
+                resolve-future!(future, async-err(-1, error_msg))
+            } else if result_type == 3 {
+                // WriteOk - get bytes written
+                let bytes_written = core/file-result-value(loop_id)
+                resolve-future!(future, async-ok(bytes_written))
+            } else if result_type == 4 {
+                // WriteErr - get error message
+                let error_msg = core/file-result-data(loop_id)
+                resolve-future!(future, async-err(-1, error_msg))
+            } else if result_type == 5 {
+                // DeleteOk
+                resolve-future!(future, async-ok(null))
+            } else if result_type == 6 {
+                // DeleteErr - get error message
+                let error_msg = core/file-result-data(loop_id)
+                resolve-future!(future, async-err(-1, error_msg))
+            } else if result_type == 7 {
+                // StatOk - get file size
+                let file_size = core/file-result-value(loop_id)
+                resolve-future!(future, async-ok(file_size))
+            } else if result_type == 8 {
+                // StatErr - get error message
+                let error_msg = core/file-result-data(loop_id)
+                resolve-future!(future, async-err(-1, error_msg))
+            } else if result_type == 9 {
+                // ReadDirOk - get entries (as string data for now, would need proper array handling)
+                let entries_data = core/file-result-data(loop_id)
+                resolve-future!(future, async-ok(entries_data))
+            } else if result_type == 10 {
+                // ReadDirErr - get error message
+                let error_msg = core/file-result-data(loop_id)
+                resolve-future!(future, async-err(-1, error_msg))
+            }
+        }
+    }
+}
+
+// Submit an async read file operation
+fn submit-read-file-async(loop_id, path) {
+    let future = make-future(FutureState.Running {})
+    // Get the raw atom address for this future's state atom
+    let atom_addr = core/atom-address(future.state_atom)
+    // Register the future so we can resolve it later
+    register-pending-future(atom_addr, future)
+    // Submit the operation
+    let result = core/file-read-async(loop_id, path, atom_addr)
+    if result < 0 {
+        // Failed to submit - reject immediately
+        find-and-remove-pending-future(atom_addr)
+        reject-future!(future, "Failed to submit read operation")
+    }
+    future
+}
+
+// Submit an async write file operation
+fn submit-write-file-async(loop_id, path, content) {
+    let future = make-future(FutureState.Running {})
+    let atom_addr = core/atom-address(future.state_atom)
+    register-pending-future(atom_addr, future)
+    let result = core/file-write-async(loop_id, path, content, atom_addr)
+    if result < 0 {
+        find-and-remove-pending-future(atom_addr)
+        reject-future!(future, "Failed to submit write operation")
+    }
+    future
+}
+
+// Submit an async delete file operation
+fn submit-delete-file-async(loop_id, path) {
+    let future = make-future(FutureState.Running {})
+    let atom_addr = core/atom-address(future.state_atom)
+    register-pending-future(atom_addr, future)
+    let result = core/file-delete-async(loop_id, path, atom_addr)
+    if result < 0 {
+        find-and-remove-pending-future(atom_addr)
+        reject-future!(future, "Failed to submit delete operation")
+    }
+    future
+}
+
+// Submit an async stat (file size) operation
+fn submit-file-stat-async(loop_id, path) {
+    let future = make-future(FutureState.Running {})
+    let atom_addr = core/atom-address(future.state_atom)
+    register-pending-future(atom_addr, future)
+    let result = core/file-stat-async(loop_id, path, atom_addr)
+    if result < 0 {
+        find-and-remove-pending-future(atom_addr)
+        reject-future!(future, "Failed to submit stat operation")
+    }
+    future
+}
+
+// Submit an async readdir operation
+fn submit-readdir-async(loop_id, path) {
+    let future = make-future(FutureState.Running {})
+    let atom_addr = core/atom-address(future.state_atom)
+    register-pending-future(atom_addr, future)
+    let result = core/file-readdir-async(loop_id, path, atom_addr)
+    if result < 0 {
+        find-and-remove-pending-future(atom_addr)
+        reject-future!(future, "Failed to submit readdir operation")
+    }
+    future
+}
+
+// ============================================================================
+// Async File Handler Functions for EventLoopHandler
+// ============================================================================
+// These functions use the async file I/O infrastructure
+
+fn handle-read-file-async(loop_id, path) {
+    let future = submit-read-file-async(loop_id, path)
+    // Poll until the future is resolved
+    loop {
+        // Process events and file results
+        core/event-loop-run-once(loop_id, 10)
+        process-file-results(loop_id)
+
+        // Check if our future is resolved
+        let state = future-state(future)
+        match state {
+            FutureState.Resolved { value } => break(value),
+            FutureState.Rejected { error } => throw(error),
+            FutureState.Cancelled {} => throw("Operation cancelled"),
+            _ => {}
+        }
+    }
+}
+
+fn handle-write-file-async(loop_id, path, content) {
+    let future = submit-write-file-async(loop_id, path, content)
+    loop {
+        core/event-loop-run-once(loop_id, 10)
+        process-file-results(loop_id)
+
+        let state = future-state(future)
+        match state {
+            FutureState.Resolved { value } => break(value),
+            FutureState.Rejected { error } => throw(error),
+            FutureState.Cancelled {} => throw("Operation cancelled"),
+            _ => {}
+        }
+    }
+}
+
+fn handle-delete-file-async(loop_id, path) {
+    let future = submit-delete-file-async(loop_id, path)
+    loop {
+        core/event-loop-run-once(loop_id, 10)
+        process-file-results(loop_id)
+
+        let state = future-state(future)
+        match state {
+            FutureState.Resolved { value } => break(value),
+            FutureState.Rejected { error } => throw(error),
+            FutureState.Cancelled {} => throw("Operation cancelled"),
+            _ => {}
+        }
+    }
+}
+
+fn handle-file-size-async(loop_id, path) {
+    let future = submit-file-stat-async(loop_id, path)
+    loop {
+        core/event-loop-run-once(loop_id, 10)
+        process-file-results(loop_id)
+
+        let state = future-state(future)
+        match state {
+            FutureState.Resolved { value } => break(value),
+            FutureState.Rejected { error } => throw(error),
+            FutureState.Cancelled {} => throw("Operation cancelled"),
+            _ => {}
+        }
+    }
+}
+
+fn handle-read-dir-async(loop_id, path) {
+    let future = submit-readdir-async(loop_id, path)
+    loop {
+        core/event-loop-run-once(loop_id, 10)
+        process-file-results(loop_id)
+
+        let state = future-state(future)
+        match state {
+            FutureState.Resolved { value } => break(value),
+            FutureState.Rejected { error } => throw(error),
+            FutureState.Cancelled {} => throw("Operation cancelled"),
+            _ => {}
+        }
+    }
+}
+
+// Process completed timer results
+fn process-timer-results(loop_id) {
+    loop {
+        let completed_atom = core/timer-pop-completed(loop_id)
+        if completed_atom == 0 {
+            break(null)
+        }
+        // Timer completed - the future associated with this atom
+        // should be resolved. This requires maintaining a map from
+        // atom addresses to futures.
+    }
+}
+
+// Wait for all futures using event loop
+fn handle-await-all-event-loop(loop_id, futures) {
+    let mut results = []
+    let mut s = seq(futures)
+    while s != null {
+        let f = first(s)
+        let value = handle-await-event-loop(loop_id, f)
+        results = push(results, value)
+        s = next(s)
+    }
+    results
+}
+
+// Wait for first future using event loop
+fn handle-await-first-event-loop(loop_id, futures) {
+    let len = length(futures)
+    if len == 0 {
+        RaceResult.AllFailed { errors: [] }
+    } else {
+        loop {
+            // Process events
+            core/event-loop-run-once(loop_id, 50)
+            process-tcp-results(loop_id)
+            process-file-results(loop_id)
+            process-timer-results(loop_id)
+
+            // Check for resolved futures
+            let mut i = 0
+            let mut found = false
+            let mut resolved_value = null
+            let mut resolved_index = 0
+
+            while i < len && found == false {
+                let f = get(futures, i)
+                let state = future-state(f)
+                match state {
+                    FutureState.Resolved { value } => {
+                        found = true
+                        resolved_value = value
+                        resolved_index = i
+                    },
+                    _ => {}
+                }
+                i = i + 1
+            }
+
+            if found {
+                break(RaceResult.Ok { value: resolved_value, index: resolved_index })
+            }
+
+            // Check if all failed (rejected or cancelled)
+            let mut all_failed = true
+            let mut j = 0
+            while j < len {
+                let f = get(futures, j)
+                let state = future-state(f)
+                match state {
+                    FutureState.Running {} => { all_failed = false },
+                    FutureState.Pending {} => { all_failed = false },
+                    FutureState.Resolved { value } => { all_failed = false },
+                    FutureState.Rejected { error } => {},
+                    FutureState.Cancelled {} => {}
+                }
+                j = j + 1
+            }
+
+            if all_failed {
+                let mut errors = []
+                let mut k = 0
+                while k < len {
+                    let f = get(futures, k)
+                    let state = future-state(f)
+                    match state {
+                        FutureState.Rejected { error } => {
+                            errors = push(errors, error)
+                        },
+                        FutureState.Cancelled {} => {
+                            errors = push(errors, "Cancelled")
+                        },
+                        FutureState.Pending {} => {},
+                        FutureState.Running {} => {},
+                        FutureState.Resolved { value } => {}
+                    }
+                    k = k + 1
+                }
+                break(RaceResult.AllFailed { errors: errors })
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -467,12 +1626,165 @@ fn flush(file) {
     perform Async.Flush { file: file }
 }
 
-// Sleep for a number of milliseconds
+// Sleep for a number of milliseconds (blocking version)
 fn sleep(ms) {
     perform Async.Sleep { ms: ms }
 }
 
-// Spawn a computation (handler determines execution strategy)
+// ============================================================================
+// Future/Async API Functions
+// ============================================================================
+
+// Create a future from a thunk - starts execution immediately (eager)
+// Usage: let f = async(fn() { expensive-computation() })
+fn async(thunk) {
+    perform Async.Spawn { thunk: thunk }
+}
+
+// Wait for a future to complete and return its value
+// Usage: let result = await(future)
+fn await(future) {
+    perform Async.Await { future: future }
+}
+
+// Wait for all futures to complete and return their values as a list
+// Usage: let [r1, r2, r3] = await-all([f1, f2, f3])
+fn await-all(futures) {
+    perform Async.AwaitAll { futures: futures }
+}
+
+// Wait for the first future to complete and return it
+// Returns RaceResult.Ok { value, index } or RaceResult.AllFailed { errors }
+fn await-first(futures) {
+    perform Async.AwaitFirst { futures: futures }
+}
+
+// Wait for a future with a timeout (in milliseconds)
+// Returns TimeoutResult.Ok { value } or TimeoutResult.TimedOut {}
+fn await-timeout(ms, future) {
+    let start = time-now()
+    let deadline_ns = start + (ms * 1000000)  // Convert ms to ns
+    let wait_timeout = 50  // Check every 50ms at most
+
+    loop {
+        let state = future-state(future)
+        match state {
+            FutureState.Resolved { value } => {
+                break(TimeoutResult.Ok { value: value })
+            },
+            FutureState.Rejected { error } => {
+                throw(error)
+            },
+            FutureState.Cancelled {} => {
+                throw("Future was cancelled")
+            },
+            _ => {
+                // Check if we've exceeded the timeout
+                let now = time-now()
+                if now >= deadline_ns {
+                    break(TimeoutResult.TimedOut {})
+                }
+                // Calculate remaining time and wait up to wait_timeout ms
+                let remaining_ms = (deadline_ns - now) / 1000000
+                let actual_wait = if remaining_ms < wait_timeout {
+                    remaining_ms
+                } else {
+                    wait_timeout
+                }
+                // Wait for notification or timeout
+                core/future-wait(actual_wait)
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Cancellation API Functions
+// ============================================================================
+
+// Create a future with a cancellation token
+// The task will check the token periodically and exit early if cancelled
+// Usage: let f = async-with-token(token, fn() { ... })
+fn async-with-token(token, thunk) {
+    perform Async.SpawnWithToken { thunk: thunk, token: token }
+}
+
+// Cancel a future (cooperative cancellation)
+// The future will be marked as cancelled when it next checks its state
+fn cancel(future) {
+    perform Async.Cancel { future: future }
+}
+
+// Spawn a task in a scope - the task will be automatically cancelled
+// when the scope exits
+fn spawn-in-scope(scope, thunk) {
+    let future = async-with-token(scope.token, thunk)
+    scope-add-child!(scope, future)
+    future
+}
+
+// ============================================================================
+// Timeout Wrappers
+// ============================================================================
+
+// Run a thunk with a timeout (in milliseconds)
+// Returns TimeoutResult.Ok { value } if completed, TimeoutResult.TimedOut {} if timed out
+// Note: This is cooperative - the thunk must complete before we can check the timeout
+fn with-timeout(ms, thunk) {
+    let start = time-now()
+    let deadline_ns = start + (ms * 1000000)
+
+    let result = thunk()
+    let end = time-now()
+
+    if end > deadline_ns {
+        TimeoutResult.TimedOut {}
+    } else {
+        TimeoutResult.Ok { value: result }
+    }
+}
+
+// Run an async operation with a timeout
+// This creates a race between the operation and a timer
+// If the operation completes first, returns TimeoutResult.Ok { value }
+// If the timer fires first, returns TimeoutResult.TimedOut {}
+fn async-with-timeout(ms, thunk) {
+    let token = make-cancellation-token()
+    let result_future = async-with-token(token, thunk)
+
+    // Wait for either the future to resolve or timeout
+    let outcome = await-timeout(ms, result_future)
+    match outcome {
+        TimeoutResult.TimedOut {} => {
+            // Cancel the task since it timed out
+            cancel!(token)
+            TimeoutResult.TimedOut {}
+        },
+        TimeoutResult.Ok { value } => {
+            TimeoutResult.Ok { value: value }
+        }
+    }
+}
+
+// Create an async sleep - returns a future that resolves after ms milliseconds
+fn async-sleep(ms) {
+    async(fn() {
+        core/sleep(ms)
+        null
+    })
+}
+
+// Shorthand for awaiting a sleep
+fn await-sleep(ms) {
+    await(async-sleep(ms))
+}
+
+// Get current time in nanoseconds (for internal timing)
+fn time-now() {
+    core/time-now()
+}
+
+// Legacy spawn function (for backwards compatibility)
 fn spawn(thunk) {
     perform Async.Spawn { thunk: thunk }
 }
@@ -594,11 +1906,13 @@ fn blocking-sleep(ms) {
 }
 
 // ============================================================================
-// Async Combinators
+// Async Combinators (Legacy - for running thunks)
 // ============================================================================
 
-// Run multiple async operations and collect results
-fn await-all(thunks) {
+// Run multiple thunks and collect results
+// NOTE: This is for running thunks, not for awaiting futures.
+// For futures, use await-all(futures) which uses the effect system.
+fn run-all-thunks(thunks) {
     let mut results = []
     let mut s = seq(thunks)
     while s != null {

@@ -14,7 +14,7 @@ Beagle is a dynamically-typed, functional programming language that compiles dir
 - Dynamic typing with structs, enums, closures, atoms, threads
 - Namespace system for code organization
 - Tail call optimization (currently only way to do loops)
-- Multi-threading with thread-safe GC options
+- Multi-threading with thread-safe GC
 - FFI for C interop
 - Built-in debugger with runtime introspection
 
@@ -131,7 +131,6 @@ fn main() {
 ```
 
 **Special Annotations:**
-- `// thread-safe` - Only runs with thread-safe GC features enabled
 - `// no-std` - Sets no_std flag automatically
 
 **Test Execution:**

@@ -36,6 +36,12 @@ use crate::collections::{
 };
 
 use std::cell::RefCell;
+use std::sync::mpsc;
+use std::time::Instant;
+
+// mio imports for async I/O
+use mio::net::TcpStream;
+use mio::{Events, Interest, Poll, Token, Waker};
 
 // ============================================================================
 // GlobalObject: Unified GC roots system
@@ -560,6 +566,1068 @@ impl ThreadState {
 
     pub fn clear(&mut self) {
         self.stack_pointers.clear();
+    }
+}
+
+/// FutureWaitSet enables efficient waiting for future completion.
+/// Instead of polling, threads can block on a condition variable until
+/// any future completes and notifies waiters.
+pub struct FutureWaitSet {
+    /// Condition variable that all waiters block on
+    pub cond: Condvar,
+    /// Mutex protecting the wait count
+    pub mutex: Mutex<usize>,
+}
+
+impl FutureWaitSet {
+    pub fn new() -> Self {
+        Self {
+            cond: Condvar::new(),
+            mutex: Mutex::new(0),
+        }
+    }
+
+    /// Wait for a notification with timeout (in milliseconds).
+    /// Returns true if notified, false if timed out.
+    pub fn wait_timeout(&self, timeout_ms: u64) -> bool {
+        let guard = self.mutex.lock().unwrap();
+        let result = self
+            .cond
+            .wait_timeout(guard, Duration::from_millis(timeout_ms))
+            .unwrap();
+        !result.1.timed_out()
+    }
+
+    /// Wait for a notification without timeout.
+    pub fn wait(&self) {
+        let guard = self.mutex.lock().unwrap();
+        let _guard = self.cond.wait(guard).unwrap();
+    }
+
+    /// Notify all waiting threads that a future has completed.
+    pub fn notify_all(&self) {
+        self.cond.notify_all();
+    }
+}
+
+impl Default for FutureWaitSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
+// EventLoop - mio-based async I/O event loop
+// ============================================================================
+
+/// Token for the waker (used to wake the event loop from other threads)
+const WAKER_TOKEN: Token = Token(0);
+
+/// Represents a pending async operation registered with the event loop
+#[derive(Debug)]
+pub enum PendingOperation {
+    /// TCP connection in progress
+    TcpConnect {
+        future_atom: usize,
+        socket_id: usize,
+    },
+    /// TCP accept operation (waiting for incoming connection)
+    TcpAccept {
+        future_atom: usize,
+        listener_id: usize,
+    },
+    /// TCP read operation
+    TcpRead {
+        future_atom: usize,
+        socket_id: usize,
+        buffer_size: usize,
+    },
+    /// TCP write operation
+    TcpWrite {
+        future_atom: usize,
+        socket_id: usize,
+        data: Vec<u8>,
+        bytes_written: usize,
+    },
+    /// Timer (deadline-based)
+    Timer {
+        future_atom: usize,
+        deadline: Instant,
+    },
+    /// File operation (handled by thread pool, wakes event loop on completion)
+    FileOp { future_atom: usize },
+}
+
+/// Result of a completed TCP operation
+#[derive(Debug, Clone)]
+pub enum TcpResult {
+    /// Connection completed successfully
+    ConnectOk {
+        future_atom: usize,
+        socket_id: usize,
+    },
+    /// Connection failed
+    ConnectErr { future_atom: usize, error: String },
+    /// Accept completed successfully
+    AcceptOk {
+        future_atom: usize,
+        socket_id: usize,
+    },
+    /// Accept failed
+    AcceptErr { future_atom: usize, error: String },
+    /// Read completed successfully
+    ReadOk { future_atom: usize, data: Vec<u8> },
+    /// Read failed
+    ReadErr { future_atom: usize, error: String },
+    /// Write completed successfully
+    WriteOk {
+        future_atom: usize,
+        bytes_written: usize,
+    },
+    /// Write failed
+    WriteErr { future_atom: usize, error: String },
+}
+
+/// Result of a completed file operation from the thread pool
+#[derive(Debug)]
+pub enum FileResult {
+    ReadOk {
+        future_atom: usize,
+        content: String,
+    },
+    ReadErr {
+        future_atom: usize,
+        error: String,
+    },
+    WriteOk {
+        future_atom: usize,
+        bytes_written: usize,
+    },
+    WriteErr {
+        future_atom: usize,
+        error: String,
+    },
+    DeleteOk {
+        future_atom: usize,
+    },
+    DeleteErr {
+        future_atom: usize,
+        error: String,
+    },
+    StatOk {
+        future_atom: usize,
+        size: u64,
+    },
+    StatErr {
+        future_atom: usize,
+        error: String,
+    },
+    ReadDirOk {
+        future_atom: usize,
+        entries: Vec<String>,
+    },
+    ReadDirErr {
+        future_atom: usize,
+        error: String,
+    },
+}
+
+/// File operation to be executed by the thread pool
+#[derive(Debug)]
+pub enum FileOperation {
+    Read { path: String },
+    Write { path: String, content: Vec<u8> },
+    Delete { path: String },
+    Stat { path: String },
+    ReadDir { path: String },
+}
+
+/// Task for the file I/O thread pool
+pub struct FileTask {
+    pub op: FileOperation,
+    pub future_atom: usize,
+}
+
+/// Event loop for async I/O operations using mio
+pub struct EventLoop {
+    /// mio Poll instance for event notification
+    poll: Poll,
+    /// Waker to wake the event loop from other threads
+    waker: Arc<Waker>,
+    /// Pending operations indexed by token
+    pending_ops: HashMap<usize, PendingOperation>,
+    /// Next token to assign
+    next_token: usize,
+    /// Channel to receive completed file operations from thread pool
+    /// Wrapped in Mutex to satisfy Sync trait for static storage
+    file_result_rx: Mutex<mpsc::Receiver<FileResult>>,
+    /// Channel to send file operations to thread pool
+    file_task_tx: mpsc::Sender<FileTask>,
+    /// Events buffer for polling
+    events: Events,
+    /// TCP streams indexed by socket ID
+    tcp_streams: HashMap<usize, TcpStream>,
+    /// TCP listeners indexed by listener ID
+    tcp_listeners: HashMap<usize, mio::net::TcpListener>,
+    /// Next socket/listener ID to assign
+    next_socket_id: usize,
+    /// Mapping from token to socket ID (for looking up socket when event fires)
+    token_to_socket: HashMap<usize, usize>,
+    /// Mapping from token to listener ID
+    token_to_listener: HashMap<usize, usize>,
+    /// Completed TCP results waiting to be retrieved
+    completed_tcp_results: Vec<TcpResult>,
+    /// Current result being inspected (after pop)
+    current_result: Option<TcpResult>,
+    /// Active timers: timer_id -> (deadline, future_atom)
+    timers: HashMap<usize, (Instant, usize)>,
+    /// Next timer ID
+    next_timer_id: usize,
+    /// Completed timer future_atoms (ready to be resolved)
+    completed_timers: Vec<usize>,
+    /// Completed file results waiting to be retrieved
+    completed_file_results: Vec<FileResult>,
+    /// Current file result being inspected (after pop)
+    current_file_result: Option<FileResult>,
+}
+
+impl EventLoop {
+    /// Create a new event loop with a file I/O thread pool
+    pub fn new(pool_size: usize) -> std::io::Result<Self> {
+        let poll = Poll::new()?;
+        let waker = Arc::new(Waker::new(poll.registry(), WAKER_TOKEN)?);
+
+        // Create channels for file I/O thread pool
+        let (file_task_tx, file_task_rx) = mpsc::channel::<FileTask>();
+        let (file_result_tx, file_result_rx) = mpsc::channel::<FileResult>();
+
+        // Wrap receiver in Arc<Mutex> for sharing among worker threads
+        let shared_rx = Arc::new(Mutex::new(file_task_rx));
+
+        // Clone waker for thread pool workers to wake event loop
+        let waker_clone = waker.clone();
+
+        // Spawn file I/O worker threads
+        for _ in 0..pool_size {
+            let rx = shared_rx.clone();
+            let tx = file_result_tx.clone();
+            let waker = waker_clone.clone();
+
+            std::thread::spawn(move || {
+                file_worker_loop_shared(rx, tx, waker);
+            });
+        }
+
+        Ok(Self {
+            poll,
+            waker,
+            pending_ops: HashMap::new(),
+            next_token: 1, // Start at 1, 0 is reserved for waker
+            file_result_rx: Mutex::new(file_result_rx),
+            file_task_tx,
+            events: Events::with_capacity(128),
+            tcp_streams: HashMap::new(),
+            tcp_listeners: HashMap::new(),
+            next_socket_id: 1,
+            token_to_socket: HashMap::new(),
+            token_to_listener: HashMap::new(),
+            completed_tcp_results: Vec::new(),
+            current_result: None,
+            timers: HashMap::new(),
+            next_timer_id: 1,
+            completed_timers: Vec::new(),
+            completed_file_results: Vec::new(),
+            current_file_result: None,
+        })
+    }
+
+    /// Get the next available token
+    pub fn next_token(&mut self) -> Token {
+        let token = Token(self.next_token);
+        self.next_token += 1;
+        token
+    }
+
+    /// Submit a file operation to the thread pool
+    pub fn submit_file_op(&self, op: FileOperation, future_atom: usize) -> Result<(), String> {
+        self.file_task_tx
+            .send(FileTask { op, future_atom })
+            .map_err(|e| format!("Failed to submit file operation: {}", e))
+    }
+
+    /// Wake the event loop from another thread
+    pub fn wake(&self) -> std::io::Result<()> {
+        self.waker.wake()
+    }
+
+    /// Get a clone of the waker for external use
+    pub fn get_waker(&self) -> Arc<Waker> {
+        self.waker.clone()
+    }
+
+    /// Poll for events with timeout (in milliseconds)
+    /// Returns the number of events processed
+    pub fn poll_once(&mut self, timeout_ms: u64) -> std::io::Result<usize> {
+        // Calculate effective timeout (minimum of requested and time to nearest timer)
+        let now = Instant::now();
+        let effective_timeout = if self.timers.is_empty() {
+            Duration::from_millis(timeout_ms)
+        } else {
+            let nearest_deadline = self
+                .timers
+                .values()
+                .map(|(deadline, _)| *deadline)
+                .min()
+                .unwrap();
+            let time_to_timer = nearest_deadline.saturating_duration_since(now);
+            std::cmp::min(Duration::from_millis(timeout_ms), time_to_timer)
+        };
+
+        self.poll.poll(&mut self.events, Some(effective_timeout))?;
+
+        let mut processed = 0;
+        let mut tokens_to_process = Vec::new();
+
+        // Process mio events (network I/O)
+        for event in self.events.iter() {
+            if event.token() == WAKER_TOKEN {
+                // Waker was triggered - check for file results
+                processed += 1;
+            } else {
+                // Network event - handle based on token
+                tokens_to_process.push(event.token().0);
+            }
+        }
+
+        // Process collected network tokens
+        for token_id in tokens_to_process {
+            if let Some(op) = self.pending_ops.remove(&token_id) {
+                self.handle_tcp_event(token_id, op);
+                processed += 1;
+            }
+        }
+
+        // Process completed file operations
+        // Collect all results first to avoid borrowing issues
+        let results: Vec<FileResult> = {
+            if let Ok(rx) = self.file_result_rx.lock() {
+                let mut results = Vec::new();
+                while let Ok(result) = rx.try_recv() {
+                    results.push(result);
+                }
+                results
+            } else {
+                Vec::new()
+            }
+        };
+        for result in results {
+            self.handle_file_result(result);
+            processed += 1;
+        }
+
+        // Process expired timers
+        let now = Instant::now();
+        let expired_timer_ids: Vec<usize> = self
+            .timers
+            .iter()
+            .filter(|(_, (deadline, _))| *deadline <= now)
+            .map(|(id, _)| *id)
+            .collect();
+
+        for timer_id in expired_timer_ids {
+            if let Some((_, future_atom)) = self.timers.remove(&timer_id) {
+                self.completed_timers.push(future_atom);
+                processed += 1;
+            }
+        }
+
+        Ok(processed)
+    }
+
+    /// Set a timer that fires after delay_ms milliseconds
+    /// Returns the timer ID
+    pub fn timer_set(&mut self, delay_ms: u64, future_atom: usize) -> usize {
+        let timer_id = self.next_timer_id;
+        self.next_timer_id += 1;
+        let deadline = Instant::now() + Duration::from_millis(delay_ms);
+        self.timers.insert(timer_id, (deadline, future_atom));
+        timer_id
+    }
+
+    /// Cancel a timer by ID
+    /// Returns true if the timer was cancelled, false if not found
+    pub fn timer_cancel(&mut self, timer_id: usize) -> bool {
+        self.timers.remove(&timer_id).is_some()
+    }
+
+    /// Get the number of pending completed timers
+    pub fn completed_timers_len(&self) -> usize {
+        self.completed_timers.len()
+    }
+
+    /// Pop the next completed timer's future_atom
+    pub fn pop_completed_timer(&mut self) -> Option<usize> {
+        if self.completed_timers.is_empty() {
+            None
+        } else {
+            Some(self.completed_timers.remove(0))
+        }
+    }
+
+    /// Handle a completed file operation result
+    fn handle_file_result(&mut self, result: FileResult) {
+        // Queue the result for retrieval by Beagle code
+        self.completed_file_results.push(result);
+    }
+
+    /// Get the number of completed file results waiting
+    pub fn file_results_count(&self) -> usize {
+        self.completed_file_results.len()
+    }
+
+    /// Pop the next file result, returning a type code:
+    /// 0 = no result, 1 = ReadOk, 2 = ReadErr, 3 = WriteOk, 4 = WriteErr,
+    /// 5 = DeleteOk, 6 = DeleteErr, 7 = StatOk, 8 = StatErr, 9 = ReadDirOk, 10 = ReadDirErr
+    pub fn file_result_pop(&mut self) -> usize {
+        if self.completed_file_results.is_empty() {
+            self.current_file_result = None;
+            return 0;
+        }
+        let result = self.completed_file_results.remove(0);
+        let type_code = match &result {
+            FileResult::ReadOk { .. } => 1,
+            FileResult::ReadErr { .. } => 2,
+            FileResult::WriteOk { .. } => 3,
+            FileResult::WriteErr { .. } => 4,
+            FileResult::DeleteOk { .. } => 5,
+            FileResult::DeleteErr { .. } => 6,
+            FileResult::StatOk { .. } => 7,
+            FileResult::StatErr { .. } => 8,
+            FileResult::ReadDirOk { .. } => 9,
+            FileResult::ReadDirErr { .. } => 10,
+        };
+        self.current_file_result = Some(result);
+        type_code
+    }
+
+    /// Get the future_atom from the current file result
+    pub fn file_result_future_atom(&self) -> usize {
+        match &self.current_file_result {
+            Some(FileResult::ReadOk { future_atom, .. }) => *future_atom,
+            Some(FileResult::ReadErr { future_atom, .. }) => *future_atom,
+            Some(FileResult::WriteOk { future_atom, .. }) => *future_atom,
+            Some(FileResult::WriteErr { future_atom, .. }) => *future_atom,
+            Some(FileResult::DeleteOk { future_atom }) => *future_atom,
+            Some(FileResult::DeleteErr { future_atom, .. }) => *future_atom,
+            Some(FileResult::StatOk { future_atom, .. }) => *future_atom,
+            Some(FileResult::StatErr { future_atom, .. }) => *future_atom,
+            Some(FileResult::ReadDirOk { future_atom, .. }) => *future_atom,
+            Some(FileResult::ReadDirErr { future_atom, .. }) => *future_atom,
+            None => 0,
+        }
+    }
+
+    /// Get the string data from the current file result (content for read, error for errors)
+    pub fn file_result_string_data(&self) -> Option<&str> {
+        match &self.current_file_result {
+            Some(FileResult::ReadOk { content, .. }) => Some(content),
+            Some(FileResult::ReadErr { error, .. }) => Some(error),
+            Some(FileResult::WriteErr { error, .. }) => Some(error),
+            Some(FileResult::DeleteErr { error, .. }) => Some(error),
+            Some(FileResult::StatErr { error, .. }) => Some(error),
+            Some(FileResult::ReadDirErr { error, .. }) => Some(error),
+            _ => None,
+        }
+    }
+
+    /// Get the numeric value from the current file result (bytes_written or size)
+    pub fn file_result_value(&self) -> usize {
+        match &self.current_file_result {
+            Some(FileResult::WriteOk { bytes_written, .. }) => *bytes_written,
+            Some(FileResult::StatOk { size, .. }) => *size as usize,
+            _ => 0,
+        }
+    }
+
+    /// Get the directory entries from a ReadDirOk result
+    pub fn file_result_entries(&self) -> Option<&Vec<String>> {
+        match &self.current_file_result {
+            Some(FileResult::ReadDirOk { entries, .. }) => Some(entries),
+            _ => None,
+        }
+    }
+
+    /// Handle a TCP event
+    fn handle_tcp_event(&mut self, _token_id: usize, op: PendingOperation) {
+        use std::io::{Read, Write};
+
+        match op {
+            PendingOperation::TcpConnect {
+                future_atom,
+                socket_id,
+            } => {
+                // Connection completed - check if it succeeded
+                if let Some(stream) = self.tcp_streams.get(&socket_id) {
+                    match stream.peer_addr() {
+                        Ok(_) => {
+                            self.completed_tcp_results.push(TcpResult::ConnectOk {
+                                future_atom,
+                                socket_id,
+                            });
+                        }
+                        Err(e) => {
+                            self.completed_tcp_results.push(TcpResult::ConnectErr {
+                                future_atom,
+                                error: e.to_string(),
+                            });
+                        }
+                    }
+                } else {
+                    self.completed_tcp_results.push(TcpResult::ConnectErr {
+                        future_atom,
+                        error: "Socket not found".to_string(),
+                    });
+                }
+            }
+            PendingOperation::TcpAccept {
+                future_atom,
+                listener_id,
+            } => {
+                // Listener is ready - accept the connection
+                if let Some(listener) = self.tcp_listeners.get(&listener_id) {
+                    match listener.accept() {
+                        Ok((stream, _addr)) => {
+                            let socket_id = self.next_socket_id();
+                            self.tcp_streams.insert(socket_id, stream);
+                            self.completed_tcp_results.push(TcpResult::AcceptOk {
+                                future_atom,
+                                socket_id,
+                            });
+                        }
+                        Err(e) => {
+                            self.completed_tcp_results.push(TcpResult::AcceptErr {
+                                future_atom,
+                                error: e.to_string(),
+                            });
+                        }
+                    }
+                } else {
+                    self.completed_tcp_results.push(TcpResult::AcceptErr {
+                        future_atom,
+                        error: "Listener not found".to_string(),
+                    });
+                }
+            }
+            PendingOperation::TcpRead {
+                future_atom,
+                socket_id,
+                buffer_size,
+            } => {
+                // Socket is ready for reading - remove to avoid borrow conflicts
+                if let Some(mut stream) = self.tcp_streams.remove(&socket_id) {
+                    let mut buffer = vec![0u8; buffer_size];
+                    let result = stream.read(&mut buffer);
+
+                    // Put the stream back
+                    self.tcp_streams.insert(socket_id, stream);
+
+                    match result {
+                        Ok(n) => {
+                            buffer.truncate(n);
+                            self.completed_tcp_results.push(TcpResult::ReadOk {
+                                future_atom,
+                                data: buffer,
+                            });
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            // Not ready yet, re-register for read
+                            let token = self.next_token();
+                            if let Some(stream) = self.tcp_streams.get_mut(&socket_id) {
+                                let _ = self.poll.registry().reregister(
+                                    stream,
+                                    token,
+                                    Interest::READABLE,
+                                );
+                            }
+                            self.token_to_socket.insert(token.0, socket_id);
+                            self.pending_ops.insert(
+                                token.0,
+                                PendingOperation::TcpRead {
+                                    future_atom,
+                                    socket_id,
+                                    buffer_size,
+                                },
+                            );
+                        }
+                        Err(e) => {
+                            self.completed_tcp_results.push(TcpResult::ReadErr {
+                                future_atom,
+                                error: e.to_string(),
+                            });
+                        }
+                    }
+                } else {
+                    self.completed_tcp_results.push(TcpResult::ReadErr {
+                        future_atom,
+                        error: "Socket not found".to_string(),
+                    });
+                }
+            }
+            PendingOperation::TcpWrite {
+                future_atom,
+                socket_id,
+                data,
+                bytes_written,
+            } => {
+                // Socket is ready for writing - remove to avoid borrow conflicts
+                if let Some(mut stream) = self.tcp_streams.remove(&socket_id) {
+                    let result = stream.write(&data[bytes_written..]);
+
+                    // Put the stream back
+                    self.tcp_streams.insert(socket_id, stream);
+
+                    match result {
+                        Ok(n) => {
+                            let total_written = bytes_written + n;
+                            if total_written >= data.len() {
+                                // All data written
+                                self.completed_tcp_results.push(TcpResult::WriteOk {
+                                    future_atom,
+                                    bytes_written: total_written,
+                                });
+                            } else {
+                                // More data to write, re-register
+                                let token = self.next_token();
+                                if let Some(stream) = self.tcp_streams.get_mut(&socket_id) {
+                                    let _ = self.poll.registry().reregister(
+                                        stream,
+                                        token,
+                                        Interest::WRITABLE,
+                                    );
+                                }
+                                self.token_to_socket.insert(token.0, socket_id);
+                                self.pending_ops.insert(
+                                    token.0,
+                                    PendingOperation::TcpWrite {
+                                        future_atom,
+                                        socket_id,
+                                        data,
+                                        bytes_written: total_written,
+                                    },
+                                );
+                            }
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            // Not ready yet, re-register
+                            let token = self.next_token();
+                            if let Some(stream) = self.tcp_streams.get_mut(&socket_id) {
+                                let _ = self.poll.registry().reregister(
+                                    stream,
+                                    token,
+                                    Interest::WRITABLE,
+                                );
+                            }
+                            self.token_to_socket.insert(token.0, socket_id);
+                            self.pending_ops.insert(
+                                token.0,
+                                PendingOperation::TcpWrite {
+                                    future_atom,
+                                    socket_id,
+                                    data,
+                                    bytes_written,
+                                },
+                            );
+                        }
+                        Err(e) => {
+                            self.completed_tcp_results.push(TcpResult::WriteErr {
+                                future_atom,
+                                error: e.to_string(),
+                            });
+                        }
+                    }
+                } else {
+                    self.completed_tcp_results.push(TcpResult::WriteErr {
+                        future_atom,
+                        error: "Socket not found".to_string(),
+                    });
+                }
+            }
+            // Other operations don't need TCP-specific handling
+            _ => {}
+        }
+    }
+
+    /// Get completed TCP results
+    pub fn take_tcp_results(&mut self) -> Vec<TcpResult> {
+        std::mem::take(&mut self.completed_tcp_results)
+    }
+
+    /// Get the number of pending TCP results
+    pub fn tcp_results_len(&self) -> usize {
+        self.completed_tcp_results.len()
+    }
+
+    /// Pop the next TCP result
+    pub fn pop_tcp_result(&mut self) -> Option<TcpResult> {
+        if self.completed_tcp_results.is_empty() {
+            None
+        } else {
+            Some(self.completed_tcp_results.remove(0))
+        }
+    }
+
+    /// Set the current result (for inspection after pop)
+    pub fn set_current_result(&mut self, result: TcpResult) {
+        self.current_result = Some(result);
+    }
+
+    /// Get a reference to the current result
+    pub fn current_result(&self) -> &Option<TcpResult> {
+        &self.current_result
+    }
+
+    /// Allocate a new socket ID
+    fn next_socket_id(&mut self) -> usize {
+        let id = self.next_socket_id;
+        self.next_socket_id += 1;
+        id
+    }
+
+    /// Start a non-blocking TCP connection
+    /// Returns (socket_id, token) on success
+    pub fn tcp_connect(
+        &mut self,
+        addr: std::net::SocketAddr,
+        future_atom: usize,
+    ) -> std::io::Result<(usize, Token)> {
+        let mut stream = TcpStream::connect(addr)?;
+        let socket_id = self.next_socket_id();
+        let token = self.next_token();
+
+        self.poll
+            .registry()
+            .register(&mut stream, token, Interest::WRITABLE)?;
+
+        self.tcp_streams.insert(socket_id, stream);
+        self.token_to_socket.insert(token.0, socket_id);
+        self.pending_ops.insert(
+            token.0,
+            PendingOperation::TcpConnect {
+                future_atom,
+                socket_id,
+            },
+        );
+
+        Ok((socket_id, token))
+    }
+
+    /// Create a TCP listener
+    /// Returns listener_id on success
+    pub fn tcp_listen(
+        &mut self,
+        addr: std::net::SocketAddr,
+        _backlog: u32,
+    ) -> std::io::Result<usize> {
+        let listener = mio::net::TcpListener::bind(addr)?;
+        let listener_id = self.next_socket_id();
+        self.tcp_listeners.insert(listener_id, listener);
+        Ok(listener_id)
+    }
+
+    /// Start accepting a connection on a listener
+    /// Returns token on success
+    pub fn tcp_accept(&mut self, listener_id: usize, future_atom: usize) -> std::io::Result<Token> {
+        // Remove the listener temporarily to avoid borrow conflicts
+        let mut listener = self.tcp_listeners.remove(&listener_id).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "Listener not found")
+        })?;
+
+        let token = self.next_token();
+        let result = self
+            .poll
+            .registry()
+            .register(&mut listener, token, Interest::READABLE);
+
+        // Put the listener back
+        self.tcp_listeners.insert(listener_id, listener);
+
+        result?;
+
+        self.token_to_listener.insert(token.0, listener_id);
+        self.pending_ops.insert(
+            token.0,
+            PendingOperation::TcpAccept {
+                future_atom,
+                listener_id,
+            },
+        );
+
+        Ok(token)
+    }
+
+    /// Start a read operation on a socket
+    /// Returns token on success
+    pub fn tcp_read(
+        &mut self,
+        socket_id: usize,
+        buffer_size: usize,
+        future_atom: usize,
+    ) -> std::io::Result<Token> {
+        // Remove the stream temporarily to avoid borrow conflicts
+        let mut stream = self
+            .tcp_streams
+            .remove(&socket_id)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "Socket not found"))?;
+
+        let token = self.next_token();
+        let result = self
+            .poll
+            .registry()
+            .reregister(&mut stream, token, Interest::READABLE);
+
+        // Put the stream back
+        self.tcp_streams.insert(socket_id, stream);
+
+        result?;
+
+        self.token_to_socket.insert(token.0, socket_id);
+        self.pending_ops.insert(
+            token.0,
+            PendingOperation::TcpRead {
+                future_atom,
+                socket_id,
+                buffer_size,
+            },
+        );
+
+        Ok(token)
+    }
+
+    /// Start a write operation on a socket
+    /// Returns token on success
+    pub fn tcp_write(
+        &mut self,
+        socket_id: usize,
+        data: Vec<u8>,
+        future_atom: usize,
+    ) -> std::io::Result<Token> {
+        // Remove the stream temporarily to avoid borrow conflicts
+        let mut stream = self
+            .tcp_streams
+            .remove(&socket_id)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "Socket not found"))?;
+
+        let token = self.next_token();
+        let result = self
+            .poll
+            .registry()
+            .reregister(&mut stream, token, Interest::WRITABLE);
+
+        // Put the stream back
+        self.tcp_streams.insert(socket_id, stream);
+
+        result?;
+
+        self.token_to_socket.insert(token.0, socket_id);
+        self.pending_ops.insert(
+            token.0,
+            PendingOperation::TcpWrite {
+                future_atom,
+                socket_id,
+                data,
+                bytes_written: 0,
+            },
+        );
+
+        Ok(token)
+    }
+
+    /// Close a TCP socket
+    pub fn tcp_close(&mut self, socket_id: usize) -> std::io::Result<()> {
+        if let Some(mut stream) = self.tcp_streams.remove(&socket_id) {
+            let _ = self.poll.registry().deregister(&mut stream);
+        }
+        Ok(())
+    }
+
+    /// Close a TCP listener
+    pub fn tcp_close_listener(&mut self, listener_id: usize) -> std::io::Result<()> {
+        if let Some(mut listener) = self.tcp_listeners.remove(&listener_id) {
+            let _ = self.poll.registry().deregister(&mut listener);
+        }
+        Ok(())
+    }
+
+    /// Get an immutable reference to a TCP stream
+    pub fn get_tcp_stream(&self, socket_id: usize) -> Option<&TcpStream> {
+        self.tcp_streams.get(&socket_id)
+    }
+
+    /// Get a mutable reference to a TCP stream
+    pub fn get_tcp_stream_mut(&mut self, socket_id: usize) -> Option<&mut TcpStream> {
+        self.tcp_streams.get_mut(&socket_id)
+    }
+
+    /// Store a new TCP stream (e.g., from accept) and return its socket_id
+    pub fn store_tcp_stream(&mut self, stream: TcpStream) -> usize {
+        let socket_id = self.next_socket_id();
+        self.tcp_streams.insert(socket_id, stream);
+        socket_id
+    }
+}
+
+/// Worker loop for file I/O threads with shared receiver
+fn file_worker_loop_shared(
+    rx: Arc<Mutex<mpsc::Receiver<FileTask>>>,
+    tx: mpsc::Sender<FileResult>,
+    waker: Arc<Waker>,
+) {
+    // Note: In a full implementation, we'd register this thread with the GC
+    // For now, file operations are short-lived and don't allocate on the Beagle heap
+
+    loop {
+        // Lock the receiver to get a task
+        let task = {
+            let guard = rx.lock().unwrap();
+            guard.recv()
+        };
+
+        match task {
+            Ok(task) => {
+                let result = execute_file_op(task.op, task.future_atom);
+                if tx.send(result).is_ok() {
+                    // Wake the event loop to process the result
+                    let _ = waker.wake();
+                }
+            }
+            Err(_) => {
+                // Channel closed, exit the loop
+                break;
+            }
+        }
+    }
+}
+
+/// Execute a file operation and return the result
+fn execute_file_op(op: FileOperation, future_atom: usize) -> FileResult {
+    match op {
+        FileOperation::Read { path } => match std::fs::read_to_string(&path) {
+            Ok(content) => FileResult::ReadOk {
+                future_atom,
+                content,
+            },
+            Err(e) => FileResult::ReadErr {
+                future_atom,
+                error: e.to_string(),
+            },
+        },
+        FileOperation::Write { path, content } => match std::fs::write(&path, &content) {
+            Ok(()) => FileResult::WriteOk {
+                future_atom,
+                bytes_written: content.len(),
+            },
+            Err(e) => FileResult::WriteErr {
+                future_atom,
+                error: e.to_string(),
+            },
+        },
+        FileOperation::Delete { path } => match std::fs::remove_file(&path) {
+            Ok(()) => FileResult::DeleteOk { future_atom },
+            Err(e) => FileResult::DeleteErr {
+                future_atom,
+                error: e.to_string(),
+            },
+        },
+        FileOperation::Stat { path } => match std::fs::metadata(&path) {
+            Ok(meta) => FileResult::StatOk {
+                future_atom,
+                size: meta.len(),
+            },
+            Err(e) => FileResult::StatErr {
+                future_atom,
+                error: e.to_string(),
+            },
+        },
+        FileOperation::ReadDir { path } => match std::fs::read_dir(&path) {
+            Ok(entries) => {
+                let names: Vec<String> = entries
+                    .filter_map(|e| e.ok())
+                    .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+                    .collect();
+                FileResult::ReadDirOk {
+                    future_atom,
+                    entries: names,
+                }
+            }
+            Err(e) => FileResult::ReadDirErr {
+                future_atom,
+                error: e.to_string(),
+            },
+        },
+    }
+}
+
+// ============================================================================
+// EventLoopHandle - Stored in Runtime for access from builtins
+// ============================================================================
+
+/// Storage for event loops in the runtime
+/// Each event loop is stored with a unique ID
+pub struct EventLoopRegistry {
+    loops: HashMap<usize, EventLoop>,
+    next_id: usize,
+}
+
+impl EventLoopRegistry {
+    pub fn new() -> Self {
+        Self {
+            loops: HashMap::new(),
+            next_id: 1,
+        }
+    }
+
+    /// Create a new event loop and return its ID
+    pub fn create(&mut self, pool_size: usize) -> Result<usize, String> {
+        let event_loop =
+            EventLoop::new(pool_size).map_err(|e| format!("Failed to create event loop: {}", e))?;
+        let id = self.next_id;
+        self.next_id += 1;
+        self.loops.insert(id, event_loop);
+        Ok(id)
+    }
+
+    /// Get a mutable reference to an event loop by ID
+    pub fn get_mut(&mut self, id: usize) -> Option<&mut EventLoop> {
+        self.loops.get_mut(&id)
+    }
+
+    /// Get an immutable reference to an event loop by ID
+    pub fn get(&self, id: usize) -> Option<&EventLoop> {
+        self.loops.get(&id)
+    }
+
+    /// Register an event loop and return its ID
+    pub fn register(&mut self, event_loop: EventLoop) -> usize {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.loops.insert(id, event_loop);
+        id
+    }
+
+    /// Unregister (remove) an event loop by ID
+    pub fn unregister(&mut self, id: usize) -> Option<EventLoop> {
+        self.loops.remove(&id)
+    }
+
+    /// Remove an event loop (alias for unregister)
+    pub fn remove(&mut self, id: usize) -> Option<EventLoop> {
+        self.loops.remove(&id)
+    }
+}
+
+impl Default for EventLoopRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1403,6 +2471,19 @@ pub struct InvocationReturnPoint {
     /// Used to match return points with their corresponding handle blocks.
     /// This distinguishes sequential handlers at the same stack depth.
     pub prompt_id: usize,
+    /// Where the continuation's stack segment was relocated to.
+    /// Used to copy modifications back to the original location.
+    pub relocated_sp: usize,
+    /// Original SP where the stack segment was captured from.
+    /// The modifications need to be copied back here.
+    pub original_sp: usize,
+    /// Length of the stack segment in bytes.
+    pub segment_len: usize,
+    /// Whether this is a "root" invocation from original code (true) or a nested
+    /// invocation from within a continuation body (false).
+    /// Only root invocations should copy modifications back, because nested invocations
+    /// have an "original_sp" that points to a relocated stack, not the true original.
+    pub is_root_invocation: bool,
 }
 
 /// Captured continuation: a snapshot of the stack between a shift point and its enclosing reset.
@@ -1632,6 +2713,16 @@ pub struct Runtime {
     // (after `call-handler` in perform). When set, return_from_shift should skip
     // popping InvocationReturnPoints and use the passed continuation pointer instead.
     pub is_handler_return: HashMap<ThreadId, bool>,
+    // Per-thread saved continuation pointer from when via_return_point was used.
+    // When a continuation is invoked and returns via via_return_point, we save
+    // the continuation pointer here. Then when return_from_shift_handler is called
+    // with a null cont_ptr (because the stack local was overwritten), we use this
+    // saved pointer instead.
+    pub saved_continuation_ptr: HashMap<ThreadId, usize>,
+    /// Depth of relocated stacks for each thread. When > 0, we're running on a
+    /// relocated stack and should not copy modifications back to "original_sp"
+    /// because the "original" is itself a relocated location.
+    pub relocation_depth: HashMap<ThreadId, usize>,
     // Counter for generating unique prompt IDs to distinguish sequential handlers
     pub prompt_id_counter: AtomicUsize,
     // Per-thread uncaught exception handlers (Beagle function pointers)
@@ -1651,6 +2742,13 @@ pub struct Runtime {
     /// Regexes are stored here and accessed by index.
     /// The index is tagged as a special "Regex" type for Beagle.
     pub compiled_regexes: Vec<Regex>,
+    /// Wait set for efficient future waiting.
+    /// Maps atom addresses to condition variables that threads wait on.
+    /// When an atom is updated (via reset!), waiters should be notified.
+    pub future_wait_set: FutureWaitSet,
+    /// Registry for mio-based event loops.
+    /// Allows creating multiple event loops for different async contexts.
+    pub event_loops: EventLoopRegistry,
 }
 
 pub fn create_stack_with_protected_page_after(stack_size: usize) -> MmapMut {
@@ -1760,6 +2858,8 @@ impl Runtime {
             skip_return_from_shift: HashMap::new(),
             return_from_shift_via_pop_prompt: HashMap::new(),
             is_handler_return: HashMap::new(),
+            saved_continuation_ptr: HashMap::new(),
+            relocation_depth: HashMap::new(),
             prompt_id_counter: AtomicUsize::new(1),
             thread_exception_handler_fns: HashMap::new(),
             default_exception_handler_fn: None,
@@ -1767,6 +2867,8 @@ impl Runtime {
             pending_heap_bindings: Mutex::new(Vec::new()),
             variant_to_enum: HashMap::new(),
             compiled_regexes: Vec::new(),
+            future_wait_set: FutureWaitSet::new(),
+            event_loops: EventLoopRegistry::new(),
         }
     }
 
@@ -3104,70 +4206,58 @@ impl Runtime {
         let closure_temp_id = self.register_temporary_root(f);
 
         // Create Thread struct containing the closure.
-        // In thread-safe mode, allocate + initialize + register temp root while holding
-        // the allocator lock to prevent a GC between these steps.
+        // Allocate + initialize + register temp root while holding the allocator lock
+        // to prevent a GC between these steps.
         let (_thread_obj, thread_temp_id) = {
-            #[cfg(feature = "thread-safe")]
-            {
-                let actual_struct_id = self
-                    .get_struct("beagle.core/Thread")
-                    .expect("Struct 'beagle.core/Thread' not found")
-                    .0;
-                let options = self.memory.heap.get_allocation_options();
-                let frame_pointer = crate::builtins::get_saved_frame_pointer();
+            let actual_struct_id = self
+                .get_struct("beagle.core/Thread")
+                .expect("Struct 'beagle.core/Thread' not found")
+                .0;
+            let options = self.memory.heap.get_allocation_options();
+            let frame_pointer = crate::builtins::get_saved_frame_pointer();
 
-                if options.gc_always {
-                    self.run_gc(stack_pointer, frame_pointer);
-                }
-
-                loop {
-                    let result = self
-                        .memory
-                        .heap
-                        .with_locked_alloc(|alloc| {
-                            match alloc.try_allocate(1, BuiltInTypes::HeapObject) {
-                                Ok(AllocateAction::Allocated(ptr)) => {
-                                    let tagged =
-                                        BuiltInTypes::HeapObject.tag(ptr as isize) as usize;
-                                    let heap_obj = HeapObject::from_tagged(tagged);
-
-                                    // Write struct_id to header using Header API (as raw value).
-                                    let untagged = heap_obj.untagged();
-                                    let header_ptr = untagged as *mut usize;
-                                    unsafe {
-                                        let mut header = Header::from_usize(*header_ptr);
-                                        header.type_data = actual_struct_id as u32;
-                                        *header_ptr = header.to_usize();
-                                    }
-
-                                    heap_obj.write_field(0, f);
-                                    // Return the tagged pointer - we'll register temp root outside
-                                    // the allocator lock but while still holding gc_lock
-                                    Ok(Some(tagged))
-                                }
-                                Ok(AllocateAction::Gc) => Ok(None),
-                                Err(err) => Err(err),
-                            }
-                        })
-                        .expect("Failed to allocate Thread struct");
-
-                    if let Some(tagged) = result {
-                        // Register temp root outside allocator lock but still holding gc_lock
-                        // This is safe because no GC can happen while we hold gc_lock
-                        let temp_id = self.register_temporary_root(tagged);
-                        break (tagged, temp_id);
-                    }
-
-                    self.run_gc(stack_pointer, frame_pointer);
-                }
+            if options.gc_always {
+                self.run_gc(stack_pointer, frame_pointer);
             }
-            #[cfg(not(feature = "thread-safe"))]
-            {
-                let thread_obj = self
-                    .create_struct("beagle.core/Thread", None, &[f], stack_pointer)
-                    .expect("Failed to create Thread struct");
-                let thread_temp_id = self.register_temporary_root(thread_obj);
-                (thread_obj, thread_temp_id)
+
+            loop {
+                let result = self
+                    .memory
+                    .heap
+                    .with_locked_alloc(|alloc| {
+                        match alloc.try_allocate(1, BuiltInTypes::HeapObject) {
+                            Ok(AllocateAction::Allocated(ptr)) => {
+                                let tagged = BuiltInTypes::HeapObject.tag(ptr as isize) as usize;
+                                let heap_obj = HeapObject::from_tagged(tagged);
+
+                                // Write struct_id to header using Header API (as raw value).
+                                let untagged = heap_obj.untagged();
+                                let header_ptr = untagged as *mut usize;
+                                unsafe {
+                                    let mut header = Header::from_usize(*header_ptr);
+                                    header.type_data = actual_struct_id as u32;
+                                    *header_ptr = header.to_usize();
+                                }
+
+                                heap_obj.write_field(0, f);
+                                // Return the tagged pointer - we'll register temp root outside
+                                // the allocator lock but while still holding gc_lock
+                                Ok(Some(tagged))
+                            }
+                            Ok(AllocateAction::Gc) => Ok(None),
+                            Err(err) => Err(err),
+                        }
+                    })
+                    .expect("Failed to allocate Thread struct");
+
+                if let Some(tagged) = result {
+                    // Register temp root outside allocator lock but still holding gc_lock
+                    // This is safe because no GC can happen while we hold gc_lock
+                    let temp_id = self.register_temporary_root(tagged);
+                    break (tagged, temp_id);
+                }
+
+                self.run_gc(stack_pointer, frame_pointer);
             }
         };
 

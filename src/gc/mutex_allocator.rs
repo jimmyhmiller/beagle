@@ -18,7 +18,6 @@ pub struct MutexAllocator<Alloc: Allocator> {
 }
 
 impl<Alloc: Allocator> MutexAllocator<Alloc> {
-    #[cfg(feature = "thread-safe")]
     pub fn with_locked_alloc<F, R>(&mut self, f: F) -> R
     where
         F: FnOnce(&mut Alloc) -> R,

@@ -55,7 +55,6 @@ fn wait_for_done(done_atom, attempts) {
     }
 }
 
-// thread-safe
 // DISABLED
 // 10
 // 10

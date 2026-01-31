@@ -49,5 +49,4 @@ fn wait(done_atom, target, attempts) {
     }
 }
 
-// thread-safe
 // KNOWN BUG: Beagle persistent-map has GC race condition (see line 343 of persistent-map.bg)
