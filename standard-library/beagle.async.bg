@@ -27,6 +27,18 @@ fn rmdir(path) {
     core/fs-rmdir(path)
 }
 
+fn rename-raw(old-path, new-path) {
+    core/fs-rename(old-path, new-path)
+}
+
+fn is-directory-raw(path) {
+    core/fs-is-directory?(path)
+}
+
+fn is-file-raw(path) {
+    core/fs-is-file?(path)
+}
+
 fn readdir(path) {
     core/fs-readdir(path)
 }
@@ -237,6 +249,8 @@ enum Async {
     AppendFile { path, content },
     DeleteFile { path },
     FileExists { path },
+    RenameFile { old_path, new_path },
+    CopyFile { src_path, dest_path },
 
     // Directory operations
     ReadDir { path },
@@ -247,6 +261,8 @@ enum Async {
 
     // File metadata
     FileSize { path },
+    IsDirectory { path },
+    IsFile { path },
 
     // Low-level file operations
     Open { path, mode },
@@ -335,6 +351,12 @@ extend BlockingHandler with effect/Handler(Async) {
             Async.FileExists { path } => {
                 handle-file-exists(path)
             },
+            Async.RenameFile { old_path, new_path } => {
+                handle-rename-file(old_path, new_path)
+            },
+            Async.CopyFile { src_path, dest_path } => {
+                handle-copy-file(src_path, dest_path)
+            },
             Async.ReadDir { path } => {
                 handle-read-dir(path)
             },
@@ -352,6 +374,12 @@ extend BlockingHandler with effect/Handler(Async) {
             },
             Async.FileSize { path } => {
                 handle-file-size(path)
+            },
+            Async.IsDirectory { path } => {
+                handle-is-directory(path)
+            },
+            Async.IsFile { path } => {
+                handle-is-file(path)
             },
             Async.Open { path, mode } => {
                 handle-open(path, mode)
@@ -480,12 +508,42 @@ fn handle-create-dir(path) {
 }
 
 fn handle-create-dir-all(path) {
-    // Simple implementation - try to create, if exists that's ok
-    let result = mkdir(path, 493) // 0755 in octal
-    if result == 0 || result == -17 { // EEXIST
+    // Create directory and all parent directories
+    // Split path into components and create each one
+    if path == "" || path == "/" {
         async-ok(null)
     } else {
-        async-err(result, "Failed to create directory")
+        let components = core/split(path, "/")
+        let mut current-path = ""
+        let mut i = 0
+        let len = length(components)
+        let mut error = null
+
+        while i < len && error == null {
+            let component = get(components, i)
+            if component != "" {
+                if current-path == "" && core/starts-with?(path, "/") {
+                    current-path = "/" ++ component
+                } else if current-path == "" {
+                    current-path = component
+                } else {
+                    current-path = current-path ++ "/" ++ component
+                }
+
+                let result = mkdir(current-path, 493) // 0755 in octal
+                // 0 = success, -17 = EEXIST (already exists, that's ok)
+                if result != 0 && result != -17 {
+                    error = async-err(result, "Failed to create directory: " ++ current-path)
+                }
+            }
+            i = i + 1
+        }
+
+        if error == null {
+            async-ok(null)
+        } else {
+            error
+        }
     }
 }
 
@@ -499,21 +557,94 @@ fn handle-remove-dir(path) {
 }
 
 fn handle-remove-dir-all(path) {
-    // For now, just try simple rmdir - recursive delete is complex
-    let result = rmdir(path)
-    if result == 0 {
-        async-ok(null)
+    // Recursively remove directory and all its contents
+    let entries = readdir(path)
+    if entries == null {
+        // Not a directory or doesn't exist - try to unlink as file
+        let result = unlink(path)
+        if result == 0 {
+            async-ok(null)
+        } else {
+            async-err(result, "Failed to remove: " ++ path)
+        }
     } else {
-        async-err(result, "Failed to remove directory")
+        // It's a directory - remove all entries first
+        let mut i = 0
+        let len = length(entries)
+        let mut error = null
+
+        while i < len && error == null {
+            let entry = get(entries, i)
+            // Skip . and ..
+            if entry != "." && entry != ".." {
+                let entry-path = path ++ "/" ++ entry
+
+                // Try to unlink as file first
+                let unlink-result = unlink(entry-path)
+                if unlink-result != 0 {
+                    // unlink failed - might be a directory, try recursive remove
+                    // Error code 21 is EISDIR on macOS, 1 on Linux
+                    let recursive-result = handle-remove-dir-all(entry-path)
+                    if async-ok?(recursive-result) == false {
+                        error = recursive-result
+                    }
+                }
+            }
+            i = i + 1
+        }
+
+        if error != null {
+            error
+        } else {
+            // Now remove the empty directory
+            let result = rmdir(path)
+            if result == 0 {
+                async-ok(null)
+            } else {
+                async-err(result, "Failed to remove directory: " ++ path)
+            }
+        }
     }
 }
 
 fn handle-file-size(path) {
     let size = file-size-raw(path)
     if size < 0 {
-        async-err(size, "Failed to get file size")
+        async-err(size, "Failed to get file size: " ++ path)
     } else {
         async-ok(size)
+    }
+}
+
+fn handle-is-directory(path) {
+    let result = is-directory-raw(path)
+    async-ok(result)
+}
+
+fn handle-is-file(path) {
+    let result = is-file-raw(path)
+    async-ok(result)
+}
+
+fn handle-rename-file(old-path, new-path) {
+    let result = rename-raw(old-path, new-path)
+    if result == 0 {
+        async-ok(null)
+    } else {
+        async-err(result, "Failed to rename " ++ old-path ++ " to " ++ new-path)
+    }
+}
+
+fn handle-copy-file(src-path, dest-path) {
+    // Read source file and write to destination
+    let read-result = handle-read-file(src-path)
+    match read-result {
+        AsyncResult.Ok { value } => {
+            handle-write-file(dest-path, value)
+        },
+        AsyncResult.Err { code, message } => {
+            async-err(code, "Failed to copy file: " ++ message)
+        }
     }
 }
 
@@ -734,6 +865,12 @@ extend ThreadedAsyncHandler with effect/Handler(Async) {
             Async.FileExists { path } => {
                 handle-file-exists(path)
             },
+            Async.RenameFile { old_path, new_path } => {
+                handle-rename-file(old_path, new_path)
+            },
+            Async.CopyFile { src_path, dest_path } => {
+                handle-copy-file(src_path, dest_path)
+            },
             Async.ReadDir { path } => {
                 handle-read-dir(path)
             },
@@ -751,6 +888,12 @@ extend ThreadedAsyncHandler with effect/Handler(Async) {
             },
             Async.FileSize { path } => {
                 handle-file-size(path)
+            },
+            Async.IsDirectory { path } => {
+                handle-is-directory(path)
+            },
+            Async.IsFile { path } => {
+                handle-is-file(path)
             },
             Async.Open { path, mode } => {
                 handle-open(path, mode)
@@ -1023,6 +1166,14 @@ extend EventLoopHandler with effect/Handler(Async) {
                 // FileExists uses stat internally - fall back for now
                 handle-file-exists(path)
             },
+            Async.RenameFile { old_path, new_path } => {
+                // Fall back to blocking
+                handle-rename-file(old_path, new_path)
+            },
+            Async.CopyFile { src_path, dest_path } => {
+                // Fall back to blocking
+                handle-copy-file(src_path, dest_path)
+            },
             Async.ReadDir { path } => {
                 handle-read-dir-async(loop_id, path)
             },
@@ -1044,6 +1195,14 @@ extend EventLoopHandler with effect/Handler(Async) {
             },
             Async.FileSize { path } => {
                 handle-file-size-async(loop_id, path)
+            },
+            Async.IsDirectory { path } => {
+                // Fall back to blocking
+                handle-is-directory(path)
+            },
+            Async.IsFile { path } => {
+                // Fall back to blocking
+                handle-is-file(path)
             },
             Async.Open { path, mode } => {
                 // Low-level file handle - fall back to blocking
@@ -1596,6 +1755,26 @@ fn file-size(path) {
     perform Async.FileSize { path: path }
 }
 
+// Check if path is a directory
+fn is-directory?(path) {
+    perform Async.IsDirectory { path: path }
+}
+
+// Check if path is a regular file
+fn is-file?(path) {
+    perform Async.IsFile { path: path }
+}
+
+// Rename/move a file or directory
+fn rename-file(old-path, new-path) {
+    perform Async.RenameFile { old_path: old-path, new_path: new-path }
+}
+
+// Copy a file
+fn copy-file(src-path, dest-path) {
+    perform Async.CopyFile { src_path: src-path, dest_path: dest-path }
+}
+
 // Open a file with mode ("r", "w", "a", etc.)
 fn open(path, mode) {
     perform Async.Open { path: path, mode: mode }
@@ -1895,6 +2074,34 @@ fn blocking-file-size(path) {
     let handler = BlockingHandler {}
     handle effect/Handler(Async) with handler {
         file-size(path)
+    }
+}
+
+fn blocking-is-directory?(path) {
+    let handler = BlockingHandler {}
+    handle effect/Handler(Async) with handler {
+        is-directory?(path)
+    }
+}
+
+fn blocking-is-file?(path) {
+    let handler = BlockingHandler {}
+    handle effect/Handler(Async) with handler {
+        is-file?(path)
+    }
+}
+
+fn blocking-rename-file(old-path, new-path) {
+    let handler = BlockingHandler {}
+    handle effect/Handler(Async) with handler {
+        rename-file(old-path, new-path)
+    }
+}
+
+fn blocking-copy-file(src-path, dest-path) {
+    let handler = BlockingHandler {}
+    handle effect/Handler(Async) with handler {
+        copy-file(src-path, dest-path)
     }
 }
 
