@@ -1,0 +1,80 @@
+namespace async_dir_recursive_test
+
+use beagle.async as async
+use beagle.effect as effect
+
+// Test create-dir-all and remove-dir-all with nested directories
+
+fn main() {
+    println("=== Async Directory Recursive Test ===")
+
+    let handler = async/BlockingHandler {}
+
+    let result = handle effect/Handler(async/Async) with handler {
+        // Test create-dir-all with nested path
+        println("Testing create-dir-all...")
+        let mkdir-result = async/create-dir-all("/tmp/beagle_test_nested/a/b/c")
+        match mkdir-result {
+            async/AsyncResult.Ok { value } => println("create-dir-all: OK"),
+            async/AsyncResult.Err { code, message } => println("create-dir-all error:", message)
+        }
+
+        // Verify the directories exist by writing a file in the deepest one
+        println("Writing test file in nested dir...")
+        let write-result = async/write-file("/tmp/beagle_test_nested/a/b/c/test.txt", "Hello nested!\n")
+        match write-result {
+            async/AsyncResult.Ok { value } => println("write-file: OK"),
+            async/AsyncResult.Err { code, message } => println("write-file error:", message)
+        }
+
+        // Also write a file at intermediate level
+        println("Writing file at intermediate level...")
+        let write2-result = async/write-file("/tmp/beagle_test_nested/a/middle.txt", "Middle file\n")
+        match write2-result {
+            async/AsyncResult.Ok { value } => println("write-file intermediate: OK"),
+            async/AsyncResult.Err { code, message } => println("write-file intermediate error:", message)
+        }
+
+        // Now test remove-dir-all - should remove everything
+        println("Testing remove-dir-all...")
+        let rmdir-result = async/remove-dir-all("/tmp/beagle_test_nested")
+        match rmdir-result {
+            async/AsyncResult.Ok { value } => println("remove-dir-all: OK"),
+            async/AsyncResult.Err { code, message } => println("remove-dir-all error:", message)
+        }
+
+        // Verify it's gone
+        println("Verifying removal...")
+        let exists-result = async/file-exists?("/tmp/beagle_test_nested")
+        match exists-result {
+            async/AsyncResult.Ok { value } => {
+                if value {
+                    println("Directory still exists: FAIL")
+                } else {
+                    println("Directory removed: OK")
+                }
+            },
+            async/AsyncResult.Err { code, message } => println("file-exists error:", message)
+        }
+
+        println("=== All tests completed ===")
+        42
+    }
+
+    println("Result:", result)
+}
+
+// Expect
+// === Async Directory Recursive Test ===
+// Testing create-dir-all...
+// create-dir-all: OK
+// Writing test file in nested dir...
+// write-file: OK
+// Writing file at intermediate level...
+// write-file intermediate: OK
+// Testing remove-dir-all...
+// remove-dir-all: OK
+// Verifying removal...
+// Directory removed: OK
+// === All tests completed ===
+// Result: 42

@@ -5041,6 +5041,71 @@ extern "C" fn fs_rmdir(stack_pointer: usize, frame_pointer: usize, path: usize) 
     BuiltInTypes::construct_int(result as isize) as usize
 }
 
+/// rename builtin - Rename/move a file or directory
+/// Returns 0 on success, -1 on error
+extern "C" fn fs_rename(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    old_path: usize,
+    new_path: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let old_path_str = runtime.get_string(stack_pointer, old_path);
+    let new_path_str = runtime.get_string(stack_pointer, new_path);
+
+    let c_old_path = match std::ffi::CString::new(old_path_str) {
+        Ok(s) => s,
+        Err(_) => return BuiltInTypes::construct_int(-1) as usize,
+    };
+
+    let c_new_path = match std::ffi::CString::new(new_path_str) {
+        Ok(s) => s,
+        Err(_) => return BuiltInTypes::construct_int(-1) as usize,
+    };
+
+    let result = unsafe { libc::rename(c_old_path.as_ptr(), c_new_path.as_ptr()) };
+    BuiltInTypes::construct_int(result as isize) as usize
+}
+
+/// is_directory builtin - Check if path is a directory
+/// Returns true if directory, false otherwise
+extern "C" fn fs_is_directory(stack_pointer: usize, frame_pointer: usize, path: usize) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let path_str = runtime.get_string(stack_pointer, path);
+
+    match std::fs::metadata(&path_str) {
+        Ok(metadata) => {
+            if metadata.is_dir() {
+                BuiltInTypes::true_value() as usize
+            } else {
+                BuiltInTypes::false_value() as usize
+            }
+        }
+        Err(_) => BuiltInTypes::false_value() as usize,
+    }
+}
+
+/// is_file builtin - Check if path is a regular file
+/// Returns true if file, false otherwise
+extern "C" fn fs_is_file(stack_pointer: usize, frame_pointer: usize, path: usize) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let path_str = runtime.get_string(stack_pointer, path);
+
+    match std::fs::metadata(&path_str) {
+        Ok(metadata) => {
+            if metadata.is_file() {
+                BuiltInTypes::true_value() as usize
+            } else {
+                BuiltInTypes::false_value() as usize
+            }
+        }
+        Err(_) => BuiltInTypes::false_value() as usize,
+    }
+}
+
 /// readdir builtin - List directory contents
 /// Returns an array of strings (filenames), or null on error
 extern "C" fn fs_readdir(stack_pointer: usize, frame_pointer: usize, path: usize) -> usize {
@@ -8850,6 +8915,33 @@ impl Runtime {
         self.add_builtin_function_with_fp(
             "beagle.core/fs-rmdir",
             fs_rmdir as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, path
+        )?;
+
+        // fs-rename: rename/move a file or directory
+        self.add_builtin_function_with_fp(
+            "beagle.core/fs-rename",
+            fs_rename as *const u8,
+            true,
+            true,
+            4, // stack_pointer, frame_pointer, old_path, new_path
+        )?;
+
+        // fs-is-directory: check if path is a directory
+        self.add_builtin_function_with_fp(
+            "beagle.core/fs-is-directory?",
+            fs_is_directory as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, path
+        )?;
+
+        // fs-is-file: check if path is a regular file
+        self.add_builtin_function_with_fp(
+            "beagle.core/fs-is-file?",
+            fs_is_file as *const u8,
             true,
             true,
             3, // stack_pointer, frame_pointer, path
