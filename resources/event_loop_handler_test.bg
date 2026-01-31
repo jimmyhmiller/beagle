@@ -1,0 +1,36 @@
+namespace event_loop_handler_test
+
+use beagle.async as async
+use beagle.effect as effect
+use beagle.core as core
+
+fn main() {
+    // Create an event loop handler
+    let handler = async/create-event-loop-handler(2)
+    println("Handler created:", handler != null)
+
+    // Test sleep with event loop
+    let start = core/time-now()
+    handle effect/Handler(async/Async) with handler {
+        async/sleep(50)
+    }
+    let elapsed = (core/time-now() - start) / 1000000  // Convert to ms
+    println("Sleep worked:", elapsed >= 40)
+
+    // Test blocking file read (still uses blocking handler internally)
+    // Use absolute path or a file we know exists
+    handle effect/Handler(async/Async) with handler {
+        let result = async/file-exists?("/etc/hosts")
+        // file-exists? returns AsyncResult.Ok { value: bool }
+        let exists = async/async-unwrap(result)
+        println("File exists:", exists == true)
+    }
+
+    println("done")
+}
+
+// Expect
+// Handler created: true
+// Sleep worked: true
+// File exists: true
+// done

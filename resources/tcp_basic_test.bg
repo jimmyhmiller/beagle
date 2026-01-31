@@ -1,0 +1,30 @@
+namespace tcp_basic_test
+
+use beagle.core as core
+
+fn main() {
+    // Create an event loop for TCP operations
+    let loop_id = core/event-loop-create(2)
+    println("Event loop created:", loop_id > 0)
+
+    // Create a TCP listener on localhost
+    let listener_id = core/tcp-listen(loop_id, "127.0.0.1", 0, 10)
+    println("Listener created:", listener_id > 0)
+
+    // Close the listener
+    let close_result = core/tcp-close-listener(loop_id, listener_id)
+    println("Listener closed:", close_result > 0)
+
+    // Clean up
+    let destroy_result = core/event-loop-destroy(loop_id)
+    println("Event loop destroyed:", destroy_result > 0)
+
+    println("done")
+}
+
+// Expect
+// Event loop created: true
+// Listener created: true
+// Listener closed: true
+// Event loop destroyed: true
+// done

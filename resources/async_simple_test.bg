@@ -1,0 +1,14 @@
+namespace async_simple_test
+
+use beagle.async as async
+
+fn main() {
+    println("Testing simple async")
+    let result = async/async-ok(42)
+    println("Result:", result)
+    "done"
+}
+
+// Expect
+// Testing simple async
+// Result: AsyncResult.Ok { value: 42 }

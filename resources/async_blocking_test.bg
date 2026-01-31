@@ -61,7 +61,7 @@ fn main() {
     let readdir-result = async/blocking-read-dir("/tmp")
     match readdir-result {
         async/AsyncResult.Ok { value } => {
-            println("Read dir: got", length(value), "entries")
+            println("Read dir: OK")
         },
         async/AsyncResult.Err { code, message } => {
             println("Read dir error:", message)
@@ -74,3 +74,34 @@ fn main() {
 
     println("=== All tests completed successfully ===")
 }
+
+// Expect
+// === Async Blocking Functions Test ===
+// Testing blocking-sleep...
+// Sleep result: AsyncResult.Ok { value: null }
+// Testing blocking-write-file...
+// Write result: AsyncResult.Ok { value: 27 }
+// Testing blocking-file-exists?...
+// File exists: AsyncResult.Ok { value: true }
+// Testing blocking-read-file...
+// Read result: AsyncResult.Ok { value: "Hello from blocking async!
+// " }
+// Testing blocking-file-size...
+// File size: AsyncResult.Ok { value: 27 }
+// Testing blocking-append-file...
+// Append result: AsyncResult.Ok { value: 12 }
+// Reading after append...
+// Read after append: AsyncResult.Ok { value: "Hello from blocking async!
+// Second line
+// " }
+// Testing blocking-delete-file...
+// Delete result: AsyncResult.Ok { value: null }
+// Verifying deletion...
+// File exists after delete: AsyncResult.Ok { value: false }
+// Testing blocking-create-dir...
+// Mkdir result: AsyncResult.Ok { value: null }
+// Testing blocking-read-dir on /tmp...
+// Read dir: OK
+// Testing blocking-remove-dir...
+// Rmdir result: AsyncResult.Ok { value: null }
+// === All tests completed successfully ===

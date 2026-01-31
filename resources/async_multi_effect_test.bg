@@ -1,6 +1,7 @@
 namespace async_multi_effect_test
 
 use beagle.async as async
+use beagle.effect as effect
 
 // Test multiple sequential effects
 
@@ -9,7 +10,7 @@ fn main() {
 
     let handler = async/BlockingHandler {}
 
-    let result = handle async/Handler(async/Async) with handler {
+    let result = handle effect/Handler(async/Async) with handler {
         println("First sleep...")
         let r1 = async/sleep(10)
         println("First sleep done:", r1)
@@ -28,3 +29,14 @@ fn main() {
 
     println("Result:", result)
 }
+
+// Expect
+// === Multiple Effect Test ===
+// First sleep...
+// First sleep done: AsyncResult.Ok { value: null }
+// Second sleep...
+// Second sleep done: AsyncResult.Ok { value: null }
+// Third sleep...
+// Third sleep done: AsyncResult.Ok { value: null }
+// === All done ===
+// Result: 42

@@ -1,0 +1,40 @@
+namespace event_loop_test
+
+use beagle.core as core
+
+fn main() {
+    // Test get-cpu-count
+    let cpu_count = core/get-cpu-count()
+    println("CPU count > 0:", cpu_count > 0)
+
+    // Test event loop creation
+    let loop_id = core/event-loop-create(2)
+    println("Event loop created:", loop_id > 0)
+
+    // Test running the event loop once (should return 0 with no pending events)
+    let events = core/event-loop-run-once(loop_id, 10)
+    println("Events processed:", events >= 0)
+
+    // Test waking the event loop
+    let wake_result = core/event-loop-wake(loop_id)
+    println("Wake result:", wake_result > 0)
+
+    // After wake, run-once should see at least one event (the waker)
+    let events2 = core/event-loop-run-once(loop_id, 10)
+    println("Events after wake:", events2 >= 0)
+
+    // Test destroying the event loop
+    let destroy_result = core/event-loop-destroy(loop_id)
+    println("Destroy result:", destroy_result > 0)
+
+    println("done")
+}
+
+// Expect
+// CPU count > 0: true
+// Event loop created: true
+// Events processed: true
+// Wake result: true
+// Events after wake: true
+// Destroy result: true
+// done

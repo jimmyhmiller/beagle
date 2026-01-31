@@ -1,0 +1,65 @@
+namespace async_parallel_test
+
+use beagle.async as async
+use beagle.effect as effect
+use beagle.core as core
+
+// Test actual parallel execution with ThreadedAsyncHandler
+// This test verifies that futures run in parallel by timing them.
+//
+// If futures run sequentially: total time >= 200ms (100 + 100)
+// If futures run in parallel: total time ~= 100ms
+
+fn main() {
+    println("=== Async Parallel Execution Test ===")
+
+    let handler = async/ThreadedAsyncHandler {}
+
+    let start_time = async/time-now()
+
+    let result = handle effect/Handler(async/Async) with handler {
+        println("Spawning parallel futures...")
+
+        // Spawn two futures that each sleep for 100ms
+        // Use beagle.core/sleep directly, not the effect-based version
+        let f1 = async/async(fn() {
+            core/sleep(100)
+            "result1"
+        })
+
+        let f2 = async/async(fn() {
+            core/sleep(100)
+            "result2"
+        })
+
+        println("Futures spawned, now waiting...")
+
+        // Wait for both
+        let v1 = async/await(f1)
+        let v2 = async/await(f2)
+
+        println("Got:", v1, v2)
+        "done"
+    }
+
+    let end_time = async/time-now()
+    let elapsed_ms = (end_time - start_time) / 1000000  // Convert ns to ms
+
+    // If parallel, should be around 100-150ms
+    // If sequential, would be around 200-250ms
+    if elapsed_ms < 180 {
+        println("Parallel execution: OK")
+    } else {
+        println("Parallel execution: FAILED (took too long)")
+    }
+
+    println("Final result:", result)
+}
+
+// Expect
+// === Async Parallel Execution Test ===
+// Spawning parallel futures...
+// Futures spawned, now waiting...
+// Got: result1 result2
+// Parallel execution: OK
+// Final result: done
