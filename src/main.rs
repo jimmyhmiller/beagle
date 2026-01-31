@@ -1001,6 +1001,7 @@ fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Erro
         "beagle.ffi.bg",
         "beagle.io.bg",
         "beagle.effect.bg",
+        "beagle.async.bg",
     ];
     let mut all_top_levels = vec![];
 
@@ -1105,12 +1106,6 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
         if !source.contains("// Expect") {
             continue;
-        }
-        #[cfg(not(feature = "thread-safe"))]
-        {
-            if source.contains("// thread-safe") {
-                continue;
-            }
         }
 
         println!("Running test: {}", path);
@@ -1258,38 +1253,14 @@ fn run_repl(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "compacting")] {
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "thread-safe")] {
-                pub type Alloc = MutexAllocator<CompactingHeap>;
-            } else {
-                pub type Alloc = CompactingHeap;
-            }
-        }
+        pub type Alloc = MutexAllocator<CompactingHeap>;
     } else if #[cfg(feature = "mark-and-sweep")] {
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "thread-safe")] {
-                pub type Alloc = MutexAllocator<MarkAndSweep>;
-            } else {
-                pub type Alloc = MarkAndSweep;
-            }
-        }
+        pub type Alloc = MutexAllocator<MarkAndSweep>;
     } else if #[cfg(feature = "generational")] {
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "thread-safe")] {
-                pub type Alloc = MutexAllocator<GenerationalGC>;
-            } else {
-                pub type Alloc = GenerationalGC;
-            }
-        }
+        pub type Alloc = MutexAllocator<GenerationalGC>;
     } else {
         // Default to generational GC
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "thread-safe")] {
-                pub type Alloc = MutexAllocator<GenerationalGC>;
-            } else {
-                pub type Alloc = GenerationalGC;
-            }
-        }
+        pub type Alloc = MutexAllocator<GenerationalGC>;
     }
 }
 

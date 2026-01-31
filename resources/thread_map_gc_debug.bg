@@ -60,7 +60,6 @@ fn wait(done_atom, target, attempts) {
     }
 }
 
-// thread-safe
 // DISABLED
 // Starting test
 // Spawning thread 1

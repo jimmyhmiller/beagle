@@ -116,6 +116,5 @@ fn main() {
     "done"
 }
 
-// thread-safe
 // Expect
 // 22

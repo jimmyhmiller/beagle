@@ -986,6 +986,15 @@ extern "C" fn get_os(stack_pointer: usize, frame_pointer: usize) -> usize {
         .into()
 }
 
+/// Return the raw usize value of any Beagle value (tagged pointer).
+/// This is useful for using atoms as unique identifiers when coordinating
+/// async operations across the Rust/Beagle boundary.
+extern "C" fn atom_address(value: usize) -> usize {
+    // Just return the raw tagged pointer value as an integer.
+    // This works because each atom has a unique address.
+    BuiltInTypes::Int.tag(value as isize) as usize
+}
+
 extern "C" fn equal(a: usize, b: usize) -> usize {
     print_call_builtin(get_runtime().get(), "equal");
     let runtime = get_runtime().get_mut();
@@ -3183,22 +3192,9 @@ pub unsafe extern "C" fn new_thread(
     function: usize,
 ) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
-    #[cfg(feature = "thread-safe")]
-    {
-        let runtime = get_runtime().get_mut();
-        runtime.new_thread(function, stack_pointer, frame_pointer);
-        BuiltInTypes::null_value() as usize
-    }
-    #[cfg(not(feature = "thread-safe"))]
-    {
-        unsafe {
-            throw_runtime_error(
-                stack_pointer,
-                "ThreadError",
-                "Threads are not supported in this build".to_string(),
-            );
-        }
-    }
+    let runtime = get_runtime().get_mut();
+    runtime.new_thread(function, stack_pointer, frame_pointer);
+    BuiltInTypes::null_value() as usize
 }
 
 // I don't know what the deal is here
@@ -4957,6 +4953,159 @@ extern "C" fn read_full_file(
     string.unwrap().into()
 }
 
+// ============================================================================
+// Filesystem builtins for async I/O operations
+// ============================================================================
+
+/// unlink builtin - Delete a file
+/// Returns 0 on success, -1 on error
+extern "C" fn fs_unlink(stack_pointer: usize, frame_pointer: usize, path: usize) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let path_str = runtime.get_string(stack_pointer, path);
+
+    let c_path = match std::ffi::CString::new(path_str) {
+        Ok(s) => s,
+        Err(_) => return BuiltInTypes::construct_int(-1) as usize,
+    };
+
+    let result = unsafe { libc::unlink(c_path.as_ptr()) };
+    BuiltInTypes::construct_int(result as isize) as usize
+}
+
+/// access builtin - Check file accessibility
+/// mode: 0 = F_OK (existence), 1 = X_OK (execute), 2 = W_OK (write), 4 = R_OK (read)
+/// Returns 0 on success, -1 on error
+extern "C" fn fs_access(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    path: usize,
+    mode: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let path_str = runtime.get_string(stack_pointer, path);
+    let mode_val = BuiltInTypes::untag(mode) as i32;
+
+    let c_path = match std::ffi::CString::new(path_str) {
+        Ok(s) => s,
+        Err(_) => return BuiltInTypes::construct_int(-1) as usize,
+    };
+
+    let result = unsafe { libc::access(c_path.as_ptr(), mode_val) };
+    BuiltInTypes::construct_int(result as isize) as usize
+}
+
+/// mkdir builtin - Create a directory
+/// mode: permission bits (e.g., 0o755 = 493)
+/// Returns 0 on success, negative errno on error
+extern "C" fn fs_mkdir(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    path: usize,
+    mode: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let path_str = runtime.get_string(stack_pointer, path);
+    let mode_val = BuiltInTypes::untag(mode) as libc::mode_t;
+
+    let c_path = match std::ffi::CString::new(path_str) {
+        Ok(s) => s,
+        Err(_) => return BuiltInTypes::construct_int(-1) as usize,
+    };
+
+    let result = unsafe { libc::mkdir(c_path.as_ptr(), mode_val) };
+    if result == 0 {
+        BuiltInTypes::construct_int(0) as usize
+    } else {
+        // Return negative errno
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
+        BuiltInTypes::construct_int(-errno as isize) as usize
+    }
+}
+
+/// rmdir builtin - Remove an empty directory
+/// Returns 0 on success, -1 on error
+extern "C" fn fs_rmdir(stack_pointer: usize, frame_pointer: usize, path: usize) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let path_str = runtime.get_string(stack_pointer, path);
+
+    let c_path = match std::ffi::CString::new(path_str) {
+        Ok(s) => s,
+        Err(_) => return BuiltInTypes::construct_int(-1) as usize,
+    };
+
+    let result = unsafe { libc::rmdir(c_path.as_ptr()) };
+    BuiltInTypes::construct_int(result as isize) as usize
+}
+
+/// readdir builtin - List directory contents
+/// Returns an array of strings (filenames), or null on error
+extern "C" fn fs_readdir(stack_pointer: usize, frame_pointer: usize, path: usize) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let path_str = runtime.get_string(stack_pointer, path);
+
+    // Use std::fs::read_dir for safer directory reading
+    match std::fs::read_dir(&path_str) {
+        Ok(entries) => {
+            let mut filenames: Vec<String> = Vec::new();
+            for entry in entries {
+                if let Ok(entry) = entry
+                    && let Some(name) = entry.file_name().to_str()
+                {
+                    filenames.push(name.to_string());
+                }
+            }
+            // Create a Beagle array of strings
+            runtime
+                .create_string_array(stack_pointer, &filenames)
+                .unwrap()
+        }
+        Err(_) => BuiltInTypes::null_value() as usize,
+    }
+}
+
+/// file_size builtin - Get file size in bytes
+/// Returns file size on success, -1 on error
+extern "C" fn fs_file_size(stack_pointer: usize, frame_pointer: usize, path: usize) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let path_str = runtime.get_string(stack_pointer, path);
+
+    match std::fs::metadata(&path_str) {
+        Ok(metadata) => {
+            let size = metadata.len() as isize;
+            BuiltInTypes::construct_int(size) as usize
+        }
+        Err(_) => BuiltInTypes::construct_int(-1) as usize,
+    }
+}
+
+// ============================================================================
+// Future waiting builtins for efficient async await
+// ============================================================================
+
+/// future_wait builtin - Wait for any future to complete with timeout.
+/// timeout_ms: Maximum time to wait in milliseconds
+/// Returns true if notified (a future completed), false if timed out.
+extern "C" fn future_wait(timeout_ms: usize) -> usize {
+    let timeout = BuiltInTypes::untag(timeout_ms) as u64;
+    let runtime = get_runtime().get_mut();
+    let notified = runtime.future_wait_set.wait_timeout(timeout);
+    BuiltInTypes::construct_boolean(notified) as usize
+}
+
+/// future_notify builtin - Notify all threads waiting on futures.
+/// Should be called after a future completes (after reset! on the future atom).
+extern "C" fn future_notify() -> usize {
+    let runtime = get_runtime().get_mut();
+    runtime.future_wait_set.notify_all();
+    BuiltInTypes::null_value() as usize
+}
+
 extern "C" fn eval(stack_pointer: usize, frame_pointer: usize, code: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
@@ -5022,6 +5171,716 @@ extern "C" fn time_now() -> usize {
     let start = START.get_or_init(Instant::now);
     let elapsed = start.elapsed().as_nanos() as isize;
     BuiltInTypes::Int.tag(elapsed) as usize
+}
+
+/// Returns the number of available CPU cores
+/// Useful for sizing thread pools
+extern "C" fn get_cpu_count() -> usize {
+    let count = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1) as isize;
+    BuiltInTypes::Int.tag(count) as usize
+}
+
+/// Create a new event loop for async I/O operations
+/// Takes pool_size as argument - number of threads for file I/O
+extern "C" fn event_loop_create(pool_size: usize) -> usize {
+    let pool_size = BuiltInTypes::untag(pool_size);
+    let runtime = get_runtime().get_mut();
+
+    match crate::runtime::EventLoop::new(pool_size) {
+        Ok(event_loop) => {
+            let id = runtime.event_loops.register(event_loop);
+            BuiltInTypes::Int.tag(id as isize) as usize
+        }
+        Err(e) => {
+            eprintln!("Failed to create event loop: {}", e);
+            BuiltInTypes::Int.tag(-1) as usize
+        }
+    }
+}
+
+/// Run the event loop once, processing events with given timeout in milliseconds
+/// Returns the number of events processed
+extern "C" fn event_loop_run_once(loop_id: usize, timeout_ms: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let timeout_ms = BuiltInTypes::untag(timeout_ms) as u64;
+    let runtime = get_runtime().get_mut();
+
+    if let Some(event_loop) = runtime.event_loops.get_mut(loop_id) {
+        match event_loop.poll_once(timeout_ms) {
+            Ok(count) => BuiltInTypes::Int.tag(count as isize) as usize,
+            Err(e) => {
+                eprintln!("Event loop poll error: {}", e);
+                BuiltInTypes::Int.tag(-1) as usize
+            }
+        }
+    } else {
+        BuiltInTypes::Int.tag(-1) as usize
+    }
+}
+
+/// Wake the event loop from another thread
+extern "C" fn event_loop_wake(loop_id: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+
+    if let Some(event_loop) = runtime.event_loops.get(loop_id) {
+        match event_loop.wake() {
+            Ok(()) => BuiltInTypes::Int.tag(1) as usize,
+            Err(e) => {
+                eprintln!("Event loop wake error: {}", e);
+                BuiltInTypes::Int.tag(-1) as usize
+            }
+        }
+    } else {
+        BuiltInTypes::Int.tag(-1) as usize
+    }
+}
+
+/// Destroy an event loop
+extern "C" fn event_loop_destroy(loop_id: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+
+    if runtime.event_loops.unregister(loop_id).is_some() {
+        BuiltInTypes::Int.tag(1) as usize
+    } else {
+        BuiltInTypes::Int.tag(-1) as usize
+    }
+}
+
+// =============================================================================
+// TCP Networking Builtins
+// =============================================================================
+
+/// Start a non-blocking TCP connection
+/// Returns socket_id on success, -1 on error
+extern "C" fn tcp_connect_async(
+    _stack_pointer: usize,
+    _frame_pointer: usize,
+    loop_id: usize,
+    host: usize,
+    port: usize,
+    future_atom: usize,
+) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let port = BuiltInTypes::untag(port) as u16;
+    let future_atom = BuiltInTypes::untag(future_atom);
+    let runtime = get_runtime().get_mut();
+
+    let host_str = runtime.get_string_literal(host);
+
+    // Parse the address
+    let addr = match format!("{}:{}", host_str, port).parse::<std::net::SocketAddr>() {
+        Ok(addr) => addr,
+        Err(_) => {
+            // Try resolving hostname
+            match std::net::ToSocketAddrs::to_socket_addrs(&(host_str, port)) {
+                Ok(mut addrs) => match addrs.next() {
+                    Some(addr) => addr,
+                    None => return BuiltInTypes::Int.tag(-1) as usize,
+                },
+                Err(_) => return BuiltInTypes::Int.tag(-1) as usize,
+            }
+        }
+    };
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.tcp_connect(addr, future_atom) {
+        Ok((socket_id, _token)) => BuiltInTypes::Int.tag(socket_id as isize) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Create a TCP listener
+/// Returns listener_id on success, -1 on error
+extern "C" fn tcp_listen(
+    _stack_pointer: usize,
+    _frame_pointer: usize,
+    loop_id: usize,
+    host: usize,
+    port: usize,
+    backlog: usize,
+) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let port = BuiltInTypes::untag(port) as u16;
+    let backlog = BuiltInTypes::untag(backlog) as u32;
+    let runtime = get_runtime().get_mut();
+
+    let host_str = runtime.get_string_literal(host);
+
+    // Parse the address
+    let addr = match format!("{}:{}", host_str, port).parse::<std::net::SocketAddr>() {
+        Ok(addr) => addr,
+        Err(_) => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.tcp_listen(addr, backlog) {
+        Ok(listener_id) => BuiltInTypes::Int.tag(listener_id as isize) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Start accepting a connection on a listener
+/// Returns 1 on success (operation started), -1 on error
+extern "C" fn tcp_accept_async(loop_id: usize, listener_id: usize, future_atom: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let listener_id = BuiltInTypes::untag(listener_id);
+    let future_atom = BuiltInTypes::untag(future_atom);
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.tcp_accept(listener_id, future_atom) {
+        Ok(_token) => BuiltInTypes::Int.tag(1) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Start a read operation on a TCP socket
+/// Returns 1 on success (operation started), -1 on error
+extern "C" fn tcp_read_async(
+    loop_id: usize,
+    socket_id: usize,
+    buffer_size: usize,
+    future_atom: usize,
+) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let socket_id = BuiltInTypes::untag(socket_id);
+    let buffer_size = BuiltInTypes::untag(buffer_size);
+    let future_atom = BuiltInTypes::untag(future_atom);
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.tcp_read(socket_id, buffer_size, future_atom) {
+        Ok(_token) => BuiltInTypes::Int.tag(1) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Start a write operation on a TCP socket
+/// Returns 1 on success (operation started), -1 on error
+extern "C" fn tcp_write_async(
+    _stack_pointer: usize,
+    _frame_pointer: usize,
+    loop_id: usize,
+    socket_id: usize,
+    data: usize,
+    future_atom: usize,
+) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let socket_id = BuiltInTypes::untag(socket_id);
+    let future_atom = BuiltInTypes::untag(future_atom);
+    let runtime = get_runtime().get_mut();
+
+    // Get the data as bytes
+    let data_str = runtime.get_string_literal(data);
+    let data_bytes = data_str.as_bytes().to_vec();
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.tcp_write(socket_id, data_bytes, future_atom) {
+        Ok(_token) => BuiltInTypes::Int.tag(1) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Close a TCP socket
+extern "C" fn tcp_close(loop_id: usize, socket_id: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let socket_id = BuiltInTypes::untag(socket_id);
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.tcp_close(socket_id) {
+        Ok(()) => BuiltInTypes::Int.tag(1) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Close a TCP listener
+extern "C" fn tcp_close_listener(loop_id: usize, listener_id: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let listener_id = BuiltInTypes::untag(listener_id);
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.tcp_close_listener(listener_id) {
+        Ok(()) => BuiltInTypes::Int.tag(1) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Check if there are any completed TCP results
+/// Returns the count of pending results
+extern "C" fn tcp_results_count(loop_id: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(0) as usize,
+    };
+
+    let count = event_loop.tcp_results_len();
+    BuiltInTypes::Int.tag(count as isize) as usize
+}
+
+/// Pop and get the next completed TCP result type
+/// Returns 0 if no results, otherwise:
+/// 1=connect-ok, 2=connect-err, 3=accept-ok, 4=accept-err,
+/// 5=read-ok, 6=read-err, 7=write-ok, 8=write-err
+/// The result stays "current" until the next call
+extern "C" fn tcp_result_pop(loop_id: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(0) as usize,
+    };
+
+    use crate::runtime::TcpResult;
+
+    match event_loop.pop_tcp_result() {
+        None => BuiltInTypes::Int.tag(0) as usize,
+        Some(result) => {
+            let type_code = match &result {
+                TcpResult::ConnectOk { .. } => 1,
+                TcpResult::ConnectErr { .. } => 2,
+                TcpResult::AcceptOk { .. } => 3,
+                TcpResult::AcceptErr { .. } => 4,
+                TcpResult::ReadOk { .. } => 5,
+                TcpResult::ReadErr { .. } => 6,
+                TcpResult::WriteOk { .. } => 7,
+                TcpResult::WriteErr { .. } => 8,
+            };
+            event_loop.set_current_result(result);
+            BuiltInTypes::Int.tag(type_code) as usize
+        }
+    }
+}
+
+/// Get the future_atom from the current TCP result
+extern "C" fn tcp_result_future_atom(loop_id: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(0) as usize,
+    };
+
+    use crate::runtime::TcpResult;
+
+    let atom = match event_loop.current_result() {
+        None => 0,
+        Some(result) => match result {
+            TcpResult::ConnectOk { future_atom, .. } => *future_atom,
+            TcpResult::ConnectErr { future_atom, .. } => *future_atom,
+            TcpResult::AcceptOk { future_atom, .. } => *future_atom,
+            TcpResult::AcceptErr { future_atom, .. } => *future_atom,
+            TcpResult::ReadOk { future_atom, .. } => *future_atom,
+            TcpResult::ReadErr { future_atom, .. } => *future_atom,
+            TcpResult::WriteOk { future_atom, .. } => *future_atom,
+            TcpResult::WriteErr { future_atom, .. } => *future_atom,
+        },
+    };
+    BuiltInTypes::Int.tag(atom as isize) as usize
+}
+
+/// Get the value (socket_id or bytes_written) from the current TCP result
+/// For error results, returns 0
+extern "C" fn tcp_result_value(loop_id: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(0) as usize,
+    };
+
+    use crate::runtime::TcpResult;
+
+    let value = match event_loop.current_result() {
+        None => 0,
+        Some(result) => match result {
+            TcpResult::ConnectOk { socket_id, .. } => *socket_id,
+            TcpResult::AcceptOk { socket_id, .. } => *socket_id,
+            TcpResult::WriteOk { bytes_written, .. } => *bytes_written,
+            _ => 0,
+        },
+    };
+    BuiltInTypes::Int.tag(value as isize) as usize
+}
+
+/// Get the data/error string from the current TCP result
+/// Returns the data for ReadOk, error message for error results, empty string otherwise
+extern "C" fn tcp_result_data(stack_pointer: usize, loop_id: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => {
+            let runtime = get_runtime().get_mut();
+            return runtime
+                .allocate_string(stack_pointer, String::new())
+                .map(|t| t.into())
+                .unwrap_or(0);
+        }
+    };
+
+    use crate::runtime::TcpResult;
+
+    let data = match event_loop.current_result() {
+        None => String::new(),
+        Some(result) => match result {
+            TcpResult::ReadOk { data, .. } => String::from_utf8_lossy(data).to_string(),
+            TcpResult::ConnectErr { error, .. } => error.clone(),
+            TcpResult::AcceptErr { error, .. } => error.clone(),
+            TcpResult::ReadErr { error, .. } => error.clone(),
+            TcpResult::WriteErr { error, .. } => error.clone(),
+            _ => String::new(),
+        },
+    };
+
+    let runtime = get_runtime().get_mut();
+    runtime
+        .allocate_string(stack_pointer, data)
+        .map(|t| t.into())
+        .unwrap_or(0)
+}
+
+// =============================================================================
+// Timer Builtins
+// =============================================================================
+
+/// Set a timer that fires after delay_ms milliseconds
+/// Returns timer_id on success, -1 on error
+extern "C" fn timer_set(loop_id: usize, delay_ms: usize, future_atom: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let delay_ms = BuiltInTypes::untag(delay_ms) as u64;
+    let future_atom = BuiltInTypes::untag(future_atom);
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    let timer_id = event_loop.timer_set(delay_ms, future_atom);
+    BuiltInTypes::Int.tag(timer_id as isize) as usize
+}
+
+/// Cancel a timer by ID
+/// Returns 1 if cancelled, 0 if not found
+extern "C" fn timer_cancel(loop_id: usize, timer_id: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let timer_id = BuiltInTypes::untag(timer_id);
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(0) as usize,
+    };
+
+    let cancelled = event_loop.timer_cancel(timer_id);
+    BuiltInTypes::Int.tag(if cancelled { 1 } else { 0 }) as usize
+}
+
+/// Get the count of completed timers
+extern "C" fn timer_completed_count(loop_id: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(0) as usize,
+    };
+
+    let count = event_loop.completed_timers_len();
+    BuiltInTypes::Int.tag(count as isize) as usize
+}
+
+/// Pop the next completed timer's future_atom
+/// Returns 0 if no completed timers
+extern "C" fn timer_pop_completed(loop_id: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(0) as usize,
+    };
+
+    match event_loop.pop_completed_timer() {
+        Some(future_atom) => BuiltInTypes::Int.tag(future_atom as isize) as usize,
+        None => BuiltInTypes::Int.tag(0) as usize,
+    }
+}
+
+// ============================================================================
+// Async File I/O Builtins
+// ============================================================================
+
+/// Start an async file read operation
+/// Returns 1 on success, -1 on error
+extern "C" fn file_read_async(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    loop_id: usize,
+    path: usize,
+    future_atom: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let future_atom = BuiltInTypes::untag(future_atom);
+    let runtime = get_runtime().get_mut();
+    let path_str = runtime.get_string(stack_pointer, path);
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.submit_file_op(
+        crate::runtime::FileOperation::Read { path: path_str },
+        future_atom,
+    ) {
+        Ok(()) => BuiltInTypes::Int.tag(1) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Start an async file write operation
+/// Returns 1 on success, -1 on error
+extern "C" fn file_write_async(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    loop_id: usize,
+    path: usize,
+    content: usize,
+    future_atom: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let future_atom = BuiltInTypes::untag(future_atom);
+    let runtime = get_runtime().get_mut();
+    let path_str = runtime.get_string(stack_pointer, path);
+    let content_str = runtime.get_string(stack_pointer, content);
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.submit_file_op(
+        crate::runtime::FileOperation::Write {
+            path: path_str,
+            content: content_str.into_bytes(),
+        },
+        future_atom,
+    ) {
+        Ok(()) => BuiltInTypes::Int.tag(1) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Start an async file delete operation
+/// Returns 1 on success, -1 on error
+extern "C" fn file_delete_async(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    loop_id: usize,
+    path: usize,
+    future_atom: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let future_atom = BuiltInTypes::untag(future_atom);
+    let runtime = get_runtime().get_mut();
+    let path_str = runtime.get_string(stack_pointer, path);
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.submit_file_op(
+        crate::runtime::FileOperation::Delete { path: path_str },
+        future_atom,
+    ) {
+        Ok(()) => BuiltInTypes::Int.tag(1) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Start an async file stat operation
+/// Returns 1 on success, -1 on error
+extern "C" fn file_stat_async(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    loop_id: usize,
+    path: usize,
+    future_atom: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let future_atom = BuiltInTypes::untag(future_atom);
+    let runtime = get_runtime().get_mut();
+    let path_str = runtime.get_string(stack_pointer, path);
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.submit_file_op(
+        crate::runtime::FileOperation::Stat { path: path_str },
+        future_atom,
+    ) {
+        Ok(()) => BuiltInTypes::Int.tag(1) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Start an async readdir operation
+/// Returns 1 on success, -1 on error
+extern "C" fn file_readdir_async(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    loop_id: usize,
+    path: usize,
+    future_atom: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let future_atom = BuiltInTypes::untag(future_atom);
+    let runtime = get_runtime().get_mut();
+    let path_str = runtime.get_string(stack_pointer, path);
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.submit_file_op(
+        crate::runtime::FileOperation::ReadDir { path: path_str },
+        future_atom,
+    ) {
+        Ok(()) => BuiltInTypes::Int.tag(1) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Get the count of completed file operations
+extern "C" fn file_results_count(loop_id: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(0) as usize,
+    };
+
+    BuiltInTypes::Int.tag(event_loop.file_results_count() as isize) as usize
+}
+
+/// Pop the next file result, returns type code:
+/// 0 = no result, 1 = ReadOk, 2 = ReadErr, 3 = WriteOk, 4 = WriteErr,
+/// 5 = DeleteOk, 6 = DeleteErr, 7 = StatOk, 8 = StatErr, 9 = ReadDirOk, 10 = ReadDirErr
+extern "C" fn file_result_pop(loop_id: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(0) as usize,
+    };
+
+    BuiltInTypes::Int.tag(event_loop.file_result_pop() as isize) as usize
+}
+
+/// Get the future_atom from the current file result
+extern "C" fn file_result_future_atom(loop_id: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(0) as usize,
+    };
+
+    BuiltInTypes::Int.tag(event_loop.file_result_future_atom() as isize) as usize
+}
+
+/// Get the numeric value from the current file result (bytes_written or file size)
+extern "C" fn file_result_value(loop_id: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(0) as usize,
+    };
+
+    BuiltInTypes::Int.tag(event_loop.file_result_value() as isize) as usize
+}
+
+/// Get the string data from the current file result (content or error message)
+extern "C" fn file_result_data(
+    stack_pointer: usize,
+    _frame_pointer: usize,
+    loop_id: usize,
+) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+
+    // Get the string data and clone it immediately to release the borrow
+    let data_opt = {
+        let event_loop = match runtime.event_loops.get_mut(loop_id) {
+            Some(el) => el,
+            None => return BuiltInTypes::null_value() as usize,
+        };
+        event_loop.file_result_string_data().map(|s| s.to_string())
+    };
+
+    match data_opt {
+        Some(data) => runtime
+            .allocate_string(stack_pointer, data)
+            .map(|t| t.into())
+            .unwrap_or(BuiltInTypes::null_value() as usize),
+        None => BuiltInTypes::null_value() as usize,
+    }
 }
 
 pub extern "C" fn register_extension(
@@ -5703,8 +6562,9 @@ pub unsafe extern "C" fn return_from_shift_runtime(
         .unwrap_or(false);
 
     // Check if this is a handler return (after `call-handler` in perform).
-    // Handler returns should skip popping InvocationReturnPoints and use the passed continuation.
-    let _is_handler_return = runtime
+    // Handler returns should skip restoring the stack segment because the continuation
+    // has already been invoked and modified the stack - those changes should persist.
+    let is_handler_return = runtime
         .is_handler_return
         .remove(&thread_id)
         .unwrap_or(false);
@@ -5719,23 +6579,72 @@ pub unsafe extern "C" fn return_from_shift_runtime(
     if let Some(return_points) = runtime.invocation_return_points.get_mut(&thread_id)
         && let Some(return_point) = return_points.pop()
     {
+        // Get remaining count before we drop the mutable borrow
+        let remaining = return_points.len();
         if debug_prompts {
             eprintln!(
                 "[return_from_shift] via_return_point from_pop_prompt={} remaining_after_pop={} rp_sp={:#x} rp_fp={:#x} ret_addr={:#x} prompt_id={}",
                 from_pop_prompt,
-                return_points.len(),
+                remaining,
                 return_point.stack_pointer,
                 return_point.frame_pointer,
                 return_point.return_address,
                 return_point.prompt_id
             );
         }
+        // Note: We're done with return_points here. The mutable borrow is released
+        // when return_points goes out of scope after the if-let block.
+
         // For deep handler semantics: pop the prompt that was pushed by invoke_continuation.
         // Both empty and non-empty segments push a prompt that must be popped.
         let _ = runtime.pop_prompt_handler();
 
         // NOTE: We intentionally do NOT adjust continuation lifetime here.
         // The continuation pointer is carried by the shift body and used by return_from_shift.
+
+        // Decrement relocation depth - we're returning from a relocated stack level.
+        // Each invoke_continuation incremented the depth, so each return must decrement.
+        let current_depth = runtime
+            .relocation_depth
+            .get(&thread_id)
+            .copied()
+            .unwrap_or(0);
+        if current_depth > 0 {
+            runtime
+                .relocation_depth
+                .insert(thread_id, current_depth - 1);
+        }
+
+        // CRITICAL: Copy the modified stack segment back to the original location,
+        // BUT ONLY when:
+        // 1. This is a "root" invocation (is_root_invocation = true), meaning the
+        //    original_sp points to the true original stack, not a relocated one
+        // 2. This is the last return point (remaining == 0)
+        //
+        // For nested invocations (is_root_invocation = false), the "original_sp"
+        // actually points to a previously relocated stack. Copying back would
+        // corrupt that relocated stack, breaking subsequent operations.
+        if return_point.segment_len > 0 && return_point.is_root_invocation && remaining == 0 {
+            if debug_prompts {
+                eprintln!(
+                    "[return_from_shift] Copying modifications: {} bytes from relocated_sp={:#x} to original_sp={:#x}",
+                    return_point.segment_len, return_point.relocated_sp, return_point.original_sp
+                );
+            }
+            // SAFETY: Both pointers point to valid stack memory
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    return_point.relocated_sp as *const u8,
+                    return_point.original_sp as *mut u8,
+                    return_point.segment_len,
+                );
+            }
+        } else if debug_prompts && return_point.segment_len > 0 {
+            eprintln!(
+                "[return_from_shift] Skipping copy-back (remaining={}, is_root={}, returning to intermediate handler)",
+                remaining, return_point.is_root_invocation
+            );
+        }
 
         let new_sp = return_point.stack_pointer;
         let new_fp = return_point.frame_pointer;
@@ -5806,11 +6715,59 @@ pub unsafe extern "C" fn return_from_shift_runtime(
     }
 
     // No invocation return point - return to prompt handler using the passed continuation.
-    let cont_ptr = if cont_ptr == BuiltInTypes::null_value() as usize {
-        0
-    } else {
+    // If the passed cont_ptr is invalid (null, not a heap pointer, or not properly aligned),
+    // try to use the saved continuation pointer. This happens when the continuation was
+    // invoked and via_return_point copied back the stack segment, which overwrote the
+    // cont_ptr local with its captured value (which might be garbage since cont_ptr is
+    // stored AFTER capture).
+    let original_cont_ptr = cont_ptr;
+    let is_valid_cont_ptr = cont_ptr != 0
+        && cont_ptr != BuiltInTypes::null_value() as usize
+        && BuiltInTypes::is_heap_pointer(cont_ptr)
+        && BuiltInTypes::untag(cont_ptr).is_multiple_of(8);
+
+    // ALWAYS prefer the saved continuation pointer over the passed one.
+    // The passed cont_ptr might be corrupted by copy-back (invalid) or it might
+    // be a nested continuation (valid but wrong). The saved pointer is the FIRST
+    // (root) continuation which has the original prompt.
+    let saved = runtime
+        .saved_continuation_ptr
+        .get(&thread_id)
+        .copied()
+        .unwrap_or(0);
+
+    let cont_ptr = if saved != 0 && BuiltInTypes::is_heap_pointer(saved) {
+        // Use saved (root) continuation pointer
+        if debug_prompts {
+            eprintln!(
+                "[return_from_shift] using saved cont_ptr={:#x} (passed={:#x})",
+                saved, original_cont_ptr
+            );
+        }
+        // Clear the saved pointer now that we've used it
+        runtime.saved_continuation_ptr.remove(&thread_id);
+        saved
+    } else if is_valid_cont_ptr {
+        // Fall back to passed pointer if no saved pointer
+        if debug_prompts {
+            eprintln!("[return_from_shift] using passed cont_ptr={:#x}", cont_ptr);
+        }
         cont_ptr
+    } else {
+        if debug_prompts {
+            eprintln!(
+                "[return_from_shift] no valid cont_ptr (passed={:#x}, saved={:#x})",
+                original_cont_ptr, saved
+            );
+        }
+        0
     };
+    if debug_prompts && original_cont_ptr != cont_ptr {
+        eprintln!(
+            "[return_from_shift] original_cont_ptr={:#x} -> cont_ptr={:#x}",
+            original_cont_ptr, cont_ptr
+        );
+    }
 
     if cont_ptr != 0 {
         // Validate that cont_ptr still looks like a heap pointer before dereferencing.
@@ -5874,16 +6831,20 @@ pub unsafe extern "C" fn return_from_shift_runtime(
         let new_lr = prompt.link_register;
         let result_local_offset = prompt.result_local;
 
-        // CRITICAL: Restore the stack segment before jumping!
-        // The stack contents at capture time may have been overwritten by subsequent
-        // code execution (function calls, etc.). We must restore the original stack data
-        // for the epilogue to read correct FP/LR values.
+        // Restore the stack segment before jumping, BUT only if this is NOT a handler return.
+        // When the handler returns after calling resume(), the continuation has already been
+        // invoked and has modified the stack. Those modifications should persist - we should
+        // NOT overwrite them with the captured (old) stack segment.
+        //
+        // The stack segment restoration is only needed when:
+        // 1. The shift body returns directly without invoking the continuation, OR
+        // 2. For multi-shot continuations, each invocation starts fresh (handled in invoke_continuation)
         //
         // NOTE: We restore to continuation.original_sp (where the data was captured from),
         // NOT to prompt.stack_pointer (which is the push_prompt SP, above the capture region).
         let restore_sp = continuation.original_sp();
         let stack_segment_len = continuation.segment_len();
-        if stack_segment_len > 0 {
+        if stack_segment_len > 0 && !is_handler_return {
             if debug_prompts {
                 eprintln!(
                     "[return_from_shift] Restoring stack segment: {} bytes to original_sp={:#x} (prompt_sp={:#x})",
@@ -5900,6 +6861,10 @@ pub unsafe extern "C" fn return_from_shift_runtime(
                     );
                 }
             });
+        } else if debug_prompts && is_handler_return {
+            eprintln!(
+                "[return_from_shift] Skipping stack segment restore (is_handler_return=true)"
+            );
         }
 
         // Store the value in the result local
@@ -5993,7 +6958,16 @@ pub unsafe extern "C" fn return_from_shift_runtime(
     }
 
     // No continuation found - this shouldn't happen in normal operation.
-    panic!("return_from_shift called without captured continuation or return point");
+    if debug_prompts {
+        eprintln!(
+            "[return_from_shift] PANIC: no return point and cont_ptr={:#x} is_handler_return={}",
+            cont_ptr, is_handler_return
+        );
+    }
+    panic!(
+        "return_from_shift called without captured continuation or return point: cont_ptr={:#x}",
+        cont_ptr
+    );
 }
 
 /// Return from shift body to the enclosing reset, specifically for handler returns.
@@ -6032,6 +7006,17 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
 
     let runtime = get_runtime().get_mut();
     let debug_prompts = runtime.get_command_line_args().debug;
+    let thread_id = std::thread::current().id();
+
+    // Save the continuation pointer so it can be used by return_from_shift_handler
+    // after the stack local has been overwritten by copying modifications back.
+    // IMPORTANT: Only save the FIRST (root) continuation pointer. Nested invocations
+    // have cont_ptrs that point to nested continuations with relocated prompts.
+    // We want the root continuation, which has the original prompt.
+    runtime
+        .saved_continuation_ptr
+        .entry(thread_id)
+        .or_insert(cont_ptr);
 
     let continuation = ContinuationObject::from_tagged(cont_ptr).unwrap_or_else(|| {
         panic!(
@@ -6193,33 +7178,6 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
     }
 
     // Non-empty stack segment - need to copy and relocate
-    // For non-empty segments, create InvocationReturnPoint for multi-shot support.
-
-    runtime
-        .invocation_return_points
-        .entry(thread_id)
-        .or_default()
-        .push(crate::runtime::InvocationReturnPoint {
-            stack_pointer: beagle_sp,
-            frame_pointer: beagle_fp,
-            return_address: beagle_return_address,
-            callee_saved_regs,
-            saved_stack_frame,
-            prompt_id,
-        });
-
-    if debug_prompts {
-        let rp_len = runtime
-            .invocation_return_points
-            .get(&thread_id)
-            .map(|rps| rps.len())
-            .unwrap_or(0);
-        eprintln!(
-            "[invoke_cont] push_return_point prompt_id={} stack_seg={} beagle_sp={:#x} beagle_fp={:#x} ret_addr={:#x} rp_len={}",
-            prompt_id, stack_segment_size, beagle_sp, beagle_fp, beagle_return_address, rp_len
-        );
-    }
-
     #[allow(unused_variables)]
     let return_trampoline = continuation_return_trampoline as usize;
 
@@ -6252,6 +7210,71 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
             stack_segment_size,
         );
     });
+
+    // For non-empty segments, create InvocationReturnPoint for multi-shot support.
+    // Store relocated_sp, original_sp, and segment_len so we can copy modifications
+    // back to the original location when the continuation completes.
+    let original_sp = continuation.original_sp();
+
+    // Determine if this is a "root" invocation (from original code) or a nested invocation
+    // (from within a continuation body). Only root invocations should copy modifications
+    // back, because nested invocations have an "original_sp" that points to a relocated
+    // stack, not the true original.
+    //
+    // We track this using relocation_depth: if depth > 0 when we invoke, the "original_sp"
+    // is actually inside a relocated stack. The depth is incremented when we invoke and
+    // decremented when we return via the LAST return point for that invocation level.
+    let current_depth = runtime
+        .relocation_depth
+        .get(&thread_id)
+        .copied()
+        .unwrap_or(0);
+    let is_root_invocation = current_depth == 0;
+
+    // Increment relocation depth - we're about to run on a relocated stack
+    runtime
+        .relocation_depth
+        .insert(thread_id, current_depth + 1);
+
+    runtime
+        .invocation_return_points
+        .entry(thread_id)
+        .or_default()
+        .push(crate::runtime::InvocationReturnPoint {
+            stack_pointer: beagle_sp,
+            frame_pointer: beagle_fp,
+            return_address: beagle_return_address,
+            callee_saved_regs,
+            saved_stack_frame,
+            prompt_id,
+            relocated_sp: new_sp,
+            original_sp,
+            segment_len: stack_segment_size,
+            is_root_invocation,
+        });
+
+    if debug_prompts {
+        let rp_len = runtime
+            .invocation_return_points
+            .get(&thread_id)
+            .map(|rps| rps.len())
+            .unwrap_or(0);
+        let new_depth = runtime
+            .relocation_depth
+            .get(&thread_id)
+            .copied()
+            .unwrap_or(0);
+        eprintln!(
+            "[invoke_cont] push_return_point prompt_id={} stack_seg={} is_root={} depth={} rp_len={} relocated_sp={:#x} original_sp={:#x}",
+            prompt_id,
+            stack_segment_size,
+            is_root_invocation,
+            new_depth,
+            rp_len,
+            new_sp,
+            original_sp
+        );
+    }
 
     // Calculate relocation offset for frame pointers
     let relocation_offset = (new_sp as isize) - (continuation.original_sp() as isize);
@@ -6714,6 +7737,14 @@ impl Runtime {
             true,
             true,
             2,
+        )?;
+
+        // atom-address returns the raw usize value of any value (useful for async coordination)
+        self.add_builtin_function(
+            "beagle.core/atom-address",
+            atom_address as *const u8,
+            false,
+            1,
         )?;
 
         self.add_builtin_function("beagle.core/equal", equal as *const u8, false, 2)?;
@@ -7331,6 +8362,213 @@ impl Runtime {
         self.add_builtin_function("beagle.core/time-now", time_now as *const u8, false, 0)?;
 
         self.add_builtin_function(
+            "beagle.core/get-cpu-count",
+            get_cpu_count as *const u8,
+            false,
+            0,
+        )?;
+
+        // Event loop builtins for async I/O
+        self.add_builtin_function(
+            "beagle.core/event-loop-create",
+            event_loop_create as *const u8,
+            false,
+            1,
+        )?;
+        self.add_builtin_function(
+            "beagle.core/event-loop-run-once",
+            event_loop_run_once as *const u8,
+            false,
+            2,
+        )?;
+        self.add_builtin_function(
+            "beagle.core/event-loop-wake",
+            event_loop_wake as *const u8,
+            false,
+            1,
+        )?;
+        self.add_builtin_function(
+            "beagle.core/event-loop-destroy",
+            event_loop_destroy as *const u8,
+            false,
+            1,
+        )?;
+
+        // TCP networking builtins
+        self.add_builtin_function_with_fp(
+            "beagle.core/tcp-connect-async",
+            tcp_connect_async as *const u8,
+            true,
+            true,
+            6, // stack_pointer, frame_pointer, loop_id, host, port, future_atom
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/tcp-listen",
+            tcp_listen as *const u8,
+            true,
+            true,
+            6, // stack_pointer, frame_pointer, loop_id, host, port, backlog
+        )?;
+        self.add_builtin_function(
+            "beagle.core/tcp-accept-async",
+            tcp_accept_async as *const u8,
+            false,
+            3, // loop_id, listener_id, future_atom
+        )?;
+        self.add_builtin_function(
+            "beagle.core/tcp-read-async",
+            tcp_read_async as *const u8,
+            false,
+            4, // loop_id, socket_id, buffer_size, future_atom
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/tcp-write-async",
+            tcp_write_async as *const u8,
+            true,
+            true,
+            6, // stack_pointer, frame_pointer, loop_id, socket_id, data, future_atom
+        )?;
+        self.add_builtin_function(
+            "beagle.core/tcp-close",
+            tcp_close as *const u8,
+            false,
+            2, // loop_id, socket_id
+        )?;
+        self.add_builtin_function(
+            "beagle.core/tcp-close-listener",
+            tcp_close_listener as *const u8,
+            false,
+            2, // loop_id, listener_id
+        )?;
+
+        // TCP result polling builtins
+        self.add_builtin_function(
+            "beagle.core/tcp-results-count",
+            tcp_results_count as *const u8,
+            false,
+            1, // loop_id
+        )?;
+        self.add_builtin_function(
+            "beagle.core/tcp-result-pop",
+            tcp_result_pop as *const u8,
+            false,
+            1, // loop_id
+        )?;
+        self.add_builtin_function(
+            "beagle.core/tcp-result-future-atom",
+            tcp_result_future_atom as *const u8,
+            false,
+            1, // loop_id
+        )?;
+        self.add_builtin_function(
+            "beagle.core/tcp-result-value",
+            tcp_result_value as *const u8,
+            false,
+            1, // loop_id
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/tcp-result-data",
+            tcp_result_data as *const u8,
+            true,
+            false,
+            3, // stack_pointer, frame_pointer (implicit), loop_id
+        )?;
+
+        // Timer builtins
+        self.add_builtin_function(
+            "beagle.core/timer-set",
+            timer_set as *const u8,
+            false,
+            3, // loop_id, delay_ms, future_atom
+        )?;
+        self.add_builtin_function(
+            "beagle.core/timer-cancel",
+            timer_cancel as *const u8,
+            false,
+            2, // loop_id, timer_id
+        )?;
+        self.add_builtin_function(
+            "beagle.core/timer-completed-count",
+            timer_completed_count as *const u8,
+            false,
+            1, // loop_id
+        )?;
+        self.add_builtin_function(
+            "beagle.core/timer-pop-completed",
+            timer_pop_completed as *const u8,
+            false,
+            1, // loop_id
+        )?;
+
+        // Async file I/O builtins
+        self.add_builtin_function_with_fp(
+            "beagle.core/file-read-async",
+            file_read_async as *const u8,
+            true,
+            true,
+            5, // stack_pointer, frame_pointer, loop_id, path, future_atom
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/file-write-async",
+            file_write_async as *const u8,
+            true,
+            true,
+            6, // stack_pointer, frame_pointer, loop_id, path, content, future_atom
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/file-delete-async",
+            file_delete_async as *const u8,
+            true,
+            true,
+            5, // stack_pointer, frame_pointer, loop_id, path, future_atom
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/file-stat-async",
+            file_stat_async as *const u8,
+            true,
+            true,
+            5, // stack_pointer, frame_pointer, loop_id, path, future_atom
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/file-readdir-async",
+            file_readdir_async as *const u8,
+            true,
+            true,
+            5, // stack_pointer, frame_pointer, loop_id, path, future_atom
+        )?;
+        self.add_builtin_function(
+            "beagle.core/file-results-count",
+            file_results_count as *const u8,
+            false,
+            1, // loop_id
+        )?;
+        self.add_builtin_function(
+            "beagle.core/file-result-pop",
+            file_result_pop as *const u8,
+            false,
+            1, // loop_id
+        )?;
+        self.add_builtin_function(
+            "beagle.core/file-result-future-atom",
+            file_result_future_atom as *const u8,
+            false,
+            1, // loop_id
+        )?;
+        self.add_builtin_function(
+            "beagle.core/file-result-value",
+            file_result_value as *const u8,
+            false,
+            1, // loop_id
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/file-result-data",
+            file_result_data as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer (implicit), loop_id
+        )?;
+
+        self.add_builtin_function(
             "beagle.builtin/register-extension",
             register_extension as *const u8,
             false,
@@ -7575,6 +8813,84 @@ impl Runtime {
             true,
             true,
             3,
+        )?;
+
+        // ============================================================================
+        // Filesystem builtins for async I/O
+        // ============================================================================
+
+        // fs-unlink: delete a file
+        self.add_builtin_function_with_fp(
+            "beagle.core/fs-unlink",
+            fs_unlink as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, path
+        )?;
+
+        // fs-access: check file accessibility
+        self.add_builtin_function_with_fp(
+            "beagle.core/fs-access",
+            fs_access as *const u8,
+            true,
+            true,
+            4, // stack_pointer, frame_pointer, path, mode
+        )?;
+
+        // fs-mkdir: create a directory
+        self.add_builtin_function_with_fp(
+            "beagle.core/fs-mkdir",
+            fs_mkdir as *const u8,
+            true,
+            true,
+            4, // stack_pointer, frame_pointer, path, mode
+        )?;
+
+        // fs-rmdir: remove an empty directory
+        self.add_builtin_function_with_fp(
+            "beagle.core/fs-rmdir",
+            fs_rmdir as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, path
+        )?;
+
+        // fs-readdir: list directory contents
+        self.add_builtin_function_with_fp(
+            "beagle.core/fs-readdir",
+            fs_readdir as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, path
+        )?;
+
+        // fs-file-size: get file size in bytes
+        self.add_builtin_function_with_fp(
+            "beagle.core/fs-file-size",
+            fs_file_size as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, path
+        )?;
+
+        // ============================================================================
+        // Future waiting builtins for efficient async await
+        // ============================================================================
+
+        // future-wait: wait for any future to complete with timeout
+        self.add_builtin_function(
+            "beagle.core/future-wait",
+            future_wait as *const u8,
+            false,
+            1, // timeout_ms
+        )?;
+
+        // future-notify: notify all waiters that a future completed
+        self.add_builtin_function(
+            "beagle.core/future-notify",
+            future_notify as *const u8,
+            false,
+            0,
         )?;
 
         // Diagnostic system builtins
@@ -8039,7 +9355,7 @@ fn get_type_info(
                         // Check if this is actually an enum variant
                         if let Some(enum_name) = runtime.get_enum_name_for_variant(struct_id) {
                             // It's an enum variant - get the enum's info
-                            if let Some(enum_def) = runtime.enums.get(&enum_name) {
+                            if let Some(enum_def) = runtime.enums.get(enum_name) {
                                 let variant_names: Vec<String> = enum_def
                                     .variants
                                     .iter()
@@ -8055,7 +9371,7 @@ fn get_type_info(
                                 let enum_local_name = enum_name
                                     .split('/')
                                     .next_back()
-                                    .unwrap_or(&enum_name)
+                                    .unwrap_or(enum_name)
                                     .to_string();
                                 return (
                                     "enum".to_string(),

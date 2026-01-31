@@ -13,30 +13,6 @@ jobs:
         include:
           # Linux x86-64 configurations
           - os: ubuntu-latest
-            gc-features: "compacting,thread-safe"
-            backend: "backend-x86-64"
-            build-mode: "debug"
-          - os: ubuntu-latest
-            gc-features: "compacting,thread-safe"
-            backend: "backend-x86-64"
-            build-mode: "release"
-          - os: ubuntu-latest
-            gc-features: "generational,thread-safe"
-            backend: "backend-x86-64"
-            build-mode: "debug"
-          - os: ubuntu-latest
-            gc-features: "generational,thread-safe"
-            backend: "backend-x86-64"
-            build-mode: "release"
-          - os: ubuntu-latest
-            gc-features: "mark-and-sweep,thread-safe"
-            backend: "backend-x86-64"
-            build-mode: "debug"
-          - os: ubuntu-latest
-            gc-features: "mark-and-sweep,thread-safe"
-            backend: "backend-x86-64"
-            build-mode: "release"
-          - os: ubuntu-latest
             gc-features: "generational"
             backend: "backend-x86-64"
             build-mode: "debug"
@@ -61,30 +37,6 @@ jobs:
             backend: "backend-x86-64"
             build-mode: "release"
           # macOS ARM64 configurations
-          - os: macos-latest
-            gc-features: "compacting,thread-safe"
-            backend: "backend-arm64"
-            build-mode: "debug"
-          - os: macos-latest
-            gc-features: "compacting,thread-safe"
-            backend: "backend-arm64"
-            build-mode: "release"
-          - os: macos-latest
-            gc-features: "generational,thread-safe"
-            backend: "backend-arm64"
-            build-mode: "debug"
-          - os: macos-latest
-            gc-features: "generational,thread-safe"
-            backend: "backend-arm64"
-            build-mode: "release"
-          - os: macos-latest
-            gc-features: "mark-and-sweep,thread-safe"
-            backend: "backend-arm64"
-            build-mode: "debug"
-          - os: macos-latest
-            gc-features: "mark-and-sweep,thread-safe"
-            backend: "backend-arm64"
-            build-mode: "release"
           - os: macos-latest
             gc-features: "generational"
             backend: "backend-arm64"

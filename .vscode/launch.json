@@ -15,7 +15,7 @@
                     // "--profile=release-with-debug",
                     "--bin=main",
                     "--package=main",
-                    "--features=generational,thread-safe"
+                    "--features=generational"
                 ],
                 "filter": {
                     "name": "main",

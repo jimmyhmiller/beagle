@@ -1,5 +1,4 @@
 namespace exception_nested_threads_test
-// thread-safe
 
 fn main() {
     let result = atom("unset")

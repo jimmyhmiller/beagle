@@ -49,4 +49,3 @@ fn wait(done_atom, target, attempts) {
     }
 }
 
-// thread-safe

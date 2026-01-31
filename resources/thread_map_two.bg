@@ -41,7 +41,6 @@ fn wait(done_atom, target, attempts) {
     }
 }
 
-// thread-safe
 // DISABLED
 // 6
 // done

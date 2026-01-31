@@ -25,7 +25,6 @@ fn main() {
     "done"
 }
 
-// thread-safe
 // DISABLED
 // 10
 // 10

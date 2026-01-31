@@ -26,6 +26,7 @@ nanoserde = { version = "0.2.0-beta.0", features = ["json", "binary"] }
 usdt = "0.5"
 rand = "0.8"
 regex = "1"
+mio = { version = "1.0", features = ["os-poll", "net"] }
 
 
 
@@ -34,7 +35,6 @@ default = []
 compacting = []
 mark-and-sweep = []
 generational = []
-thread-safe = []
 json = []
 backend-arm64 = []
 backend-x86-64 = []
