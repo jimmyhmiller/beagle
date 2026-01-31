@@ -1,0 +1,30 @@
+namespace handle_in_loop_test
+
+use beagle.effect as effect
+
+enum TestEffect { Get {} }
+
+struct TestHandler {}
+
+extend TestHandler with effect/Handler(TestEffect) {
+    fn handle(self, op, resume) {
+        resume(42)
+    }
+}
+
+fn main() {
+    let handler = TestHandler {}
+    let mut i = 0
+    let mut sum = 0
+    while i < 5 {
+        handle effect/Handler(TestEffect) with handler {
+            let v = perform TestEffect.Get {}
+            sum = sum + v
+        }
+        i = i + 1
+    }
+    println(sum)
+}
+
+// Expect
+// 210

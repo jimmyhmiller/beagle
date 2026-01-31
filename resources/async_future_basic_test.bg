@@ -1,0 +1,85 @@
+namespace async_future_basic_test
+
+use beagle.async as async
+use beagle.effect as effect
+
+// Test basic async/await functionality
+
+fn main() {
+    println("=== Async Future Basic Test ===")
+
+    let handler = async/BlockingHandler {}
+
+    let result = handle effect/Handler(async/Async) with handler {
+        // Test 1: Basic async/await
+        println("Test 1: Basic async/await")
+        let f1 = async/async(fn() { 42 })
+        let v1 = async/await(f1)
+        println("Result:", v1)
+
+        // Test 2: Multiple futures
+        println("Test 2: Multiple futures")
+        let f2 = async/async(fn() { "hello" })
+        let f3 = async/async(fn() { "world" })
+        let v2 = async/await(f2)
+        let v3 = async/await(f3)
+        println("Results:", v2, v3)
+
+        // Test 3: await-all
+        println("Test 3: await-all")
+        let fa = async/async(fn() { 1 })
+        let fb = async/async(fn() { 2 })
+        let fc = async/async(fn() { 3 })
+        let results = async/await-all([fa, fb, fc])
+        println("All results:", results)
+
+        // Test 4: Nested computation in async
+        println("Test 4: Nested computation")
+        let f4 = async/async(fn() {
+            let x = 10
+            let y = 20
+            x + y
+        })
+        let v4 = async/await(f4)
+        println("Nested result:", v4)
+
+        // Test 5: Future state check
+        println("Test 5: Future state")
+        let f5 = async/async(fn() { "done" })
+        let state5 = async/future-state(f5)
+        match state5 {
+            async/FutureState.Resolved { value } => {
+                println("Future is resolved with:", value)
+            },
+            async/FutureState.Pending {} => {
+                println("Future is pending")
+            },
+            async/FutureState.Running {} => {
+                println("Future is running")
+            },
+            async/FutureState.Rejected { error } => {
+                println("Future is rejected with:", error)
+            }
+        }
+
+        println("=== All tests passed ===")
+        "done"
+    }
+
+    println("Final result:", result)
+}
+
+// Expect
+// === Async Future Basic Test ===
+// Test 1: Basic async/await
+// Result: 42
+// Test 2: Multiple futures
+// Results: hello world
+// Test 3: await-all
+// All results: [1, 2, 3]
+// Test 4: Nested computation
+// Nested result: 30
+// Test 5: Future state
+// Future is resolved with: done
+// === All tests passed ===
+// Final result: done

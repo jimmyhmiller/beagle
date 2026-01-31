@@ -1,10 +1,7 @@
 namespace async_test
 
-// WIP: This test requires builtin functions (unlink, access, mkdir, etc.)
-// that are not yet implemented in src/builtins.rs
-// TODO: Implement missing builtins or remove dependencies
-
 use beagle.async as async
+use beagle.effect as effect
 
 // Test basic async file operations with effect handlers
 
@@ -14,7 +11,7 @@ fn main() {
     // Create the handler ourselves to have more control
     let handler = async/BlockingHandler {}
 
-    let result = handle async/Handler(async/Async) with handler {
+    let result = handle effect/Handler(async/Async) with handler {
         // Test sleep
         println("Testing sleep...")
         let sleep-result = async/sleep(10)
@@ -67,10 +64,7 @@ fn main() {
     println("Handler block returned:", result)
 }
 
-// NOTE: Test disabled - awaiting builtin implementations
-// TODO: Re-enable once unlink, access, mkdir, rmdir, readdir, file-size, sleep-ms are implemented
-/*
-// Test output (disabled):
+// Expect
 // === Async Effect Test ===
 // Testing sleep...
 // Sleep result: AsyncResult.Ok { value: null }
@@ -95,4 +89,4 @@ fn main() {
 // File exists after delete: AsyncResult.Ok { value: false }
 // === All tests completed ===
 // Handler block returned: 42
-*/
+

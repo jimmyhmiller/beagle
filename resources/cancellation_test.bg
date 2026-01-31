@@ -1,0 +1,62 @@
+namespace cancellation_test
+
+use beagle.async as async
+use beagle.effect as effect
+use beagle.core as core
+
+fn main() {
+    let handler = async/BlockingHandler {}
+
+    // Test 1: Create and check cancellation token
+    let token = async/make-cancellation-token()
+    println("Token created:", token != null)
+    println("Initially cancelled:", async/cancelled?(token))
+
+    // Test 2: Cancel the token
+    async/cancel!(token)
+    println("After cancel:", async/cancelled?(token))
+
+    // Test 3: Spawn with token (already cancelled, should not run)
+    handle effect/Handler(async/Async) with handler {
+        let token2 = async/make-cancellation-token()
+        async/cancel!(token2)
+
+        let future = async/async-with-token(token2, fn() {
+            // This should not execute since token is already cancelled
+            "should not see this"
+        })
+
+        let is_cancelled = async/future-cancelled?(future)
+        println("Pre-cancelled task is cancelled:", is_cancelled)
+    }
+
+    // Test 4: Cancel future directly
+    handle effect/Handler(async/Async) with handler {
+        let future = async/async(fn() {
+            "completed"
+        })
+
+        // Cancel it immediately
+        async/cancel(future)
+
+        let is_cancelled = async/future-cancelled?(future)
+        println("Direct cancel works:", is_cancelled)
+    }
+
+    // Test 5: Create a scope and verify token
+    let scope = async/make-scope()
+    println("Scope created:", scope != null)
+    println("Scope has token:", scope.token != null)
+
+    println("done")
+}
+
+// Expect
+// Token created: true
+// Initially cancelled: false
+// After cancel: true
+// Pre-cancelled task is cancelled: true
+// Direct cancel works: true
+// Scope created: true
+// Scope has token: true
+// done
