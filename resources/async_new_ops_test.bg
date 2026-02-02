@@ -1,6 +1,7 @@
 namespace async_new_ops_test
 
 use beagle.async as async
+use beagle.core as core
 use beagle.effect as effect
 
 // Test new async operations: is-directory?, is-file?, rename-file, copy-file
@@ -8,87 +9,87 @@ use beagle.effect as effect
 fn main() {
     println("=== Async New Operations Test ===")
 
-    let handler = async/BlockingHandler {}
+    let handler = async/BlockingAsyncHandler {}
 
     let result = handle effect/Handler(async/Async) with handler {
         // Create test file
         println("Creating test file...")
         let write-result = async/write-file("/tmp/beagle_new_ops_test.txt", "Test content\n")
         match write-result {
-            async/AsyncResult.Ok { value } => println("write-file: OK"),
-            async/AsyncResult.Err { code, message } => println("write-file error:", message)
+            Result.Ok { value } => println("write-file: OK"),
+            Result.Err { error } => println("write-file error:", error)
         }
 
         // Test is-file?
         println("Testing is-file?...")
         let is-file-result = async/is-file?("/tmp/beagle_new_ops_test.txt")
         match is-file-result {
-            async/AsyncResult.Ok { value } => {
+            Result.Ok { value } => {
                 if value {
                     println("is-file?: true (correct)")
                 } else {
                     println("is-file?: false (WRONG)")
                 }
             },
-            async/AsyncResult.Err { code, message } => println("is-file? error:", message)
+            Result.Err { error } => println("is-file? error:", error)
         }
 
         // Test is-directory? on file (should be false)
         println("Testing is-directory? on file...")
         let is-dir-result = async/is-directory?("/tmp/beagle_new_ops_test.txt")
         match is-dir-result {
-            async/AsyncResult.Ok { value } => {
+            Result.Ok { value } => {
                 if value {
                     println("is-directory?: true (WRONG)")
                 } else {
                     println("is-directory?: false (correct)")
                 }
             },
-            async/AsyncResult.Err { code, message } => println("is-directory? error:", message)
+            Result.Err { error } => println("is-directory? error:", error)
         }
 
         // Test is-directory? on /tmp (should be true)
         println("Testing is-directory? on /tmp...")
         let is-dir-result2 = async/is-directory?("/tmp")
         match is-dir-result2 {
-            async/AsyncResult.Ok { value } => {
+            Result.Ok { value } => {
                 if value {
                     println("is-directory? /tmp: true (correct)")
                 } else {
                     println("is-directory? /tmp: false (WRONG)")
                 }
             },
-            async/AsyncResult.Err { code, message } => println("is-directory? /tmp error:", message)
+            Result.Err { error } => println("is-directory? /tmp error:", error)
         }
 
         // Test copy-file
         println("Testing copy-file...")
         let copy-result = async/copy-file("/tmp/beagle_new_ops_test.txt", "/tmp/beagle_new_ops_copy.txt")
         match copy-result {
-            async/AsyncResult.Ok { value } => println("copy-file: OK"),
-            async/AsyncResult.Err { code, message } => println("copy-file error:", message)
+            Result.Ok { value } => println("copy-file: OK"),
+            Result.Err { error } => println("copy-file error:", error)
         }
 
         // Verify copy exists
         println("Verifying copy exists...")
         let exists-result = async/file-exists?("/tmp/beagle_new_ops_copy.txt")
         match exists-result {
-            async/AsyncResult.Ok { value } => {
+            Result.Ok { value } => {
                 if value {
                     println("Copy exists: OK")
                 } else {
                     println("Copy exists: FAIL")
                 }
             },
-            async/AsyncResult.Err { code, message } => println("file-exists? error:", message)
+            Result.Err { error } => println("file-exists? error:", error)
         }
 
         // Test rename-file
         println("Testing rename-file...")
         let rename-result = async/rename-file("/tmp/beagle_new_ops_copy.txt", "/tmp/beagle_new_ops_renamed.txt")
         match rename-result {
-            async/AsyncResult.Ok { value } => println("rename-file: OK"),
-            async/AsyncResult.Err { code, message } => println("rename-file error:", message)
+            Result.Ok { value } => println("rename-file: OK"),
+            Result.Err { error } => println("rename-file error:", error)
         }
 
         // Verify rename worked
@@ -96,24 +97,24 @@ fn main() {
         let old-exists = async/file-exists?("/tmp/beagle_new_ops_copy.txt")
         let new-exists = async/file-exists?("/tmp/beagle_new_ops_renamed.txt")
         match old-exists {
-            async/AsyncResult.Ok { value } => {
+            Result.Ok { value } => {
                 if value {
                     println("Old file still exists: FAIL")
                 } else {
                     println("Old file gone: OK")
                 }
             },
-            async/AsyncResult.Err { code, message } => println("file-exists? error:", message)
+            Result.Err { error } => println("file-exists? error:", error)
         }
         match new-exists {
-            async/AsyncResult.Ok { value } => {
+            Result.Ok { value } => {
                 if value {
                     println("New file exists: OK")
                 } else {
                     println("New file missing: FAIL")
                 }
             },
-            async/AsyncResult.Err { code, message } => println("file-exists? error:", message)
+            Result.Err { error } => println("file-exists? error:", error)
         }
 
         // Cleanup

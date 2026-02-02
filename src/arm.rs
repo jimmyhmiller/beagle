@@ -1449,6 +1449,12 @@ impl LowLevelArm {
             // frames we need a different approach. We use X10 as a pointer that we decrement.
             let null_value = crate::types::BuiltInTypes::null_value() as i32;
 
+            #[cfg(feature = "debug-gc")]
+            eprintln!(
+                "[GC DEBUG] patch_prelude: max_locals={}, zeroing {} slots",
+                self.max_locals, self.max_locals
+            );
+
             if self.max_locals > 0 {
                 // Load null value into X11 (NOT X9 - that's reserved for arg count!)
                 alloc_instructions.push(ArmAsm::Movz {
@@ -1638,6 +1644,11 @@ impl LowLevelArm {
     }
 
     pub fn set_max_locals(&mut self, num_locals: usize) {
+        #[cfg(feature = "debug-gc")]
+        eprintln!(
+            "[GC DEBUG] set_max_locals: {} -> {}",
+            self.max_locals, num_locals
+        );
         self.max_locals = num_locals as i32;
     }
 

@@ -3030,12 +3030,25 @@ impl Runtime {
         let mut heap_obj = HeapObject::from_tagged(array_ptr);
         heap_obj.write_type_id(1); // type_id=1 marks raw array
 
+        // Root the array so GC can update its pointer during string allocations.
+        // Without this, GC could move the array and we'd write to stale memory.
+        let array_root_slot = self
+            .add_handle_root(array_ptr)
+            .ok_or("Failed to add root")?;
+
         for (i, s) in strings.iter().enumerate() {
             let string_ptr = self.allocate_string(stack_pointer, s.clone())?;
+            // Get the current array pointer from the root (GC updates this when array moves)
+            let current_array_ptr = self.get_handle_root(array_root_slot);
+            heap_obj = HeapObject::from_tagged(current_array_ptr);
             heap_obj.write_field(i as i32, string_ptr.into());
         }
 
-        Ok(array_ptr)
+        // Get final pointer and remove root
+        let final_array_ptr = self.get_handle_root(array_root_slot);
+        self.remove_handle_root(array_root_slot);
+
+        Ok(final_array_ptr)
     }
 
     /// Low-level keyword allocation. Private because keywords must be interned

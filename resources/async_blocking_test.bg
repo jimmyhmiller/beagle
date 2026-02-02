@@ -1,6 +1,7 @@
 namespace async_blocking_test
 
 use beagle.async as async
+use beagle.core as core
 
 // Test the blocking convenience functions
 
@@ -60,11 +61,11 @@ fn main() {
     println("Testing blocking-read-dir on /tmp...")
     let readdir-result = async/blocking-read-dir("/tmp")
     match readdir-result {
-        async/AsyncResult.Ok { value } => {
+        Result.Ok { value } => {
             println("Read dir: OK")
         },
-        async/AsyncResult.Err { code, message } => {
-            println("Read dir error:", message)
+        Result.Err { error } => {
+            println("Read dir error:", error)
         }
     }
 
@@ -78,30 +79,30 @@ fn main() {
 // Expect
 // === Async Blocking Functions Test ===
 // Testing blocking-sleep...
-// Sleep result: AsyncResult.Ok { value: null }
+// Sleep result: Result.Ok { value: null }
 // Testing blocking-write-file...
-// Write result: AsyncResult.Ok { value: 27 }
+// Write result: Result.Ok { value: 27 }
 // Testing blocking-file-exists?...
-// File exists: AsyncResult.Ok { value: true }
+// File exists: Result.Ok { value: true }
 // Testing blocking-read-file...
-// Read result: AsyncResult.Ok { value: "Hello from blocking async!
+// Read result: Result.Ok { value: "Hello from blocking async!
 // " }
 // Testing blocking-file-size...
-// File size: AsyncResult.Ok { value: 27 }
+// File size: Result.Ok { value: 27 }
 // Testing blocking-append-file...
-// Append result: AsyncResult.Ok { value: 12 }
+// Append result: Result.Ok { value: 12 }
 // Reading after append...
-// Read after append: AsyncResult.Ok { value: "Hello from blocking async!
+// Read after append: Result.Ok { value: "Hello from blocking async!
 // Second line
 // " }
 // Testing blocking-delete-file...
-// Delete result: AsyncResult.Ok { value: null }
+// Delete result: Result.Ok { value: null }
 // Verifying deletion...
-// File exists after delete: AsyncResult.Ok { value: false }
+// File exists after delete: Result.Ok { value: false }
 // Testing blocking-create-dir...
-// Mkdir result: AsyncResult.Ok { value: null }
+// Mkdir result: Result.Ok { value: null }
 // Testing blocking-read-dir on /tmp...
 // Read dir: OK
 // Testing blocking-remove-dir...
-// Rmdir result: AsyncResult.Ok { value: null }
+// Rmdir result: Result.Ok { value: null }
 // === All tests completed successfully ===

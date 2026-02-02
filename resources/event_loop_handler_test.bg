@@ -10,18 +10,19 @@ fn main() {
     println("Handler created:", handler != null)
 
     // Test sleep with event loop
+    // sleep blocks and returns a Result directly with EventLoopHandler
     let start = core/time-now()
     handle effect/Handler(async/Async) with handler {
-        async/sleep(50)
+        let sleep_result = async/sleep(50)
+        // sleep returns Result.Ok { value: null } directly, no await needed
     }
     let elapsed = (core/time-now() - start) / 1000000  // Convert to ms
     println("Sleep worked:", elapsed >= 40)
 
-    // Test blocking file read (still uses blocking handler internally)
-    // Use absolute path or a file we know exists
+    // Test file exists with event loop handler
+    // file-exists? returns Result directly with EventLoopHandler
     handle effect/Handler(async/Async) with handler {
         let result = async/file-exists?("/etc/hosts")
-        // file-exists? returns AsyncResult.Ok { value: bool }
         let exists = async/async-unwrap(result)
         println("File exists:", exists == true)
     }

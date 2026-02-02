@@ -1,0 +1,155 @@
+namespace beagle.timer
+
+use beagle.core as core
+use beagle.effect as effect
+
+// ============================================================================
+// Timer Effect
+// ============================================================================
+// The Timer effect provides time-related operations.
+// Handlers determine how operations execute (blocking sleep vs async timer).
+//
+// Usage:
+//   use beagle.timer as timer
+//
+//   // With a handler installed:
+//   handle effect/Handler(timer/Timer) with some_handler {
+//       timer/sleep(100)  // Sleep for 100ms
+//       let now = timer/now()
+//   }
+//
+// For blocking sleep (no handler required):
+//   timer/blocking-sleep(100)
+
+// ============================================================================
+// Timer Effect Enum
+// ============================================================================
+
+enum Timer {
+    Sleep { ms },
+    Now {}
+}
+
+// ============================================================================
+// Timer Operations
+// ============================================================================
+// These functions perform Timer effects. They must be called within a
+// `handle effect/Handler(Timer) with handler { ... }` block.
+
+// Sleep for a number of milliseconds
+// Returns: Result<null>
+fn sleep(ms) {
+    perform Timer.Sleep { ms: ms }
+}
+
+// Get current time in nanoseconds
+// Returns: Int (nanoseconds since epoch)
+fn now() {
+    perform Timer.Now {}
+}
+
+// ============================================================================
+// BlockingTimerHandler - Synchronous timer handler
+// ============================================================================
+
+struct BlockingTimerHandler {}
+
+extend BlockingTimerHandler with effect/Handler(Timer) {
+    fn handle(self, op, resume) {
+        let result = match op {
+            Timer.Sleep { ms } => {
+                core/sleep(ms)
+                ok(null)
+            },
+            Timer.Now {} => {
+                core/time-now()
+            }
+        }
+        resume(result)
+    }
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+// Wrap a future with a timeout
+// Returns Result.Ok { value } if completed before timeout
+// Returns Result.Err { error: Error.Timeout { operation } } if timeout is reached
+// NOTE: This requires both Timer and Async handlers to be installed
+fn timeout(ms, future) {
+    // Import async module for future-state
+    use beagle.async as async
+
+    let start = core/time-now()
+    let deadline_ns = start + (ms * 1000000)  // Convert ms to ns
+    let wait_timeout = 50  // Check every 50ms at most
+
+    loop {
+        let state = async/future-state(future)
+        match state {
+            async/FutureState.Resolved { value } => {
+                break(core/ok(value))
+            },
+            async/FutureState.Rejected { error } => {
+                throw(error)
+            },
+            async/FutureState.Cancelled {} => {
+                break(core/err(core/Error.Cancelled {}))
+            },
+            _ => {
+                let now-time = core/time-now()
+                if now-time >= deadline_ns {
+                    break(core/err(core/Error.Timeout { operation: "timeout" }))
+                }
+                let remaining_ms = (deadline_ns - now-time) / 1000000
+                let actual_wait = if remaining_ms < wait_timeout {
+                    remaining_ms
+                } else {
+                    wait_timeout
+                }
+                core/future-wait(actual_wait)
+            }
+        }
+    }
+}
+
+// Create a deadline (absolute time in nanoseconds)
+// Useful for setting a single deadline across multiple operations
+fn deadline(ms) {
+    core/time-now() + (ms * 1000000)
+}
+
+// Check if a deadline has passed
+fn deadline-passed?(deadline-time) {
+    core/time-now() >= deadline-time
+}
+
+// Remaining milliseconds until deadline (0 if passed)
+fn deadline-remaining(deadline-time) {
+    let remaining = deadline-time - core/time-now()
+    if remaining < 0 {
+        0
+    } else {
+        remaining / 1000000
+    }
+}
+
+// ============================================================================
+// Blocking Convenience Functions
+// ============================================================================
+
+fn run-blocking(thunk) {
+    let handler = BlockingTimerHandler {}
+    handle effect/Handler(Timer) with handler {
+        thunk()
+    }
+}
+
+fn blocking-sleep(ms) {
+    run-blocking(fn() { sleep(ms) })
+}
+
+fn blocking-now() {
+    run-blocking(fn() { now() })
+}

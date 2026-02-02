@@ -1,0 +1,17 @@
+namespace null_property_test
+
+fn main() {
+    let x = null
+    try {
+        // This should throw a nice error, not crash
+        let y = x.foo
+        println("Should not reach here:", y)
+    } catch (e) {
+        println("Caught error:", e)
+    }
+    println("done")
+}
+
+// Expect
+// Caught error: SystemError.TypeError { message: "Cannot access property 'foo' on null", location: null }
+// done

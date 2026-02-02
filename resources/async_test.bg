@@ -1,6 +1,7 @@
 namespace async_test
 
 use beagle.async as async
+use beagle.core as core
 use beagle.effect as effect
 
 // Test basic async file operations with effect handlers
@@ -9,7 +10,7 @@ fn main() {
     println("=== Async Effect Test ===")
 
     // Create the handler ourselves to have more control
-    let handler = async/BlockingHandler {}
+    let handler = async/BlockingAsyncHandler {}
 
     let result = handle effect/Handler(async/Async) with handler {
         // Test sleep
@@ -67,26 +68,25 @@ fn main() {
 // Expect
 // === Async Effect Test ===
 // Testing sleep...
-// Sleep result: AsyncResult.Ok { value: null }
+// Sleep result: Result.Ok { value: null }
 // Testing file write...
-// Write result: AsyncResult.Ok { value: 18 }
+// Write result: Result.Ok { value: 18 }
 // Testing file exists...
-// File exists result: AsyncResult.Ok { value: true }
+// File exists result: Result.Ok { value: true }
 // Testing file read...
-// Read result: AsyncResult.Ok { value: "Hello from async!
+// Read result: Result.Ok { value: "Hello from async!
 // " }
 // Testing file size...
-// File size result: AsyncResult.Ok { value: 18 }
+// File size result: Result.Ok { value: 18 }
 // Testing append...
-// Append result: AsyncResult.Ok { value: 14 }
+// Append result: Result.Ok { value: 14 }
 // Reading after append...
-// Read after append: AsyncResult.Ok { value: "Hello from async!
+// Read after append: Result.Ok { value: "Hello from async!
 // Appended line
 // " }
 // Testing delete...
-// Delete result: AsyncResult.Ok { value: null }
+// Delete result: Result.Ok { value: null }
 // Testing file exists after delete...
-// File exists after delete: AsyncResult.Ok { value: false }
+// File exists after delete: Result.Ok { value: false }
 // === All tests completed ===
 // Handler block returned: 42
-

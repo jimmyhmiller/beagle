@@ -1002,6 +1002,8 @@ fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Erro
         "beagle.io.bg",
         "beagle.effect.bg",
         "beagle.async.bg",
+        "beagle.fs.bg",
+        "beagle.timer.bg",
     ];
     let mut all_top_levels = vec![];
 

@@ -1,0 +1,55 @@
+namespace tail_call_bug
+
+// Test that tail call optimization is disabled for functions with too many args.
+//
+// On ARM64, the first 8 arguments are passed in registers (x0-x7).
+// On x86-64, the first 6 arguments are passed in registers.
+// Functions with more args than registers cannot be safely tail-call optimized
+// because stack-spilled arguments aren't handled correctly.
+//
+// Fix: Tail call optimization is only applied when all args fit in registers.
+
+// 8 parameters - tail call optimized (all args fit in registers on ARM64)
+fn count_8_params(a, b, c, d, e, f, g, i) {
+    println("8 params: i = " ++ to-string(i))
+    if i >= 4 {
+        println("8 params: done")
+    } else {
+        count_8_params(a, b, c, d, e, f, g, i + 1)
+    }
+}
+
+// 9 parameters - NOT tail call optimized (9th arg would be on stack)
+fn count_9_params(a, b, c, d, e, f, g, h, i) {
+    println("9 params: i = " ++ to-string(i))
+    if i >= 4 {
+        println("9 params: done")
+    } else {
+        count_9_params(a, b, c, d, e, f, g, h, i + 1)
+    }
+}
+
+fn main() {
+    println("Testing 8 parameters (tail call optimized):")
+    count_8_params(1, 2, 3, 4, 5, 6, 7, 0)
+    println("")
+    println("Testing 9 parameters (not tail call optimized):")
+    count_9_params(1, 2, 3, 4, 5, 6, 7, 8, 0)
+}
+
+// Expect
+// Testing 8 parameters (tail call optimized):
+// 8 params: i = 0
+// 8 params: i = 1
+// 8 params: i = 2
+// 8 params: i = 3
+// 8 params: i = 4
+// 8 params: done
+//
+// Testing 9 parameters (not tail call optimized):
+// 9 params: i = 0
+// 9 params: i = 1
+// 9 params: i = 2
+// 9 params: i = 3
+// 9 params: i = 4
+// 9 params: done

@@ -18,33 +18,10 @@ fn get-libc-path() {
 
 let libc = ffi/load-library(get-libc-path())
 
-// Result type for error handling
-enum Result {
-    Ok { value },
-    Err { code, message }
-}
+// Result and Error types come from beagle.core (globally available)
 
-fn ok(value) { Result.Ok { value: value } }
-fn err(code, msg) { Result.Err { code: code, message: msg } }
-
-// Check if a result is ok
-fn ok?(result) {
-    match result {
-        Result.Ok { value } => true,
-        Result.Err { code, message } => false
-    }
-}
-
-// Unwrap a result, printing error and returning null on error
-fn unwrap(result) {
-    match result {
-        Result.Ok { value } => value,
-        Result.Err { code, message } => {
-            println("Error: ", message)
-            null
-        }
-    }
-}
+// Helper to create IO errors
+fn io-err(msg) { err(Error.IO { message: msg }) }
 
 // FFI function bindings for FILE* operations
 let _fopen = ffi/get-function(libc, "fopen",
@@ -106,7 +83,7 @@ fn string-to-buffer(s) {
 fn open(path, mode) {
     let handle = _fopen(path, mode, 0, 0, 0, 0)
     if is-null(handle) {
-        err(-1, "Failed to open file")
+        io-err("Failed to open file")
     } else {
         ok(File { handle: handle })
     }
@@ -117,7 +94,7 @@ fn close(file) {
     if result == 0 {
         ok(null)
     } else {
-        err(result, "Failed to close file")
+        io-err("Failed to close file")
     }
 }
 
@@ -130,7 +107,7 @@ fn read-bytes(file, n) {
 fn read-char(file) {
     let c = _fgetc(file.handle, 0, 0, 0, 0, 0)
     if c == -1 {
-        err(-1, "EOF or error")
+        io-err("EOF or error")
     } else {
         ok(c)
     }
@@ -154,7 +131,7 @@ fn flush(file) {
     if result == 0 {
         ok(null)
     } else {
-        err(result, "Failed to flush file")
+        io-err("Failed to flush file")
     }
 }
 
@@ -184,7 +161,7 @@ fn read-line(file, max-len) {
     }
     if i == 0 && done {
         ffi/deallocate(buf)
-        err(-1, "EOF")
+        io-err("EOF")
     } else {
         let s = ffi/get-string(buf, 0, i)
         ffi/deallocate(buf)
@@ -199,7 +176,7 @@ fn read-stdin(n) {
     let bytes-read = _read(STDIN-FD, buf, n, 0, 0, 0)
     if bytes-read < 0 {
         ffi/deallocate(buf)
-        err(bytes-read, "Read error")
+        io-err("Read error")
     } else {
         ok(BufferResult { buffer: buf, length: bytes-read })
     }
@@ -213,7 +190,7 @@ fn read-stdin-string(n) {
             ffi/deallocate(value.buffer)
             ok(s)
         },
-        Result.Err { code, message } => err(code, message)
+        Result.Err { error } => err(error)
     }
 }
 
@@ -223,7 +200,7 @@ fn write-stdout(s) {
     let written = _write(STDOUT-FD, buf, len, 0, 0, 0)
     ffi/deallocate(buf)
     if written < 0 {
-        err(written, "Write error")
+        io-err("Write error")
     } else {
         ok(written)
     }
@@ -233,7 +210,7 @@ fn write-stdout(s) {
 fn write-stdout-buffer(buf, len) {
     let written = _write(STDOUT-FD, buf, len, 0, 0, 0)
     if written < 0 {
-        err(written, "Write error")
+        io-err("Write error")
     } else {
         ok(written)
     }
@@ -245,7 +222,7 @@ fn write-stderr(s) {
     let written = _write(STDERR-FD, buf, len, 0, 0, 0)
     ffi/deallocate(buf)
     if written < 0 {
-        err(written, "Write error")
+        io-err("Write error")
     } else {
         ok(written)
     }
@@ -255,7 +232,7 @@ fn write-stderr(s) {
 fn write-stdout-buffer-offset(buf, offset, len) {
     let written = ffi/write-buffer-offset(STDOUT-FD, buf, offset, len)
     if written < 0 {
-        err(written, "Write error")
+        io-err("Write error")
     } else {
         ok(written)
     }
@@ -289,7 +266,7 @@ fn read-stdin-line(max-len) {
     ffi/deallocate(one-byte-buf)
     if i == 0 {
         ffi/deallocate(buf)
-        err(-1, "EOF")
+        io-err("EOF")
     } else {
         let s = ffi/get-string(buf, 0, i)
         ffi/deallocate(buf)

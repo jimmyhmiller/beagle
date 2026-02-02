@@ -864,6 +864,13 @@ impl Compiler {
         if let Some(name) = function_name {
             backend.set_function_name(name);
         }
+        #[cfg(feature = "debug-gc")]
+        eprintln!(
+            "[GC DEBUG] upsert_function: {:?} max_locals_param={}, backend.max_locals={}",
+            function_name,
+            max_locals,
+            backend.max_locals()
+        );
         let code = backend.compile_to_bytes();
         let pointer = self.add_code(&code)?;
         let runtime = get_runtime().get_mut();

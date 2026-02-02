@@ -1,0 +1,94 @@
+namespace bench_file_io
+
+use beagle.async as async
+use beagle.effect as effect
+use beagle.core as core
+
+// Benchmark file I/O operations
+
+fn main() {
+    println("=== Beagle File I/O Benchmark ===")
+
+    let handler = async/BlockingAsyncHandler {}
+
+    // Setup: create test directory
+    handle effect/Handler(async/Async) with handler {
+        async/create-dir-all("/tmp/beagle_bench")
+    }
+
+    let iterations = 1000
+
+    // Benchmark 1: Write small files
+    let start1 = core/time-now()
+    handle effect/Handler(async/Async) with handler {
+        let mut i = 0
+        while i < iterations {
+            async/write-file("/tmp/beagle_bench/test" ++ to-string(i) ++ ".txt", "Hello, World!\n")
+            i = i + 1
+        }
+    }
+    let end1 = core/time-now()
+    let write-time = (end1 - start1) / 1000000
+    println("Write", iterations, "small files:", write-time, "ms")
+
+    // Benchmark 2: Read small files
+    let start2 = core/time-now()
+    handle effect/Handler(async/Async) with handler {
+        let mut i = 0
+        while i < iterations {
+            async/read-file("/tmp/beagle_bench/test" ++ to-string(i) ++ ".txt")
+            i = i + 1
+        }
+    }
+    let end2 = core/time-now()
+    let read-time = (end2 - start2) / 1000000
+    println("Read", iterations, "small files:", read-time, "ms")
+
+    // Benchmark 3: File exists checks
+    let start3 = core/time-now()
+    handle effect/Handler(async/Async) with handler {
+        let mut i = 0
+        while i < iterations {
+            async/file-exists?("/tmp/beagle_bench/test" ++ to-string(i) ++ ".txt")
+            i = i + 1
+        }
+    }
+    let end3 = core/time-now()
+    let exists-time = (end3 - start3) / 1000000
+    println("Check exists", iterations, "files:", exists-time, "ms")
+
+    // Benchmark 4: File size queries
+    let start4 = core/time-now()
+    handle effect/Handler(async/Async) with handler {
+        let mut i = 0
+        while i < iterations {
+            async/file-size("/tmp/beagle_bench/test" ++ to-string(i) ++ ".txt")
+            i = i + 1
+        }
+    }
+    let end4 = core/time-now()
+    let size-time = (end4 - start4) / 1000000
+    println("Get size", iterations, "files:", size-time, "ms")
+
+    // Benchmark 5: Delete files
+    let start5 = core/time-now()
+    handle effect/Handler(async/Async) with handler {
+        let mut i = 0
+        while i < iterations {
+            async/delete-file("/tmp/beagle_bench/test" ++ to-string(i) ++ ".txt")
+            i = i + 1
+        }
+    }
+    let end5 = core/time-now()
+    let delete-time = (end5 - start5) / 1000000
+    println("Delete", iterations, "files:", delete-time, "ms")
+
+    // Cleanup
+    handle effect/Handler(async/Async) with handler {
+        async/remove-dir("/tmp/beagle_bench")
+    }
+
+    println("=== Benchmark Complete ===")
+    let total = write-time + read-time + exists-time + size-time + delete-time
+    println("Total time:", total, "ms")
+}

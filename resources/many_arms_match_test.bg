@@ -1,0 +1,62 @@
+namespace many_arms_match_test
+
+enum Op {
+    A { x },
+    B { x },
+    C { x },
+    D { x },
+    E { x },
+    F { x },
+    G { x },
+    H { x },
+    I { x },
+    J { x },
+    K { x },
+    L { x },
+    M { x },
+    N { x },
+    O { x },
+    P { x },
+    Q { x },
+    R { x },
+    S { x },
+    T { x }
+}
+
+fn test-match(op) {
+    match op {
+        Op.A { x } => { println("A:", x); x },
+        Op.B { x } => { println("B:", x); x },
+        Op.C { x } => { println("C:", x); x },
+        Op.D { x } => { println("D:", x); x },
+        Op.E { x } => { println("E:", x); x },
+        Op.F { x } => { println("F:", x); x },
+        Op.G { x } => { println("G:", x); x },
+        Op.H { x } => { println("H:", x); x },
+        Op.I { x } => { println("I:", x); x },
+        Op.J { x } => { println("J:", x); x },
+        Op.K { x } => { println("K:", x); x },
+        Op.L { x } => { println("L:", x); x },
+        Op.M { x } => { println("M:", x); x },
+        Op.N { x } => { println("N:", x); x },
+        Op.O { x } => { println("O:", x); x },
+        Op.P { x } => { println("P:", x); x },
+        Op.Q { x } => { println("Q:", x); x },
+        Op.R { x } => { println("R:", x); x },
+        Op.S { x } => { println("S:", x); x },
+        Op.T { x } => { println("T:", x); x }
+    }
+}
+
+fn main() {
+    test-match(Op.A { x: 1 })
+    test-match(Op.J { x: 10 })
+    test-match(Op.T { x: 20 })
+    println("done")
+}
+
+// Expect
+// A: 1
+// J: 10
+// T: 20
+// done

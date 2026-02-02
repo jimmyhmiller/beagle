@@ -2,6 +2,7 @@ namespace async_file_io_test
 
 use beagle.async as async
 use beagle.effect as effect
+use beagle.core as core
 
 // Test async file I/O using the EventLoopHandler
 
@@ -14,15 +15,15 @@ fn main() {
         let test_path = "/tmp/beagle_async_test.txt"
         let content = "Hello from async file I/O!"
 
-        // Write file
+        // Write file - EventLoopHandler polls internally and returns Result directly
         println("Writing file...")
         let write_result = async/write-file(test_path, content)
         match write_result {
-            async/AsyncResult.Ok { value } => {
+            Result.Ok { value } => {
                 println("Write OK, bytes: ", value)
             },
-            async/AsyncResult.Err { code, message } => {
-                println("Write ERROR: ", message)
+            Result.Err { error } => {
+                println("Write ERROR: ", error)
             }
         }
 
@@ -30,11 +31,11 @@ fn main() {
         println("Reading file...")
         let read_result = async/read-file(test_path)
         match read_result {
-            async/AsyncResult.Ok { value } => {
+            Result.Ok { value } => {
                 println("Read OK: ", value)
             },
-            async/AsyncResult.Err { code, message } => {
-                println("Read ERROR: ", message)
+            Result.Err { error } => {
+                println("Read ERROR: ", error)
             }
         }
 
@@ -42,11 +43,11 @@ fn main() {
         println("Getting file size...")
         let size_result = async/file-size(test_path)
         match size_result {
-            async/AsyncResult.Ok { value } => {
+            Result.Ok { value } => {
                 println("Size: ", value)
             },
-            async/AsyncResult.Err { code, message } => {
-                println("Size ERROR: ", message)
+            Result.Err { error } => {
+                println("Size ERROR: ", error)
             }
         }
 
@@ -54,11 +55,11 @@ fn main() {
         println("Deleting file...")
         let delete_result = async/delete-file(test_path)
         match delete_result {
-            async/AsyncResult.Ok { value } => {
+            Result.Ok { value } => {
                 println("Delete OK")
             },
-            async/AsyncResult.Err { code, message } => {
-                println("Delete ERROR: ", message)
+            Result.Err { error } => {
+                println("Delete ERROR: ", error)
             }
         }
 

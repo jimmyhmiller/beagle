@@ -843,6 +843,21 @@ extern "C" fn property_access(
     str_constant_ptr: usize,
     property_cache_location: usize,
 ) -> usize {
+    // Check for null before accessing properties
+    if struct_pointer == BuiltInTypes::null_value() as usize {
+        let runtime = get_runtime().get_mut();
+        let str_constant_idx: usize = BuiltInTypes::untag(str_constant_ptr);
+        let property_name = &runtime.string_constants[str_constant_idx].str;
+        let stack_pointer = get_current_stack_pointer();
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "TypeError",
+                format!("Cannot access property '{}' on null", property_name),
+            );
+        }
+    }
+
     let runtime = get_runtime().get_mut();
     let (result, index) = runtime
         .property_access(struct_pointer, str_constant_ptr)

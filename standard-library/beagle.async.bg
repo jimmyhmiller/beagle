@@ -7,58 +7,22 @@ use beagle.effect as effect
 use beagle.core as core
 
 // ============================================================================
-// FFI Wrappers for File System Builtins
-// ============================================================================
-// These wrap the Rust builtins for file system operations
-
-fn unlink(path) {
-    core/fs-unlink(path)
-}
-
-fn access(path, mode) {
-    core/fs-access(path, mode)
-}
-
-fn mkdir(path, mode) {
-    core/fs-mkdir(path, mode)
-}
-
-fn rmdir(path) {
-    core/fs-rmdir(path)
-}
-
-fn rename-raw(old-path, new-path) {
-    core/fs-rename(old-path, new-path)
-}
-
-fn is-directory-raw(path) {
-    core/fs-is-directory?(path)
-}
-
-fn is-file-raw(path) {
-    core/fs-is-file?(path)
-}
-
-fn readdir(path) {
-    core/fs-readdir(path)
-}
-
-fn file-size-raw(path) {
-    core/fs-file-size(path)
-}
-
-// ============================================================================
 // Async Effect System
 // ============================================================================
-// This module provides an effect-based async system for file I/O operations.
-// The Async effect allows code to be written in a direct style while
-// supporting different execution strategies (blocking, event-loop, etc.)
+// This module provides the core async/await mechanism via the Async effect.
+// The Async effect handles awaiting futures and cancellation.
+//
+// For file I/O, you can also use beagle.fs (Fs effect) for cleaner separation.
+// For timers, you can also use beagle.timer (Timer effect).
+// For spawning tasks, you can also use beagle.spawn (Spawn effect).
+//
+// This module maintains backwards compatibility by handling all legacy operations.
 
 // ============================================================================
 // Future Data Types
 // ============================================================================
 // Futures represent values that may not be available yet. They are created
-// by async() and resolved by the async runtime.
+// by spawn() and resolved by the async runtime.
 
 enum FutureState {
     Pending {},
@@ -230,7 +194,7 @@ enum RaceResult {
     AllFailed { errors }
 }
 
-// Result types for await-timeout
+// Result type for timeout operations
 enum TimeoutResult {
     Ok { value },
     TimedOut {}
@@ -239,10 +203,15 @@ enum TimeoutResult {
 // ============================================================================
 // Async Effect Enum
 // ============================================================================
-// Each variant represents an async operation that can be performed.
-// Handlers intercept these operations and decide how to execute them.
+// The Async effect handles all async operations including legacy file I/O.
 
 enum Async {
+    // Future operations
+    Await { future },
+    AwaitAll { futures },
+    AwaitFirst { futures },
+    Cancel { future },
+
     // File operations
     ReadFile { path },
     WriteFile { path, content },
@@ -275,67 +244,352 @@ enum Async {
     // Timing
     Sleep { ms },
 
-    // Future operations
+    // Spawning
     Spawn { thunk },
-    Await { future },
-    AwaitAll { futures },
-    AwaitFirst { futures },
-
-    // Cancellation operations
-    SpawnWithToken { thunk, token },
-    Cancel { future }
+    SpawnWithToken { thunk, token }
 }
 
-// Handler is imported from beagle.effect
-// Use effect/Handler(Async) in extend and handle statements
-
 // ============================================================================
-// Async Result Types
+// Async Result Helpers (wrappers around beagle.core Result/Error)
 // ============================================================================
+// These provide a consistent API for async operations while using the
+// standard Result and Error types from beagle.core.
 
-enum AsyncResult {
-    Ok { value },
-    Err { code, message }
+// Create an async success result (uses beagle.core/ok)
+fn async-ok(value) {
+    ok(value)
 }
 
-fn async-ok(value) { AsyncResult.Ok { value: value } }
-fn async-err(code, msg) { AsyncResult.Err { code: code, message: msg } }
+// Create an async error result (uses beagle.core/err with Error.IO)
+fn async-err(code, message) {
+    err(Error.IO { message: message })
+}
 
+// Check if a result is successful
 fn async-ok?(result) {
     match result {
-        AsyncResult.Ok { value } => true,
-        AsyncResult.Err { code, message } => false
+        Result.Ok { value } => true,
+        Result.Err { error } => false
     }
 }
 
+// Unwrap a result, throwing on error
 fn async-unwrap(result) {
     match result {
-        AsyncResult.Ok { value } => value,
-        AsyncResult.Err { code, message } => {
-            println("Async Error: ", message)
-            null
+        Result.Ok { value } => value,
+        Result.Err { error } => throw(error)
+    }
+}
+
+// Unwrap a result with a default value on error
+fn async-unwrap-or(result, default) {
+    match result {
+        Result.Ok { value } => value,
+        Result.Err { error } => default
+    }
+}
+
+// ============================================================================
+// File Handler Implementation Functions (inlined to avoid circular deps)
+// ============================================================================
+
+fn handle-read-file(path) {
+    try {
+        let content = read-full-file(path)
+        ok(content)
+    } catch (e) {
+        err(Error.NotFound { path: path })
+    }
+}
+
+fn handle-write-file(path, content) {
+    let file-result = io/open(path, "w")
+    match file-result {
+        Result.Ok { value } => {
+            let file = value
+            let write-result = io/write-string(file, content)
+            io/close(file)
+            match write-result {
+                Result.Ok { value } => ok(value),
+                Result.Err { error } => err(error)
+            }
+        },
+        Result.Err { error } => {
+            err(error)
         }
     }
 }
 
-fn async-unwrap-or(result, default) {
-    match result {
-        AsyncResult.Ok { value } => value,
-        AsyncResult.Err { code, message } => default
+fn handle-append-file(path, content) {
+    let file-result = io/open(path, "a")
+    match file-result {
+        Result.Ok { value } => {
+            let file = value
+            let write-result = io/write-string(file, content)
+            io/close(file)
+            match write-result {
+                Result.Ok { value } => ok(value),
+                Result.Err { error } => err(error)
+            }
+        },
+        Result.Err { error } => {
+            err(error)
+        }
     }
 }
 
-// ============================================================================
-// Default Blocking Handler
-// ============================================================================
-// This handler performs I/O operations synchronously using the beagle.io module.
-// It's the default handler that gets installed when running main.
+fn handle-delete-file(path) {
+    let result = core/fs-unlink(path)
+    if result == 0 {
+        ok(null)
+    } else {
+        err(Error.NotFound { path: path })
+    }
+}
 
-struct BlockingHandler {}
+fn handle-file-exists(path) {
+    let result = core/fs-access(path, 0) // F_OK = 0
+    ok(result == 0)
+}
 
-extend BlockingHandler with effect/Handler(Async) {
+fn handle-file-size(path) {
+    let size = core/fs-file-size(path)
+    if size < 0 {
+        async-err(size, "Failed to get file size: " ++ path)
+    } else {
+        async-ok(size)
+    }
+}
+
+fn handle-is-file(path) {
+    let result = core/fs-is-file?(path)
+    async-ok(result)
+}
+
+fn handle-is-directory(path) {
+    let result = core/fs-is-directory?(path)
+    async-ok(result)
+}
+
+fn handle-rename-file(old-path, new-path) {
+    let result = core/fs-rename(old-path, new-path)
+    if result == 0 {
+        async-ok(null)
+    } else {
+        async-err(result, "Failed to rename " ++ old-path ++ " to " ++ new-path)
+    }
+}
+
+fn handle-copy-file(src-path, dest-path) {
+    let read-result = handle-read-file(src-path)
+    match read-result {
+        Result.Ok { value } => {
+            handle-write-file(dest-path, value)
+        },
+        Result.Err { error } => {
+            err(error)
+        }
+    }
+}
+
+fn handle-read-dir(path) {
+    let entries = core/fs-readdir(path)
+    if entries == null {
+        err(Error.NotFound { path: path })
+    } else {
+        ok(entries)
+    }
+}
+
+fn handle-create-dir(path) {
+    let result = core/fs-mkdir(path, 493) // 0755 in octal
+    if result == 0 {
+        ok(null)
+    } else if result == -17 {
+        err(Error.AlreadyExists { path: path })
+    } else {
+        err(Error.IO { message: "Failed to create directory" })
+    }
+}
+
+fn handle-create-dir-all(path) {
+    if path == "" || path == "/" {
+        async-ok(null)
+    } else {
+        let components = core/split(path, "/")
+        let mut current-path = ""
+        let mut i = 0
+        let len = length(components)
+        let mut found-error = null
+
+        while i < len && found-error == null {
+            let component = get(components, i)
+            if component != "" {
+                if current-path == "" && core/starts-with?(path, "/") {
+                    current-path = "/" ++ component
+                } else if current-path == "" {
+                    current-path = component
+                } else {
+                    current-path = current-path ++ "/" ++ component
+                }
+
+                let result = core/fs-mkdir(current-path, 493) // 0755 in octal
+                // 0 = success, -17 = EEXIST (already exists, that's ok)
+                if result != 0 && result != -17 {
+                    found-error = async-err(result, "Failed to create directory: " ++ current-path)
+                }
+            }
+            i = i + 1
+        }
+
+        if found-error == null {
+            async-ok(null)
+        } else {
+            found-error
+        }
+    }
+}
+
+fn handle-remove-dir(path) {
+    let result = core/fs-rmdir(path)
+    if result == 0 {
+        async-ok(null)
+    } else {
+        async-err(result, "Failed to remove directory")
+    }
+}
+
+fn handle-remove-dir-all(path) {
+    let entries = core/fs-readdir(path)
+    if entries == null {
+        // Not a directory or doesn't exist - try to unlink as file
+        let result = core/fs-unlink(path)
+        if result == 0 {
+            async-ok(null)
+        } else {
+            async-err(result, "Failed to remove: " ++ path)
+        }
+    } else {
+        // It's a directory - remove all entries first
+        let mut i = 0
+        let len = length(entries)
+        let mut found-error = null
+
+        while i < len && found-error == null {
+            let entry = get(entries, i)
+            // Skip . and ..
+            if entry != "." && entry != ".." {
+                let entry-path = path ++ "/" ++ entry
+
+                // Try to unlink as file first
+                let unlink-result = core/fs-unlink(entry-path)
+                if unlink-result != 0 {
+                    // unlink failed - might be a directory, try recursive remove
+                    let recursive-result = handle-remove-dir-all(entry-path)
+                    if async-ok?(recursive-result) == false {
+                        found-error = recursive-result
+                    }
+                }
+            }
+            i = i + 1
+        }
+
+        if found-error != null {
+            found-error
+        } else {
+            // Now remove the empty directory
+            let result = core/fs-rmdir(path)
+            if result == 0 {
+                async-ok(null)
+            } else {
+                async-err(result, "Failed to remove directory: " ++ path)
+            }
+        }
+    }
+}
+
+fn handle-open(path, mode) {
+    let result = io/open(path, mode)
+    match result {
+        Result.Ok { value } => async-ok(value),
+        Result.Err { error } => err(error)
+    }
+}
+
+fn handle-close(file) {
+    let result = io/close(file)
+    match result {
+        Result.Ok { value } => async-ok(null),
+        Result.Err { error } => err(error)
+    }
+}
+
+fn handle-read(file, n) {
+    let result = io/read-bytes(file, n)
+    match result {
+        Result.Ok { value } => {
+            let s = ffi/get-string(value.buffer, 0, value.length)
+            ffi/deallocate(value.buffer)
+            async-ok(s)
+        },
+        Result.Err { error } => err(error)
+    }
+}
+
+fn handle-write(file, content) {
+    let result = io/write-string(file, content)
+    match result {
+        Result.Ok { value } => async-ok(value),
+        Result.Err { error } => err(error)
+    }
+}
+
+fn handle-read-line(file) {
+    let result = io/read-line(file, 4096)
+    match result {
+        Result.Ok { value } => async-ok(value),
+        Result.Err { error } => err(error)
+    }
+}
+
+fn handle-flush(file) {
+    let result = io/flush(file)
+    match result {
+        Result.Ok { value } => async-ok(null),
+        Result.Err { error } => err(error)
+    }
+}
+
+fn handle-sleep(ms) {
+    // Use the builtin sleep from beagle.core
+    core/sleep(ms)
+    async-ok(null)
+}
+
+// ============================================================================
+// BlockingAsyncHandler - handles Async effects synchronously
+// ============================================================================
+
+struct BlockingAsyncHandler {}
+
+extend BlockingAsyncHandler with effect/Handler(Async) {
     fn handle(self, op, resume) {
         let result = match op {
+            // Core async operations
+            Async.Await { future } => {
+                handle-await-blocking(future)
+            },
+            Async.AwaitAll { futures } => {
+                handle-await-all-blocking(futures)
+            },
+            Async.AwaitFirst { futures } => {
+                handle-await-first-blocking(futures)
+            },
+            Async.Cancel { future } => {
+                handle-cancel(future)
+            },
+
+            // File operations
             Async.ReadFile { path } => {
                 handle-read-file(path)
             },
@@ -405,20 +659,8 @@ extend BlockingHandler with effect/Handler(Async) {
             Async.Spawn { thunk } => {
                 handle-spawn-blocking(thunk)
             },
-            Async.Await { future } => {
-                handle-await-blocking(future)
-            },
-            Async.AwaitAll { futures } => {
-                handle-await-all-blocking(futures)
-            },
-            Async.AwaitFirst { futures } => {
-                handle-await-first-blocking(futures)
-            },
             Async.SpawnWithToken { thunk, token } => {
                 handle-spawn-with-token-blocking(thunk, token)
-            },
-            Async.Cancel { future } => {
-                handle-cancel(future)
             }
         }
         resume(result)
@@ -426,311 +668,30 @@ extend BlockingHandler with effect/Handler(Async) {
 }
 
 // ============================================================================
-// Handler Implementation Functions
+// Blocking Handler Implementation Functions
 // ============================================================================
-
-fn handle-read-file(path) {
-    // Use the built-in read-full-file which is faster
-    try {
-        let content = read-full-file(path)
-        async-ok(content)
-    } catch (e) {
-        async-err(-1, "Failed to read file")
-    }
-}
-
-fn handle-write-file(path, content) {
-    // Use the built-in write-full-file which is faster
-    let result = core/write-full-file(path, content)
-    if result >= 0 {
-        async-ok(result)
-    } else {
-        async-err(result, "Failed to write file: " ++ path)
-    }
-}
-
-fn handle-append-file(path, content) {
-    let file-result = io/open(path, "a")
-    match file-result {
-        io/Result.Ok { value } => {
-            let file = value
-            let write-result = io/write-string(file, content)
-            io/close(file)
-            match write-result {
-                io/Result.Ok { value } => async-ok(value),
-                io/Result.Err { code, message } => async-err(code, message)
-            }
-        },
-        io/Result.Err { code, message } => {
-            async-err(code, message)
-        }
-    }
-}
-
-fn handle-delete-file(path) {
-    let result = unlink(path)
-    if result == 0 {
-        async-ok(null)
-    } else {
-        async-err(result, "Failed to delete file")
-    }
-}
-
-fn handle-file-exists(path) {
-    let result = access(path, 0) // F_OK = 0
-    async-ok(result == 0)
-}
-
-fn handle-read-dir(path) {
-    let entries = readdir(path)
-    if entries == null {
-        async-err(-1, "Failed to read directory")
-    } else {
-        async-ok(entries)
-    }
-}
-
-fn handle-create-dir(path) {
-    let result = mkdir(path, 493) // 0755 in octal
-    if result == 0 {
-        async-ok(null)
-    } else {
-        async-err(result, "Failed to create directory")
-    }
-}
-
-fn handle-create-dir-all(path) {
-    // Create directory and all parent directories
-    // Split path into components and create each one
-    if path == "" || path == "/" {
-        async-ok(null)
-    } else {
-        let components = core/split(path, "/")
-        let mut current-path = ""
-        let mut i = 0
-        let len = length(components)
-        let mut error = null
-
-        while i < len && error == null {
-            let component = get(components, i)
-            if component != "" {
-                if current-path == "" && core/starts-with?(path, "/") {
-                    current-path = "/" ++ component
-                } else if current-path == "" {
-                    current-path = component
-                } else {
-                    current-path = current-path ++ "/" ++ component
-                }
-
-                let result = mkdir(current-path, 493) // 0755 in octal
-                // 0 = success, -17 = EEXIST (already exists, that's ok)
-                if result != 0 && result != -17 {
-                    error = async-err(result, "Failed to create directory: " ++ current-path)
-                }
-            }
-            i = i + 1
-        }
-
-        if error == null {
-            async-ok(null)
-        } else {
-            error
-        }
-    }
-}
-
-fn handle-remove-dir(path) {
-    let result = rmdir(path)
-    if result == 0 {
-        async-ok(null)
-    } else {
-        async-err(result, "Failed to remove directory")
-    }
-}
-
-fn handle-remove-dir-all(path) {
-    // Recursively remove directory and all its contents
-    let entries = readdir(path)
-    if entries == null {
-        // Not a directory or doesn't exist - try to unlink as file
-        let result = unlink(path)
-        if result == 0 {
-            async-ok(null)
-        } else {
-            async-err(result, "Failed to remove: " ++ path)
-        }
-    } else {
-        // It's a directory - remove all entries first
-        let mut i = 0
-        let len = length(entries)
-        let mut error = null
-
-        while i < len && error == null {
-            let entry = get(entries, i)
-            // Skip . and ..
-            if entry != "." && entry != ".." {
-                let entry-path = path ++ "/" ++ entry
-
-                // Try to unlink as file first
-                let unlink-result = unlink(entry-path)
-                if unlink-result != 0 {
-                    // unlink failed - might be a directory, try recursive remove
-                    // Error code 21 is EISDIR on macOS, 1 on Linux
-                    let recursive-result = handle-remove-dir-all(entry-path)
-                    if async-ok?(recursive-result) == false {
-                        error = recursive-result
-                    }
-                }
-            }
-            i = i + 1
-        }
-
-        if error != null {
-            error
-        } else {
-            // Now remove the empty directory
-            let result = rmdir(path)
-            if result == 0 {
-                async-ok(null)
-            } else {
-                async-err(result, "Failed to remove directory: " ++ path)
-            }
-        }
-    }
-}
-
-fn handle-file-size(path) {
-    let size = file-size-raw(path)
-    if size < 0 {
-        async-err(size, "Failed to get file size: " ++ path)
-    } else {
-        async-ok(size)
-    }
-}
-
-fn handle-is-directory(path) {
-    let result = is-directory-raw(path)
-    async-ok(result)
-}
-
-fn handle-is-file(path) {
-    let result = is-file-raw(path)
-    async-ok(result)
-}
-
-fn handle-rename-file(old-path, new-path) {
-    let result = rename-raw(old-path, new-path)
-    if result == 0 {
-        async-ok(null)
-    } else {
-        async-err(result, "Failed to rename " ++ old-path ++ " to " ++ new-path)
-    }
-}
-
-fn handle-copy-file(src-path, dest-path) {
-    // Read source file and write to destination
-    let read-result = handle-read-file(src-path)
-    match read-result {
-        AsyncResult.Ok { value } => {
-            handle-write-file(dest-path, value)
-        },
-        AsyncResult.Err { code, message } => {
-            async-err(code, "Failed to copy file: " ++ message)
-        }
-    }
-}
-
-fn handle-open(path, mode) {
-    let result = io/open(path, mode)
-    match result {
-        io/Result.Ok { value } => async-ok(value),
-        io/Result.Err { code, message } => async-err(code, message)
-    }
-}
-
-fn handle-close(file) {
-    let result = io/close(file)
-    match result {
-        io/Result.Ok { value } => async-ok(null),
-        io/Result.Err { code, message } => async-err(code, message)
-    }
-}
-
-fn handle-read(file, n) {
-    let result = io/read-bytes(file, n)
-    match result {
-        io/Result.Ok { value } => {
-            let s = ffi/get-string(value.buffer, 0, value.length)
-            ffi/deallocate(value.buffer)
-            async-ok(s)
-        },
-        io/Result.Err { code, message } => async-err(code, message)
-    }
-}
-
-fn handle-write(file, content) {
-    let result = io/write-string(file, content)
-    match result {
-        io/Result.Ok { value } => async-ok(value),
-        io/Result.Err { code, message } => async-err(code, message)
-    }
-}
-
-fn handle-read-line(file) {
-    let result = io/read-line(file, 4096)
-    match result {
-        io/Result.Ok { value } => async-ok(value),
-        io/Result.Err { code, message } => async-err(code, message)
-    }
-}
-
-fn handle-flush(file) {
-    let result = io/flush(file)
-    match result {
-        io/Result.Ok { value } => async-ok(null),
-        io/Result.Err { code, message } => async-err(code, message)
-    }
-}
-
-fn handle-sleep(ms) {
-    // Use the builtin sleep from beagle.core
-    core/sleep(ms)
-    async-ok(null)
-}
-
-// ============================================================================
-// Blocking Handler Implementations for Futures
-// ============================================================================
-// For the blocking handler, futures execute synchronously (eager but blocking).
-
-fn handle-spawn-blocking(thunk) {
-    // Create a future and immediately execute the thunk synchronously
-    let future = make-future(FutureState.Running {})
-    try {
-        let result = thunk()
-        resolve-future!(future, result)
-    } catch (e) {
-        reject-future!(future, e)
-    }
-    future
-}
 
 fn handle-await-blocking(future) {
-    // For blocking handler, futures are already resolved when we get here
-    let state = future-state(future)
-    match state {
-        FutureState.Resolved { value } => value,
-        FutureState.Rejected { error } => {
-            throw(error)
-        },
-        FutureState.Cancelled {} => {
-            throw("Future was cancelled")
-        },
-        FutureState.Pending {} => {
-            throw("Attempted to await a pending future in blocking mode")
-        },
-        FutureState.Running {} => {
-            throw("Attempted to await a running future in blocking mode")
+    // Handle null futures - nothing to await, just return null
+    if future == null {
+        null
+    } else {
+        // For blocking handler, futures are already resolved when we get here
+        let state = future-state(future)
+        match state {
+            FutureState.Resolved { value } => value,
+            FutureState.Rejected { error } => {
+                throw(error)
+            },
+            FutureState.Cancelled {} => {
+                throw("Future was cancelled")
+            },
+            FutureState.Pending {} => {
+                throw("Attempted to await a pending future in blocking mode")
+            },
+            FutureState.Running {} => {
+                throw("Attempted to await a running future in blocking mode")
+            }
         }
     }
 }
@@ -803,7 +764,23 @@ fn handle-await-first-blocking(futures) {
     }
 }
 
-// Spawn with cancellation token (blocking version)
+fn handle-cancel(future) {
+    cancel-future!(future)
+    null
+}
+
+fn handle-spawn-blocking(thunk) {
+    // Create a future and immediately execute the thunk synchronously
+    let future = make-future(FutureState.Running {})
+    try {
+        let result = thunk()
+        resolve-future!(future, result)
+    } catch (e) {
+        reject-future!(future, e)
+    }
+    future
+}
+
 fn handle-spawn-with-token-blocking(thunk, token) {
     // Create a future and immediately execute the thunk synchronously
     let future = make-future(FutureState.Running {})
@@ -826,14 +803,8 @@ fn handle-spawn-with-token-blocking(thunk, token) {
     future
 }
 
-// Cancel a future
-fn handle-cancel(future) {
-    cancel-future!(future)
-    null
-}
-
 // ============================================================================
-// Threaded Async Handler
+// ThreadedAsyncHandler
 // ============================================================================
 // This handler spawns actual threads for parallel execution.
 
@@ -842,6 +813,21 @@ struct ThreadedAsyncHandler {}
 extend ThreadedAsyncHandler with effect/Handler(Async) {
     fn handle(self, op, resume) {
         let result = match op {
+            // Core async operations
+            Async.Await { future } => {
+                handle-await-threaded(future)
+            },
+            Async.AwaitAll { futures } => {
+                handle-await-all-threaded(futures)
+            },
+            Async.AwaitFirst { futures } => {
+                handle-await-first-threaded(futures)
+            },
+            Async.Cancel { future } => {
+                handle-cancel(future)
+            },
+
+            // File operations
             Async.ReadFile { path } => {
                 handle-read-file(path)
             },
@@ -911,20 +897,8 @@ extend ThreadedAsyncHandler with effect/Handler(Async) {
             Async.Spawn { thunk } => {
                 handle-spawn-threaded(thunk)
             },
-            Async.Await { future } => {
-                handle-await-threaded(future)
-            },
-            Async.AwaitAll { futures } => {
-                handle-await-all-threaded(futures)
-            },
-            Async.AwaitFirst { futures } => {
-                handle-await-first-threaded(futures)
-            },
             Async.SpawnWithToken { thunk, token } => {
                 handle-spawn-with-token-threaded(thunk, token)
-            },
-            Async.Cancel { future } => {
-                handle-cancel(future)
             }
         }
         resume(result)
@@ -983,7 +957,12 @@ fn handle-spawn-with-token-threaded(thunk, token) {
 
 // Wait for a future by polling its state
 fn handle-await-threaded(future) {
-    poll-until-resolved(future)
+    // Handle null futures - nothing to await, just return null
+    if future == null {
+        null
+    } else {
+        poll-until-resolved(future)
+    }
 }
 
 // Poll a future until it resolves, using efficient condition variable waiting
@@ -1003,8 +982,6 @@ fn poll-until-resolved(future) {
             },
             _ => {
                 // Wait for notification that a future completed (or timeout)
-                // This is more efficient than pure sleep because we wake immediately
-                // when any future completes instead of waiting the full sleep time.
                 core/future-wait(wait_timeout)
             }
         }
@@ -1114,8 +1091,6 @@ fn handle-await-first-threaded(futures) {
 // EventLoopHandler - mio-based async handler
 // ============================================================================
 // This handler uses the mio-based event loop for efficient async I/O.
-// It uses non-blocking operations with the OS event notification system
-// instead of spawning threads for each operation.
 
 struct EventLoopHandler {
     event_loop_id
@@ -1140,6 +1115,20 @@ extend EventLoopHandler with effect/Handler(Async) {
     fn handle(self, op, resume) {
         let loop_id = self.event_loop_id
         let result = match op {
+            // Core async operations
+            Async.Await { future } => {
+                handle-await-event-loop(loop_id, future)
+            },
+            Async.AwaitAll { futures } => {
+                handle-await-all-event-loop(loop_id, futures)
+            },
+            Async.AwaitFirst { futures } => {
+                handle-await-first-event-loop(loop_id, futures)
+            },
+            Async.Cancel { future } => {
+                handle-cancel(future)
+            },
+
             // File operations - use async thread pool I/O
             Async.ReadFile { path } => {
                 handle-read-file-async(loop_id, path)
@@ -1223,21 +1212,8 @@ extend EventLoopHandler with effect/Handler(Async) {
             Async.Spawn { thunk } => {
                 handle-spawn-event-loop(loop_id, thunk)
             },
-            // Await polls the event loop
-            Async.Await { future } => {
-                handle-await-event-loop(loop_id, future)
-            },
-            Async.AwaitAll { futures } => {
-                handle-await-all-event-loop(loop_id, futures)
-            },
-            Async.AwaitFirst { futures } => {
-                handle-await-first-event-loop(loop_id, futures)
-            },
             Async.SpawnWithToken { thunk, token } => {
                 handle-spawn-with-token-threaded(thunk, token)
-            },
-            Async.Cancel { future } => {
-                handle-cancel(future)
             }
         }
         resume(result)
@@ -1263,51 +1239,52 @@ fn handle-sleep-event-loop(loop_id, ms) {
         // Check for completed timers
         let completed_marker = core/timer-pop-completed(loop_id)
         if completed_marker == marker {
-            // Our timer completed
-            break(null)
+            // Our timer completed - return Result like other handlers
+            break(async-ok(null))
         }
 
         // If we got a different marker, it's for another timer - ignore
-        // (in a full implementation we'd queue it for later)
     }
 }
 
 // Spawn using event loop (currently still uses threads for compute tasks)
-// For truly non-blocking spawn, we'd need cooperative scheduling
 fn handle-spawn-event-loop(loop_id, thunk) {
     // For compute tasks, we still use threads
-    // The event loop is for I/O operations
     handle-spawn-threaded(thunk)
 }
 
 // Await using event loop polling
 fn handle-await-event-loop(loop_id, future) {
-    loop {
-        // Process events (network I/O, timers, etc.)
-        core/event-loop-run-once(loop_id, 50)
+    // Handle null futures - nothing to await, just return null
+    if future == null {
+        null
+    } else {
+        loop {
+            // Process events (network I/O, timers, etc.)
+            core/event-loop-run-once(loop_id, 50)
 
-        // Process any completed TCP results
-        process-tcp-results(loop_id)
+            // Process any completed TCP results
+            process-tcp-results(loop_id)
 
-        // Process any completed file results
-        process-file-results(loop_id)
+            // Process any completed file results
+            process-file-results(loop_id)
 
-        // Process any completed timers
-        process-timer-results(loop_id)
+            // Process any completed timers
+            process-timer-results(loop_id)
 
-        // Check if our future is resolved
-        let state = future-state(future)
-        match state {
-            FutureState.Resolved { value } => break(value),
-            FutureState.Rejected { error } => throw(error),
-            FutureState.Cancelled {} => throw("Future was cancelled"),
-            _ => {}
+            // Check if our future is resolved
+            let state = future-state(future)
+            match state {
+                FutureState.Resolved { value } => break(value),
+                FutureState.Rejected { error } => throw(error),
+                FutureState.Cancelled {} => throw("Future was cancelled"),
+                _ => {}
+            }
         }
     }
 }
 
 // Process completed TCP results (placeholder for future implementation)
-// In a full implementation, this would resolve futures based on their atom addresses
 fn process-tcp-results(loop_id) {
     // Just drain completed results for now
     loop {
@@ -1322,12 +1299,6 @@ fn process-tcp-results(loop_id) {
 // ============================================================================
 // Async File I/O Functions (using thread pool)
 // ============================================================================
-// These functions submit file operations to the event loop's thread pool
-// and return immediately with a Future that will be resolved when complete.
-
-// Internal: Map from future_atom addresses to Future objects
-// This allows us to resolve futures when we process completed results
-// We use a mutable vector of [atom_addr, future] pairs
 
 // Global registry for pending file operation futures
 // Each entry is [atom_addr, future]
@@ -1374,13 +1345,8 @@ fn process-file-results(loop_id) {
         let future = find-and-remove-pending-future(future_atom)
         if future == null {
             // No future registered for this atom - skip
-            // (This shouldn't happen in normal operation)
         } else {
             // Resolve or reject based on result type
-            // Type codes:
-            // 1=ReadOk, 2=ReadErr, 3=WriteOk, 4=WriteErr,
-            // 5=DeleteOk, 6=DeleteErr, 7=StatOk, 8=StatErr,
-            // 9=ReadDirOk, 10=ReadDirErr
             if result_type == 1 {
                 // ReadOk - get content string
                 let content = core/file-result-data(loop_id)
@@ -1413,7 +1379,7 @@ fn process-file-results(loop_id) {
                 let error_msg = core/file-result-data(loop_id)
                 resolve-future!(future, async-err(-1, error_msg))
             } else if result_type == 9 {
-                // ReadDirOk - get entries (as string data for now, would need proper array handling)
+                // ReadDirOk - get entries
                 let entries_data = core/file-result-data(loop_id)
                 resolve-future!(future, async-ok(entries_data))
             } else if result_type == 10 {
@@ -1428,14 +1394,10 @@ fn process-file-results(loop_id) {
 // Submit an async read file operation
 fn submit-read-file-async(loop_id, path) {
     let future = make-future(FutureState.Running {})
-    // Get the raw atom address for this future's state atom
     let atom_addr = core/atom-address(future.state_atom)
-    // Register the future so we can resolve it later
     register-pending-future(atom_addr, future)
-    // Submit the operation
     let result = core/file-read-async(loop_id, path, atom_addr)
     if result < 0 {
-        // Failed to submit - reject immediately
         find-and-remove-pending-future(atom_addr)
         reject-future!(future, "Failed to submit read operation")
     }
@@ -1468,7 +1430,7 @@ fn submit-delete-file-async(loop_id, path) {
     future
 }
 
-// Submit an async stat (file size) operation
+// Submit an async stat operation
 fn submit-file-stat-async(loop_id, path) {
     let future = make-future(FutureState.Running {})
     let atom_addr = core/atom-address(future.state_atom)
@@ -1497,17 +1459,13 @@ fn submit-readdir-async(loop_id, path) {
 // ============================================================================
 // Async File Handler Functions for EventLoopHandler
 // ============================================================================
-// These functions use the async file I/O infrastructure
 
 fn handle-read-file-async(loop_id, path) {
     let future = submit-read-file-async(loop_id, path)
-    // Poll until the future is resolved
     loop {
-        // Process events and file results
         core/event-loop-run-once(loop_id, 10)
         process-file-results(loop_id)
 
-        // Check if our future is resolved
         let state = future-state(future)
         match state {
             FutureState.Resolved { value } => break(value),
@@ -1590,8 +1548,7 @@ fn process-timer-results(loop_id) {
             break(null)
         }
         // Timer completed - the future associated with this atom
-        // should be resolved. This requires maintaining a map from
-        // atom addresses to futures.
+        // should be resolved
     }
 }
 
@@ -1689,8 +1646,6 @@ fn handle-await-first-event-loop(loop_id, futures) {
 // ============================================================================
 // Public Async API Functions
 // ============================================================================
-// These functions perform effects. They must be called within a
-// `handle effect/Handler(Async) with handler { ... }` block.
 
 // Read the entire contents of a file as a string
 fn read-file(path) {
@@ -1807,35 +1762,30 @@ fn sleep(ms) {
 // ============================================================================
 
 // Create a future from a thunk - starts execution immediately (eager)
-// Usage: let f = async(fn() { expensive-computation() })
 fn async(thunk) {
     perform Async.Spawn { thunk: thunk }
 }
 
 // Wait for a future to complete and return its value
-// Usage: let result = await(future)
 fn await(future) {
     perform Async.Await { future: future }
 }
 
 // Wait for all futures to complete and return their values as a list
-// Usage: let [r1, r2, r3] = await-all([f1, f2, f3])
 fn await-all(futures) {
     perform Async.AwaitAll { futures: futures }
 }
 
 // Wait for the first future to complete and return it
-// Returns RaceResult.Ok { value, index } or RaceResult.AllFailed { errors }
 fn await-first(futures) {
     perform Async.AwaitFirst { futures: futures }
 }
 
 // Wait for a future with a timeout (in milliseconds)
-// Returns TimeoutResult.Ok { value } or TimeoutResult.TimedOut {}
 fn await-timeout(ms, future) {
     let start = time-now()
-    let deadline_ns = start + (ms * 1000000)  // Convert ms to ns
-    let wait_timeout = 50  // Check every 50ms at most
+    let deadline_ns = start + (ms * 1000000)
+    let wait_timeout = 50
 
     loop {
         let state = future-state(future)
@@ -1850,19 +1800,16 @@ fn await-timeout(ms, future) {
                 throw("Future was cancelled")
             },
             _ => {
-                // Check if we've exceeded the timeout
                 let now = time-now()
                 if now >= deadline_ns {
                     break(TimeoutResult.TimedOut {})
                 }
-                // Calculate remaining time and wait up to wait_timeout ms
                 let remaining_ms = (deadline_ns - now) / 1000000
                 let actual_wait = if remaining_ms < wait_timeout {
                     remaining_ms
                 } else {
                     wait_timeout
                 }
-                // Wait for notification or timeout
                 core/future-wait(actual_wait)
             }
         }
@@ -1874,20 +1821,16 @@ fn await-timeout(ms, future) {
 // ============================================================================
 
 // Create a future with a cancellation token
-// The task will check the token periodically and exit early if cancelled
-// Usage: let f = async-with-token(token, fn() { ... })
 fn async-with-token(token, thunk) {
     perform Async.SpawnWithToken { thunk: thunk, token: token }
 }
 
 // Cancel a future (cooperative cancellation)
-// The future will be marked as cancelled when it next checks its state
 fn cancel(future) {
     perform Async.Cancel { future: future }
 }
 
-// Spawn a task in a scope - the task will be automatically cancelled
-// when the scope exits
+// Spawn a task in a scope
 fn spawn-in-scope(scope, thunk) {
     let future = async-with-token(scope.token, thunk)
     scope-add-child!(scope, future)
@@ -1899,8 +1842,6 @@ fn spawn-in-scope(scope, thunk) {
 // ============================================================================
 
 // Run a thunk with a timeout (in milliseconds)
-// Returns TimeoutResult.Ok { value } if completed, TimeoutResult.TimedOut {} if timed out
-// Note: This is cooperative - the thunk must complete before we can check the timeout
 fn with-timeout(ms, thunk) {
     let start = time-now()
     let deadline_ns = start + (ms * 1000000)
@@ -1916,18 +1857,13 @@ fn with-timeout(ms, thunk) {
 }
 
 // Run an async operation with a timeout
-// This creates a race between the operation and a timer
-// If the operation completes first, returns TimeoutResult.Ok { value }
-// If the timer fires first, returns TimeoutResult.TimedOut {}
 fn async-with-timeout(ms, thunk) {
     let token = make-cancellation-token()
     let result_future = async-with-token(token, thunk)
 
-    // Wait for either the future to resolve or timeout
     let outcome = await-timeout(ms, result_future)
     match outcome {
         TimeoutResult.TimedOut {} => {
-            // Cancel the task since it timed out
             cancel!(token)
             TimeoutResult.TimedOut {}
         },
@@ -1950,7 +1886,7 @@ fn await-sleep(ms) {
     await(async-sleep(ms))
 }
 
-// Get current time in nanoseconds (for internal timing)
+// Get current time in nanoseconds
 fn time-now() {
     core/time-now()
 }
@@ -1986,15 +1922,12 @@ fn unwrap-or(result, default) {
 
 // Create the default async handler
 fn default-handler() {
-    BlockingHandler {}
+    BlockingAsyncHandler {}
 }
 
 // Run a block with the default blocking handler
-// NOTE: Due to current limitations, the thunk should only perform ONE async operation.
-// For multiple operations, use separate run-blocking calls or use the explicit
-// handle/with pattern with separate handle blocks for each operation.
 fn run-blocking(thunk) {
-    let handler = BlockingHandler {}
+    let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
         thunk()
     }
@@ -2003,102 +1936,100 @@ fn run-blocking(thunk) {
 // ============================================================================
 // Single-Operation Convenience Functions
 // ============================================================================
-// These functions wrap each async operation in its own handler block,
-// making it easy to use async operations without manual handler setup.
 
 fn blocking-read-file(path) {
-    let handler = BlockingHandler {}
+    let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
         read-file(path)
     }
 }
 
 fn blocking-write-file(path, content) {
-    let handler = BlockingHandler {}
+    let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
         write-file(path, content)
     }
 }
 
 fn blocking-append-file(path, content) {
-    let handler = BlockingHandler {}
+    let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
         append-file(path, content)
     }
 }
 
 fn blocking-delete-file(path) {
-    let handler = BlockingHandler {}
+    let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
         delete-file(path)
     }
 }
 
 fn blocking-file-exists?(path) {
-    let handler = BlockingHandler {}
+    let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
         file-exists?(path)
     }
 }
 
 fn blocking-read-dir(path) {
-    let handler = BlockingHandler {}
+    let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
         read-dir(path)
     }
 }
 
 fn blocking-create-dir(path) {
-    let handler = BlockingHandler {}
+    let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
         create-dir(path)
     }
 }
 
 fn blocking-remove-dir(path) {
-    let handler = BlockingHandler {}
+    let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
         remove-dir(path)
     }
 }
 
 fn blocking-file-size(path) {
-    let handler = BlockingHandler {}
+    let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
         file-size(path)
     }
 }
 
 fn blocking-is-directory?(path) {
-    let handler = BlockingHandler {}
+    let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
         is-directory?(path)
     }
 }
 
 fn blocking-is-file?(path) {
-    let handler = BlockingHandler {}
+    let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
         is-file?(path)
     }
 }
 
 fn blocking-rename-file(old-path, new-path) {
-    let handler = BlockingHandler {}
+    let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
         rename-file(old-path, new-path)
     }
 }
 
 fn blocking-copy-file(src-path, dest-path) {
-    let handler = BlockingHandler {}
+    let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
         copy-file(src-path, dest-path)
     }
 }
 
 fn blocking-sleep(ms) {
-    let handler = BlockingHandler {}
+    let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
         sleep(ms)
     }
@@ -2108,9 +2039,6 @@ fn blocking-sleep(ms) {
 // Async Combinators (Legacy - for running thunks)
 // ============================================================================
 
-// Run multiple thunks and collect results
-// NOTE: This is for running thunks, not for awaiting futures.
-// For futures, use await-all(futures) which uses the effect system.
 fn run-all-thunks(thunks) {
     let mut results = []
     let mut s = seq(thunks)
@@ -2122,7 +2050,6 @@ fn run-all-thunks(thunks) {
     results
 }
 
-// Run operations until one succeeds
 fn await-any(thunks) {
     let mut s = seq(thunks)
     let mut result = null
@@ -2139,27 +2066,24 @@ fn await-any(thunks) {
     result
 }
 
-// Map over results
 fn map-results(results, f) {
     map(results, fn(r) {
         match r {
-            AsyncResult.Ok { value } => async-ok(f(value)),
-            AsyncResult.Err { code, message } => r
+            Result.Ok { value } => ok(f(value)),
+            Result.Err { error } => r
         }
     })
 }
 
-// Filter to only successful results
 fn filter-ok(results) {
     filter(results, fn(r) { async-ok?(r) })
 }
 
-// Extract values from successful results
 fn unwrap-all(results) {
     map(filter-ok(results), fn(r) {
         match r {
-            AsyncResult.Ok { value } => value,
-            AsyncResult.Err { code, message } => null
+            Result.Ok { value } => value,
+            Result.Err { error } => null
         }
     })
 }
