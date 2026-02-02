@@ -1,0 +1,134 @@
+namespace custom_handler_test
+
+use beagle.fs as fs
+use beagle.async as async
+use beagle.effect as effect
+use beagle.core as core
+
+// Test custom handlers for mocking file I/O
+// This test uses the Fs effect for file operations
+
+// Mock file system handler for testing
+struct MockFSHandler {
+    files_atom
+}
+
+fn create-mock-fs-handler() {
+    MockFSHandler { files_atom: atom({}) }
+}
+
+// Add a file to the mock file system
+fn mock-add-file!(handler, path, content) {
+    let files = deref(handler.files_atom)
+    reset!(handler.files_atom, assoc(files, path, content))
+}
+
+// Get all files in the mock file system (for inspection)
+fn mock-get-files(handler) {
+    deref(handler.files_atom)
+}
+
+extend MockFSHandler with effect/Handler(fs/Fs) {
+    fn handle(self, op, resume) {
+        let result = match op {
+            fs/Fs.ReadFile { path } => {
+                let files = deref(self.files_atom)
+                let content = get(files, path)
+                if content == null {
+                    err(Error.NotFound { path: path })
+                } else {
+                    ok(content)
+                }
+            },
+            fs/Fs.WriteFile { path, content } => {
+                let files = deref(self.files_atom)
+                reset!(self.files_atom, assoc(files, path, content))
+                ok(length(content))
+            },
+            fs/Fs.DeleteFile { path } => {
+                let files = deref(self.files_atom)
+                reset!(self.files_atom, dissoc(files, path))
+                ok(null)
+            },
+            fs/Fs.FileExists { path } => {
+                let files = deref(self.files_atom)
+                let content = get(files, path)
+                ok(content != null)
+            },
+            fs/Fs.FileSize { path } => {
+                let files = deref(self.files_atom)
+                let content = get(files, path)
+                if content == null {
+                    err(Error.NotFound { path: path })
+                } else {
+                    ok(length(content))
+                }
+            },
+            _ => {
+                throw("Unhandled operation in MockFSHandler")
+            }
+        }
+        resume(result)
+    }
+}
+
+fn main() {
+    println("Testing custom mock handler...")
+
+    // Create a mock file system
+    let mock = create-mock-fs-handler()
+
+    // Pre-populate with test files
+    mock-add-file!(mock, "/test/hello.txt", "Hello, World!")
+    mock-add-file!(mock, "/test/data.json", "{\"key\": \"value\"}")
+
+    handle effect/Handler(fs/Fs) with mock {
+        // Test reading pre-populated file
+        let result1 = fs/read-file("/test/hello.txt")
+        println("Read hello.txt:", core/unwrap(result1))
+
+        // Test reading another file
+        let result2 = fs/read-file("/test/data.json")
+        println("Read data.json:", core/unwrap(result2))
+
+        // Test reading non-existent file
+        let result3 = fs/read-file("/nonexistent.txt")
+        println("Read nonexistent ok?:", core/ok?(result3))
+
+        // Test writing a new file
+        let write_result = fs/write-file("/test/new.txt", "New content!")
+        println("Write result:", core/unwrap(write_result))
+
+        // Verify the write worked
+        let read_new = fs/read-file("/test/new.txt")
+        println("Read new file:", core/unwrap(read_new))
+
+        // Test exists?
+        let exists1 = fs/exists?("/test/hello.txt")
+        println("hello.txt exists:", core/unwrap(exists1))
+
+        let exists2 = fs/exists?("/nonexistent.txt")
+        println("nonexistent exists:", core/unwrap(exists2))
+
+        // Test delete
+        let _ = fs/delete-file("/test/new.txt")
+        let exists3 = fs/exists?("/test/new.txt")
+        println("new.txt exists after delete:", core/unwrap(exists3))
+
+        println("All mock tests passed!")
+    }
+
+    "done"
+}
+
+// Expect
+// Testing custom mock handler...
+// Read hello.txt: Hello, World!
+// Read data.json: {"key": "value"}
+// Read nonexistent ok?: false
+// Write result: 12
+// Read new file: New content!
+// hello.txt exists: true
+// nonexistent exists: false
+// new.txt exists after delete: false
+// All mock tests passed!

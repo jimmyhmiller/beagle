@@ -863,17 +863,40 @@ impl AstCompiler<'_> {
                     let arg_count_local = self.find_or_insert_local("<arg_count>");
                     self.ir.store_local(arg_count_local, arg_count);
 
-                    // Save all 8 potential arg registers to dedicated locals
-                    // We use locals so we can read them back by index later
-                    let first_arg_index = if is_not_top_level { 1 } else { 0 };
+                    // Save only the arg registers that were actually passed.
+                    // Previously we saved all 8 unconditionally, but unused registers
+                    // contain garbage that could crash GC if it looks like a heap pointer.
+                    // Now we conditionally store based on runtime arg_count.
+                    let first_arg_index: usize = if is_not_top_level { 1 } else { 0 };
                     let mut saved_arg_locals = Vec::new();
+
+                    // Pre-allocate all the locals (they're zeroed by prologue)
                     for i in first_arg_index..8 {
-                        let arg_reg = self.ir.arg(i);
-                        let arg_val = self.ir.assign_new(arg_reg);
                         let local_name = format!("<saved_arg_{}>", i);
                         let local = self.find_or_insert_local(&local_name);
-                        self.ir.store_local(local, arg_val.into());
                         saved_arg_locals.push(local);
+                    }
+
+                    // Conditionally store each arg register only if i < arg_count
+                    for i in first_arg_index..8 {
+                        let skip_label = self.ir.label(&format!("skip_save_arg_{}", i));
+                        let tagged_index = Value::TaggedConstant(i as isize);
+
+                        // If i >= arg_count, skip storing this arg (local stays zeroed/null)
+                        self.ir.jump_if(
+                            skip_label,
+                            Condition::GreaterThanOrEqual,
+                            tagged_index,
+                            arg_count,
+                        );
+
+                        // i < arg_count, so store the arg register
+                        let arg_reg = self.ir.arg(i);
+                        let arg_val = self.ir.assign_new(arg_reg);
+                        let local = saved_arg_locals[i - first_arg_index];
+                        self.ir.store_local(local, arg_val.into());
+
+                        self.ir.write_label(skip_label);
                     }
 
                     Some((arg_count_local, saved_arg_locals))
@@ -2218,17 +2241,28 @@ impl AstCompiler<'_> {
             } => {
                 let object = self.call_compile(object.as_ref())?;
                 let object = self.ir.assign_new(object);
-                let untagged_object = self.ir.untag(object.into());
-                // self.ir.breakpoint();
-                let struct_id = self.ir.read_struct_id(untagged_object);
+
                 let property_location =
                     Value::RawValue(self.compiler.add_property_lookup().unwrap());
                 let property_location = self.ir.assign_new(property_location);
-                let property_value = self.ir.load_from_heap(property_location.into(), 0);
                 let result = self.ir.assign_new(0);
 
                 let exit_property_access = self.ir.label("exit_property_access");
                 let slow_property_path = self.ir.label("slow_property_path");
+
+                // Check for null before untagging - go to slow path for nice error
+                let object_value: Value = object.into();
+                self.ir.jump_if(
+                    slow_property_path,
+                    Condition::Equal,
+                    object_value,
+                    Value::Null,
+                );
+
+                let untagged_object = self.ir.untag(object.into());
+                // self.ir.breakpoint();
+                let struct_id = self.ir.read_struct_id(untagged_object);
+                let property_value = self.ir.load_from_heap(property_location.into(), 0);
                 self.ir.jump_if(
                     slow_property_path,
                     Condition::NotEqual,
@@ -2466,11 +2500,22 @@ impl AstCompiler<'_> {
                             ),
                         });
                     }
-                    if self.is_tail_position() {
-                        return self.call_compile(&Ast::TailRecurse { args, token_range });
-                    } else {
-                        return self.call_compile(&Ast::Recurse { args, token_range });
+                    // Tail/recurse optimization only works when all args fit in registers
+                    // ARM64: 8 registers (x0-x7), x86-64: 6 registers (rdi, rsi, rdx, rcx, r8, r9)
+                    // When args exceed register count, fall through to regular Call handling
+                    #[cfg(target_arch = "aarch64")]
+                    const MAX_RECURSE_ARGS: usize = 8;
+                    #[cfg(target_arch = "x86_64")]
+                    const MAX_RECURSE_ARGS: usize = 6;
+
+                    if args.len() <= MAX_RECURSE_ARGS {
+                        if self.is_tail_position() {
+                            return self.call_compile(&Ast::TailRecurse { args, token_range });
+                        } else {
+                            return self.call_compile(&Ast::Recurse { args, token_range });
+                        }
                     }
+                    // Too many args - fall through to regular Call handling below
                 }
 
                 if self.should_not_evaluate_arguments(&name) {
@@ -3558,6 +3603,7 @@ impl AstCompiler<'_> {
 
                 // Step 7: Call handler.handle(op, resume) via call-handler builtin
                 // call-handler takes: (handler, enum_type_ptr, op_value, resume)
+                // Register allocation handles saving/restoring heap pointers across calls
                 let handler_result = self.call_builtin(
                     "beagle.builtin/call-handler",
                     vec![
@@ -4737,7 +4783,21 @@ impl AstCompiler<'_> {
                 })?;
             Ok((namespace, name.to_string()))
         } else {
-            Ok((self.compiler.current_namespace_name(), name.to_string()))
+            // Try current namespace first
+            let current_ns = self.compiler.current_namespace_name();
+            let current_ns_enum = format!("{}/{}", current_ns, name);
+            if self.compiler.get_enum(&current_ns_enum).is_some() {
+                Ok((current_ns, name.to_string()))
+            } else {
+                // Fall back to beagle.core
+                let core_enum = format!("beagle.core/{}", name);
+                if self.compiler.get_enum(&core_enum).is_some() {
+                    Ok(("beagle.core".to_string(), name.to_string()))
+                } else {
+                    // Return current namespace (error will be reported later)
+                    Ok((current_ns, name.to_string()))
+                }
+            }
         }
     }
 
@@ -5206,7 +5266,7 @@ impl AstCompiler<'_> {
 
     /// Build the full enum name with namespace.
     /// If enum_name already contains a '/', resolve the alias to get the actual namespace.
-    /// Otherwise, prepend the current namespace.
+    /// Otherwise, prepend the current namespace, falling back to beagle.core if not found.
     fn get_full_enum_name(&self, enum_name: &str) -> String {
         if enum_name.contains('/') {
             // Namespace-qualified with alias (e.g., "other/Color")
@@ -5221,8 +5281,21 @@ impl AstCompiler<'_> {
                 .unwrap_or_else(|| alias.to_string());
             format!("{}/{}", namespace, name)
         } else {
-            // Add current namespace (e.g., "Color" -> "current_namespace/Color")
-            format!("{}/{}", self.compiler.current_namespace_name(), enum_name)
+            // Try current namespace first
+            let current_ns_name =
+                format!("{}/{}", self.compiler.current_namespace_name(), enum_name);
+            if self.compiler.get_enum(&current_ns_name).is_some() {
+                current_ns_name
+            } else {
+                // Fall back to beagle.core
+                let core_name = format!("beagle.core/{}", enum_name);
+                if self.compiler.get_enum(&core_name).is_some() {
+                    core_name
+                } else {
+                    // Return current namespace name (error will be reported later)
+                    current_ns_name
+                }
+            }
         }
     }
 
@@ -5242,6 +5315,10 @@ impl AstCompiler<'_> {
                 variant_name,
                 ..
             } => {
+                // First check if the value is null - null can't match any enum variant
+                self.ir
+                    .jump_if(no_match_label, Condition::Equal, value_reg, Value::Null);
+
                 // Get the struct ID for this enum variant
                 let full_enum_name = self.get_full_enum_name(enum_name);
                 let full_name = format!("{}.{}", full_enum_name, variant_name);
@@ -5275,6 +5352,10 @@ impl AstCompiler<'_> {
                 Ok(())
             }
             Pattern::Struct { name, .. } => {
+                // First check if the value is null - null can't match any struct pattern
+                self.ir
+                    .jump_if(no_match_label, Condition::Equal, value_reg, Value::Null);
+
                 // Check if the value is a struct with the expected struct ID
                 let full_struct_name = self.get_full_struct_name(name);
                 let (expected_struct_id, _) = self
@@ -5409,7 +5490,21 @@ impl AstCompiler<'_> {
         if struct_name.contains('/') {
             struct_name.to_string()
         } else {
-            format!("{}/{}", self.compiler.current_namespace_name(), struct_name)
+            // Try current namespace first
+            let current_ns_name =
+                format!("{}/{}", self.compiler.current_namespace_name(), struct_name);
+            if self.compiler.get_struct(&current_ns_name).is_some() {
+                current_ns_name
+            } else {
+                // Fall back to beagle.core
+                let core_name = format!("beagle.core/{}", struct_name);
+                if self.compiler.get_struct(&core_name).is_some() {
+                    core_name
+                } else {
+                    // Return current namespace name (error will be reported later)
+                    current_ns_name
+                }
+            }
         }
     }
 

@@ -1,0 +1,61 @@
+namespace bench_medium_file
+
+use beagle.async as async
+use beagle.effect as effect
+use beagle.core as core
+
+// Benchmark medium file I/O (1KB files)
+
+fn main() {
+    println("=== Beagle Medium File Benchmark ===")
+
+    let handler = async/BlockingAsyncHandler {}
+
+    // Create 1KB content (small enough to avoid large object issues)
+    let content = "This is a line of text for testing file I/O performance in Beagle.\n"
+    // Repeat it ~15 times to get ~1KB
+    let content1k = content ++ content ++ content ++ content ++ content ++
+                    content ++ content ++ content ++ content ++ content ++
+                    content ++ content ++ content ++ content ++ content
+    println("Content size:", length(content1k), "bytes")
+
+    let iterations = 500
+
+    // Benchmark: Write 1KB files
+    let start1 = core/time-now()
+    handle effect/Handler(async/Async) with handler {
+        let mut i = 0
+        while i < iterations {
+            async/write-file("/tmp/beagle_med_" ++ to-string(i) ++ ".txt", content1k)
+            i = i + 1
+        }
+    }
+    let end1 = core/time-now()
+    let write-time = (end1 - start1) / 1000000
+    println("Write", iterations, "x 1KB files:", write-time, "ms")
+
+    // Benchmark: Read 1KB files
+    let start2 = core/time-now()
+    handle effect/Handler(async/Async) with handler {
+        let mut i = 0
+        while i < iterations {
+            async/read-file("/tmp/beagle_med_" ++ to-string(i) ++ ".txt")
+            i = i + 1
+        }
+    }
+    let end2 = core/time-now()
+    let read-time = (end2 - start2) / 1000000
+    println("Read", iterations, "x 1KB files:", read-time, "ms")
+
+    // Cleanup
+    handle effect/Handler(async/Async) with handler {
+        let mut i = 0
+        while i < iterations {
+            async/delete-file("/tmp/beagle_med_" ++ to-string(i) ++ ".txt")
+            i = i + 1
+        }
+    }
+
+    println("=== Complete ===")
+    println("Total:", write-time + read-time, "ms")
+}

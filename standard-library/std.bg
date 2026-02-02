@@ -1974,3 +1974,124 @@ fn char-code(s) {
 fn char-from-code(code) {
     builtin/char-from-code(code)
 }
+
+// ============================================================================
+// Error Enum for Unified Error Handling
+// ============================================================================
+// This is the canonical Error type used across all async and I/O operations.
+// Pattern match on specific error types to handle different failure cases.
+
+enum Error {
+    NotFound { path },
+    PermissionDenied { path },
+    AlreadyExists { path },
+    IsDirectory { path },
+    NotDirectory { path },
+    Timeout { operation },
+    Cancelled {},
+    IO { message },
+    Other { code, message }
+}
+
+// ============================================================================
+// Result Type for Error Handling
+// ============================================================================
+// This is the canonical Result type used across all async and I/O operations.
+// All namespaces (fs, timer, io, async) should use this type.
+
+enum Result {
+    Ok { value },
+    Err { error }
+}
+
+// Create a successful result
+fn ok(value) {
+    Result.Ok { value: value }
+}
+
+// Create an error result from an Error enum variant
+fn err(error) {
+    Result.Err { error: error }
+}
+
+// Create an error result with code and message (convenience for legacy/IO errors)
+fn err-io(message) {
+    Result.Err { error: Error.IO { message: message } }
+}
+
+// Create an error result with code (convenience for legacy code)
+fn err-code(code, message) {
+    Result.Err { error: Error.Other { code: code, message: message } }
+}
+
+// Check if a result is successful
+fn ok?(result) {
+    match result {
+        Result.Ok { value } => true,
+        Result.Err { error } => false
+    }
+}
+
+// Unwrap a result, returning the value or null on error
+fn unwrap(result) {
+    match result {
+        Result.Ok { value } => value,
+        Result.Err { error } => {
+            match error {
+                Error.NotFound { path } => println("Error: Not found:", path),
+                Error.PermissionDenied { path } => println("Error: Permission denied:", path),
+                Error.AlreadyExists { path } => println("Error: Already exists:", path),
+                Error.IsDirectory { path } => println("Error: Is a directory:", path),
+                Error.NotDirectory { path } => println("Error: Not a directory:", path),
+                Error.Timeout { operation } => println("Error: Timeout on:", operation),
+                Error.Cancelled {} => println("Error: Cancelled"),
+                Error.IO { message } => println("Error:", message),
+                Error.Other { code, message } => println("Error:", message)
+            }
+            null
+        }
+    }
+}
+
+// Unwrap a result, returning the value or a default on error
+fn unwrap-or(result, default) {
+    match result {
+        Result.Ok { value } => value,
+        Result.Err { error } => default
+    }
+}
+
+// Check if a result is a timeout error
+fn timeout?(result) {
+    match result {
+        Result.Err { error } => match error {
+            Error.Timeout { operation } => true,
+            _ => false
+        },
+        _ => false
+    }
+}
+
+// Check if a result is a not-found error
+fn not-found?(result) {
+    match result {
+        Result.Err { error } => match error {
+            Error.NotFound { path } => true,
+            _ => false
+        },
+        _ => false
+    }
+}
+
+// Get the error from a result (returns null if Ok)
+fn get-error(result) {
+    match result {
+        Result.Ok { value } => null,
+        Result.Err { error } => error
+    }
+}
+
+// ============================================================================
+// String Utility Functions
+// ============================================================================
+// Note: split() and starts-with?() are provided as builtins - see builtins.rs

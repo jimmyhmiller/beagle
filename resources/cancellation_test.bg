@@ -5,7 +5,7 @@ use beagle.effect as effect
 use beagle.core as core
 
 fn main() {
-    let handler = async/BlockingHandler {}
+    let handler = async/BlockingAsyncHandler {}
 
     // Test 1: Create and check cancellation token
     let token = async/make-cancellation-token()

@@ -38,14 +38,14 @@ fn deserialize-contact(line) {
 fn save-contacts(contacts) {
     let file-result = io/open(CONTACTS_FILE, "w")
     match file-result {
-        io/Result.Ok { value } => {
+        Result.Ok { value } => {
             let file = value
             save-contacts-loop(file, contacts, 0)
             io/close(file)
             true
         },
-        io/Result.Err { code, message } => {
-            println("Error saving: " ++ message)
+        Result.Err { error } => {
+            println("Error saving: " ++ "unknown")
             false
         }
     }
@@ -66,13 +66,13 @@ fn save-contacts-loop(file, contacts, idx) {
 fn load-contacts() {
     let file-result = io/open(CONTACTS_FILE, "r")
     match file-result {
-        io/Result.Ok { value } => {
+        Result.Ok { value } => {
             let file = value
             let contacts = load-contacts-loop(file, [])
             io/close(file)
             contacts
         },
-        io/Result.Err { code, message } => {
+        Result.Err { error } => {
             // File doesn't exist or can't be read - start fresh
             []
         }
@@ -82,7 +82,7 @@ fn load-contacts() {
 fn load-contacts-loop(file, acc) {
     let line-result = io/read-line(file, 1024)
     match line-result {
-        io/Result.Ok { value } => {
+        Result.Ok { value } => {
             let line = trim(value)
             if length(line) > 0 {
                 let contact = deserialize-contact(line)
@@ -95,7 +95,7 @@ fn load-contacts-loop(file, acc) {
                 load-contacts-loop(file, acc)
             }
         },
-        io/Result.Err { code, message } => {
+        Result.Err { error } => {
             // EOF or error - return what we have
             acc
         }
@@ -122,8 +122,8 @@ fn print-menu() {
 fn read-input() {
     let result = io/read-stdin-line(256)
     match result {
-        io/Result.Ok { value } => trim(value),
-        io/Result.Err { code, message } => ""
+        Result.Ok { value } => trim(value),
+        Result.Err { error } => ""
     }
 }
 

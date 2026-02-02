@@ -1,0 +1,72 @@
+namespace bench_large_file
+
+use beagle.async as async
+use beagle.effect as effect
+use beagle.core as core
+
+// Benchmark large file I/O
+
+fn make-large-content(size-kb) {
+    // Create a string that's roughly size-kb kilobytes
+    let line = "This is a line of text that will be repeated many times to create a large file for testing.\n"
+    let line-len = length(line)
+    let lines-needed = (size-kb * 1024) / line-len
+    let mut content = ""
+    let mut i = 0
+    while i < lines-needed {
+        content = content ++ line
+        i = i + 1
+    }
+    content
+}
+
+fn main() {
+    println("=== Beagle Large File Benchmark ===")
+
+    let handler = async/BlockingAsyncHandler {}
+
+    // Create 100KB content
+    println("Creating 100KB content...")
+    let content = make-large-content(100)
+    println("Content size:", length(content), "bytes")
+
+    let iterations = 100
+
+    // Benchmark: Write large files
+    let start1 = core/time-now()
+    handle effect/Handler(async/Async) with handler {
+        let mut i = 0
+        while i < iterations {
+            async/write-file("/tmp/beagle_large_" ++ to-string(i) ++ ".txt", content)
+            i = i + 1
+        }
+    }
+    let end1 = core/time-now()
+    let write-time = (end1 - start1) / 1000000
+    println("Write", iterations, "x 100KB files:", write-time, "ms")
+
+    // Benchmark: Read large files
+    let start2 = core/time-now()
+    handle effect/Handler(async/Async) with handler {
+        let mut i = 0
+        while i < iterations {
+            async/read-file("/tmp/beagle_large_" ++ to-string(i) ++ ".txt")
+            i = i + 1
+        }
+    }
+    let end2 = core/time-now()
+    let read-time = (end2 - start2) / 1000000
+    println("Read", iterations, "x 100KB files:", read-time, "ms")
+
+    // Cleanup
+    handle effect/Handler(async/Async) with handler {
+        let mut i = 0
+        while i < iterations {
+            async/delete-file("/tmp/beagle_large_" ++ to-string(i) ++ ".txt")
+            i = i + 1
+        }
+    }
+
+    println("=== Complete ===")
+    println("Total:", write-time + read-time, "ms")
+}

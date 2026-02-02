@@ -1,0 +1,12 @@
+namespace core_types_test
+
+fn main() {
+    let r = ok(42)
+    match r {
+        Result.Ok { value } => println("Got:", value),
+        Result.Err { error } => println("Error")
+    }
+}
+
+// Expect
+// Got: 42

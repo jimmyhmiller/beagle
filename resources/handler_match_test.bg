@@ -1,0 +1,85 @@
+namespace handler_match_test
+
+use beagle.effect as effect
+
+enum TestOp {
+    Op1 { val },
+    Op2 { val },
+    Op3 { val }
+}
+
+struct TestHandler {
+    data
+}
+
+fn create-test-handler() {
+    TestHandler { data: 100 }
+}
+
+extend TestHandler with effect/Handler(TestOp) {
+    fn handle(self, op, resume) {
+        println("Handler called, data:", self.data)
+        let result = match op {
+            TestOp.Op1 { val } => {
+                println("Op1:", val)
+                val + self.data
+            },
+            TestOp.Op2 { val } => {
+                println("Op2:", val)
+                val * 2
+            },
+            TestOp.Op3 { val } => {
+                println("Op3:", val)
+                val - 1
+            }
+        }
+        println("Result:", result)
+        resume(result)
+    }
+}
+
+fn perform-op1(val) {
+    perform(TestOp.Op1 { val: val })
+}
+
+fn perform-op2(val) {
+    perform(TestOp.Op2 { val: val })
+}
+
+fn perform-op3(val) {
+    perform(TestOp.Op3 { val: val })
+}
+
+fn main() {
+    let handler = create-test-handler()
+    println("Handler created")
+
+    handle effect/Handler(TestOp) with handler {
+        let r1 = perform-op1(5)
+        println("After op1:", r1)
+
+        let r2 = perform-op2(10)
+        println("After op2:", r2)
+
+        let r3 = perform-op3(7)
+        println("After op3:", r3)
+    }
+
+    println("done")
+}
+
+// Expect
+// Handler created
+// Handler called, data: 100
+// Op1: 5
+// Result: 105
+// After op1: 105
+// Handler called, data: 100
+// Op2: 10
+// Result: 20
+// After op2: 20
+// Handler called, data: 100
+// Op3: 7
+// Result: 6
+// After op3: 6
+// done

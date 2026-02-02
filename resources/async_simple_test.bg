@@ -11,4 +11,4 @@ fn main() {
 
 // Expect
 // Testing simple async
-// Result: AsyncResult.Ok { value: 42 }
+// Result: Result.Ok { value: 42 }

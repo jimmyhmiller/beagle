@@ -8,38 +8,38 @@ fn test_file_write_read() {
     // Write to a temp file
     let file_result = io/open("/tmp/beagle_io_test.txt", "w")
     match file_result {
-        io/Result.Ok { value } => {
+        Result.Ok { value } => {
             let file = value
             io/write-string(file, "Hello from Beagle!\n")
             io/write-string(file, "Second line\n")
             io/close(file)
             println("Write successful")
         },
-        io/Result.Err { code, message } => {
-            println("Failed to open file for writing: ", message)
+        Result.Err { error } => {
+            println("Failed to open file for writing: ", error)
         }
     }
 
     // Read it back
     let file_result = io/open("/tmp/beagle_io_test.txt", "r")
     match file_result {
-        io/Result.Ok { value } => {
+        Result.Ok { value } => {
             let file = value
             let line1 = io/read-line(file, 256)
             match line1 {
-                io/Result.Ok { value } => println("Line 1: ", value),
-                io/Result.Err { code, message } => println("Read error: ", message)
+                Result.Ok { value } => println("Line 1: ", value),
+                Result.Err { error } => println("Read error: ", error)
             }
             let line2 = io/read-line(file, 256)
             match line2 {
-                io/Result.Ok { value } => println("Line 2: ", value),
-                io/Result.Err { code, message } => println("Read error: ", message)
+                Result.Ok { value } => println("Line 2: ", value),
+                Result.Err { error } => println("Read error: ", error)
             }
             io/close(file)
             println("Read successful")
         },
-        io/Result.Err { code, message } => {
-            println("Failed to open file for reading: ", message)
+        Result.Err { error } => {
+            println("Failed to open file for reading: ", error)
         }
     }
 }
@@ -48,20 +48,21 @@ fn test_stderr() {
     println("Testing stderr output...")
     let result = io/write-stderr("This goes to stderr\n")
     match result {
-        io/Result.Ok { value } => println("Wrote ", value, " bytes to stderr"),
-        io/Result.Err { code, message } => println("stderr error: ", message)
+        Result.Ok { value } => println("Wrote ", value, " bytes to stderr"),
+        Result.Err { error } => println("stderr error: ", error)
     }
 }
 
 fn test_result_helpers() {
     println("Testing Result helpers...")
 
-    let good = io/ok(42)
-    let bad = io/err(-1, "something went wrong")
+    // ok and err are global functions from std.bg, not io/ namespace
+    let good = ok(42)
+    let bad = err(-1)
 
-    println("ok?(good) = ", io/ok?(good))
-    println("ok?(bad) = ", io/ok?(bad))
-    println("unwrap(good) = ", io/unwrap(good))
+    println("ok?(good) = ", ok?(good))
+    println("ok?(bad) = ", ok?(bad))
+    println("unwrap(good) = ", unwrap(good))
 }
 
 fn main() {

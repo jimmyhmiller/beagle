@@ -1,0 +1,200 @@
+namespace beagle.spawn
+
+use beagle.core as core
+use beagle.effect as effect
+
+// ============================================================================
+// Spawn Effect
+// ============================================================================
+// The Spawn effect provides task/thread spawning operations.
+// Handlers determine how tasks are created (thread pool, async runtime, etc.)
+//
+// Usage:
+//   use beagle.spawn as spawn
+//
+//   // With a handler installed:
+//   handle effect/Handler(spawn/Spawn) with some_handler {
+//       let future = spawn/spawn(fn() { expensive_computation() })
+//       // future can be awaited using the Async effect
+//   }
+
+// ============================================================================
+// Spawn Effect Enum
+// ============================================================================
+
+enum Spawn {
+    Spawn { thunk },
+    SpawnWithToken { thunk, token }
+}
+
+// ============================================================================
+// Spawn Operations
+// ============================================================================
+// These functions perform Spawn effects. They must be called within a
+// `handle effect/Handler(Spawn) with handler { ... }` block.
+
+// Spawn a task to execute the thunk
+// Returns: Future that resolves to the thunk's result
+fn spawn(thunk) {
+    perform Spawn.Spawn { thunk: thunk }
+}
+
+// Spawn a task with a cancellation token
+// The task will check the token periodically and exit early if cancelled
+// Returns: Future that resolves to the thunk's result
+fn spawn-with-token(thunk, token) {
+    perform Spawn.SpawnWithToken { thunk: thunk, token: token }
+}
+
+// ============================================================================
+// Future Data Types (shared with beagle.async)
+// ============================================================================
+// Re-export from beagle.async for convenience
+
+use beagle.async as async
+
+// Re-export FutureState enum and Future struct
+// Users should use async/FutureState and async/Future directly
+
+// ============================================================================
+// BlockingSpawnHandler - Synchronous spawn handler
+// ============================================================================
+// In blocking mode, spawned tasks execute immediately and synchronously.
+
+struct BlockingSpawnHandler {}
+
+extend BlockingSpawnHandler with effect/Handler(Spawn) {
+    fn handle(self, op, resume) {
+        let result = match op {
+            Spawn.Spawn { thunk } => {
+                handle-spawn-blocking(thunk)
+            },
+            Spawn.SpawnWithToken { thunk, token } => {
+                handle-spawn-with-token-blocking(thunk, token)
+            }
+        }
+        resume(result)
+    }
+}
+
+fn handle-spawn-blocking(thunk) {
+    // Create a future and immediately execute the thunk synchronously
+    let future = async/make-future(async/FutureState.Running {})
+    try {
+        let result = thunk()
+        async/resolve-future!(future, result)
+    } catch (e) {
+        async/reject-future!(future, e)
+    }
+    future
+}
+
+fn handle-spawn-with-token-blocking(thunk, token) {
+    // Create a future and immediately execute the thunk synchronously
+    let future = async/make-future(async/FutureState.Running {})
+    try {
+        // Check if already cancelled before starting
+        if async/cancelled?(token) {
+            async/cancel-future!(future)
+        } else {
+            let result = thunk()
+            // Check again after completion (cooperative cancellation)
+            if async/cancelled?(token) {
+                async/cancel-future!(future)
+            } else {
+                async/resolve-future!(future, result)
+            }
+        }
+    } catch (e) {
+        async/reject-future!(future, e)
+    }
+    future
+}
+
+// ============================================================================
+// ThreadedSpawnHandler - Threaded spawn handler
+// ============================================================================
+// Spawns actual threads for parallel execution.
+
+struct ThreadedSpawnHandler {}
+
+extend ThreadedSpawnHandler with effect/Handler(Spawn) {
+    fn handle(self, op, resume) {
+        let result = match op {
+            Spawn.Spawn { thunk } => {
+                handle-spawn-threaded(thunk)
+            },
+            Spawn.SpawnWithToken { thunk, token } => {
+                handle-spawn-with-token-threaded(thunk, token)
+            }
+        }
+        resume(result)
+    }
+}
+
+fn handle-spawn-threaded(thunk) {
+    let future = async/make-future(async/FutureState.Running {})
+    // Capture the atom for the closure
+    let state_atom = future.state_atom
+
+    // Spawn a thread that executes the thunk and updates the future
+    thread(fn() {
+        try {
+            let result = thunk()
+            reset!(state_atom, async/FutureState.Resolved { value: result })
+        } catch (e) {
+            reset!(state_atom, async/FutureState.Rejected { error: e })
+        }
+    })
+
+    future
+}
+
+fn handle-spawn-with-token-threaded(thunk, token) {
+    let future = async/make-future(async/FutureState.Running {})
+    let state_atom = future.state_atom
+    let cancelled_atom = token.cancelled_atom
+
+    // Spawn a thread that checks cancellation periodically
+    thread(fn() {
+        // Check if cancelled before starting
+        if deref(cancelled_atom) {
+            reset!(state_atom, async/FutureState.Cancelled {})
+            core/future-notify()
+        } else {
+            try {
+                let result = thunk()
+                // Check if cancelled after completion
+                if deref(cancelled_atom) {
+                    reset!(state_atom, async/FutureState.Cancelled {})
+                } else {
+                    reset!(state_atom, async/FutureState.Resolved { value: result })
+                }
+            } catch (e) {
+                reset!(state_atom, async/FutureState.Rejected { error: e })
+            }
+            core/future-notify()
+        }
+    })
+
+    future
+}
+
+// ============================================================================
+// Blocking Convenience Functions
+// ============================================================================
+
+fn run-blocking(thunk) {
+    let handler = BlockingSpawnHandler {}
+    handle effect/Handler(Spawn) with handler {
+        thunk()
+    }
+}
+
+fn blocking-spawn(thunk) {
+    run-blocking(fn() { spawn(thunk) })
+}
+
+fn blocking-spawn-with-token(thunk, token) {
+    run-blocking(fn() { spawn-with-token(thunk, token) })
+}

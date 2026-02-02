@@ -231,22 +231,11 @@ impl LinearScan {
                     // *end > i: register is used after the call (at instruction i+1 or later)
                     if *start < i && *end > i && !self.location.contains_key(original_register) {
                         let register = self.allocated_registers.get(original_register).unwrap();
-                        // Skip callee-saved registers (X19-X28 on ARM64, R12-R15+RBX on x86-64)
-                        // These are preserved by the callee per AAPCS64/System V ABI,
-                        // so we don't need to save them at call sites.
-                        cfg_if::cfg_if! {
-                            if #[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))] {
-                                // x86-64: callee-saved are R12-R15 (indices 12-15) and RBX (index 16)
-                                if register.index >= 12 && register.index <= 16 {
-                                    continue;
-                                }
-                            } else {
-                                // ARM64: callee-saved are X19-X28 (indices 19-28)
-                                if register.index >= 19 && register.index <= 28 {
-                                    continue;
-                                }
-                            }
-                        }
+                        // We save ALL registers that are live across calls, including callee-saved.
+                        // While the ABI guarantees callee-saved registers are preserved by the callee,
+                        // our GC needs to be able to find and update heap pointers during collection.
+                        // If a register holds a heap pointer and GC runs during the call, the object
+                        // may be moved. By saving to the stack, GC can scan and update the pointer.
                         if let Value::Register(dest) = dest
                             && dest == register
                         {
@@ -262,18 +251,7 @@ impl LinearScan {
                     // *end > i: register is used after the call (at instruction i+1 or later)
                     if *start < i && *end > i && !self.location.contains_key(original_register) {
                         let register = self.allocated_registers.get(original_register).unwrap();
-                        // Skip callee-saved registers - preserved by callee per ABI
-                        cfg_if::cfg_if! {
-                            if #[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))] {
-                                if register.index >= 12 && register.index <= 16 {
-                                    continue;
-                                }
-                            } else {
-                                if register.index >= 19 && register.index <= 28 {
-                                    continue;
-                                }
-                            }
-                        }
+                        // Save all live registers across recursive calls for GC safety
                         if let Value::Register(dest) = dest
                             && dest == register
                         {

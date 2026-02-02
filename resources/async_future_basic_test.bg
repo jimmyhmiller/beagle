@@ -8,7 +8,7 @@ use beagle.effect as effect
 fn main() {
     println("=== Async Future Basic Test ===")
 
-    let handler = async/BlockingHandler {}
+    let handler = async/BlockingAsyncHandler {}
 
     let result = handle effect/Handler(async/Async) with handler {
         // Test 1: Basic async/await

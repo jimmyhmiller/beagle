@@ -1,0 +1,634 @@
+namespace beagle.fs
+
+use beagle.core as core
+use beagle.effect as effect
+
+// ============================================================================
+// Filesystem Effect
+// ============================================================================
+// The Fs effect provides all file and directory operations.
+// Handlers determine how operations execute (blocking, async, etc.)
+// but the return type is always the same: Result<T> for most operations.
+//
+// Usage:
+//   use beagle.fs as fs
+//
+//   // With a handler installed:
+//   handle effect/Handler(fs/Fs) with some_handler {
+//       let result = fs/read-file("/tmp/test.txt")
+//       match result {
+//           Result.Ok { value } => println("Content:", value),
+//           Result.Err { error } => println("Error:", error)
+//       }
+//   }
+//
+// For blocking synchronous I/O (no handler required):
+//   let result = fs/blocking-read-file("/tmp/test.txt")
+
+// ============================================================================
+// Fs Effect Enum
+// ============================================================================
+// Each variant represents a filesystem operation.
+
+enum Fs {
+    // File operations
+    ReadFile { path },
+    WriteFile { path, content },
+    AppendFile { path, content },
+    DeleteFile { path },
+    FileExists { path },
+    FileSize { path },
+    IsFile { path },
+    RenameFile { old_path, new_path },
+    CopyFile { src_path, dest_path },
+
+    // Directory operations
+    ReadDir { path },
+    CreateDir { path },
+    CreateDirAll { path },
+    RemoveDir { path },
+    RemoveDirAll { path },
+    IsDirectory { path },
+
+    // Low-level file handle operations
+    Open { path, mode },
+    Close { file },
+    Read { file, n },
+    Write { file, content },
+    ReadLine { file },
+    Flush { file }
+}
+
+// ============================================================================
+// High-Level File Operations
+// ============================================================================
+// These functions perform Fs effects. They must be called within a
+// `handle effect/Handler(Fs) with handler { ... }` block.
+
+// Read the entire contents of a file as a string
+// Returns: Result<String>
+fn read-file(path) {
+    perform Fs.ReadFile { path: path }
+}
+
+// Write content to a file (creates or overwrites)
+// Returns: Result<Int> (bytes written)
+fn write-file(path, content) {
+    perform Fs.WriteFile { path: path, content: content }
+}
+
+// Append content to a file (creates if doesn't exist)
+// Returns: Result<Int> (bytes written)
+fn append-file(path, content) {
+    perform Fs.AppendFile { path: path, content: content }
+}
+
+// Delete a file
+// Returns: Result<null>
+fn delete-file(path) {
+    perform Fs.DeleteFile { path: path }
+}
+
+// Check if a file or directory exists
+// Returns: Result<Bool>
+fn exists?(path) {
+    perform Fs.FileExists { path: path }
+}
+
+// Get file size in bytes
+// Returns: Result<Int>
+fn file-size(path) {
+    perform Fs.FileSize { path: path }
+}
+
+// Check if path is a regular file
+// Returns: Result<Bool>
+fn is-file?(path) {
+    perform Fs.IsFile { path: path }
+}
+
+// Rename/move a file or directory
+// Returns: Result<null>
+fn rename(old-path, new-path) {
+    perform Fs.RenameFile { old_path: old-path, new_path: new-path }
+}
+
+// Copy a file
+// Returns: Result<null>
+fn copy(src-path, dest-path) {
+    perform Fs.CopyFile { src_path: src-path, dest_path: dest-path }
+}
+
+// ============================================================================
+// Directory Operations
+// ============================================================================
+
+// List directory contents
+// Returns: Result<[String]> (array of entry names)
+fn read-dir(path) {
+    perform Fs.ReadDir { path: path }
+}
+
+// Create a directory
+// Returns: Result<null>
+fn create-dir(path) {
+    perform Fs.CreateDir { path: path }
+}
+
+// Create a directory and all parent directories
+// Returns: Result<null>
+fn create-dir-all(path) {
+    perform Fs.CreateDirAll { path: path }
+}
+
+// Remove an empty directory
+// Returns: Result<null>
+fn remove-dir(path) {
+    perform Fs.RemoveDir { path: path }
+}
+
+// Remove a directory and all contents
+// Returns: Result<null>
+fn remove-dir-all(path) {
+    perform Fs.RemoveDirAll { path: path }
+}
+
+// Check if path is a directory
+// Returns: Result<Bool>
+fn is-directory?(path) {
+    perform Fs.IsDirectory { path: path }
+}
+
+// ============================================================================
+// Low-Level File Handle Operations
+// ============================================================================
+
+// Open a file with mode ("r", "w", "a", etc.)
+// Returns: Result<File>
+fn open(path, mode) {
+    perform Fs.Open { path: path, mode: mode }
+}
+
+// Close a file handle
+// Returns: Result<null>
+fn close(file) {
+    perform Fs.Close { file: file }
+}
+
+// Read n bytes from a file
+// Returns: Result<String>
+fn read(file, n) {
+    perform Fs.Read { file: file, n: n }
+}
+
+// Write content to a file handle
+// Returns: Result<Int> (bytes written)
+fn write(file, content) {
+    perform Fs.Write { file: file, content: content }
+}
+
+// Read a line from a file
+// Returns: Result<String>
+fn read-line(file) {
+    perform Fs.ReadLine { file: file }
+}
+
+// Flush a file's buffers
+// Returns: Result<null>
+fn flush(file) {
+    perform Fs.Flush { file: file }
+}
+
+// ============================================================================
+// Blocking Synchronous Operations
+// ============================================================================
+// These functions perform I/O synchronously without requiring a handler.
+// They install their own BlockingFsHandler internally.
+
+// Import the blocking handler implementations
+use beagle.io as io
+use beagle.ffi as ffi
+use beagle.builtin as builtin
+
+// ============================================================================
+// BlockingFsHandler - Synchronous filesystem handler
+// ============================================================================
+
+struct BlockingFsHandler {}
+
+extend BlockingFsHandler with effect/Handler(Fs) {
+    fn handle(self, op, resume) {
+        let result = match op {
+            Fs.ReadFile { path } => {
+                handle-read-file(path)
+            },
+            Fs.WriteFile { path, content } => {
+                handle-write-file(path, content)
+            },
+            Fs.AppendFile { path, content } => {
+                handle-append-file(path, content)
+            },
+            Fs.DeleteFile { path } => {
+                handle-delete-file(path)
+            },
+            Fs.FileExists { path } => {
+                handle-file-exists(path)
+            },
+            Fs.FileSize { path } => {
+                handle-file-size(path)
+            },
+            Fs.IsFile { path } => {
+                handle-is-file(path)
+            },
+            Fs.RenameFile { old_path, new_path } => {
+                handle-rename-file(old_path, new_path)
+            },
+            Fs.CopyFile { src_path, dest_path } => {
+                handle-copy-file(src_path, dest_path)
+            },
+            Fs.ReadDir { path } => {
+                handle-read-dir(path)
+            },
+            Fs.CreateDir { path } => {
+                handle-create-dir(path)
+            },
+            Fs.CreateDirAll { path } => {
+                handle-create-dir-all(path)
+            },
+            Fs.RemoveDir { path } => {
+                handle-remove-dir(path)
+            },
+            Fs.RemoveDirAll { path } => {
+                handle-remove-dir-all(path)
+            },
+            Fs.IsDirectory { path } => {
+                handle-is-directory(path)
+            },
+            Fs.Open { path, mode } => {
+                handle-open(path, mode)
+            },
+            Fs.Close { file } => {
+                handle-close(file)
+            },
+            Fs.Read { file, n } => {
+                handle-read(file, n)
+            },
+            Fs.Write { file, content } => {
+                handle-write(file, content)
+            },
+            Fs.ReadLine { file } => {
+                handle-read-line(file)
+            },
+            Fs.Flush { file } => {
+                handle-flush(file)
+            }
+        }
+        resume(result)
+    }
+}
+
+// ============================================================================
+// Handler Implementation Functions
+// ============================================================================
+
+fn handle-read-file(path) {
+    try {
+        let content = read-full-file(path)
+        ok(content)
+    } catch (e) {
+        err(Error.NotFound { path: path })
+    }
+}
+
+fn handle-write-file(path, content) {
+    let file-result = io/open(path, "w")
+    match file-result {
+        Result.Ok { value } => {
+            let file = value
+            let write-result = io/write-string(file, content)
+            io/close(file)
+            match write-result {
+                Result.Ok { value } => ok(value),
+                Result.Err { error } => err(error)
+            }
+        },
+        Result.Err { error } => {
+            err(error)
+        }
+    }
+}
+
+fn handle-append-file(path, content) {
+    let file-result = io/open(path, "a")
+    match file-result {
+        Result.Ok { value } => {
+            let file = value
+            let write-result = io/write-string(file, content)
+            io/close(file)
+            match write-result {
+                Result.Ok { value } => ok(value),
+                Result.Err { error } => err(error)
+            }
+        },
+        Result.Err { error } => {
+            err(error)
+        }
+    }
+}
+
+fn handle-delete-file(path) {
+    let result = core/fs-unlink(path)
+    if result == 0 {
+        ok(null)
+    } else {
+        err(Error.NotFound { path: path })
+    }
+}
+
+fn handle-file-exists(path) {
+    let result = core/fs-access(path, 0) // F_OK = 0
+    ok(result == 0)
+}
+
+fn handle-file-size(path) {
+    let size = core/fs-file-size(path)
+    if size < 0 {
+        err(Error.NotFound { path: path })
+    } else {
+        ok(size)
+    }
+}
+
+fn handle-is-file(path) {
+    let result = core/fs-is-file?(path)
+    ok(result)
+}
+
+fn handle-is-directory(path) {
+    let result = core/fs-is-directory?(path)
+    ok(result)
+}
+
+fn handle-rename-file(old-path, new-path) {
+    let result = core/fs-rename(old-path, new-path)
+    if result == 0 {
+        ok(null)
+    } else {
+        err(Error.IO { message: "Failed to rename " ++ old-path ++ " to " ++ new-path })
+    }
+}
+
+fn handle-copy-file(src-path, dest-path) {
+    let read-result = handle-read-file(src-path)
+    match read-result {
+        Result.Ok { value } => {
+            handle-write-file(dest-path, value)
+        },
+        Result.Err { error } => {
+            err(error)
+        }
+    }
+}
+
+fn handle-read-dir(path) {
+    let entries = core/fs-readdir(path)
+    if entries == null {
+        err(Error.NotFound { path: path })
+    } else {
+        ok(entries)
+    }
+}
+
+fn handle-create-dir(path) {
+    let result = core/fs-mkdir(path, 493) // 0755 in octal
+    if result == 0 {
+        ok(null)
+    } else if result == -17 {
+        err(Error.AlreadyExists { path: path })
+    } else {
+        err(Error.IO { message: "Failed to create directory" })
+    }
+}
+
+fn handle-create-dir-all(path) {
+    if path == "" || path == "/" {
+        ok(null)
+    } else {
+        let components = core/split(path, "/")
+        let mut current-path = ""
+        let mut i = 0
+        let len = length(components)
+        let mut found-error = null
+
+        while i < len && found-error == null {
+            let component = get(components, i)
+            if component != "" {
+                if current-path == "" && core/starts-with?(path, "/") {
+                    current-path = "/" ++ component
+                } else if current-path == "" {
+                    current-path = component
+                } else {
+                    current-path = current-path ++ "/" ++ component
+                }
+
+                let result = core/fs-mkdir(current-path, 493) // 0755 in octal
+                // 0 = success, -17 = EEXIST (already exists, that's ok)
+                if result != 0 && result != -17 {
+                    found-error = err(Error.IO { message: "Failed to create directory: " ++ current-path })
+                }
+            }
+            i = i + 1
+        }
+
+        if found-error == null {
+            ok(null)
+        } else {
+            found-error
+        }
+    }
+}
+
+fn handle-remove-dir(path) {
+    let result = core/fs-rmdir(path)
+    if result == 0 {
+        ok(null)
+    } else {
+        err(Error.IO { message: "Failed to remove directory" })
+    }
+}
+
+fn handle-remove-dir-all(path) {
+    let entries = core/fs-readdir(path)
+    if entries == null {
+        // Not a directory or doesn't exist - try to unlink as file
+        let result = core/fs-unlink(path)
+        if result == 0 {
+            ok(null)
+        } else {
+            err(Error.IO { message: "Failed to remove: " ++ path })
+        }
+    } else {
+        // It's a directory - remove all entries first
+        let mut i = 0
+        let len = length(entries)
+        let mut found-error = null
+
+        while i < len && found-error == null {
+            let entry = get(entries, i)
+            // Skip . and ..
+            if entry != "." && entry != ".." {
+                let entry-path = path ++ "/" ++ entry
+
+                // Try to unlink as file first
+                let unlink-result = core/fs-unlink(entry-path)
+                if unlink-result != 0 {
+                    // unlink failed - might be a directory, try recursive remove
+                    let recursive-result = handle-remove-dir-all(entry-path)
+                    match recursive-result {
+                        Result.Ok { value } => {},
+                        _ => {
+                            found-error = recursive-result
+                        }
+                    }
+                }
+            }
+            i = i + 1
+        }
+
+        if found-error != null {
+            found-error
+        } else {
+            // Now remove the empty directory
+            let result = core/fs-rmdir(path)
+            if result == 0 {
+                ok(null)
+            } else {
+                err(Error.IO { message: "Failed to remove directory: " ++ path })
+            }
+        }
+    }
+}
+
+fn handle-open(path, mode) {
+    let result = io/open(path, mode)
+    match result {
+        Result.Ok { value } => ok(value),
+        Result.Err { error } => err(error)
+    }
+}
+
+fn handle-close(file) {
+    let result = io/close(file)
+    match result {
+        Result.Ok { value } => ok(null),
+        Result.Err { error } => err(error)
+    }
+}
+
+fn handle-read(file, n) {
+    let result = io/read-bytes(file, n)
+    match result {
+        Result.Ok { value } => {
+            let s = ffi/get-string(value.buffer, 0, value.length)
+            ffi/deallocate(value.buffer)
+            ok(s)
+        },
+        Result.Err { error } => err(error)
+    }
+}
+
+fn handle-write(file, content) {
+    let result = io/write-string(file, content)
+    match result {
+        Result.Ok { value } => ok(value),
+        Result.Err { error } => err(error)
+    }
+}
+
+fn handle-read-line(file) {
+    let result = io/read-line(file, 4096)
+    match result {
+        Result.Ok { value } => ok(value),
+        Result.Err { error } => err(error)
+    }
+}
+
+fn handle-flush(file) {
+    let result = io/flush(file)
+    match result {
+        Result.Ok { value } => ok(null),
+        Result.Err { error } => err(error)
+    }
+}
+
+// ============================================================================
+// Blocking Convenience Functions
+// ============================================================================
+// These wrap each operation in its own handler block for easy use.
+
+fn run-blocking(thunk) {
+    let handler = BlockingFsHandler {}
+    handle effect/Handler(Fs) with handler {
+        thunk()
+    }
+}
+
+fn blocking-read-file(path) {
+    run-blocking(fn() { read-file(path) })
+}
+
+fn blocking-write-file(path, content) {
+    run-blocking(fn() { write-file(path, content) })
+}
+
+fn blocking-append-file(path, content) {
+    run-blocking(fn() { append-file(path, content) })
+}
+
+fn blocking-delete-file(path) {
+    run-blocking(fn() { delete-file(path) })
+}
+
+fn blocking-exists?(path) {
+    run-blocking(fn() { exists?(path) })
+}
+
+fn blocking-file-size(path) {
+    run-blocking(fn() { file-size(path) })
+}
+
+fn blocking-is-file?(path) {
+    run-blocking(fn() { is-file?(path) })
+}
+
+fn blocking-is-directory?(path) {
+    run-blocking(fn() { is-directory?(path) })
+}
+
+fn blocking-rename(old-path, new-path) {
+    run-blocking(fn() { rename(old-path, new-path) })
+}
+
+fn blocking-copy(src-path, dest-path) {
+    run-blocking(fn() { copy(src-path, dest-path) })
+}
+
+fn blocking-read-dir(path) {
+    run-blocking(fn() { read-dir(path) })
+}
+
+fn blocking-create-dir(path) {
+    run-blocking(fn() { create-dir(path) })
+}
+
+fn blocking-create-dir-all(path) {
+    run-blocking(fn() { create-dir-all(path) })
+}
+
+fn blocking-remove-dir(path) {
+    run-blocking(fn() { remove-dir(path) })
+}
+
+fn blocking-remove-dir-all(path) {
+    run-blocking(fn() { remove-dir-all(path) })
+}
