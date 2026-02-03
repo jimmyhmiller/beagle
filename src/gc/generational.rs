@@ -357,6 +357,29 @@ impl GenerationalGC {
         }
     }
 
+    /// Update saved_continuation_ptr values that point to young gen objects.
+    /// These are continuation objects saved during invoke_continuation_runtime
+    /// that may be collected or moved during GC.
+    fn update_saved_continuation_ptrs(&mut self) {
+        let runtime = crate::get_runtime().get_mut();
+
+        for (_thread_id, cont_ptr) in runtime.saved_continuation_ptr.iter_mut() {
+            if *cont_ptr == 0 {
+                continue;
+            }
+            if !BuiltInTypes::is_heap_pointer(*cont_ptr) {
+                continue;
+            }
+            let untagged = BuiltInTypes::untag(*cont_ptr);
+            // Only process if in young gen
+            if self.young.contains(untagged as *const u8) {
+                // Copy to old gen and update the pointer
+                let new_ptr = self.copy(*cont_ptr);
+                *cont_ptr = new_ptr;
+            }
+        }
+    }
+
     fn update_segment_young_gen_pointers(
         &mut self,
         segment: &mut [u8],
@@ -684,6 +707,9 @@ impl GenerationalGC {
 
         // Update continuation segments
         self.update_continuation_segments(stack_map);
+
+        // Update saved_continuation_ptr values (continuation objects saved in Rust runtime)
+        self.update_saved_continuation_ptrs();
 
         // Process old gen objects found on stack - update their young gen references.
         // This scans one level deep for old gen objects directly referenced from stack.
