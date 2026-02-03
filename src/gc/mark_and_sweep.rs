@@ -7,7 +7,7 @@ use super::get_page_size;
 use crate::{
     collections::TYPE_ID_CONTINUATION,
     runtime::ContinuationObject,
-    types::{Header, HeapObject, Word},
+    types::{BuiltInTypes, Header, HeapObject, Word},
 };
 
 use super::{
@@ -403,6 +403,17 @@ impl MarkAndSweep {
                         to_mark.push(HeapObject::from_tagged(pointer));
                     },
                 );
+            }
+        }
+
+        // Mark saved_continuation_ptr values as roots.
+        // These are continuation objects saved during invoke_continuation_runtime.
+        for (_thread_id, cont_ptr) in runtime.saved_continuation_ptr.iter() {
+            if *cont_ptr == 0 {
+                continue;
+            }
+            if BuiltInTypes::is_heap_pointer(*cont_ptr) {
+                to_mark.push(HeapObject::from_tagged(*cont_ptr));
             }
         }
     }

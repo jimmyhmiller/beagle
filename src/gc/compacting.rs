@@ -338,6 +338,25 @@ impl CompactingHeap {
         }
     }
 
+    /// Update saved_continuation_ptr values after copying.
+    /// These are continuation objects saved during invoke_continuation_runtime.
+    fn gc_saved_continuation_ptrs(&mut self) {
+        let runtime = crate::get_runtime().get_mut();
+
+        for (_thread_id, cont_ptr) in runtime.saved_continuation_ptr.iter_mut() {
+            if *cont_ptr == 0 {
+                continue;
+            }
+            if !BuiltInTypes::is_heap_pointer(*cont_ptr) {
+                continue;
+            }
+            // Copy the object and update the pointer
+            let heap_object = HeapObject::from_tagged(*cont_ptr);
+            let new_ptr = self.copy_using_cheneys_algorithm(heap_object);
+            *cont_ptr = new_ptr;
+        }
+    }
+
     fn gc_continuation_segment(
         &mut self,
         segment: &mut [u8],
@@ -438,6 +457,9 @@ impl Allocator for CompactingHeap {
 
         // Process continuation segments
         self.gc_continuations(stack_map);
+
+        // Process saved_continuation_ptr values (continuation objects saved in Rust runtime)
+        self.gc_saved_continuation_ptrs();
 
         let start_offset = self.to_space.allocation_offset;
 
