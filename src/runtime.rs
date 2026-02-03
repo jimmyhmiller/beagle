@@ -1,5 +1,5 @@
 use libloading::Library;
-use mmap_rs::{Mmap, MmapMut, MmapOptions};
+use mmap_rs::{Mmap, MmapMut, MmapOptions, Reserved};
 use regex::Regex;
 use std::{
     collections::HashMap,
@@ -2683,7 +2683,9 @@ pub struct Runtime {
     // namespace manager? Shouldn't these functions
     // and things be under that?
     pub functions: Vec<Function>,
-    pub jump_table: Option<Mmap>,
+    jump_table_reserved: Reserved,
+    jump_table_pages: Vec<Mmap>,
+    jump_table_base_ptr: usize,
     pub jump_table_offset: usize,
     compiler_channel: Option<BlockingSender<CompilerMessage, CompilerResponse>>,
     compiler_thread: Option<JoinHandle<()>>,
@@ -2788,6 +2790,12 @@ impl Runtime {
         allocator: Alloc,
         printer: Box<dyn Printer>,
     ) -> Self {
+        let jump_table_reserved = MmapOptions::new(MmapOptions::page_size() * 10000)
+            .expect("Failed to create mmap options for jump table")
+            .reserve()
+            .expect("Failed to reserve address space for jump table");
+        let jump_table_base_ptr = jump_table_reserved.as_ptr() as usize;
+
         Self {
             printer,
             command_line_arguments: command_line_arguments.clone(),
@@ -2823,12 +2831,9 @@ impl Runtime {
             string_constants: vec![],
             keyword_constants: vec![],
             keyword_heap_ptrs: vec![],
-            jump_table: Some(
-                MmapOptions::new(MmapOptions::page_size())
-                    .expect("Failed to create mmap for jump table - out of memory")
-                    .map()
-                    .expect("Failed to map jump table memory - this is a fatal error"),
-            ),
+            jump_table_reserved,
+            jump_table_pages: vec![],
+            jump_table_base_ptr,
             jump_table_offset: 0,
             functions: vec![],
             compiler_channel: None,
@@ -2887,12 +2892,12 @@ impl Runtime {
         self.keyword_constants.clear();
         self.keyword_heap_ptrs.clear();
         self.functions.clear();
-        self.jump_table = Some(
-            MmapOptions::new(MmapOptions::page_size())
-                .expect("Failed to create mmap for jump table - out of memory")
-                .map()
-                .expect("Failed to map jump table memory - this is a fatal error"),
-        );
+        self.jump_table_reserved = MmapOptions::new(MmapOptions::page_size() * 10000)
+            .expect("Failed to create mmap options for jump table")
+            .reserve()
+            .expect("Failed to reserve address space for jump table");
+        self.jump_table_base_ptr = self.jump_table_reserved.as_ptr() as usize;
+        self.jump_table_pages.clear();
         self.jump_table_offset = 0;
         self.printer.reset();
         self.ffi_function_info.clear();
@@ -5734,11 +5739,10 @@ impl Runtime {
     }
 
     pub fn get_jump_table_pointer(&self, function: Function) -> Result<usize, Box<dyn Error>> {
-        let jump_table = self
-            .jump_table
-            .as_ref()
-            .ok_or("Jump table not initialized")?;
-        Ok(function.jump_table_offset * 8 + jump_table.as_ptr() as usize)
+        if self.jump_table_base_ptr == 0 {
+            return Err("Jump table not initialized".into());
+        }
+        Ok(function.jump_table_offset * 8 + self.jump_table_base_ptr)
     }
 
     pub fn add_jump_table_entry(
@@ -5747,22 +5751,61 @@ impl Runtime {
         pointer: *const u8,
     ) -> Result<usize, Box<dyn Error>> {
         let jump_table_offset = self.jump_table_offset;
-        let memory = self.jump_table.take();
-        let mut memory = memory
-            .ok_or("Jump table not initialized")?
-            .make_mut()
-            .map_err(|(_, e)| e)?;
-        let buffer = &mut memory[jump_table_offset * 8..];
-        let pointer = BuiltInTypes::Function.tag(pointer as isize) as usize;
-        // Write full usize to buffer
-        for (index, byte) in pointer.to_le_bytes().iter().enumerate() {
-            buffer[index] = *byte;
+        let page_size = MmapOptions::page_size();
+        let byte_offset = jump_table_offset * 8;
+        let page_index = byte_offset / page_size;
+        let offset_in_page = byte_offset % page_size;
+
+        // Ensure we have enough pages committed
+        while self.jump_table_pages.len() <= page_index {
+            // Split a new page from reserved space and commit it
+            let reserved = self
+                .jump_table_reserved
+                .split_to(page_size)
+                .map_err(|e| format!("Failed to split jump table page: {:?}", e))?;
+
+            let mut new_page = reserved
+                .make_mut()
+                .map_err(|(_reserved, e)| format!("Failed to make jump table page mutable: {:?}", e))?;
+
+            // Zero out the new page
+            unsafe {
+                std::ptr::write_bytes(new_page.as_mut_ptr(), 0, page_size);
+            }
+
+            let page_reserved = new_page
+                .make_read_only()
+                .map_err(|(_page, e)| format!("Failed to make jump table page read-only: {:?}", e))?;
+
+            let page: Mmap = page_reserved
+                .try_into()
+                .map_err(|e| format!("Failed to convert Reserved to Mmap: {:?}", e))?;
+
+            self.jump_table_pages.push(page);
         }
-        let mem = memory
+
+        // Get the page, make it mutable, write to it, make it read-only again
+        let page = self.jump_table_pages.remove(page_index);
+        let mut page_mut = page
+            .make_mut()
+            .map_err(|(_, e)| format!("Failed to make jump table page mutable for writing: {:?}", e))?;
+
+        let tagged_pointer = BuiltInTypes::Function.tag(pointer as isize) as usize;
+        let bytes = tagged_pointer.to_le_bytes();
+
+        page_mut[offset_in_page..offset_in_page + 8].copy_from_slice(&bytes);
+
+        let page_reserved = page_mut
             .make_read_only()
-            .map_err(|(_map, e)| format!("Failed to make mmap read_only: {}", e))?;
+            .map_err(|(_, e)| format!("Failed to make jump table page read-only after writing: {:?}", e))?;
+
+        let page: Mmap = page_reserved
+            .try_into()
+            .map_err(|e| format!("Failed to convert Reserved to Mmap after writing: {:?}", e))?;
+
+        self.jump_table_pages.insert(page_index, page);
+
         self.jump_table_offset += 1;
-        self.jump_table = Some(mem);
         Ok(jump_table_offset)
     }
 
@@ -5771,22 +5814,36 @@ impl Runtime {
         jump_table_offset: usize,
         function_pointer: usize,
     ) -> Result<usize, Box<dyn Error>> {
-        let memory = self.jump_table.take();
-        let mut memory = memory
-            .ok_or("Jump table not initialized")?
-            .make_mut()
-            .map_err(|(_, e)| e)?;
-        let buffer = &mut memory[jump_table_offset * 8..];
+        let page_size = MmapOptions::page_size();
+        let byte_offset = jump_table_offset * 8;
+        let page_index = byte_offset / page_size;
+        let offset_in_page = byte_offset % page_size;
 
-        let function_pointer = BuiltInTypes::Function.tag(function_pointer as isize) as usize;
-        // Write full usize to buffer
-        for (index, byte) in function_pointer.to_le_bytes().iter().enumerate() {
-            buffer[index] = *byte;
+        if page_index >= self.jump_table_pages.len() {
+            return Err("Jump table entry does not exist".into());
         }
-        let mem = memory
+
+        // Get the page, make it mutable, write to it, make it read-only again
+        let page = self.jump_table_pages.remove(page_index);
+        let mut page_mut = page
+            .make_mut()
+            .map_err(|(_, e)| format!("Failed to make jump table page mutable for modification: {}", e))?;
+
+        let tagged_pointer = BuiltInTypes::Function.tag(function_pointer as isize) as usize;
+        let bytes = tagged_pointer.to_le_bytes();
+
+        page_mut[offset_in_page..offset_in_page + 8].copy_from_slice(&bytes);
+
+        let page_reserved = page_mut
             .make_read_only()
-            .map_err(|(_map, e)| format!("Failed to make mmap read_only: {}", e))?;
-        self.jump_table = Some(mem);
+            .map_err(|(_, e)| format!("Failed to make jump table page read-only after modification: {:?}", e))?;
+
+        let page: Mmap = page_reserved
+            .try_into()
+            .map_err(|e| format!("Failed to convert Reserved to Mmap after modification: {:?}", e))?;
+
+        self.jump_table_pages.insert(page_index, page);
+
         Ok(jump_table_offset)
     }
 
