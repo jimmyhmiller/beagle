@@ -5272,6 +5272,18 @@ extern "C" fn time_now() -> usize {
     BuiltInTypes::Int.tag(elapsed) as usize
 }
 
+/// Returns a unique identifier for the current thread
+/// Useful for verifying that code is running on different threads
+extern "C" fn thread_id() -> usize {
+    use std::sync::atomic::{AtomicIsize, Ordering};
+    static NEXT_ID: AtomicIsize = AtomicIsize::new(1);
+    thread_local! {
+        static THREAD_ID: isize = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    }
+    let id = THREAD_ID.with(|id| *id);
+    BuiltInTypes::Int.tag(id) as usize
+}
+
 /// Returns the number of available CPU cores
 /// Useful for sizing thread pools
 extern "C" fn get_cpu_count() -> usize {
@@ -8459,6 +8471,8 @@ impl Runtime {
         self.add_builtin_function("beagle.core/sleep", sleep as *const u8, false, 1)?;
 
         self.add_builtin_function("beagle.core/time-now", time_now as *const u8, false, 0)?;
+
+        self.add_builtin_function("beagle.core/thread-id", thread_id as *const u8, false, 0)?;
 
         self.add_builtin_function(
             "beagle.core/get-cpu-count",
