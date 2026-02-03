@@ -2942,6 +2942,7 @@ impl Runtime {
             let diagnostic_store_clone = Arc::clone(&self.diagnostic_store);
             let compiler_thread = thread::Builder::new()
                 .name("Beagle Compiler".to_string())
+                .stack_size(16 * 1024 * 1024) // 16MB stack for compiler thread
                 .spawn(move || {
                     CompilerThread::new(receiver, args_clone, diagnostic_store_clone)
                         .expect("Failed to create compiler thread - this is a fatal error")
