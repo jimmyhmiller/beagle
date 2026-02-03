@@ -9,7 +9,7 @@ use std::{
     slice::{self},
     sync::{
         Arc, Condvar, Mutex, TryLockError,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle, Thread, ThreadId},
     time::Duration,
@@ -688,48 +688,32 @@ pub enum TcpResult {
     WriteErr { future_atom: usize, error: String },
 }
 
+/// Opaque handle for async file operations
+/// This is a thread-safe identifier that does NOT contain any Beagle heap references
+pub type OperationHandle = u64;
+
 /// Result of a completed file operation from the thread pool
+/// NOTE: This enum does NOT contain any Beagle heap references (future_atom removed)
+/// Results are identified by their OperationHandle
 #[derive(Debug)]
-pub enum FileResult {
-    ReadOk {
-        future_atom: usize,
-        content: String,
-    },
-    ReadErr {
-        future_atom: usize,
-        error: String,
-    },
-    WriteOk {
-        future_atom: usize,
-        bytes_written: usize,
-    },
-    WriteErr {
-        future_atom: usize,
-        error: String,
-    },
-    DeleteOk {
-        future_atom: usize,
-    },
-    DeleteErr {
-        future_atom: usize,
-        error: String,
-    },
-    StatOk {
-        future_atom: usize,
-        size: u64,
-    },
-    StatErr {
-        future_atom: usize,
-        error: String,
-    },
-    ReadDirOk {
-        future_atom: usize,
-        entries: Vec<String>,
-    },
-    ReadDirErr {
-        future_atom: usize,
-        error: String,
-    },
+pub enum FileResultData {
+    ReadOk { content: String },
+    ReadErr { error: String },
+    WriteOk { bytes_written: usize },
+    WriteErr { error: String },
+    DeleteOk,
+    DeleteErr { error: String },
+    StatOk { size: u64 },
+    StatErr { error: String },
+    ReadDirOk { entries: Vec<String> },
+    ReadDirErr { error: String },
+}
+
+/// Completed result with its handle for lookup
+#[derive(Debug)]
+pub struct CompletedResult {
+    pub handle: OperationHandle,
+    pub data: FileResultData,
 }
 
 /// File operation to be executed by the thread pool
@@ -743,9 +727,10 @@ pub enum FileOperation {
 }
 
 /// Task for the file I/O thread pool
+/// NOTE: Uses OperationHandle instead of raw future_atom pointer
 pub struct FileTask {
     pub op: FileOperation,
-    pub future_atom: usize,
+    pub handle: OperationHandle,
 }
 
 /// Event loop for async I/O operations using mio
@@ -760,7 +745,7 @@ pub struct EventLoop {
     next_token: usize,
     /// Channel to receive completed file operations from thread pool
     /// Wrapped in Mutex to satisfy Sync trait for static storage
-    file_result_rx: Mutex<mpsc::Receiver<FileResult>>,
+    file_result_rx: Mutex<mpsc::Receiver<CompletedResult>>,
     /// Channel to send file operations to thread pool
     file_task_tx: mpsc::Sender<FileTask>,
     /// Events buffer for polling
@@ -785,10 +770,10 @@ pub struct EventLoop {
     next_timer_id: usize,
     /// Completed timer future_atoms (ready to be resolved)
     completed_timers: Vec<usize>,
-    /// Completed file results waiting to be retrieved
-    completed_file_results: Vec<FileResult>,
-    /// Current file result being inspected (after pop)
-    current_file_result: Option<FileResult>,
+    /// Counter for generating unique operation handles (thread-safe)
+    next_handle: AtomicU64,
+    /// Completed file results indexed by handle for O(1) lookup
+    completed_file_results: HashMap<OperationHandle, FileResultData>,
 }
 
 impl EventLoop {
@@ -799,7 +784,7 @@ impl EventLoop {
 
         // Create channels for file I/O thread pool
         let (file_task_tx, file_task_rx) = mpsc::channel::<FileTask>();
-        let (file_result_tx, file_result_rx) = mpsc::channel::<FileResult>();
+        let (file_result_tx, file_result_rx) = mpsc::channel::<CompletedResult>();
 
         // Wrap receiver in Arc<Mutex> for sharing among worker threads
         let shared_rx = Arc::new(Mutex::new(file_task_rx));
@@ -836,8 +821,8 @@ impl EventLoop {
             timers: HashMap::new(),
             next_timer_id: 1,
             completed_timers: Vec::new(),
-            completed_file_results: Vec::new(),
-            current_file_result: None,
+            next_handle: AtomicU64::new(1), // Start at 1, 0 could be used as "no handle"
+            completed_file_results: HashMap::new(),
         })
     }
 
@@ -848,11 +833,19 @@ impl EventLoop {
         token
     }
 
+    /// Generate a new unique operation handle
+    pub fn next_operation_handle(&self) -> OperationHandle {
+        self.next_handle.fetch_add(1, Ordering::SeqCst)
+    }
+
     /// Submit a file operation to the thread pool
-    pub fn submit_file_op(&self, op: FileOperation, future_atom: usize) -> Result<(), String> {
+    /// Returns the operation handle that can be used to poll for results
+    pub fn submit_file_op(&self, op: FileOperation) -> Result<OperationHandle, String> {
+        let handle = self.next_operation_handle();
         self.file_task_tx
-            .send(FileTask { op, future_atom })
-            .map_err(|e| format!("Failed to submit file operation: {}", e))
+            .send(FileTask { op, handle })
+            .map_err(|e| format!("Failed to submit file operation: {}", e))?;
+        Ok(handle)
     }
 
     /// Wake the event loop from another thread
@@ -909,7 +902,7 @@ impl EventLoop {
 
         // Process completed file operations
         // Collect all results first to avoid borrowing issues
-        let results: Vec<FileResult> = {
+        let results: Vec<CompletedResult> = {
             if let Ok(rx) = self.file_result_rx.lock() {
                 let mut results = Vec::new();
                 while let Ok(result) = rx.try_recv() {
@@ -975,9 +968,10 @@ impl EventLoop {
     }
 
     /// Handle a completed file operation result
-    fn handle_file_result(&mut self, result: FileResult) {
-        // Queue the result for retrieval by Beagle code
-        self.completed_file_results.push(result);
+    fn handle_file_result(&mut self, result: CompletedResult) {
+        // Store the result indexed by handle for O(1) lookup
+        self.completed_file_results
+            .insert(result.handle, result.data);
     }
 
     /// Get the number of completed file results waiting
@@ -985,74 +979,69 @@ impl EventLoop {
         self.completed_file_results.len()
     }
 
-    /// Pop the next file result, returning a type code:
-    /// 0 = no result, 1 = ReadOk, 2 = ReadErr, 3 = WriteOk, 4 = WriteErr,
+    /// Check if a result is ready for the given handle (without removing it)
+    pub fn file_result_ready(&self, handle: OperationHandle) -> bool {
+        self.completed_file_results.contains_key(&handle)
+    }
+
+    /// Poll for a result by handle
+    /// Returns Some(data) and removes the result if found, None otherwise
+    pub fn file_result_poll(&mut self, handle: OperationHandle) -> Option<FileResultData> {
+        self.completed_file_results.remove(&handle)
+    }
+
+    /// Peek at a result's type code without removing it
+    /// Returns Some(type_code) if found, None otherwise
+    pub fn file_result_peek_type(&self, handle: OperationHandle) -> Option<usize> {
+        self.completed_file_results
+            .get(&handle)
+            .map(Self::file_result_type_code)
+    }
+
+    /// Get the type code for a FileResultData
+    /// 1 = ReadOk, 2 = ReadErr, 3 = WriteOk, 4 = WriteErr,
     /// 5 = DeleteOk, 6 = DeleteErr, 7 = StatOk, 8 = StatErr, 9 = ReadDirOk, 10 = ReadDirErr
-    pub fn file_result_pop(&mut self) -> usize {
-        if self.completed_file_results.is_empty() {
-            self.current_file_result = None;
-            return 0;
-        }
-        let result = self.completed_file_results.remove(0);
-        let type_code = match &result {
-            FileResult::ReadOk { .. } => 1,
-            FileResult::ReadErr { .. } => 2,
-            FileResult::WriteOk { .. } => 3,
-            FileResult::WriteErr { .. } => 4,
-            FileResult::DeleteOk { .. } => 5,
-            FileResult::DeleteErr { .. } => 6,
-            FileResult::StatOk { .. } => 7,
-            FileResult::StatErr { .. } => 8,
-            FileResult::ReadDirOk { .. } => 9,
-            FileResult::ReadDirErr { .. } => 10,
-        };
-        self.current_file_result = Some(result);
-        type_code
-    }
-
-    /// Get the future_atom from the current file result
-    pub fn file_result_future_atom(&self) -> usize {
-        match &self.current_file_result {
-            Some(FileResult::ReadOk { future_atom, .. }) => *future_atom,
-            Some(FileResult::ReadErr { future_atom, .. }) => *future_atom,
-            Some(FileResult::WriteOk { future_atom, .. }) => *future_atom,
-            Some(FileResult::WriteErr { future_atom, .. }) => *future_atom,
-            Some(FileResult::DeleteOk { future_atom }) => *future_atom,
-            Some(FileResult::DeleteErr { future_atom, .. }) => *future_atom,
-            Some(FileResult::StatOk { future_atom, .. }) => *future_atom,
-            Some(FileResult::StatErr { future_atom, .. }) => *future_atom,
-            Some(FileResult::ReadDirOk { future_atom, .. }) => *future_atom,
-            Some(FileResult::ReadDirErr { future_atom, .. }) => *future_atom,
-            None => 0,
+    pub fn file_result_type_code(data: &FileResultData) -> usize {
+        match data {
+            FileResultData::ReadOk { .. } => 1,
+            FileResultData::ReadErr { .. } => 2,
+            FileResultData::WriteOk { .. } => 3,
+            FileResultData::WriteErr { .. } => 4,
+            FileResultData::DeleteOk => 5,
+            FileResultData::DeleteErr { .. } => 6,
+            FileResultData::StatOk { .. } => 7,
+            FileResultData::StatErr { .. } => 8,
+            FileResultData::ReadDirOk { .. } => 9,
+            FileResultData::ReadDirErr { .. } => 10,
         }
     }
 
-    /// Get the string data from the current file result (content for read, error for errors)
-    pub fn file_result_string_data(&self) -> Option<&str> {
-        match &self.current_file_result {
-            Some(FileResult::ReadOk { content, .. }) => Some(content),
-            Some(FileResult::ReadErr { error, .. }) => Some(error),
-            Some(FileResult::WriteErr { error, .. }) => Some(error),
-            Some(FileResult::DeleteErr { error, .. }) => Some(error),
-            Some(FileResult::StatErr { error, .. }) => Some(error),
-            Some(FileResult::ReadDirErr { error, .. }) => Some(error),
+    /// Get the string data from a FileResultData (content for read, error for errors)
+    pub fn file_result_string_data(data: &FileResultData) -> Option<&str> {
+        match data {
+            FileResultData::ReadOk { content } => Some(content),
+            FileResultData::ReadErr { error } => Some(error),
+            FileResultData::WriteErr { error } => Some(error),
+            FileResultData::DeleteErr { error } => Some(error),
+            FileResultData::StatErr { error } => Some(error),
+            FileResultData::ReadDirErr { error } => Some(error),
             _ => None,
         }
     }
 
-    /// Get the numeric value from the current file result (bytes_written or size)
-    pub fn file_result_value(&self) -> usize {
-        match &self.current_file_result {
-            Some(FileResult::WriteOk { bytes_written, .. }) => *bytes_written,
-            Some(FileResult::StatOk { size, .. }) => *size as usize,
+    /// Get the numeric value from a FileResultData (bytes_written or file size)
+    pub fn file_result_value(data: &FileResultData) -> usize {
+        match data {
+            FileResultData::WriteOk { bytes_written } => *bytes_written,
+            FileResultData::StatOk { size } => *size as usize,
             _ => 0,
         }
     }
 
     /// Get the directory entries from a ReadDirOk result
-    pub fn file_result_entries(&self) -> Option<&Vec<String>> {
-        match &self.current_file_result {
-            Some(FileResult::ReadDirOk { entries, .. }) => Some(entries),
+    pub fn file_result_entries(data: &FileResultData) -> Option<&Vec<String>> {
+        match data {
+            FileResultData::ReadDirOk { entries } => Some(entries),
             _ => None,
         }
     }
@@ -1479,7 +1468,7 @@ impl EventLoop {
 /// Worker loop for file I/O threads with shared receiver
 fn file_worker_loop_shared(
     rx: Arc<Mutex<mpsc::Receiver<FileTask>>>,
-    tx: mpsc::Sender<FileResult>,
+    tx: mpsc::Sender<CompletedResult>,
     waker: Arc<Waker>,
 ) {
     // Note: In a full implementation, we'd register this thread with the GC
@@ -1494,7 +1483,11 @@ fn file_worker_loop_shared(
 
         match task {
             Ok(task) => {
-                let result = execute_file_op(task.op, task.future_atom);
+                let data = execute_file_op(task.op);
+                let result = CompletedResult {
+                    handle: task.handle,
+                    data,
+                };
                 if tx.send(result).is_ok() {
                     // Wake the event loop to process the result
                     let _ = waker.wake();
@@ -1508,43 +1501,33 @@ fn file_worker_loop_shared(
     }
 }
 
-/// Execute a file operation and return the result
-fn execute_file_op(op: FileOperation, future_atom: usize) -> FileResult {
+/// Execute a file operation and return the result data
+/// NOTE: This function does NOT receive any Beagle heap references
+fn execute_file_op(op: FileOperation) -> FileResultData {
     match op {
         FileOperation::Read { path } => match std::fs::read_to_string(&path) {
-            Ok(content) => FileResult::ReadOk {
-                future_atom,
-                content,
-            },
-            Err(e) => FileResult::ReadErr {
-                future_atom,
+            Ok(content) => FileResultData::ReadOk { content },
+            Err(e) => FileResultData::ReadErr {
                 error: e.to_string(),
             },
         },
         FileOperation::Write { path, content } => match std::fs::write(&path, &content) {
-            Ok(()) => FileResult::WriteOk {
-                future_atom,
+            Ok(()) => FileResultData::WriteOk {
                 bytes_written: content.len(),
             },
-            Err(e) => FileResult::WriteErr {
-                future_atom,
+            Err(e) => FileResultData::WriteErr {
                 error: e.to_string(),
             },
         },
         FileOperation::Delete { path } => match std::fs::remove_file(&path) {
-            Ok(()) => FileResult::DeleteOk { future_atom },
-            Err(e) => FileResult::DeleteErr {
-                future_atom,
+            Ok(()) => FileResultData::DeleteOk,
+            Err(e) => FileResultData::DeleteErr {
                 error: e.to_string(),
             },
         },
         FileOperation::Stat { path } => match std::fs::metadata(&path) {
-            Ok(meta) => FileResult::StatOk {
-                future_atom,
-                size: meta.len(),
-            },
-            Err(e) => FileResult::StatErr {
-                future_atom,
+            Ok(meta) => FileResultData::StatOk { size: meta.len() },
+            Err(e) => FileResultData::StatErr {
                 error: e.to_string(),
             },
         },
@@ -1554,13 +1537,9 @@ fn execute_file_op(op: FileOperation, future_atom: usize) -> FileResult {
                     .filter_map(|e| e.ok())
                     .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
                     .collect();
-                FileResult::ReadDirOk {
-                    future_atom,
-                    entries: names,
-                }
+                FileResultData::ReadDirOk { entries: names }
             }
-            Err(e) => FileResult::ReadDirErr {
-                future_atom,
+            Err(e) => FileResultData::ReadDirErr {
                 error: e.to_string(),
             },
         },

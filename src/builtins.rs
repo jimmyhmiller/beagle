@@ -11,12 +11,16 @@ use std::{
 
 use crate::{
     Message,
-    collections::{TYPE_ID_CONTINUATION_SEGMENT, TYPE_ID_MULTI_ARITY_FUNCTION},
+    collections::{
+        GcHandle, PersistentVec, TYPE_ID_CONTINUATION_SEGMENT, TYPE_ID_MULTI_ARITY_FUNCTION,
+    },
     gc::STACK_SIZE,
     get_runtime,
     runtime::{ContinuationObject, DispatchTable, FFIInfo, FFIType, RawPtr, Runtime},
     types::{BuiltInTypes, Header, HeapObject},
 };
+
+// FileResultData is used in local imports where needed
 
 use rand::Rng;
 use std::hint::black_box;
@@ -5763,18 +5767,22 @@ extern "C" fn timer_pop_completed(loop_id: usize) -> usize {
 // Async File I/O Builtins
 // ============================================================================
 
-/// Start an async file read operation
-/// Returns 1 on success, -1 on error
-extern "C" fn file_read_async(
+// ============================================================================
+// New Handle-Based Async File I/O Builtins
+// ============================================================================
+// These builtins use opaque integer handles instead of raw heap pointers.
+// This makes them GC-safe and thread-safe.
+
+/// Submit a file read operation, returns the operation handle
+/// Returns -1 on error
+extern "C" fn file_read_submit(
     stack_pointer: usize,
     frame_pointer: usize,
     loop_id: usize,
     path: usize,
-    future_atom: usize,
 ) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let loop_id = BuiltInTypes::untag(loop_id);
-    let future_atom = BuiltInTypes::untag(future_atom);
     let runtime = get_runtime().get_mut();
     let path_str = runtime.get_string(stack_pointer, path);
 
@@ -5783,28 +5791,23 @@ extern "C" fn file_read_async(
         None => return BuiltInTypes::Int.tag(-1) as usize,
     };
 
-    match event_loop.submit_file_op(
-        crate::runtime::FileOperation::Read { path: path_str },
-        future_atom,
-    ) {
-        Ok(()) => BuiltInTypes::Int.tag(1) as usize,
+    match event_loop.submit_file_op(crate::runtime::FileOperation::Read { path: path_str }) {
+        Ok(handle) => BuiltInTypes::Int.tag(handle as isize) as usize,
         Err(_) => BuiltInTypes::Int.tag(-1) as usize,
     }
 }
 
-/// Start an async file write operation
-/// Returns 1 on success, -1 on error
-extern "C" fn file_write_async(
+/// Submit a file write operation, returns the operation handle
+/// Returns -1 on error
+extern "C" fn file_write_submit(
     stack_pointer: usize,
     frame_pointer: usize,
     loop_id: usize,
     path: usize,
     content: usize,
-    future_atom: usize,
 ) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let loop_id = BuiltInTypes::untag(loop_id);
-    let future_atom = BuiltInTypes::untag(future_atom);
     let runtime = get_runtime().get_mut();
     let path_str = runtime.get_string(stack_pointer, path);
     let content_str = runtime.get_string(stack_pointer, content);
@@ -5814,30 +5817,25 @@ extern "C" fn file_write_async(
         None => return BuiltInTypes::Int.tag(-1) as usize,
     };
 
-    match event_loop.submit_file_op(
-        crate::runtime::FileOperation::Write {
-            path: path_str,
-            content: content_str.into_bytes(),
-        },
-        future_atom,
-    ) {
-        Ok(()) => BuiltInTypes::Int.tag(1) as usize,
+    match event_loop.submit_file_op(crate::runtime::FileOperation::Write {
+        path: path_str,
+        content: content_str.into_bytes(),
+    }) {
+        Ok(handle) => BuiltInTypes::Int.tag(handle as isize) as usize,
         Err(_) => BuiltInTypes::Int.tag(-1) as usize,
     }
 }
 
-/// Start an async file delete operation
-/// Returns 1 on success, -1 on error
-extern "C" fn file_delete_async(
+/// Submit a file delete operation, returns the operation handle
+/// Returns -1 on error
+extern "C" fn file_delete_submit(
     stack_pointer: usize,
     frame_pointer: usize,
     loop_id: usize,
     path: usize,
-    future_atom: usize,
 ) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let loop_id = BuiltInTypes::untag(loop_id);
-    let future_atom = BuiltInTypes::untag(future_atom);
     let runtime = get_runtime().get_mut();
     let path_str = runtime.get_string(stack_pointer, path);
 
@@ -5846,27 +5844,22 @@ extern "C" fn file_delete_async(
         None => return BuiltInTypes::Int.tag(-1) as usize,
     };
 
-    match event_loop.submit_file_op(
-        crate::runtime::FileOperation::Delete { path: path_str },
-        future_atom,
-    ) {
-        Ok(()) => BuiltInTypes::Int.tag(1) as usize,
+    match event_loop.submit_file_op(crate::runtime::FileOperation::Delete { path: path_str }) {
+        Ok(handle) => BuiltInTypes::Int.tag(handle as isize) as usize,
         Err(_) => BuiltInTypes::Int.tag(-1) as usize,
     }
 }
 
-/// Start an async file stat operation
-/// Returns 1 on success, -1 on error
-extern "C" fn file_stat_async(
+/// Submit a file stat operation, returns the operation handle
+/// Returns -1 on error
+extern "C" fn file_stat_submit(
     stack_pointer: usize,
     frame_pointer: usize,
     loop_id: usize,
     path: usize,
-    future_atom: usize,
 ) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let loop_id = BuiltInTypes::untag(loop_id);
-    let future_atom = BuiltInTypes::untag(future_atom);
     let runtime = get_runtime().get_mut();
     let path_str = runtime.get_string(stack_pointer, path);
 
@@ -5875,27 +5868,22 @@ extern "C" fn file_stat_async(
         None => return BuiltInTypes::Int.tag(-1) as usize,
     };
 
-    match event_loop.submit_file_op(
-        crate::runtime::FileOperation::Stat { path: path_str },
-        future_atom,
-    ) {
-        Ok(()) => BuiltInTypes::Int.tag(1) as usize,
+    match event_loop.submit_file_op(crate::runtime::FileOperation::Stat { path: path_str }) {
+        Ok(handle) => BuiltInTypes::Int.tag(handle as isize) as usize,
         Err(_) => BuiltInTypes::Int.tag(-1) as usize,
     }
 }
 
-/// Start an async readdir operation
-/// Returns 1 on success, -1 on error
-extern "C" fn file_readdir_async(
+/// Submit a readdir operation, returns the operation handle
+/// Returns -1 on error
+extern "C" fn file_readdir_submit(
     stack_pointer: usize,
     frame_pointer: usize,
     loop_id: usize,
     path: usize,
-    future_atom: usize,
 ) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let loop_id = BuiltInTypes::untag(loop_id);
-    let future_atom = BuiltInTypes::untag(future_atom);
     let runtime = get_runtime().get_mut();
     let path_str = runtime.get_string(stack_pointer, path);
 
@@ -5904,11 +5892,8 @@ extern "C" fn file_readdir_async(
         None => return BuiltInTypes::Int.tag(-1) as usize,
     };
 
-    match event_loop.submit_file_op(
-        crate::runtime::FileOperation::ReadDir { path: path_str },
-        future_atom,
-    ) {
-        Ok(()) => BuiltInTypes::Int.tag(1) as usize,
+    match event_loop.submit_file_op(crate::runtime::FileOperation::ReadDir { path: path_str }) {
+        Ok(handle) => BuiltInTypes::Int.tag(handle as isize) as usize,
         Err(_) => BuiltInTypes::Int.tag(-1) as usize,
     }
 }
@@ -5926,11 +5911,29 @@ extern "C" fn file_results_count(loop_id: usize) -> usize {
     BuiltInTypes::Int.tag(event_loop.file_results_count() as isize) as usize
 }
 
-/// Pop the next file result, returns type code:
-/// 0 = no result, 1 = ReadOk, 2 = ReadErr, 3 = WriteOk, 4 = WriteErr,
+/// Check if a result is ready for the given handle (without consuming it)
+/// Returns true/false
+extern "C" fn file_result_ready(loop_id: usize, handle: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let handle = BuiltInTypes::untag(handle) as u64;
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::construct_boolean(false) as usize,
+    };
+
+    BuiltInTypes::construct_boolean(event_loop.file_result_ready(handle)) as usize
+}
+
+/// Poll for a file result type by handle
+/// Returns the type code if ready, 0 if not ready
+/// After calling this, use file_result_get_* functions to get the data
+/// 0 = not ready, 1 = ReadOk, 2 = ReadErr, 3 = WriteOk, 4 = WriteErr,
 /// 5 = DeleteOk, 6 = DeleteErr, 7 = StatOk, 8 = StatErr, 9 = ReadDirOk, 10 = ReadDirErr
-extern "C" fn file_result_pop(loop_id: usize) -> usize {
+extern "C" fn file_result_poll_type(loop_id: usize, handle: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
+    let handle = BuiltInTypes::untag(handle) as u64;
     let runtime = get_runtime().get_mut();
 
     let event_loop = match runtime.event_loops.get_mut(loop_id) {
@@ -5938,60 +5941,169 @@ extern "C" fn file_result_pop(loop_id: usize) -> usize {
         None => return BuiltInTypes::Int.tag(0) as usize,
     };
 
-    BuiltInTypes::Int.tag(event_loop.file_result_pop() as isize) as usize
+    // Use the peek method to check without removing
+    match event_loop.file_result_peek_type(handle) {
+        Some(type_code) => BuiltInTypes::Int.tag(type_code as isize) as usize,
+        None => BuiltInTypes::Int.tag(0) as usize,
+    }
 }
 
-/// Get the future_atom from the current file result
-extern "C" fn file_result_future_atom(loop_id: usize) -> usize {
-    let loop_id = BuiltInTypes::untag(loop_id);
-    let runtime = get_runtime().get_mut();
-
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
-        Some(el) => el,
-        None => return BuiltInTypes::Int.tag(0) as usize,
-    };
-
-    BuiltInTypes::Int.tag(event_loop.file_result_future_atom() as isize) as usize
-}
-
-/// Get the numeric value from the current file result (bytes_written or file size)
-extern "C" fn file_result_value(loop_id: usize) -> usize {
-    let loop_id = BuiltInTypes::untag(loop_id);
-    let runtime = get_runtime().get_mut();
-
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
-        Some(el) => el,
-        None => return BuiltInTypes::Int.tag(0) as usize,
-    };
-
-    BuiltInTypes::Int.tag(event_loop.file_result_value() as isize) as usize
-}
-
-/// Get the string data from the current file result (content or error message)
-extern "C" fn file_result_data(
+/// Get the string value from a completed file result (for ReadOk or any error)
+/// Removes the result from the map
+extern "C" fn file_result_get_string(
     stack_pointer: usize,
-    _frame_pointer: usize,
+    frame_pointer: usize,
     loop_id: usize,
+    handle: usize,
 ) -> usize {
+    use crate::runtime::EventLoop;
+
+    save_gc_context!(stack_pointer, frame_pointer);
     let loop_id = BuiltInTypes::untag(loop_id);
+    let handle = BuiltInTypes::untag(handle) as u64;
     let runtime = get_runtime().get_mut();
 
-    // Get the string data and clone it immediately to release the borrow
-    let data_opt = {
+    // Get and remove the result
+    let result_data = {
         let event_loop = match runtime.event_loops.get_mut(loop_id) {
             Some(el) => el,
             None => return BuiltInTypes::null_value() as usize,
         };
-        event_loop.file_result_string_data().map(|s| s.to_string())
+        event_loop.file_result_poll(handle)
     };
 
-    match data_opt {
-        Some(data) => runtime
-            .allocate_string(stack_pointer, data)
+    let data = match result_data {
+        Some(d) => d,
+        None => return BuiltInTypes::null_value() as usize,
+    };
+
+    // Get the string data
+    match EventLoop::file_result_string_data(&data) {
+        Some(s) => runtime
+            .allocate_string(stack_pointer, s.to_string())
             .map(|t| t.into())
             .unwrap_or(BuiltInTypes::null_value() as usize),
         None => BuiltInTypes::null_value() as usize,
     }
+}
+
+/// Get the numeric value from a completed file result (for WriteOk or StatOk)
+/// Removes the result from the map
+extern "C" fn file_result_get_value(loop_id: usize, handle: usize) -> usize {
+    use crate::runtime::EventLoop;
+
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let handle = BuiltInTypes::untag(handle) as u64;
+    let runtime = get_runtime().get_mut();
+
+    // Get and remove the result
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(0) as usize,
+    };
+
+    match event_loop.file_result_poll(handle) {
+        Some(data) => {
+            let value = EventLoop::file_result_value(&data);
+            BuiltInTypes::Int.tag(value as isize) as usize
+        }
+        None => BuiltInTypes::Int.tag(0) as usize,
+    }
+}
+
+/// Consume (remove) a file result by handle without getting its data
+/// Use this for DeleteOk which has no data
+extern "C" fn file_result_consume(loop_id: usize, handle: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let handle = BuiltInTypes::untag(handle) as u64;
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::construct_boolean(false) as usize,
+    };
+
+    let was_present = event_loop.file_result_poll(handle).is_some();
+    BuiltInTypes::construct_boolean(was_present) as usize
+}
+
+/// Get directory entries from a ReadDirOk result
+/// Returns a PersistentVec of strings, or null if not ready/wrong type
+extern "C" fn file_result_get_entries(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    loop_id: usize,
+    handle: usize,
+) -> usize {
+    use crate::runtime::FileResultData;
+
+    save_gc_context!(stack_pointer, frame_pointer);
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let handle = BuiltInTypes::untag(handle) as u64;
+    let runtime = get_runtime().get_mut();
+
+    // Get and remove the result
+    let result_data = {
+        let event_loop = match runtime.event_loops.get_mut(loop_id) {
+            Some(el) => el,
+            None => return BuiltInTypes::null_value() as usize,
+        };
+        event_loop.file_result_poll(handle)
+    };
+
+    let entries = match result_data {
+        Some(FileResultData::ReadDirOk { entries }) => entries,
+        _ => return BuiltInTypes::null_value() as usize,
+    };
+
+    // Create a PersistentVec from the entries
+    // Start with an empty vector and push each string
+    let mut vec: usize = match PersistentVec::empty(runtime, stack_pointer) {
+        Ok(h) => h.as_tagged(),
+        Err(_) => return BuiltInTypes::null_value() as usize,
+    };
+
+    // Register the vector as a temporary root so GC doesn't collect it
+    let mut vec_root_id = runtime.register_temporary_root(vec);
+
+    for entry in entries {
+        // Allocate the string
+        let string_tagged: usize = match runtime.allocate_string(stack_pointer, entry) {
+            Ok(t) => t.into(),
+            Err(_) => {
+                runtime.unregister_temporary_root(vec_root_id);
+                return BuiltInTypes::null_value() as usize;
+            }
+        };
+
+        // Register string as root during push
+        let string_root_id = runtime.register_temporary_root(string_tagged);
+
+        // Get updated vec pointer (GC may have moved it)
+        let vec_updated = runtime.peek_temporary_root(vec_root_id);
+        let string_updated = runtime.peek_temporary_root(string_root_id);
+
+        let vec_handle = GcHandle::from_tagged(vec_updated);
+
+        // Push it onto the vector
+        match PersistentVec::push(runtime, stack_pointer, vec_handle, string_updated) {
+            Ok(new_vec) => {
+                vec = new_vec.as_tagged();
+            }
+            Err(_) => {
+                runtime.unregister_temporary_root(string_root_id);
+                runtime.unregister_temporary_root(vec_root_id);
+                return BuiltInTypes::null_value() as usize;
+            }
+        };
+
+        runtime.unregister_temporary_root(string_root_id);
+        runtime.unregister_temporary_root(vec_root_id);
+        vec_root_id = runtime.register_temporary_root(vec);
+    }
+
+    runtime.unregister_temporary_root(vec_root_id);
+    vec
 }
 
 pub extern "C" fn register_extension(
@@ -8613,41 +8725,41 @@ impl Runtime {
             1, // loop_id
         )?;
 
-        // Async file I/O builtins
+        // Handle-based async file I/O builtins (new API)
         self.add_builtin_function_with_fp(
-            "beagle.core/file-read-async",
-            file_read_async as *const u8,
+            "beagle.core/file-read-submit",
+            file_read_submit as *const u8,
             true,
             true,
-            5, // stack_pointer, frame_pointer, loop_id, path, future_atom
+            4, // stack_pointer, frame_pointer, loop_id, path -> handle
         )?;
         self.add_builtin_function_with_fp(
-            "beagle.core/file-write-async",
-            file_write_async as *const u8,
+            "beagle.core/file-write-submit",
+            file_write_submit as *const u8,
             true,
             true,
-            6, // stack_pointer, frame_pointer, loop_id, path, content, future_atom
+            5, // stack_pointer, frame_pointer, loop_id, path, content -> handle
         )?;
         self.add_builtin_function_with_fp(
-            "beagle.core/file-delete-async",
-            file_delete_async as *const u8,
+            "beagle.core/file-delete-submit",
+            file_delete_submit as *const u8,
             true,
             true,
-            5, // stack_pointer, frame_pointer, loop_id, path, future_atom
+            4, // stack_pointer, frame_pointer, loop_id, path -> handle
         )?;
         self.add_builtin_function_with_fp(
-            "beagle.core/file-stat-async",
-            file_stat_async as *const u8,
+            "beagle.core/file-stat-submit",
+            file_stat_submit as *const u8,
             true,
             true,
-            5, // stack_pointer, frame_pointer, loop_id, path, future_atom
+            4, // stack_pointer, frame_pointer, loop_id, path -> handle
         )?;
         self.add_builtin_function_with_fp(
-            "beagle.core/file-readdir-async",
-            file_readdir_async as *const u8,
+            "beagle.core/file-readdir-submit",
+            file_readdir_submit as *const u8,
             true,
             true,
-            5, // stack_pointer, frame_pointer, loop_id, path, future_atom
+            4, // stack_pointer, frame_pointer, loop_id, path -> handle
         )?;
         self.add_builtin_function(
             "beagle.core/file-results-count",
@@ -8656,29 +8768,42 @@ impl Runtime {
             1, // loop_id
         )?;
         self.add_builtin_function(
-            "beagle.core/file-result-pop",
-            file_result_pop as *const u8,
+            "beagle.core/file-result-ready",
+            file_result_ready as *const u8,
             false,
-            1, // loop_id
+            2, // loop_id, handle -> bool
         )?;
         self.add_builtin_function(
-            "beagle.core/file-result-future-atom",
-            file_result_future_atom as *const u8,
+            "beagle.core/file-result-poll-type",
+            file_result_poll_type as *const u8,
             false,
-            1, // loop_id
-        )?;
-        self.add_builtin_function(
-            "beagle.core/file-result-value",
-            file_result_value as *const u8,
-            false,
-            1, // loop_id
+            2, // loop_id, handle -> type_code (0 if not ready)
         )?;
         self.add_builtin_function_with_fp(
-            "beagle.core/file-result-data",
-            file_result_data as *const u8,
+            "beagle.core/file-result-get-string",
+            file_result_get_string as *const u8,
             true,
             true,
-            3, // stack_pointer, frame_pointer (implicit), loop_id
+            4, // stack_pointer, frame_pointer, loop_id, handle -> string (consumes result)
+        )?;
+        self.add_builtin_function(
+            "beagle.core/file-result-get-value",
+            file_result_get_value as *const u8,
+            false,
+            2, // loop_id, handle -> int (consumes result)
+        )?;
+        self.add_builtin_function(
+            "beagle.core/file-result-consume",
+            file_result_consume as *const u8,
+            false,
+            2, // loop_id, handle -> bool (consumes result)
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/file-result-get-entries",
+            file_result_get_entries as *const u8,
+            true,
+            true,
+            4, // stack_pointer, frame_pointer, loop_id, handle -> [string] (consumes result)
         )?;
 
         self.add_builtin_function(
