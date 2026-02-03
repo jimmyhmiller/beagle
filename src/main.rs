@@ -1105,14 +1105,24 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             continue;
         }
 
-        // Skip flaky async_parallel_test on macOS ARM
-        if path.contains("async_parallel_test.bg") {
-            continue;
-        }
-
         let source: String = std::fs::read_to_string(path)?;
 
         if !source.contains("// Expect") {
+            continue;
+        }
+
+        // Check for // Skip annotation (supports "// Skip" or "// Skip: reason")
+        if let Some(skip_line) = source.lines().find(|line| line.starts_with("// Skip")) {
+            let reason = skip_line
+                .strip_prefix("// Skip")
+                .unwrap()
+                .trim_start_matches(':')
+                .trim();
+            if reason.is_empty() {
+                println!("Skipping test: {}", path);
+            } else {
+                println!("Skipping test: {} ({})", path, reason);
+            }
             continue;
         }
 

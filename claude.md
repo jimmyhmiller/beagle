@@ -132,6 +132,8 @@ fn main() {
 
 **Special Annotations:**
 - `// no-std` - Sets no_std flag automatically
+- `// Skip` or `// Skip: reason` - Skip this test (use for flaky/timing-dependent tests)
+- `// gc-always` - Run GC on every allocation (for GC stress testing)
 
 **Test Execution:**
 - `cargo run -- --all-tests` runs all tests with `// Expect`

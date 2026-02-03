@@ -5765,18 +5765,18 @@ impl Runtime {
                 .split_to(page_size)
                 .map_err(|e| format!("Failed to split jump table page: {:?}", e))?;
 
-            let mut new_page = reserved
-                .make_mut()
-                .map_err(|(_reserved, e)| format!("Failed to make jump table page mutable: {:?}", e))?;
+            let mut new_page = reserved.make_mut().map_err(|(_reserved, e)| {
+                format!("Failed to make jump table page mutable: {:?}", e)
+            })?;
 
             // Zero out the new page
             unsafe {
                 std::ptr::write_bytes(new_page.as_mut_ptr(), 0, page_size);
             }
 
-            let page_reserved = new_page
-                .make_read_only()
-                .map_err(|(_page, e)| format!("Failed to make jump table page read-only: {:?}", e))?;
+            let page_reserved = new_page.make_read_only().map_err(|(_page, e)| {
+                format!("Failed to make jump table page read-only: {:?}", e)
+            })?;
 
             let page: Mmap = page_reserved
                 .try_into()
@@ -5787,18 +5787,24 @@ impl Runtime {
 
         // Get the page, make it mutable, write to it, make it read-only again
         let page = self.jump_table_pages.remove(page_index);
-        let mut page_mut = page
-            .make_mut()
-            .map_err(|(_, e)| format!("Failed to make jump table page mutable for writing: {:?}", e))?;
+        let mut page_mut = page.make_mut().map_err(|(_, e)| {
+            format!(
+                "Failed to make jump table page mutable for writing: {:?}",
+                e
+            )
+        })?;
 
         let tagged_pointer = BuiltInTypes::Function.tag(pointer as isize) as usize;
         let bytes = tagged_pointer.to_le_bytes();
 
         page_mut[offset_in_page..offset_in_page + 8].copy_from_slice(&bytes);
 
-        let page_reserved = page_mut
-            .make_read_only()
-            .map_err(|(_, e)| format!("Failed to make jump table page read-only after writing: {:?}", e))?;
+        let page_reserved = page_mut.make_read_only().map_err(|(_, e)| {
+            format!(
+                "Failed to make jump table page read-only after writing: {:?}",
+                e
+            )
+        })?;
 
         let page: Mmap = page_reserved
             .try_into()
@@ -5826,22 +5832,31 @@ impl Runtime {
 
         // Get the page, make it mutable, write to it, make it read-only again
         let page = self.jump_table_pages.remove(page_index);
-        let mut page_mut = page
-            .make_mut()
-            .map_err(|(_, e)| format!("Failed to make jump table page mutable for modification: {}", e))?;
+        let mut page_mut = page.make_mut().map_err(|(_, e)| {
+            format!(
+                "Failed to make jump table page mutable for modification: {}",
+                e
+            )
+        })?;
 
         let tagged_pointer = BuiltInTypes::Function.tag(function_pointer as isize) as usize;
         let bytes = tagged_pointer.to_le_bytes();
 
         page_mut[offset_in_page..offset_in_page + 8].copy_from_slice(&bytes);
 
-        let page_reserved = page_mut
-            .make_read_only()
-            .map_err(|(_, e)| format!("Failed to make jump table page read-only after modification: {:?}", e))?;
+        let page_reserved = page_mut.make_read_only().map_err(|(_, e)| {
+            format!(
+                "Failed to make jump table page read-only after modification: {:?}",
+                e
+            )
+        })?;
 
-        let page: Mmap = page_reserved
-            .try_into()
-            .map_err(|e| format!("Failed to convert Reserved to Mmap after modification: {:?}", e))?;
+        let page: Mmap = page_reserved.try_into().map_err(|e| {
+            format!(
+                "Failed to convert Reserved to Mmap after modification: {:?}",
+                e
+            )
+        })?;
 
         self.jump_table_pages.insert(page_index, page);
 
