@@ -1266,9 +1266,6 @@ fn handle-await-event-loop(loop_id, future) {
             // Process any completed TCP results
             process-tcp-results(loop_id)
 
-            // Process any completed file results
-            process-file-results(loop_id)
-
             // Process any completed timers
             process-timer-results(loop_id)
 
@@ -1297,163 +1294,79 @@ fn process-tcp-results(loop_id) {
 }
 
 // ============================================================================
-// Async File I/O Functions (using thread pool)
+// Handle-Based Async File I/O Functions
 // ============================================================================
+// These functions use the new handle-based API which is:
+// - Memory-safe: No raw heap pointers passed to worker threads
+// - Thread-safe: Single atomic poll operation
+// - O(1) lookup: Results indexed by handle in HashMap
 
-// Global registry for pending file operation futures
-// Each entry is [atom_addr, future]
-let pending-file-futures-atom = atom([])
-
-fn register-pending-future(atom_addr, future) {
-    let pending = deref(pending-file-futures-atom)
-    reset!(pending-file-futures-atom, push(pending, [atom_addr, future]))
-}
-
-fn find-and-remove-pending-future(atom_addr) {
-    let pending = deref(pending-file-futures-atom)
-    let mut result_future = null
-    let mut new_pending = []
-    let mut s = seq(pending)
-    while s != null {
-        let entry = first(s)
-        let entry_addr = get(entry, 0)
-        let entry_future = get(entry, 1)
-        if entry_addr == atom_addr {
-            result_future = entry_future
-        } else {
-            new_pending = push(new_pending, entry)
-        }
-        s = next(s)
+// Poll a file operation result by handle
+// Returns the result value (ok/err) or null if not ready
+// Type codes: 1=ReadOk, 2=ReadErr, 3=WriteOk, 4=WriteErr,
+//             5=DeleteOk, 6=DeleteErr, 7=StatOk, 8=StatErr,
+//             9=ReadDirOk, 10=ReadDirErr
+fn poll-file-result(loop_id, handle) {
+    let type_code = core/file-result-poll-type(loop_id, handle)
+    if type_code == 0 {
+        // Not ready yet
+        null
+    } else if type_code == 1 {
+        // ReadOk - get content string
+        let content = core/file-result-get-string(loop_id, handle)
+        async-ok(content)
+    } else if type_code == 2 {
+        // ReadErr - get error message
+        let error_msg = core/file-result-get-string(loop_id, handle)
+        async-err(-1, error_msg)
+    } else if type_code == 3 {
+        // WriteOk - get bytes written
+        let bytes_written = core/file-result-get-value(loop_id, handle)
+        async-ok(bytes_written)
+    } else if type_code == 4 {
+        // WriteErr - get error message
+        let error_msg = core/file-result-get-string(loop_id, handle)
+        async-err(-1, error_msg)
+    } else if type_code == 5 {
+        // DeleteOk - consume the result
+        core/file-result-consume(loop_id, handle)
+        async-ok(null)
+    } else if type_code == 6 {
+        // DeleteErr - get error message
+        let error_msg = core/file-result-get-string(loop_id, handle)
+        async-err(-1, error_msg)
+    } else if type_code == 7 {
+        // StatOk - get file size
+        let file_size = core/file-result-get-value(loop_id, handle)
+        async-ok(file_size)
+    } else if type_code == 8 {
+        // StatErr - get error message
+        let error_msg = core/file-result-get-string(loop_id, handle)
+        async-err(-1, error_msg)
+    } else if type_code == 9 {
+        // ReadDirOk - get entries
+        let entries = core/file-result-get-entries(loop_id, handle)
+        async-ok(entries)
+    } else if type_code == 10 {
+        // ReadDirErr - get error message
+        let error_msg = core/file-result-get-string(loop_id, handle)
+        async-err(-1, error_msg)
+    } else {
+        // Unknown type code - consume and return error
+        core/file-result-consume(loop_id, handle)
+        async-err(-1, "Unknown result type")
     }
-    reset!(pending-file-futures-atom, new_pending)
-    result_future
 }
 
-// Process completed file results and resolve corresponding futures
-fn process-file-results(loop_id) {
+// Wait for a file operation to complete by handle
+fn wait-for-file-result(loop_id, handle) {
     loop {
-        // Pop next completed result (returns type code: 0=none, 1=ReadOk, 2=ReadErr, etc.)
-        let result_type = core/file-result-pop(loop_id)
-        if result_type == 0 {
-            break(null)
-        }
-
-        // Get the future_atom for this result
-        let future_atom = core/file-result-future-atom(loop_id)
-
-        // Find the corresponding future
-        let future = find-and-remove-pending-future(future_atom)
-        if future == null {
-            // No future registered for this atom - skip
-        } else {
-            // Resolve or reject based on result type
-            if result_type == 1 {
-                // ReadOk - get content string
-                let content = core/file-result-data(loop_id)
-                resolve-future!(future, async-ok(content))
-            } else if result_type == 2 {
-                // ReadErr - get error message
-                let error_msg = core/file-result-data(loop_id)
-                resolve-future!(future, async-err(-1, error_msg))
-            } else if result_type == 3 {
-                // WriteOk - get bytes written
-                let bytes_written = core/file-result-value(loop_id)
-                resolve-future!(future, async-ok(bytes_written))
-            } else if result_type == 4 {
-                // WriteErr - get error message
-                let error_msg = core/file-result-data(loop_id)
-                resolve-future!(future, async-err(-1, error_msg))
-            } else if result_type == 5 {
-                // DeleteOk
-                resolve-future!(future, async-ok(null))
-            } else if result_type == 6 {
-                // DeleteErr - get error message
-                let error_msg = core/file-result-data(loop_id)
-                resolve-future!(future, async-err(-1, error_msg))
-            } else if result_type == 7 {
-                // StatOk - get file size
-                let file_size = core/file-result-value(loop_id)
-                resolve-future!(future, async-ok(file_size))
-            } else if result_type == 8 {
-                // StatErr - get error message
-                let error_msg = core/file-result-data(loop_id)
-                resolve-future!(future, async-err(-1, error_msg))
-            } else if result_type == 9 {
-                // ReadDirOk - get entries
-                let entries_data = core/file-result-data(loop_id)
-                resolve-future!(future, async-ok(entries_data))
-            } else if result_type == 10 {
-                // ReadDirErr - get error message
-                let error_msg = core/file-result-data(loop_id)
-                resolve-future!(future, async-err(-1, error_msg))
-            }
+        core/event-loop-run-once(loop_id, 10)
+        let result = poll-file-result(loop_id, handle)
+        if result != null {
+            break(result)
         }
     }
-}
-
-// Submit an async read file operation
-fn submit-read-file-async(loop_id, path) {
-    let future = make-future(FutureState.Running {})
-    let atom_addr = core/atom-address(future.state_atom)
-    register-pending-future(atom_addr, future)
-    let result = core/file-read-async(loop_id, path, atom_addr)
-    if result < 0 {
-        find-and-remove-pending-future(atom_addr)
-        reject-future!(future, "Failed to submit read operation")
-    }
-    future
-}
-
-// Submit an async write file operation
-fn submit-write-file-async(loop_id, path, content) {
-    let future = make-future(FutureState.Running {})
-    let atom_addr = core/atom-address(future.state_atom)
-    register-pending-future(atom_addr, future)
-    let result = core/file-write-async(loop_id, path, content, atom_addr)
-    if result < 0 {
-        find-and-remove-pending-future(atom_addr)
-        reject-future!(future, "Failed to submit write operation")
-    }
-    future
-}
-
-// Submit an async delete file operation
-fn submit-delete-file-async(loop_id, path) {
-    let future = make-future(FutureState.Running {})
-    let atom_addr = core/atom-address(future.state_atom)
-    register-pending-future(atom_addr, future)
-    let result = core/file-delete-async(loop_id, path, atom_addr)
-    if result < 0 {
-        find-and-remove-pending-future(atom_addr)
-        reject-future!(future, "Failed to submit delete operation")
-    }
-    future
-}
-
-// Submit an async stat operation
-fn submit-file-stat-async(loop_id, path) {
-    let future = make-future(FutureState.Running {})
-    let atom_addr = core/atom-address(future.state_atom)
-    register-pending-future(atom_addr, future)
-    let result = core/file-stat-async(loop_id, path, atom_addr)
-    if result < 0 {
-        find-and-remove-pending-future(atom_addr)
-        reject-future!(future, "Failed to submit stat operation")
-    }
-    future
-}
-
-// Submit an async readdir operation
-fn submit-readdir-async(loop_id, path) {
-    let future = make-future(FutureState.Running {})
-    let atom_addr = core/atom-address(future.state_atom)
-    register-pending-future(atom_addr, future)
-    let result = core/file-readdir-async(loop_id, path, atom_addr)
-    if result < 0 {
-        find-and-remove-pending-future(atom_addr)
-        reject-future!(future, "Failed to submit readdir operation")
-    }
-    future
 }
 
 // ============================================================================
@@ -1461,83 +1374,43 @@ fn submit-readdir-async(loop_id, path) {
 // ============================================================================
 
 fn handle-read-file-async(loop_id, path) {
-    let future = submit-read-file-async(loop_id, path)
-    loop {
-        core/event-loop-run-once(loop_id, 10)
-        process-file-results(loop_id)
-
-        let state = future-state(future)
-        match state {
-            FutureState.Resolved { value } => break(value),
-            FutureState.Rejected { error } => throw(error),
-            FutureState.Cancelled {} => throw("Operation cancelled"),
-            _ => {}
-        }
+    let handle = core/file-read-submit(loop_id, path)
+    if handle < 0 {
+        throw("Failed to submit read operation")
     }
+    wait-for-file-result(loop_id, handle)
 }
 
 fn handle-write-file-async(loop_id, path, content) {
-    let future = submit-write-file-async(loop_id, path, content)
-    loop {
-        core/event-loop-run-once(loop_id, 10)
-        process-file-results(loop_id)
-
-        let state = future-state(future)
-        match state {
-            FutureState.Resolved { value } => break(value),
-            FutureState.Rejected { error } => throw(error),
-            FutureState.Cancelled {} => throw("Operation cancelled"),
-            _ => {}
-        }
+    let handle = core/file-write-submit(loop_id, path, content)
+    if handle < 0 {
+        throw("Failed to submit write operation")
     }
+    wait-for-file-result(loop_id, handle)
 }
 
 fn handle-delete-file-async(loop_id, path) {
-    let future = submit-delete-file-async(loop_id, path)
-    loop {
-        core/event-loop-run-once(loop_id, 10)
-        process-file-results(loop_id)
-
-        let state = future-state(future)
-        match state {
-            FutureState.Resolved { value } => break(value),
-            FutureState.Rejected { error } => throw(error),
-            FutureState.Cancelled {} => throw("Operation cancelled"),
-            _ => {}
-        }
+    let handle = core/file-delete-submit(loop_id, path)
+    if handle < 0 {
+        throw("Failed to submit delete operation")
     }
+    wait-for-file-result(loop_id, handle)
 }
 
 fn handle-file-size-async(loop_id, path) {
-    let future = submit-file-stat-async(loop_id, path)
-    loop {
-        core/event-loop-run-once(loop_id, 10)
-        process-file-results(loop_id)
-
-        let state = future-state(future)
-        match state {
-            FutureState.Resolved { value } => break(value),
-            FutureState.Rejected { error } => throw(error),
-            FutureState.Cancelled {} => throw("Operation cancelled"),
-            _ => {}
-        }
+    let handle = core/file-stat-submit(loop_id, path)
+    if handle < 0 {
+        throw("Failed to submit stat operation")
     }
+    wait-for-file-result(loop_id, handle)
 }
 
 fn handle-read-dir-async(loop_id, path) {
-    let future = submit-readdir-async(loop_id, path)
-    loop {
-        core/event-loop-run-once(loop_id, 10)
-        process-file-results(loop_id)
-
-        let state = future-state(future)
-        match state {
-            FutureState.Resolved { value } => break(value),
-            FutureState.Rejected { error } => throw(error),
-            FutureState.Cancelled {} => throw("Operation cancelled"),
-            _ => {}
-        }
+    let handle = core/file-readdir-submit(loop_id, path)
+    if handle < 0 {
+        throw("Failed to submit readdir operation")
     }
+    wait-for-file-result(loop_id, handle)
 }
 
 // Process completed timer results
@@ -1575,7 +1448,6 @@ fn handle-await-first-event-loop(loop_id, futures) {
             // Process events
             core/event-loop-run-once(loop_id, 50)
             process-tcp-results(loop_id)
-            process-file-results(loop_id)
             process-timer-results(loop_id)
 
             // Check for resolved futures
