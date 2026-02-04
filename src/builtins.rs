@@ -5407,7 +5407,7 @@ extern "C" fn tcp_connect_async(
     };
 
     match event_loop.tcp_connect(addr, future_atom) {
-        Ok((socket_id, _token)) => BuiltInTypes::Int.tag(socket_id as isize) as usize,
+        Ok((socket_id, _token, _op_id)) => BuiltInTypes::Int.tag(socket_id as isize) as usize,
         Err(_) => BuiltInTypes::Int.tag(-1) as usize,
     }
 }
@@ -5447,7 +5447,7 @@ extern "C" fn tcp_listen(
 }
 
 /// Start accepting a connection on a listener
-/// Returns 1 on success (operation started), -1 on error
+/// Returns op_id on success (operation started), -1 on error
 extern "C" fn tcp_accept_async(loop_id: usize, listener_id: usize, future_atom: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
     let listener_id = BuiltInTypes::untag(listener_id);
@@ -5460,13 +5460,13 @@ extern "C" fn tcp_accept_async(loop_id: usize, listener_id: usize, future_atom: 
     };
 
     match event_loop.tcp_accept(listener_id, future_atom) {
-        Ok(_token) => BuiltInTypes::Int.tag(1) as usize,
+        Ok((_token, op_id)) => BuiltInTypes::Int.tag(op_id as isize) as usize,
         Err(_) => BuiltInTypes::Int.tag(-1) as usize,
     }
 }
 
 /// Start a read operation on a TCP socket
-/// Returns 1 on success (operation started), -1 on error
+/// Returns op_id on success (operation started), -1 on error
 extern "C" fn tcp_read_async(
     loop_id: usize,
     socket_id: usize,
@@ -5485,15 +5485,15 @@ extern "C" fn tcp_read_async(
     };
 
     match event_loop.tcp_read(socket_id, buffer_size, future_atom) {
-        Ok(_token) => BuiltInTypes::Int.tag(1) as usize,
+        Ok((_token, op_id)) => BuiltInTypes::Int.tag(op_id as isize) as usize,
         Err(_) => BuiltInTypes::Int.tag(-1) as usize,
     }
 }
 
 /// Start a write operation on a TCP socket
-/// Returns 1 on success (operation started), -1 on error
+/// Returns op_id on success (operation started), -1 on error
 extern "C" fn tcp_write_async(
-    _stack_pointer: usize,
+    stack_pointer: usize,
     _frame_pointer: usize,
     loop_id: usize,
     socket_id: usize,
@@ -5505,8 +5505,8 @@ extern "C" fn tcp_write_async(
     let future_atom = BuiltInTypes::untag(future_atom);
     let runtime = get_runtime().get_mut();
 
-    // Get the data as bytes
-    let data_str = runtime.get_string_literal(data);
+    // Get the data as bytes - handle both string literals and heap strings
+    let data_str = runtime.get_string(stack_pointer, data);
     let data_bytes = data_str.as_bytes().to_vec();
 
     let event_loop = match runtime.event_loops.get_mut(loop_id) {
@@ -5515,7 +5515,7 @@ extern "C" fn tcp_write_async(
     };
 
     match event_loop.tcp_write(socket_id, data_bytes, future_atom) {
-        Ok(_token) => BuiltInTypes::Int.tag(1) as usize,
+        Ok((_token, op_id)) => BuiltInTypes::Int.tag(op_id as isize) as usize,
         Err(_) => BuiltInTypes::Int.tag(-1) as usize,
     }
 }
@@ -5693,6 +5693,58 @@ extern "C" fn tcp_result_data(stack_pointer: usize, loop_id: usize) -> usize {
         .allocate_string(stack_pointer, data)
         .map(|t| t.into())
         .unwrap_or(0)
+}
+
+/// Get the op_id from the current TCP result
+/// Returns 0 if no result is current
+extern "C" fn tcp_result_op_id(loop_id: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(0) as usize,
+    };
+
+    use crate::runtime::TcpResult;
+
+    let op_id = match event_loop.current_result() {
+        None => 0,
+        Some(result) => match result {
+            TcpResult::ConnectOk { op_id, .. } => *op_id,
+            TcpResult::ConnectErr { op_id, .. } => *op_id,
+            TcpResult::AcceptOk { op_id, .. } => *op_id,
+            TcpResult::AcceptErr { op_id, .. } => *op_id,
+            TcpResult::ReadOk { op_id, .. } => *op_id,
+            TcpResult::ReadErr { op_id, .. } => *op_id,
+            TcpResult::WriteOk { op_id, .. } => *op_id,
+            TcpResult::WriteErr { op_id, .. } => *op_id,
+        },
+    };
+    BuiltInTypes::Int.tag(op_id as isize) as usize
+}
+
+/// Get the listener_id from the current TCP result (for AcceptOk results)
+/// Returns 0 if not an AcceptOk result or no result is current
+extern "C" fn tcp_result_listener_id(loop_id: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(0) as usize,
+    };
+
+    use crate::runtime::TcpResult;
+
+    let listener_id = match event_loop.current_result() {
+        None => 0,
+        Some(result) => match result {
+            TcpResult::AcceptOk { listener_id, .. } => *listener_id,
+            _ => 0,
+        },
+    };
+    BuiltInTypes::Int.tag(listener_id as isize) as usize
 }
 
 // =============================================================================
@@ -8696,7 +8748,19 @@ impl Runtime {
             tcp_result_data as *const u8,
             true,
             false,
-            3, // stack_pointer, frame_pointer (implicit), loop_id
+            2, // stack_pointer, loop_id
+        )?;
+        self.add_builtin_function(
+            "beagle.core/tcp-result-op-id",
+            tcp_result_op_id as *const u8,
+            false,
+            1, // loop_id
+        )?;
+        self.add_builtin_function(
+            "beagle.core/tcp-result-listener-id",
+            tcp_result_listener_id as *const u8,
+            false,
+            1, // loop_id
         )?;
 
         // Timer builtins

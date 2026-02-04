@@ -354,6 +354,12 @@ pub enum Ast {
         body: Vec<Ast>,
         token_range: TokenRange,
     },
+    /// Future expression: `future(expr)` - captures expr as a thunk and creates a future
+    /// The body is NOT evaluated immediately; it's wrapped in a thunk and passed to __make_future
+    Future {
+        body: Box<Ast>,
+        token_range: TokenRange,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -548,7 +554,8 @@ impl Ast {
             | Ast::Reset { token_range, .. }
             | Ast::Shift { token_range, .. }
             | Ast::Perform { token_range, .. }
-            | Ast::Handle { token_range, .. } => *token_range,
+            | Ast::Handle { token_range, .. }
+            | Ast::Future { token_range, .. } => *token_range,
             Ast::IntegerLiteral(_, position)
             | Ast::FloatLiteral(_, position)
             | Ast::Identifier(_, position)
@@ -3759,6 +3766,32 @@ impl AstCompiler<'_> {
                 self.ir.write_label(after_handle);
                 Ok(result_reg.into())
             }
+            Ast::Future { body, token_range } => {
+                // future(expr) is a special form that captures expr as a thunk
+                // and calls __make_future(thunk)
+                //
+                // Compiles to:
+                // 1. Create anonymous function wrapping body: fn() { body }
+                // 2. Call beagle.async/__make_future(thunk)
+
+                // Create an anonymous function wrapping the body
+                let thunk_fn = Ast::Function {
+                    name: None,
+                    args: vec![],
+                    rest_param: None,
+                    body: vec![(*body).clone()],
+                    token_range,
+                    docstring: None,
+                };
+
+                // Compile the thunk function
+                self.not_tail_position();
+                let thunk_value = self.call_compile(&thunk_fn)?;
+
+                // Call __make_future with the thunk
+                let result = self.call("beagle.async/__make_future", vec![thunk_value])?;
+                Ok(result)
+            }
         }
     }
 
@@ -5204,6 +5237,9 @@ impl AstCompiler<'_> {
                 for ast in body.iter() {
                     self.find_mutable_vars_that_need_boxing(ast);
                 }
+            }
+            Ast::Future { body, .. } => {
+                self.find_mutable_vars_that_need_boxing(body);
             }
         }
     }

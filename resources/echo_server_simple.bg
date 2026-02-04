@@ -1,0 +1,31 @@
+namespace echo_server_simple
+
+// Simple echo server using continuation-based concurrent I/O
+// Run with: cargo run -- resources/echo_server_simple.bg
+// Test with multiple clients:
+//   (echo "hello from 1" && sleep 2) | nc localhost 8888 &
+//   (echo "hello from 2" && sleep 2) | nc localhost 8888 &
+//   wait
+
+use beagle.simple-socket as socket
+
+fn main() {
+    let server = socket/listen("0.0.0.0", 8888)
+    println("Listening on 0.0.0.0:8888")
+
+    let client = socket/accept(server)
+    // Everything below here runs once PER CLIENT
+    println("Client connected!")
+
+    loop {
+        let data = socket/read(client, 1024)
+
+        if length(data) == 0 {
+            println("Client disconnected")
+            break(null)
+        }
+
+        println("Received: " ++ data)
+        socket/write(client, data)
+    }
+}

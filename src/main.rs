@@ -1004,6 +1004,8 @@ fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Erro
         "beagle.async.bg",
         "beagle.fs.bg",
         "beagle.timer.bg",
+        "beagle.socket.bg",
+        "beagle.simple-socket.bg",
     ];
     let mut all_top_levels = vec![];
 
@@ -1410,12 +1412,36 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             gc::usdt_probes::fire_thread_register(new_count);
         }
 
-        let result = if arity == 0 {
-            // main() - call with no arguments
+        // Check if beagle.async/__main__ exists (implicit async handler wrapper)
+        // If it does, call it with the main function pointer; otherwise call main directly
+        let async_main_wrapper = "beagle.async/__main__";
+        let has_async_wrapper = runtime.get_function_arity(async_main_wrapper).is_some();
+
+        let result = if has_async_wrapper {
+            // Call __main__(main_fn, args) - it will set up the async handler
+            let stack_pointer = runtime.get_stack_base();
+            let main_fn = runtime.find_function(&fully_qualified_main).unwrap();
+            let main_fn_ptr = runtime.get_function_pointer(main_fn).unwrap();
+            // Tag the function pointer as BuiltInTypes::Function (tag 0b100)
+            let tagged_main_fn = ((main_fn_ptr as u64) << 3) | 0b100;
+
+            let args_or_null = if arity == 1 {
+                runtime
+                    .create_string_array(stack_pointer, &args.program_args)
+                    .expect("Failed to create args array") as u64
+            } else {
+                // null for 0-arity main (tag 0b111)
+                0b111u64
+            };
+
+            let wrapper = runtime.get_function2(async_main_wrapper).unwrap();
+            wrapper(tagged_main_fn, args_or_null)
+        } else if arity == 0 {
+            // No async wrapper, call main() directly with no arguments
             let f = runtime.get_function0(&fully_qualified_main).unwrap();
             f()
         } else if arity == 1 {
-            // main(args) - create args array and pass it
+            // No async wrapper, call main(args) directly
             let stack_pointer = runtime.get_stack_base();
             let args_array = runtime
                 .create_string_array(stack_pointer, &args.program_args)

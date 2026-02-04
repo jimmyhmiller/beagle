@@ -201,6 +201,34 @@ enum TimeoutResult {
 }
 
 // ============================================================================
+// IO Action Enum - Generic async I/O operations
+// ============================================================================
+// IOAction describes what I/O operation to perform. The handler executes
+// the operation and resumes the continuation when it completes.
+
+// TCP Listener - wraps a listener ID and event loop ID
+struct TcpListener {
+    loop_id
+    listener_id
+}
+
+// TCP Socket - wraps a socket ID and event loop ID
+struct TcpSocket {
+    loop_id
+    socket_id
+}
+
+enum IOAction {
+    // TCP operations
+    TcpListen { host, port },
+    TcpAccept { listener },
+    TcpRead { socket, n },
+    TcpWrite { socket, data },
+    TcpClose { socket },
+    TcpCloseListener { listener }
+}
+
+// ============================================================================
 // Async Effect Enum
 // ============================================================================
 // The Async effect handles all async operations including legacy file I/O.
@@ -211,6 +239,9 @@ enum Async {
     AwaitAll { futures },
     AwaitFirst { futures },
     Cancel { future },
+
+    // Generic I/O - handler multiplexes across pending operations
+    IO { action },
 
     // File operations
     ReadFile { path },
@@ -589,6 +620,11 @@ extend BlockingAsyncHandler with effect/Handler(Async) {
                 handle-cancel(future)
             },
 
+            // Generic IO operations
+            Async.IO { action } => {
+                handle-io-action(action)
+            },
+
             // File operations
             Async.ReadFile { path } => {
                 handle-read-file(path)
@@ -825,6 +861,11 @@ extend ThreadedAsyncHandler with effect/Handler(Async) {
             },
             Async.Cancel { future } => {
                 handle-cancel(future)
+            },
+
+            // Generic IO operations
+            Async.IO { action } => {
+                handle-io-action(action)
             },
 
             // File operations
@@ -1127,6 +1168,11 @@ extend EventLoopHandler with effect/Handler(Async) {
             },
             Async.Cancel { future } => {
                 handle-cancel(future)
+            },
+
+            // Generic IO operations
+            Async.IO { action } => {
+                handle-io-action(action)
             },
 
             // File operations - use async thread pool I/O
@@ -1959,3 +2005,249 @@ fn unwrap-all(results) {
         }
     })
 }
+
+// ============================================================================
+// IO Runtime Support
+// ============================================================================
+// Global event loop for all IO operations
+
+let __io_loop_atom = atom(null)
+
+fn get-io-loop() {
+    let loop_id = deref(__io_loop_atom)
+    if loop_id == null {
+        let new_loop = core/event-loop-create(4)
+        reset!(__io_loop_atom, new_loop)
+        new_loop
+    } else {
+        loop_id
+    }
+}
+
+// ============================================================================
+// ImplicitAsyncHandler - the default handler for main()
+// ============================================================================
+// This handler provides the implicit async context for main functions.
+// It uses the blocking handler for simplicity, but also supports IO operations.
+
+struct ImplicitAsyncHandler {}
+
+// Handle an IO action synchronously (blocking current thread)
+fn handle-io-action(action) {
+    let loop_id = get-io-loop()
+
+    match action {
+        IOAction.TcpListen { host, port } => {
+            let listener_id = core/tcp-listen(loop_id, host, port, 128)
+            if listener_id < 0 {
+                throw("Failed to create TCP listener on " ++ host ++ ":" ++ to-string(port))
+            }
+            TcpListener { loop_id: loop_id, listener_id: listener_id }
+        },
+
+        IOAction.TcpAccept { listener } => {
+            let result_atom = atom(null)
+            core/tcp-accept-async(loop_id, listener.listener_id, result_atom)
+
+            // Poll until we get a result
+            loop {
+                core/event-loop-run-once(loop_id, 50)
+                let result_type = core/tcp-result-pop(loop_id)
+                if result_type == 3 {
+                    // AcceptOk
+                    let socket_id = core/tcp-result-value(loop_id)
+                    break(TcpSocket { loop_id: loop_id, socket_id: socket_id })
+                } else if result_type == 4 {
+                    // AcceptErr
+                    let error = core/tcp-result-data(loop_id)
+                    throw("Accept failed: " ++ error)
+                }
+            }
+        },
+
+        IOAction.TcpRead { socket, n } => {
+            let result_atom = atom(null)
+            let read_result = core/tcp-read-async(loop_id, socket.socket_id, n, result_atom)
+            if read_result < 0 {
+                throw("Failed to start read operation")
+            }
+
+            loop {
+                core/event-loop-run-once(loop_id, 50)
+                let result_type = core/tcp-result-pop(loop_id)
+                if result_type == 5 {
+                    // ReadOk
+                    let data = core/tcp-result-data(loop_id)
+                    break(data)
+                } else if result_type == 6 {
+                    // ReadErr
+                    let error = core/tcp-result-data(loop_id)
+                    throw("Read failed: " ++ error)
+                }
+            }
+        },
+
+        IOAction.TcpWrite { socket, data } => {
+            let result_atom = atom(null)
+            core/tcp-write-async(loop_id, socket.socket_id, data, result_atom)
+
+            loop {
+                core/event-loop-run-once(loop_id, 50)
+                let result_type = core/tcp-result-pop(loop_id)
+                if result_type == 7 {
+                    // WriteOk
+                    let bytes_written = core/tcp-result-value(loop_id)
+                    break(bytes_written)
+                } else if result_type == 8 {
+                    // WriteErr
+                    let error = core/tcp-result-data(loop_id)
+                    throw("Write failed: " ++ error)
+                }
+            }
+        },
+
+        IOAction.TcpClose { socket } => {
+            core/tcp-close(loop_id, socket.socket_id)
+            null
+        },
+
+        IOAction.TcpCloseListener { listener } => {
+            core/tcp-close-listener(loop_id, listener.listener_id)
+            null
+        }
+    }
+}
+
+extend ImplicitAsyncHandler with effect/Handler(Async) {
+    fn handle(self, op, resume) {
+        let result = match op {
+            // Core async operations
+            Async.Await { future } => {
+                handle-await-blocking(future)
+            },
+            Async.AwaitAll { futures } => {
+                handle-await-all-blocking(futures)
+            },
+            Async.AwaitFirst { futures } => {
+                handle-await-first-blocking(futures)
+            },
+            Async.Cancel { future } => {
+                handle-cancel(future)
+            },
+
+            // Generic IO operations
+            Async.IO { action } => {
+                handle-io-action(action)
+            },
+
+            // File operations
+            Async.ReadFile { path } => {
+                handle-read-file(path)
+            },
+            Async.WriteFile { path, content } => {
+                handle-write-file(path, content)
+            },
+            Async.AppendFile { path, content } => {
+                handle-append-file(path, content)
+            },
+            Async.DeleteFile { path } => {
+                handle-delete-file(path)
+            },
+            Async.FileExists { path } => {
+                handle-file-exists(path)
+            },
+            Async.RenameFile { old_path, new_path } => {
+                handle-rename-file(old_path, new_path)
+            },
+            Async.CopyFile { src_path, dest_path } => {
+                handle-copy-file(src_path, dest_path)
+            },
+            Async.ReadDir { path } => {
+                handle-read-dir(path)
+            },
+            Async.CreateDir { path } => {
+                handle-create-dir(path)
+            },
+            Async.CreateDirAll { path } => {
+                handle-create-dir-all(path)
+            },
+            Async.RemoveDir { path } => {
+                handle-remove-dir(path)
+            },
+            Async.RemoveDirAll { path } => {
+                handle-remove-dir-all(path)
+            },
+            Async.FileSize { path } => {
+                handle-file-size(path)
+            },
+            Async.IsDirectory { path } => {
+                handle-is-directory(path)
+            },
+            Async.IsFile { path } => {
+                handle-is-file(path)
+            },
+            Async.Open { path, mode } => {
+                handle-open(path, mode)
+            },
+            Async.Close { file } => {
+                handle-close(file)
+            },
+            Async.Read { file, n } => {
+                handle-read(file, n)
+            },
+            Async.Write { file, content } => {
+                handle-write(file, content)
+            },
+            Async.ReadLine { file } => {
+                handle-read-line(file)
+            },
+            Async.Flush { file } => {
+                handle-flush(file)
+            },
+            Async.Sleep { ms } => {
+                handle-sleep(ms)
+            },
+            Async.Spawn { thunk } => {
+                handle-spawn-threaded(thunk)
+            },
+            Async.SpawnWithToken { thunk, token } => {
+                handle-spawn-with-token-threaded(thunk, token)
+            }
+        }
+        resume(result)
+    }
+}
+
+// Create the default implicit handler instance
+fn create-implicit-handler() {
+    ImplicitAsyncHandler {}
+}
+
+// Run a block with the implicit async handler
+fn with-implicit-async(thunk) {
+    let handler = create-implicit-handler()
+    handle effect/Handler(Async) with handler {
+        thunk()
+    }
+}
+
+// ============================================================================
+// Main Function Wrapper
+// ============================================================================
+// This function is called by the runtime to wrap main() with the implicit
+// async handler. It takes the main function pointer and optional args.
+// The runtime checks for beagle.async/__main__ and calls it if present.
+
+fn __main__(main_fn, args) {
+    let handler = create-implicit-handler()
+    handle effect/Handler(Async) with handler {
+        reset {
+            if args == null {
+                main_fn()
+            } else {
+                main_fn(args)
+            }
+        }
+    }
+}
+
