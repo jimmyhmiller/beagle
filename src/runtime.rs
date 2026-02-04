@@ -630,17 +630,20 @@ pub enum PendingOperation {
     TcpConnect {
         future_atom: usize,
         socket_id: usize,
+        op_id: usize,
     },
     /// TCP accept operation (waiting for incoming connection)
     TcpAccept {
         future_atom: usize,
         listener_id: usize,
+        op_id: usize,
     },
     /// TCP read operation
     TcpRead {
         future_atom: usize,
         socket_id: usize,
         buffer_size: usize,
+        op_id: usize,
     },
     /// TCP write operation
     TcpWrite {
@@ -648,6 +651,7 @@ pub enum PendingOperation {
         socket_id: usize,
         data: Vec<u8>,
         bytes_written: usize,
+        op_id: usize,
     },
     /// Timer (deadline-based)
     Timer {
@@ -665,27 +669,51 @@ pub enum TcpResult {
     ConnectOk {
         future_atom: usize,
         socket_id: usize,
+        op_id: usize,
     },
     /// Connection failed
-    ConnectErr { future_atom: usize, error: String },
+    ConnectErr {
+        future_atom: usize,
+        error: String,
+        op_id: usize,
+    },
     /// Accept completed successfully
     AcceptOk {
         future_atom: usize,
         socket_id: usize,
+        listener_id: usize,
+        op_id: usize,
     },
     /// Accept failed
-    AcceptErr { future_atom: usize, error: String },
+    AcceptErr {
+        future_atom: usize,
+        error: String,
+        op_id: usize,
+    },
     /// Read completed successfully
-    ReadOk { future_atom: usize, data: Vec<u8> },
+    ReadOk {
+        future_atom: usize,
+        data: Vec<u8>,
+        op_id: usize,
+    },
     /// Read failed
-    ReadErr { future_atom: usize, error: String },
+    ReadErr {
+        future_atom: usize,
+        error: String,
+        op_id: usize,
+    },
     /// Write completed successfully
     WriteOk {
         future_atom: usize,
         bytes_written: usize,
+        op_id: usize,
     },
     /// Write failed
-    WriteErr { future_atom: usize, error: String },
+    WriteErr {
+        future_atom: usize,
+        error: String,
+        op_id: usize,
+    },
 }
 
 /// Opaque handle for async file operations
@@ -774,6 +802,8 @@ pub struct EventLoop {
     next_handle: AtomicU64,
     /// Completed file results indexed by handle for O(1) lookup
     completed_file_results: HashMap<OperationHandle, FileResultData>,
+    /// Counter for generating unique operation IDs for TCP operations
+    next_op_id: usize,
 }
 
 impl EventLoop {
@@ -823,6 +853,7 @@ impl EventLoop {
             completed_timers: Vec::new(),
             next_handle: AtomicU64::new(1), // Start at 1, 0 could be used as "no handle"
             completed_file_results: HashMap::new(),
+            next_op_id: 1, // Start at 1, 0 could be used as "no op_id"
         })
     }
 
@@ -831,6 +862,13 @@ impl EventLoop {
         let token = Token(self.next_token);
         self.next_token += 1;
         token
+    }
+
+    /// Get the next unique operation ID for TCP operations
+    pub fn next_op_id(&mut self) -> usize {
+        let op_id = self.next_op_id;
+        self.next_op_id += 1;
+        op_id
     }
 
     /// Generate a new unique operation handle
@@ -1054,6 +1092,7 @@ impl EventLoop {
             PendingOperation::TcpConnect {
                 future_atom,
                 socket_id,
+                op_id,
             } => {
                 // Connection completed - check if it succeeded
                 if let Some(stream) = self.tcp_streams.get(&socket_id) {
@@ -1062,12 +1101,14 @@ impl EventLoop {
                             self.completed_tcp_results.push(TcpResult::ConnectOk {
                                 future_atom,
                                 socket_id,
+                                op_id,
                             });
                         }
                         Err(e) => {
                             self.completed_tcp_results.push(TcpResult::ConnectErr {
                                 future_atom,
                                 error: e.to_string(),
+                                op_id,
                             });
                         }
                     }
@@ -1075,12 +1116,14 @@ impl EventLoop {
                     self.completed_tcp_results.push(TcpResult::ConnectErr {
                         future_atom,
                         error: "Socket not found".to_string(),
+                        op_id,
                     });
                 }
             }
             PendingOperation::TcpAccept {
                 future_atom,
                 listener_id,
+                op_id,
             } => {
                 // Listener is ready - accept the connection
                 if let Some(listener) = self.tcp_listeners.get(&listener_id) {
@@ -1091,12 +1134,15 @@ impl EventLoop {
                             self.completed_tcp_results.push(TcpResult::AcceptOk {
                                 future_atom,
                                 socket_id,
+                                listener_id,
+                                op_id,
                             });
                         }
                         Err(e) => {
                             self.completed_tcp_results.push(TcpResult::AcceptErr {
                                 future_atom,
                                 error: e.to_string(),
+                                op_id,
                             });
                         }
                     }
@@ -1104,6 +1150,7 @@ impl EventLoop {
                     self.completed_tcp_results.push(TcpResult::AcceptErr {
                         future_atom,
                         error: "Listener not found".to_string(),
+                        op_id,
                     });
                 }
             }
@@ -1111,6 +1158,7 @@ impl EventLoop {
                 future_atom,
                 socket_id,
                 buffer_size,
+                op_id,
             } => {
                 // Socket is ready for reading - remove to avoid borrow conflicts
                 if let Some(mut stream) = self.tcp_streams.remove(&socket_id) {
@@ -1126,6 +1174,7 @@ impl EventLoop {
                             self.completed_tcp_results.push(TcpResult::ReadOk {
                                 future_atom,
                                 data: buffer,
+                                op_id,
                             });
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1145,6 +1194,7 @@ impl EventLoop {
                                     future_atom,
                                     socket_id,
                                     buffer_size,
+                                    op_id,
                                 },
                             );
                         }
@@ -1152,6 +1202,7 @@ impl EventLoop {
                             self.completed_tcp_results.push(TcpResult::ReadErr {
                                 future_atom,
                                 error: e.to_string(),
+                                op_id,
                             });
                         }
                     }
@@ -1159,6 +1210,7 @@ impl EventLoop {
                     self.completed_tcp_results.push(TcpResult::ReadErr {
                         future_atom,
                         error: "Socket not found".to_string(),
+                        op_id,
                     });
                 }
             }
@@ -1167,6 +1219,7 @@ impl EventLoop {
                 socket_id,
                 data,
                 bytes_written,
+                op_id,
             } => {
                 // Socket is ready for writing - remove to avoid borrow conflicts
                 if let Some(mut stream) = self.tcp_streams.remove(&socket_id) {
@@ -1183,6 +1236,7 @@ impl EventLoop {
                                 self.completed_tcp_results.push(TcpResult::WriteOk {
                                     future_atom,
                                     bytes_written: total_written,
+                                    op_id,
                                 });
                             } else {
                                 // More data to write, re-register
@@ -1202,6 +1256,7 @@ impl EventLoop {
                                         socket_id,
                                         data,
                                         bytes_written: total_written,
+                                        op_id,
                                     },
                                 );
                             }
@@ -1224,6 +1279,7 @@ impl EventLoop {
                                     socket_id,
                                     data,
                                     bytes_written,
+                                    op_id,
                                 },
                             );
                         }
@@ -1231,6 +1287,7 @@ impl EventLoop {
                             self.completed_tcp_results.push(TcpResult::WriteErr {
                                 future_atom,
                                 error: e.to_string(),
+                                op_id,
                             });
                         }
                     }
@@ -1238,6 +1295,7 @@ impl EventLoop {
                     self.completed_tcp_results.push(TcpResult::WriteErr {
                         future_atom,
                         error: "Socket not found".to_string(),
+                        op_id,
                     });
                 }
             }
@@ -1283,15 +1341,16 @@ impl EventLoop {
     }
 
     /// Start a non-blocking TCP connection
-    /// Returns (socket_id, token) on success
+    /// Returns (socket_id, token, op_id) on success
     pub fn tcp_connect(
         &mut self,
         addr: std::net::SocketAddr,
         future_atom: usize,
-    ) -> std::io::Result<(usize, Token)> {
+    ) -> std::io::Result<(usize, Token, usize)> {
         let mut stream = TcpStream::connect(addr)?;
         let socket_id = self.next_socket_id();
         let token = self.next_token();
+        let op_id = self.next_op_id();
 
         self.poll
             .registry()
@@ -1304,10 +1363,11 @@ impl EventLoop {
             PendingOperation::TcpConnect {
                 future_atom,
                 socket_id,
+                op_id,
             },
         );
 
-        Ok((socket_id, token))
+        Ok((socket_id, token, op_id))
     }
 
     /// Create a TCP listener
@@ -1324,18 +1384,30 @@ impl EventLoop {
     }
 
     /// Start accepting a connection on a listener
-    /// Returns token on success
-    pub fn tcp_accept(&mut self, listener_id: usize, future_atom: usize) -> std::io::Result<Token> {
+    /// Returns (token, op_id) on success
+    pub fn tcp_accept(
+        &mut self,
+        listener_id: usize,
+        future_atom: usize,
+    ) -> std::io::Result<(Token, usize)> {
         // Remove the listener temporarily to avoid borrow conflicts
         let mut listener = self.tcp_listeners.remove(&listener_id).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::NotFound, "Listener not found")
         })?;
 
         let token = self.next_token();
+        let op_id = self.next_op_id();
+
+        // Try register first, fall back to reregister for subsequent accepts
         let result = self
             .poll
             .registry()
-            .register(&mut listener, token, Interest::READABLE);
+            .register(&mut listener, token, Interest::READABLE)
+            .or_else(|_| {
+                self.poll
+                    .registry()
+                    .reregister(&mut listener, token, Interest::READABLE)
+            });
 
         // Put the listener back
         self.tcp_listeners.insert(listener_id, listener);
@@ -1348,20 +1420,21 @@ impl EventLoop {
             PendingOperation::TcpAccept {
                 future_atom,
                 listener_id,
+                op_id,
             },
         );
 
-        Ok(token)
+        Ok((token, op_id))
     }
 
     /// Start a read operation on a socket
-    /// Returns token on success
+    /// Returns (token, op_id) on success
     pub fn tcp_read(
         &mut self,
         socket_id: usize,
         buffer_size: usize,
         future_atom: usize,
-    ) -> std::io::Result<Token> {
+    ) -> std::io::Result<(Token, usize)> {
         // Remove the stream temporarily to avoid borrow conflicts
         let mut stream = self
             .tcp_streams
@@ -1369,10 +1442,18 @@ impl EventLoop {
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "Socket not found"))?;
 
         let token = self.next_token();
+        let op_id = self.next_op_id();
+
+        // Try register first (for new sockets from accept), fall back to reregister
         let result = self
             .poll
             .registry()
-            .reregister(&mut stream, token, Interest::READABLE);
+            .register(&mut stream, token, Interest::READABLE)
+            .or_else(|_| {
+                self.poll
+                    .registry()
+                    .reregister(&mut stream, token, Interest::READABLE)
+            });
 
         // Put the stream back
         self.tcp_streams.insert(socket_id, stream);
@@ -1386,20 +1467,21 @@ impl EventLoop {
                 future_atom,
                 socket_id,
                 buffer_size,
+                op_id,
             },
         );
 
-        Ok(token)
+        Ok((token, op_id))
     }
 
     /// Start a write operation on a socket
-    /// Returns token on success
+    /// Returns (token, op_id) on success
     pub fn tcp_write(
         &mut self,
         socket_id: usize,
         data: Vec<u8>,
         future_atom: usize,
-    ) -> std::io::Result<Token> {
+    ) -> std::io::Result<(Token, usize)> {
         // Remove the stream temporarily to avoid borrow conflicts
         let mut stream = self
             .tcp_streams
@@ -1407,10 +1489,18 @@ impl EventLoop {
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "Socket not found"))?;
 
         let token = self.next_token();
+        let op_id = self.next_op_id();
+
+        // Try register first (for new sockets from accept), fall back to reregister
         let result = self
             .poll
             .registry()
-            .reregister(&mut stream, token, Interest::WRITABLE);
+            .register(&mut stream, token, Interest::WRITABLE)
+            .or_else(|_| {
+                self.poll
+                    .registry()
+                    .reregister(&mut stream, token, Interest::WRITABLE)
+            });
 
         // Put the stream back
         self.tcp_streams.insert(socket_id, stream);
@@ -1425,10 +1515,11 @@ impl EventLoop {
                 socket_id,
                 data,
                 bytes_written: 0,
+                op_id,
             },
         );
 
-        Ok(token)
+        Ok((token, op_id))
     }
 
     /// Close a TCP socket
@@ -4171,7 +4262,7 @@ impl Runtime {
     }
 
     #[allow(unused)]
-    fn get_function2(&self, name: &str) -> Option<Box<dyn Fn(u64, u64) -> u64>> {
+    pub fn get_function2(&self, name: &str) -> Option<Box<dyn Fn(u64, u64) -> u64>> {
         let (stack_pointer, start, trampoline_start) = self.get_function_base(name)?;
         let global_block_ptr = self.get_global_block_ptr();
         let f: fn(u64, u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline_start) };

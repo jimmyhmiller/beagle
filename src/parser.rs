@@ -210,6 +210,7 @@ pub enum Token {
     Perform,
     Handle,
     Use,
+    Future,
 }
 impl Token {
     fn is_binary_operator(&self) -> bool {
@@ -313,6 +314,7 @@ impl Token {
             Token::Perform => Ok("perform".to_string()),
             Token::Handle => Ok("handle".to_string()),
             Token::Use => Ok("use".to_string()),
+            Token::Future => Ok("future".to_string()),
             Token::Comment((start, end))
             | Token::DocComment((start, end))
             | Token::Atom((start, end))
@@ -726,6 +728,7 @@ impl Tokenizer {
             b"perform" => Token::Perform,
             b"handle" => Token::Handle,
             b"use" => Token::Use,
+            b"future" => Token::Future,
             _ => Token::Atom((start, self.position)),
         }
     }
@@ -1188,6 +1191,22 @@ impl Parser {
                     Ok(Some(Ast::Identifier("handle".to_string(), self.position)))
                 }
             }
+            Token::Future => {
+                // future(expr) is a special form that captures expr as a thunk
+                // Check if this looks like future(expr): `future(`
+                // We need to peek ahead: consume future, skip whitespace, check next token, restore
+                let saved_position = self.position;
+                self.consume(); // consume 'future'
+                self.skip_spaces();
+                let next = self.current_token();
+                self.position = saved_position; // restore
+                if matches!(next, Token::OpenParen) {
+                    Ok(Some(self.parse_future()?))
+                } else {
+                    self.consume();
+                    Ok(Some(Ast::Identifier("future".to_string(), self.position)))
+                }
+            }
             Token::Match => Ok(Some(self.parse_match()?)),
             Token::Namespace => Ok(Some(self.parse_namespace()?)),
             Token::Use => Ok(Some(self.parse_use()?)),
@@ -1422,6 +1441,10 @@ impl Parser {
             Token::Perform => {
                 self.move_to_next_non_whitespace();
                 Some("perform".to_string())
+            }
+            Token::Future => {
+                self.move_to_next_non_whitespace();
+                Some("future".to_string())
             }
             _ => None,
         };
@@ -1797,6 +1820,7 @@ impl Parser {
                     }
                     Token::Handle => "handle".to_string(),
                     Token::Perform => "perform".to_string(),
+                    Token::Future => "future".to_string(),
                     _ => {
                         return Err(ParseError::UnexpectedToken {
                             expected: "protocol member name".to_string(),
@@ -2230,6 +2254,15 @@ impl Parser {
                     docstring,
                 })
             }
+            Token::Future => {
+                let end_position = self.consume();
+                Ok(Ast::StructField {
+                    name: "future".to_string(),
+                    mutable,
+                    token_range: TokenRange::new(start_position, end_position),
+                    docstring,
+                })
+            }
             Token::NewLine => Err(ParseError::InvalidExpression {
                 message: "Expected field name but found newline. Note: struct fields should be separated by newlines, not commas. Use:\nstruct Foo {\n    field1\n    field2\n}".to_string(),
                 position: self.position,
@@ -2613,6 +2646,13 @@ impl Parser {
                     token_range: TokenRange::new(start, self.position),
                 })
             }
+            Token::Future => {
+                self.consume();
+                Ok(Pattern::Identifier {
+                    name: "future".to_string(),
+                    token_range: TokenRange::new(start, self.position),
+                })
+            }
             _ => Err(ParseError::InvalidPattern {
                 message: format!(
                     "Expected identifier or destructuring pattern, found {:?}",
@@ -2944,6 +2984,27 @@ impl Parser {
                 }
                 Ok(Some(("handle".to_string(), value)))
             }
+            Token::Future => {
+                let keyword_start = self.position;
+                self.consume();
+                self.skip_spaces();
+                let value = if self.is_colon() {
+                    self.consume();
+                    self.skip_spaces();
+                    self.parse_expression(0, false, true)?.ok_or_else(|| {
+                        ParseError::InvalidExpression {
+                            message: "Expected value for struct field".to_string(),
+                            position: self.position,
+                        }
+                    })?
+                } else {
+                    Ast::Identifier("future".to_string(), keyword_start)
+                };
+                if !self.is_close_curly() {
+                    self.data_delimiter()?;
+                }
+                Ok(Some(("future".to_string(), value)))
+            }
             _ => Ok(None),
         }
     }
@@ -3244,6 +3305,29 @@ impl Parser {
         let end_position = self.position;
         Ok(Ast::Perform {
             value,
+            token_range: TokenRange::new(start_position, end_position),
+        })
+    }
+
+    /// Parse `future(expr)` - captures expr as a thunk for async execution
+    fn parse_future(&mut self) -> ParseResult<Ast> {
+        let start_position = self.position;
+        self.move_to_next_non_whitespace(); // consume 'future'
+
+        self.expect_open_paren()?;
+
+        // Parse the body expression (will be wrapped in a thunk by the compiler)
+        let body = Box::new(self.parse_expression(0, true, true)?.ok_or_else(|| {
+            ParseError::UnexpectedEof {
+                expected: "expression in future(...)".to_string(),
+            }
+        })?);
+
+        self.expect_close_paren()?;
+
+        let end_position = self.position;
+        Ok(Ast::Future {
+            body,
             token_range: TokenRange::new(start_position, end_position),
         })
     }
@@ -3828,19 +3912,42 @@ impl Parser {
         while !matches!(self.current_token(), Token::CloseCurly) {
             let field_start = self.position;
 
-            // Get field name
-            if let Token::Atom((start, end)) = self.current_token() {
-                let field_name = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
+            // Get field name - can be an atom or certain keywords
+            let field_name = match self.current_token() {
+                Token::Atom((start, end)) => {
+                    let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                        .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
+                    self.consume();
+                    name
+                }
+                Token::Future => {
+                    self.consume();
+                    "future".to_string()
+                }
+                Token::Handle => {
+                    self.consume();
+                    "handle".to_string()
+                }
+                Token::Perform => {
+                    self.consume();
+                    "perform".to_string()
+                }
+                _ => {
+                    return Err(ParseError::InvalidPattern {
+                        message: "Expected field name in pattern".to_string(),
+                        position: self.position,
+                    });
+                }
+            };
+            self.skip_whitespace();
+
+            // Check for rename syntax: field: binding
+            let binding_name = if matches!(self.current_token(), Token::Colon) {
                 self.consume();
                 self.skip_whitespace();
 
-                // Check for rename syntax: field: binding
-                let binding_name = if matches!(self.current_token(), Token::Colon) {
-                    self.consume();
-                    self.skip_whitespace();
-
-                    if let Token::Atom((bind_start, bind_end)) = self.current_token() {
+                match self.current_token() {
+                    Token::Atom((bind_start, bind_end)) => {
                         let binding = String::from_utf8(
                             self.source.as_bytes()[bind_start..bind_end].to_vec(),
                         )
@@ -3850,34 +3957,45 @@ impl Parser {
                         self.consume();
                         self.skip_whitespace();
                         Some(binding)
-                    } else {
+                    }
+                    Token::Future => {
+                        self.consume();
+                        self.skip_whitespace();
+                        Some("future".to_string())
+                    }
+                    Token::Handle => {
+                        self.consume();
+                        self.skip_whitespace();
+                        Some("handle".to_string())
+                    }
+                    Token::Perform => {
+                        self.consume();
+                        self.skip_whitespace();
+                        Some("perform".to_string())
+                    }
+                    _ => {
                         return Err(ParseError::InvalidPattern {
                             message: "Expected binding name after ':'".to_string(),
                             position: self.position,
                         });
                     }
-                } else {
-                    None
-                };
-
-                fields.push(FieldPattern {
-                    field_name,
-                    binding_name,
-                    token_range: TokenRange::new(field_start, self.position),
-                });
-
-                // Allow comma or newline between fields
-                if matches!(self.current_token(), Token::Comma) {
-                    self.consume();
-                    self.skip_whitespace();
-                } else {
-                    self.skip_whitespace();
                 }
             } else {
-                return Err(ParseError::InvalidPattern {
-                    message: "Expected field name in pattern".to_string(),
-                    position: self.position,
-                });
+                None
+            };
+
+            fields.push(FieldPattern {
+                field_name,
+                binding_name,
+                token_range: TokenRange::new(field_start, self.position),
+            });
+
+            // Allow comma or newline between fields
+            if matches!(self.current_token(), Token::Comma) {
+                self.consume();
+                self.skip_whitespace();
+            } else {
+                self.skip_whitespace();
             }
         }
 

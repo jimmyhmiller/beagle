@@ -1,0 +1,51 @@
+namespace beagle.socket
+
+// ============================================================================
+// Low-Level Socket API
+// ============================================================================
+// This module provides explicit control over TCP sockets with manual event
+// loop management. Use beagle.simple-socket for a higher-level API.
+
+use beagle.async as async
+
+// Create a TCP listener on the given host and port
+fn listen(host, port) {
+    perform async/Async.IO {
+        action: async/IOAction.TcpListen { host: host, port: port }
+    }
+}
+
+// Accept a connection on a TCP listener (blocking)
+fn accept(listener) {
+    perform async/Async.IO {
+        action: async/IOAction.TcpAccept { listener: listener }
+    }
+}
+
+// Read up to n bytes from a TCP socket (blocking)
+fn read(socket, n) {
+    perform async/Async.IO {
+        action: async/IOAction.TcpRead { socket: socket, n: n }
+    }
+}
+
+// Write data to a TCP socket (blocking)
+fn write(socket, data) {
+    perform async/Async.IO {
+        action: async/IOAction.TcpWrite { socket: socket, data: data }
+    }
+}
+
+// Close a TCP socket
+fn close(socket) {
+    perform async/Async.IO {
+        action: async/IOAction.TcpClose { socket: socket }
+    }
+}
+
+// Close a TCP listener
+fn close-listener(listener) {
+    perform async/Async.IO {
+        action: async/IOAction.TcpCloseListener { listener: listener }
+    }
+}
