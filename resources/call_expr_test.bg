@@ -1,0 +1,23 @@
+namespace call_expr_test
+
+struct Container {
+    func
+}
+
+fn main() {
+    let add_one = fn(x) { x + 1 }
+    let container = Container { func: add_one }
+
+    // Call function stored in struct field
+    println(container.func(5))
+
+    // Nested property access call
+    let outer = Container { func: Container { func: add_one } }
+    println(outer.func.func(10))
+
+    "done"
+}
+
+// Expect
+// 6
+// 11

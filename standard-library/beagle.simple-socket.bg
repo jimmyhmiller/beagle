@@ -167,6 +167,12 @@ extend ContinuationHandler with effect/Handler(async/Async) {
                         let conts = deref(self.accept_continuations)
                         reset!(self.accept_continuations, dissoc(conts, listener.listener_id))
                         resume(null)
+                    },
+
+                    async/IOAction.TcpConnect { host, port } => {
+                        // Client connect - delegate to standard handler
+                        let socket = async/handle-io-action(action)
+                        resume(socket)
                     }
                 }
             },

@@ -142,6 +142,7 @@ pub enum Token {
     While,
     Break,
     Continue,
+    Return,
     If,
     Else,
     LessThanOrEqual,
@@ -287,6 +288,7 @@ impl Token {
             Token::While => Ok("while".to_string()),
             Token::Break => Ok("break".to_string()),
             Token::Continue => Ok("continue".to_string()),
+            Token::Return => Ok("return".to_string()),
             Token::If => Ok("if".to_string()),
             Token::Else => Ok("else".to_string()),
             Token::Let => Ok("let".to_string()),
@@ -676,6 +678,7 @@ impl Tokenizer {
             b"while" => Token::While,
             b"break" => Token::Break,
             b"continue" => Token::Continue,
+            b"return" => Token::Return,
             b"if" => Token::If,
             b"else" => Token::Else,
             b"<=" => Token::LessThanOrEqual,
@@ -1034,7 +1037,10 @@ impl Parser {
                 (90, Associativity::Left)
             }
 
-            // Dot (e.g., for member access) should have very high precedence.
+            // Dot, index, and struct creation should have very high precedence.
+            // Note: OpenParen is NOT included here - function calls on identifiers are handled
+            // specially in parse_atom, and we don't want "value(next_key)" to be parsed as
+            // a function call in contexts like map literals {key1 value1 (key2) value2}.
             Token::Dot | Token::OpenBracket | Token::OpenCurly => (100, Associativity::Left),
             // Default for unrecognized tokens.
             _ => (0, Associativity::Left),
@@ -1140,6 +1146,7 @@ impl Parser {
             Token::While => Ok(Some(self.parse_while()?)),
             Token::Break => Ok(Some(self.parse_break()?)),
             Token::Continue => Ok(Some(self.parse_continue()?)),
+            Token::Return => Ok(Some(self.parse_return()?)),
             Token::For => Ok(Some(self.parse_for()?)),
             Token::Struct => Ok(Some(self.parse_struct()?)),
             Token::Enum => Ok(Some(self.parse_enum()?)),
@@ -1635,6 +1642,38 @@ impl Parser {
         })
     }
 
+    fn parse_return(&mut self) -> ParseResult<Ast> {
+        let start_position = self.position;
+        self.move_to_next_non_whitespace();
+        if self.current_token() != Token::OpenParen {
+            return Err(ParseError::MissingToken {
+                expected: "'(' after return".to_string(),
+                position: self.position,
+            });
+        }
+        self.move_to_next_non_whitespace();
+        let value = if self.current_token() == Token::CloseParen {
+            Ast::Null(self.position)
+        } else {
+            self.parse_expression(0, true, true)?
+                .ok_or_else(|| ParseError::UnexpectedEof {
+                    expected: "value in return()".to_string(),
+                })?
+        };
+        if self.current_token() != Token::CloseParen {
+            return Err(ParseError::MissingToken {
+                expected: "')' after return value".to_string(),
+                position: self.position,
+            });
+        }
+        self.move_to_next_non_whitespace();
+        let end_position = self.position;
+        Ok(Ast::Return {
+            value: Box::new(value),
+            token_range: TokenRange::new(start_position, end_position),
+        })
+    }
+
     fn parse_for(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
         self.move_to_next_non_whitespace();
@@ -1998,6 +2037,14 @@ impl Parser {
     fn consume(&mut self) -> usize {
         self.position += 1;
         self.position - 1
+    }
+
+    /// Consume a keyword token and return it as an identifier string.
+    /// Used when keywords appear in contexts where they should be treated as identifiers
+    /// (e.g., property names after '.')
+    fn consume_keyword_as_identifier(&mut self, name: &str) -> String {
+        self.consume();
+        name.to_string()
     }
 
     fn move_to_next_atom(&mut self) {
@@ -4376,46 +4423,161 @@ impl Parser {
     fn parse_postfix(
         &mut self,
         lhs: Ast,
-        min_precedence: usize,
+        _min_precedence: usize,
         struct_creation_allowed: bool,
     ) -> ParseResult<Option<Ast>> {
         match self.current_token() {
             Token::Dot => {
                 self.consume();
-                let rhs = self
-                    .parse_expression(min_precedence, true, struct_creation_allowed)?
-                    .ok_or_else(|| ParseError::UnexpectedEof {
-                        expected: "expression after '.'".to_string(),
-                    })?;
+                self.skip_spaces();
                 let start_position = lhs.token_range().start;
-                let end_position = rhs.token_range().end + 1;
-                let token_range = TokenRange::new(start_position, end_position);
-                if matches!(rhs, Ast::StructCreation { .. }) {
-                    // turn this into enum creation
-                    match rhs {
-                        Ast::StructCreation {
-                            name,
-                            fields,
-                            token_range,
-                        } => Ok(Some(Ast::EnumCreation {
-                            name: if let Ast::Identifier(name, _) = lhs {
-                                name
-                            } else {
-                                return Err(ParseError::InvalidExpression {
-                                    message: "Expected identifier before '.'".to_string(),
-                                    position: start_position,
-                                });
-                            },
+
+                // After a dot, we only want to parse an identifier (for property access)
+                // or a struct creation (for enum variant syntax: Enum.Variant { ... })
+                // We should NOT parse a full expression like func(5), because that would
+                // create a Call as the property. Instead, we parse just the identifier,
+                // and let the postfix loop handle the subsequent ( to create a CallExpr.
+                //
+                // Keywords can also be used as property names (e.g., obj.handle, obj.match)
+                let (name, name_position) = match self.current_token() {
+                    Token::Atom((name_start, name_end)) => {
+                        let name = String::from_utf8(
+                            self.source.as_bytes()[name_start..name_end].to_vec(),
+                        )
+                        .map_err(|_| ParseError::InvalidUtf8 {
+                            position: name_start,
+                        })?;
+                        let pos = self.consume();
+                        (name, pos)
+                    }
+                    // Allow keywords as property names after .
+                    Token::Fn => (self.consume_keyword_as_identifier("fn"), self.position),
+                    Token::If => (self.consume_keyword_as_identifier("if"), self.position),
+                    Token::Else => (self.consume_keyword_as_identifier("else"), self.position),
+                    Token::Let => (self.consume_keyword_as_identifier("let"), self.position),
+                    Token::True => (self.consume_keyword_as_identifier("true"), self.position),
+                    Token::False => (self.consume_keyword_as_identifier("false"), self.position),
+                    Token::Null => (self.consume_keyword_as_identifier("null"), self.position),
+                    Token::Struct => (self.consume_keyword_as_identifier("struct"), self.position),
+                    Token::Enum => (self.consume_keyword_as_identifier("enum"), self.position),
+                    Token::Match => (self.consume_keyword_as_identifier("match"), self.position),
+                    Token::While => (self.consume_keyword_as_identifier("while"), self.position),
+                    Token::For => (self.consume_keyword_as_identifier("for"), self.position),
+                    Token::In => (self.consume_keyword_as_identifier("in"), self.position),
+                    Token::Loop => (self.consume_keyword_as_identifier("loop"), self.position),
+                    Token::Break => (self.consume_keyword_as_identifier("break"), self.position),
+                    Token::Continue => (
+                        self.consume_keyword_as_identifier("continue"),
+                        self.position,
+                    ),
+                    Token::Try => (self.consume_keyword_as_identifier("try"), self.position),
+                    Token::Catch => (self.consume_keyword_as_identifier("catch"), self.position),
+                    Token::Throw => (self.consume_keyword_as_identifier("throw"), self.position),
+                    Token::Reset => (self.consume_keyword_as_identifier("reset"), self.position),
+                    Token::Shift => (self.consume_keyword_as_identifier("shift"), self.position),
+                    Token::Perform => {
+                        (self.consume_keyword_as_identifier("perform"), self.position)
+                    }
+                    Token::Handle => (self.consume_keyword_as_identifier("handle"), self.position),
+                    Token::With => (self.consume_keyword_as_identifier("with"), self.position),
+                    Token::Protocol => (
+                        self.consume_keyword_as_identifier("protocol"),
+                        self.position,
+                    ),
+                    Token::Extend => (self.consume_keyword_as_identifier("extend"), self.position),
+                    Token::Use => (self.consume_keyword_as_identifier("use"), self.position),
+                    Token::Namespace => (
+                        self.consume_keyword_as_identifier("namespace"),
+                        self.position,
+                    ),
+                    Token::Future => (self.consume_keyword_as_identifier("future"), self.position),
+                    Token::Mut => (self.consume_keyword_as_identifier("mut"), self.position),
+                    Token::Infinity => (
+                        self.consume_keyword_as_identifier("infinity"),
+                        self.position,
+                    ),
+                    Token::NegativeInfinity => (
+                        self.consume_keyword_as_identifier("-infinity"),
+                        self.position,
+                    ),
+                    _ => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "identifier after '.'".to_string(),
+                            found: self
+                                .current_token()
+                                .literal(self.source.as_bytes())
+                                .unwrap_or_else(|_| "unknown".to_string()),
+                            position: self.position,
+                        });
+                    }
+                };
+
+                self.skip_spaces();
+
+                // Check if this is enum creation syntax: Enum.Variant { ... }
+                if self.is_open_curly() && struct_creation_allowed {
+                    let fields_start = self.consume();
+                    let fields = self.parse_struct_fields_creations()?;
+                    self.expect_close_curly()?;
+                    let token_range = TokenRange::new(start_position, self.position);
+                    match lhs {
+                        Ast::Identifier(enum_name, _) => Ok(Some(Ast::EnumCreation {
+                            name: enum_name,
                             variant: name,
                             fields,
                             token_range,
                         })),
+                        Ast::PropertyAccess { .. } => {
+                            // Handle nested: namespace.Enum.Variant { ... }
+                            // Not currently supported, error out
+                            Err(ParseError::InvalidExpression {
+                                message: "Nested enum creation not supported".to_string(),
+                                position: fields_start,
+                            })
+                        }
                         _ => Err(ParseError::InvalidExpression {
-                            message: "Expected struct creation".to_string(),
+                            message: "Expected identifier before '.' for enum creation".to_string(),
                             position: start_position,
                         }),
                     }
+                } else if self.is_open_paren() {
+                    // Method call: obj.method(args)
+                    // Create the property access first
+                    let rhs = Ast::Identifier(name.clone(), name_position);
+                    let prop_end = rhs.token_range().end + 1;
+                    let prop_access = Ast::PropertyAccess {
+                        object: Box::new(lhs),
+                        property: Box::new(rhs),
+                        token_range: TokenRange::new(start_position, prop_end),
+                    };
+
+                    // Now parse the function call arguments
+                    self.consume(); // consume '('
+                    let mut args = Vec::new();
+                    while !self.at_end() && !self.is_close_paren() {
+                        let arg = self.parse_expression(0, true, true)?.ok_or_else(|| {
+                            ParseError::UnexpectedEof {
+                                expected: "argument in function call".to_string(),
+                            }
+                        })?;
+                        args.push(arg);
+                        self.skip_whitespace();
+                        if !self.is_close_paren() {
+                            self.expect_comma()?;
+                        }
+                    }
+                    self.expect_close_paren()?;
+                    let token_range = TokenRange::new(start_position, self.position);
+                    Ok(Some(Ast::CallExpr {
+                        callee: Box::new(prop_access),
+                        args,
+                        token_range,
+                    }))
                 } else {
+                    // Simple property access: obj.field
+                    let rhs = Ast::Identifier(name, name_position);
+                    let end_position = rhs.token_range().end + 1;
+                    let token_range = TokenRange::new(start_position, end_position);
                     Ok(Some(Ast::PropertyAccess {
                         object: Box::new(lhs),
                         property: Box::new(rhs),
@@ -4424,7 +4586,8 @@ impl Parser {
                 }
             }
             Token::OpenParen => {
-                let position = self.consume();
+                let start_position = lhs.token_range().start;
+                self.consume();
                 let mut args = Vec::new();
                 while !self.at_end() && !self.is_close_paren() {
                     let arg = self.parse_expression(0, true, true)?.ok_or_else(|| {
@@ -4439,19 +4602,21 @@ impl Parser {
                     }
                 }
                 self.expect_close_paren()?;
-                Ok(Some(Ast::Call {
-                    name: match lhs {
-                        Ast::Identifier(name, _) => name,
-                        _ => {
-                            return Err(ParseError::InvalidExpression {
-                                message: "Expected identifier before '('".to_string(),
-                                position,
-                            });
-                        }
-                    },
-                    args,
-                    token_range: TokenRange::new(position, self.position),
-                }))
+                let token_range = TokenRange::new(start_position, self.position);
+                // If the callee is a simple identifier, use Call for backwards compatibility
+                // Otherwise use CallExpr for expression calls like x.y()
+                match lhs {
+                    Ast::Identifier(name, _) => Ok(Some(Ast::Call {
+                        name,
+                        args,
+                        token_range,
+                    })),
+                    _ => Ok(Some(Ast::CallExpr {
+                        callee: Box::new(lhs),
+                        args,
+                        token_range,
+                    })),
+                }
             }
             Token::OpenBracket => {
                 let position = self.consume();

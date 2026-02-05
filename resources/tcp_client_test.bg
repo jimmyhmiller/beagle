@@ -1,0 +1,27 @@
+namespace tcp_client_test
+
+use beagle.socket as socket
+
+// Simple TCP client test using the socket API
+
+fn main() {
+    println("TCP Client Test")
+    println("===============")
+
+    try {
+        println("Connecting to localhost:8080...")
+        let conn = socket/connect("127.0.0.1", 8080)
+        println("Connected!")
+
+        println("Sending data...")
+        socket/write(conn, "Hello from Beagle!\n")
+        println("Data sent!")
+
+        socket/close(conn)
+        println("Connection closed")
+    } catch (e) {
+        println("Connection failed (server not running?):", e)
+    }
+
+    println("done")
+}

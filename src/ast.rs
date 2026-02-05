@@ -155,6 +155,13 @@ pub enum Ast {
         args: Vec<Ast>,
         token_range: TokenRange,
     },
+    /// Call an expression (for calling functions stored in variables or fields)
+    /// e.g., `x.y()` or `(get_fn())(arg)`
+    CallExpr {
+        callee: Box<Ast>,
+        args: Vec<Ast>,
+        token_range: TokenRange,
+    },
     Let {
         pattern: Pattern,
         value: Box<Ast>,
@@ -275,6 +282,10 @@ pub enum Ast {
         token_range: TokenRange,
     },
     Continue {
+        token_range: TokenRange,
+    },
+    Return {
+        value: Box<Ast>,
         token_range: TokenRange,
     },
     For {
@@ -519,6 +530,7 @@ impl Ast {
             | Ast::Recurse { token_range, .. }
             | Ast::TailRecurse { token_range, .. }
             | Ast::Call { token_range, .. }
+            | Ast::CallExpr { token_range, .. }
             | Ast::Let { token_range, .. }
             | Ast::LetMut { token_range, .. }
             | Ast::Assignment { token_range, .. }
@@ -540,6 +552,7 @@ impl Ast {
             | Ast::While { token_range, .. }
             | Ast::Break { token_range, .. }
             | Ast::Continue { token_range, .. }
+            | Ast::Return { token_range, .. }
             | Ast::For { token_range, .. }
             | Ast::StructCreation { token_range, .. }
             | Ast::PropertyAccess { token_range, .. }
@@ -1273,6 +1286,11 @@ impl AstCompiler<'_> {
                 self.ir.jump(loop_start);
 
                 Ok(Value::Null) // Unreachable after jump
+            }
+            Ast::Return { value, .. } => {
+                let return_value = self.call_compile(&value)?;
+                self.ir.ret(return_value);
+                Ok(Value::Null) // Unreachable after return
             }
             Ast::For {
                 binding,
@@ -2572,6 +2590,30 @@ impl AstCompiler<'_> {
                 } else {
                     self.call(&name, args)
                 }
+            }
+            Ast::CallExpr { callee, args, .. } => {
+                // Compile the callee expression to get the function value
+                self.not_tail_position();
+                let callee_value = self.call_compile(callee.as_ref())?;
+
+                // Compile arguments
+                let mut args_vec: Vec<Value> = Vec::new();
+                for arg in args.iter() {
+                    self.not_tail_position();
+                    let value = self.call_compile(arg)?;
+                    let value = match value {
+                        Value::Register(_) => value,
+                        _ => {
+                            let reg = self.ir.volatile_register();
+                            self.ir.assign(reg, value);
+                            reg.into()
+                        }
+                    };
+                    args_vec.push(value);
+                }
+
+                // Use the value-based closure call
+                Ok(self.compile_closure_call_from_value(callee_value, args_vec))
             }
             Ast::IntegerLiteral(n, _) => Ok(Value::TaggedConstant(n as isize)),
             Ast::FloatLiteral(n, _) => {
@@ -4125,6 +4167,124 @@ impl AstCompiler<'_> {
         // self.ir.breakpoint();
     }
 
+    /// Like compile_closure_call but takes a Value directly instead of a VariableLocation.
+    /// Used for CallExpr where we have an expression result (e.g., x.y()) rather than a variable name.
+    fn compile_closure_call_from_value(
+        &mut self,
+        function_value: Value,
+        args: Vec<Value>,
+    ) -> Value {
+        let ret_register = self.ir.assign_new(Value::TaggedConstant(0));
+
+        // Save argument values to locals FIRST, before any operations that could clobber registers
+        let mut saved_arg_locals = Vec::new();
+        for (i, arg) in args.iter().enumerate() {
+            let local_name = format!("__closure_call_arg_{}", i);
+            let local = self.find_or_insert_local(&local_name);
+            let arg_reg = self.ir.assign_new_force(*arg);
+            self.ir.store_local(local, arg_reg.into());
+            saved_arg_locals.push(local);
+        }
+
+        let function_register = self.ir.assign_new(function_value);
+
+        // Save the function value to a local to survive across branch checks
+        let saved_func_local = self.find_or_insert_local("__closure_call_func");
+        self.ir
+            .store_local(saved_func_local, function_register.into());
+
+        let closure_register = self.ir.assign_new(function_register);
+
+        // Get the tag
+        let tag = self.ir.get_tag(closure_register.into());
+        let tag_reg = self.ir.assign_new(tag);
+
+        let call_closure = self.ir.label("call_closure");
+        let call_multi_arity = self.ir.label("call_multi_arity");
+        let call_function = self.ir.label("call_function");
+        let exit_closure_call = self.ir.label("exit_closure_call");
+
+        // Check for Closure tag
+        let closure_tag = BuiltInTypes::Closure.get_tag();
+        let closure_tag_val = Value::RawValue(closure_tag as usize);
+        self.ir
+            .jump_if(call_closure, Condition::Equal, tag_reg, closure_tag_val);
+
+        // Check for HeapObject tag (multi-arity functions are stored as HeapObjects)
+        let heap_object_tag = BuiltInTypes::HeapObject.get_tag();
+        let heap_object_tag_val = Value::RawValue(heap_object_tag as usize);
+        self.ir.jump_if(
+            call_multi_arity,
+            Condition::Equal,
+            tag_reg,
+            heap_object_tag_val,
+        );
+
+        // Fall through to direct function call
+        self.ir.write_label(call_function);
+
+        // Non-closure, non-multi-arity function call path
+        let saved_fn = self.ir.assign_new(function_register);
+        let reloaded_args: Vec<Value> = saved_arg_locals
+            .iter()
+            .map(|local| self.ir.load_local(*local))
+            .collect();
+        let result = self.ir.call(saved_fn.into(), reloaded_args);
+        self.ir.assign(ret_register, result);
+        self.ir.jump(exit_closure_call);
+
+        // Multi-arity function call path
+        self.ir.write_label(call_multi_arity);
+        {
+            let func_obj = self.ir.load_local(saved_func_local);
+
+            let dispatch_fn = self
+                .compiler
+                .find_function("beagle.builtin/dispatch-multi-arity")
+                .expect("dispatch-multi-arity builtin not found");
+            let dispatch_fn_ptr = self.compiler.get_function_pointer(dispatch_fn).unwrap();
+            let dispatch_fn_val = self.ir.assign_new(dispatch_fn_ptr);
+
+            let stack_pointer = self.ir.get_stack_pointer_imm(0);
+            let frame_pointer = self.ir.get_frame_pointer();
+            let arg_count = Value::TaggedConstant(args.len() as isize);
+            let arg_count_reg = self.ir.assign_new(arg_count);
+            let fn_ptr = self.ir.call_builtin(
+                dispatch_fn_val.into(),
+                vec![stack_pointer, frame_pointer, func_obj, arg_count_reg.into()],
+            );
+
+            let saved_fn_ptr = self.ir.assign_new(fn_ptr);
+            let reloaded_args: Vec<Value> = saved_arg_locals
+                .iter()
+                .map(|local| self.ir.load_local(*local))
+                .collect();
+            let result = self.ir.call(saved_fn_ptr.into(), reloaded_args);
+            self.ir.assign(ret_register, result);
+        }
+        self.ir.jump(exit_closure_call);
+
+        // Closure call path
+        self.ir.write_label(call_closure);
+        {
+            let closure_val = self.ir.load_local(saved_func_local);
+            let untagged_closure_register = self.ir.untag(closure_val);
+            let function_pointer = self.ir.load_from_memory(untagged_closure_register, 1);
+            let saved_fn_ptr = self.ir.assign_new(function_pointer);
+
+            let mut reloaded_args: Vec<Value> = saved_arg_locals
+                .iter()
+                .map(|local| self.ir.load_local(*local))
+                .collect();
+            reloaded_args.insert(0, closure_val);
+            let result = self.ir.call(saved_fn_ptr.into(), reloaded_args);
+            self.ir.assign(ret_register, result);
+        }
+
+        self.ir.write_label(exit_closure_call);
+        ret_register.into()
+    }
+
     fn compile_closure(&mut self, function_pointer: usize) -> Result<Value, CompileError> {
         // When I get those free variables, I'd need to
         // make sure that the variables they refer to are
@@ -5046,6 +5206,17 @@ impl AstCompiler<'_> {
                 }
             }
 
+            Ast::CallExpr {
+                callee,
+                args,
+                token_range: _,
+            } => {
+                self.find_mutable_vars_that_need_boxing(callee);
+                for arg in args.iter() {
+                    self.find_mutable_vars_that_need_boxing(arg);
+                }
+            }
+
             Ast::StructCreation {
                 name: _,
                 fields,
@@ -5133,6 +5304,12 @@ impl AstCompiler<'_> {
             }
             Ast::Continue { token_range: _ } => {
                 // No sub-expressions to check
+            }
+            Ast::Return {
+                value,
+                token_range: _,
+            } => {
+                self.find_mutable_vars_that_need_boxing(value);
             }
             Ast::Try {
                 body,

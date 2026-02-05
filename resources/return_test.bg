@@ -1,0 +1,56 @@
+namespace return_test
+
+fn simple_return() {
+    return(42)
+    println("SHOULD NOT PRINT")
+}
+
+fn conditional_return(x) {
+    if x > 10 {
+        return("big")
+    }
+    "small"
+}
+
+fn return_null() {
+    return()
+}
+
+fn return_in_loop() {
+    let mut i = 0
+    loop {
+        i = i + 1
+        if i == 5 {
+            return(i * 10)
+        }
+    }
+}
+
+fn nested_function_return() {
+    let inner = fn(x) {
+        if x < 0 {
+            return("negative")
+        }
+        "non-negative"
+    }
+    inner(-5) ++ " and " ++ inner(5)
+}
+
+fn main() {
+    println(simple_return())
+    println(conditional_return(5))
+    println(conditional_return(15))
+    println(return_null())
+    println(return_in_loop())
+    println(nested_function_return())
+    println("done")
+}
+
+// Expect
+// 42
+// small
+// big
+// null
+// 50
+// negative and non-negative
+// done
