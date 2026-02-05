@@ -850,6 +850,7 @@ impl Compiler {
         runtime.get_function_pointer(f).ok().map(|x| x as usize)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert_function<B: CodegenBackend>(
         &mut self,
         function_name: Option<&str>,

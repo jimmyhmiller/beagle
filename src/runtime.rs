@@ -5876,9 +5876,7 @@ impl Runtime {
             )
         })?;
 
-        let page: Mmap = page_reserved
-            .try_into()
-            .map_err(|e| format!("Failed to convert Reserved to Mmap after writing: {:?}", e))?;
+        let page: Mmap = page_reserved;
 
         self.jump_table_pages.insert(page_index, page);
 
@@ -5921,12 +5919,7 @@ impl Runtime {
             )
         })?;
 
-        let page: Mmap = page_reserved.try_into().map_err(|e| {
-            format!(
-                "Failed to convert Reserved to Mmap after modification: {:?}",
-                e
-            )
-        })?;
+        let page: Mmap = page_reserved;
 
         self.jump_table_pages.insert(page_index, page);
 
