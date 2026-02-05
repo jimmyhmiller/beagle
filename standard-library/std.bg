@@ -628,6 +628,7 @@ enum SystemError {
     FieldError { message, location }
     IndexError { message, location }
     MutabilityError { message, location }
+    JsonError { message, location }
 }
 
 // Diagnostic severity levels

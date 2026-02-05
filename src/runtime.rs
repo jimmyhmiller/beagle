@@ -4997,6 +4997,12 @@ impl Runtime {
         }
     }
 
+    /// Public method to collect all key-value entries from a PersistentMap.
+    /// Used by json-encode builtin for serialization.
+    pub fn get_map_entries_for_json(&self, map: GcHandle) -> Vec<(usize, usize)> {
+        self.collect_map_entries(map)
+    }
+
     pub fn get_struct_by_id(&self, struct_id: usize) -> Option<&Struct> {
         self.structs.get_by_id(struct_id)
     }

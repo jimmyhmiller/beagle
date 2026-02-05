@@ -649,7 +649,7 @@ impl Compiler {
             _ => Err(CompileError::ParseError(
                 crate::parser::ParseError::InvalidDeclaration {
                     message: "Expected use AST node".to_string(),
-                    position: 0,
+                    location: crate::parser::SourceLocation::from_position(0),
                 },
             )),
         }

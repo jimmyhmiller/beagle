@@ -2014,6 +2014,22 @@ fn unwrap-all(results) {
 
 let __io_loop_atom = atom(null)
 
+// ============================================================================
+// TCP Result Type Constants
+// ============================================================================
+// These constants correspond to the result types returned by core/tcp-result-pop().
+// Using named constants instead of magic numbers improves code readability.
+
+let TCP_RESULT_NONE = 0
+let TCP_CONNECT_OK = 1
+let TCP_CONNECT_ERR = 2
+let TCP_ACCEPT_OK = 3
+let TCP_ACCEPT_ERR = 4
+let TCP_READ_OK = 5
+let TCP_READ_ERR = 6
+let TCP_WRITE_OK = 7
+let TCP_WRITE_ERR = 8
+
 fn get-io-loop() {
     let loop_id = deref(__io_loop_atom)
     if loop_id == null {
@@ -2054,12 +2070,10 @@ fn handle-io-action(action) {
             loop {
                 core/event-loop-run-once(loop_id, 50)
                 let result_type = core/tcp-result-pop(loop_id)
-                if result_type == 1 {
-                    // ConnectOk
+                if result_type == TCP_CONNECT_OK {
                     let socket_id = core/tcp-result-value(loop_id)
                     break(TcpSocket { loop_id: loop_id, socket_id: socket_id })
-                } else if result_type == 2 {
-                    // ConnectErr
+                } else if result_type == TCP_CONNECT_ERR {
                     let error = core/tcp-result-data(loop_id)
                     throw("Connect failed: " ++ error)
                 }
@@ -2074,12 +2088,10 @@ fn handle-io-action(action) {
             loop {
                 core/event-loop-run-once(loop_id, 50)
                 let result_type = core/tcp-result-pop(loop_id)
-                if result_type == 3 {
-                    // AcceptOk
+                if result_type == TCP_ACCEPT_OK {
                     let socket_id = core/tcp-result-value(loop_id)
                     break(TcpSocket { loop_id: loop_id, socket_id: socket_id })
-                } else if result_type == 4 {
-                    // AcceptErr
+                } else if result_type == TCP_ACCEPT_ERR {
                     let error = core/tcp-result-data(loop_id)
                     throw("Accept failed: " ++ error)
                 }
@@ -2096,12 +2108,10 @@ fn handle-io-action(action) {
             loop {
                 core/event-loop-run-once(loop_id, 50)
                 let result_type = core/tcp-result-pop(loop_id)
-                if result_type == 5 {
-                    // ReadOk
+                if result_type == TCP_READ_OK {
                     let data = core/tcp-result-data(loop_id)
                     break(data)
-                } else if result_type == 6 {
-                    // ReadErr
+                } else if result_type == TCP_READ_ERR {
                     let error = core/tcp-result-data(loop_id)
                     throw("Read failed: " ++ error)
                 }
@@ -2115,12 +2125,10 @@ fn handle-io-action(action) {
             loop {
                 core/event-loop-run-once(loop_id, 50)
                 let result_type = core/tcp-result-pop(loop_id)
-                if result_type == 7 {
-                    // WriteOk
+                if result_type == TCP_WRITE_OK {
                     let bytes_written = core/tcp-result-value(loop_id)
                     break(bytes_written)
-                } else if result_type == 8 {
-                    // WriteErr
+                } else if result_type == TCP_WRITE_ERR {
                     let error = core/tcp-result-data(loop_id)
                     throw("Write failed: " ++ error)
                 }

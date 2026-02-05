@@ -1,0 +1,37 @@
+namespace radix_literal_test
+
+fn main() {
+    // Hexadecimal
+    println(0x1F)     // 31
+    println(0xFF)     // 255
+    println(0xABCD)   // 43981
+
+    // Octal
+    println(0o755)    // 493
+    println(0o17)     // 15
+    println(0o777)    // 511
+
+    // Binary
+    println(0b1010)   // 10
+    println(0b11111111) // 255
+    println(0b1)      // 1
+
+    // Uppercase prefixes
+    println(0XFF)     // 255
+    println(0O755)    // 493
+    println(0B1010)   // 10
+}
+
+// Expect
+// 31
+// 255
+// 43981
+// 493
+// 15
+// 511
+// 10
+// 255
+// 1
+// 255
+// 493
+// 10

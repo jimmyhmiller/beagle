@@ -1,0 +1,61 @@
+namespace json_test
+
+fn main() {
+    // Test encoding primitives
+    println(json-encode(42))
+    println(json-encode(3.14))
+    println(json-encode("hello"))
+    println(json-encode(true))
+    println(json-encode(false))
+    println(json-encode(null))
+
+    // Test encoding arrays
+    println(json-encode([1, 2, 3]))
+    println(json-encode(["a", "b"]))
+
+    // Test encoding maps
+    println(json-encode({:name "Alice"}))
+    println(json-encode({:x 1, :y 2}))
+
+    // Test decoding primitives
+    println(json-decode("42"))
+    println(json-decode("3.14"))
+    println(json-decode("\"hello\""))
+    println(json-decode("true"))
+    println(json-decode("false"))
+    println(json-decode("null"))
+
+    // Test decoding arrays
+    let arr = json-decode("[1, 2, 3]")
+    println(get(arr, 0))
+    println(get(arr, 1))
+    println(get(arr, 2))
+
+    // Test decoding objects
+    let obj = json-decode("{\"name\":\"Bob\",\"age\":30}")
+    println(get(obj, "name"))
+    println(get(obj, "age"))
+}
+
+// Expect
+// 42
+// 3.14
+// "hello"
+// true
+// false
+// null
+// [1,2,3]
+// ["a","b"]
+// {"name":"Alice"}
+// {"x":1,"y":2}
+// 42
+// 3.14
+// hello
+// true
+// false
+// null
+// 1
+// 2
+// 3
+// Bob
+// 30

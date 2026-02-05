@@ -12,41 +12,70 @@ use crate::{
 };
 use std::{error::Error, fmt};
 
+/// Represents a source location with file, line, and column information
+#[derive(Debug, Clone)]
+pub struct SourceLocation {
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+}
+
+impl SourceLocation {
+    pub fn new(file: String, line: usize, column: usize) -> Self {
+        Self { file, line, column }
+    }
+
+    /// Create a location with just a byte position (for tokenizer errors before line/column mapping)
+    pub fn from_position(position: usize) -> Self {
+        Self {
+            file: "<unknown>".to_string(),
+            line: 0,
+            column: position,
+        }
+    }
+}
+
+impl fmt::Display for SourceLocation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}:{}", self.file, self.line, self.column)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ParseError {
     InvalidUtf8 {
-        position: usize,
+        location: SourceLocation,
     },
     UnexpectedToken {
         expected: String,
         found: String,
-        position: usize,
+        location: SourceLocation,
     },
     UnexpectedEof {
         expected: String,
     },
     InvalidNumberLiteral {
         literal: String,
-        position: usize,
+        location: SourceLocation,
     },
     InvalidStringEscape {
-        position: usize,
+        location: SourceLocation,
     },
     MissingToken {
         expected: String,
-        position: usize,
+        location: SourceLocation,
     },
     InvalidPattern {
         message: String,
-        position: usize,
+        location: SourceLocation,
     },
     InvalidExpression {
         message: String,
-        position: usize,
+        location: SourceLocation,
     },
     InvalidDeclaration {
         message: String,
-        position: usize,
+        location: SourceLocation,
     },
     IoError {
         message: String,
@@ -56,52 +85,36 @@ pub enum ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ParseError::InvalidUtf8 { position } => {
-                write!(f, "Invalid UTF-8 at position {}", position)
+            ParseError::InvalidUtf8 { location } => {
+                write!(f, "{}: Invalid UTF-8", location)
             }
             ParseError::UnexpectedToken {
                 expected,
                 found,
-                position,
+                location,
             } => {
-                write!(
-                    f,
-                    "Expected {} but found {} at position {}",
-                    expected, found, position
-                )
+                write!(f, "{}: Expected {} but found {}", location, expected, found)
             }
             ParseError::UnexpectedEof { expected } => {
                 write!(f, "Unexpected end of file, expected {}", expected)
             }
-            ParseError::InvalidNumberLiteral { literal, position } => {
-                write!(
-                    f,
-                    "Invalid number literal '{}' at position {}",
-                    literal, position
-                )
+            ParseError::InvalidNumberLiteral { literal, location } => {
+                write!(f, "{}: Invalid number literal '{}'", location, literal)
             }
-            ParseError::InvalidStringEscape { position } => {
-                write!(f, "Invalid string escape sequence at position {}", position)
+            ParseError::InvalidStringEscape { location } => {
+                write!(f, "{}: Invalid string escape sequence", location)
             }
-            ParseError::MissingToken { expected, position } => {
-                write!(f, "Missing {} at position {}", expected, position)
+            ParseError::MissingToken { expected, location } => {
+                write!(f, "{}: Missing {}", location, expected)
             }
-            ParseError::InvalidPattern { message, position } => {
-                write!(f, "Invalid pattern: {} at position {}", message, position)
+            ParseError::InvalidPattern { message, location } => {
+                write!(f, "{}: Invalid pattern: {}", location, message)
             }
-            ParseError::InvalidExpression { message, position } => {
-                write!(
-                    f,
-                    "Invalid expression: {} at position {}",
-                    message, position
-                )
+            ParseError::InvalidExpression { message, location } => {
+                write!(f, "{}: Invalid expression: {}", location, message)
             }
-            ParseError::InvalidDeclaration { message, position } => {
-                write!(
-                    f,
-                    "Invalid declaration: {} at position {}",
-                    message, position
-                )
+            ParseError::InvalidDeclaration { message, location } => {
+                write!(f, "{}: Invalid declaration: {}", location, message)
             }
             ParseError::IoError { message } => {
                 write!(f, "IO error: {}", message)
@@ -325,11 +338,13 @@ impl Token {
             | Token::String((start, end))
             | Token::Integer((start, end))
             | Token::Float((start, end)) => String::from_utf8(input_bytes[*start..*end].to_vec())
-                .map_err(|_| ParseError::InvalidUtf8 { position: *start }),
+                .map_err(|_| ParseError::InvalidUtf8 {
+                    location: SourceLocation::from_position(*start),
+                }),
             Token::InterpolatedString(_) => Ok("<interpolated string>".to_string()),
             Token::Never => Err(ParseError::InvalidExpression {
                 message: "Internal error: Token::Never should not be used".to_string(),
-                position: 0,
+                location: SourceLocation::from_position(0),
             }),
         }
     }
@@ -621,9 +636,72 @@ impl Tokenizer {
                 && self.peek(input_bytes).unwrap() <= NINE)
     }
 
+    /// Check if a byte is a valid hex digit
+    fn is_hex_digit(b: u8) -> bool {
+        b.is_ascii_hexdigit()
+    }
+
+    /// Check if a byte is a valid octal digit
+    fn is_octal_digit(b: u8) -> bool {
+        (b'0'..=b'7').contains(&b)
+    }
+
+    /// Check if a byte is a valid binary digit
+    fn is_binary_digit(b: u8) -> bool {
+        b == b'0' || b == b'1'
+    }
+
     pub fn parse_number(&mut self, input_bytes: &[u8]) -> Result<Token, ParseError> {
-        let mut is_float = false;
         let start = self.position;
+
+        // Check for radix prefixes: 0x (hex), 0o (octal), 0b (binary)
+        if self.current_byte(input_bytes) == ZERO {
+            self.consume(input_bytes);
+
+            if !self.at_end(input_bytes) {
+                let prefix = self.current_byte(input_bytes);
+                if prefix == b'x' || prefix == b'X' {
+                    // Hexadecimal
+                    self.consume(input_bytes);
+                    while !self.at_end(input_bytes)
+                        && Self::is_hex_digit(self.current_byte(input_bytes))
+                    {
+                        self.consume(input_bytes);
+                    }
+                    return Ok(Token::Integer((start, self.position)));
+                } else if prefix == b'o' || prefix == b'O' {
+                    // Octal
+                    self.consume(input_bytes);
+                    while !self.at_end(input_bytes)
+                        && Self::is_octal_digit(self.current_byte(input_bytes))
+                    {
+                        self.consume(input_bytes);
+                    }
+                    return Ok(Token::Integer((start, self.position)));
+                } else if prefix == b'b' || prefix == b'B' {
+                    // Binary
+                    self.consume(input_bytes);
+                    while !self.at_end(input_bytes)
+                        && Self::is_binary_digit(self.current_byte(input_bytes))
+                    {
+                        self.consume(input_bytes);
+                    }
+                    return Ok(Token::Integer((start, self.position)));
+                }
+            }
+
+            // Not a radix prefix, but already consumed a '0'
+            // Continue parsing as a regular number (could be 0, 0.5, etc.)
+            if self.at_end(input_bytes)
+                || (!self.is_valid_number_char(input_bytes)
+                    && self.current_byte(input_bytes) != PERIOD)
+            {
+                return Ok(Token::Integer((start, self.position)));
+            }
+        }
+
+        // Parse regular decimal number
+        let mut is_float = false;
         while !self.at_end(input_bytes)
             && (self.is_valid_number_char(input_bytes) || self.current_byte(input_bytes) == PERIOD)
         {
@@ -634,7 +712,11 @@ impl Tokenizer {
                         .unwrap_or_else(|_| "<invalid utf8>".to_string());
                     return Err(ParseError::InvalidNumberLiteral {
                         literal: format!("{}. (multiple decimal points)", literal),
-                        position: start,
+                        location: SourceLocation::new(
+                            "<unknown>".to_string(),
+                            self.line,
+                            self.column,
+                        ),
                     });
                 }
                 is_float = true;
@@ -959,6 +1041,26 @@ impl Parser {
         format!("{}:{}:{}", self.file_name, line, column)
     }
 
+    /// Get the SourceLocation for a given token position
+    fn location_at(&self, token_pos: usize) -> SourceLocation {
+        if token_pos < self.token_line_column_map.len() {
+            let (line, column) = self.token_line_column_map[token_pos];
+            SourceLocation::new(self.file_name.clone(), line, column)
+        } else {
+            // Fall back to last known location
+            if let Some(&(line, column)) = self.token_line_column_map.last() {
+                SourceLocation::new(self.file_name.clone(), line, column)
+            } else {
+                SourceLocation::from_position(token_pos)
+            }
+        }
+    }
+
+    /// Get the SourceLocation for the current token position
+    fn current_source_location(&self) -> SourceLocation {
+        self.location_at(self.position)
+    }
+
     pub fn get_token_line_column_map(&self) -> Vec<(usize, usize)> {
         self.token_line_column_map.clone()
     }
@@ -973,13 +1075,16 @@ impl Parser {
     fn expect_atom(&self) -> ParseResult<String> {
         match self.current_token() {
             Token::Atom((start, end)) => {
-                String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                    .map_err(|_| ParseError::InvalidUtf8 { position: start })
+                String::from_utf8(self.source.as_bytes()[start..end].to_vec()).map_err(|_| {
+                    ParseError::InvalidUtf8 {
+                        location: self.current_source_location(),
+                    }
+                })
             }
             _ => Err(ParseError::UnexpectedToken {
                 expected: "identifier".to_string(),
                 found: self.get_token_repr(),
-                position: self.position,
+                location: self.current_source_location(),
             }),
         }
     }
@@ -1221,8 +1326,11 @@ impl Parser {
             Token::Extend => Ok(Some(self.parse_extend()?)),
             Token::Atom((start, end)) => {
                 let start_position = self.position;
-                let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
+                let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec()).map_err(
+                    |_| ParseError::InvalidUtf8 {
+                        location: self.current_source_location(),
+                    },
+                )?;
                 // TODO: Make better
                 self.consume();
                 self.skip_spaces();
@@ -1246,7 +1354,9 @@ impl Parser {
             Token::String((start, end)) => {
                 let mut value =
                     String::from_utf8(self.source.as_bytes()[start + 1..end - 1].to_vec())
-                        .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
+                        .map_err(|_| ParseError::InvalidUtf8 {
+                            location: self.current_source_location(),
+                        })?;
                 // TODO: Test escapes properly
                 // Maybe token shouldn't have a range but an actual string value
                 // Or I do both
@@ -1265,7 +1375,7 @@ impl Parser {
                         let expr_bytes = &self.source.as_bytes()[seg_start..seg_end];
                         let expr_source = String::from_utf8(expr_bytes.to_vec()).map_err(|_| {
                             ParseError::InvalidUtf8 {
-                                position: seg_start,
+                                location: self.current_source_location(),
                             }
                         })?;
 
@@ -1281,7 +1391,7 @@ impl Parser {
                         let seg_bytes = &self.source.as_bytes()[seg_start..seg_end];
                         let seg_str = String::from_utf8(seg_bytes.to_vec()).map_err(|_| {
                             ParseError::InvalidUtf8 {
-                                position: seg_start,
+                                location: self.current_source_location(),
                             }
                         })?;
                         let processed = stripslashes(&seg_str);
@@ -1298,15 +1408,46 @@ impl Parser {
             }
             Token::Keyword((start, end)) => {
                 let keyword_text = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
+                    .map_err(|_| ParseError::InvalidUtf8 {
+                    location: self.current_source_location(),
+                })?;
                 let position = self.consume();
                 Ok(Some(Ast::Keyword(keyword_text, position)))
             }
             Token::Integer((start, end)) => {
                 let value = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
+                    .map_err(|_| ParseError::InvalidUtf8 {
+                        location: self.current_source_location(),
+                    })?;
                 let position = self.consume();
-                let parsed_value =
+
+                // Parse integer with radix prefix support
+                let parsed_value = if value.starts_with("0x") || value.starts_with("0X") {
+                    // Hexadecimal
+                    i64::from_str_radix(&value[2..], 16).map_err(|_| {
+                        ParseError::InvalidNumberLiteral {
+                            literal: format!("{} (invalid hexadecimal literal)", value),
+                            location: self.current_source_location(),
+                        }
+                    })?
+                } else if value.starts_with("0o") || value.starts_with("0O") {
+                    // Octal
+                    i64::from_str_radix(&value[2..], 8).map_err(|_| {
+                        ParseError::InvalidNumberLiteral {
+                            literal: format!("{} (invalid octal literal)", value),
+                            location: self.current_source_location(),
+                        }
+                    })?
+                } else if value.starts_with("0b") || value.starts_with("0B") {
+                    // Binary
+                    i64::from_str_radix(&value[2..], 2).map_err(|_| {
+                        ParseError::InvalidNumberLiteral {
+                            literal: format!("{} (invalid binary literal)", value),
+                            location: self.current_source_location(),
+                        }
+                    })?
+                } else {
+                    // Decimal
                     value
                         .parse::<i64>()
                         .map_err(|_| ParseError::InvalidNumberLiteral {
@@ -1316,8 +1457,9 @@ impl Parser {
                                 i64::MIN,
                                 i64::MAX
                             ),
-                            position: start,
-                        })?;
+                            location: self.current_source_location(),
+                        })?
+                };
                 // Values use 3-bit tagging (shifted left by 3), so only 61 bits available
                 const MAX_61_BIT: i64 = (1i64 << 60) - 1;
                 const MIN_61_BIT: i64 = -(1i64 << 60);
@@ -1327,14 +1469,16 @@ impl Parser {
                             "{} (tagged integers use 61 bits: {} to {})",
                             value, MIN_61_BIT, MAX_61_BIT
                         ),
-                        position: start,
+                        location: self.current_source_location(),
                     });
                 }
                 Ok(Some(Ast::IntegerLiteral(parsed_value, position)))
             }
             Token::Float((start, end)) => {
                 let value = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
+                    .map_err(|_| ParseError::InvalidUtf8 {
+                        location: self.current_source_location(),
+                    })?;
                 let position = self.consume();
                 Ok(Some(Ast::FloatLiteral(value, position)))
             }
@@ -1423,7 +1567,7 @@ impl Parser {
             _ => Err(ParseError::UnexpectedToken {
                 expected: "expression".to_string(),
                 found: self.get_token_repr(),
-                position: self.position,
+                location: self.current_source_location(),
             }),
         }
     }
@@ -1437,8 +1581,11 @@ impl Parser {
             Token::Atom((start, end)) => {
                 self.move_to_next_non_whitespace();
                 Some(
-                    String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                        .map_err(|_| ParseError::InvalidUtf8 { position: start })?,
+                    String::from_utf8(self.source.as_bytes()[start..end].to_vec()).map_err(
+                        |_| ParseError::InvalidUtf8 {
+                            location: self.current_source_location(),
+                        },
+                    )?,
                 )
             }
             Token::Handle => {
@@ -1529,7 +1676,7 @@ impl Parser {
         if !matches!(self.current_token(), Token::Arrow) {
             return Err(ParseError::MissingToken {
                 expected: "'=>' after arity case arguments".to_string(),
-                position: self.position,
+                location: self.current_source_location(),
             });
         }
         self.move_to_next_non_whitespace();
@@ -1592,7 +1739,7 @@ impl Parser {
         if self.current_token() != Token::OpenParen {
             return Err(ParseError::MissingToken {
                 expected: "'(' after break".to_string(),
-                position: self.position,
+                location: self.current_source_location(),
             });
         }
         self.move_to_next_non_whitespace();
@@ -1605,7 +1752,7 @@ impl Parser {
         if self.current_token() != Token::CloseParen {
             return Err(ParseError::MissingToken {
                 expected: "')' after break value".to_string(),
-                position: self.position,
+                location: self.current_source_location(),
             });
         }
         self.move_to_next_non_whitespace();
@@ -1623,7 +1770,7 @@ impl Parser {
         if self.current_token() != Token::OpenParen {
             return Err(ParseError::MissingToken {
                 expected: "'(' after continue".to_string(),
-                position: self.position,
+                location: self.current_source_location(),
             });
         }
         self.move_to_next_non_whitespace();
@@ -1632,7 +1779,7 @@ impl Parser {
             return Err(ParseError::UnexpectedToken {
                 expected: "')' - continue takes no arguments".to_string(),
                 found: self.get_token_repr(),
-                position: self.position,
+                location: self.current_source_location(),
             });
         }
         self.move_to_next_non_whitespace();
@@ -1648,7 +1795,7 @@ impl Parser {
         if self.current_token() != Token::OpenParen {
             return Err(ParseError::MissingToken {
                 expected: "'(' after return".to_string(),
-                position: self.position,
+                location: self.current_source_location(),
             });
         }
         self.move_to_next_non_whitespace();
@@ -1663,7 +1810,7 @@ impl Parser {
         if self.current_token() != Token::CloseParen {
             return Err(ParseError::MissingToken {
                 expected: "')' after return value".to_string(),
-                position: self.position,
+                location: self.current_source_location(),
             });
         }
         self.move_to_next_non_whitespace();
@@ -1681,14 +1828,17 @@ impl Parser {
         // Parse binding name
         let binding = match self.current_token() {
             Token::Atom((start, end)) => {
-                String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?
+                String::from_utf8(self.source.as_bytes()[start..end].to_vec()).map_err(|_| {
+                    ParseError::InvalidUtf8 {
+                        location: self.current_source_location(),
+                    }
+                })?
             }
             _ => {
                 return Err(ParseError::UnexpectedToken {
                     expected: "identifier after 'for'".to_string(),
                     found: self.get_token_repr(),
-                    position: self.position,
+                    location: self.current_source_location(),
                 });
             }
         };
@@ -1697,13 +1847,16 @@ impl Parser {
         // Expect 'in' keyword (context-sensitive - only in for-loops)
         match self.current_token() {
             Token::Atom((start, end)) => {
-                let atom = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
+                let atom = String::from_utf8(self.source.as_bytes()[start..end].to_vec()).map_err(
+                    |_| ParseError::InvalidUtf8 {
+                        location: self.current_source_location(),
+                    },
+                )?;
                 if atom != "in" {
                     return Err(ParseError::UnexpectedToken {
                         expected: "'in' after for binding".to_string(),
                         found: atom,
-                        position: self.position,
+                        location: self.current_source_location(),
                     });
                 }
             }
@@ -1711,7 +1864,7 @@ impl Parser {
                 return Err(ParseError::UnexpectedToken {
                     expected: "'in' after for binding".to_string(),
                     found: self.get_token_repr(),
-                    position: self.position,
+                    location: self.current_source_location(),
                 });
             }
         }
@@ -1742,14 +1895,17 @@ impl Parser {
         self.move_to_next_atom();
         let name = match self.current_token() {
             Token::Atom((start, end)) => {
-                String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?
+                String::from_utf8(self.source.as_bytes()[start..end].to_vec()).map_err(|_| {
+                    ParseError::InvalidUtf8 {
+                        location: self.current_source_location(),
+                    }
+                })?
             }
             _ => {
                 return Err(ParseError::UnexpectedToken {
                     expected: "struct name".to_string(),
                     found: self.get_token_repr(),
-                    position: self.position,
+                    location: self.current_source_location(),
                 });
             }
         };
@@ -1771,14 +1927,17 @@ impl Parser {
         self.move_to_next_atom();
         let name = match self.current_token() {
             Token::Atom((start, end)) => {
-                String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?
+                String::from_utf8(self.source.as_bytes()[start..end].to_vec()).map_err(|_| {
+                    ParseError::InvalidUtf8 {
+                        location: self.current_source_location(),
+                    }
+                })?
             }
             _ => {
                 return Err(ParseError::UnexpectedToken {
                     expected: "protocol name".to_string(),
                     found: self.get_token_repr(),
-                    position: self.position,
+                    location: self.current_source_location(),
                 });
             }
         };
@@ -1793,7 +1952,9 @@ impl Parser {
                 match self.current_token() {
                     Token::Atom((start, end)) => {
                         let param = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                            .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
+                            .map_err(|_| ParseError::InvalidUtf8 {
+                                location: self.current_source_location(),
+                            })?;
                         params.push(param);
                         self.consume();
                         self.skip_whitespace();
@@ -1807,7 +1968,7 @@ impl Parser {
                         return Err(ParseError::UnexpectedToken {
                             expected: "type parameter name".to_string(),
                             found: self.get_token_repr(),
-                            position: self.position,
+                            location: self.current_source_location(),
                         });
                     }
                 }
@@ -1853,10 +2014,12 @@ impl Parser {
                 self.move_to_next_non_whitespace();
                 // Allow keywords like "handle" and "perform" to be used as function names
                 let name = match self.current_token() {
-                    Token::Atom((start, end)) => {
-                        String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                            .map_err(|_| ParseError::InvalidUtf8 { position: start })?
-                    }
+                    Token::Atom((start, end)) => String::from_utf8(
+                        self.source.as_bytes()[start..end].to_vec(),
+                    )
+                    .map_err(|_| ParseError::InvalidUtf8 {
+                        location: self.current_source_location(),
+                    })?,
                     Token::Handle => "handle".to_string(),
                     Token::Perform => "perform".to_string(),
                     Token::Future => "future".to_string(),
@@ -1864,7 +2027,7 @@ impl Parser {
                         return Err(ParseError::UnexpectedToken {
                             expected: "protocol member name".to_string(),
                             found: self.get_token_repr(),
-                            position: self.position,
+                            location: self.current_source_location(),
                         });
                     }
                 };
@@ -1897,7 +2060,7 @@ impl Parser {
             _ => Err(ParseError::UnexpectedToken {
                 expected: "protocol member".to_string(),
                 found: self.get_token_repr(),
-                position: self.position,
+                location: self.current_source_location(),
             }),
         }
     }
@@ -1907,14 +2070,17 @@ impl Parser {
         self.move_to_next_atom();
         let target_type = match self.current_token() {
             Token::Atom((start, end)) => {
-                String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?
+                String::from_utf8(self.source.as_bytes()[start..end].to_vec()).map_err(|_| {
+                    ParseError::InvalidUtf8 {
+                        location: self.current_source_location(),
+                    }
+                })?
             }
             _ => {
                 return Err(ParseError::UnexpectedToken {
                     expected: "type name after 'extend'".to_string(),
                     found: self.get_token_repr(),
-                    position: self.position,
+                    location: self.current_source_location(),
                 });
             }
         };
@@ -1923,14 +2089,17 @@ impl Parser {
         self.move_to_next_non_whitespace();
         let protocol = match self.current_token() {
             Token::Atom((start, end)) => {
-                String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?
+                String::from_utf8(self.source.as_bytes()[start..end].to_vec()).map_err(|_| {
+                    ParseError::InvalidUtf8 {
+                        location: self.current_source_location(),
+                    }
+                })?
             }
             _ => {
                 return Err(ParseError::UnexpectedToken {
                     expected: "protocol name after 'with'".to_string(),
                     found: self.get_token_repr(),
-                    position: self.position,
+                    location: self.current_source_location(),
                 });
             }
         };
@@ -1945,7 +2114,9 @@ impl Parser {
                 match self.current_token() {
                     Token::Atom((start, end)) => {
                         let arg = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                            .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
+                            .map_err(|_| ParseError::InvalidUtf8 {
+                                location: self.current_source_location(),
+                            })?;
                         args.push(arg);
                         self.consume();
                         self.skip_whitespace();
@@ -1959,7 +2130,7 @@ impl Parser {
                         return Err(ParseError::UnexpectedToken {
                             expected: "type argument".to_string(),
                             found: self.get_token_repr(),
-                            position: self.position,
+                            location: self.current_source_location(),
                         });
                     }
                 }
@@ -2010,14 +2181,17 @@ impl Parser {
         self.move_to_next_atom();
         let name = match self.current_token() {
             Token::Atom((start, end)) => {
-                String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?
+                String::from_utf8(self.source.as_bytes()[start..end].to_vec()).map_err(|_| {
+                    ParseError::InvalidUtf8 {
+                        location: self.current_source_location(),
+                    }
+                })?
             }
             _ => {
                 return Err(ParseError::UnexpectedToken {
                     expected: "enum name".to_string(),
                     found: self.get_token_repr(),
-                    position: self.position,
+                    location: self.current_source_location(),
                 });
             }
         };
@@ -2119,7 +2293,7 @@ impl Parser {
             Err(ParseError::UnexpectedToken {
                 expected: "open paren '('".to_string(),
                 found: self.get_token_repr(),
-                position: self.position,
+                location: self.current_source_location(),
             })
         }
     }
@@ -2133,7 +2307,7 @@ impl Parser {
             Err(ParseError::UnexpectedToken {
                 expected: "'with' keyword".to_string(),
                 found: self.get_token_repr(),
-                position: self.position,
+                location: self.current_source_location(),
             })
         }
     }
@@ -2147,7 +2321,7 @@ impl Parser {
             Err(ParseError::UnexpectedToken {
                 expected: "close bracket ']'".to_string(),
                 found: self.get_token_repr(),
-                position: self.position,
+                location: self.current_source_location(),
             })
         }
     }
@@ -2161,7 +2335,7 @@ impl Parser {
             Err(ParseError::UnexpectedToken {
                 expected: "comma ','".to_string(),
                 found: self.get_token_repr(),
-                position: self.position,
+                location: self.current_source_location(),
             })
         }
     }
@@ -2175,7 +2349,7 @@ impl Parser {
             Err(ParseError::UnexpectedToken {
                 expected: "'as' keyword".to_string(),
                 found: self.get_token_repr(),
-                position: self.position,
+                location: self.current_source_location(),
             })
         }
     }
@@ -2198,7 +2372,7 @@ impl Parser {
                 if rest_param.is_some() {
                     return Err(ParseError::InvalidDeclaration {
                         message: "Only one rest parameter allowed".to_string(),
-                        position: self.position,
+                        location: self.current_source_location(),
                     });
                 }
                 // Rest params must be simple identifiers
@@ -2207,14 +2381,14 @@ impl Parser {
                 } else {
                     return Err(ParseError::InvalidDeclaration {
                         message: "Rest parameter must be a simple identifier".to_string(),
-                        position: self.position,
+                        location: self.current_source_location(),
                     });
                 }
             } else {
                 if rest_param.is_some() {
                     return Err(ParseError::InvalidDeclaration {
                         message: "Rest parameter must be last".to_string(),
-                        position: self.position,
+                        location: self.current_source_location(),
                     });
                 }
                 result.push(pattern);
@@ -2255,7 +2429,7 @@ impl Parser {
         match self.current_token() {
             Token::Atom((start, end)) => {
                 let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
+                    .map_err(|_| ParseError::InvalidUtf8 { location: self.current_source_location() })?;
                 let end_position = self.consume();
                 Ok(Ast::StructField {
                     name,
@@ -2312,12 +2486,12 @@ impl Parser {
             }
             Token::NewLine => Err(ParseError::InvalidExpression {
                 message: "Expected field name but found newline. Note: struct fields should be separated by newlines, not commas. Use:\nstruct Foo {\n    field1\n    field2\n}".to_string(),
-                position: self.position,
+                location: self.current_source_location(),
             }),
             _ => Err(ParseError::UnexpectedToken {
                 expected: "field name".to_string(),
                 found: self.get_token_repr(),
-                position: self.position,
+                location: self.current_source_location(),
             }),
         }
     }
@@ -2338,8 +2512,11 @@ impl Parser {
 
         match self.current_token() {
             Token::Atom((start, end)) => {
-                let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
+                let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec()).map_err(
+                    |_| ParseError::InvalidUtf8 {
+                        location: self.current_source_location(),
+                    },
+                )?;
                 let position = self.consume();
                 self.skip_spaces();
                 let result = if self.is_open_curly() {
@@ -2367,7 +2544,7 @@ impl Parser {
             _ => Err(ParseError::UnexpectedToken {
                 expected: "variant name".to_string(),
                 found: self.get_token_repr(),
-                position: self.position,
+                location: self.current_source_location(),
             }),
         }
     }
@@ -2405,7 +2582,7 @@ impl Parser {
             Err(ParseError::UnexpectedToken {
                 expected: "comma or newline".to_string(),
                 found: self.get_token_repr(),
-                position: self.position,
+                location: self.current_source_location(),
             })
         }
     }
@@ -2451,7 +2628,7 @@ impl Parser {
             Token::Atom((atom_start, atom_end)) => {
                 let name = String::from_utf8(self.source.as_bytes()[atom_start..atom_end].to_vec())
                     .map_err(|_| ParseError::InvalidUtf8 {
-                        position: atom_start,
+                        location: self.current_source_location(),
                     })?;
                 self.consume();
                 self.skip_whitespace();
@@ -2493,7 +2670,7 @@ impl Parser {
                             return Err(ParseError::InvalidPattern {
                                 message: "Rest pattern must be last in array destructuring"
                                     .to_string(),
-                                position: self.position,
+                                location: self.current_source_location(),
                             });
                         }
                         break;
@@ -2510,7 +2687,7 @@ impl Parser {
                         return Err(ParseError::UnexpectedToken {
                             expected: "',' or ']'".to_string(),
                             found: self.get_token_repr(),
-                            position: self.position,
+                            location: self.current_source_location(),
                         });
                     }
                 }
@@ -2519,7 +2696,7 @@ impl Parser {
                 if !matches!(self.current_token(), Token::CloseBracket) {
                     return Err(ParseError::MissingToken {
                         expected: "']' to close array pattern".to_string(),
-                        position: self.position,
+                        location: self.current_source_location(),
                     });
                 }
                 self.consume();
@@ -2547,7 +2724,7 @@ impl Parser {
                                 self.source.as_bytes()[atom_start..atom_end].to_vec(),
                             )
                             .map_err(|_| ParseError::InvalidUtf8 {
-                                position: atom_start,
+                                location: self.current_source_location(),
                             })?;
                             self.consume();
                             self.skip_whitespace();
@@ -2563,7 +2740,7 @@ impl Parser {
                                             self.source.as_bytes()[bind_start..bind_end].to_vec(),
                                         )
                                         .map_err(|_| ParseError::InvalidUtf8 {
-                                            position: bind_start,
+                                            location: self.current_source_location(),
                                         })?;
                                         self.consume();
                                         self.skip_whitespace();
@@ -2578,7 +2755,7 @@ impl Parser {
                                         return Err(ParseError::InvalidPattern {
                                             message: "Expected binding name or '_' after ':'"
                                                 .to_string(),
-                                            position: self.position,
+                                            location: self.current_source_location(),
                                         });
                                     }
                                 }
@@ -2599,7 +2776,7 @@ impl Parser {
                                 self.source.as_bytes()[str_start + 1..str_end - 1].to_vec(),
                             )
                             .map_err(|_| ParseError::InvalidUtf8 {
-                                position: str_start,
+                                location: self.current_source_location(),
                             })?;
                             self.consume();
                             self.skip_whitespace();
@@ -2608,7 +2785,7 @@ impl Parser {
                             if !matches!(self.current_token(), Token::Colon) {
                                 return Err(ParseError::InvalidPattern {
                                     message: "String keys in map destructuring require ': binding' syntax".to_string(),
-                                    position: self.position,
+                                    location: self.current_source_location(),
                                 });
                             }
                             self.consume();
@@ -2620,7 +2797,7 @@ impl Parser {
                                         self.source.as_bytes()[bind_start..bind_end].to_vec(),
                                     )
                                     .map_err(|_| ParseError::InvalidUtf8 {
-                                        position: bind_start,
+                                        location: self.current_source_location(),
                                     })?;
                                     self.consume();
                                     self.skip_whitespace();
@@ -2635,7 +2812,7 @@ impl Parser {
                                     return Err(ParseError::InvalidPattern {
                                         message: "Expected binding name or '_' after ':'"
                                             .to_string(),
-                                        position: self.position,
+                                        location: self.current_source_location(),
                                     });
                                 }
                             };
@@ -2650,7 +2827,7 @@ impl Parser {
                             return Err(ParseError::InvalidPattern {
                                 message: "Expected field name or string key in map pattern"
                                     .to_string(),
-                                position: self.position,
+                                location: self.current_source_location(),
                             });
                         }
                     }
@@ -2668,7 +2845,7 @@ impl Parser {
                 if !matches!(self.current_token(), Token::CloseCurly) {
                     return Err(ParseError::MissingToken {
                         expected: "'}' to close map pattern".to_string(),
-                        position: self.position,
+                        location: self.current_source_location(),
                     });
                 }
                 self.consume();
@@ -2705,7 +2882,7 @@ impl Parser {
                     "Expected identifier or destructuring pattern, found {:?}",
                     self.current_token()
                 ),
-                position: self.position,
+                location: self.current_source_location(),
             }),
         }
     }
@@ -2719,7 +2896,7 @@ impl Parser {
             Err(ParseError::UnexpectedToken {
                 expected: "close paren ')'".to_string(),
                 found: self.get_token_repr(),
-                position: self.position,
+                location: self.current_source_location(),
             })
         }
     }
@@ -2752,7 +2929,7 @@ impl Parser {
             Err(ParseError::UnexpectedToken {
                 expected: "open curly '{'".to_string(),
                 found: self.get_token_repr(),
-                position: self.position,
+                location: self.current_source_location(),
             })
         }
     }
@@ -2774,7 +2951,7 @@ impl Parser {
             Err(ParseError::UnexpectedToken {
                 expected: "close curly '}'".to_string(),
                 found: self.get_token_repr(),
-                position: self.position,
+                location: self.current_source_location(),
             })
         }
     }
@@ -2824,7 +3001,7 @@ impl Parser {
                     return Err(ParseError::UnexpectedToken {
                         expected: "dotted identifier".to_string(),
                         found: self.get_token_repr(),
-                        position: self.position,
+                        location: self.current_source_location(),
                     });
                 }
             }
@@ -2834,7 +3011,7 @@ impl Parser {
             return Err(ParseError::UnexpectedToken {
                 expected: "dotted identifier".to_string(),
                 found: self.get_token_repr(),
-                position: self.position,
+                location: self.current_source_location(),
             });
         }
         Ok(name)
@@ -2920,8 +3097,11 @@ impl Parser {
         self.skip_whitespace();
         match self.current_token() {
             Token::Atom((start, end)) => {
-                let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
+                let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec()).map_err(
+                    |_| ParseError::InvalidUtf8 {
+                        location: self.current_source_location(),
+                    },
+                )?;
                 let name_start = start;
                 let _ = end; // token end position not needed for Ast::Identifier
                 self.consume();
@@ -2934,7 +3114,7 @@ impl Parser {
                     self.parse_expression(0, false, true)?.ok_or_else(|| {
                         ParseError::InvalidExpression {
                             message: "Expected value for struct field".to_string(),
-                            position: self.position,
+                            location: self.current_source_location(),
                         }
                     })?
                 } else {
@@ -2957,7 +3137,7 @@ impl Parser {
                     self.parse_expression(0, false, true)?.ok_or_else(|| {
                         ParseError::InvalidExpression {
                             message: "Expected value for struct field".to_string(),
-                            position: self.position,
+                            location: self.current_source_location(),
                         }
                     })?
                 } else {
@@ -2978,7 +3158,7 @@ impl Parser {
                     self.parse_expression(0, false, true)?.ok_or_else(|| {
                         ParseError::InvalidExpression {
                             message: "Expected value for struct field".to_string(),
-                            position: self.position,
+                            location: self.current_source_location(),
                         }
                     })?
                 } else {
@@ -2999,7 +3179,7 @@ impl Parser {
                     self.parse_expression(0, false, true)?.ok_or_else(|| {
                         ParseError::InvalidExpression {
                             message: "Expected value for struct field".to_string(),
-                            position: self.position,
+                            location: self.current_source_location(),
                         }
                     })?
                 } else {
@@ -3020,7 +3200,7 @@ impl Parser {
                     self.parse_expression(0, false, true)?.ok_or_else(|| {
                         ParseError::InvalidExpression {
                             message: "Expected value for struct field".to_string(),
-                            position: self.position,
+                            location: self.current_source_location(),
                         }
                     })?
                 } else {
@@ -3041,7 +3221,7 @@ impl Parser {
                     self.parse_expression(0, false, true)?.ok_or_else(|| {
                         ParseError::InvalidExpression {
                             message: "Expected value for struct field".to_string(),
-                            position: self.position,
+                            location: self.current_source_location(),
                         }
                     })?
                 } else {
@@ -3152,7 +3332,7 @@ impl Parser {
         if !matches!(self.current_token(), Token::Catch) {
             return Err(ParseError::MissingToken {
                 expected: "'catch' after try block".to_string(),
-                position: self.position,
+                location: self.current_source_location(),
             });
         }
         self.consume();
@@ -3162,31 +3342,34 @@ impl Parser {
         if !matches!(self.current_token(), Token::OpenParen) {
             return Err(ParseError::MissingToken {
                 expected: "'(' after 'catch'".to_string(),
-                position: self.position,
+                location: self.current_source_location(),
             });
         }
         self.consume();
         self.skip_whitespace();
 
         // Get the exception binding identifier
-        let exception_binding = if let Token::Atom((start, end)) = self.current_token() {
-            let binding = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
-            self.consume();
-            binding
-        } else {
-            return Err(ParseError::UnexpectedToken {
-                expected: "identifier for exception binding".to_string(),
-                found: self.get_token_repr(),
-                position: self.position,
-            });
-        };
+        let exception_binding =
+            if let Token::Atom((start, end)) = self.current_token() {
+                let binding = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                    .map_err(|_| ParseError::InvalidUtf8 {
+                        location: self.current_source_location(),
+                    })?;
+                self.consume();
+                binding
+            } else {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "identifier for exception binding".to_string(),
+                    found: self.get_token_repr(),
+                    location: self.current_source_location(),
+                });
+            };
 
         self.skip_whitespace();
         if !matches!(self.current_token(), Token::CloseParen) {
             return Err(ParseError::MissingToken {
                 expected: "')' after exception binding".to_string(),
-                position: self.position,
+                location: self.current_source_location(),
             });
         }
         self.consume();
@@ -3211,7 +3394,7 @@ impl Parser {
         if !matches!(self.current_token(), Token::OpenParen) {
             return Err(ParseError::MissingToken {
                 expected: "'(' after 'throw'".to_string(),
-                position: self.position,
+                location: self.current_source_location(),
             });
         }
         self.consume();
@@ -3227,7 +3410,7 @@ impl Parser {
         if !matches!(self.current_token(), Token::CloseParen) {
             return Err(ParseError::MissingToken {
                 expected: "')' after throw value".to_string(),
-                position: self.position,
+                location: self.current_source_location(),
             });
         }
         self.consume();
@@ -3262,7 +3445,7 @@ impl Parser {
         if !matches!(self.current_token(), Token::OpenParen) {
             return Err(ParseError::MissingToken {
                 expected: "'(' after 'shift'".to_string(),
-                position: self.position,
+                location: self.current_source_location(),
             });
         }
         self.consume();
@@ -3272,7 +3455,7 @@ impl Parser {
         if !matches!(self.current_token(), Token::Fn) {
             return Err(ParseError::MissingToken {
                 expected: "'fn' for continuation handler".to_string(),
-                position: self.position,
+                location: self.current_source_location(),
             });
         }
         self.consume();
@@ -3282,7 +3465,7 @@ impl Parser {
         if !matches!(self.current_token(), Token::OpenParen) {
             return Err(ParseError::MissingToken {
                 expected: "'(' after 'fn'".to_string(),
-                position: self.position,
+                location: self.current_source_location(),
             });
         }
         self.consume();
@@ -3290,15 +3473,19 @@ impl Parser {
 
         // Get the continuation parameter identifier
         let continuation_param = if let Token::Atom((start, end)) = self.current_token() {
-            let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
+            let name =
+                String::from_utf8(self.source.as_bytes()[start..end].to_vec()).map_err(|_| {
+                    ParseError::InvalidUtf8 {
+                        location: self.current_source_location(),
+                    }
+                })?;
             self.consume();
             name
         } else {
             return Err(ParseError::UnexpectedToken {
                 expected: "identifier for continuation parameter".to_string(),
                 found: self.get_token_repr(),
-                position: self.position,
+                location: self.current_source_location(),
             });
         };
 
@@ -3308,7 +3495,7 @@ impl Parser {
         if !matches!(self.current_token(), Token::CloseParen) {
             return Err(ParseError::MissingToken {
                 expected: "')' after continuation parameter".to_string(),
-                position: self.position,
+                location: self.current_source_location(),
             });
         }
         self.consume();
@@ -3323,7 +3510,7 @@ impl Parser {
         if !matches!(self.current_token(), Token::CloseParen) {
             return Err(ParseError::MissingToken {
                 expected: "')' after shift body".to_string(),
-                position: self.position,
+                location: self.current_source_location(),
             });
         }
         self.consume();
@@ -3387,14 +3574,17 @@ impl Parser {
         // Parse protocol name
         let protocol = match self.current_token() {
             Token::Atom((start, end)) => {
-                String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                    .map_err(|_| ParseError::InvalidUtf8 { position: start })?
+                String::from_utf8(self.source.as_bytes()[start..end].to_vec()).map_err(|_| {
+                    ParseError::InvalidUtf8 {
+                        location: self.current_source_location(),
+                    }
+                })?
             }
             _ => {
                 return Err(ParseError::UnexpectedToken {
                     expected: "protocol name after 'handle'".to_string(),
                     found: self.get_token_repr(),
-                    position: self.position,
+                    location: self.current_source_location(),
                 });
             }
         };
@@ -3410,7 +3600,9 @@ impl Parser {
                 match self.current_token() {
                     Token::Atom((start, end)) => {
                         let arg = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                            .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
+                            .map_err(|_| ParseError::InvalidUtf8 {
+                                location: self.current_source_location(),
+                            })?;
                         args.push(arg);
                         self.consume();
                         self.skip_whitespace();
@@ -3424,7 +3616,7 @@ impl Parser {
                         return Err(ParseError::UnexpectedToken {
                             expected: "type argument".to_string(),
                             found: self.get_token_repr(),
-                            position: self.position,
+                            location: self.current_source_location(),
                         });
                     }
                 }
@@ -3469,7 +3661,7 @@ impl Parser {
                 if !matches!(self.current_token(), Token::OpenCurly) {
                     return Err(ParseError::MissingToken {
                         expected: "'{{' for handle body after struct creation".to_string(),
-                        position: self.position,
+                        location: self.current_source_location(),
                     });
                 }
 
@@ -3483,7 +3675,7 @@ impl Parser {
                     _ => {
                         return Err(ParseError::InvalidExpression {
                             message: "Expected identifier before '{}'".to_string(),
-                            position: saved_position,
+                            location: self.location_at(saved_position),
                         });
                     }
                 }
@@ -3500,7 +3692,7 @@ impl Parser {
         if !matches!(self.current_token(), Token::OpenCurly) {
             return Err(ParseError::MissingToken {
                 expected: "'{{' for handle body".to_string(),
-                position: self.position,
+                location: self.current_source_location(),
             });
         }
         let body = self.parse_block()?;
@@ -3531,7 +3723,7 @@ impl Parser {
         if !matches!(self.current_token(), Token::OpenCurly) {
             return Err(ParseError::MissingToken {
                 expected: "'{{' after match value".to_string(),
-                position: self.position,
+                location: self.current_source_location(),
             });
         }
         self.consume();
@@ -3574,7 +3766,7 @@ impl Parser {
             return Err(ParseError::UnexpectedToken {
                 expected: "'=>' after match pattern".to_string(),
                 found: self.get_token_repr(),
-                position: self.position,
+                location: self.current_source_location(),
             });
         }
         self.consume();
@@ -3588,7 +3780,7 @@ impl Parser {
             let expr = self.parse_expression(1, true, false)?.ok_or_else(|| {
                 ParseError::InvalidExpression {
                     message: "Expected expression in match arm body".to_string(),
-                    position: self.position,
+                    location: self.current_source_location(),
                 }
             })?;
             vec![expr]
@@ -3624,7 +3816,7 @@ impl Parser {
                 let first_name =
                     String::from_utf8(self.source.as_bytes()[atom_start..atom_end].to_vec())
                         .map_err(|_| ParseError::InvalidUtf8 {
-                            position: atom_start,
+                            location: self.current_source_location(),
                         })?;
                 self.consume();
                 self.skip_whitespace();
@@ -3639,7 +3831,7 @@ impl Parser {
                         let variant_name =
                             String::from_utf8(self.source.as_bytes()[var_start..var_end].to_vec())
                                 .map_err(|_| ParseError::InvalidUtf8 {
-                                    position: var_start,
+                                    location: self.current_source_location(),
                                 })?;
                         self.consume();
                         self.skip_whitespace();
@@ -3660,7 +3852,7 @@ impl Parser {
                     } else {
                         return Err(ParseError::InvalidPattern {
                             message: "Expected variant name after '.'".to_string(),
-                            position: self.position,
+                            location: self.current_source_location(),
                         });
                     }
                 } else if matches!(self.current_token(), Token::OpenCurly) {
@@ -3700,7 +3892,7 @@ impl Parser {
                             return Err(ParseError::InvalidPattern {
                                 message: "Rest pattern must be last in array destructuring"
                                     .to_string(),
-                                position: self.position,
+                                location: self.current_source_location(),
                             });
                         }
                         break;
@@ -3717,7 +3909,7 @@ impl Parser {
                         return Err(ParseError::UnexpectedToken {
                             expected: "',' or ']'".to_string(),
                             found: self.get_token_repr(),
-                            position: self.position,
+                            location: self.current_source_location(),
                         });
                     }
                 }
@@ -3726,7 +3918,7 @@ impl Parser {
                 if !matches!(self.current_token(), Token::CloseBracket) {
                     return Err(ParseError::MissingToken {
                         expected: "']' to close array pattern".to_string(),
-                        position: self.position,
+                        location: self.current_source_location(),
                     });
                 }
                 self.consume();
@@ -3754,7 +3946,7 @@ impl Parser {
                                 self.source.as_bytes()[atom_start..atom_end].to_vec(),
                             )
                             .map_err(|_| ParseError::InvalidUtf8 {
-                                position: atom_start,
+                                location: self.current_source_location(),
                             })?;
                             self.consume();
                             self.skip_whitespace();
@@ -3770,7 +3962,7 @@ impl Parser {
                                             self.source.as_bytes()[bind_start..bind_end].to_vec(),
                                         )
                                         .map_err(|_| ParseError::InvalidUtf8 {
-                                            position: bind_start,
+                                            location: self.current_source_location(),
                                         })?;
                                         self.consume();
                                         self.skip_whitespace();
@@ -3785,7 +3977,7 @@ impl Parser {
                                         return Err(ParseError::InvalidPattern {
                                             message: "Expected binding name or '_' after ':'"
                                                 .to_string(),
-                                            position: self.position,
+                                            location: self.current_source_location(),
                                         });
                                     }
                                 }
@@ -3806,7 +3998,7 @@ impl Parser {
                                 self.source.as_bytes()[str_start + 1..str_end - 1].to_vec(),
                             )
                             .map_err(|_| ParseError::InvalidUtf8 {
-                                position: str_start,
+                                location: self.current_source_location(),
                             })?;
                             self.consume();
                             self.skip_whitespace();
@@ -3817,7 +4009,7 @@ impl Parser {
                                     message:
                                         "String keys in map destructuring require ': binding' syntax"
                                             .to_string(),
-                                    position: self.position,
+                                    location: self.current_source_location(),
                                 });
                             }
                             self.consume();
@@ -3829,7 +4021,7 @@ impl Parser {
                                         self.source.as_bytes()[bind_start..bind_end].to_vec(),
                                     )
                                     .map_err(|_| ParseError::InvalidUtf8 {
-                                        position: bind_start,
+                                        location: self.current_source_location(),
                                     })?;
                                     self.consume();
                                     self.skip_whitespace();
@@ -3844,7 +4036,7 @@ impl Parser {
                                     return Err(ParseError::InvalidPattern {
                                         message: "Expected binding name or '_' after ':'"
                                             .to_string(),
-                                        position: self.position,
+                                        location: self.current_source_location(),
                                     });
                                 }
                             };
@@ -3859,7 +4051,7 @@ impl Parser {
                             return Err(ParseError::InvalidPattern {
                                 message: "Expected field name or string key in map pattern"
                                     .to_string(),
-                                position: self.position,
+                                location: self.current_source_location(),
                             });
                         }
                     }
@@ -3877,7 +4069,7 @@ impl Parser {
                 if !matches!(self.current_token(), Token::CloseCurly) {
                     return Err(ParseError::MissingToken {
                         expected: "'}' to close map pattern".to_string(),
-                        position: self.position,
+                        location: self.current_source_location(),
                     });
                 }
                 self.consume();
@@ -3892,14 +4084,14 @@ impl Parser {
                 let int_str =
                     String::from_utf8(self.source.as_bytes()[int_start..int_end].to_vec())
                         .map_err(|_| ParseError::InvalidUtf8 {
-                            position: int_start,
+                            location: self.current_source_location(),
                         })?;
                 let value =
                     int_str
                         .parse::<i64>()
                         .map_err(|_| ParseError::InvalidNumberLiteral {
                             literal: int_str,
-                            position: int_start,
+                            location: self.current_source_location(),
                         })?;
                 self.consume();
                 Pattern::Literal {
@@ -3912,7 +4104,7 @@ impl Parser {
                 let string_value =
                     String::from_utf8(self.source.as_bytes()[str_start + 1..str_end - 1].to_vec())
                         .map_err(|_| ParseError::InvalidUtf8 {
-                            position: str_start,
+                            location: self.current_source_location(),
                         })?;
                 self.consume();
                 Pattern::Literal {
@@ -3944,7 +4136,7 @@ impl Parser {
             _ => {
                 return Err(ParseError::InvalidPattern {
                     message: format!("Unexpected token in pattern: {:?}", self.current_token()),
-                    position: self.position,
+                    location: self.current_source_location(),
                 });
             }
         })
@@ -3963,7 +4155,9 @@ impl Parser {
             let field_name = match self.current_token() {
                 Token::Atom((start, end)) => {
                     let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                        .map_err(|_| ParseError::InvalidUtf8 { position: start })?;
+                        .map_err(|_| ParseError::InvalidUtf8 {
+                            location: self.current_source_location(),
+                        })?;
                     self.consume();
                     name
                 }
@@ -3982,7 +4176,7 @@ impl Parser {
                 _ => {
                     return Err(ParseError::InvalidPattern {
                         message: "Expected field name in pattern".to_string(),
-                        position: self.position,
+                        location: self.current_source_location(),
                     });
                 }
             };
@@ -3999,7 +4193,7 @@ impl Parser {
                             self.source.as_bytes()[bind_start..bind_end].to_vec(),
                         )
                         .map_err(|_| ParseError::InvalidUtf8 {
-                            position: bind_start,
+                            location: self.current_source_location(),
                         })?;
                         self.consume();
                         self.skip_whitespace();
@@ -4023,7 +4217,7 @@ impl Parser {
                     _ => {
                         return Err(ParseError::InvalidPattern {
                             message: "Expected binding name after ':'".to_string(),
-                            position: self.position,
+                            location: self.current_source_location(),
                         });
                     }
                 }
@@ -4196,7 +4390,7 @@ impl Parser {
                     return Err(ParseError::InvalidExpression {
                         message: "Pipe operator requires a function or function call on the right"
                             .to_string(),
-                        position: start_position,
+                        location: self.location_at(start_position),
                     });
                 }
             },
@@ -4220,14 +4414,14 @@ impl Parser {
                         message:
                             "Pipe-last operator requires a function or function call on the right"
                                 .to_string(),
-                        position: start_position,
+                        location: self.location_at(start_position),
                     });
                 }
             },
             _ => {
                 return Err(ParseError::InvalidExpression {
                     message: format!("Unexpected binary operator: {:?}", current_token),
-                    position: start_position,
+                    location: self.location_at(start_position),
                 });
             }
         })
@@ -4242,7 +4436,7 @@ impl Parser {
             Err(ParseError::UnexpectedToken {
                 expected: "equal '='".to_string(),
                 found: self.get_token_repr(),
-                position: self.position,
+                location: self.current_source_location(),
             })
         }
     }
@@ -4310,6 +4504,8 @@ impl Parser {
         // Parse key-value pairs
         let mut pairs = Vec::new();
         loop {
+            let key_position = self.position;
+
             // Parse key (any expression)
             let key =
                 self.parse_expression(0, true, true)?
@@ -4318,6 +4514,26 @@ impl Parser {
                     })?;
 
             self.skip_whitespace();
+
+            // Detect JavaScript-style map syntax: { key: value }
+            // Beagle uses { :key value } or { key value } syntax
+            if self.is_colon() {
+                if let Ast::Identifier(ref name, _) = key {
+                    return Err(ParseError::InvalidExpression {
+                        message: format!(
+                            "JavaScript-style map syntax detected. Beagle uses {{:key value}} syntax.\n\
+                             Try: {{:{} <value>}} instead of {{{}: <value>}}",
+                            name, name
+                        ),
+                        location: self.location_at(key_position),
+                    });
+                } else {
+                    return Err(ParseError::InvalidExpression {
+                        message: "Unexpected ':' in map literal. Beagle uses {:key value} syntax, not {key: value}".to_string(),
+                        location: self.current_source_location(),
+                    });
+                }
+            }
 
             // Parse value (any expression)
             let value =
@@ -4445,7 +4661,7 @@ impl Parser {
                             self.source.as_bytes()[name_start..name_end].to_vec(),
                         )
                         .map_err(|_| ParseError::InvalidUtf8 {
-                            position: name_start,
+                            location: self.current_source_location(),
                         })?;
                         let pos = self.consume();
                         (name, pos)
@@ -4507,7 +4723,7 @@ impl Parser {
                                 .current_token()
                                 .literal(self.source.as_bytes())
                                 .unwrap_or_else(|_| "unknown".to_string()),
-                            position: self.position,
+                            location: self.current_source_location(),
                         });
                     }
                 };
@@ -4516,7 +4732,7 @@ impl Parser {
 
                 // Check if this is enum creation syntax: Enum.Variant { ... }
                 if self.is_open_curly() && struct_creation_allowed {
-                    let fields_start = self.consume();
+                    let _fields_start = self.consume();
                     let fields = self.parse_struct_fields_creations()?;
                     self.expect_close_curly()?;
                     let token_range = TokenRange::new(start_position, self.position);
@@ -4532,12 +4748,12 @@ impl Parser {
                             // Not currently supported, error out
                             Err(ParseError::InvalidExpression {
                                 message: "Nested enum creation not supported".to_string(),
-                                position: fields_start,
+                                location: self.current_source_location(),
                             })
                         }
                         _ => Err(ParseError::InvalidExpression {
                             message: "Expected identifier before '.' for enum creation".to_string(),
-                            position: start_position,
+                            location: self.location_at(start_position),
                         }),
                     }
                 } else if self.is_open_paren() {
@@ -4653,7 +4869,7 @@ impl Parser {
                             _ => {
                                 return Err(ParseError::InvalidExpression {
                                     message: "Expected identifier for enum variant".to_string(),
-                                    position,
+                                    location: self.location_at(position),
                                 });
                             }
                         };
@@ -4662,7 +4878,7 @@ impl Parser {
                             _ => {
                                 return Err(ParseError::InvalidExpression {
                                     message: "Expected identifier for enum name".to_string(),
-                                    position,
+                                    location: self.location_at(position),
                                 });
                             }
                         };
@@ -4675,7 +4891,7 @@ impl Parser {
                     }
                     _ => Err(ParseError::InvalidExpression {
                         message: "Expected identifier or property access before '{'".to_string(),
-                        position,
+                        location: self.location_at(position),
                     }),
                 }
             }
