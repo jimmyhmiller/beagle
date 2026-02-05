@@ -1,0 +1,255 @@
+namespace file_sync_checker
+
+use beagle.socket as socket
+
+// A real-world-ish application: File Sync Status Checker
+// Scans a directory and detects file changes (new, deleted, modified)
+
+// Store file info: path -> size
+struct FileInfo {
+    path,
+    size
+}
+
+// Scan a directory and return a map of path -> size
+fn scan_directory(dir_path) {
+    let entries = fs-readdir(dir_path)
+    if entries == null {
+        println("ERROR: Could not read directory:", dir_path)
+        {}
+    } else {
+        build_file_map(dir_path, entries, 0, {})
+    }
+}
+
+// Recursively build file map
+fn build_file_map(base_path, entries, index, acc) {
+    if index >= length(entries) {
+        acc
+    } else {
+        let entry = nth(entries, index)
+        let full_path = base_path ++ "/" ++ entry
+
+        // Check if it's a file
+        if fs-is-file?(full_path) {
+            let size = fs-file-size(full_path)
+            let new_acc = assoc(acc, full_path, size)
+            build_file_map(base_path, entries, index + 1, new_acc)
+        } else {
+            // Skip directories for now
+            build_file_map(base_path, entries, index + 1, acc)
+        }
+    }
+}
+
+// Compare two file maps and find changes
+fn compare_snapshots(old_snapshot, new_snapshot) {
+    let changes = []
+
+    // Find new and modified files
+    let changes = find_new_and_modified(old_snapshot, new_snapshot, keys(new_snapshot), 0, changes)
+
+    // Find deleted files
+    let changes = find_deleted(old_snapshot, new_snapshot, keys(old_snapshot), 0, changes)
+
+    changes
+}
+
+fn find_new_and_modified(old_map, new_map, new_keys, index, changes) {
+    if index >= length(new_keys) {
+        changes
+    } else {
+        let path = nth(new_keys, index)
+        let new_size = get(new_map, path)
+        let old_size = get(old_map, path)
+
+        let changes = if old_size == null {
+            // New file
+            push(changes, {:type "added", :path path, :size new_size})
+        } else if old_size != new_size {
+            // Modified file
+            push(changes, {:type "modified", :path path, :old_size old_size, :new_size new_size})
+        } else {
+            changes
+        }
+
+        find_new_and_modified(old_map, new_map, new_keys, index + 1, changes)
+    }
+}
+
+fn find_deleted(old_map, new_map, old_keys, index, changes) {
+    if index >= length(old_keys) {
+        changes
+    } else {
+        let path = nth(old_keys, index)
+        let still_exists = get(new_map, path)
+
+        let changes = if still_exists == null {
+            push(changes, {:type "deleted", :path path})
+        } else {
+            changes
+        }
+
+        find_deleted(old_map, new_map, old_keys, index + 1, changes)
+    }
+}
+
+// TCP notification - send changes to a webhook server
+fn send_notification(host, port, message) {
+    try {
+        let conn = socket/connect(host, port)
+
+        // Send an HTTP POST request
+        let http_request = "POST /webhook HTTP/1.1\r\n" ++
+                          "Host: " ++ host ++ "\r\n" ++
+                          "Content-Type: text/plain\r\n" ++
+                          "Content-Length: " ++ to-string(length(message)) ++ "\r\n" ++
+                          "\r\n" ++
+                          message
+
+        socket/write(conn, http_request)
+        socket/close(conn)
+        true
+    } catch (e) {
+        false
+    }
+}
+
+// Format changes for logging (human readable)
+fn format_changes(changes, index, output) {
+    if index >= length(changes) {
+        output
+    } else {
+        let change = nth(changes, index)
+        let change_type = get(change, :type)
+        let change_path = get(change, :path)
+        let line = match change_type {
+            "added" => "[+] " ++ change_path ++ " (" ++ to-string(get(change, :size)) ++ " bytes)",
+            "modified" => "[~] " ++ change_path ++ " (" ++ to-string(get(change, :old_size)) ++ " -> " ++ to-string(get(change, :new_size)) ++ " bytes)",
+            "deleted" => "[-] " ++ change_path,
+            _ => "[?] Unknown change type"
+        }
+        format_changes(changes, index + 1, output ++ line ++ "\n")
+    }
+}
+
+// Format changes as JSON (simple manual serialization)
+fn format_changes_json(changes, index, output) {
+    if index >= length(changes) {
+        output
+    } else {
+        let change = nth(changes, index)
+        let change_type = get(change, :type)
+        let change_path = get(change, :path)
+
+        let json_obj = match change_type {
+            "added" => "{\"type\":\"added\",\"path\":\"" ++ escape_json_string(change_path) ++ "\",\"size\":" ++ to-string(get(change, :size)) ++ "}",
+            "modified" => "{\"type\":\"modified\",\"path\":\"" ++ escape_json_string(change_path) ++ "\",\"old_size\":" ++ to-string(get(change, :old_size)) ++ ",\"new_size\":" ++ to-string(get(change, :new_size)) ++ "}",
+            "deleted" => "{\"type\":\"deleted\",\"path\":\"" ++ escape_json_string(change_path) ++ "\"}",
+            _ => "{\"type\":\"unknown\"}"
+        }
+
+        let separator = if index > 0 { "," } else { "" }
+        format_changes_json(changes, index + 1, output ++ separator ++ json_obj)
+    }
+}
+
+// Simple JSON string escaping (handles basic cases)
+fn escape_json_string(s) {
+    // For now, just replace backslashes and quotes
+    // A real implementation would handle more escape sequences
+    replace(replace(s, "\\", "\\\\"), "\"", "\\\"")
+}
+
+fn main() {
+    println("File Sync Status Checker")
+    println("========================")
+
+    // Create a temp directory for testing
+    let test_dir = "/tmp/beagle_sync_test"
+    fs-mkdir(test_dir, 493)  // 0o755
+
+    // Create initial test files
+    println("Creating test files...")
+    write-full-file(test_dir ++ "/file1.txt", "Hello World")
+    write-full-file(test_dir ++ "/file2.txt", "Test content")
+    write-full-file(test_dir ++ "/file3.txt", "Another file")
+
+    // Take first snapshot
+    println("Taking snapshot 1...")
+    let snapshot1 = scan_directory(test_dir)
+    println("Snapshot 1: Found", length(keys(snapshot1)), "files")
+
+    // Modify the directory
+    println("\nModifying files...")
+    write-full-file(test_dir ++ "/file1.txt", "Hello World - MODIFIED with more content")  // Modified
+    write-full-file(test_dir ++ "/file4.txt", "New file!")  // Added
+    fs-unlink(test_dir ++ "/file3.txt")  // Deleted
+
+    // Take second snapshot
+    println("Taking snapshot 2...")
+    let snapshot2 = scan_directory(test_dir)
+    println("Snapshot 2: Found", length(keys(snapshot2)), "files")
+
+    // Compare and report changes
+    println("\n--- Changes Detected ---")
+    let changes = compare_snapshots(snapshot1, snapshot2)
+
+    if length(changes) == 0 {
+        println("No changes detected")
+    } else {
+        let formatted = format_changes(changes, 0, "")
+        print(formatted)
+    }
+
+    // Write changes to a log file
+    let log_content = "Sync Report\n===========\n" ++ format_changes(changes, 0, "")
+    write-full-file(test_dir ++ "/sync_report.txt", log_content)
+    println("\nReport written to:", test_dir ++ "/sync_report.txt")
+
+    // Try to send notification via TCP
+    println("\nAttempting to send notification to localhost:9999...")
+    let json_payload = format_changes_json(changes, 0, "[") ++ "]"
+    let sent = send_notification("127.0.0.1", 9999, json_payload)
+    if sent {
+        println("Notification sent successfully!")
+    } else {
+        println("Could not send notification (server not running?)")
+    }
+
+    // Cleanup
+    println("\nCleaning up...")
+    cleanup_test_dir(test_dir)
+
+    println("done")
+}
+
+fn cleanup_test_dir(dir) {
+    let entries = fs-readdir(dir)
+    if entries != null {
+        delete_files(dir, entries, 0)
+        fs-rmdir(dir)
+    }
+}
+
+fn delete_files(dir, entries, index) {
+    if index >= length(entries) {
+        null
+    } else {
+        let entry = nth(entries, index)
+        let path = dir ++ "/" ++ entry
+        fs-unlink(path)
+        delete_files(dir, entries, index + 1)
+    }
+}
+
+fn show_sample_files(snapshot, file_keys, index, max) {
+    if index >= length(file_keys) || index >= max {
+        null
+    } else {
+        let path = nth(file_keys, index)
+        let size = get(snapshot, path)
+        println("  -", path, ":", size, "bytes")
+        show_sample_files(snapshot, file_keys, index + 1, max)
+    }
+}

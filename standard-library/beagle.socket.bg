@@ -15,6 +15,13 @@ fn listen(host, port) {
     }
 }
 
+// Connect to a TCP server
+fn connect(host, port) {
+    perform async/Async.IO {
+        action: async/IOAction.TcpConnect { host: host, port: port }
+    }
+}
+
 // Accept a connection on a TCP listener (blocking)
 fn accept(listener) {
     perform async/Async.IO {

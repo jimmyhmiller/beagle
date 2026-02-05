@@ -221,6 +221,7 @@ struct TcpSocket {
 enum IOAction {
     // TCP operations
     TcpListen { host, port },
+    TcpConnect { host, port },
     TcpAccept { listener },
     TcpRead { socket, n },
     TcpWrite { socket, data },
@@ -2043,6 +2044,26 @@ fn handle-io-action(action) {
                 throw("Failed to create TCP listener on " ++ host ++ ":" ++ to-string(port))
             }
             TcpListener { loop_id: loop_id, listener_id: listener_id }
+        },
+
+        IOAction.TcpConnect { host, port } => {
+            let result_atom = atom(null)
+            core/tcp-connect-async(loop_id, host, port, result_atom)
+
+            // Poll until we get a result
+            loop {
+                core/event-loop-run-once(loop_id, 50)
+                let result_type = core/tcp-result-pop(loop_id)
+                if result_type == 1 {
+                    // ConnectOk
+                    let socket_id = core/tcp-result-value(loop_id)
+                    break(TcpSocket { loop_id: loop_id, socket_id: socket_id })
+                } else if result_type == 2 {
+                    // ConnectErr
+                    let error = core/tcp-result-data(loop_id)
+                    throw("Connect failed: " ++ error)
+                }
+            }
         },
 
         IOAction.TcpAccept { listener } => {
