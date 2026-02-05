@@ -25,6 +25,14 @@ use crate::{
 use rand::Rng;
 use std::hint::black_box;
 
+// Type aliases for complex function pointer types (for apply trampolines)
+#[allow(clippy::type_complexity)]
+type TrampolineFn10 =
+    fn(usize, usize, usize, usize, usize, usize, usize, usize, usize, usize) -> usize;
+#[allow(clippy::type_complexity)]
+type TrampolineFn11 =
+    fn(usize, usize, usize, usize, usize, usize, usize, usize, usize, usize, usize) -> usize;
+
 // Thread-local storage for the frame pointer and gc return address at builtin entry.
 // This is set by builtins that receive frame_pointer from Beagle code.
 // Used by gc() when triggered internally (e.g., during allocation).
@@ -1821,18 +1829,7 @@ unsafe fn call_trampoline(
                 )
             }
             9 => {
-                let f: fn(
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                ) -> usize = transmute(trampoline_ptr);
+                let f: TrampolineFn10 = transmute(trampoline_ptr);
                 f(
                     fn_ptr as usize,
                     args[0],
@@ -1847,19 +1844,7 @@ unsafe fn call_trampoline(
                 )
             }
             10 => {
-                let f: fn(
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                ) -> usize = transmute(trampoline_ptr);
+                let f: TrampolineFn11 = transmute(trampoline_ptr);
                 f(
                     fn_ptr as usize,
                     args[0],
@@ -1966,18 +1951,7 @@ unsafe fn call_trampoline_with_closure(
                 )
             }
             8 => {
-                let f: fn(
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                ) -> usize = transmute(trampoline_ptr);
+                let f: TrampolineFn10 = transmute(trampoline_ptr);
                 f(
                     fn_ptr as usize,
                     closure_ptr,
@@ -1992,19 +1966,7 @@ unsafe fn call_trampoline_with_closure(
                 )
             }
             9 => {
-                let f: fn(
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                ) -> usize = transmute(trampoline_ptr);
+                let f: TrampolineFn11 = transmute(trampoline_ptr);
                 f(
                     fn_ptr as usize,
                     closure_ptr,
@@ -2157,18 +2119,7 @@ unsafe fn call_with_args(
                 )
             }
             (9, true) => {
-                let f: fn(
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                ) -> usize = transmute(fn_ptr);
+                let f: TrampolineFn10 = transmute(fn_ptr);
                 f(
                     closure_ptr,
                     args[0],
@@ -2183,37 +2134,14 @@ unsafe fn call_with_args(
                 )
             }
             (10, false) => {
-                let f: fn(
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                ) -> usize = transmute(fn_ptr);
+                let f: TrampolineFn10 = transmute(fn_ptr);
                 f(
                     args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
                     args[8], args[9],
                 )
             }
             (10, true) => {
-                let f: fn(
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                ) -> usize = transmute(fn_ptr);
+                let f: TrampolineFn11 = transmute(fn_ptr);
                 f(
                     closure_ptr,
                     args[0],
@@ -5738,11 +5666,8 @@ extern "C" fn tcp_result_listener_id(loop_id: usize) -> usize {
     use crate::runtime::TcpResult;
 
     let listener_id = match event_loop.current_result() {
-        None => 0,
-        Some(result) => match result {
-            TcpResult::AcceptOk { listener_id, .. } => *listener_id,
-            _ => 0,
-        },
+        Some(TcpResult::AcceptOk { listener_id, .. }) => *listener_id,
+        _ => 0,
     };
     BuiltInTypes::Int.tag(listener_id as isize) as usize
 }
