@@ -12,7 +12,8 @@ use std::{
 use crate::{
     Message,
     collections::{
-        GcHandle, PersistentVec, TYPE_ID_CONTINUATION_SEGMENT, TYPE_ID_MULTI_ARITY_FUNCTION,
+        GcHandle, PersistentVec, TYPE_ID_CONTINUATION_SEGMENT, TYPE_ID_KEYWORD,
+        TYPE_ID_MULTI_ARITY_FUNCTION, TYPE_ID_STRING,
     },
     gc::STACK_SIZE,
     get_runtime,
@@ -340,9 +341,7 @@ extern "C" fn get_string_index(
         let object_pointer_id = runtime.register_temporary_root(string);
         // we have a heap allocated string
         let string = HeapObject::from_tagged(string);
-        // TODO: Type safety
-        // We are just going to assert that the type_id == 2
-        assert!(string.get_type_id() == 2);
+        assert!(string.get_type_id() == TYPE_ID_STRING as usize);
         let index = BuiltInTypes::untag(index);
         let string = string.get_string_bytes();
         // TODO: This will break with unicode
@@ -5986,7 +5985,7 @@ extern "C" fn eval(stack_pointer: usize, frame_pointer: usize, code: usize) -> u
         BuiltInTypes::String => runtime.get_string_literal(code),
         BuiltInTypes::HeapObject => {
             let code = HeapObject::from_tagged(code);
-            if code.get_header().type_id != 2 {
+            if code.get_header().type_id != TYPE_ID_STRING {
                 unsafe {
                     throw_runtime_error(
                         stack_pointer,
@@ -6970,7 +6969,7 @@ pub extern "C" fn is_keyword(value: usize) -> usize {
         return BuiltInTypes::construct_boolean(false) as usize;
     }
     let heap_object = HeapObject::from_tagged(value);
-    let is_kw = heap_object.get_header().type_id == 3;
+    let is_kw = heap_object.get_header().type_id == TYPE_ID_KEYWORD;
     BuiltInTypes::construct_boolean(is_kw) as usize
 }
 
@@ -6996,7 +6995,7 @@ pub extern "C" fn keyword_to_string(
 
     let heap_object = HeapObject::from_tagged(keyword);
 
-    if heap_object.get_header().type_id != 3 {
+    if heap_object.get_header().type_id != TYPE_ID_KEYWORD {
         unsafe {
             throw_runtime_error(
                 stack_pointer,
@@ -11985,7 +11984,7 @@ pub unsafe extern "C" fn diagnostics_for_file(
             return BuiltInTypes::null_value() as usize;
         }
         let heap_object = HeapObject::from_tagged(file_path);
-        if heap_object.get_type_id() != 2 {
+        if heap_object.get_type_id() != TYPE_ID_STRING as usize {
             eprintln!("diagnostics_for_file: Invalid file path argument (not a string)");
             return BuiltInTypes::null_value() as usize;
         }
@@ -12735,7 +12734,7 @@ mod regex_builtins {
             runtime.get_string_literal(value)
         } else if tag == BuiltInTypes::HeapObject {
             let heap_object = HeapObject::from_tagged(value);
-            if heap_object.get_type_id() != 2 {
+            if heap_object.get_type_id() != TYPE_ID_STRING as usize {
                 return String::new();
             }
             let bytes = heap_object.get_string_bytes();

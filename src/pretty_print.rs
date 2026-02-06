@@ -881,20 +881,25 @@ impl PrettyPrint for ArmAsm {
             ArmAsm::LsrUbfm {
                 sf: _,
                 n: _,
-                immr: _,
+                immr,
                 imms: _,
-                rn: _,
-                rd: _,
+                rn,
+                rd,
             } => {
-                unimplemented!("Need to implement LsrUbfm")
+                format!(
+                    "lsr {}, {}, #{}",
+                    rd.pretty_print(),
+                    rn.pretty_print(),
+                    immr
+                )
             }
-            ArmAsm::LsrLsrv {
-                sf: _,
-                rm: _,
-                rn: _,
-                rd: _,
-            } => {
-                unimplemented!("Need to implement LsrUbfm")
+            ArmAsm::LsrLsrv { sf: _, rm, rn, rd } => {
+                format!(
+                    "lsr {}, {}, {}",
+                    rd.pretty_print(),
+                    rn.pretty_print(),
+                    rm.pretty_print()
+                )
             }
             ArmAsm::AsrAsrv { sf: _, rm, rn, rd } => {
                 format!(
