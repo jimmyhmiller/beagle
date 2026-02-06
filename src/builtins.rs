@@ -2408,6 +2408,11 @@ pub unsafe extern "C" fn truncate_builtin(
     unsafe {
         let runtime = get_runtime().get_mut();
 
+        let kind = BuiltInTypes::get_kind(value);
+        if kind == BuiltInTypes::Int {
+            return value;
+        }
+
         let untagged = BuiltInTypes::untag(value);
         let float_ptr = untagged as *const f64;
         let float_value = *float_ptr.add(1);
@@ -3122,6 +3127,27 @@ pub unsafe extern "C" fn to_float_builtin(
         *result_ptr.add(1) = float_value;
 
         new_float_ptr
+    }
+}
+
+/// to_int builtin - converts a float to a tagged integer (truncating towards zero)
+pub unsafe extern "C" fn to_int_builtin(
+    _stack_pointer: usize,
+    _frame_pointer: usize,
+    value: usize,
+) -> usize {
+    unsafe {
+        let kind = BuiltInTypes::get_kind(value);
+        if kind == BuiltInTypes::Int {
+            return value;
+        }
+
+        let untagged = BuiltInTypes::untag(value);
+        let float_ptr = untagged as *const f64;
+        let float_value = *float_ptr.add(1);
+
+        let result = float_value.trunc() as isize;
+        BuiltInTypes::Int.tag(result) as usize
     }
 }
 
@@ -4148,6 +4174,41 @@ fn build_ffi_trampoline() -> *const u8 {
     // === Call the function ===
     code.push(ArmAsm::Blr { rn: X19 }.encode());
 
+    // === Save float return value (s0) to int_args[0] via x20 ===
+    // fmov w9, s0  (move float return bits to w9)
+    code.push(
+        ArmAsm::FmovFloatGen {
+            sf: 0,
+            ftype: 0b00,
+            rmode: 0b00,
+            opcode: 0b110, // float-to-general
+            rn: Register {
+                index: 0,
+                size: Size::S32,
+            }, // s0
+            rd: Register {
+                index: 9,
+                size: Size::S32,
+            }, // w9
+        }
+        .encode(),
+    );
+    // str w9, [x20]  (store float bits to int_args[0])
+    code.push(
+        ArmAsm::StrImmGen {
+            size: 2, // 32-bit store
+            imm9: 0,
+            rn: X20,
+            rt: Register {
+                index: 9,
+                size: Size::S32,
+            },
+            imm12: 0,
+            class_selector: StrImmGenSelector::UnsignedOffset,
+        }
+        .encode(),
+    );
+
     // === Restore SP (add x24 back) ===
     // add x9, sp, #0  (mov x9, sp)
     code.push(
@@ -4276,7 +4337,12 @@ fn get_ffi_trampoline() -> *const u8 {
 /// Returns (low, high) for struct return support.
 #[cfg(target_arch = "aarch64")]
 #[inline(never)]
-unsafe fn dynamic_c_call(func_ptr: *const u8, args: &[u64], arg_types: &[FFIType]) -> (u64, u64) {
+unsafe fn dynamic_c_call(
+    func_ptr: *const u8,
+    args: &[u64],
+    arg_types: &[FFIType],
+    return_type: &FFIType,
+) -> (u64, u64) {
     // Split args into integer regs, float regs, and overflow (stack) based on ARM64 AAPCS
     let mut int_args: [u64; 8] = [0; 8];
     let mut float_args: [u64; 8] = [0; 8];
@@ -4307,7 +4373,7 @@ unsafe fn dynamic_c_call(func_ptr: *const u8, args: &[u64], arg_types: &[FFIType
 
     let trampoline: extern "C" fn(
         *const u8,
-        *const u64,
+        *mut u64,
         *const u64,
         *const u64,
         usize,
@@ -4316,7 +4382,7 @@ unsafe fn dynamic_c_call(func_ptr: *const u8, args: &[u64], arg_types: &[FFIType
 
     let result = trampoline(
         func_ptr,
-        int_args.as_ptr(),
+        int_args.as_mut_ptr(),
         float_args.as_ptr(),
         overflow_args.as_ptr(),
         num_overflow,
@@ -4324,13 +4390,24 @@ unsafe fn dynamic_c_call(func_ptr: *const u8, args: &[u64], arg_types: &[FFIType
     );
     let low = result as u64;
     let high = (result >> 64) as u64;
+
+    // For F32 returns, the trampoline saved s0 bits into int_args[0]
+    if matches!(return_type, FFIType::F32) {
+        return (int_args[0], 0);
+    }
+
     (low, high)
 }
 
 /// x86-64 fallback: use transmute-based dispatch (same as before but cleaned up).
 #[cfg(target_arch = "x86_64")]
 #[inline(never)]
-unsafe fn dynamic_c_call(func_ptr: *const u8, args: &[u64], arg_types: &[FFIType]) -> (u64, u64) {
+unsafe fn dynamic_c_call(
+    func_ptr: *const u8,
+    args: &[u64],
+    arg_types: &[FFIType],
+    _return_type: &FFIType,
+) -> (u64, u64) {
     // On x86-64, integer and float registers are independently allocated:
     // Integer: rdi, rsi, rdx, rcx, r8, r9
     // Float: xmm0-xmm7
@@ -4520,10 +4597,16 @@ unsafe fn unmarshal_ffi_return(
                 BuiltInTypes::Int.tag(signed_result) as usize
             }
             FFIType::F32 => {
-                // Convert f32 bits to integer for Beagle
-                // The result is already the f32 bit pattern in the low 32 bits
+                // Convert f32 return to a heap-allocated Beagle float (f64)
                 let f32_val = f32::from_bits(low as u32);
-                BuiltInTypes::Int.tag(f32_val as i32 as isize) as usize
+                let f64_val = f32_val as f64;
+                let new_float_ptr = runtime
+                    .allocate(1, stack_pointer, BuiltInTypes::Float)
+                    .unwrap();
+                let untagged_result = BuiltInTypes::untag(new_float_ptr);
+                let result_ptr = untagged_result as *mut f64;
+                *result_ptr.add(1) = f64_val;
+                new_float_ptr
             }
             FFIType::Pointer | FFIType::MutablePointer => {
                 let pointer_value = BuiltInTypes::Int.tag(low as isize) as usize;
@@ -4607,7 +4690,7 @@ pub unsafe extern "C" fn call_ffi_info(
         }
 
         // Call the native function using the dynamic trampoline
-        let (low, high) = dynamic_c_call(func_ptr, &native_args, &argument_types);
+        let (low, high) = dynamic_c_call(func_ptr, &native_args, &argument_types, &return_type);
 
         // Unmarshal the return value
         let return_value = unmarshal_ffi_return(runtime, stack_pointer, low, high, &return_type);
@@ -9511,6 +9594,14 @@ impl Runtime {
             true,
             &["x"],
             "Convert an integer to a floating-point number.\n\nExamples:\n  (to-float 42)  ; => 42.0",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.core/to-int",
+            to_int_builtin as *const u8,
+            true,
+            &["x"],
+            "Convert a float to an integer by truncating towards zero. If already an integer, returns unchanged.\n\nExamples:\n  (to-int 3.7)   ; => 3\n  (to-int -3.7)  ; => -3\n  (to-int 42)    ; => 42",
         )?;
 
         // ============================================================================

@@ -225,6 +225,7 @@ pub enum Token {
     Handle,
     Use,
     Future,
+    Not,
 }
 impl Token {
     fn is_binary_operator(&self) -> bool {
@@ -330,6 +331,7 @@ impl Token {
             Token::Handle => Ok("handle".to_string()),
             Token::Use => Ok("use".to_string()),
             Token::Future => Ok("future".to_string()),
+            Token::Not => Ok("!".to_string()),
             Token::Comment((start, end))
             | Token::DocComment((start, end))
             | Token::Atom((start, end))
@@ -930,6 +932,14 @@ impl Tokenizer {
             } else {
                 Token::BitWiseOr // | at end
             }
+        } else if self.current_byte(input_bytes) == b'!' {
+            self.consume(input_bytes);
+            if !self.at_end(input_bytes) && self.current_byte(input_bytes) == b'=' {
+                self.consume(input_bytes);
+                Token::NotEqual
+            } else {
+                Token::Not
+            }
         } else {
             // println!("identifier");
             self.parse_identifier(input_bytes)
@@ -1168,7 +1178,7 @@ impl Parser {
             return Ok(None);
         }
 
-        let mut lhs = match self.parse_atom(min_precedence)? {
+        let mut lhs = match self.parse_atom(struct_creation_allowed)? {
             Some(ast) => ast,
             None => return Ok(None),
         };
@@ -1244,7 +1254,7 @@ impl Parser {
         Ok(Some(lhs))
     }
 
-    fn parse_atom(&mut self, min_precedence: usize) -> ParseResult<Option<Ast>> {
+    fn parse_atom(&mut self, struct_creation_allowed: bool) -> ParseResult<Option<Ast>> {
         match self.current_token() {
             Token::Fn => Ok(Some(self.parse_function()?)),
             Token::Loop => Ok(Some(self.parse_loop()?)),
@@ -1256,6 +1266,26 @@ impl Parser {
             Token::Struct => Ok(Some(self.parse_struct()?)),
             Token::Enum => Ok(Some(self.parse_enum()?)),
             Token::If => Ok(Some(self.parse_if()?)),
+            Token::Not => {
+                let start = self.position;
+                self.consume(); // consume the '!'
+                // Parse the operand as a full expression but with struct_creation_allowed=false.
+                // This allows: !x, !(a && b), !state.focused, !arr[0], !f()
+                // But prevents !x { } from treating { as struct creation.
+                let expr = self.parse_expression(0, true, false)?.ok_or_else(|| {
+                    ParseError::UnexpectedEof {
+                        expected: "expression after '!'".to_string(),
+                    }
+                })?;
+                let token_range = TokenRange {
+                    start,
+                    end: self.position,
+                };
+                Ok(Some(Ast::Not {
+                    expr: Box::new(expr),
+                    token_range,
+                }))
+            }
             Token::Try => Ok(Some(self.parse_try()?)),
             Token::Throw => Ok(Some(self.parse_throw()?)),
             Token::Reset => Ok(Some(self.parse_reset()?)),
@@ -1281,7 +1311,7 @@ impl Parser {
                         | Token::False
                         | Token::Null
                 );
-                if looks_like_statement && min_precedence == 0 {
+                if looks_like_statement && struct_creation_allowed {
                     Ok(Some(self.parse_perform()?))
                 } else {
                     self.consume();
@@ -1296,7 +1326,7 @@ impl Parser {
                 self.consume(); // consume 'handle'
                 let next = self.peek_next_non_whitespace();
                 self.position = saved_position; // restore
-                if matches!(next, Token::Atom(_)) && min_precedence == 0 {
+                if matches!(next, Token::Atom(_)) && struct_creation_allowed {
                     Ok(Some(self.parse_handle()?))
                 } else {
                     self.consume();
@@ -1342,10 +1372,7 @@ impl Parser {
                 // and if I want double colon for that.
                 if self.is_open_paren() {
                     Ok(Some(self.parse_call(name, start_position)?))
-                }
-                // TODO: Hack to try and let struct creation work in ambiguous contexts
-                // like if. Need a better way.
-                else if self.is_open_curly() && min_precedence == 0 {
+                } else if self.is_open_curly() && struct_creation_allowed {
                     Ok(Some(self.parse_struct_creation(name, start_position)?))
                 } else {
                     Ok(Some(Ast::Identifier(name, self.position)))
@@ -1544,7 +1571,7 @@ impl Parser {
             }
             Token::NewLine | Token::Spaces(_) | Token::Comment(_) => {
                 self.consume();
-                self.parse_atom(min_precedence)
+                self.parse_atom(struct_creation_allowed)
             }
             Token::OpenParen => {
                 self.consume();
