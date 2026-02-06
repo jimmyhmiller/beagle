@@ -123,8 +123,7 @@ fn test_zero_args() {
     println("\n--- Zero Arguments Tests ---")
 
     // getpid() - 0 args, returns I32
-    // Note: FFI wrapper always requires 6 args, pass 0 for unused
-    let pid = c_getpid(0, 0, 0, 0, 0, 0)
+    let pid = c_getpid()
     assert_true("getpid returns positive value", pid > 0)
 }
 
@@ -132,15 +131,15 @@ fn test_one_arg_i32() {
     println("\n--- One Argument (I32) Tests ---")
 
     // abs(-42) should return 42
-    let result = c_abs(-42, 0, 0, 0, 0, 0)
+    let result = c_abs(-42)
     assert_eq("abs(-42) == 42", 42, result)
 
     // abs(42) should return 42
-    let result2 = c_abs(42, 0, 0, 0, 0, 0)
+    let result2 = c_abs(42)
     assert_eq("abs(42) == 42", 42, result2)
 
     // abs(0) should return 0
-    let result3 = c_abs(0, 0, 0, 0, 0, 0)
+    let result3 = c_abs(0)
     assert_eq("abs(0) == 0", 0, result3)
 }
 
@@ -148,15 +147,15 @@ fn test_one_arg_string() {
     println("\n--- One Argument (String) Tests ---")
 
     // strlen("hello") should return 5
-    let len = c_strlen("hello", 0, 0, 0, 0, 0)
+    let len = c_strlen("hello")
     assert_eq("strlen('hello') == 5", 5, len)
 
     // strlen("") should return 0
-    let empty_len = c_strlen("", 0, 0, 0, 0, 0)
+    let empty_len = c_strlen("")
     assert_eq("strlen('') == 0", 0, empty_len)
 
     // strlen with longer string
-    let long_len = c_strlen("hello world!", 0, 0, 0, 0, 0)
+    let long_len = c_strlen("hello world!")
     assert_eq("strlen('hello world!') == 12", 12, long_len)
 }
 
@@ -164,7 +163,7 @@ fn test_one_arg_pointer_null() {
     println("\n--- One Argument (Pointer - null) Tests ---")
 
     // time(NULL) should return current time (non-zero)
-    let current_time = c_time(null, 0, 0, 0, 0, 0)
+    let current_time = c_time(null)
     assert_true("time(NULL) returns positive value", current_time > 0)
 }
 
@@ -172,19 +171,19 @@ fn test_two_args() {
     println("\n--- Two Arguments Tests ---")
 
     // strcmp("abc", "abc") should return 0
-    let cmp1 = c_strcmp("abc", "abc", 0, 0, 0, 0)
+    let cmp1 = c_strcmp("abc", "abc")
     assert_eq("strcmp('abc', 'abc') == 0", 0, cmp1)
 
     // strcmp("abc", "abd") should return negative
-    let cmp2 = c_strcmp("abc", "abd", 0, 0, 0, 0)
+    let cmp2 = c_strcmp("abc", "abd")
     assert_true("strcmp('abc', 'abd') < 0", cmp2 < 0)
 
     // strcmp("abd", "abc") should return positive
-    let cmp3 = c_strcmp("abd", "abc", 0, 0, 0, 0)
+    let cmp3 = c_strcmp("abd", "abc")
     assert_true("strcmp('abd', 'abc') > 0", cmp3 > 0)
 
     // strchr("hello", 'l') should return non-null pointer
-    let found = c_strchr("hello", 108, 0, 0, 0, 0) // 'l' = 108
+    let found = c_strchr("hello", 108) // 'l' = 108
     assert_not_null("strchr('hello', 'l') != null", found)
 }
 
@@ -195,7 +194,7 @@ fn test_three_args_pointer() {
     let buf = ffi/allocate(16)
 
     // memset(buf, 0x41, 8) - fill first 8 bytes with 'A'
-    let result = c_memset(buf, 65, 8, 0, 0, 0) // 65 = 'A'
+    let result = c_memset(buf, 65, 8) // 65 = 'A'
     assert_not_null("memset returns non-null", result)
 
     // Verify the bytes were set
@@ -214,7 +213,7 @@ fn test_three_args_pointer() {
 
     // memcpy to a third buffer
     let buf3 = ffi/allocate(16)
-    c_memcpy(buf3, buf2, 4, 0, 0, 0)
+    c_memcpy(buf3, buf2, 4)
 
     // Verify copied bytes
     assert_eq("memcpy byte 0", 1, ffi/get-u8(buf3, 0))
@@ -223,12 +222,12 @@ fn test_three_args_pointer() {
     assert_eq("memcpy byte 3", 4, ffi/get-u8(buf3, 3))
 
     // memcmp test
-    let cmp = c_memcmp(buf2, buf3, 4, 0, 0, 0)
+    let cmp = c_memcmp(buf2, buf3, 4)
     assert_eq("memcmp equal buffers == 0", 0, cmp)
 
     // Make buf3 different
     ffi/set-u8(buf3, 0, 0)
-    let cmp2 = c_memcmp(buf2, buf3, 4, 0, 0, 0)
+    let cmp2 = c_memcmp(buf2, buf3, 4)
     assert_true("memcmp different buffers != 0", cmp2 != 0)
 }
 
@@ -236,15 +235,15 @@ fn test_strncmp() {
     println("\n--- String Compare with Length Tests ---")
 
     // strncmp("hello", "hello", 5) should return 0
-    let cmp1 = c_strncmp("hello", "hello", 5, 0, 0, 0)
+    let cmp1 = c_strncmp("hello", "hello", 5)
     assert_eq("strncmp equal strings == 0", 0, cmp1)
 
     // strncmp("hello", "help", 3) should return 0 (only compares first 3 chars)
-    let cmp2 = c_strncmp("hello", "help", 3, 0, 0, 0)
+    let cmp2 = c_strncmp("hello", "help", 3)
     assert_eq("strncmp first 3 chars equal == 0", 0, cmp2)
 
     // strncmp("hello", "help", 4) should return non-zero (4th char differs)
-    let cmp3 = c_strncmp("hello", "help", 4, 0, 0, 0)
+    let cmp3 = c_strncmp("hello", "help", 4)
     assert_true("strncmp 4 chars differ != 0", cmp3 != 0)
 }
 
@@ -324,14 +323,14 @@ fn test_heap_string_to_ffi() {
     let combined = s1 ++ s2
 
     // strlen on heap string
-    let len = c_strlen(combined, 0, 0, 0, 0, 0)
+    let len = c_strlen(combined)
     assert_eq("strlen on heap string", 11, len)
 
     // strcmp with heap strings
     let a = "abc"
     let b = "def"
     let ab = a ++ ""  // Force heap allocation
-    let cmp = c_strcmp(ab, "abc", 0, 0, 0, 0)
+    let cmp = c_strcmp(ab, "abc")
     assert_eq("strcmp heap string == literal", 0, cmp)
 }
 

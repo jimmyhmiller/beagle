@@ -981,15 +981,14 @@ impl AstCompiler<'_> {
                         let stack_pointer = self.ir.get_stack_pointer_imm(0);
                         let frame_pointer = self.ir.get_frame_pointer();
 
-                        // Load saved arg_count (already tagged)
+                        // Load saved arg_count (already tagged, includes closure env for closures)
                         let arg_count_val = self.ir.load_local(arg_count_local);
 
-                        // min_args as tagged int
+                        // min_args as tagged int (number of named params, NOT including closure env)
                         let min_args_val = Value::TaggedConstant(min_args as isize);
                         let min_args_reg = self.ir.assign_new(min_args_val);
 
                         // First local index where args are saved (as raw value)
-                        // The first saved arg local index
                         let first_local_index = if saved_arg_locals.is_empty() {
                             0
                         } else {
@@ -998,7 +997,12 @@ impl AstCompiler<'_> {
                         let first_local_val = Value::RawValue(first_local_index);
                         let first_local_reg = self.ir.assign_new(first_local_val);
 
-                        // Call the builtin: build_rest_array_from_locals(sp, fp, arg_count, min_args, first_local)
+                        // first_arg_index: 1 for closures (arg0 is closure env), 0 for top-level
+                        let first_arg_idx =
+                            Value::TaggedConstant(if is_not_top_level { 1 } else { 0 });
+                        let first_arg_idx_reg = self.ir.assign_new(first_arg_idx);
+
+                        // Call: build_rest_array_from_locals(sp, fp, arg_count, min_args, first_local, first_arg_index)
                         self.ir.call_builtin(
                             build_fn_val.into(),
                             vec![
@@ -1007,6 +1011,7 @@ impl AstCompiler<'_> {
                                 arg_count_val,
                                 min_args_reg.into(),
                                 first_local_reg.into(),
+                                first_arg_idx_reg.into(),
                             ],
                         )
                     } else {

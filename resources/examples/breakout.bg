@@ -167,93 +167,93 @@ let KEY_R = 82
 // ============================================================
 
 fn init_window(width, height, title) {
-    rl_init_window(width, height, title, 0, 0, 0)
+    rl_init_window(width, height, title)
 }
 
 fn close_window() {
-    rl_close_window(0, 0, 0, 0, 0, 0)
+    rl_close_window()
 }
 
 fn window_should_close() {
-    rl_window_should_close(0, 0, 0, 0, 0, 0) != 0
+    rl_window_should_close() != 0
 }
 
 fn set_target_fps(fps) {
-    rl_set_target_fps(fps, 0, 0, 0, 0, 0)
+    rl_set_target_fps(fps)
 }
 
 fn begin_drawing() {
-    rl_begin_drawing(0, 0, 0, 0, 0, 0)
+    rl_begin_drawing()
 }
 
 fn end_drawing() {
-    rl_end_drawing(0, 0, 0, 0, 0, 0)
+    rl_end_drawing()
 }
 
 fn clear_background(c) {
-    rl_clear_background(c, 0, 0, 0, 0, 0)
+    rl_clear_background(c)
 }
 
 fn draw_rectangle(x, y, w, h, c) {
-    rl_draw_rectangle(x, y, w, h, c, 0)
+    rl_draw_rectangle(x, y, w, h, c)
 }
 
 fn draw_rectangle_lines(x, y, w, h, c) {
-    rl_draw_rectangle_lines(x, y, w, h, c, 0)
+    rl_draw_rectangle_lines(x, y, w, h, c)
 }
 
 fn draw_circle(x, y, radius, c) {
-    rl_draw_circle(x, y, radius, c, 0, 0)
+    rl_draw_circle(x, y, radius, c)
 }
 
 fn draw_text(text, x, y, size, c) {
-    rl_draw_text(text, x, y, size, c, 0)
+    rl_draw_text(text, x, y, size, c)
 }
 
 fn is_key_down(key) {
-    rl_is_key_down(key, 0, 0, 0, 0, 0) != 0
+    rl_is_key_down(key) != 0
 }
 
 fn is_key_pressed(key) {
-    rl_is_key_pressed(key, 0, 0, 0, 0, 0) != 0
+    rl_is_key_pressed(key) != 0
 }
 
 // Shader functions
 fn load_shader_from_memory(vs_code, fs_code) {
     // Returns a StructReturn { low, high }
-    rl_load_shader_from_memory(vs_code, fs_code, 0, 0, 0, 0)
+    rl_load_shader_from_memory(vs_code, fs_code)
 }
 
 fn begin_shader_mode(shader) {
     // shader is StructReturn { low, high }
-    rl_begin_shader_mode(shader.low, shader.high, 0, 0, 0, 0)
+    rl_begin_shader_mode(shader.low, shader.high)
 }
 
 fn end_shader_mode() {
-    rl_end_shader_mode(0, 0, 0, 0, 0, 0)
+    rl_end_shader_mode()
 }
 
 fn unload_shader(shader) {
-    rl_unload_shader(shader.low, shader.high, 0, 0, 0, 0)
+    rl_unload_shader(shader.low, shader.high)
 }
 
 fn get_time() {
     // Returns time as f64 bits - we need to convert to f32 for shader
-    rl_get_time(0, 0, 0, 0, 0, 0)
+    rl_get_time()
 }
 
 fn get_shader_location(shader, name) {
-    rl_get_shader_location(shader.low, shader.high, name, 0, 0, 0)
+    rl_get_shader_location(shader.low, shader.high, name)
 }
 
 fn set_shader_value_float(shader, loc, value_buffer) {
     // uniformType 0 = SHADER_UNIFORM_FLOAT
-    rl_set_shader_value(shader.low, shader.high, loc, value_buffer, 0, 0)
+    rl_set_shader_value(shader.low, shader.high, loc, value_buffer, 0)
 }
 
 fn set_shader_value_int(shader, loc, value_buffer) {
     // uniformType 4 = SHADER_UNIFORM_INT
-    rl_set_shader_value(shader.low, shader.high, loc, value_buffer, 4, 0)
+    rl_set_shader_value(shader.low, shader.high, loc, value_buffer, 4)
 }
 
 // ============================================================

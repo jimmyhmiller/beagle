@@ -486,7 +486,8 @@ impl PersistentMap {
                     // Create new children array with updated sub-node
                     let children = children_h.to_gc_handle();
                     let old_len = children.field_count();
-                    let new_children_h = scope.allocate_typed_zeroed(old_len, TYPE_ID_BITMAP_NODE)?;
+                    let new_children_h =
+                        scope.allocate_typed_zeroed(old_len, TYPE_ID_BITMAP_NODE)?;
 
                     // Bulk copy all fields
                     let children = children_h.to_gc_handle();
@@ -597,7 +598,8 @@ impl PersistentMap {
                     // Update children to point to collision node
                     let children = children_h.to_gc_handle();
                     let old_len = children.field_count();
-                    let new_children_h = scope.allocate_typed_zeroed(old_len, TYPE_ID_BITMAP_NODE)?;
+                    let new_children_h =
+                        scope.allocate_typed_zeroed(old_len, TYPE_ID_BITMAP_NODE)?;
 
                     // Bulk copy all fields
                     let children = children_h.to_gc_handle();
@@ -650,7 +652,8 @@ impl PersistentMap {
                     // Update children to point to sub-node
                     let children = children_h.to_gc_handle();
                     let old_len = children.field_count();
-                    let new_children_h = scope.allocate_typed_zeroed(old_len, TYPE_ID_BITMAP_NODE)?;
+                    let new_children_h =
+                        scope.allocate_typed_zeroed(old_len, TYPE_ID_BITMAP_NODE)?;
 
                     // Bulk copy all fields
                     let children = children_h.to_gc_handle();
@@ -1307,7 +1310,8 @@ impl PersistentMap {
 
                 if keys_equal {
                     // Update existing entry
-                    let new_kv_array_h = scope.allocate_typed_zeroed(count * 2, TYPE_ID_COLLISION_NODE)?;
+                    let new_kv_array_h =
+                        scope.allocate_typed_zeroed(count * 2, TYPE_ID_COLLISION_NODE)?;
 
                     let kv_array = kv_array_h.to_gc_handle();
                     let new_kv_array = new_kv_array_h.to_gc_handle();
@@ -1344,7 +1348,8 @@ impl PersistentMap {
             }
 
             // Key not found - add new entry
-            let new_kv_array_h = scope.allocate_typed_zeroed((count + 1) * 2, TYPE_ID_COLLISION_NODE)?;
+            let new_kv_array_h =
+                scope.allocate_typed_zeroed((count + 1) * 2, TYPE_ID_COLLISION_NODE)?;
 
             // Bulk copy existing entries
             let kv_array = kv_array_h.to_gc_handle();

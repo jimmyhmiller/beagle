@@ -91,7 +91,7 @@ fn string-to-buffer(s) {
 ///       Result.Err { error } => println("Failed to open")
 ///   })
 fn open(path, mode) {
-    let handle = _fopen(path, mode, 0, 0, 0, 0)
+    let handle = _fopen(path, mode)
     if is-null(handle) {
         io-err("Failed to open file")
     } else {
@@ -101,7 +101,7 @@ fn open(path, mode) {
 
 /// Close an open file handle.
 fn close(file) {
-    let result = _fclose(file.handle, 0, 0, 0, 0, 0)
+    let result = _fclose(file.handle)
     if result == 0 {
         ok(null)
     } else {
@@ -117,7 +117,7 @@ fn close(file) {
 /// Returns a BufferResult with the buffer and bytes read.
 fn read-bytes(file, n) {
     let buf = ffi/allocate(n)
-    let bytes-read = _fread(buf, 1, n, file.handle, 0, 0)
+    let bytes-read = _fread(buf, 1, n, file.handle)
     ok(BufferResult { buffer: buf, length: bytes-read })
 }
 
@@ -125,7 +125,7 @@ fn read-bytes(file, n) {
 ///
 /// Returns Result.Ok with the character code, or Result.Err at EOF.
 fn read-char(file) {
-    let c = _fgetc(file.handle, 0, 0, 0, 0, 0)
+    let c = _fgetc(file.handle)
     if c == -1 {
         io-err("EOF or error")
     } else {
@@ -137,7 +137,7 @@ fn read-char(file) {
 ///
 /// Returns the number of bytes written.
 fn write-bytes(file, buf, len) {
-    let written = _fwrite(buf, 1, len, file.handle, 0, 0)
+    let written = _fwrite(buf, 1, len, file.handle)
     ok(written)
 }
 
@@ -147,14 +147,14 @@ fn write-bytes(file, buf, len) {
 fn write-string(file, s) {
     let len = length(s)
     let buf = string-to-buffer(s)
-    let written = _fwrite(buf, 1, len, file.handle, 0, 0)
+    let written = _fwrite(buf, 1, len, file.handle)
     ffi/deallocate(buf)
     ok(written)
 }
 
 /// Flush a file's buffers to disk.
 fn flush(file) {
-    let result = _fflush(file.handle, 0, 0, 0, 0, 0)
+    let result = _fflush(file.handle)
     if result == 0 {
         ok(null)
     } else {
@@ -164,7 +164,7 @@ fn flush(file) {
 
 /// Check if a file has reached end-of-file.
 fn eof?(file) {
-    _feof(file.handle, 0, 0, 0, 0, 0) != 0
+    _feof(file.handle) != 0
 }
 
 /// Read a line from a file (up to newline or max-len bytes).
@@ -176,7 +176,7 @@ fn read-line(file, max-len) {
     let mut done = false
     // Use done == false instead of !done for while condition
     while i < max-len && done == false {
-        let c = _fgetc(file.handle, 0, 0, 0, 0, 0)
+        let c = _fgetc(file.handle)
         if c == -1 {
             done = true
         } else if c == 10 {
@@ -206,7 +206,7 @@ fn read-line(file, max-len) {
 /// Returns a BufferResult with the buffer and bytes read.
 fn read-stdin(n) {
     let buf = ffi/allocate(n)
-    let bytes-read = _read(STDIN-FD, buf, n, 0, 0, 0)
+    let bytes-read = _read(STDIN-FD, buf, n)
     if bytes-read < 0 {
         ffi/deallocate(buf)
         io-err("Read error")
@@ -236,7 +236,7 @@ fn read-stdin-string(n) {
 fn write-stdout(s) {
     let len = length(s)
     let buf = string-to-buffer(s)
-    let written = _write(STDOUT-FD, buf, len, 0, 0, 0)
+    let written = _write(STDOUT-FD, buf, len)
     ffi/deallocate(buf)
     if written < 0 {
         io-err("Write error")
@@ -249,7 +249,7 @@ fn write-stdout(s) {
 ///
 /// More efficient than write-stdout for binary data.
 fn write-stdout-buffer(buf, len) {
-    let written = _write(STDOUT-FD, buf, len, 0, 0, 0)
+    let written = _write(STDOUT-FD, buf, len)
     if written < 0 {
         io-err("Write error")
     } else {
@@ -263,7 +263,7 @@ fn write-stdout-buffer(buf, len) {
 fn write-stderr(s) {
     let len = length(s)
     let buf = string-to-buffer(s)
-    let written = _write(STDERR-FD, buf, len, 0, 0, 0)
+    let written = _write(STDERR-FD, buf, len)
     ffi/deallocate(buf)
     if written < 0 {
         io-err("Write error")
@@ -294,7 +294,7 @@ fn read-stdin-line(max-len) {
     let mut done = false
     // Use done == false instead of !done for while condition
     while i < max-len && done == false {
-        let bytes-read = _read(STDIN-FD, one-byte-buf, 1, 0, 0, 0)
+        let bytes-read = _read(STDIN-FD, one-byte-buf, 1)
         if bytes-read <= 0 {
             done = true
         } else {
