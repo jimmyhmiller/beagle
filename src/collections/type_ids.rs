@@ -1,11 +1,17 @@
-//! Type ID constants for Rust-native persistent collections.
+//! Type ID constants for heap object types.
 //!
 //! These type IDs are used in the heap object headers to identify the type of
-//! collection node. They are chosen to not conflict with existing type IDs:
-//! - 1 = raw array
-//! - 2 = string
-//! - 3 = keyword
+//! object. They are chosen to not conflict with each other:
 //! - User-defined structs use higher IDs assigned at runtime
+
+/// Type ID for raw arrays (internal backing storage)
+pub const TYPE_ID_RAW_ARRAY: u8 = 1;
+
+/// Type ID for heap-allocated strings
+pub const TYPE_ID_STRING: u8 = 2;
+
+/// Type ID for keywords (interned symbol-like values)
+pub const TYPE_ID_KEYWORD: u8 = 3;
 
 /// Type ID for PersistentVec struct (4 fields: count, shift, root, tail)
 pub const TYPE_ID_PERSISTENT_VEC: u8 = 20;

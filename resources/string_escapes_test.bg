@@ -1,0 +1,40 @@
+namespace string_escapes_test
+
+fn main() {
+    // Basic escape sequences
+    println("tab: [\t]")
+    println("newline in string length: " ++ to-string(length("\n")))
+    println("null char length: " ++ to-string(length("\0")))
+    println("cr length: " ++ to-string(length("\r")))
+
+    // Escaped special characters
+    println("backslash: [\\]")
+    println("quote: [\"]")
+    println("dollar: [\$]")
+
+    // Escapes in string interpolation
+    let x = 42
+    println("value is\t${x}")
+
+    // Multiple escapes in one string
+    println("a\tb\tc")
+
+    // Double backslash
+    println("double: [\\\\]")
+
+    // Escapes in concatenation
+    println("hello\tworld")
+}
+
+// Expect
+// tab: [	]
+// newline in string length: 1
+// null char length: 1
+// cr length: 1
+// backslash: [\]
+// quote: ["]
+// dollar: [$]
+// value is	42
+// a	b	c
+// double: [\\]
+// hello	world

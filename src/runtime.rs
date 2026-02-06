@@ -33,7 +33,9 @@ use crate::{
 
 use crate::collections::{
     GcHandle, HandleScope, PersistentMap, PersistentVec, TYPE_ID_ATOM, TYPE_ID_CONTINUATION,
-    TYPE_ID_CONTINUATION_SEGMENT, TYPE_ID_FUNCTION_OBJECT,
+    TYPE_ID_CONTINUATION_SEGMENT, TYPE_ID_FUNCTION_OBJECT, TYPE_ID_KEYWORD,
+    TYPE_ID_MULTI_ARITY_FUNCTION, TYPE_ID_PERSISTENT_MAP, TYPE_ID_PERSISTENT_SET,
+    TYPE_ID_PERSISTENT_VEC, TYPE_ID_RAW_ARRAY, TYPE_ID_STRING,
 };
 
 use std::cell::RefCell;
@@ -463,11 +465,11 @@ impl Printer for DefaultPrinter {
     }
 
     fn get_output(&self) -> Vec<String> {
-        unimplemented!("We don't store this in the default")
+        vec![]
     }
 
     fn reset(&mut self) {
-        unimplemented!("We don't store this in the default")
+        // no-op: DefaultPrinter doesn't buffer output
     }
 }
 
@@ -5263,13 +5265,13 @@ impl Runtime {
                 }
 
                 match type_id {
-                    1 => "Array",               // Raw mutable array (type_id == 1)
-                    2 => "String",              // HeapObject string (type_id == 2)
-                    3 => "Keyword",             // Keyword type (type_id == 3)
-                    20 => "PersistentVector",   // Rust-backed persistent vector
-                    22 => "PersistentMap",      // Rust-backed persistent map
-                    28 => "PersistentSet",      // Rust-backed persistent set
-                    29 => "MultiArityFunction", // Multi-arity function dispatch object
+                    val if val == TYPE_ID_RAW_ARRAY as usize => "Array",
+                    val if val == TYPE_ID_STRING as usize => "String",
+                    val if val == TYPE_ID_KEYWORD as usize => "Keyword",
+                    val if val == TYPE_ID_PERSISTENT_VEC as usize => "PersistentVector",
+                    val if val == TYPE_ID_PERSISTENT_MAP as usize => "PersistentMap",
+                    val if val == TYPE_ID_PERSISTENT_SET as usize => "PersistentSet",
+                    val if val == TYPE_ID_MULTI_ARITY_FUNCTION as usize => "MultiArityFunction",
                     val if val == TYPE_ID_CONTINUATION as usize => "Continuation",
                     val if val == TYPE_ID_CONTINUATION_SEGMENT as usize => "ContinuationSegment",
                     _ => {
@@ -5322,7 +5324,7 @@ impl Runtime {
 
         if a_tag == BuiltInTypes::HeapObject && b_tag == BuiltInTypes::String {
             let a_object = HeapObject::from_tagged(a);
-            if a_object.get_type_id() != 2 {
+            if a_object.get_type_id() != TYPE_ID_STRING as usize {
                 return false;
             }
             let b_string = self.get_str_literal(b);
@@ -5352,13 +5354,17 @@ impl Runtime {
                 let a_object = HeapObject::from_tagged(a);
                 let b_object = HeapObject::from_tagged(b);
 
-                // Keywords (type_id=3) are interned, so compare by pointer identity
-                if a_object.get_type_id() == 3 && b_object.get_type_id() == 3 {
+                // Keywords are interned, so compare by pointer identity
+                if a_object.get_type_id() == TYPE_ID_KEYWORD as usize
+                    && b_object.get_type_id() == TYPE_ID_KEYWORD as usize
+                {
                     return a == b;
                 }
 
-                // Strings (type_id=2) should also compare by byte content
-                if a_object.get_type_id() == 2 && b_object.get_type_id() == 2 {
+                // Strings should also compare by byte content
+                if a_object.get_type_id() == TYPE_ID_STRING as usize
+                    && b_object.get_type_id() == TYPE_ID_STRING as usize
+                {
                     let a_bytes = a_object.get_string_bytes();
                     let b_bytes = b_object.get_string_bytes();
                     return a_bytes == b_bytes;
@@ -5496,14 +5502,13 @@ impl Runtime {
             BuiltInTypes::HeapObject => {
                 let heap_object = HeapObject::from_tagged(value);
                 let type_id = heap_object.get_header().type_id;
-                if type_id == 2 {
-                    // String
+                if type_id == TYPE_ID_STRING {
                     let bytes = heap_object.get_string_bytes();
                     let string = unsafe { std::str::from_utf8_unchecked(bytes) };
                     let mut s = DefaultHasher::new();
                     string.hash(&mut s);
                     s.finish() as usize
-                } else if type_id == 3 {
+                } else if type_id == TYPE_ID_KEYWORD {
                     // Keyword - use cached hash
                     heap_object.get_keyword_hash() as usize
                 } else {
@@ -5537,7 +5542,7 @@ impl Runtime {
             self.get_string_literal(value)
         } else if tag == BuiltInTypes::HeapObject {
             let heap_object = HeapObject::from_tagged(value);
-            if heap_object.get_type_id() != 2 {
+            if heap_object.get_type_id() != TYPE_ID_STRING as usize {
                 unsafe {
                     crate::builtins::throw_runtime_error(
                         stack_pointer,
@@ -5591,7 +5596,7 @@ impl Runtime {
             self.allocate_string(stack_pointer, string)
         } else if tag == BuiltInTypes::HeapObject {
             let heap_object = HeapObject::from_tagged(string);
-            if heap_object.get_type_id() != 2 {
+            if heap_object.get_type_id() != TYPE_ID_STRING as usize {
                 unsafe {
                     crate::builtins::throw_runtime_error(
                         stack_pointer,

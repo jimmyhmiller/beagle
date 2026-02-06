@@ -49,6 +49,9 @@ pub fn get_thread_count() -> u32 {
     0
 }
 
+// USDT probes use inline assembly with architecture-specific registers.
+// Only enable real probes on aarch64; provide no-op stubs on other architectures.
+#[cfg(target_arch = "aarch64")]
 #[usdt::provider(provider = "beagle")]
 mod probes {
     // GC lifecycle probes - all include thread_count
@@ -101,98 +104,157 @@ pub fn thread_id_u64() -> u64 {
     hasher.finish()
 }
 
-// Convenience functions that fire the probes
+// On aarch64, fire real USDT probes
+#[cfg(target_arch = "aarch64")]
+mod fire_impl {
+    use super::*;
 
-#[inline]
-pub fn fire_gc_start(gc_number: usize) {
-    probes::gc__start!(|| (gc_number as u64, get_thread_count()));
+    #[inline]
+    pub fn fire_gc_start(gc_number: usize) {
+        probes::gc__start!(|| (gc_number as u64, get_thread_count()));
+    }
+
+    #[inline]
+    pub fn fire_gc_end(gc_number: usize, objects_copied: usize) {
+        probes::gc__end!(|| (gc_number as u64, objects_copied as u64, get_thread_count()));
+    }
+
+    #[inline]
+    pub fn fire_gc_minor_start(gc_number: usize) {
+        probes::gc__minor__start!(|| (gc_number as u64, get_thread_count()));
+    }
+
+    #[inline]
+    pub fn fire_gc_minor_end(gc_number: usize) {
+        probes::gc__minor__end!(|| (gc_number as u64, get_thread_count()));
+    }
+
+    #[inline]
+    pub fn fire_gc_full_start(gc_number: usize) {
+        probes::gc__full__start!(|| (gc_number as u64, get_thread_count()));
+    }
+
+    #[inline]
+    pub fn fire_gc_full_end(gc_number: usize) {
+        probes::gc__full__end!(|| (gc_number as u64, get_thread_count()));
+    }
+
+    #[inline]
+    pub fn fire_thread_pause_enter() {
+        probes::thread__pause__enter!(|| (thread_id_u64(), get_thread_count()));
+    }
+
+    #[inline]
+    pub fn fire_thread_pause_exit(pause_duration_ns: u64) {
+        probes::thread__pause__exit!(|| (thread_id_u64(), pause_duration_ns, get_thread_count()));
+    }
+
+    #[inline]
+    pub fn fire_thread_state(state: ThreadStateCode) {
+        probes::thread__state!(|| (thread_id_u64(), state as u64, get_thread_count()));
+    }
+
+    #[inline]
+    pub fn fire_thread_start() {
+        probes::thread__start!(|| (thread_id_u64(), get_thread_count()));
+    }
+
+    #[inline]
+    pub fn fire_thread_exit() {
+        probes::thread__exit!(|| (thread_id_u64(), get_thread_count()));
+    }
+
+    #[inline]
+    pub fn fire_thread_spawn() {
+        probes::thread__spawn!(|| get_thread_count());
+    }
+
+    #[inline]
+    pub fn fire_thread_register(registered_count: usize) {
+        probes::thread__register!(|| (
+            thread_id_u64(),
+            registered_count as u64,
+            get_thread_count()
+        ));
+    }
+
+    #[inline]
+    pub fn fire_thread_unregister(registered_count: usize) {
+        probes::thread__unregister!(|| (
+            thread_id_u64(),
+            registered_count as u64,
+            get_thread_count()
+        ));
+    }
+
+    #[inline]
+    pub fn fire_stw_begin() {
+        probes::stw__begin!(|| (thread_id_u64(), get_thread_count()));
+    }
+
+    #[inline]
+    pub fn fire_stw_all_paused(num_paused: usize, total_registered: usize) {
+        probes::stw__all__paused!(|| (
+            num_paused as u64,
+            total_registered as u64,
+            get_thread_count()
+        ));
+    }
+
+    #[inline]
+    pub fn fire_stw_end() {
+        probes::stw__end!(|| (thread_id_u64(), get_thread_count()));
+    }
+
+    pub fn register() -> Result<(), usdt::Error> {
+        usdt::register_probes()
+    }
 }
 
-#[inline]
-pub fn fire_gc_end(gc_number: usize, objects_copied: usize) {
-    probes::gc__end!(|| (gc_number as u64, objects_copied as u64, get_thread_count()));
+// On non-aarch64 (e.g. x86-64), provide no-op stubs
+#[cfg(not(target_arch = "aarch64"))]
+mod fire_impl {
+    use super::*;
+
+    #[inline]
+    pub fn fire_gc_start(_gc_number: usize) {}
+    #[inline]
+    pub fn fire_gc_end(_gc_number: usize, _objects_copied: usize) {}
+    #[inline]
+    pub fn fire_gc_minor_start(_gc_number: usize) {}
+    #[inline]
+    pub fn fire_gc_minor_end(_gc_number: usize) {}
+    #[inline]
+    pub fn fire_gc_full_start(_gc_number: usize) {}
+    #[inline]
+    pub fn fire_gc_full_end(_gc_number: usize) {}
+    #[inline]
+    pub fn fire_thread_pause_enter() {}
+    #[inline]
+    pub fn fire_thread_pause_exit(_pause_duration_ns: u64) {}
+    #[inline]
+    pub fn fire_thread_state(_state: ThreadStateCode) {}
+    #[inline]
+    pub fn fire_thread_start() {}
+    #[inline]
+    pub fn fire_thread_exit() {}
+    #[inline]
+    pub fn fire_thread_spawn() {}
+    #[inline]
+    pub fn fire_thread_register(_registered_count: usize) {}
+    #[inline]
+    pub fn fire_thread_unregister(_registered_count: usize) {}
+    #[inline]
+    pub fn fire_stw_begin() {}
+    #[inline]
+    pub fn fire_stw_all_paused(_num_paused: usize, _total_registered: usize) {}
+    #[inline]
+    pub fn fire_stw_end() {}
+
+    pub fn register() -> Result<(), String> {
+        Ok(())
+    }
 }
 
-#[inline]
-pub fn fire_gc_minor_start(gc_number: usize) {
-    probes::gc__minor__start!(|| (gc_number as u64, get_thread_count()));
-}
-
-#[inline]
-pub fn fire_gc_minor_end(gc_number: usize) {
-    probes::gc__minor__end!(|| (gc_number as u64, get_thread_count()));
-}
-
-#[inline]
-pub fn fire_gc_full_start(gc_number: usize) {
-    probes::gc__full__start!(|| (gc_number as u64, get_thread_count()));
-}
-
-#[inline]
-pub fn fire_gc_full_end(gc_number: usize) {
-    probes::gc__full__end!(|| (gc_number as u64, get_thread_count()));
-}
-
-#[inline]
-pub fn fire_thread_pause_enter() {
-    probes::thread__pause__enter!(|| (thread_id_u64(), get_thread_count()));
-}
-
-#[inline]
-pub fn fire_thread_pause_exit(pause_duration_ns: u64) {
-    probes::thread__pause__exit!(|| (thread_id_u64(), pause_duration_ns, get_thread_count()));
-}
-
-#[inline]
-pub fn fire_thread_state(state: ThreadStateCode) {
-    probes::thread__state!(|| (thread_id_u64(), state as u64, get_thread_count()));
-}
-
-#[inline]
-pub fn fire_thread_start() {
-    probes::thread__start!(|| (thread_id_u64(), get_thread_count()));
-}
-
-#[inline]
-pub fn fire_thread_exit() {
-    probes::thread__exit!(|| (thread_id_u64(), get_thread_count()));
-}
-
-#[inline]
-pub fn fire_thread_spawn() {
-    probes::thread__spawn!(|| get_thread_count());
-}
-
-#[inline]
-pub fn fire_thread_register(registered_count: usize) {
-    probes::thread__register!(|| (thread_id_u64(), registered_count as u64, get_thread_count()));
-}
-
-#[inline]
-pub fn fire_thread_unregister(registered_count: usize) {
-    probes::thread__unregister!(|| (thread_id_u64(), registered_count as u64, get_thread_count()));
-}
-
-#[inline]
-pub fn fire_stw_begin() {
-    probes::stw__begin!(|| (thread_id_u64(), get_thread_count()));
-}
-
-#[inline]
-pub fn fire_stw_all_paused(num_paused: usize, total_registered: usize) {
-    probes::stw__all__paused!(|| (
-        num_paused as u64,
-        total_registered as u64,
-        get_thread_count()
-    ));
-}
-
-#[inline]
-pub fn fire_stw_end() {
-    probes::stw__end!(|| (thread_id_u64(), get_thread_count()));
-}
-
-/// Register all probes. Call this at startup.
-pub fn register() -> Result<(), usdt::Error> {
-    usdt::register_probes()
-}
+// Re-export all fire functions at the module level
+pub use fire_impl::*;
