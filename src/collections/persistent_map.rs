@@ -65,7 +65,7 @@ impl PersistentMap {
         let mut scope = HandleScope::new(runtime, stack_pointer);
 
         // Allocate the map struct (2 fields: count, root)
-        let map = scope.allocate_typed(2, TYPE_ID_PERSISTENT_MAP)?;
+        let map = scope.allocate_typed_zeroed(2, TYPE_ID_PERSISTENT_MAP)?;
 
         // Initialize fields
         let map_gc = map.to_gc_handle();
@@ -254,7 +254,7 @@ impl PersistentMap {
         };
 
         // Allocate new map
-        let new_map = scope.allocate_typed(2, TYPE_ID_PERSISTENT_MAP)?;
+        let new_map = scope.allocate_typed_zeroed(2, TYPE_ID_PERSISTENT_MAP)?;
         let new_count = if added { count + 1 } else { count };
 
         // No re-reading needed! Handles are stable.
@@ -279,10 +279,10 @@ impl PersistentMap {
         hash: usize,
     ) -> Result<Handle, Box<dyn Error>> {
         // Create children array with 2 elements (key, value)
-        let children = scope.allocate_typed(2, TYPE_ID_BITMAP_NODE)?;
+        let children = scope.allocate_typed_zeroed(2, TYPE_ID_BITMAP_NODE)?;
 
         // Create bitmap node
-        let node = scope.allocate_typed(2, TYPE_ID_BITMAP_NODE)?;
+        let node = scope.allocate_typed_zeroed(2, TYPE_ID_BITMAP_NODE)?;
 
         // Use write barriers for heap pointer writes
         children
@@ -317,10 +317,10 @@ impl PersistentMap {
         shift: usize,
     ) -> Result<Handle, Box<dyn Error>> {
         // Create children array with 2 elements (key, value)
-        let children = scope.allocate_typed(2, TYPE_ID_BITMAP_NODE)?;
+        let children = scope.allocate_typed_zeroed(2, TYPE_ID_BITMAP_NODE)?;
 
         // Create bitmap node
-        let node = scope.allocate_typed(2, TYPE_ID_BITMAP_NODE)?;
+        let node = scope.allocate_typed_zeroed(2, TYPE_ID_BITMAP_NODE)?;
 
         children
             .to_gc_handle()
@@ -400,7 +400,7 @@ impl PersistentMap {
             let old_len = children.field_count();
 
             // Create new children array with 2 more slots
-            let new_children_h = scope.allocate_typed(old_len + 2, TYPE_ID_BITMAP_NODE)?;
+            let new_children_h = scope.allocate_typed_zeroed(old_len + 2, TYPE_ID_BITMAP_NODE)?;
 
             // Copy entries before insertion point (bulk memcpy)
             let children = children_h.to_gc_handle();
@@ -441,7 +441,7 @@ impl PersistentMap {
 
             // Create new bitmap node
             let new_bitmap = bitmap | bit;
-            let new_node_h = scope.allocate_typed(2, TYPE_ID_BITMAP_NODE)?;
+            let new_node_h = scope.allocate_typed_zeroed(2, TYPE_ID_BITMAP_NODE)?;
 
             let new_children = new_children_h.to_gc_handle();
             let new_node = new_node_h.to_gc_handle();
@@ -486,7 +486,7 @@ impl PersistentMap {
                     // Create new children array with updated sub-node
                     let children = children_h.to_gc_handle();
                     let old_len = children.field_count();
-                    let new_children_h = scope.allocate_typed(old_len, TYPE_ID_BITMAP_NODE)?;
+                    let new_children_h = scope.allocate_typed_zeroed(old_len, TYPE_ID_BITMAP_NODE)?;
 
                     // Bulk copy all fields
                     let children = children_h.to_gc_handle();
@@ -514,7 +514,7 @@ impl PersistentMap {
 
                     // Create new bitmap node
                     let node = node_h.to_gc_handle();
-                    let new_node_h = scope.allocate_typed(2, TYPE_ID_BITMAP_NODE)?;
+                    let new_node_h = scope.allocate_typed_zeroed(2, TYPE_ID_BITMAP_NODE)?;
                     let new_children = new_children_h.to_gc_handle();
                     let new_node = new_node_h.to_gc_handle();
 
@@ -542,7 +542,7 @@ impl PersistentMap {
                 // Same key - update value
                 let children = children_h.to_gc_handle();
                 let old_len = children.field_count();
-                let new_children_h = scope.allocate_typed(old_len, TYPE_ID_BITMAP_NODE)?;
+                let new_children_h = scope.allocate_typed_zeroed(old_len, TYPE_ID_BITMAP_NODE)?;
 
                 // Bulk copy all fields
                 let children = children_h.to_gc_handle();
@@ -564,7 +564,7 @@ impl PersistentMap {
 
                 // Create new bitmap node
                 let node = node_h.to_gc_handle();
-                let new_node_h = scope.allocate_typed(2, TYPE_ID_BITMAP_NODE)?;
+                let new_node_h = scope.allocate_typed_zeroed(2, TYPE_ID_BITMAP_NODE)?;
                 let new_children = new_children_h.to_gc_handle();
                 let new_node = new_node_h.to_gc_handle();
 
@@ -597,7 +597,7 @@ impl PersistentMap {
                     // Update children to point to collision node
                     let children = children_h.to_gc_handle();
                     let old_len = children.field_count();
-                    let new_children_h = scope.allocate_typed(old_len, TYPE_ID_BITMAP_NODE)?;
+                    let new_children_h = scope.allocate_typed_zeroed(old_len, TYPE_ID_BITMAP_NODE)?;
 
                     // Bulk copy all fields
                     let children = children_h.to_gc_handle();
@@ -622,7 +622,7 @@ impl PersistentMap {
                     new_children.set_field(index * 2 + 1, BuiltInTypes::null_value() as usize);
 
                     let node = node_h.to_gc_handle();
-                    let new_node_h = scope.allocate_typed(2, TYPE_ID_BITMAP_NODE)?;
+                    let new_node_h = scope.allocate_typed_zeroed(2, TYPE_ID_BITMAP_NODE)?;
                     let new_children = new_children_h.to_gc_handle();
                     let new_node = new_node_h.to_gc_handle();
 
@@ -650,7 +650,7 @@ impl PersistentMap {
                     // Update children to point to sub-node
                     let children = children_h.to_gc_handle();
                     let old_len = children.field_count();
-                    let new_children_h = scope.allocate_typed(old_len, TYPE_ID_BITMAP_NODE)?;
+                    let new_children_h = scope.allocate_typed_zeroed(old_len, TYPE_ID_BITMAP_NODE)?;
 
                     // Bulk copy all fields
                     let children = children_h.to_gc_handle();
@@ -675,7 +675,7 @@ impl PersistentMap {
                     new_children.set_field(index * 2 + 1, BuiltInTypes::null_value() as usize);
 
                     let node = node_h.to_gc_handle();
-                    let new_node_h = scope.allocate_typed(2, TYPE_ID_BITMAP_NODE)?;
+                    let new_node_h = scope.allocate_typed_zeroed(2, TYPE_ID_BITMAP_NODE)?;
                     let new_children = new_children_h.to_gc_handle();
                     let new_node = new_node_h.to_gc_handle();
 
@@ -754,7 +754,7 @@ impl PersistentMap {
             new_children.set_field_with_barrier(scope.runtime(), index, singleton.as_tagged());
 
             // Create new array node with incremented count
-            let new_node_h = scope.allocate_typed(2, TYPE_ID_ARRAY_NODE)?;
+            let new_node_h = scope.allocate_typed_zeroed(2, TYPE_ID_ARRAY_NODE)?;
             let new_children = new_children_h.to_gc_handle();
             let new_node = new_node_h.to_gc_handle();
             new_node.set_field(
@@ -797,7 +797,7 @@ impl PersistentMap {
             new_children.set_field_with_barrier(scope.runtime(), index, new_sub.as_tagged());
 
             // Create new array node (count unchanged since we're updating existing child)
-            let new_node_h = scope.allocate_typed(2, TYPE_ID_ARRAY_NODE)?;
+            let new_node_h = scope.allocate_typed_zeroed(2, TYPE_ID_ARRAY_NODE)?;
             let new_children = new_children_h.to_gc_handle();
             let new_node = new_node_h.to_gc_handle();
             new_node.set_field(
@@ -894,7 +894,7 @@ impl PersistentMap {
         }
 
         // Create array node with 2 fields: count and children
-        let array_node_h = scope.allocate_typed(2, TYPE_ID_ARRAY_NODE)?;
+        let array_node_h = scope.allocate_typed_zeroed(2, TYPE_ID_ARRAY_NODE)?;
         let new_children = new_children_h.to_gc_handle();
         let array_node = array_node_h.to_gc_handle();
         array_node.set_field(
@@ -939,7 +939,7 @@ impl PersistentMap {
 
         // Create new children array with count * 2 slots (for key/value pairs)
         // Each child node becomes (node_ptr, null)
-        let new_children_h = scope.allocate_typed(count * 2, TYPE_ID_BITMAP_NODE)?;
+        let new_children_h = scope.allocate_typed_zeroed(count * 2, TYPE_ID_BITMAP_NODE)?;
 
         // Copy non-null child nodes
         let old_children = old_children_h.to_gc_handle();
@@ -956,7 +956,7 @@ impl PersistentMap {
         }
 
         // Create bitmap node
-        let bitmap_node_h = scope.allocate_typed(2, TYPE_ID_BITMAP_NODE)?;
+        let bitmap_node_h = scope.allocate_typed_zeroed(2, TYPE_ID_BITMAP_NODE)?;
         let new_children = new_children_h.to_gc_handle();
         let bitmap_node = bitmap_node_h.to_gc_handle();
         bitmap_node.set_field(
@@ -978,7 +978,7 @@ impl PersistentMap {
         value2_h: Handle,
     ) -> Result<Handle, Box<dyn Error>> {
         // Create kv_array with 4 elements
-        let kv_array_h = scope.allocate_typed(4, TYPE_ID_COLLISION_NODE)?;
+        let kv_array_h = scope.allocate_typed_zeroed(4, TYPE_ID_COLLISION_NODE)?;
 
         let key1 = key1_h.get();
         let value1 = value1_h.get();
@@ -992,7 +992,7 @@ impl PersistentMap {
         kv_array.set_field(3, value2);
 
         // Create collision node
-        let node_h = scope.allocate_typed(3, TYPE_ID_COLLISION_NODE)?;
+        let node_h = scope.allocate_typed_zeroed(3, TYPE_ID_COLLISION_NODE)?;
         let kv_array = kv_array_h.to_gc_handle();
         let node = node_h.to_gc_handle();
 
@@ -1035,7 +1035,7 @@ impl PersistentMap {
             )?;
 
             // Create children array with just the sub-node
-            let children_h = scope.allocate_typed(2, TYPE_ID_BITMAP_NODE)?;
+            let children_h = scope.allocate_typed_zeroed(2, TYPE_ID_BITMAP_NODE)?;
 
             let sub_node = sub_node_h.to_gc_handle();
             let children = children_h.to_gc_handle();
@@ -1043,7 +1043,7 @@ impl PersistentMap {
             children.set_field(1, BuiltInTypes::null_value() as usize);
 
             // Create bitmap node
-            let node_h = scope.allocate_typed(2, TYPE_ID_BITMAP_NODE)?;
+            let node_h = scope.allocate_typed_zeroed(2, TYPE_ID_BITMAP_NODE)?;
             let children = children_h.to_gc_handle();
             let node = node_h.to_gc_handle();
 
@@ -1059,7 +1059,7 @@ impl PersistentMap {
             let bitmap = bit1 | bit2;
 
             // Create children array with 4 elements (2 key-value pairs)
-            let children_h = scope.allocate_typed(4, TYPE_ID_BITMAP_NODE)?;
+            let children_h = scope.allocate_typed_zeroed(4, TYPE_ID_BITMAP_NODE)?;
 
             let key1 = key1_h.get();
             let value1 = value1_h.get();
@@ -1080,7 +1080,7 @@ impl PersistentMap {
             }
 
             // Create bitmap node
-            let node_h = scope.allocate_typed(2, TYPE_ID_BITMAP_NODE)?;
+            let node_h = scope.allocate_typed_zeroed(2, TYPE_ID_BITMAP_NODE)?;
             let children = children_h.to_gc_handle();
             let node = node_h.to_gc_handle();
 
@@ -1132,7 +1132,7 @@ impl PersistentMap {
             )?;
 
             // Create children array with just the sub-node
-            let children_h = scope.allocate_typed(2, TYPE_ID_BITMAP_NODE)?;
+            let children_h = scope.allocate_typed_zeroed(2, TYPE_ID_BITMAP_NODE)?;
 
             let sub_node = sub_node_h.to_gc_handle();
             let children = children_h.to_gc_handle();
@@ -1140,7 +1140,7 @@ impl PersistentMap {
             children.set_field(1, BuiltInTypes::null_value() as usize);
 
             // Create bitmap node with single bit
-            let node_h = scope.allocate_typed(2, TYPE_ID_BITMAP_NODE)?;
+            let node_h = scope.allocate_typed_zeroed(2, TYPE_ID_BITMAP_NODE)?;
             let children = children_h.to_gc_handle();
             let node = node_h.to_gc_handle();
 
@@ -1156,7 +1156,7 @@ impl PersistentMap {
             let bitmap = bit1 | bit2;
 
             // Create children array with 4 elements (2 slots)
-            let children_h = scope.allocate_typed(4, TYPE_ID_BITMAP_NODE)?;
+            let children_h = scope.allocate_typed_zeroed(4, TYPE_ID_BITMAP_NODE)?;
 
             let collision_node = collision_node_h.to_gc_handle();
             let new_key = new_key_h.get();
@@ -1178,7 +1178,7 @@ impl PersistentMap {
             }
 
             // Create bitmap node
-            let node_h = scope.allocate_typed(2, TYPE_ID_BITMAP_NODE)?;
+            let node_h = scope.allocate_typed_zeroed(2, TYPE_ID_BITMAP_NODE)?;
             let children = children_h.to_gc_handle();
             let node = node_h.to_gc_handle();
 
@@ -1219,7 +1219,7 @@ impl PersistentMap {
             )?;
 
             // Create children array with just the sub-node
-            let children_h = scope.allocate_typed(2, TYPE_ID_BITMAP_NODE)?;
+            let children_h = scope.allocate_typed_zeroed(2, TYPE_ID_BITMAP_NODE)?;
 
             let sub_node = sub_node_h.to_gc_handle();
             let children = children_h.to_gc_handle();
@@ -1227,7 +1227,7 @@ impl PersistentMap {
             children.set_field(1, BuiltInTypes::null_value() as usize);
 
             // Create bitmap node with single bit
-            let node_h = scope.allocate_typed(2, TYPE_ID_BITMAP_NODE)?;
+            let node_h = scope.allocate_typed_zeroed(2, TYPE_ID_BITMAP_NODE)?;
             let children = children_h.to_gc_handle();
             let node = node_h.to_gc_handle();
 
@@ -1242,7 +1242,7 @@ impl PersistentMap {
             // Different positions - create bitmap with both
             let bitmap = bit1 | bit2;
 
-            let children_h = scope.allocate_typed(4, TYPE_ID_BITMAP_NODE)?;
+            let children_h = scope.allocate_typed_zeroed(4, TYPE_ID_BITMAP_NODE)?;
 
             let collision_node = collision_node_h.to_gc_handle();
             let new_key = new_key_h.get();
@@ -1261,7 +1261,7 @@ impl PersistentMap {
                 children.set_field(3, BuiltInTypes::null_value() as usize);
             }
 
-            let node_h = scope.allocate_typed(2, TYPE_ID_BITMAP_NODE)?;
+            let node_h = scope.allocate_typed_zeroed(2, TYPE_ID_BITMAP_NODE)?;
             let children = children_h.to_gc_handle();
             let node = node_h.to_gc_handle();
 
@@ -1307,7 +1307,7 @@ impl PersistentMap {
 
                 if keys_equal {
                     // Update existing entry
-                    let new_kv_array_h = scope.allocate_typed(count * 2, TYPE_ID_COLLISION_NODE)?;
+                    let new_kv_array_h = scope.allocate_typed_zeroed(count * 2, TYPE_ID_COLLISION_NODE)?;
 
                     let kv_array = kv_array_h.to_gc_handle();
                     let new_kv_array = new_kv_array_h.to_gc_handle();
@@ -1325,7 +1325,7 @@ impl PersistentMap {
                     }
 
                     // Create new collision node
-                    let new_node_h = scope.allocate_typed(3, TYPE_ID_COLLISION_NODE)?;
+                    let new_node_h = scope.allocate_typed_zeroed(3, TYPE_ID_COLLISION_NODE)?;
                     let new_kv_array = new_kv_array_h.to_gc_handle();
                     let new_node = new_node_h.to_gc_handle();
 
@@ -1344,7 +1344,7 @@ impl PersistentMap {
             }
 
             // Key not found - add new entry
-            let new_kv_array_h = scope.allocate_typed((count + 1) * 2, TYPE_ID_COLLISION_NODE)?;
+            let new_kv_array_h = scope.allocate_typed_zeroed((count + 1) * 2, TYPE_ID_COLLISION_NODE)?;
 
             // Bulk copy existing entries
             let kv_array = kv_array_h.to_gc_handle();
@@ -1359,7 +1359,7 @@ impl PersistentMap {
             new_kv_array.set_field(count * 2 + 1, value);
 
             // Create new collision node
-            let new_node_h = scope.allocate_typed(3, TYPE_ID_COLLISION_NODE)?;
+            let new_node_h = scope.allocate_typed_zeroed(3, TYPE_ID_COLLISION_NODE)?;
             let new_kv_array = new_kv_array_h.to_gc_handle();
             let new_node = new_node_h.to_gc_handle();
 

@@ -51,6 +51,21 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         result
     }
 
+    fn try_allocate_zeroed(
+        &mut self,
+        words: usize,
+        kind: BuiltInTypes,
+    ) -> Result<AllocateAction, Box<dyn Error>> {
+        if self.registered_threads.load(Ordering::Acquire) == 0 {
+            return self.alloc.try_allocate_zeroed(words, kind);
+        }
+
+        let lock = self.mutex.lock().unwrap();
+        let result = self.alloc.try_allocate_zeroed(words, kind);
+        drop(lock);
+        result
+    }
+
     fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
         if self.registered_threads.load(Ordering::Acquire) == 0 {
             return self.alloc.gc(stack_map, stack_pointers);

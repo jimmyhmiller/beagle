@@ -34,7 +34,7 @@ impl PersistentSet {
         let mut scope = HandleScope::new(runtime, stack_pointer);
 
         // Allocate the set struct (2 fields: count, root)
-        let set = scope.allocate_typed(2, TYPE_ID_PERSISTENT_SET)?;
+        let set = scope.allocate_typed_zeroed(2, TYPE_ID_PERSISTENT_SET)?;
 
         // Initialize fields
         let set_gc = set.to_gc_handle();
@@ -97,7 +97,7 @@ impl PersistentSet {
 
         // Create a temporary map with the set's root to use PersistentMap::assoc
         // First, we need to create a map struct pointing to the same root
-        let temp_map = scope.allocate_typed(2, TYPE_ID_PERSISTENT_MAP)?;
+        let temp_map = scope.allocate_typed_zeroed(2, TYPE_ID_PERSISTENT_MAP)?;
         temp_map.to_gc_handle().set_field(
             FIELD_COUNT,
             BuiltInTypes::construct_int(old_count as isize) as usize,
@@ -116,7 +116,7 @@ impl PersistentSet {
         )?;
 
         // Create a new set struct with the map's new root
-        let new_set = scope.allocate_typed(2, TYPE_ID_PERSISTENT_SET)?;
+        let new_set = scope.allocate_typed_zeroed(2, TYPE_ID_PERSISTENT_SET)?;
         let new_count = PersistentMap::count(new_map);
 
         let new_set_gc = new_set.to_gc_handle();
@@ -154,7 +154,7 @@ impl PersistentSet {
         }
 
         // Create temporary map with set's root
-        let temp_map = scope.allocate_typed(2, TYPE_ID_PERSISTENT_MAP)?;
+        let temp_map = scope.allocate_typed_zeroed(2, TYPE_ID_PERSISTENT_MAP)?;
         temp_map.to_gc_handle().set_field(
             FIELD_COUNT,
             BuiltInTypes::construct_int(count as isize) as usize,

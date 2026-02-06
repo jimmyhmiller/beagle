@@ -3071,6 +3071,8 @@ impl Runtime {
         self.thread_exception_handler_fns.clear();
         self.default_exception_handler_fn = None;
         self.stacks_for_continuation_swapping.clear();
+        self.saved_continuation_ptr.clear();
+        self.relocation_depth.clear();
         self.variant_to_enum.clear();
         self.compiled_regexes.clear();
     }

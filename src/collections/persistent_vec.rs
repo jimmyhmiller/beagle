@@ -50,13 +50,13 @@ impl PersistentVec {
         let mut scope = HandleScope::new(runtime, stack_pointer);
 
         // Allocate empty root array (0 elements)
-        let root_h = scope.allocate_typed(0, TYPE_ID_PERSISTENT_VEC_NODE)?;
+        let root_h = scope.allocate_typed_zeroed(0, TYPE_ID_PERSISTENT_VEC_NODE)?;
 
         // Allocate empty tail array (0 elements)
-        let tail_h = scope.allocate_typed(0, TYPE_ID_PERSISTENT_VEC_NODE)?;
+        let tail_h = scope.allocate_typed_zeroed(0, TYPE_ID_PERSISTENT_VEC_NODE)?;
 
         // Allocate the vector struct (4 fields)
-        let vec_h = scope.allocate_typed(4, TYPE_ID_PERSISTENT_VEC)?;
+        let vec_h = scope.allocate_typed_zeroed(4, TYPE_ID_PERSISTENT_VEC)?;
 
         // No re-reading needed! Handles are stable.
         let root = root_h.to_gc_handle();
@@ -165,10 +165,10 @@ impl PersistentVec {
         let value_h = scope.alloc(value);
 
         // Allocate new tail with one more slot
-        let new_tail_h = scope.allocate_typed(tail_len + 1, TYPE_ID_PERSISTENT_VEC_NODE)?;
+        let new_tail_h = scope.allocate_typed_zeroed(tail_len + 1, TYPE_ID_PERSISTENT_VEC_NODE)?;
 
         // Allocate new vector struct
-        let new_vec_h = scope.allocate_typed(4, TYPE_ID_PERSISTENT_VEC)?;
+        let new_vec_h = scope.allocate_typed_zeroed(4, TYPE_ID_PERSISTENT_VEC)?;
 
         // Bulk copy old tail to new tail
         let old_tail = tail_h.to_gc_handle();
@@ -223,7 +223,7 @@ impl PersistentVec {
         let value_h = scope.alloc(value);
 
         // Create new single-element tail with the new value
-        let new_tail_h = scope.allocate_typed(1, TYPE_ID_PERSISTENT_VEC_NODE)?;
+        let new_tail_h = scope.allocate_typed_zeroed(1, TYPE_ID_PERSISTENT_VEC_NODE)?;
 
         let new_tail = new_tail_h.to_gc_handle();
         // Use write barrier - value could be a heap pointer
@@ -246,7 +246,7 @@ impl PersistentVec {
         };
 
         // Allocate final vector
-        let result_vec_h = scope.allocate_typed(4, TYPE_ID_PERSISTENT_VEC)?;
+        let result_vec_h = scope.allocate_typed_zeroed(4, TYPE_ID_PERSISTENT_VEC)?;
 
         let new_tail = new_tail_h.to_gc_handle();
         let new_root = new_root_h.to_gc_handle();
@@ -284,7 +284,7 @@ impl PersistentVec {
         let new_path_h = Self::new_path(scope, shift, old_tail)?;
 
         // Allocate new root array
-        let new_root_h = scope.allocate_typed(BRANCH_FACTOR, TYPE_ID_PERSISTENT_VEC_NODE)?;
+        let new_root_h = scope.allocate_typed_zeroed(BRANCH_FACTOR, TYPE_ID_PERSISTENT_VEC_NODE)?;
 
         let current_root = current_root_h.to_gc_handle();
         let new_path = new_path_h.to_gc_handle();
@@ -317,7 +317,7 @@ impl PersistentVec {
             let inner_h = Self::new_path(scope, level - 5, node_h.to_gc_handle())?;
 
             // Allocate wrapper node
-            let path_node_h = scope.allocate_typed(BRANCH_FACTOR, TYPE_ID_PERSISTENT_VEC_NODE)?;
+            let path_node_h = scope.allocate_typed_zeroed(BRANCH_FACTOR, TYPE_ID_PERSISTENT_VEC_NODE)?;
 
             let inner = inner_h.to_gc_handle();
             let path_node = path_node_h.to_gc_handle();
@@ -361,7 +361,7 @@ impl PersistentVec {
         let tail_h = scope.alloc_handle(tail_node);
 
         // Allocate new parent (copy-on-write)
-        let new_parent_h = scope.allocate_typed(BRANCH_FACTOR, TYPE_ID_PERSISTENT_VEC_NODE)?;
+        let new_parent_h = scope.allocate_typed_zeroed(BRANCH_FACTOR, TYPE_ID_PERSISTENT_VEC_NODE)?;
 
         let parent = parent_h.to_gc_handle();
         let new_parent = new_parent_h.to_gc_handle();
@@ -490,10 +490,10 @@ impl PersistentVec {
         let tail_len = tail.field_count();
 
         // Allocate new tail (copy)
-        let new_tail_h = scope.allocate_typed(tail_len, TYPE_ID_PERSISTENT_VEC_NODE)?;
+        let new_tail_h = scope.allocate_typed_zeroed(tail_len, TYPE_ID_PERSISTENT_VEC_NODE)?;
 
         // Allocate new vector
-        let new_vec_h = scope.allocate_typed(4, TYPE_ID_PERSISTENT_VEC)?;
+        let new_vec_h = scope.allocate_typed_zeroed(4, TYPE_ID_PERSISTENT_VEC)?;
 
         let old_tail = tail_h.to_gc_handle();
         let new_tail = new_tail_h.to_gc_handle();
@@ -553,7 +553,7 @@ impl PersistentVec {
         let new_root_h = Self::do_assoc(&mut scope, shift, root_h, index, value_h)?;
 
         // Allocate new vector
-        let new_vec_h = scope.allocate_typed(4, TYPE_ID_PERSISTENT_VEC)?;
+        let new_vec_h = scope.allocate_typed_zeroed(4, TYPE_ID_PERSISTENT_VEC)?;
 
         let vec = vec_h.to_gc_handle();
         let new_root = new_root_h.to_gc_handle();
@@ -587,7 +587,7 @@ impl PersistentVec {
         let node_len = node.field_count();
 
         // Allocate new node (copy-on-write)
-        let new_node_h = scope.allocate_typed(node_len, TYPE_ID_PERSISTENT_VEC_NODE)?;
+        let new_node_h = scope.allocate_typed_zeroed(node_len, TYPE_ID_PERSISTENT_VEC_NODE)?;
 
         let node = node_h.to_gc_handle();
         let new_node = new_node_h.to_gc_handle();
