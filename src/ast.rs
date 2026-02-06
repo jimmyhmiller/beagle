@@ -251,6 +251,10 @@ pub enum Ast {
         right: Box<Ast>,
         token_range: TokenRange,
     },
+    Not {
+        expr: Box<Ast>,
+        token_range: TokenRange,
+    },
     Array {
         array: Vec<Ast>,
         token_range: TokenRange,
@@ -544,6 +548,7 @@ impl Ast {
             | Ast::BitWiseXor { token_range, .. }
             | Ast::And { token_range, .. }
             | Ast::Or { token_range, .. }
+            | Ast::Not { token_range, .. }
             | Ast::Array { token_range, .. }
             | Ast::MapLiteral { token_range, .. }
             | Ast::SetLiteral { token_range, .. }
@@ -2380,6 +2385,17 @@ impl AstCompiler<'_> {
                 let right = self.call_compile(&right)?;
                 self.ir.assign(result_reg, right);
                 self.ir.write_label(short_circuit);
+                Ok(result_reg.into())
+            }
+            Ast::Not { expr, .. } => {
+                let result_reg = self.ir.volatile_register();
+                self.ir.assign(result_reg, Value::True);
+                let was_false = self.ir.label("not_was_false");
+                let expr_val = self.call_compile(&expr)?;
+                self.ir
+                    .jump_if(was_false, Condition::Equal, expr_val, Value::False);
+                self.ir.assign(result_reg, Value::False);
+                self.ir.write_label(was_false);
                 Ok(result_reg.into())
             }
             Ast::Or { left, right, .. } => {
@@ -5183,6 +5199,10 @@ impl AstCompiler<'_> {
             | Ast::Or { left, right, .. } => {
                 self.find_mutable_vars_that_need_boxing(left);
                 self.find_mutable_vars_that_need_boxing(right);
+            }
+
+            Ast::Not { expr, .. } => {
+                self.find_mutable_vars_that_need_boxing(expr);
             }
 
             Ast::Recurse {
