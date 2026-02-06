@@ -530,6 +530,26 @@ impl Allocator for MarkAndSweep {
         }
     }
 
+    fn try_allocate_zeroed(
+        &mut self,
+        words: usize,
+        kind: crate::types::BuiltInTypes,
+    ) -> Result<super::AllocateAction, Box<dyn std::error::Error>> {
+        let result = self.try_allocate(words, kind)?;
+        if let AllocateAction::Allocated(ptr) = result {
+            // Zero the field area (skip header) so GC doesn't trace garbage data
+            let heap_object = HeapObject::from_untagged(ptr);
+            let header_size = heap_object.header_size();
+            let field_bytes = words * 8;
+            unsafe {
+                std::ptr::write_bytes((ptr as *mut u8).add(header_size), 0, field_bytes);
+            }
+            Ok(AllocateAction::Allocated(ptr))
+        } else {
+            Ok(result)
+        }
+    }
+
     fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
         if !self.options.gc {
             return;
