@@ -838,7 +838,7 @@ impl AstCompiler<'_> {
                 rest_param,
                 body,
                 docstring,
-                ..
+                token_range,
             } => {
                 // Check if this is a nested function BEFORE creating new environment
                 // so we can create the local in the parent environment
@@ -1107,6 +1107,13 @@ impl AstCompiler<'_> {
                     .flat_map(|pattern| pattern.binding_names())
                     .collect();
 
+                // Extract source location from token range
+                let source_line = if token_range.start < self.token_line_column_map.len() {
+                    Some(self.token_line_column_map[token_range.start].0)
+                } else {
+                    None
+                };
+
                 let function_pointer = self
                     .compiler
                     .upsert_function(
@@ -1118,6 +1125,8 @@ impl AstCompiler<'_> {
                         min_args,
                         docstring,
                         arg_names,
+                        Some(self.file_name.clone()),
+                        source_line,
                     )
                     .unwrap();
 

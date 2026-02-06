@@ -79,28 +79,28 @@ fn main() {
 //
 // truncate tests (positive):
 // truncate(1.4):
-// 1.0
+// 1
 // truncate(1.9):
-// 1.0
+// 1
 // truncate(2.0):
-// 2.0
+// 2
 //
 // truncate tests (negative):
 // truncate(-1.4):
-// -1.0
+// -1
 // truncate(-1.9):
-// -1.0
+// -1
 // truncate(-2.0):
-// -2.0
+// -2
 //
 // Tests with zero:
 // round(0.0):
 // 0.0
 // truncate(0.0):
-// 0.0
+// 0
 //
 // Tests with integers:
 // round(5.0):
 // 5.0
 // truncate(5.0):
-// 5.0
+// 5

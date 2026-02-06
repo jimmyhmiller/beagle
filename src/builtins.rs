@@ -1056,7 +1056,7 @@ extern "C" fn write_field(
 pub unsafe extern "C" fn throw_error(stack_pointer: usize, frame_pointer: usize) -> ! {
     save_gc_context!(stack_pointer, frame_pointer);
     print_stack(stack_pointer);
-    panic!("Error!");
+    std::process::exit(1);
 }
 
 pub unsafe extern "C" fn throw_type_error(stack_pointer: usize, frame_pointer: usize) -> ! {
@@ -2181,7 +2181,7 @@ fn print_stack(_stack_pointer: usize) {
         fp
     };
 
-    println!("Walking stack frames:");
+    println!("Stack trace:");
 
     let mut frame_count = 0;
     const MAX_FRAMES: usize = 100; // Prevent infinite loops
@@ -2205,7 +2205,17 @@ fn print_stack(_stack_pointer: usize) {
             let function_start = usize::from(function.pointer);
             let range = function_start..function_start + function_size;
             if range.contains(&return_address) {
-                println!("Function: {:?}", function.name);
+                match (&function.source_file, &function.source_line) {
+                    (Some(file), Some(line)) => {
+                        println!("  at {} ({}:{})", function.name, file, line);
+                    }
+                    (Some(file), None) => {
+                        println!("  at {} ({})", function.name, file);
+                    }
+                    _ => {
+                        println!("  at {}", function.name);
+                    }
+                }
                 break;
             }
         }
@@ -2406,8 +2416,6 @@ pub unsafe extern "C" fn truncate_builtin(
 ) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     unsafe {
-        let runtime = get_runtime().get_mut();
-
         let kind = BuiltInTypes::get_kind(value);
         if kind == BuiltInTypes::Int {
             return value;
@@ -2417,17 +2425,8 @@ pub unsafe extern "C" fn truncate_builtin(
         let float_ptr = untagged as *const f64;
         let float_value = *float_ptr.add(1);
 
-        let result = float_value.trunc();
-
-        let new_float_ptr = runtime
-            .allocate(1, stack_pointer, BuiltInTypes::Float)
-            .unwrap();
-
-        let untagged_result = BuiltInTypes::untag(new_float_ptr);
-        let result_ptr = untagged_result as *mut f64;
-        *result_ptr.add(1) = result;
-
-        new_float_ptr
+        let result = float_value.trunc() as isize;
+        BuiltInTypes::Int.tag(result) as usize
     }
 }
 
