@@ -40,8 +40,6 @@ type TrampolineFn11 =
 thread_local! {
     static SAVED_FRAME_POINTER: Cell<usize> = const { Cell::new(0) };
     static SAVED_GC_RETURN_ADDR: Cell<usize> = const { Cell::new(0) };
-    // Used for struct returns - stores the high 64 bits of a 16-byte struct return
-    static STRUCT_RETURN_HIGH: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Save the frame pointer for later use by gc().
@@ -1176,26 +1174,31 @@ pub unsafe extern "C" fn get_function_min_args(function_pointer: usize) -> usize
 /// Arguments:
 /// - stack_pointer: for GC
 /// - frame_pointer: used to compute local addresses
-/// - arg_count: number of args passed (tagged int, from X9)
-/// - min_args: minimum args before rest param (tagged int, compile-time constant)
+/// - arg_count: total args passed including closure env (tagged int, from X9)
+/// - min_args: named params count, NOT including closure env (tagged int)
 /// - first_local_index: index of first saved arg local (untagged raw value)
+/// - first_arg_index: 0 for top-level, 1 for closures (tagged int)
 ///
-/// Returns: tagged array pointer containing args[min_args..arg_count]
+/// Returns: tagged array pointer containing the rest args
 pub unsafe extern "C" fn build_rest_array_from_locals(
     stack_pointer: usize,
     frame_pointer: usize,
     arg_count: usize,
     min_args: usize,
     first_local_index: usize,
+    first_arg_index: usize,
 ) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
 
     let total = BuiltInTypes::untag(arg_count);
     let min = BuiltInTypes::untag(min_args);
+    let first_arg = BuiltInTypes::untag(first_arg_index);
 
-    // Number of extra args to pack
-    let num_extra = total.saturating_sub(min);
+    // Number of user-visible args (excluding closure env)
+    let total_user_args = total.saturating_sub(first_arg);
+    // Number of rest args
+    let num_extra = total_user_args.saturating_sub(min);
 
     if num_extra == 0 {
         // Return empty array
@@ -1218,39 +1221,30 @@ pub unsafe extern "C" fn build_rest_array_from_locals(
 
     let array_data = heap_obj.untagged() as *mut usize;
 
-    // Read args from locals and write to array
-    // Local N is at FP - (N + 1) * 8
-    // We saved args starting at local first_local_index
-    // The saved args are: arg[first_arg_index], arg[first_arg_index+1], ...
-    // We want args[min..total], which are at local indices:
-    //   first_local_index + (min - first_arg_index), first_local_index + (min - first_arg_index) + 1, ...
-    // But since first_arg_index is typically 0 (or 1 for closures), and the saved args
-    // already account for this offset, we can simplify:
-    // Saved local at index i corresponds to arg (first_arg_index + i)
-    // We want arg indices min..total
-    // So we want saved local indices (min - first_arg_index)..(total - first_arg_index)
-    // Since first_arg_index is typically 0 for top-level functions, this simplifies to min..total
-    // But for closures, first_arg_index = 1, so we want (min - 1)..(total - 1)
-
-    // Read args from either saved locals (for register args 0-7) or stack (for args 8+).
-    // The prologue saves register args to locals, but stack args are at positive FP offsets.
+    // Read args from saved locals (register args) or the stack (overflow args).
+    //
+    // saved_arg_locals layout (allocated in AST for indices first_arg..8):
+    //   saved_arg_locals[k] at local (first_local_index + k) = arg register (first_arg + k)
+    //
+    // We want user arg indices min..min+num_extra (0-based within user args).
+    // The actual register index for user_arg_idx is: first_arg + user_arg_idx.
+    // The saved local offset for that register is: user_arg_idx (since locals start at first_arg).
     const NUM_ARG_REGISTERS: usize = 8; // ARM64 uses X0-X7
 
     for i in 0..num_extra {
-        let arg_index = min + i; // The actual argument index we need
+        let user_arg_idx = min + i; // 0-based user arg index
+        let actual_register = first_arg + user_arg_idx; // actual arg register index
 
-        let arg = if arg_index < NUM_ARG_REGISTERS {
-            // Register arg (0-7): read from saved local
-            let local_index = first_local_index + arg_index;
+        let arg = if actual_register < NUM_ARG_REGISTERS {
+            // Register arg: read from saved local
+            let local_index = first_local_index + user_arg_idx;
             let local_addr = frame_pointer.wrapping_sub((local_index + 1) * 8);
-            // SAFETY: local_addr points to a valid stack slot written by the prologue
             unsafe { *(local_addr as *const usize) }
         } else {
-            // Stack arg (8+): read from caller's stack frame
-            // Stack args are at [FP + (arg_index - 8 + 2) * 8] = [FP + 16], [FP + 24], etc.
-            let stack_offset = (arg_index - NUM_ARG_REGISTERS + 2) * 8;
+            // Stack arg: read from caller's stack frame
+            // Stack args are at [FP + (actual_register - 8 + 2) * 8]
+            let stack_offset = (actual_register - NUM_ARG_REGISTERS + 2) * 8;
             let stack_addr = frame_pointer.wrapping_add(stack_offset);
-            // SAFETY: stack_addr points to a valid stack arg passed by the caller
             unsafe { *(stack_addr as *const usize) }
         };
 
@@ -3844,477 +3838,712 @@ unsafe fn marshal_ffi_argument(
     }
 }
 
-/// Call a native function with the given number of arguments and return type.
-/// Uses transmute to cast the function pointer to the appropriate signature.
-/// Dispatches based on return type to avoid undefined behavior when calling
-/// void functions or functions returning narrower types.
-#[inline(never)]
-unsafe fn call_native_function(
-    func_ptr: *const u8,
-    num_args: usize,
-    args: [u64; 6],
-    arg_types: &[FFIType],
-    return_type: &FFIType,
-) -> u64 {
-    // Check if any arguments are floats
-    let has_float = arg_types.iter().any(|t| matches!(t, FFIType::F32));
+/// Build an ARM64 FFI trampoline using the existing assembler.
+///
+/// The trampoline takes:
+///   x0 = func_ptr (the C function to call)
+///   x1 = int_args_ptr (pointer to array of 8 u64 integer register values)
+///   x2 = float_args_ptr (pointer to array of 8 u64 float arg bit patterns)
+///
+/// It loads x0-x7 from int_args_ptr, s0-s7 from float_args_ptr,
+/// calls func_ptr, and returns (x0, x1) for struct return support.
+/// Supports unlimited args: x0-x7 via int_args, s0-s7 via float_args,
+/// overflow args placed on the stack per ARM64 AAPCS.
+///
+/// Signature: trampoline(func_ptr, int_args, float_args, overflow_args, num_overflow, stack_alloc_size)
+///                        x0         x1         x2          x3             x4            x5
+#[cfg(target_arch = "aarch64")]
+fn build_ffi_trampoline() -> *const u8 {
+    use crate::machine_code::arm_codegen::*;
 
-    if has_float {
-        // Use float-aware calling for functions with float arguments
-        // SAFETY: Same requirements as this function - func_ptr must be valid
-        return unsafe {
-            call_native_function_with_floats(func_ptr, num_args, args, arg_types, return_type)
+    let xzr = Register {
+        index: 31,
+        size: Size::S64,
+    };
+
+    let mut code: Vec<u32> = Vec::new();
+
+    // === Prologue ===
+    // 0: stp x29, x30, [sp, #-16]!
+    code.push(
+        ArmAsm::StpGen {
+            opc: 0b10,
+            imm7: -2,
+            rt2: X30,
+            rn: SP,
+            rt: X29,
+            class_selector: StpGenSelector::PreIndex,
+        }
+        .encode(),
+    );
+    // 1: mov x29, sp
+    code.push(
+        ArmAsm::MovAddAddsubImm {
+            sf: 1,
+            rn: SP,
+            rd: X29,
+        }
+        .encode(),
+    );
+    // 2: stp x19, x20, [sp, #-16]!
+    code.push(
+        ArmAsm::StpGen {
+            opc: 0b10,
+            imm7: -2,
+            rt2: X20,
+            rn: SP,
+            rt: X19,
+            class_selector: StpGenSelector::PreIndex,
+        }
+        .encode(),
+    );
+    // 3: stp x21, x22, [sp, #-16]!
+    code.push(
+        ArmAsm::StpGen {
+            opc: 0b10,
+            imm7: -2,
+            rt2: X22,
+            rn: SP,
+            rt: X21,
+            class_selector: StpGenSelector::PreIndex,
+        }
+        .encode(),
+    );
+    // 4: stp x23, x24, [sp, #-16]!
+    code.push(
+        ArmAsm::StpGen {
+            opc: 0b10,
+            imm7: -2,
+            rt2: X24,
+            rn: SP,
+            rt: X23,
+            class_selector: StpGenSelector::PreIndex,
+        }
+        .encode(),
+    );
+
+    // === Save inputs to callee-saved regs ===
+    // 5: mov x19, x0  (func_ptr)
+    code.push(
+        ArmAsm::MovOrrLogShift {
+            sf: 1,
+            rm: X0,
+            rd: X19,
+        }
+        .encode(),
+    );
+    // 6: mov x20, x1  (int_args_ptr)
+    code.push(
+        ArmAsm::MovOrrLogShift {
+            sf: 1,
+            rm: X1,
+            rd: X20,
+        }
+        .encode(),
+    );
+    // 7: mov x21, x2  (float_args_ptr)
+    code.push(
+        ArmAsm::MovOrrLogShift {
+            sf: 1,
+            rm: X2,
+            rd: X21,
+        }
+        .encode(),
+    );
+    // 8: mov x22, x3  (overflow_args_ptr)
+    code.push(
+        ArmAsm::MovOrrLogShift {
+            sf: 1,
+            rm: X3,
+            rd: X22,
+        }
+        .encode(),
+    );
+    // 9: mov x23, x4  (num_overflow)
+    code.push(
+        ArmAsm::MovOrrLogShift {
+            sf: 1,
+            rm: X4,
+            rd: X23,
+        }
+        .encode(),
+    );
+    // 10: mov x24, x5  (stack_alloc_size, pre-aligned to 16)
+    code.push(
+        ArmAsm::MovOrrLogShift {
+            sf: 1,
+            rm: X5,
+            rd: X24,
+        }
+        .encode(),
+    );
+
+    // === Adjust SP down by x24 (may be 0, which is a no-op) ===
+    // 11: add x9, sp, #0  (mov x9, sp)
+    code.push(
+        ArmAsm::AddAddsubImm {
+            sf: 1,
+            sh: 0,
+            imm12: 0,
+            rn: SP,
+            rd: X9,
+        }
+        .encode(),
+    );
+    // 12: sub x9, x9, x24
+    code.push(
+        ArmAsm::SubAddsubShift {
+            sf: 1,
+            shift: 0,
+            rm: X24,
+            imm6: 0,
+            rn: X9,
+            rd: X9,
+        }
+        .encode(),
+    );
+    // 13: add sp, x9, #0  (mov sp, x9)
+    code.push(
+        ArmAsm::AddAddsubImm {
+            sf: 1,
+            sh: 0,
+            imm12: 0,
+            rn: X9,
+            rd: SP,
+        }
+        .encode(),
+    );
+
+    // === Copy overflow args from x22 to stack ===
+    // 14: movz x10, #0  (i = 0)
+    code.push(
+        ArmAsm::Movz {
+            sf: 1,
+            hw: 0,
+            imm16: 0,
+            rd: X10,
+        }
+        .encode(),
+    );
+    // .copy_loop (instruction 15):
+    // 15: cmp x10, x23  (compare i with num_overflow)
+    code.push(
+        ArmAsm::CmpSubsAddsubShift {
+            sf: 1,
+            shift: 0,
+            rm: X23,
+            imm6: 0,
+            rn: X10,
+        }
+        .encode(),
+    );
+    // 16: b.ge .copy_done  (if i >= num_overflow, skip to instruction 21; offset = 5)
+    code.push(
+        ArmAsm::BCond {
+            imm19: 5,
+            cond: 0b1010,
+        }
+        .encode(),
+    ); // GE = 0b1010
+    // 17: ldr x12, [x22, x10, lsl #3]  (load overflow_args[i])
+    code.push(
+        ArmAsm::LdrRegGen {
+            size: 3,
+            rm: X10,
+            option: 0b011,
+            s: 1,
+            rn: X22,
+            rt: X12,
+        }
+        .encode(),
+    );
+    // 18: str x12, [sp, x10, lsl #3]  (store to stack[i])
+    code.push(
+        ArmAsm::StrRegGen {
+            size: 3,
+            rm: X10,
+            option: 0b011,
+            s: 1,
+            rn: SP,
+            rt: X12,
+        }
+        .encode(),
+    );
+    // 19: add x10, x10, #1
+    code.push(
+        ArmAsm::AddAddsubImm {
+            sf: 1,
+            sh: 0,
+            imm12: 1,
+            rn: X10,
+            rd: X10,
+        }
+        .encode(),
+    );
+    // 20: b .copy_loop  (unconditional jump back to instruction 15; offset = -5)
+    code.push(
+        ArmAsm::BCond {
+            imm19: -5,
+            cond: 0b1110,
+        }
+        .encode(),
+    ); // AL = 0b1110
+
+    // .copy_done (instruction 21):
+    // === Load float args from x21 into s0-s7 ===
+    for i in 0..8u8 {
+        let float_reg = Register {
+            index: i,
+            size: Size::S32,
         };
-    }
-
-    // Macro for non-void return types (all integer arguments)
-    macro_rules! call_with_args {
-        ($ret_type:ty) => {
-            match num_args {
-                0 => {
-                    let f: extern "C" fn() -> $ret_type = transmute(func_ptr);
-                    f() as u64
-                }
-                1 => {
-                    let f: extern "C" fn(u64) -> $ret_type = transmute(func_ptr);
-                    f(args[0]) as u64
-                }
-                2 => {
-                    let f: extern "C" fn(u64, u64) -> $ret_type = transmute(func_ptr);
-                    f(args[0], args[1]) as u64
-                }
-                3 => {
-                    let f: extern "C" fn(u64, u64, u64) -> $ret_type = transmute(func_ptr);
-                    f(args[0], args[1], args[2]) as u64
-                }
-                4 => {
-                    let f: extern "C" fn(u64, u64, u64, u64) -> $ret_type = transmute(func_ptr);
-                    f(args[0], args[1], args[2], args[3]) as u64
-                }
-                5 => {
-                    let f: extern "C" fn(u64, u64, u64, u64, u64) -> $ret_type =
-                        transmute(func_ptr);
-                    f(args[0], args[1], args[2], args[3], args[4]) as u64
-                }
-                6 => {
-                    let f: extern "C" fn(u64, u64, u64, u64, u64, u64) -> $ret_type =
-                        transmute(func_ptr);
-                    f(args[0], args[1], args[2], args[3], args[4], args[5]) as u64
-                }
-                _ => panic!("Too many arguments for FFI call: {}", num_args),
+        // ldr w9, [x21, #i*8]
+        code.push(
+            ArmAsm::LdrImmGen {
+                size: 2,
+                imm9: 0,
+                rn: X21,
+                rt: Register {
+                    index: 9,
+                    size: Size::S32,
+                },
+                imm12: (i as i32) * 2,
+                class_selector: LdrImmGenSelector::UnsignedOffset,
             }
-        };
-    }
-
-    // Macro for void return type (returns 0)
-    macro_rules! call_void {
-        () => {
-            match num_args {
-                0 => {
-                    let f: extern "C" fn() = transmute(func_ptr);
-                    f();
-                    0
-                }
-                1 => {
-                    let f: extern "C" fn(u64) = transmute(func_ptr);
-                    f(args[0]);
-                    0
-                }
-                2 => {
-                    let f: extern "C" fn(u64, u64) = transmute(func_ptr);
-                    f(args[0], args[1]);
-                    0
-                }
-                3 => {
-                    let f: extern "C" fn(u64, u64, u64) = transmute(func_ptr);
-                    f(args[0], args[1], args[2]);
-                    0
-                }
-                4 => {
-                    let f: extern "C" fn(u64, u64, u64, u64) = transmute(func_ptr);
-                    f(args[0], args[1], args[2], args[3]);
-                    0
-                }
-                5 => {
-                    let f: extern "C" fn(u64, u64, u64, u64, u64) = transmute(func_ptr);
-                    f(args[0], args[1], args[2], args[3], args[4]);
-                    0
-                }
-                6 => {
-                    let f: extern "C" fn(u64, u64, u64, u64, u64, u64) = transmute(func_ptr);
-                    f(args[0], args[1], args[2], args[3], args[4], args[5]);
-                    0
-                }
-                _ => panic!("Too many arguments for FFI call: {}", num_args),
+            .encode(),
+        );
+        // fmov sN, w9
+        code.push(
+            ArmAsm::FmovFloatGen {
+                sf: 0,
+                ftype: 0b00,
+                rmode: 0b00,
+                opcode: 0b111,
+                rn: Register {
+                    index: 9,
+                    size: Size::S32,
+                },
+                rd: float_reg,
             }
-        };
+            .encode(),
+        );
     }
 
-    // Dispatch based on return type
+    // === Load integer args from x20 into x0-x7 ===
+    for pair in 0..4 {
+        let r1 = Register::from_index(pair * 2);
+        let r2 = Register::from_index(pair * 2 + 1);
+        code.push(
+            ArmAsm::LdpGen {
+                opc: 0b10,
+                imm7: (pair as i32) * 2,
+                rt2: r2,
+                rn: X20,
+                rt: r1,
+                class_selector: LdpGenSelector::SignedOffset,
+            }
+            .encode(),
+        );
+    }
+
+    // === Call the function ===
+    code.push(ArmAsm::Blr { rn: X19 }.encode());
+
+    // === Restore SP (add x24 back) ===
+    // add x9, sp, #0  (mov x9, sp)
+    code.push(
+        ArmAsm::AddAddsubImm {
+            sf: 1,
+            sh: 0,
+            imm12: 0,
+            rn: SP,
+            rd: X9,
+        }
+        .encode(),
+    );
+    // add x9, x9, x24
+    code.push(
+        ArmAsm::AddAddsubShift {
+            sf: 1,
+            shift: 0,
+            rm: X24,
+            imm6: 0,
+            rn: X9,
+            rd: X9,
+        }
+        .encode(),
+    );
+    // add sp, x9, #0  (mov sp, x9)
+    code.push(
+        ArmAsm::AddAddsubImm {
+            sf: 1,
+            sh: 0,
+            imm12: 0,
+            rn: X9,
+            rd: SP,
+        }
+        .encode(),
+    );
+
+    // === Epilogue ===
+    // ldp x23, x24, [sp], #16
+    code.push(
+        ArmAsm::LdpGen {
+            opc: 0b10,
+            imm7: 2,
+            rt2: X24,
+            rn: SP,
+            rt: X23,
+            class_selector: LdpGenSelector::PostIndex,
+        }
+        .encode(),
+    );
+    // ldp x21, x22, [sp], #16
+    code.push(
+        ArmAsm::LdpGen {
+            opc: 0b10,
+            imm7: 2,
+            rt2: X22,
+            rn: SP,
+            rt: X21,
+            class_selector: LdpGenSelector::PostIndex,
+        }
+        .encode(),
+    );
+    // ldp x19, x20, [sp], #16
+    code.push(
+        ArmAsm::LdpGen {
+            opc: 0b10,
+            imm7: 2,
+            rt2: X20,
+            rn: SP,
+            rt: X19,
+            class_selector: LdpGenSelector::PostIndex,
+        }
+        .encode(),
+    );
+    // ldp x29, x30, [sp], #16
+    code.push(
+        ArmAsm::LdpGen {
+            opc: 0b10,
+            imm7: 2,
+            rt2: X30,
+            rn: SP,
+            rt: X29,
+            class_selector: LdpGenSelector::PostIndex,
+        }
+        .encode(),
+    );
+    // ret
+    code.push(ArmAsm::Ret { rn: X30 }.encode());
+
+    // Suppress unused variable warning
+    let _ = xzr;
+
+    // Convert to bytes and mmap as executable
+    let bytes: Vec<u8> = code.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let size = bytes.len();
+    let page_size = crate::mmap_utils::get_page_size();
+    let alloc_size = (size + page_size - 1) & !(page_size - 1);
+
     unsafe {
-        match return_type {
-            FFIType::Void => call_void!(),
-            FFIType::U8 => call_with_args!(u8),
-            FFIType::U16 => call_with_args!(u16),
-            FFIType::U32 => call_with_args!(u32),
-            FFIType::I32 => call_with_args!(i32),
-            FFIType::U64 | FFIType::Pointer | FFIType::MutablePointer | FFIType::String => {
-                call_with_args!(u64)
-            }
-            FFIType::F32 => call_with_args!(f32),
-            FFIType::Structure(fields) => {
-                // For small structs (≤16 bytes on ARM64), they're returned in x0/x1
-                // We call with a struct return type and pack the result
-                call_struct_return(func_ptr, num_args, args, fields)
+        let ptr = libc::mmap(
+            std::ptr::null_mut(),
+            alloc_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_JIT,
+            -1,
+            0,
+        );
+        assert!(ptr != libc::MAP_FAILED, "mmap failed for FFI trampoline");
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, size);
+        let ret = libc::mprotect(ptr, alloc_size, libc::PROT_READ | libc::PROT_EXEC);
+        assert!(ret == 0, "mprotect failed for FFI trampoline");
+        ptr as *const u8
+    }
+}
+
+/// Get the cached FFI trampoline function pointer.
+#[cfg(target_arch = "aarch64")]
+fn get_ffi_trampoline() -> *const u8 {
+    use std::sync::OnceLock;
+    static TRAMPOLINE: OnceLock<usize> = OnceLock::new();
+    *TRAMPOLINE.get_or_init(|| build_ffi_trampoline() as usize) as *const u8
+}
+
+/// Call a native C function dynamically using the JIT'd trampoline.
+/// Splits args into integer and float register arrays based on arg_types.
+/// Args beyond 8 int or 8 float registers overflow to the stack per ARM64 AAPCS.
+/// Returns (low, high) for struct return support.
+#[cfg(target_arch = "aarch64")]
+#[inline(never)]
+unsafe fn dynamic_c_call(func_ptr: *const u8, args: &[u64], arg_types: &[FFIType]) -> (u64, u64) {
+    // Split args into integer regs, float regs, and overflow (stack) based on ARM64 AAPCS
+    let mut int_args: [u64; 8] = [0; 8];
+    let mut float_args: [u64; 8] = [0; 8];
+    let mut overflow_args: Vec<u64> = Vec::new();
+    let mut int_idx = 0;
+    let mut float_idx = 0;
+
+    for (i, arg_type) in arg_types.iter().enumerate() {
+        if i < args.len() {
+            if matches!(arg_type, FFIType::F32) {
+                if float_idx < 8 {
+                    float_args[float_idx] = args[i];
+                    float_idx += 1;
+                } else {
+                    overflow_args.push(args[i]);
+                }
+            } else if int_idx < 8 {
+                int_args[int_idx] = args[i];
+                int_idx += 1;
+            } else {
+                overflow_args.push(args[i]);
             }
         }
     }
+
+    let num_overflow = overflow_args.len();
+    let stack_alloc_size = (num_overflow * 8 + 15) & !15; // 16-byte aligned
+
+    let trampoline: extern "C" fn(
+        *const u8,
+        *const u64,
+        *const u64,
+        *const u64,
+        usize,
+        usize,
+    ) -> u128 = unsafe { std::mem::transmute(get_ffi_trampoline()) };
+
+    let result = trampoline(
+        func_ptr,
+        int_args.as_ptr(),
+        float_args.as_ptr(),
+        overflow_args.as_ptr(),
+        num_overflow,
+        stack_alloc_size,
+    );
+    let low = result as u64;
+    let high = (result >> 64) as u64;
+    (low, high)
 }
 
-/// A 16-byte struct for receiving struct returns from C functions.
-/// On ARM64, structs up to 16 bytes are returned in x0 and x1.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct StructReturn16 {
-    low: u64,
-    high: u64,
-}
-
-/// Call a function that returns a struct (up to 16 bytes).
-/// Returns the struct packed as two u64 values in a single u128.
+/// x86-64 fallback: use transmute-based dispatch (same as before but cleaned up).
+#[cfg(target_arch = "x86_64")]
 #[inline(never)]
-unsafe fn call_struct_return(
-    func_ptr: *const u8,
-    num_args: usize,
-    args: [u64; 6],
-    _fields: &[FFIType],
-) -> u64 {
+unsafe fn dynamic_c_call(func_ptr: *const u8, args: &[u64], arg_types: &[FFIType]) -> (u64, u64) {
+    // On x86-64, integer and float registers are independently allocated:
+    // Integer: rdi, rsi, rdx, rcx, r8, r9
+    // Float: xmm0-xmm7
+    // For now, use the simple transmute approach for x86-64.
+
+    let has_float = arg_types.iter().any(|t| matches!(t, FFIType::F32));
+    let num_args = args.len();
+
+    // Pad args to 8 for indexing safety
+    let mut padded: [u64; 8] = [0; 8];
+    for (i, &a) in args.iter().enumerate().take(8) {
+        padded[i] = a;
+    }
+
+    if has_float {
+        fn to_f32(v: u64) -> f32 {
+            f32::from_bits(v as u32)
+        }
+        let mut float_mask: u8 = 0;
+        for (i, t) in arg_types.iter().enumerate() {
+            if matches!(t, FFIType::F32) {
+                float_mask |= 1 << i;
+            }
+        }
+        // Handle common float patterns (same as old code)
+        unsafe {
+            match (num_args, float_mask) {
+                (1, 0b0001) => {
+                    let f: extern "C" fn(f32) -> u64 = transmute(func_ptr);
+                    return (f(to_f32(padded[0])), 0);
+                }
+                (2, 0b0001) => {
+                    let f: extern "C" fn(f32, u64) -> u64 = transmute(func_ptr);
+                    return (f(to_f32(padded[0]), padded[1]), 0);
+                }
+                (2, 0b0010) => {
+                    let f: extern "C" fn(u64, f32) -> u64 = transmute(func_ptr);
+                    return (f(padded[0], to_f32(padded[1])), 0);
+                }
+                (2, 0b0011) => {
+                    let f: extern "C" fn(f32, f32) -> u64 = transmute(func_ptr);
+                    return (f(to_f32(padded[0]), to_f32(padded[1])), 0);
+                }
+                (3, 0b0001) => {
+                    let f: extern "C" fn(f32, u64, u64) -> u64 = transmute(func_ptr);
+                    return (f(to_f32(padded[0]), padded[1], padded[2]), 0);
+                }
+                (3, 0b0010) => {
+                    let f: extern "C" fn(u64, f32, u64) -> u64 = transmute(func_ptr);
+                    return (f(padded[0], to_f32(padded[1]), padded[2]), 0);
+                }
+                (3, 0b0100) => {
+                    let f: extern "C" fn(u64, u64, f32) -> u64 = transmute(func_ptr);
+                    return (f(padded[0], padded[1], to_f32(padded[2])), 0);
+                }
+                (4, 0b0001) => {
+                    let f: extern "C" fn(f32, u64, u64, u64) -> u64 = transmute(func_ptr);
+                    return (f(to_f32(padded[0]), padded[1], padded[2], padded[3]), 0);
+                }
+                (4, 0b0010) => {
+                    let f: extern "C" fn(u64, f32, u64, u64) -> u64 = transmute(func_ptr);
+                    return (f(padded[0], to_f32(padded[1]), padded[2], padded[3]), 0);
+                }
+                (4, 0b0100) => {
+                    let f: extern "C" fn(u64, u64, f32, u64) -> u64 = transmute(func_ptr);
+                    return (f(padded[0], padded[1], to_f32(padded[2]), padded[3]), 0);
+                }
+                (4, 0b1000) => {
+                    let f: extern "C" fn(u64, u64, u64, f32) -> u64 = transmute(func_ptr);
+                    return (f(padded[0], padded[1], padded[2], to_f32(padded[3])), 0);
+                }
+                (4, 0b0011) => {
+                    let f: extern "C" fn(f32, f32, u64, u64) -> u64 = transmute(func_ptr);
+                    return (
+                        f(to_f32(padded[0]), to_f32(padded[1]), padded[2], padded[3]),
+                        0,
+                    );
+                }
+                (4, 0b0110) => {
+                    let f: extern "C" fn(u64, f32, f32, u64) -> u64 = transmute(func_ptr);
+                    return (
+                        f(padded[0], to_f32(padded[1]), to_f32(padded[2]), padded[3]),
+                        0,
+                    );
+                }
+                (4, 0b1100) => {
+                    let f: extern "C" fn(u64, u64, f32, f32) -> u64 = transmute(func_ptr);
+                    return (
+                        f(padded[0], padded[1], to_f32(padded[2]), to_f32(padded[3])),
+                        0,
+                    );
+                }
+                (5, 0b00100) => {
+                    let f: extern "C" fn(u64, u64, f32, u64, u64) -> u64 = transmute(func_ptr);
+                    return (
+                        f(
+                            padded[0],
+                            padded[1],
+                            to_f32(padded[2]),
+                            padded[3],
+                            padded[4],
+                        ),
+                        0,
+                    );
+                }
+                (6, 0b000100) => {
+                    let f: extern "C" fn(u64, u64, f32, u64, u64, u64) -> u64 = transmute(func_ptr);
+                    return (
+                        f(
+                            padded[0],
+                            padded[1],
+                            to_f32(padded[2]),
+                            padded[3],
+                            padded[4],
+                            padded[5],
+                        ),
+                        0,
+                    );
+                }
+                _ => {
+                    panic!(
+                        "Unsupported float argument pattern on x86-64: {} args, float_mask=0b{:06b}",
+                        num_args, float_mask
+                    );
+                }
+            }
+        }
+    }
+
+    // All integer args - simple dispatch
     unsafe {
-        // Call the function with struct return type
-        let result: StructReturn16 = match num_args {
+        let result = match num_args {
             0 => {
-                let f: extern "C" fn() -> StructReturn16 = transmute(func_ptr);
+                let f: extern "C" fn() -> u64 = transmute(func_ptr);
                 f()
             }
             1 => {
-                let f: extern "C" fn(u64) -> StructReturn16 = transmute(func_ptr);
-                f(args[0])
+                let f: extern "C" fn(u64) -> u64 = transmute(func_ptr);
+                f(padded[0])
             }
             2 => {
-                let f: extern "C" fn(u64, u64) -> StructReturn16 = transmute(func_ptr);
-                f(args[0], args[1])
+                let f: extern "C" fn(u64, u64) -> u64 = transmute(func_ptr);
+                f(padded[0], padded[1])
             }
             3 => {
-                let f: extern "C" fn(u64, u64, u64) -> StructReturn16 = transmute(func_ptr);
-                f(args[0], args[1], args[2])
+                let f: extern "C" fn(u64, u64, u64) -> u64 = transmute(func_ptr);
+                f(padded[0], padded[1], padded[2])
             }
             4 => {
-                let f: extern "C" fn(u64, u64, u64, u64) -> StructReturn16 = transmute(func_ptr);
-                f(args[0], args[1], args[2], args[3])
+                let f: extern "C" fn(u64, u64, u64, u64) -> u64 = transmute(func_ptr);
+                f(padded[0], padded[1], padded[2], padded[3])
             }
             5 => {
-                let f: extern "C" fn(u64, u64, u64, u64, u64) -> StructReturn16 =
-                    transmute(func_ptr);
-                f(args[0], args[1], args[2], args[3], args[4])
+                let f: extern "C" fn(u64, u64, u64, u64, u64) -> u64 = transmute(func_ptr);
+                f(padded[0], padded[1], padded[2], padded[3], padded[4])
             }
             6 => {
-                let f: extern "C" fn(u64, u64, u64, u64, u64, u64) -> StructReturn16 =
-                    transmute(func_ptr);
-                f(args[0], args[1], args[2], args[3], args[4], args[5])
+                let f: extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64 = transmute(func_ptr);
+                f(
+                    padded[0], padded[1], padded[2], padded[3], padded[4], padded[5],
+                )
             }
-            _ => panic!("Too many arguments for FFI call: {}", num_args),
+            _ => panic!("Too many arguments for FFI call on x86-64: {}", num_args),
         };
-
-        // Store the struct in thread-local storage so unmarshal can access both parts
-        STRUCT_RETURN_HIGH.with(|cell| cell.set(result.high));
-        result.low
-    }
-}
-
-/// Call a native function that has float arguments.
-/// This creates function signatures with f32 in the appropriate positions
-/// so that the Rust compiler places floats in FP registers per the C ABI.
-#[inline(never)]
-unsafe fn call_native_function_with_floats(
-    func_ptr: *const u8,
-    num_args: usize,
-    args: [u64; 6],
-    arg_types: &[FFIType],
-    return_type: &FFIType,
-) -> u64 {
-    // Helper to convert u64 (containing f32 bits) to f32
-    fn to_f32(v: u64) -> f32 {
-        f32::from_bits(v as u32)
-    }
-
-    // Build a signature pattern: which positions are floats?
-    // We encode this as a bitmask for efficient dispatch
-    let mut float_mask: u8 = 0;
-    for (i, t) in arg_types.iter().enumerate() {
-        if matches!(t, FFIType::F32) {
-            float_mask |= 1 << i;
-        }
-    }
-
-    // For void return, we need separate handling
-    let is_void = matches!(return_type, FFIType::Void);
-
-    // Dispatch based on number of args and float positions
-    // We handle common patterns explicitly
-    unsafe {
-        match (num_args, float_mask) {
-            // 1 arg patterns
-            (1, 0b0001) => {
-                // f32
-                let f: extern "C" fn(f32) -> u64 = transmute(func_ptr);
-                if is_void {
-                    f(to_f32(args[0]));
-                    0
-                } else {
-                    f(to_f32(args[0]))
-                }
-            }
-
-            // 2 arg patterns
-            (2, 0b0001) => {
-                // f32, u64
-                let f: extern "C" fn(f32, u64) -> u64 = transmute(func_ptr);
-                if is_void {
-                    f(to_f32(args[0]), args[1]);
-                    0
-                } else {
-                    f(to_f32(args[0]), args[1])
-                }
-            }
-            (2, 0b0010) => {
-                // u64, f32
-                let f: extern "C" fn(u64, f32) -> u64 = transmute(func_ptr);
-                if is_void {
-                    f(args[0], to_f32(args[1]));
-                    0
-                } else {
-                    f(args[0], to_f32(args[1]))
-                }
-            }
-            (2, 0b0011) => {
-                // f32, f32
-                let f: extern "C" fn(f32, f32) -> u64 = transmute(func_ptr);
-                if is_void {
-                    f(to_f32(args[0]), to_f32(args[1]));
-                    0
-                } else {
-                    f(to_f32(args[0]), to_f32(args[1]))
-                }
-            }
-
-            // 3 arg patterns
-            (3, 0b0001) => {
-                let f: extern "C" fn(f32, u64, u64) -> u64 = transmute(func_ptr);
-                if is_void {
-                    f(to_f32(args[0]), args[1], args[2]);
-                    0
-                } else {
-                    f(to_f32(args[0]), args[1], args[2])
-                }
-            }
-            (3, 0b0010) => {
-                let f: extern "C" fn(u64, f32, u64) -> u64 = transmute(func_ptr);
-                if is_void {
-                    f(args[0], to_f32(args[1]), args[2]);
-                    0
-                } else {
-                    f(args[0], to_f32(args[1]), args[2])
-                }
-            }
-            (3, 0b0100) => {
-                let f: extern "C" fn(u64, u64, f32) -> u64 = transmute(func_ptr);
-                if is_void {
-                    f(args[0], args[1], to_f32(args[2]));
-                    0
-                } else {
-                    f(args[0], args[1], to_f32(args[2]))
-                }
-            }
-
-            // 4 arg patterns (common for raylib: int, int, float, color)
-            (4, 0b0001) => {
-                let f: extern "C" fn(f32, u64, u64, u64) -> u64 = transmute(func_ptr);
-                if is_void {
-                    f(to_f32(args[0]), args[1], args[2], args[3]);
-                    0
-                } else {
-                    f(to_f32(args[0]), args[1], args[2], args[3])
-                }
-            }
-            (4, 0b0010) => {
-                let f: extern "C" fn(u64, f32, u64, u64) -> u64 = transmute(func_ptr);
-                if is_void {
-                    f(args[0], to_f32(args[1]), args[2], args[3]);
-                    0
-                } else {
-                    f(args[0], to_f32(args[1]), args[2], args[3])
-                }
-            }
-            (4, 0b0100) => {
-                // DrawCircle pattern: int, int, float, color
-                let f: extern "C" fn(u64, u64, f32, u64) -> u64 = transmute(func_ptr);
-                if is_void {
-                    f(args[0], args[1], to_f32(args[2]), args[3]);
-                    0
-                } else {
-                    f(args[0], args[1], to_f32(args[2]), args[3])
-                }
-            }
-            (4, 0b1000) => {
-                let f: extern "C" fn(u64, u64, u64, f32) -> u64 = transmute(func_ptr);
-                if is_void {
-                    f(args[0], args[1], args[2], to_f32(args[3]));
-                    0
-                } else {
-                    f(args[0], args[1], args[2], to_f32(args[3]))
-                }
-            }
-            (4, 0b0011) => {
-                let f: extern "C" fn(f32, f32, u64, u64) -> u64 = transmute(func_ptr);
-                if is_void {
-                    f(to_f32(args[0]), to_f32(args[1]), args[2], args[3]);
-                    0
-                } else {
-                    f(to_f32(args[0]), to_f32(args[1]), args[2], args[3])
-                }
-            }
-            (4, 0b0110) => {
-                let f: extern "C" fn(u64, f32, f32, u64) -> u64 = transmute(func_ptr);
-                if is_void {
-                    f(args[0], to_f32(args[1]), to_f32(args[2]), args[3]);
-                    0
-                } else {
-                    f(args[0], to_f32(args[1]), to_f32(args[2]), args[3])
-                }
-            }
-            (4, 0b1100) => {
-                let f: extern "C" fn(u64, u64, f32, f32) -> u64 = transmute(func_ptr);
-                if is_void {
-                    f(args[0], args[1], to_f32(args[2]), to_f32(args[3]));
-                    0
-                } else {
-                    f(args[0], args[1], to_f32(args[2]), to_f32(args[3]))
-                }
-            }
-
-            // 5 arg patterns
-            (5, 0b00100) => {
-                let f: extern "C" fn(u64, u64, f32, u64, u64) -> u64 = transmute(func_ptr);
-                if is_void {
-                    f(args[0], args[1], to_f32(args[2]), args[3], args[4]);
-                    0
-                } else {
-                    f(args[0], args[1], to_f32(args[2]), args[3], args[4])
-                }
-            }
-
-            // 6 arg patterns
-            (6, 0b000100) => {
-                let f: extern "C" fn(u64, u64, f32, u64, u64, u64) -> u64 = transmute(func_ptr);
-                if is_void {
-                    f(args[0], args[1], to_f32(args[2]), args[3], args[4], args[5]);
-                    0
-                } else {
-                    f(args[0], args[1], to_f32(args[2]), args[3], args[4], args[5])
-                }
-            }
-
-            _ => {
-                panic!(
-                    "Unsupported float argument pattern: {} args, float_mask=0b{:06b}. \
-                     Add this pattern to call_native_function_with_floats.",
-                    num_args, float_mask
-                );
-            }
-        }
+        (result, 0)
     }
 }
 
 /// Convert a native return value to a Beagle value.
+/// Takes the (low, high) result pair from dynamic_c_call for struct return support.
 unsafe fn unmarshal_ffi_return(
     runtime: &mut Runtime,
     stack_pointer: usize,
-    result: u64,
+    low: u64,
+    high: u64,
     return_type: &FFIType,
 ) -> usize {
     unsafe {
         match return_type {
             FFIType::Void => BuiltInTypes::null_value() as usize,
             FFIType::U8 | FFIType::U16 | FFIType::U32 | FFIType::U64 => {
-                BuiltInTypes::Int.tag(result as isize) as usize
+                BuiltInTypes::Int.tag(low as isize) as usize
             }
             FFIType::I32 => {
                 // Sign-extend I32 to isize properly
-                let signed_result = result as i32 as isize;
+                let signed_result = low as i32 as isize;
                 BuiltInTypes::Int.tag(signed_result) as usize
             }
             FFIType::F32 => {
                 // Convert f32 bits to integer for Beagle
                 // The result is already the f32 bit pattern in the low 32 bits
-                let f32_val = f32::from_bits(result as u32);
+                let f32_val = f32::from_bits(low as u32);
                 BuiltInTypes::Int.tag(f32_val as i32 as isize) as usize
             }
             FFIType::Pointer | FFIType::MutablePointer => {
-                let pointer_value = BuiltInTypes::Int.tag(result as isize) as usize;
+                let pointer_value = BuiltInTypes::Int.tag(low as isize) as usize;
                 call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", pointer_value)
             }
             FFIType::String => {
-                if result == 0 {
+                if low == 0 {
                     return BuiltInTypes::null_value() as usize;
                 }
-                let c_string = CStr::from_ptr(result as *const i8);
+                let c_string = CStr::from_ptr(low as *const i8);
                 let string = c_string.to_str().unwrap();
                 runtime
                     .allocate_string(stack_pointer, string.to_string())
                     .unwrap()
                     .into()
             }
-            FFIType::Structure(fields) => {
-                // Get the high part from thread-local storage
-                let high = STRUCT_RETURN_HIGH.with(|cell| cell.get());
-
-                // Create a Beagle array with the struct fields
+            FFIType::Structure(_fields) => {
                 // For a 16-byte struct like Shader {id: u32, locs: *int}:
                 // - low contains the first 8 bytes (id in lower 4 bytes)
                 // - high contains the next 8 bytes (locs pointer)
-                let mut offset = 0u64;
-                let low = result;
-
-                // Build an array of field values based on field types
-                let mut field_values = Vec::with_capacity(fields.len());
-                for field in fields {
-                    let (value, size) = match field {
-                        FFIType::U32 | FFIType::I32 => {
-                            let v = if offset < 8 {
-                                ((low >> (offset * 8)) & 0xFFFFFFFF) as u32
-                            } else {
-                                ((high >> ((offset - 8) * 8)) & 0xFFFFFFFF) as u32
-                            };
-                            (BuiltInTypes::Int.tag(v as isize) as usize, 4)
-                        }
-                        FFIType::Pointer | FFIType::MutablePointer | FFIType::U64 => {
-                            let v = if offset < 8 { low } else { high };
-                            // Align offset to 8 bytes for pointers
-                            offset = (offset + 7) & !7;
-                            (BuiltInTypes::Int.tag(v as isize) as usize, 8)
-                        }
-                        _ => {
-                            // For other types, just use the raw value
-                            let v = if offset < 8 { low } else { high };
-                            (BuiltInTypes::Int.tag(v as isize) as usize, 8)
-                        }
-                    };
-                    field_values.push(value);
-                    offset += size as u64;
-                }
-
-                // Create a simple array/tuple to hold the struct fields
-                // The caller can access fields by index
                 call_fn_2(
                     runtime,
                     "beagle.ffi/__make_struct_return",
@@ -4327,18 +4556,13 @@ unsafe fn unmarshal_ffi_return(
 }
 
 /// Call a foreign function through FFI.
-/// This implementation uses direct function pointer calls via transmute,
-/// eliminating the need for libffi.
+/// Takes (stack_pointer, frame_pointer, ffi_info_id, args_array) where
+/// args_array is a Beagle array (rest param) containing the actual arguments.
 pub unsafe extern "C" fn call_ffi_info(
     stack_pointer: usize,
     _frame_pointer: usize,
     ffi_info_id: usize,
-    a1: usize,
-    a2: usize,
-    a3: usize,
-    a4: usize,
-    a5: usize,
-    a6: usize,
+    args_array: usize,
 ) -> usize {
     unsafe {
         let runtime = get_runtime().get_mut();
@@ -4355,26 +4579,38 @@ pub unsafe extern "C" fn call_ffi_info(
             )
         };
 
-        let arguments = [a1, a2, a3, a4, a5, a6];
-        let args = &arguments[..number_of_arguments];
+        // Read args from the Beagle array
+        let args_obj = HeapObject::from_tagged(args_array);
+        let fields = args_obj.get_fields();
 
-        // Marshal arguments to native u64 values
-        let mut native_args: [u64; 6] = [0; 6];
-        for (i, (argument, ffi_type)) in args.iter().zip(argument_types.iter()).enumerate() {
-            native_args[i] = marshal_ffi_argument(runtime, stack_pointer, *argument, ffi_type);
+        if fields.len() != number_of_arguments {
+            throw_runtime_error(
+                stack_pointer,
+                "FFIError",
+                format!(
+                    "FFI function expects {} arguments, got {}",
+                    number_of_arguments,
+                    fields.len()
+                ),
+            );
         }
 
-        // Call the native function directly using transmute
-        let result = call_native_function(
-            func_ptr,
-            number_of_arguments,
-            native_args,
-            &argument_types,
-            &return_type,
-        );
+        // Marshal arguments to native u64 values
+        let mut native_args = Vec::with_capacity(number_of_arguments);
+        for (argument, ffi_type) in fields.iter().zip(argument_types.iter()) {
+            native_args.push(marshal_ffi_argument(
+                runtime,
+                stack_pointer,
+                *argument,
+                ffi_type,
+            ));
+        }
+
+        // Call the native function using the dynamic trampoline
+        let (low, high) = dynamic_c_call(func_ptr, &native_args, &argument_types);
 
         // Unmarshal the return value
-        let return_value = unmarshal_ffi_return(runtime, stack_pointer, result, &return_type);
+        let return_value = unmarshal_ffi_return(runtime, stack_pointer, low, high, &return_type);
 
         runtime.memory.clear_native_arguments();
         return_value
@@ -8870,13 +9106,13 @@ impl Runtime {
             5,
         )?;
 
-        // build_rest_array_from_locals takes (stack_pointer, frame_pointer, arg_count, min_args, first_local_index)
+        // build_rest_array_from_locals takes (stack_pointer, frame_pointer, arg_count, min_args, first_local_index, first_arg_index)
         self.add_builtin_function_with_fp(
             "beagle.builtin/build-rest-array-from-locals",
             build_rest_array_from_locals as *const u8,
             true,
             true,
-            5,
+            6,
         )?;
 
         // call_variadic_function_value now takes (stack_pointer, frame_pointer, function_ptr, args_array, is_closure, closure_ptr)
@@ -9309,12 +9545,12 @@ impl Runtime {
             "Get a function from a loaded library.\n\narg_types is an array of Type values, return_type is a Type.\n\nExamples:\n  (let sqrt-fn (ffi/get-function lib \"sqrt\" [Type.F64] Type.F64))",
         )?;
 
-        // Internal FFI call function
+        // Internal FFI call function: (sp, fp, ffi_info_id, args_array)
         self.add_builtin_function(
             "beagle.ffi/call-ffi-info",
             call_ffi_info as *const u8,
             true,
-            8,
+            3,
         )?;
 
         self.add_builtin_with_doc(

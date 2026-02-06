@@ -317,7 +317,8 @@ impl PersistentVec {
             let inner_h = Self::new_path(scope, level - 5, node_h.to_gc_handle())?;
 
             // Allocate wrapper node
-            let path_node_h = scope.allocate_typed_zeroed(BRANCH_FACTOR, TYPE_ID_PERSISTENT_VEC_NODE)?;
+            let path_node_h =
+                scope.allocate_typed_zeroed(BRANCH_FACTOR, TYPE_ID_PERSISTENT_VEC_NODE)?;
 
             let inner = inner_h.to_gc_handle();
             let path_node = path_node_h.to_gc_handle();
@@ -361,7 +362,8 @@ impl PersistentVec {
         let tail_h = scope.alloc_handle(tail_node);
 
         // Allocate new parent (copy-on-write)
-        let new_parent_h = scope.allocate_typed_zeroed(BRANCH_FACTOR, TYPE_ID_PERSISTENT_VEC_NODE)?;
+        let new_parent_h =
+            scope.allocate_typed_zeroed(BRANCH_FACTOR, TYPE_ID_PERSISTENT_VEC_NODE)?;
 
         let parent = parent_h.to_gc_handle();
         let new_parent = new_parent_h.to_gc_handle();

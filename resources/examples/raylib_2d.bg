@@ -139,59 +139,59 @@ struct Ball {
 // ============================================================
 
 fn init_window(width, height, title) {
-    rl_init_window(width, height, title, 0, 0, 0)
+    rl_init_window(width, height, title)
 }
 
 fn close_window() {
-    rl_close_window(0, 0, 0, 0, 0, 0)
+    rl_close_window()
 }
 
 fn window_should_close() {
-    rl_window_should_close(0, 0, 0, 0, 0, 0) != 0
+    rl_window_should_close() != 0
 }
 
 fn set_target_fps(fps) {
-    rl_set_target_fps(fps, 0, 0, 0, 0, 0)
+    rl_set_target_fps(fps)
 }
 
 fn begin_drawing() {
-    rl_begin_drawing(0, 0, 0, 0, 0, 0)
+    rl_begin_drawing()
 }
 
 fn end_drawing() {
-    rl_end_drawing(0, 0, 0, 0, 0, 0)
+    rl_end_drawing()
 }
 
 fn clear_background(c) {
-    rl_clear_background(c, 0, 0, 0, 0, 0)
+    rl_clear_background(c)
 }
 
 fn draw_rectangle(x, y, w, h, c) {
-    rl_draw_rectangle(x, y, w, h, c, 0)
+    rl_draw_rectangle(x, y, w, h, c)
 }
 
 fn draw_rectangle_lines(x, y, w, h, c) {
-    rl_draw_rectangle_lines(x, y, w, h, c, 0)
+    rl_draw_rectangle_lines(x, y, w, h, c)
 }
 
 fn draw_line(x1, y1, x2, y2, c) {
-    rl_draw_line(x1, y1, x2, y2, c, 0)
+    rl_draw_line(x1, y1, x2, y2, c)
 }
 
 fn draw_text(text, x, y, size, c) {
-    rl_draw_text(text, x, y, size, c, 0)
+    rl_draw_text(text, x, y, size, c)
 }
 
 fn is_key_down(key) {
-    rl_is_key_down(key, 0, 0, 0, 0, 0) != 0
+    rl_is_key_down(key) != 0
 }
 
 fn is_key_pressed(key) {
-    rl_is_key_pressed(key, 0, 0, 0, 0, 0) != 0
+    rl_is_key_pressed(key) != 0
 }
 
 fn random_value(min, max) {
-    rl_get_random_value(min, max, 0, 0, 0, 0)
+    rl_get_random_value(min, max)
 }
 
 // ============================================================

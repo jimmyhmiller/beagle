@@ -61,10 +61,9 @@ enum Type {
 // but I don't actually have equality defined for structures
 
 fn __create_ffi_function(ffi-info) {
-    // Wrapper takes exactly 6 args - callers must pass all 6
-    fn(a1, a2, a3, a4, a5, a6) {
+    fn(...args) {
         builtin/__register_c_call();
-        let result = call-ffi-info(ffi-info, a1, a2, a3, a4, a5, a6)
+        let result = call-ffi-info(ffi-info, args)
         builtin/__unregister_c_call()
         result
     }

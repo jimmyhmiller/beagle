@@ -1,0 +1,84 @@
+namespace ffi_many_args_test
+
+use beagle.ffi as ffi
+
+// Load our test library
+fn get-lib-path() {
+    let os = get-os()
+    if os == "macos" {
+        "resources/libtest_many_args.dylib"
+    } else {
+        "resources/libtest_many_args.so"
+    }
+}
+let lib = ffi/load-library(get-lib-path())
+
+// Build the 15-element U64 arg type array
+let u64_type = ffi/Type.U64
+let args_15 = [u64_type, u64_type, u64_type, u64_type, u64_type,
+               u64_type, u64_type, u64_type, u64_type, u64_type,
+               u64_type, u64_type, u64_type, u64_type, u64_type]
+
+let args_10 = [u64_type, u64_type, u64_type, u64_type, u64_type,
+               u64_type, u64_type, u64_type, u64_type, u64_type]
+
+let args_9 = [u64_type, u64_type, u64_type, u64_type, u64_type,
+              u64_type, u64_type, u64_type, u64_type]
+
+// Get functions
+let c_sum_15 = ffi/get-function(lib, "sum_15", args_15, ffi/Type.U64)
+let c_sum_10 = ffi/get-function(lib, "sum_10", args_10, ffi/Type.U64)
+let c_sum_9 = ffi/get-function(lib, "sum_9", args_9, ffi/Type.U64)
+let c_verify_15 = ffi/get-function(lib, "verify_15", args_15, ffi/Type.U64)
+
+fn main() {
+    println("=== FFI Many Args Test ===")
+
+    // Test 9 args (1 overflow on ARM64)
+    let result_9 = c_sum_9(1, 2, 3, 4, 5, 6, 7, 8, 9)
+    println("sum_9(1..9) = " ++ to-string(result_9))
+    if result_9 == 45 {
+        println("PASS: sum_9")
+    } else {
+        println("FAIL: sum_9")
+    }
+
+    // Test 10 args (2 overflow on ARM64)
+    let result_10 = c_sum_10(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+    println("sum_10(1..10) = " ++ to-string(result_10))
+    if result_10 == 55 {
+        println("PASS: sum_10")
+    } else {
+        println("FAIL: sum_10")
+    }
+
+    // Test 15 args (7 overflow on ARM64)
+    let result_15 = c_sum_15(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
+    println("sum_15(1..15) = " ++ to-string(result_15))
+    if result_15 == 120 {
+        println("PASS: sum_15")
+    } else {
+        println("FAIL: sum_15")
+    }
+
+    // Test verify_15 - checks each arg has the correct value
+    let verified = c_verify_15(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
+    if verified == 1 {
+        println("PASS: verify_15")
+    } else {
+        println("FAIL: verify_15")
+    }
+
+    println("=== Done ===")
+}
+
+// Expect
+// === FFI Many Args Test ===
+// sum_9(1..9) = 45
+// PASS: sum_9
+// sum_10(1..10) = 55
+// PASS: sum_10
+// sum_15(1..15) = 120
+// PASS: sum_15
+// PASS: verify_15
+// === Done ===
