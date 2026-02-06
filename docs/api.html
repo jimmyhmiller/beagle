@@ -1,0 +1,5589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Beagle API Reference</title>
+  <style>
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: #ffffff;
+    color: #24292f;
+    line-height: 1.6;
+    font-size: 16px;
+}
+
+.container {
+    display: flex;
+    min-height: 100vh;
+}
+
+/* Sidebar */
+.sidebar {
+    width: 260px;
+    background: #f6f8fa;
+    border-right: 1px solid #d0d7de;
+    position: fixed;
+    height: 100vh;
+    overflow-y: auto;
+    padding: 20px;
+}
+
+.sidebar h1 {
+    font-size: 20px;
+    font-weight: 600;
+    margin-bottom: 16px;
+    color: #24292f;
+}
+
+.sidebar h1 span {
+    color: #0969da;
+}
+
+.search-box {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    background: #ffffff;
+    color: #24292f;
+    font-size: 14px;
+    margin-bottom: 16px;
+}
+
+.search-box:focus {
+    outline: none;
+    border-color: #0969da;
+    box-shadow: 0 0 0 3px rgba(9, 105, 218, 0.1);
+}
+
+.nav-section {
+    margin-bottom: 20px;
+}
+
+.nav-section h3 {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: #57606a;
+    margin-bottom: 8px;
+    letter-spacing: 0.5px;
+}
+
+.nav-list {
+    list-style: none;
+}
+
+.nav-list li {
+    margin: 2px 0;
+}
+
+.nav-list a {
+    display: block;
+    padding: 6px 10px;
+    color: #24292f;
+    text-decoration: none;
+    border-radius: 6px;
+    font-size: 14px;
+    transition: background 0.15s;
+}
+
+.nav-list a:hover {
+    background: #eaeef2;
+}
+
+.nav-list .coverage-indicator {
+    font-size: 12px;
+    color: #57606a;
+    margin-left: 4px;
+}
+
+/* Main content */
+.main {
+    margin-left: 260px;
+    padding: 40px 60px;
+    max-width: 1000px;
+    flex: 1;
+}
+
+.main h1 {
+    font-size: 32px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: #24292f;
+}
+
+.main .subtitle {
+    color: #57606a;
+    margin-bottom: 32px;
+    font-size: 16px;
+}
+
+.overall-coverage {
+    background: #f6f8fa;
+    padding: 16px 20px;
+    border-radius: 6px;
+    margin-bottom: 32px;
+    border: 1px solid #d0d7de;
+    font-size: 14px;
+}
+
+/* Quick start */
+.quick-start {
+    background: #f6f8fa;
+    border-radius: 6px;
+    padding: 20px 24px;
+    margin-bottom: 40px;
+    border: 1px solid #d0d7de;
+}
+
+.quick-start h2 {
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 16px;
+}
+
+.quick-start pre {
+    background: #24292f;
+    color: #e6edf3;
+    padding: 16px;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.quick-start code {
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+}
+
+/* Namespace sections */
+.namespace {
+    margin-bottom: 48px;
+    scroll-margin-top: 20px;
+}
+
+.namespace h2 {
+    font-size: 24px;
+    font-weight: 600;
+    color: #24292f;
+    padding-bottom: 8px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid #d0d7de;
+}
+
+.coverage {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 500;
+    margin-bottom: 16px;
+}
+
+.coverage.good { background: #dafbe1; color: #116329; }
+.coverage.medium { background: #fff8c5; color: #6c4f00; }
+.coverage.low { background: #ffebe9; color: #82071e; }
+
+/* Function entries */
+.function {
+    padding: 16px 0;
+    border-bottom: 1px solid #eaeef2;
+}
+
+.function:last-child {
+    border-bottom: none;
+}
+
+.function-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+
+.signature {
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-size: 14px;
+    font-weight: 600;
+    color: #0550ae;
+}
+
+.badge {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+}
+
+.badge.builtin {
+    background: #ddf4ff;
+    color: #0969da;
+}
+
+.badge.mutable {
+    background: #fff8c5;
+    color: #6c4f00;
+}
+
+.docstring {
+    color: #57606a;
+    white-space: pre-wrap;
+    font-size: 14px;
+    line-height: 1.6;
+    padding-left: 0;
+}
+
+.docstring.undocumented {
+    font-style: italic;
+    color: #8c959f;
+}
+
+/* Undocumented section */
+.undocumented-section {
+    margin-top: 20px;
+    background: #f6f8fa;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    padding: 12px 16px;
+}
+
+.undocumented-section summary {
+    cursor: pointer;
+    font-weight: 500;
+    font-size: 14px;
+    color: #57606a;
+}
+
+.undocumented-section summary:hover {
+    color: #24292f;
+}
+
+.undocumented-list {
+    margin-top: 12px;
+    padding-left: 20px;
+    columns: 2;
+    column-gap: 24px;
+}
+
+.undocumented-list li {
+    margin: 4px 0;
+    font-size: 13px;
+    break-inside: avoid;
+}
+
+.undocumented-list code {
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-size: 12px;
+    color: #57606a;
+}
+
+/* Types section */
+.types-section, .enums-section {
+    margin-bottom: 48px;
+    scroll-margin-top: 20px;
+}
+
+.types-section h2, .enums-section h2 {
+    font-size: 24px;
+    font-weight: 600;
+    padding-bottom: 8px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid #d0d7de;
+}
+
+.types-section > p, .enums-section > p {
+    color: #57606a;
+    margin-bottom: 16px;
+    font-size: 14px;
+}
+
+.type-def {
+    padding: 16px 0;
+    border-bottom: 1px solid #eaeef2;
+}
+
+.type-def:last-child {
+    border-bottom: none;
+}
+
+.type-def h4 {
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-size: 14px;
+    font-weight: 600;
+    color: #0550ae;
+    margin-bottom: 8px;
+}
+
+.type-doc {
+    color: #57606a;
+    margin-bottom: 8px;
+    font-size: 14px;
+}
+
+.fields, .variants {
+    margin-top: 8px;
+    font-size: 14px;
+}
+
+.fields strong, .variants strong {
+    font-weight: 500;
+    color: #24292f;
+}
+
+.fields ul, .variants ul {
+    margin-top: 4px;
+    padding-left: 20px;
+}
+
+.fields li, .variants li {
+    margin: 4px 0;
+    color: #57606a;
+}
+
+.fields code, .variants code {
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-size: 13px;
+}
+
+/* Responsive */
+@media (max-width: 900px) {
+    .sidebar {
+        width: 220px;
+    }
+    .main {
+        margin-left: 220px;
+        padding: 24px 32px;
+    }
+}
+
+@media (max-width: 700px) {
+    .container {
+        flex-direction: column;
+    }
+    .sidebar {
+        position: relative;
+        width: 100%;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid #d0d7de;
+    }
+    .main {
+        margin-left: 0;
+        padding: 24px;
+    }
+    .undocumented-list {
+        columns: 1;
+    }
+}
+
+/* Search */
+.function.hidden {
+    display: none;
+}
+
+/* Scrollbar styling */
+.sidebar::-webkit-scrollbar {
+    width: 8px;
+}
+
+.sidebar::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.sidebar::-webkit-scrollbar-thumb {
+    background: #d0d7de;
+    border-radius: 4px;
+}
+
+.sidebar::-webkit-scrollbar-thumb:hover {
+    background: #8c959f;
+}
+</style>
+</head>
+<body>
+<div class="container">
+<aside class="sidebar">
+  <h1><span>Beagle</span> Docs</h1>
+  <input type="text" class="search-box" placeholder="Search functions...">
+  <nav class="nav-section">
+    <h3>Namespaces</h3>
+    <ul class="nav-list">
+      <li><a href="#beagle-core">beagle.core <span class="coverage-indicator">(179/297)</span></a></li>
+      <li><a href="#beagle-fs">beagle.fs <span class="coverage-indicator">(27/59)</span></a></li>
+      <li><a href="#beagle-async">beagle.async <span class="coverage-indicator">(16/139)</span></a></li>
+      <li><a href="#beagle-io">beagle.io <span class="coverage-indicator">(16/20)</span></a></li>
+      <li><a href="#beagle-timer">beagle.timer <span class="coverage-indicator">(8/10)</span></a></li>
+      <li><a href="#beagle-regex">beagle.regex <span class="coverage-indicator">(9/9)</span></a></li>
+      <li><a href="#beagle-reflect">beagle.reflect <span class="coverage-indicator">(17/17)</span></a></li>
+      <li><a href="#beagle-collections">beagle.collections <span class="coverage-indicator">(15/15)</span></a></li>
+      <li><a href="#beagle-effect">beagle.effect <span class="coverage-indicator">(0/1)</span></a></li>
+      <li><a href="#beagle-ffi">beagle.ffi <span class="coverage-indicator">(19/21)</span></a></li>
+      <li><a href="#beagle-simple-socket">beagle.simple-socket <span class="coverage-indicator">(0/8)</span></a></li>
+      <li><a href="#beagle-socket">beagle.socket <span class="coverage-indicator">(0/7)</span></a></li>
+      <li><a href="#global">global <span class="coverage-indicator">(0/42)</span></a></li>
+    </ul>
+  </nav>
+  <nav class="nav-section">
+    <h3>Reference</h3>
+    <ul class="nav-list">
+      <li><a href="#types">Types</a></li>
+      <li><a href="#enums">Enums</a></li>
+    </ul>
+  </nav>
+</aside>
+<main class="main">
+  <h1>Beagle API Reference</h1>
+  <p class="subtitle">Auto-generated documentation for the Beagle programming language.</p>
+  <div class="overall-coverage">
+    <strong>Overall documentation coverage:</strong> 306/645 functions (47%)
+  </div>
+  <div class="quick-start">
+    <h2>Quick Start</h2>
+    <pre><code>// Hello World
+fn main() {
+    println("Hello, Beagle!")
+}
+
+// Using collections
+let numbers = [1, 2, 3, 4, 5]
+let doubled = map(numbers, fn(x) { x * 2 })
+let sum = reduce(numbers, 0, fn(acc, x) { acc + x })
+
+// File I/O
+use beagle.fs as fs
+let content = fs/blocking-read-file("/tmp/test.txt")</code></pre>
+  </div>
+<section class="namespace" id="beagle-core">
+  <h2>beagle.core</h2>
+  <div class="coverage medium">179/297 functions documented (60%)</div>
+  <div class="functions-list">
+<div class="function" id="fn-_println">
+  <div class="function-header">
+    <code class="signature">_println(value)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Print a value followed by a newline to standard output.</div>
+</div>
+<div class="function" id="fn-_print">
+  <div class="function-header">
+    <code class="signature">_print(value)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Print a value to standard output without a trailing newline.</div>
+</div>
+<div class="function" id="fn-to-string">
+  <div class="function-header">
+    <code class="signature">to-string(value)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Convert any value to its string representation.
+
+Examples:
+  (to-string 42)     ; =&gt; &quot;42&quot;
+  (to-string true)   ; =&gt; &quot;true&quot;
+  (to-string [1 2])  ; =&gt; &quot;[1, 2]&quot;</div>
+</div>
+<div class="function" id="fn-to-number">
+  <div class="function-header">
+    <code class="signature">to-number(string)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Parse a string into a number. Throws an error if the string is not a valid number.
+
+Examples:
+  (to-number &quot;42&quot;)   ; =&gt; 42
+  (to-number &quot;-5&quot;)   ; =&gt; -5</div>
+</div>
+<div class="function" id="fn-type-of">
+  <div class="function-header">
+    <code class="signature">type-of(value)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return a type descriptor for the given value.
+
+Returns a Struct instance representing the type (e.g., Int, String, Array).
+
+Examples:
+  (type-of 42)        ; =&gt; Int
+  (type-of &quot;hello&quot;)   ; =&gt; String
+  (type-of [1 2 3])   ; =&gt; Array</div>
+</div>
+<div class="function" id="fn-get-os">
+  <div class="function-header">
+    <code class="signature">get-os()</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the name of the current operating system.
+
+Returns one of: &quot;macos&quot;, &quot;linux&quot;, &quot;windows&quot;, or &quot;unknown&quot;.</div>
+</div>
+<div class="function" id="fn-atom-address">
+  <div class="function-header">
+    <code class="signature">atom-address(value)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the raw memory address of a value as an integer.
+
+Useful for identity comparisons and async coordination.</div>
+</div>
+<div class="function" id="fn-equal">
+  <div class="function-header">
+    <code class="signature">equal(a, b)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Compare two values for deep equality.
+
+Returns true if the values are structurally equal, false otherwise.
+
+Examples:
+  (equal 1 1)           ; =&gt; true
+  (equal [1 2] [1 2])   ; =&gt; true
+  (equal {:a 1} {:a 1}) ; =&gt; true</div>
+</div>
+<div class="function" id="fn-apply">
+  <div class="function-header">
+    <code class="signature">apply(f, args)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Apply a function to an array of arguments.
+
+Examples:
+  (apply + [1 2 3])      ; =&gt; 6
+  (apply max [3 7 2])    ; =&gt; 7
+  (apply my-fn [a b c])  ; equivalent to (my-fn a b c)</div>
+</div>
+<div class="function" id="fn-set-thread-exception-handler!">
+  <div class="function-header">
+    <code class="signature">set-thread-exception-handler!(handler)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Set an exception handler for the current thread.
+
+The handler function receives the exception value when an uncaught exception occurs.</div>
+</div>
+<div class="function" id="fn-set-default-exception-handler!">
+  <div class="function-header">
+    <code class="signature">set-default-exception-handler!(handler)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Set the default exception handler for all threads.
+
+This handler is used when a thread doesn't have its own handler set.</div>
+</div>
+<div class="function" id="fn-gc">
+  <div class="function-header">
+    <code class="signature">gc()</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Trigger garbage collection manually.
+
+Normally GC runs automatically, but this can be useful for testing or freeing memory at specific points.</div>
+</div>
+<div class="function" id="fn-sqrt">
+  <div class="function-header">
+    <code class="signature">sqrt(x)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the square root of x.
+
+Examples:
+  (sqrt 4)    ; =&gt; 2.0
+  (sqrt 2)    ; =&gt; 1.414...</div>
+</div>
+<div class="function" id="fn-floor">
+  <div class="function-header">
+    <code class="signature">floor(x)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the largest integer less than or equal to x.
+
+Examples:
+  (floor 3.7)   ; =&gt; 3
+  (floor -2.3)  ; =&gt; -3</div>
+</div>
+<div class="function" id="fn-ceil">
+  <div class="function-header">
+    <code class="signature">ceil(x)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the smallest integer greater than or equal to x.
+
+Examples:
+  (ceil 3.2)   ; =&gt; 4
+  (ceil -2.7)  ; =&gt; -2</div>
+</div>
+<div class="function" id="fn-abs">
+  <div class="function-header">
+    <code class="signature">abs(x)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the absolute value of x.
+
+Examples:
+  (abs -5)   ; =&gt; 5
+  (abs 3.2)  ; =&gt; 3.2</div>
+</div>
+<div class="function" id="fn-round">
+  <div class="function-header">
+    <code class="signature">round(x)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Round x to the nearest integer.
+
+Examples:
+  (round 3.4)  ; =&gt; 3
+  (round 3.6)  ; =&gt; 4</div>
+</div>
+<div class="function" id="fn-truncate">
+  <div class="function-header">
+    <code class="signature">truncate(x)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Truncate x toward zero (remove the fractional part).
+
+Examples:
+  (truncate 3.7)   ; =&gt; 3
+  (truncate -3.7)  ; =&gt; -3</div>
+</div>
+<div class="function" id="fn-max">
+  <div class="function-header">
+    <code class="signature">max(a, b)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the larger of two numbers.
+
+Examples:
+  (max 3 7)  ; =&gt; 7
+  (max -1 -5)  ; =&gt; -1</div>
+</div>
+<div class="function" id="fn-min">
+  <div class="function-header">
+    <code class="signature">min(a, b)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the smaller of two numbers.
+
+Examples:
+  (min 3 7)  ; =&gt; 3
+  (min -1 -5)  ; =&gt; -5</div>
+</div>
+<div class="function" id="fn-even?">
+  <div class="function-header">
+    <code class="signature">even?(n)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return true if n is even.
+
+Examples:
+  (even? 4)  ; =&gt; true
+  (even? 3)  ; =&gt; false</div>
+</div>
+<div class="function" id="fn-odd?">
+  <div class="function-header">
+    <code class="signature">odd?(n)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return true if n is odd.
+
+Examples:
+  (odd? 3)  ; =&gt; true
+  (odd? 4)  ; =&gt; false</div>
+</div>
+<div class="function" id="fn-positive?">
+  <div class="function-header">
+    <code class="signature">positive?(n)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return true if n is positive (greater than zero).
+
+Examples:
+  (positive? 5)   ; =&gt; true
+  (positive? -3)  ; =&gt; false
+  (positive? 0)   ; =&gt; false</div>
+</div>
+<div class="function" id="fn-negative?">
+  <div class="function-header">
+    <code class="signature">negative?(n)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return true if n is negative (less than zero).
+
+Examples:
+  (negative? -3)  ; =&gt; true
+  (negative? 5)   ; =&gt; false
+  (negative? 0)   ; =&gt; false</div>
+</div>
+<div class="function" id="fn-zero?">
+  <div class="function-header">
+    <code class="signature">zero?(n)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return true if n is zero.
+
+Examples:
+  (zero? 0)  ; =&gt; true
+  (zero? 5)  ; =&gt; false</div>
+</div>
+<div class="function" id="fn-clamp">
+  <div class="function-header">
+    <code class="signature">clamp(x, min_val, max_val)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Clamp x to be within the range [min_val, max_val].
+
+Examples:
+  (clamp 5 0 10)   ; =&gt; 5
+  (clamp -5 0 10)  ; =&gt; 0
+  (clamp 15 0 10)  ; =&gt; 10</div>
+</div>
+<div class="function" id="fn-gcd">
+  <div class="function-header">
+    <code class="signature">gcd(a, b)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the greatest common divisor of a and b.
+
+Examples:
+  (gcd 12 8)  ; =&gt; 4
+  (gcd 17 5)  ; =&gt; 1</div>
+</div>
+<div class="function" id="fn-lcm">
+  <div class="function-header">
+    <code class="signature">lcm(a, b)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the least common multiple of a and b.
+
+Examples:
+  (lcm 4 6)  ; =&gt; 12
+  (lcm 3 5)  ; =&gt; 15</div>
+</div>
+<div class="function" id="fn-random">
+  <div class="function-header">
+    <code class="signature">random()</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return a random floating-point number between 0.0 (inclusive) and 1.0 (exclusive).
+
+Examples:
+  (random)  ; =&gt; 0.7234... (varies)</div>
+</div>
+<div class="function" id="fn-random-int">
+  <div class="function-header">
+    <code class="signature">random-int(max)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return a random integer from 0 (inclusive) to max (exclusive).
+
+Examples:
+  (random-int 10)  ; =&gt; 7 (varies, 0-9)</div>
+</div>
+<div class="function" id="fn-random-range">
+  <div class="function-header">
+    <code class="signature">random-range(min, max)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return a random integer from min (inclusive) to max (exclusive).
+
+Examples:
+  (random-range 5 10)  ; =&gt; 7 (varies, 5-9)</div>
+</div>
+<div class="function" id="fn-sin">
+  <div class="function-header">
+    <code class="signature">sin(x)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the sine of x (in radians).
+
+Examples:
+  (sin 0)       ; =&gt; 0.0
+  (sin (/ PI 2))  ; =&gt; 1.0</div>
+</div>
+<div class="function" id="fn-cos">
+  <div class="function-header">
+    <code class="signature">cos(x)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the cosine of x (in radians).
+
+Examples:
+  (cos 0)   ; =&gt; 1.0
+  (cos PI)  ; =&gt; -1.0</div>
+</div>
+<div class="function" id="fn-tan">
+  <div class="function-header">
+    <code class="signature">tan(x)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the tangent of x (in radians).
+
+Examples:
+  (tan 0)  ; =&gt; 0.0</div>
+</div>
+<div class="function" id="fn-asin">
+  <div class="function-header">
+    <code class="signature">asin(x)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the arc sine (inverse sine) of x in radians.
+
+The result is in the range [-PI/2, PI/2]. x must be in [-1, 1].</div>
+</div>
+<div class="function" id="fn-acos">
+  <div class="function-header">
+    <code class="signature">acos(x)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the arc cosine (inverse cosine) of x in radians.
+
+The result is in the range [0, PI]. x must be in [-1, 1].</div>
+</div>
+<div class="function" id="fn-atan">
+  <div class="function-header">
+    <code class="signature">atan(x)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the arc tangent (inverse tangent) of x in radians.
+
+The result is in the range [-PI/2, PI/2].</div>
+</div>
+<div class="function" id="fn-atan2">
+  <div class="function-header">
+    <code class="signature">atan2(y, x)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the arc tangent of y/x in radians, using signs to determine the quadrant.
+
+The result is in the range [-PI, PI].</div>
+</div>
+<div class="function" id="fn-exp">
+  <div class="function-header">
+    <code class="signature">exp(x)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return e raised to the power x (e^x).
+
+Examples:
+  (exp 0)  ; =&gt; 1.0
+  (exp 1)  ; =&gt; 2.718...</div>
+</div>
+<div class="function" id="fn-log">
+  <div class="function-header">
+    <code class="signature">log(x)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the natural logarithm (base e) of x.
+
+Examples:
+  (log 1)  ; =&gt; 0.0
+  (log E)  ; =&gt; 1.0</div>
+</div>
+<div class="function" id="fn-log10">
+  <div class="function-header">
+    <code class="signature">log10(x)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the base-10 logarithm of x.
+
+Examples:
+  (log10 10)   ; =&gt; 1.0
+  (log10 100)  ; =&gt; 2.0</div>
+</div>
+<div class="function" id="fn-log2">
+  <div class="function-header">
+    <code class="signature">log2(x)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the base-2 logarithm of x.
+
+Examples:
+  (log2 2)  ; =&gt; 1.0
+  (log2 8)  ; =&gt; 3.0</div>
+</div>
+<div class="function" id="fn-pow">
+  <div class="function-header">
+    <code class="signature">pow(base, exponent)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return base raised to the power exponent.
+
+Examples:
+  (pow 2 3)  ; =&gt; 8.0
+  (pow 10 2) ; =&gt; 100.0</div>
+</div>
+<div class="function" id="fn-to-float">
+  <div class="function-header">
+    <code class="signature">to-float(x)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Convert an integer to a floating-point number.
+
+Examples:
+  (to-float 42)  ; =&gt; 42.0</div>
+</div>
+<div class="function" id="fn-thread">
+  <div class="function-header">
+    <code class="signature">thread(f)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Spawn a new thread to execute function f.
+
+Returns a Thread object that can be used with thread-join.
+
+Examples:
+  (let t (thread fn() { expensive-computation() }))
+  (thread-join t)  ; wait for result</div>
+</div>
+<div class="function" id="fn-eval">
+  <div class="function-header">
+    <code class="signature">eval(code)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Evaluate a string as Beagle code at runtime.
+
+Returns the result of the evaluated expression.
+
+Examples:
+  (eval &quot;(+ 1 2)&quot;)  ; =&gt; 3</div>
+</div>
+<div class="function" id="fn-sleep">
+  <div class="function-header">
+    <code class="signature">sleep(ms)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Pause execution for the specified number of milliseconds.
+
+Examples:
+  (sleep 1000)  ; sleep for 1 second</div>
+</div>
+<div class="function" id="fn-time-now">
+  <div class="function-header">
+    <code class="signature">time-now()</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the current time in milliseconds since the Unix epoch.
+
+Useful for timing operations or generating timestamps.</div>
+</div>
+<div class="function" id="fn-thread-id">
+  <div class="function-header">
+    <code class="signature">thread-id()</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the ID of the current thread as an integer.</div>
+</div>
+<div class="function" id="fn-get-cpu-count">
+  <div class="function-header">
+    <code class="signature">get-cpu-count()</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the number of CPU cores available on the system.</div>
+</div>
+<div class="function" id="fn-substring">
+  <div class="function-header">
+    <code class="signature">substring(string, start, length)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Extract a substring from a string.
+
+Arguments:
+  string - The source string
+  start  - Starting index (0-based)
+  length - Number of characters to extract
+
+Examples:
+  (substring &quot;hello&quot; 1 3)  ; =&gt; &quot;ell&quot;</div>
+</div>
+<div class="function" id="fn-uppercase">
+  <div class="function-header">
+    <code class="signature">uppercase(string)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Convert a string to uppercase.
+
+Examples:
+  (uppercase &quot;hello&quot;)  ; =&gt; &quot;HELLO&quot;</div>
+</div>
+<div class="function" id="fn-lowercase">
+  <div class="function-header">
+    <code class="signature">lowercase(string)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Convert a string to lowercase.
+
+Examples:
+  (lowercase &quot;HELLO&quot;)  ; =&gt; &quot;hello&quot;</div>
+</div>
+<div class="function" id="fn-split">
+  <div class="function-header">
+    <code class="signature">split(string, delimiter)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Split a string into an array of substrings.
+
+Examples:
+  (split &quot;a,b,c&quot; &quot;,&quot;)  ; =&gt; [&quot;a&quot;, &quot;b&quot;, &quot;c&quot;]</div>
+</div>
+<div class="function" id="fn-trim">
+  <div class="function-header">
+    <code class="signature">trim(string)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Remove leading and trailing whitespace from a string.
+
+Examples:
+  (trim &quot;  hello  &quot;)  ; =&gt; &quot;hello&quot;</div>
+</div>
+<div class="function" id="fn-trim-left">
+  <div class="function-header">
+    <code class="signature">trim-left(string)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Remove leading whitespace from a string.
+
+Examples:
+  (trim-left &quot;  hello  &quot;)  ; =&gt; &quot;hello  &quot;</div>
+</div>
+<div class="function" id="fn-trim-right">
+  <div class="function-header">
+    <code class="signature">trim-right(string)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Remove trailing whitespace from a string.
+
+Examples:
+  (trim-right &quot;  hello  &quot;)  ; =&gt; &quot;  hello&quot;</div>
+</div>
+<div class="function" id="fn-starts-with?">
+  <div class="function-header">
+    <code class="signature">starts-with?(string, prefix)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Check if a string starts with a given prefix.
+
+Examples:
+  (starts-with? &quot;hello&quot; &quot;he&quot;)  ; =&gt; true</div>
+</div>
+<div class="function" id="fn-ends-with?">
+  <div class="function-header">
+    <code class="signature">ends-with?(string, suffix)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Check if a string ends with a given suffix.
+
+Examples:
+  (ends-with? &quot;hello&quot; &quot;lo&quot;)  ; =&gt; true</div>
+</div>
+<div class="function" id="fn-contains?">
+  <div class="function-header">
+    <code class="signature">contains?(string, substr)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Check if a string contains a substring.
+
+Examples:
+  (contains? &quot;hello&quot; &quot;ell&quot;)  ; =&gt; true</div>
+</div>
+<div class="function" id="fn-index-of">
+  <div class="function-header">
+    <code class="signature">index-of(string, substr)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Find the first index of a substring in a string.
+
+Returns -1 if not found.
+
+Examples:
+  (index-of &quot;hello&quot; &quot;l&quot;)  ; =&gt; 2</div>
+</div>
+<div class="function" id="fn-last-index-of">
+  <div class="function-header">
+    <code class="signature">last-index-of(string, substr)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Find the last index of a substring in a string.
+
+Returns -1 if not found.
+
+Examples:
+  (last-index-of &quot;hello&quot; &quot;l&quot;)  ; =&gt; 3</div>
+</div>
+<div class="function" id="fn-replace">
+  <div class="function-header">
+    <code class="signature">replace(string, from, to)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Replace all occurrences of a substring.
+
+Examples:
+  (replace &quot;hello&quot; &quot;l&quot; &quot;L&quot;)  ; =&gt; &quot;heLLo&quot;</div>
+</div>
+<div class="function" id="fn-blank?">
+  <div class="function-header">
+    <code class="signature">blank?(string)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Check if a string is empty or contains only whitespace.
+
+Examples:
+  (blank? &quot;&quot;)       ; =&gt; true
+  (blank? &quot;  &quot;)     ; =&gt; true
+  (blank? &quot;hello&quot;)  ; =&gt; false</div>
+</div>
+<div class="function" id="fn-replace-first">
+  <div class="function-header">
+    <code class="signature">replace-first(string, from, to)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Replace the first occurrence of a substring.
+
+Examples:
+  (replace-first &quot;hello&quot; &quot;l&quot; &quot;L&quot;)  ; =&gt; &quot;heLlo&quot;</div>
+</div>
+<div class="function" id="fn-pad-left">
+  <div class="function-header">
+    <code class="signature">pad-left(string, width, pad_char)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Pad a string on the left to a given width.
+
+Examples:
+  (pad-left &quot;42&quot; 5 &quot;0&quot;)  ; =&gt; &quot;00042&quot;</div>
+</div>
+<div class="function" id="fn-pad-right">
+  <div class="function-header">
+    <code class="signature">pad-right(string, width, pad_char)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Pad a string on the right to a given width.
+
+Examples:
+  (pad-right &quot;42&quot; 5 &quot;0&quot;)  ; =&gt; &quot;42000&quot;</div>
+</div>
+<div class="function" id="fn-lines">
+  <div class="function-header">
+    <code class="signature">lines(string)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Split a string into an array of lines.
+
+Examples:
+  (lines &quot;a\nb\nc&quot;)  ; =&gt; [&quot;a&quot;, &quot;b&quot;, &quot;c&quot;]</div>
+</div>
+<div class="function" id="fn-words">
+  <div class="function-header">
+    <code class="signature">words(string)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Split a string into an array of words (whitespace-separated).
+
+Examples:
+  (words &quot;hello world&quot;)  ; =&gt; [&quot;hello&quot;, &quot;world&quot;]</div>
+</div>
+<div class="function" id="fn-json-encode">
+  <div class="function-header">
+    <code class="signature">json-encode(value)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Serialize a Beagle value to a JSON string.
+
+Supports primitives, vectors, maps, and nested structures.
+
+Examples:
+  (json-encode {:name &quot;alice&quot; :age 30})
+  ; =&gt; &quot;{\&quot;name\&quot;:\&quot;alice\&quot;,\&quot;age\&quot;:30}&quot;</div>
+</div>
+<div class="function" id="fn-json-decode">
+  <div class="function-header">
+    <code class="signature">json-decode(json-string)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Parse a JSON string to a Beagle value.
+
+JSON objects become maps with string keys (use `get` to access).
+JSON arrays become vectors.
+
+Examples:
+  (let data (json-decode &quot;{\&quot;name\&quot;:\&quot;alice\&quot;}&quot;))
+  (get data &quot;name&quot;)  ; =&gt; &quot;alice&quot;</div>
+</div>
+<div class="function" id="fn-deref">
+  <div class="function-header">
+    <code class="signature">deref(atom)</code>
+  </div>
+  <div class="docstring">Dereference an atom to get its current value.
+
+Atoms provide thread-safe mutable state. Use `deref` to read the value.
+
+Examples:
+  (let a (atom 0))
+  (deref a)  ; =&gt; 0</div>
+</div>
+<div class="function" id="fn-swap!">
+  <div class="function-header">
+    <code class="signature">swap!(atom, f)</code>
+  </div>
+  <div class="docstring">Atomically update an atom's value by applying a function.
+
+Takes the current value, applies f to it, and attempts to set the new value.
+Retries if another thread changed the value concurrently.
+
+Examples:
+  (let counter (atom 0))
+  (swap! counter fn(x) { x + 1 })  ; =&gt; 1</div>
+</div>
+<div class="function" id="fn-reset!">
+  <div class="function-header">
+    <code class="signature">reset!(atom, value)</code>
+  </div>
+  <div class="docstring">Reset an atom to a new value unconditionally.
+
+Unlike `swap!`, this does not read the current value first.
+
+Examples:
+  (let a (atom 0))
+  (reset! a 42)
+  (deref a)  ; =&gt; 42</div>
+</div>
+<div class="function" id="fn-compare-and-swap!">
+  <div class="function-header">
+    <code class="signature">compare-and-swap!(atom, old, new)</code>
+  </div>
+  <div class="docstring">Atomically compare and swap an atom's value.
+
+If the atom's current value equals `old`, set it to `new` and return true.
+Otherwise return false without changing the value.
+
+Examples:
+  (let a (atom 0))
+  (compare-and-swap! a 0 1)  ; =&gt; true, a is now 1
+  (compare-and-swap! a 0 2)  ; =&gt; false, a is still 1</div>
+</div>
+<div class="function" id="fn-atom">
+  <div class="function-header">
+    <code class="signature">atom(value)</code>
+  </div>
+  <div class="docstring">Create a new atom with the given initial value.
+
+Atoms provide thread-safe mutable state.
+
+Examples:
+  (let counter (atom 0))
+  (swap! counter fn(x) { x + 1 })
+  (deref counter)  ; =&gt; 1</div>
+</div>
+<div class="function" id="fn-join">
+  <div class="function-header">
+    <code class="signature">join(coll, sep)</code>
+  </div>
+  <div class="docstring">Join elements of a collection into a string with a separator.
+
+Works with any collection that implements Indexed and Length protocols.
+
+Examples:
+  (join [1 2 3] &quot;, &quot;)  ; =&gt; &quot;1, 2, 3&quot;
+  (join [&quot;a&quot; &quot;b&quot;] &quot;-&quot;) ; =&gt; &quot;a-b&quot;</div>
+</div>
+<div class="function" id="fn-parse-int">
+  <div class="function-header">
+    <code class="signature">parse-int(s)</code>
+  </div>
+  <div class="docstring">Parse a string into an integer.
+
+Returns null if the string is not a valid integer.
+Supports negative numbers with leading '-'.
+
+Examples:
+  (parse-int &quot;42&quot;)   ; =&gt; 42
+  (parse-int &quot;-5&quot;)   ; =&gt; -5
+  (parse-int &quot;abc&quot;)  ; =&gt; null</div>
+</div>
+<div class="function" id="fn-print">
+  <div class="function-header">
+    <code class="signature">print(...args)</code>
+  </div>
+  <div class="docstring">Print arguments separated by spaces without a trailing newline.
+
+Accepts any number of arguments. Each is formatted and printed.
+Returns the last argument.
+
+Examples:
+  (print &quot;Hello&quot; &quot;World&quot;)  ; prints: Hello World</div>
+</div>
+<div class="function" id="fn-println">
+  <div class="function-header">
+    <code class="signature">println(...args)</code>
+  </div>
+  <div class="docstring">Print arguments separated by spaces with a trailing newline.
+
+Accepts any number of arguments. Each is formatted and printed.
+Returns the last argument.
+
+Examples:
+  (println &quot;Hello&quot; &quot;World&quot;)  ; prints: Hello World\n
+  (println 1 2 3)            ; prints: 1 2 3\n</div>
+</div>
+<div class="function" id="fn-keyword?">
+  <div class="function-header">
+    <code class="signature">keyword?(value)</code>
+  </div>
+  <div class="docstring">Check if a value is a keyword.
+
+Examples:
+  (keyword? :foo)  ; =&gt; true
+  (keyword? &quot;foo&quot;) ; =&gt; false</div>
+</div>
+<div class="function" id="fn-keyword-&gt;string">
+  <div class="function-header">
+    <code class="signature">keyword-&gt;string(kw)</code>
+  </div>
+  <div class="docstring">Convert a keyword to a string.
+
+Examples:
+  (keyword-&gt;string :foo)  ; =&gt; &quot;foo&quot;</div>
+</div>
+<div class="function" id="fn-string-&gt;keyword">
+  <div class="function-header">
+    <code class="signature">string-&gt;keyword(str)</code>
+  </div>
+  <div class="docstring">Convert a string to a keyword.
+
+Examples:
+  (string-&gt;keyword &quot;foo&quot;)  ; =&gt; :foo</div>
+</div>
+<div class="function" id="fn-range">
+  <div class="function-header">
+    <code class="signature">range(start, end)</code>
+  </div>
+  <div class="docstring">Create a range from start (inclusive) to end (exclusive).
+
+Ranges are iterable and can be used with for loops and seq functions.
+
+Examples:
+  (for i in (range 0 5) { println(i) })  ; prints 0, 1, 2, 3, 4
+  (reduce (range 1 5) 0 fn(a x) { a + x })  ; =&gt; 10</div>
+</div>
+<div class="function" id="fn-range-step">
+  <div class="function-header">
+    <code class="signature">range-step(start, end, step)</code>
+  </div>
+  <div class="docstring">Create a range with a custom step value.
+
+Examples:
+  (range-step 0 10 2)  ; =&gt; 0, 2, 4, 6, 8</div>
+</div>
+<div class="function" id="fn-reduce">
+  <div class="function-header">
+    <code class="signature">reduce(coll, init, f)</code>
+  </div>
+  <div class="docstring">Fold a collection with an accumulator function.
+
+Calls (f acc elem) for each element, threading the accumulator through.
+Works with any Seqable type.
+
+Examples:
+  (reduce [1 2 3] 0 fn(acc x) { acc + x })  ; =&gt; 6
+  (reduce [1 2 3] [] fn(acc x) { push acc (* x 2) })  ; =&gt; [2 4 6]</div>
+</div>
+<div class="function" id="fn-map">
+  <div class="function-header">
+    <code class="signature">map(coll, f)</code>
+  </div>
+  <div class="docstring">Apply a function to each element of a collection.
+
+Returns a new vector with the transformed elements.
+
+Examples:
+  (map [1 2 3] fn(x) { x * 2 })  ; =&gt; [2 4 6]
+  (map [&quot;a&quot; &quot;b&quot;] uppercase)      ; =&gt; [&quot;A&quot; &quot;B&quot;]</div>
+</div>
+<div class="function" id="fn-filter">
+  <div class="function-header">
+    <code class="signature">filter(coll, pred)</code>
+  </div>
+  <div class="docstring">Keep elements where the predicate returns true.
+
+Returns a new vector containing only matching elements.
+
+Examples:
+  (filter [1 2 3 4] even?)  ; =&gt; [2 4]
+  (filter [&quot;&quot; &quot;a&quot; &quot;&quot;] fn(s) { length(s) &gt; 0 })  ; =&gt; [&quot;a&quot;]</div>
+</div>
+<div class="function" id="fn-any?">
+  <div class="function-header">
+    <code class="signature">any?(coll, pred)</code>
+  </div>
+  <div class="docstring">Check if any element matches the predicate.
+
+Returns true if pred returns true for at least one element.
+
+Examples:
+  (any? [1 2 3] even?)  ; =&gt; true
+  (any? [1 3 5] even?)  ; =&gt; false</div>
+</div>
+<div class="function" id="fn-all?">
+  <div class="function-header">
+    <code class="signature">all?(coll, pred)</code>
+  </div>
+  <div class="docstring">Check if all elements match the predicate.
+
+Returns true if pred returns true for every element.
+
+Examples:
+  (all? [2 4 6] even?)  ; =&gt; true
+  (all? [1 2 3] even?)  ; =&gt; false</div>
+</div>
+<div class="function" id="fn-none?">
+  <div class="function-header">
+    <code class="signature">none?(coll, pred)</code>
+  </div>
+  <div class="docstring">Check if no elements match the predicate.
+
+Returns true if pred returns false for every element.
+
+Examples:
+  (none? [1 3 5] even?)  ; =&gt; true
+  (none? [1 2 3] even?)  ; =&gt; false</div>
+</div>
+<div class="function" id="fn-not-every?">
+  <div class="function-header">
+    <code class="signature">not-every?(coll, pred)</code>
+  </div>
+  <div class="docstring">Check if at least one element does NOT match the predicate.
+
+Equivalent to (not (all? coll pred)).
+
+Examples:
+  (not-every? [1 2 3] even?)  ; =&gt; true
+  (not-every? [2 4 6] even?)  ; =&gt; false</div>
+</div>
+<div class="function" id="fn-find">
+  <div class="function-header">
+    <code class="signature">find(coll, pred)</code>
+  </div>
+  <div class="docstring">Find the first element matching the predicate.
+
+Returns the element or null if no match.
+
+Examples:
+  (find [1 2 3 4] even?)  ; =&gt; 2
+  (find [1 3 5] even?)    ; =&gt; null</div>
+</div>
+<div class="function" id="fn-find-index">
+  <div class="function-header">
+    <code class="signature">find-index(coll, pred)</code>
+  </div>
+  <div class="docstring">Find the index of the first element matching the predicate.
+
+Returns the index or -1 if no match.
+
+Examples:
+  (find-index [1 2 3 4] even?)  ; =&gt; 1
+  (find-index [1 3 5] even?)    ; =&gt; -1</div>
+</div>
+<div class="function" id="fn-take">
+  <div class="function-header">
+    <code class="signature">take(coll, n)</code>
+  </div>
+  <div class="docstring">Take the first n elements from a collection.
+
+Returns a new vector with at most n elements.
+
+Examples:
+  (take [1 2 3 4 5] 3)  ; =&gt; [1 2 3]
+  (take [1 2] 5)        ; =&gt; [1 2]</div>
+</div>
+<div class="function" id="fn-drop">
+  <div class="function-header">
+    <code class="signature">drop(coll, n)</code>
+  </div>
+  <div class="docstring">Drop the first n elements from a collection.
+
+Returns a new vector with the remaining elements.
+
+Examples:
+  (drop [1 2 3 4 5] 2)  ; =&gt; [3 4 5]
+  (drop [1 2] 5)        ; =&gt; []</div>
+</div>
+<div class="function" id="fn-take-while">
+  <div class="function-header">
+    <code class="signature">take-while(coll, pred)</code>
+  </div>
+  <div class="docstring">Take elements while the predicate returns true.
+
+Stops at the first element where pred returns false.
+
+Examples:
+  (take-while [1 2 3 4 1] fn(x) { x &lt; 4 })  ; =&gt; [1 2 3]</div>
+</div>
+<div class="function" id="fn-drop-while">
+  <div class="function-header">
+    <code class="signature">drop-while(coll, pred)</code>
+  </div>
+  <div class="docstring">Drop elements while the predicate returns true.
+
+Returns elements starting from the first where pred returns false.
+
+Examples:
+  (drop-while [1 2 3 4 1] fn(x) { x &lt; 3 })  ; =&gt; [3 4 1]</div>
+</div>
+<div class="function" id="fn-slice">
+  <div class="function-header">
+    <code class="signature">slice(coll, start, end)</code>
+  </div>
+  <div class="docstring">Get a sub-collection from start (inclusive) to end (exclusive).
+
+Examples:
+  (slice [0 1 2 3 4] 1 4)  ; =&gt; [1 2 3]</div>
+</div>
+<div class="function" id="fn-enumerate">
+  <div class="function-header">
+    <code class="signature">enumerate(coll)</code>
+  </div>
+  <div class="docstring">Return pairs of [index, element] for each element.
+
+Examples:
+  (enumerate [&quot;a&quot; &quot;b&quot; &quot;c&quot;])  ; =&gt; [[0 &quot;a&quot;] [1 &quot;b&quot;] [2 &quot;c&quot;]]</div>
+</div>
+<div class="function" id="fn-remove-at">
+  <div class="function-header">
+    <code class="signature">remove-at(coll, idx)</code>
+  </div>
+  <div class="docstring">Remove element at the specified index.
+
+Returns the collection unchanged if index is out of bounds.
+
+Examples:
+  (remove-at [1 2 3 4] 1)  ; =&gt; [1 3 4]</div>
+</div>
+<div class="function" id="fn-count">
+  <div class="function-header">
+    <code class="signature">count(coll)</code>
+  </div>
+  <div class="docstring">Return the number of elements in a collection.
+
+Alias for length, more idiomatic for collections.
+
+Examples:
+  (count [1 2 3])  ; =&gt; 3
+  (count &quot;hello&quot;)  ; =&gt; 5</div>
+</div>
+<div class="function" id="fn-empty?">
+  <div class="function-header">
+    <code class="signature">empty?(coll)</code>
+  </div>
+  <div class="docstring">Check if a collection has no elements.
+
+Examples:
+  (empty? [])    ; =&gt; true
+  (empty? [1])   ; =&gt; false
+  (empty? &quot;&quot;)    ; =&gt; true</div>
+</div>
+<div class="function" id="fn-first-of">
+  <div class="function-header">
+    <code class="signature">first-of(coll)</code>
+  </div>
+  <div class="docstring">Get the first element of a collection.
+
+Returns null if the collection is empty.
+Named differently to avoid conflict with Seq protocol's first.
+
+Examples:
+  (first-of [1 2 3])  ; =&gt; 1
+  (first-of [])       ; =&gt; null</div>
+</div>
+<div class="function" id="fn-last">
+  <div class="function-header">
+    <code class="signature">last(coll)</code>
+  </div>
+  <div class="docstring">Get the last element of a collection.
+
+Returns null if the collection is empty.
+
+Examples:
+  (last [1 2 3])  ; =&gt; 3
+  (last [])       ; =&gt; null</div>
+</div>
+<div class="function" id="fn-rest">
+  <div class="function-header">
+    <code class="signature">rest(coll)</code>
+  </div>
+  <div class="docstring">Get all elements except the first.
+
+Examples:
+  (rest [1 2 3])  ; =&gt; [2 3]
+  (rest [1])      ; =&gt; []</div>
+</div>
+<div class="function" id="fn-butlast">
+  <div class="function-header">
+    <code class="signature">butlast(coll)</code>
+  </div>
+  <div class="docstring">Get all elements except the last one.
+
+Examples:
+  (butlast [1 2 3])  ; =&gt; [1 2]
+  (butlast [1])      ; =&gt; []</div>
+</div>
+<div class="function" id="fn-nth">
+  <div class="function-header">
+    <code class="signature">nth(coll, n)</code>
+  </div>
+  <div class="docstring">Get the element at index n with bounds checking.
+
+Returns null if index is out of bounds.
+
+Examples:
+  (nth [1 2 3] 1)   ; =&gt; 2
+  (nth [1 2 3] 10)  ; =&gt; null</div>
+</div>
+<div class="function" id="fn-second">
+  <div class="function-header">
+    <code class="signature">second(coll)</code>
+  </div>
+  <div class="docstring">Get the second element of a collection.
+
+Examples:
+  (second [1 2 3])  ; =&gt; 2</div>
+</div>
+<div class="function" id="fn-third">
+  <div class="function-header">
+    <code class="signature">third(coll)</code>
+  </div>
+  <div class="docstring">Get the third element of a collection.
+
+Examples:
+  (third [1 2 3])  ; =&gt; 3</div>
+</div>
+<div class="function" id="fn-min-of">
+  <div class="function-header">
+    <code class="signature">min-of(coll)</code>
+  </div>
+  <div class="docstring">Return the minimum element in a collection.
+
+Elements must be comparable with &lt;.
+
+Examples:
+  (min-of [3 1 4 1 5])  ; =&gt; 1
+  (min-of [])           ; =&gt; null</div>
+</div>
+<div class="function" id="fn-max-of">
+  <div class="function-header">
+    <code class="signature">max-of(coll)</code>
+  </div>
+  <div class="docstring">Return the maximum element in a collection.
+
+Elements must be comparable with &gt;.
+
+Examples:
+  (max-of [3 1 4 1 5])  ; =&gt; 5
+  (max-of [])           ; =&gt; null</div>
+</div>
+<div class="function" id="fn-min-by">
+  <div class="function-header">
+    <code class="signature">min-by(coll, f)</code>
+  </div>
+  <div class="docstring">Return the element with the minimum key value.
+
+Compares elements by applying f to each and using &lt; on the results.
+
+Examples:
+  (min-by [&quot;abc&quot; &quot;a&quot; &quot;ab&quot;] length)  ; =&gt; &quot;a&quot;</div>
+</div>
+<div class="function" id="fn-max-by">
+  <div class="function-header">
+    <code class="signature">max-by(coll, f)</code>
+  </div>
+  <div class="docstring">Return the element with the maximum key value.
+
+Compares elements by applying f to each and using &gt; on the results.
+
+Examples:
+  (max-by [&quot;a&quot; &quot;abc&quot; &quot;ab&quot;] length)  ; =&gt; &quot;abc&quot;</div>
+</div>
+<div class="function" id="fn-reduce-right">
+  <div class="function-header">
+    <code class="signature">reduce-right(coll, init, f)</code>
+  </div>
+  <div class="docstring">Reduce a collection from right to left.
+
+Like reduce, but processes elements in reverse order.
+
+Examples:
+  (reduce-right [1 2 3] [] fn(acc x) { push(acc, x) })  ; =&gt; [3 2 1]</div>
+</div>
+<div class="function" id="fn-concat">
+  <div class="function-header">
+    <code class="signature">concat(coll1, coll2)</code>
+  </div>
+  <div class="docstring">Concatenate two collections into one.
+
+Returns a new vector with elements from both collections.
+
+Examples:
+  (concat [1 2] [3 4])  ; =&gt; [1 2 3 4]</div>
+</div>
+<div class="function" id="fn-flatten">
+  <div class="function-header">
+    <code class="signature">flatten(coll)</code>
+  </div>
+  <div class="docstring">Flatten one level of nesting in a collection.
+
+Examples:
+  (flatten [[1 2] [3 4]])  ; =&gt; [1 2 3 4]</div>
+</div>
+<div class="function" id="fn-flat-map">
+  <div class="function-header">
+    <code class="signature">flat-map(coll, f)</code>
+  </div>
+  <div class="docstring">Map a function over a collection then flatten the result.
+
+Examples:
+  (flat-map [1 2 3] fn(x) { [x, x] })  ; =&gt; [1 1 2 2 3 3]</div>
+</div>
+<div class="function" id="fn-zip">
+  <div class="function-header">
+    <code class="signature">zip(coll1, coll2)</code>
+  </div>
+  <div class="docstring">Pair up elements from two collections into a vector of pairs.
+
+Examples:
+  (zip [1 2 3] [&quot;a&quot; &quot;b&quot; &quot;c&quot;])  ; =&gt; [[1 &quot;a&quot;] [2 &quot;b&quot;] [3 &quot;c&quot;]]</div>
+</div>
+<div class="function" id="fn-zip-with">
+  <div class="function-header">
+    <code class="signature">zip-with(coll1, coll2, f)</code>
+  </div>
+  <div class="docstring">Combine elements from two collections using a function.
+
+Like zip, but applies f to each pair instead of creating tuples.
+
+Examples:
+  (zip-with [1 2 3] [10 20 30] fn(a b) { a + b })  ; =&gt; [11 22 33]</div>
+</div>
+<div class="function" id="fn-zipmap">
+  <div class="function-header">
+    <code class="signature">zipmap(keys-coll, vals-coll)</code>
+  </div>
+  <div class="docstring">Create a map from parallel key and value collections.
+
+Pairs up keys[i] with vals[i] to form map entries.
+
+Examples:
+  (zipmap [:a :b :c] [1 2 3])  ; =&gt; {:a 1, :b 2, :c 3}</div>
+</div>
+<div class="function" id="fn-interleave">
+  <div class="function-header">
+    <code class="signature">interleave(coll1, coll2)</code>
+  </div>
+  <div class="docstring">Interleave elements from two collections.
+
+Returns a vector alternating between elements of coll1 and coll2.
+
+Examples:
+  (interleave [1 2 3] [:a :b :c])  ; =&gt; [1 :a 2 :b 3 :c]</div>
+</div>
+<div class="function" id="fn-interpose">
+  <div class="function-header">
+    <code class="signature">interpose(coll, sep)</code>
+  </div>
+  <div class="docstring">Insert a separator between each element of a collection.
+
+Examples:
+  (interpose [1 2 3] 0)  ; =&gt; [1 0 2 0 3]</div>
+</div>
+<div class="function" id="fn-into">
+  <div class="function-header">
+    <code class="signature">into(target, source)</code>
+  </div>
+  <div class="docstring">Pour elements from source collection into target collection.
+
+For vectors: appends elements. For maps: source should be [key, value] pairs.
+For sets: adds elements.
+
+Examples:
+  (into [1 2] [3 4])          ; =&gt; [1 2 3 4]
+  (into {} [[:a 1] [:b 2]])   ; =&gt; {:a 1, :b 2}
+  (into #{1 2} [2 3 4])       ; =&gt; #{1 2 3 4}</div>
+</div>
+<div class="function" id="fn-reverse">
+  <div class="function-header">
+    <code class="signature">reverse(coll)</code>
+  </div>
+  <div class="docstring">Reverse the order of elements in a collection.
+
+Returns a new vector with elements in reverse order.
+
+Examples:
+  (reverse [1 2 3])  ; =&gt; [3 2 1]</div>
+</div>
+<div class="function" id="fn-repeat">
+  <div class="function-header">
+    <code class="signature">repeat(value, n)</code>
+  </div>
+  <div class="docstring">Create a vector with a value repeated n times.
+
+Examples:
+  (repeat &quot;x&quot; 3)  ; =&gt; [&quot;x&quot; &quot;x&quot; &quot;x&quot;]</div>
+</div>
+<div class="function" id="fn-repeatedly">
+  <div class="function-header">
+    <code class="signature">repeatedly(f, n)</code>
+  </div>
+  <div class="docstring">Call a function n times and collect the results.
+
+Examples:
+  (repeatedly fn() { random() } 3)  ; =&gt; [0.1 0.7 0.4] (random values)</div>
+</div>
+<div class="function" id="fn-iterate">
+  <div class="function-header">
+    <code class="signature">iterate(f, init, n)</code>
+  </div>
+  <div class="docstring">Generate a sequence by repeatedly applying a function.
+
+Starts with init, then f(init), f(f(init)), etc. for n values.
+
+Examples:
+  (iterate fn(x) { x * 2 } 1 5)  ; =&gt; [1 2 4 8 16]</div>
+</div>
+<div class="function" id="fn-partition">
+  <div class="function-header">
+    <code class="signature">partition(coll, n)</code>
+  </div>
+  <div class="docstring">Split a collection into groups of n elements.
+
+Examples:
+  (partition [1 2 3 4 5 6] 2)  ; =&gt; [[1 2] [3 4] [5 6]]</div>
+</div>
+<div class="function" id="fn-partition-by">
+  <div class="function-header">
+    <code class="signature">partition-by(coll, f)</code>
+  </div>
+  <div class="docstring">Split a collection when the key function's return value changes.
+
+Groups consecutive elements with the same key value.
+
+Examples:
+  (partition-by [1 1 2 2 1] identity)  ; =&gt; [[1 1] [2 2] [1]]</div>
+</div>
+<div class="function" id="fn-group-by">
+  <div class="function-header">
+    <code class="signature">group-by(coll, f)</code>
+  </div>
+  <div class="docstring">Group elements by the result of a key function.
+
+Returns a map from keys to vectors of elements with that key.
+
+Examples:
+  (group-by [1 2 3 4 5] even?)  ; =&gt; {true: [2 4], false: [1 3 5]}</div>
+</div>
+<div class="function" id="fn-frequencies">
+  <div class="function-header">
+    <code class="signature">frequencies(coll)</code>
+  </div>
+  <div class="docstring">Count occurrences of each value in a collection.
+
+Returns a map from values to their counts.
+
+Examples:
+  (frequencies [1 2 1 3 1 2])  ; =&gt; {1: 3, 2: 2, 3: 1}</div>
+</div>
+<div class="function" id="fn-distinct">
+  <div class="function-header">
+    <code class="signature">distinct(coll)</code>
+  </div>
+  <div class="docstring">Remove duplicate values from a collection.
+
+Keeps the first occurrence of each value.
+
+Examples:
+  (distinct [1 2 1 3 2 1])  ; =&gt; [1 2 3]</div>
+</div>
+<div class="function" id="fn-dedupe">
+  <div class="function-header">
+    <code class="signature">dedupe(coll)</code>
+  </div>
+  <div class="docstring">Remove consecutive duplicate elements.
+
+Keeps the first occurrence of each run of duplicates.
+
+Examples:
+  (dedupe [1 1 2 2 2 1 1])  ; =&gt; [1 2 1]</div>
+</div>
+<div class="function" id="fn-sort">
+  <div class="function-header">
+    <code class="signature">sort(coll)</code>
+  </div>
+  <div class="docstring">Sort a collection in ascending order.
+
+Elements must be comparable. Uses insertion sort.
+
+Examples:
+  (sort [3 1 4 1 5])  ; =&gt; [1 1 3 4 5]</div>
+</div>
+<div class="function" id="fn-sort-by">
+  <div class="function-header">
+    <code class="signature">sort-by(coll, f)</code>
+  </div>
+  <div class="docstring">Sort a collection by a key function.
+
+Elements are ordered by comparing (f elem) values.
+
+Examples:
+  (sort-by [{:name &quot;bob&quot; :age 30} {:name &quot;alice&quot; :age 25}] fn(x) { x.age })
+  ; =&gt; [{:name &quot;alice&quot; :age 25} {:name &quot;bob&quot; :age 30}]</div>
+</div>
+<div class="function" id="fn-identity">
+  <div class="function-header">
+    <code class="signature">identity(x)</code>
+  </div>
+  <div class="docstring">Return the input unchanged.
+
+Useful as a default function argument.
+
+Examples:
+  (identity 42)  ; =&gt; 42
+  (map [1 2 3] identity)  ; =&gt; [1 2 3]</div>
+</div>
+<div class="function" id="fn-constantly">
+  <div class="function-header">
+    <code class="signature">constantly(value)</code>
+  </div>
+  <div class="docstring">Return a function that always returns the given value.
+
+Ignores any arguments passed to the returned function.
+
+Examples:
+  (let always-42 (constantly 42))
+  (always-42 &quot;ignored&quot;)  ; =&gt; 42</div>
+</div>
+<div class="function" id="fn-complement">
+  <div class="function-header">
+    <code class="signature">complement(pred)</code>
+  </div>
+  <div class="docstring">Return a function that negates a predicate.
+
+Examples:
+  (let not-even? (complement even?))
+  (not-even? 3)  ; =&gt; true</div>
+</div>
+<div class="function" id="fn-compose">
+  <div class="function-header">
+    <code class="signature">compose(f, g)</code>
+  </div>
+  <div class="docstring">Compose two functions: (compose f g) returns fn(x) { f(g(x)) }.
+
+The second function is applied first, then the first.
+
+Examples:
+  (let add1-then-double (compose fn(x) { x * 2 } fn(x) { x + 1 }))
+  (add1-then-double 3)  ; =&gt; 8  (3+1=4, 4*2=8)</div>
+</div>
+<div class="function" id="fn-partial">
+  <div class="function-header">
+    <code class="signature">partial(f, a)</code>
+  </div>
+  <div class="docstring">Partially apply a function by fixing its first argument.
+
+Examples:
+  (let add10 (partial fn(a b) { a + b } 10))
+  (add10 5)  ; =&gt; 15</div>
+</div>
+<div class="function" id="fn-not">
+  <div class="function-header">
+    <code class="signature">not(x)</code>
+  </div>
+  <div class="docstring">Boolean negation.
+
+Returns true if x is falsy, false if x is truthy.
+
+Examples:
+  (not true)   ; =&gt; false
+  (not false)  ; =&gt; true
+  (not null)   ; =&gt; true</div>
+</div>
+<div class="function" id="fn-truthy?">
+  <div class="function-header">
+    <code class="signature">truthy?(x)</code>
+  </div>
+  <div class="docstring">Check if a value is truthy (not null and not false).
+
+Examples:
+  (truthy? 1)      ; =&gt; true
+  (truthy? null)   ; =&gt; false
+  (truthy? false)  ; =&gt; false</div>
+</div>
+<div class="function" id="fn-falsy?">
+  <div class="function-header">
+    <code class="signature">falsy?(x)</code>
+  </div>
+  <div class="docstring">Check if a value is falsy (null or false).
+
+Examples:
+  (falsy? null)   ; =&gt; true
+  (falsy? false)  ; =&gt; true
+  (falsy? 0)      ; =&gt; false</div>
+</div>
+<div class="function" id="fn-nil?">
+  <div class="function-header">
+    <code class="signature">nil?(x)</code>
+  </div>
+  <div class="docstring">Check if a value is null.
+
+Examples:
+  (nil? null)  ; =&gt; true
+  (nil? 0)     ; =&gt; false</div>
+</div>
+<div class="function" id="fn-some?">
+  <div class="function-header">
+    <code class="signature">some?(x)</code>
+  </div>
+  <div class="docstring">Check if a value is not null.
+
+Examples:
+  (some? 0)     ; =&gt; true
+  (some? null)  ; =&gt; false</div>
+</div>
+<div class="function" id="fn-vals">
+  <div class="function-header">
+    <code class="signature">vals(m)</code>
+  </div>
+  <div class="docstring">Get all values from a map as a vector.
+
+Examples:
+  (vals {:a 1 :b 2})  ; =&gt; [1 2]</div>
+</div>
+<div class="function" id="fn-dissoc">
+  <div class="function-header">
+    <code class="signature">dissoc(m, key)</code>
+  </div>
+  <div class="docstring">Remove a key from a map.
+
+Returns a new map without the specified key.
+
+Examples:
+  (dissoc {:a 1 :b 2} :a)  ; =&gt; {:b 2}</div>
+</div>
+<div class="function" id="fn-merge">
+  <div class="function-header">
+    <code class="signature">merge(m1, m2)</code>
+  </div>
+  <div class="docstring">Merge two maps together.
+
+m2's values take precedence for duplicate keys.
+
+Examples:
+  (merge {:a 1 :b 2} {:b 3 :c 4})  ; =&gt; {:a 1 :b 3 :c 4}</div>
+</div>
+<div class="function" id="fn-merge-with">
+  <div class="function-header">
+    <code class="signature">merge-with(f, m1, m2)</code>
+  </div>
+  <div class="docstring">Merge two maps using a function to resolve key conflicts.
+
+When a key exists in both maps, calls f(v1, v2) to get the merged value.
+
+Examples:
+  (merge-with fn(a b) { a + b } {:a 1} {:a 2 :b 3})  ; =&gt; {:a 3, :b 3}</div>
+</div>
+<div class="function" id="fn-select-keys">
+  <div class="function-header">
+    <code class="signature">select-keys(m, ks)</code>
+  </div>
+  <div class="docstring">Keep only the specified keys from a map.
+
+Returns a new map with only the keys in ks.
+
+Examples:
+  (select-keys {:a 1 :b 2 :c 3} [:a :c])  ; =&gt; {:a 1, :c 3}</div>
+</div>
+<div class="function" id="fn-update">
+  <div class="function-header">
+    <code class="signature">update(m, key, f)</code>
+  </div>
+  <div class="docstring">Update a value at a key using a function.
+
+Applies f to the current value at key and associates the result.
+
+Examples:
+  (update {:a 1} :a fn(x) { x + 1 })  ; =&gt; {:a 2}</div>
+</div>
+<div class="function" id="fn-get-in">
+  <div class="function-header">
+    <code class="signature">get-in(m, path)</code>
+  </div>
+  <div class="docstring">Get a nested value using a path of keys.
+
+Returns null if any key in the path is not found.
+
+Examples:
+  (get-in {:a {:b {:c 42}}} [:a :b :c])  ; =&gt; 42
+  (get-in {:a {:b 1}} [:a :x])           ; =&gt; null</div>
+</div>
+<div class="function" id="fn-assoc-in">
+  <div class="function-header">
+    <code class="signature">assoc-in(m, path, val)</code>
+  </div>
+  <div class="docstring">Set a nested value using a path of keys.
+
+Creates intermediate maps as needed.
+
+Examples:
+  (assoc-in {:a {:b 1}} [:a :b] 42)  ; =&gt; {:a {:b 42}}
+  (assoc-in {} [:a :b :c] 1)         ; =&gt; {:a {:b {:c 1}}}</div>
+</div>
+<div class="function" id="fn-update-in">
+  <div class="function-header">
+    <code class="signature">update-in(m, path, f)</code>
+  </div>
+  <div class="docstring">Update a nested value using a path of keys and a function.
+
+Applies f to the current value at the path.
+
+Examples:
+  (update-in {:a {:b 1}} [:a :b] fn(x) { x + 1 })  ; =&gt; {:a {:b 2}}</div>
+</div>
+<div class="function" id="fn-contains-key?">
+  <div class="function-header">
+    <code class="signature">contains-key?(m, key)</code>
+  </div>
+  <div class="docstring">Check if a map contains a key.
+
+Examples:
+  (contains-key? {:a 1 :b 2} :a)  ; =&gt; true
+  (contains-key? {:a 1 :b 2} :c)  ; =&gt; false</div>
+</div>
+<div class="function" id="fn-invert">
+  <div class="function-header">
+    <code class="signature">invert(m)</code>
+  </div>
+  <div class="docstring">Swap keys and values in a map.
+
+Values become keys and keys become values.
+
+Examples:
+  (invert {:a 1 :b 2})  ; =&gt; {1: :a, 2: :b}</div>
+</div>
+<div class="function" id="fn-map-keys">
+  <div class="function-header">
+    <code class="signature">map-keys(m, f)</code>
+  </div>
+  <div class="docstring">Apply a function to all keys in a map.
+
+Returns a new map with transformed keys, same values.
+
+Examples:
+  (map-keys {:a 1 :b 2} keyword-&gt;string)  ; =&gt; {&quot;a&quot;: 1, &quot;b&quot;: 2}</div>
+</div>
+<div class="function" id="fn-map-vals">
+  <div class="function-header">
+    <code class="signature">map-vals(m, f)</code>
+  </div>
+  <div class="docstring">Apply a function to all values in a map.
+
+Returns a new map with same keys, transformed values.
+
+Examples:
+  (map-vals {:a 1 :b 2} fn(x) { x * 2 })  ; =&gt; {:a 2, :b 4}</div>
+</div>
+<div class="function" id="fn-filter-keys">
+  <div class="function-header">
+    <code class="signature">filter-keys(m, pred)</code>
+  </div>
+  <div class="docstring">Keep only entries where the key satisfies the predicate.
+
+Examples:
+  (filter-keys {:a 1 :ab 2 :abc 3} fn(k) { length(keyword-&gt;string(k)) &gt; 1 })
+  ; =&gt; {:ab 2, :abc 3}</div>
+</div>
+<div class="function" id="fn-filter-vals">
+  <div class="function-header">
+    <code class="signature">filter-vals(m, pred)</code>
+  </div>
+  <div class="docstring">Keep only entries where the value satisfies the predicate.
+
+Examples:
+  (filter-vals {:a 1 :b 2 :c 3} fn(v) { v &gt; 1 })  ; =&gt; {:b 2, :c 3}</div>
+</div>
+<div class="function" id="fn-set?">
+  <div class="function-header">
+    <code class="signature">set?(x)</code>
+  </div>
+  <div class="docstring">Check if a value is a PersistentSet.
+
+Examples:
+  (set? #{1 2 3})  ; =&gt; true
+  (set? [1 2 3])   ; =&gt; false</div>
+</div>
+<div class="function" id="fn-set-contains?">
+  <div class="function-header">
+    <code class="signature">set-contains?(set, elem)</code>
+  </div>
+  <div class="docstring">Check if an element is in a set.
+
+Examples:
+  (set-contains? #{1 2 3} 2)  ; =&gt; true
+  (set-contains? #{1 2 3} 5)  ; =&gt; false</div>
+</div>
+<div class="function" id="fn-set-add">
+  <div class="function-header">
+    <code class="signature">set-add(set, elem)</code>
+  </div>
+  <div class="docstring">Add an element to a set.
+
+Returns a new set with the element added (no-op if already present).
+
+Examples:
+  (set-add #{1 2} 3)  ; =&gt; #{1 2 3}
+  (set-add #{1 2} 2)  ; =&gt; #{1 2}</div>
+</div>
+<div class="function" id="fn-set-remove">
+  <div class="function-header">
+    <code class="signature">set-remove(set, elem)</code>
+  </div>
+  <div class="docstring">Remove an element from a set.
+
+Returns a new set without the element.
+
+Examples:
+  (set-remove #{1 2 3} 2)  ; =&gt; #{1 3}</div>
+</div>
+<div class="function" id="fn-set-union">
+  <div class="function-header">
+    <code class="signature">set-union(s1, s2)</code>
+  </div>
+  <div class="docstring">Return the union of two sets.
+
+Contains all elements from both sets.
+
+Examples:
+  (set-union #{1 2} #{2 3})  ; =&gt; #{1 2 3}</div>
+</div>
+<div class="function" id="fn-set-intersection">
+  <div class="function-header">
+    <code class="signature">set-intersection(s1, s2)</code>
+  </div>
+  <div class="docstring">Return the intersection of two sets.
+
+Contains only elements present in both sets.
+
+Examples:
+  (set-intersection #{1 2 3} #{2 3 4})  ; =&gt; #{2 3}</div>
+</div>
+<div class="function" id="fn-set-difference">
+  <div class="function-header">
+    <code class="signature">set-difference(s1, s2)</code>
+  </div>
+  <div class="docstring">Return the difference of two sets.
+
+Contains elements in s1 but not in s2.
+
+Examples:
+  (set-difference #{1 2 3} #{2 3 4})  ; =&gt; #{1}</div>
+</div>
+<div class="function" id="fn-set-subset?">
+  <div class="function-header">
+    <code class="signature">set-subset?(s1, s2)</code>
+  </div>
+  <div class="docstring">Check if s1 is a subset of s2.
+
+Returns true if all elements of s1 are also in s2.
+
+Examples:
+  (set-subset? #{1 2} #{1 2 3})  ; =&gt; true
+  (set-subset? #{1 4} #{1 2 3})  ; =&gt; false</div>
+</div>
+<div class="function" id="fn-into-set">
+  <div class="function-header">
+    <code class="signature">into-set(coll)</code>
+  </div>
+  <div class="docstring">Convert a collection to a set.
+
+Removes duplicates since sets only contain unique elements.
+
+Examples:
+  (into-set [1 2 2 3 3 3])  ; =&gt; #{1 2 3}</div>
+</div>
+<div class="function" id="fn-char-code">
+  <div class="function-header">
+    <code class="signature">char-code(s)</code>
+  </div>
+  <div class="docstring">Get the Unicode code point of the first character in a string.
+
+Examples:
+  (char-code &quot;A&quot;)  ; =&gt; 65
+  (char-code &quot;a&quot;)  ; =&gt; 97</div>
+</div>
+<div class="function" id="fn-char-from-code">
+  <div class="function-header">
+    <code class="signature">char-from-code(code)</code>
+  </div>
+  <div class="docstring">Create a single-character string from a Unicode code point.
+
+Examples:
+  (char-from-code 65)  ; =&gt; &quot;A&quot;
+  (char-from-code 97)  ; =&gt; &quot;a&quot;</div>
+</div>
+<div class="function" id="fn-ok">
+  <div class="function-header">
+    <code class="signature">ok(value)</code>
+  </div>
+  <div class="docstring">Create a successful Result containing a value.
+
+Examples:
+  (ok 42)  ; =&gt; Result.Ok { value: 42 }</div>
+</div>
+<div class="function" id="fn-err">
+  <div class="function-header">
+    <code class="signature">err(error)</code>
+  </div>
+  <div class="docstring">Create an error Result containing an Error.
+
+Examples:
+  (err (Error.NotFound { path: &quot;/missing&quot; }))</div>
+</div>
+<div class="function" id="fn-ok?">
+  <div class="function-header">
+    <code class="signature">ok?(result)</code>
+  </div>
+  <div class="docstring">Check if a Result is successful (Ok variant).
+
+Examples:
+  (ok? (ok 42))                      ; =&gt; true
+  (ok? (err (Error.IO { message: &quot;failed&quot; })))  ; =&gt; false</div>
+</div>
+<div class="function" id="fn-unwrap">
+  <div class="function-header">
+    <code class="signature">unwrap(result)</code>
+  </div>
+  <div class="docstring">Unwrap a Result, returning the value or null on error.
+
+Prints an error message if the result is an Err.
+
+Examples:
+  (unwrap (ok 42))  ; =&gt; 42
+  (unwrap (err (Error.NotFound { path: &quot;/x&quot; })))  ; prints error, returns null</div>
+</div>
+<div class="function" id="fn-unwrap-or">
+  <div class="function-header">
+    <code class="signature">unwrap-or(result, default)</code>
+  </div>
+  <div class="docstring">Unwrap a Result, returning the value or a default on error.
+
+Examples:
+  (unwrap-or (ok 42) 0)                        ; =&gt; 42
+  (unwrap-or (err (Error.IO { message: &quot;&quot; })) 0)  ; =&gt; 0</div>
+</div>
+<div class="function" id="fn-doc">
+  <div class="function-header">
+    <code class="signature">doc(value)</code>
+  </div>
+  <div class="docstring">Get documentation for a function or type.
+
+Returns the docstring associated with the value, or null if none exists.
+Works with functions, structs, enums, and other documented values.
+
+Examples:
+  doc(map)       ; =&gt; &quot;Apply a function to each element...&quot;
+  doc(Result)    ; =&gt; documentation for Result enum</div>
+</div>
+<div class="function" id="fn-apropos">
+  <div class="function-header">
+    <code class="signature">apropos(query)</code>
+  </div>
+  <div class="docstring">Search for functions by name or docstring.
+
+Returns a list of fully-qualified function names that match the query.
+The query is matched against both function names and their docstrings.
+
+Examples:
+  apropos(&quot;file&quot;)    ; =&gt; [&quot;beagle.fs/read-file&quot;, &quot;beagle.fs/write-file&quot;, ...]
+  apropos(&quot;reduce&quot;)  ; =&gt; [&quot;beagle.core/reduce&quot;, &quot;beagle.core/reduce-right&quot;]</div>
+</div>
+  </div>
+  <details class="undocumented-section">
+    <summary>Undocumented functions (118)</summary>
+    <ul class="undocumented-list">
+      <li><code>event-loop-create()</code></li>
+      <li><code>event-loop-run-once()</code></li>
+      <li><code>event-loop-wake()</code></li>
+      <li><code>event-loop-destroy()</code></li>
+      <li><code>tcp-connect-async()</code></li>
+      <li><code>tcp-listen()</code></li>
+      <li><code>tcp-accept-async()</code></li>
+      <li><code>tcp-read-async()</code></li>
+      <li><code>tcp-write-async()</code></li>
+      <li><code>tcp-close()</code></li>
+      <li><code>tcp-close-listener()</code></li>
+      <li><code>tcp-results-count()</code></li>
+      <li><code>tcp-result-pop()</code></li>
+      <li><code>tcp-result-future-atom()</code></li>
+      <li><code>tcp-result-value()</code></li>
+      <li><code>tcp-result-data()</code></li>
+      <li><code>tcp-result-op-id()</code></li>
+      <li><code>tcp-result-listener-id()</code></li>
+      <li><code>timer-set()</code></li>
+      <li><code>timer-cancel()</code></li>
+      <li><code>timer-completed-count()</code></li>
+      <li><code>timer-pop-completed()</code></li>
+      <li><code>file-read-submit()</code></li>
+      <li><code>file-write-submit()</code></li>
+      <li><code>file-delete-submit()</code></li>
+      <li><code>file-stat-submit()</code></li>
+      <li><code>file-readdir-submit()</code></li>
+      <li><code>file-results-count()</code></li>
+      <li><code>file-result-ready()</code></li>
+      <li><code>file-result-poll-type()</code></li>
+      <li><code>file-result-get-string()</code></li>
+      <li><code>file-result-get-value()</code></li>
+      <li><code>file-result-consume()</code></li>
+      <li><code>file-result-get-entries()</code></li>
+      <li><code>string-concat()</code></li>
+      <li><code>read-full-file()</code></li>
+      <li><code>write-full-file()</code></li>
+      <li><code>fs-unlink()</code></li>
+      <li><code>fs-access()</code></li>
+      <li><code>fs-mkdir()</code></li>
+      <li><code>fs-rmdir()</code></li>
+      <li><code>fs-rename()</code></li>
+      <li><code>fs-is-directory?()</code></li>
+      <li><code>fs-is-file?()</code></li>
+      <li><code>fs-readdir()</code></li>
+      <li><code>fs-file-size()</code></li>
+      <li><code>future-wait()</code></li>
+      <li><code>future-notify()</code></li>
+      <li><code>diagnostics()</code></li>
+      <li><code>diagnostics-for-file()</code></li>
+      <li><code>files-with-diagnostics()</code></li>
+      <li><code>clear-diagnostics()</code></li>
+      <li><code>get(coll, index)</code></li>
+      <li><code>push(coll, value)</code></li>
+      <li><code>length(coll)</code></li>
+      <li><code>format(self, depth)</code></li>
+      <li><code>assoc(coll, key, value)</code></li>
+      <li><code>keys(coll)</code></li>
+      <li><code>seq(coll)</code></li>
+      <li><code>first(seq)</code></li>
+      <li><code>next(seq)</code></li>
+      <li><code>format-rust-vec-helper(vec, idx, len, acc)</code></li>
+      <li><code>format-rust-map-entries(map, keys-vec, idx, len, acc)</code></li>
+      <li><code>instance-of(value, type)</code></li>
+      <li><code>format-persistent-vector-helper(vec, idx, acc, depth)</code></li>
+      <li><code>join-helper(coll, sep, idx, acc)</code></li>
+      <li><code>parse-int-helper(s, idx, acc)</code></li>
+      <li><code>insert-sorted(sorted, elem)</code></li>
+      <li><code>insert-sorted-by(sorted, elem, elem-key, key-fn)</code></li>
+      <li><code>merge-with-helper(f, m1, m2, ks, idx, acc)</code></li>
+      <li><code>select-keys-helper(m, ks, idx, acc)</code></li>
+      <li><code>map-keys-helper(m, f, ks, idx, acc)</code></li>
+      <li><code>map-vals-helper(m, f, ks, idx, acc)</code></li>
+      <li><code>filter-keys-helper(m, pred, ks, idx, acc)</code></li>
+      <li><code>filter-vals-helper(m, pred, ks, idx, acc)</code></li>
+      <li><code>format-rust-set-elements(elems-vec, idx, len, acc)</code></li>
+      <li><code>set-remove-helper(elems, to-remove, idx, len, acc)</code></li>
+      <li><code>set-union-helper(s1, elems2, idx, len)</code></li>
+      <li><code>set-intersection-helper(elems1, s2, idx, len, acc)</code></li>
+      <li><code>set-difference-helper(elems1, s2, idx, len, acc)</code></li>
+      <li><code>set-subset-helper(elems1, s2, idx, len)</code></li>
+      <li><code>err-io(message)</code></li>
+      <li><code>err-code(code, message)</code></li>
+      <li><code>timeout?(result)</code></li>
+      <li><code>not-found?(result)</code></li>
+      <li><code>get-error(result)</code></li>
+      <li><code>Struct_format(self, depth)</code></li>
+      <li><code>Format_format(self, depth)</code></li>
+      <li><code>String_format(self, depth)</code></li>
+      <li><code>PersistentVector_get(vec, i)</code></li>
+      <li><code>PersistentVector_length(vec)</code></li>
+      <li><code>PersistentVector_push(vec, value)</code></li>
+      <li><code>PersistentVector_format(self, depth)</code></li>
+      <li><code>PersistentVector_assoc(vec, index, value)</code></li>
+      <li><code>PersistentMap_get(m, key)</code></li>
+      <li><code>PersistentMap_length(m)</code></li>
+      <li><code>PersistentMap_assoc(m, key, value)</code></li>
+      <li><code>PersistentMap_keys(map)</code></li>
+      <li><code>PersistentMap_format(map, depth)</code></li>
+      <li><code>String_get(str, i)</code></li>
+      <li><code>String_length(str)</code></li>
+      <li><code>Array_get(arr, i)</code></li>
+      <li><code>Array_length(arr)</code></li>
+      <li><code>PersistentVector_seq(vec)</code></li>
+      <li><code>PersistentVectorSeq_first(seq)</code></li>
+      <li><code>PersistentVectorSeq_next(seq)</code></li>
+      <li><code>Range_seq(r)</code></li>
+      <li><code>Range_first(r)</code></li>
+      <li><code>Range_next(r)</code></li>
+      <li><code>String_seq(str)</code></li>
+      <li><code>StringSeq_first(seq)</code></li>
+      <li><code>StringSeq_next(seq)</code></li>
+      <li><code>PersistentSet_length(set)</code></li>
+      <li><code>PersistentSet_format(set, depth)</code></li>
+      <li><code>PersistentSetSeq_first(seq)</code></li>
+      <li><code>PersistentSetSeq_next(seq)</code></li>
+      <li><code>PersistentSet_seq(set)</code></li>
+      <li><code>Regex_format(regex, depth)</code></li>
+    </ul>
+  </details>
+</section>
+<section class="namespace" id="beagle-fs">
+  <h2>beagle.fs</h2>
+  <div class="coverage low">27/59 functions documented (45%)</div>
+  <div class="functions-list">
+<div class="function" id="fn-read-file">
+  <div class="function-header">
+    <code class="signature">read-file(path)</code>
+  </div>
+  <div class="docstring">Read the entire contents of a file as a string.
+
+Must be called within an Fs effect handler block.
+Returns Result.Ok with content or Result.Err on failure.
+
+Examples:
+  handle effect/Handler(Fs) with handler {
+      match (fs/read-file &quot;/tmp/test.txt&quot;) {
+          Result.Ok { value } =&gt; println(value),
+          Result.Err { error } =&gt; println(&quot;Error:&quot;, error)
+      }
+  }</div>
+</div>
+<div class="function" id="fn-write-file">
+  <div class="function-header">
+    <code class="signature">write-file(path, content)</code>
+  </div>
+  <div class="docstring">Write content to a file (creates or overwrites).
+
+Returns Result.Ok with bytes written, or Result.Err on failure.
+
+Examples:
+  (fs/write-file &quot;/tmp/test.txt&quot; &quot;Hello, World!&quot;)</div>
+</div>
+<div class="function" id="fn-append-file">
+  <div class="function-header">
+    <code class="signature">append-file(path, content)</code>
+  </div>
+  <div class="docstring">Append content to a file (creates if doesn't exist).
+
+Returns Result.Ok with bytes written, or Result.Err on failure.
+
+Examples:
+  (fs/append-file &quot;/tmp/log.txt&quot; &quot;New log entry\n&quot;)</div>
+</div>
+<div class="function" id="fn-delete-file">
+  <div class="function-header">
+    <code class="signature">delete-file(path)</code>
+  </div>
+  <div class="docstring">Delete a file.
+
+Returns Result.Ok on success, or Result.Err if file doesn't exist.
+
+Examples:
+  (fs/delete-file &quot;/tmp/test.txt&quot;)</div>
+</div>
+<div class="function" id="fn-exists?">
+  <div class="function-header">
+    <code class="signature">exists?(path)</code>
+  </div>
+  <div class="docstring">Check if a file or directory exists.
+
+Returns Result.Ok { value: true/false }.
+
+Examples:
+  (fs/exists? &quot;/tmp/test.txt&quot;)  ; =&gt; Result.Ok { value: true }</div>
+</div>
+<div class="function" id="fn-file-size">
+  <div class="function-header">
+    <code class="signature">file-size(path)</code>
+  </div>
+  <div class="docstring">Get file size in bytes.
+
+Returns Result.Ok with the size, or Result.Err if file doesn't exist.
+
+Examples:
+  (fs/file-size &quot;/tmp/test.txt&quot;)  ; =&gt; Result.Ok { value: 1024 }</div>
+</div>
+<div class="function" id="fn-is-file?">
+  <div class="function-header">
+    <code class="signature">is-file?(path)</code>
+  </div>
+  <div class="docstring">Check if path is a regular file (not a directory).
+
+Returns Result.Ok { value: true/false }.
+
+Examples:
+  (fs/is-file? &quot;/tmp/test.txt&quot;)  ; =&gt; Result.Ok { value: true }</div>
+</div>
+<div class="function" id="fn-rename">
+  <div class="function-header">
+    <code class="signature">rename(old-path, new-path)</code>
+  </div>
+  <div class="docstring">Rename or move a file or directory.
+
+Returns Result.Ok on success, or Result.Err on failure.
+
+Examples:
+  (fs/rename &quot;/tmp/old.txt&quot; &quot;/tmp/new.txt&quot;)</div>
+</div>
+<div class="function" id="fn-copy">
+  <div class="function-header">
+    <code class="signature">copy(src-path, dest-path)</code>
+  </div>
+  <div class="docstring">Copy a file from source to destination.
+
+Returns Result.Ok on success, or Result.Err on failure.
+
+Examples:
+  (fs/copy &quot;/tmp/source.txt&quot; &quot;/tmp/dest.txt&quot;)</div>
+</div>
+<div class="function" id="fn-read-dir">
+  <div class="function-header">
+    <code class="signature">read-dir(path)</code>
+  </div>
+  <div class="docstring">List directory contents.
+
+Returns Result.Ok with vector of entry names, or Result.Err on failure.
+
+Examples:
+  (fs/read-dir &quot;/tmp&quot;)  ; =&gt; Result.Ok { value: [&quot;file1.txt&quot;, &quot;file2.txt&quot;] }</div>
+</div>
+<div class="function" id="fn-create-dir">
+  <div class="function-header">
+    <code class="signature">create-dir(path)</code>
+  </div>
+  <div class="docstring">Create a directory.
+
+Parent directories must exist. Use create-dir-all for recursive creation.
+
+Examples:
+  (fs/create-dir &quot;/tmp/mydir&quot;)</div>
+</div>
+<div class="function" id="fn-create-dir-all">
+  <div class="function-header">
+    <code class="signature">create-dir-all(path)</code>
+  </div>
+  <div class="docstring">Create a directory and all parent directories.
+
+Like mkdir -p. Creates any missing parent directories.
+
+Examples:
+  (fs/create-dir-all &quot;/tmp/a/b/c&quot;)</div>
+</div>
+<div class="function" id="fn-remove-dir">
+  <div class="function-header">
+    <code class="signature">remove-dir(path)</code>
+  </div>
+  <div class="docstring">Remove an empty directory.
+
+Fails if directory is not empty. Use remove-dir-all for recursive removal.
+
+Examples:
+  (fs/remove-dir &quot;/tmp/empty-dir&quot;)</div>
+</div>
+<div class="function" id="fn-remove-dir-all">
+  <div class="function-header">
+    <code class="signature">remove-dir-all(path)</code>
+  </div>
+  <div class="docstring">Remove a directory and all its contents recursively.
+
+Like rm -rf. Removes files and subdirectories.
+
+Examples:
+  (fs/remove-dir-all &quot;/tmp/mydir&quot;)</div>
+</div>
+<div class="function" id="fn-is-directory?">
+  <div class="function-header">
+    <code class="signature">is-directory?(path)</code>
+  </div>
+  <div class="docstring">Check if path is a directory.
+
+Returns Result.Ok { value: true/false }.
+
+Examples:
+  (fs/is-directory? &quot;/tmp&quot;)  ; =&gt; Result.Ok { value: true }</div>
+</div>
+<div class="function" id="fn-open">
+  <div class="function-header">
+    <code class="signature">open(path, mode)</code>
+  </div>
+  <div class="docstring">Open a file with a mode string.
+
+Modes: &quot;r&quot; (read), &quot;w&quot; (write/create), &quot;a&quot; (append), &quot;r+&quot; (read/write).
+Returns a File handle for low-level operations.
+
+Examples:
+  (let file (unwrap (fs/open &quot;/tmp/test.txt&quot; &quot;r&quot;)))</div>
+</div>
+<div class="function" id="fn-close">
+  <div class="function-header">
+    <code class="signature">close(file)</code>
+  </div>
+  <div class="docstring">Close a file handle.
+
+Always close files when done to release resources.
+
+Examples:
+  (fs/close file)</div>
+</div>
+<div class="function" id="fn-read">
+  <div class="function-header">
+    <code class="signature">read(file, n)</code>
+  </div>
+  <div class="docstring">Read up to n bytes from a file handle.
+
+Returns the data read as a string.
+
+Examples:
+  (fs/read file 1024)</div>
+</div>
+<div class="function" id="fn-write">
+  <div class="function-header">
+    <code class="signature">write(file, content)</code>
+  </div>
+  <div class="docstring">Write content to a file handle.
+
+Returns the number of bytes written.
+
+Examples:
+  (fs/write file &quot;Hello, World!&quot;)</div>
+</div>
+<div class="function" id="fn-read-line">
+  <div class="function-header">
+    <code class="signature">read-line(file)</code>
+  </div>
+  <div class="docstring">Read a line from a file handle.
+
+Reads until newline or end of file.
+
+Examples:
+  (fs/read-line file)  ; =&gt; &quot;First line\n&quot;</div>
+</div>
+<div class="function" id="fn-flush">
+  <div class="function-header">
+    <code class="signature">flush(file)</code>
+  </div>
+  <div class="docstring">Flush a file's buffers to disk.
+
+Ensures all buffered writes are actually written.
+
+Examples:
+  (fs/flush file)</div>
+</div>
+<div class="function" id="fn-blocking-read-file">
+  <div class="function-header">
+    <code class="signature">blocking-read-file(path)</code>
+  </div>
+  <div class="docstring">Read the entire contents of a file synchronously.
+
+This is the simplest way to read a file. No handler required.
+
+Examples:
+  match (fs/blocking-read-file &quot;/tmp/test.txt&quot;) {
+      Result.Ok { value } =&gt; println(value),
+      Result.Err { error } =&gt; println(&quot;Error:&quot;, error)
+  }</div>
+</div>
+<div class="function" id="fn-blocking-write-file">
+  <div class="function-header">
+    <code class="signature">blocking-write-file(path, content)</code>
+  </div>
+  <div class="docstring">Write content to a file synchronously (creates or overwrites).
+
+This is the simplest way to write a file. No handler required.
+
+Examples:
+  (fs/blocking-write-file &quot;/tmp/test.txt&quot; &quot;Hello, World!&quot;)</div>
+</div>
+<div class="function" id="fn-blocking-delete-file">
+  <div class="function-header">
+    <code class="signature">blocking-delete-file(path)</code>
+  </div>
+  <div class="docstring">Delete a file synchronously.
+
+Examples:
+  (fs/blocking-delete-file &quot;/tmp/test.txt&quot;)</div>
+</div>
+<div class="function" id="fn-blocking-exists?">
+  <div class="function-header">
+    <code class="signature">blocking-exists?(path)</code>
+  </div>
+  <div class="docstring">Check if a file or directory exists synchronously.
+
+Examples:
+  (fs/blocking-exists? &quot;/tmp/test.txt&quot;)  ; =&gt; Result.Ok { value: true }</div>
+</div>
+<div class="function" id="fn-blocking-read-dir">
+  <div class="function-header">
+    <code class="signature">blocking-read-dir(path)</code>
+  </div>
+  <div class="docstring">List directory contents synchronously.
+
+Returns a Result containing a vector of filenames.
+
+Examples:
+  (fs/blocking-read-dir &quot;/tmp&quot;)  ; =&gt; Result.Ok { value: [&quot;file1.txt&quot;, &quot;file2.txt&quot;] }</div>
+</div>
+<div class="function" id="fn-blocking-create-dir">
+  <div class="function-header">
+    <code class="signature">blocking-create-dir(path)</code>
+  </div>
+  <div class="docstring">Create a directory synchronously.
+
+Examples:
+  (fs/blocking-create-dir &quot;/tmp/mydir&quot;)</div>
+</div>
+  </div>
+  <details class="undocumented-section">
+    <summary>Undocumented functions (32)</summary>
+    <ul class="undocumented-list">
+      <li><code>handle-read-file(path)</code></li>
+      <li><code>handle-write-file(path, content)</code></li>
+      <li><code>handle-append-file(path, content)</code></li>
+      <li><code>handle-delete-file(path)</code></li>
+      <li><code>handle-file-exists(path)</code></li>
+      <li><code>handle-file-size(path)</code></li>
+      <li><code>handle-is-file(path)</code></li>
+      <li><code>handle-is-directory(path)</code></li>
+      <li><code>handle-rename-file(old-path, new-path)</code></li>
+      <li><code>handle-copy-file(src-path, dest-path)</code></li>
+      <li><code>handle-read-dir(path)</code></li>
+      <li><code>handle-create-dir(path)</code></li>
+      <li><code>handle-create-dir-all(path)</code></li>
+      <li><code>handle-remove-dir(path)</code></li>
+      <li><code>handle-remove-dir-all(path)</code></li>
+      <li><code>handle-open(path, mode)</code></li>
+      <li><code>handle-close(file)</code></li>
+      <li><code>handle-read(file, n)</code></li>
+      <li><code>handle-write(file, content)</code></li>
+      <li><code>handle-read-line(file)</code></li>
+      <li><code>handle-flush(file)</code></li>
+      <li><code>run-blocking(thunk)</code></li>
+      <li><code>blocking-append-file(path, content)</code></li>
+      <li><code>blocking-file-size(path)</code></li>
+      <li><code>blocking-is-file?(path)</code></li>
+      <li><code>blocking-is-directory?(path)</code></li>
+      <li><code>blocking-rename(old-path, new-path)</code></li>
+      <li><code>blocking-copy(src-path, dest-path)</code></li>
+      <li><code>blocking-create-dir-all(path)</code></li>
+      <li><code>blocking-remove-dir(path)</code></li>
+      <li><code>blocking-remove-dir-all(path)</code></li>
+      <li><code>BlockingFsHandler_handle(self, op, resume)</code></li>
+    </ul>
+  </details>
+</section>
+<section class="namespace" id="beagle-async">
+  <h2>beagle.async</h2>
+  <div class="coverage low">16/139 functions documented (11%)</div>
+  <div class="functions-list">
+<div class="function" id="fn-make-future">
+  <div class="function-header">
+    <code class="signature">make-future(initial_state)</code>
+  </div>
+  <div class="docstring">Create a new future with an initial state.
+
+Futures represent values that may not be available yet.
+
+Examples:
+  (let f (make-future (FutureState.Pending {})))</div>
+</div>
+<div class="function" id="fn-future-state">
+  <div class="function-header">
+    <code class="signature">future-state(future)</code>
+  </div>
+  <div class="docstring">Get the current state of a future.
+
+Returns a FutureState: Pending, Running, Resolved, Rejected, or Cancelled.</div>
+</div>
+<div class="function" id="fn-resolve-future!">
+  <div class="function-header">
+    <code class="signature">resolve-future!(future, value)</code>
+  </div>
+  <div class="docstring">Resolve a future with a successful value.
+
+Notifies any threads waiting on this future.</div>
+</div>
+<div class="function" id="fn-reject-future!">
+  <div class="function-header">
+    <code class="signature">reject-future!(future, error)</code>
+  </div>
+  <div class="docstring">Reject a future with an error.
+
+Notifies any threads waiting on this future.</div>
+</div>
+<div class="function" id="fn-cancel-future!">
+  <div class="function-header">
+    <code class="signature">cancel-future!(future)</code>
+  </div>
+  <div class="docstring">Cancel a future.
+
+The future's state becomes Cancelled. Notifies any waiting threads.</div>
+</div>
+<div class="function" id="fn-future-cancelled?">
+  <div class="function-header">
+    <code class="signature">future-cancelled?(future)</code>
+  </div>
+  <div class="docstring">Check if a future has been cancelled.</div>
+</div>
+<div class="function" id="fn-make-cancellation-token">
+  <div class="function-header">
+    <code class="signature">make-cancellation-token()</code>
+  </div>
+  <div class="docstring">Create a new cancellation token.
+
+Cancellation tokens provide cooperative cancellation for async tasks.</div>
+</div>
+<div class="function" id="fn-cancel!">
+  <div class="function-header">
+    <code class="signature">cancel!(token)</code>
+  </div>
+  <div class="docstring">Cancel a cancellation token.
+
+All tasks watching this token should stop.</div>
+</div>
+<div class="function" id="fn-cancelled?">
+  <div class="function-header">
+    <code class="signature">cancelled?(token)</code>
+  </div>
+  <div class="docstring">Check if a cancellation token has been cancelled.</div>
+</div>
+<div class="function" id="fn-with-scope">
+  <div class="function-header">
+    <code class="signature">with-scope(body)</code>
+  </div>
+  <div class="docstring">Run a block with a task scope for structured concurrency.
+
+Ensures all spawned tasks complete before the scope exits.
+On error or cancellation, all child tasks are cancelled.
+
+Examples:
+  (with-scope fn(scope) {
+      let f1 = spawn(scope, fn() { compute1() })
+      let f2 = spawn(scope, fn() { compute2() })
+      [await(f1), await(f2)]
+  })</div>
+</div>
+<div class="function" id="fn-sleep">
+  <div class="function-header">
+    <code class="signature">sleep(ms)</code>
+  </div>
+  <div class="docstring">Sleep for a number of milliseconds.
+
+Must be called within an Async effect handler.
+
+Examples:
+  (sleep 1000)  ; Sleep for 1 second</div>
+</div>
+<div class="function" id="fn-await">
+  <div class="function-header">
+    <code class="signature">await(future)</code>
+  </div>
+  <div class="docstring">Wait for a future to complete and return its value.
+
+Blocks until the future resolves, rejects, or is cancelled.
+
+Examples:
+  (let f (spawn fn() { compute() }))
+  (await f)  ; =&gt; result of compute()</div>
+</div>
+<div class="function" id="fn-await-all">
+  <div class="function-header">
+    <code class="signature">await-all(futures)</code>
+  </div>
+  <div class="docstring">Wait for all futures to complete and return their values as a vector.
+
+Examples:
+  (let fs [(spawn fn() { 1 }) (spawn fn() { 2 })])
+  (await-all fs)  ; =&gt; [1 2]</div>
+</div>
+<div class="function" id="fn-await-first">
+  <div class="function-header">
+    <code class="signature">await-first(futures)</code>
+  </div>
+  <div class="docstring">Wait for the first future to complete and return its result.
+
+Returns a RaceResult indicating which future completed first.</div>
+</div>
+<div class="function" id="fn-await-timeout">
+  <div class="function-header">
+    <code class="signature">await-timeout(ms, future)</code>
+  </div>
+  <div class="docstring">Wait for a future with a timeout in milliseconds.
+
+Returns TimeoutResult.Ok if completed, TimeoutResult.TimedOut if timeout.</div>
+</div>
+<div class="function" id="fn-spawn">
+  <div class="function-header">
+    <code class="signature">spawn(thunk)</code>
+  </div>
+  <div class="docstring">Spawn an async task and return a future.
+
+The task runs concurrently. Use await to get the result.
+
+Examples:
+  (let f (spawn fn() { expensive-computation() }))
+  (await f)  ; =&gt; result of computation</div>
+</div>
+  </div>
+  <details class="undocumented-section">
+    <summary>Undocumented functions (123)</summary>
+    <ul class="undocumented-list">
+      <li><code>make-scope()</code></li>
+      <li><code>scope-add-child!(scope, future)</code></li>
+      <li><code>scope-children(scope)</code></li>
+      <li><code>scope-cancel-all!(scope)</code></li>
+      <li><code>scope-await-all-children(scope)</code></li>
+      <li><code>async-ok(value)</code></li>
+      <li><code>async-err(code, message)</code></li>
+      <li><code>async-ok?(result)</code></li>
+      <li><code>async-unwrap(result)</code></li>
+      <li><code>async-unwrap-or(result, default)</code></li>
+      <li><code>handle-read-file(path)</code></li>
+      <li><code>handle-write-file(path, content)</code></li>
+      <li><code>handle-append-file(path, content)</code></li>
+      <li><code>handle-delete-file(path)</code></li>
+      <li><code>handle-file-exists(path)</code></li>
+      <li><code>handle-file-size(path)</code></li>
+      <li><code>handle-is-file(path)</code></li>
+      <li><code>handle-is-directory(path)</code></li>
+      <li><code>handle-rename-file(old-path, new-path)</code></li>
+      <li><code>handle-copy-file(src-path, dest-path)</code></li>
+      <li><code>handle-read-dir(path)</code></li>
+      <li><code>handle-create-dir(path)</code></li>
+      <li><code>handle-create-dir-all(path)</code></li>
+      <li><code>handle-remove-dir(path)</code></li>
+      <li><code>handle-remove-dir-all(path)</code></li>
+      <li><code>handle-open(path, mode)</code></li>
+      <li><code>handle-close(file)</code></li>
+      <li><code>handle-read(file, n)</code></li>
+      <li><code>handle-write(file, content)</code></li>
+      <li><code>handle-read-line(file)</code></li>
+      <li><code>handle-flush(file)</code></li>
+      <li><code>handle-sleep(ms)</code></li>
+      <li><code>handle-await-blocking(future)</code></li>
+      <li><code>handle-await-all-blocking(futures)</code></li>
+      <li><code>handle-await-first-blocking(futures)</code></li>
+      <li><code>handle-cancel(future)</code></li>
+      <li><code>handle-spawn-blocking(thunk)</code></li>
+      <li><code>handle-spawn-with-token-blocking(thunk, token)</code></li>
+      <li><code>handle-spawn-threaded(thunk)</code></li>
+      <li><code>handle-spawn-with-token-threaded(thunk, token)</code></li>
+      <li><code>handle-await-threaded(future)</code></li>
+      <li><code>poll-until-resolved(future)</code></li>
+      <li><code>handle-await-all-threaded(futures)</code></li>
+      <li><code>handle-await-first-threaded(futures)</code></li>
+      <li><code>create-event-loop-handler(pool_size)</code></li>
+      <li><code>create-event-loop-handler-default()</code></li>
+      <li><code>handle-sleep-event-loop(loop_id, ms)</code></li>
+      <li><code>handle-spawn-event-loop(loop_id, thunk)</code></li>
+      <li><code>handle-await-event-loop(loop_id, future)</code></li>
+      <li><code>process-tcp-results(loop_id)</code></li>
+      <li><code>poll-file-result(loop_id, handle)</code></li>
+      <li><code>wait-for-file-result(loop_id, handle)</code></li>
+      <li><code>handle-read-file-async(loop_id, path)</code></li>
+      <li><code>handle-write-file-async(loop_id, path, content)</code></li>
+      <li><code>handle-delete-file-async(loop_id, path)</code></li>
+      <li><code>handle-file-size-async(loop_id, path)</code></li>
+      <li><code>handle-read-dir-async(loop_id, path)</code></li>
+      <li><code>process-timer-results(loop_id)</code></li>
+      <li><code>handle-await-all-event-loop(loop_id, futures)</code></li>
+      <li><code>handle-await-first-event-loop(loop_id, futures)</code></li>
+      <li><code>read-file(path)</code></li>
+      <li><code>write-file(path, content)</code></li>
+      <li><code>append-file(path, content)</code></li>
+      <li><code>delete-file(path)</code></li>
+      <li><code>file-exists?(path)</code></li>
+      <li><code>read-dir(path)</code></li>
+      <li><code>create-dir(path)</code></li>
+      <li><code>create-dir-all(path)</code></li>
+      <li><code>remove-dir(path)</code></li>
+      <li><code>remove-dir-all(path)</code></li>
+      <li><code>file-size(path)</code></li>
+      <li><code>is-directory?(path)</code></li>
+      <li><code>is-file?(path)</code></li>
+      <li><code>rename-file(old-path, new-path)</code></li>
+      <li><code>copy-file(src-path, dest-path)</code></li>
+      <li><code>open(path, mode)</code></li>
+      <li><code>close(file)</code></li>
+      <li><code>read(file, n)</code></li>
+      <li><code>write(file, content)</code></li>
+      <li><code>read-line(file)</code></li>
+      <li><code>flush(file)</code></li>
+      <li><code>async(thunk)</code></li>
+      <li><code>async-with-token(token, thunk)</code></li>
+      <li><code>cancel(future)</code></li>
+      <li><code>spawn-in-scope(scope, thunk)</code></li>
+      <li><code>with-timeout(ms, thunk)</code></li>
+      <li><code>async-with-timeout(ms, thunk)</code></li>
+      <li><code>async-sleep(ms)</code></li>
+      <li><code>await-sleep(ms)</code></li>
+      <li><code>time-now()</code></li>
+      <li><code>read-file!(path)</code></li>
+      <li><code>write-file!(path, content)</code></li>
+      <li><code>ok?(result)</code></li>
+      <li><code>unwrap-or(result, default)</code></li>
+      <li><code>default-handler()</code></li>
+      <li><code>run-blocking(thunk)</code></li>
+      <li><code>blocking-read-file(path)</code></li>
+      <li><code>blocking-write-file(path, content)</code></li>
+      <li><code>blocking-append-file(path, content)</code></li>
+      <li><code>blocking-delete-file(path)</code></li>
+      <li><code>blocking-file-exists?(path)</code></li>
+      <li><code>blocking-read-dir(path)</code></li>
+      <li><code>blocking-create-dir(path)</code></li>
+      <li><code>blocking-remove-dir(path)</code></li>
+      <li><code>blocking-file-size(path)</code></li>
+      <li><code>blocking-is-directory?(path)</code></li>
+      <li><code>blocking-is-file?(path)</code></li>
+      <li><code>blocking-rename-file(old-path, new-path)</code></li>
+      <li><code>blocking-copy-file(src-path, dest-path)</code></li>
+      <li><code>blocking-sleep(ms)</code></li>
+      <li><code>run-all-thunks(thunks)</code></li>
+      <li><code>await-any(thunks)</code></li>
+      <li><code>map-results(results, f)</code></li>
+      <li><code>filter-ok(results)</code></li>
+      <li><code>unwrap-all(results)</code></li>
+      <li><code>get-io-loop()</code></li>
+      <li><code>handle-io-action(action)</code></li>
+      <li><code>create-implicit-handler()</code></li>
+      <li><code>with-implicit-async(thunk)</code></li>
+      <li><code>BlockingAsyncHandler_handle(self, op, resume)</code></li>
+      <li><code>ThreadedAsyncHandler_handle(self, op, resume)</code></li>
+      <li><code>EventLoopHandler_handle(self, op, resume)</code></li>
+      <li><code>ImplicitAsyncHandler_handle(self, op, resume)</code></li>
+    </ul>
+  </details>
+</section>
+<section class="namespace" id="beagle-io">
+  <h2>beagle.io</h2>
+  <div class="coverage good">16/20 functions documented (80%)</div>
+  <div class="functions-list">
+<div class="function" id="fn-open">
+  <div class="function-header">
+    <code class="signature">open(path, mode)</code>
+  </div>
+  <div class="docstring">Open a file with the specified mode.
+
+Modes: &quot;r&quot; (read), &quot;w&quot; (write), &quot;a&quot; (append), &quot;r+&quot; (read/write).
+Returns Result with a File handle or error.
+
+Examples:
+  (match (io/open &quot;/tmp/test.txt&quot; &quot;r&quot;) {
+      Result.Ok { value } =&gt; value,
+      Result.Err { error } =&gt; println(&quot;Failed to open&quot;)
+  })</div>
+</div>
+<div class="function" id="fn-close">
+  <div class="function-header">
+    <code class="signature">close(file)</code>
+  </div>
+  <div class="docstring">Close an open file handle.</div>
+</div>
+<div class="function" id="fn-read-bytes">
+  <div class="function-header">
+    <code class="signature">read-bytes(file, n)</code>
+  </div>
+  <div class="docstring">Read up to n bytes from a file.
+
+Returns a BufferResult with buffer and actual length read.
+Read up to n bytes from a file into a buffer.
+
+Returns a BufferResult with the buffer and bytes read.</div>
+</div>
+<div class="function" id="fn-read-char">
+  <div class="function-header">
+    <code class="signature">read-char(file)</code>
+  </div>
+  <div class="docstring">Read a single character from a file.
+
+Returns Result.Ok with the character code, or Result.Err at EOF.</div>
+</div>
+<div class="function" id="fn-write-bytes">
+  <div class="function-header">
+    <code class="signature">write-bytes(file, buf, len)</code>
+  </div>
+  <div class="docstring">Write bytes from a buffer to a file.
+
+Returns the number of bytes written.</div>
+</div>
+<div class="function" id="fn-write-string">
+  <div class="function-header">
+    <code class="signature">write-string(file, s)</code>
+  </div>
+  <div class="docstring">Write a string to a file.
+
+Returns the number of bytes written.</div>
+</div>
+<div class="function" id="fn-flush">
+  <div class="function-header">
+    <code class="signature">flush(file)</code>
+  </div>
+  <div class="docstring">Flush a file's buffers to disk.</div>
+</div>
+<div class="function" id="fn-eof?">
+  <div class="function-header">
+    <code class="signature">eof?(file)</code>
+  </div>
+  <div class="docstring">Check if a file has reached end-of-file.</div>
+</div>
+<div class="function" id="fn-read-line">
+  <div class="function-header">
+    <code class="signature">read-line(file, max-len)</code>
+  </div>
+  <div class="docstring">Read a line from a file (up to newline or max-len bytes).
+
+Returns Result with the line as a string.</div>
+</div>
+<div class="function" id="fn-read-stdin">
+  <div class="function-header">
+    <code class="signature">read-stdin(n)</code>
+  </div>
+  <div class="docstring">Read up to n bytes from standard input.
+
+Returns a BufferResult with the buffer and bytes read.</div>
+</div>
+<div class="function" id="fn-read-stdin-string">
+  <div class="function-header">
+    <code class="signature">read-stdin-string(n)</code>
+  </div>
+  <div class="docstring">Read up to n bytes from stdin and return as a string.
+
+Convenience wrapper around read-stdin.</div>
+</div>
+<div class="function" id="fn-write-stdout">
+  <div class="function-header">
+    <code class="signature">write-stdout(s)</code>
+  </div>
+  <div class="docstring">Write a string to standard output.
+
+Returns the number of bytes written.</div>
+</div>
+<div class="function" id="fn-write-stdout-buffer">
+  <div class="function-header">
+    <code class="signature">write-stdout-buffer(buf, len)</code>
+  </div>
+  <div class="docstring">Write raw buffer bytes to standard output.
+
+More efficient than write-stdout for binary data.</div>
+</div>
+<div class="function" id="fn-write-stderr">
+  <div class="function-header">
+    <code class="signature">write-stderr(s)</code>
+  </div>
+  <div class="docstring">Write a string to standard error.
+
+Returns the number of bytes written.</div>
+</div>
+<div class="function" id="fn-write-stdout-buffer-offset">
+  <div class="function-header">
+    <code class="signature">write-stdout-buffer-offset(buf, offset, len)</code>
+  </div>
+  <div class="docstring">Write part of a buffer to stdout starting at an offset.
+
+Useful for efficiently writing portions of a buffer.</div>
+</div>
+<div class="function" id="fn-read-stdin-line">
+  <div class="function-header">
+    <code class="signature">read-stdin-line(max-len)</code>
+  </div>
+  <div class="docstring">Read a line from standard input (up to max-len bytes).
+
+Reads until newline or max-len is reached.</div>
+</div>
+  </div>
+  <details class="undocumented-section">
+    <summary>Undocumented functions (4)</summary>
+    <ul class="undocumented-list">
+      <li><code>get-libc-path()</code></li>
+      <li><code>io-err(msg)</code></li>
+      <li><code>is-null(pointer)</code></li>
+      <li><code>string-to-buffer(s)</code></li>
+    </ul>
+  </details>
+</section>
+<section class="namespace" id="beagle-timer">
+  <h2>beagle.timer</h2>
+  <div class="coverage good">8/10 functions documented (80%)</div>
+  <div class="functions-list">
+<div class="function" id="fn-sleep">
+  <div class="function-header">
+    <code class="signature">sleep(ms)</code>
+  </div>
+  <div class="docstring">Sleep for a number of milliseconds.
+
+Must be called within a Timer effect handler block.
+
+Examples:
+  (timer/sleep 100)  ; Sleep for 100ms</div>
+</div>
+<div class="function" id="fn-now">
+  <div class="function-header">
+    <code class="signature">now()</code>
+  </div>
+  <div class="docstring">Get current time in nanoseconds since epoch.
+
+Examples:
+  (let start (timer/now))
+  ; ... do work ...
+  (let elapsed (- (timer/now) start))</div>
+</div>
+<div class="function" id="fn-timeout">
+  <div class="function-header">
+    <code class="signature">timeout(ms, future)</code>
+  </div>
+  <div class="docstring">Wrap a future with a timeout.
+
+Returns Result.Ok if completed before timeout, or Result.Err with Timeout error.
+Requires both Timer and Async handlers to be installed.
+
+Examples:
+  (match (timer/timeout 1000 my-future) {
+      Result.Ok { value } =&gt; value,
+      Result.Err { error } =&gt; &quot;timed out&quot;
+  })</div>
+</div>
+<div class="function" id="fn-deadline">
+  <div class="function-header">
+    <code class="signature">deadline(ms)</code>
+  </div>
+  <div class="docstring">Create a deadline (absolute time in nanoseconds from now).
+
+Useful for setting a single deadline across multiple operations.
+
+Examples:
+  (let d (timer/deadline 5000))  ; 5 second deadline</div>
+</div>
+<div class="function" id="fn-deadline-passed?">
+  <div class="function-header">
+    <code class="signature">deadline-passed?(deadline-time)</code>
+  </div>
+  <div class="docstring">Check if a deadline has passed.</div>
+</div>
+<div class="function" id="fn-deadline-remaining">
+  <div class="function-header">
+    <code class="signature">deadline-remaining(deadline-time)</code>
+  </div>
+  <div class="docstring">Get remaining milliseconds until a deadline (0 if passed).</div>
+</div>
+<div class="function" id="fn-blocking-sleep">
+  <div class="function-header">
+    <code class="signature">blocking-sleep(ms)</code>
+  </div>
+  <div class="docstring">Sleep for a number of milliseconds synchronously.
+
+No handler required. Blocks the current thread.
+
+Examples:
+  (timer/blocking-sleep 100)  ; Sleep for 100ms</div>
+</div>
+<div class="function" id="fn-blocking-now">
+  <div class="function-header">
+    <code class="signature">blocking-now()</code>
+  </div>
+  <div class="docstring">Get current time in nanoseconds synchronously.
+
+No handler required.</div>
+</div>
+  </div>
+  <details class="undocumented-section">
+    <summary>Undocumented functions (2)</summary>
+    <ul class="undocumented-list">
+      <li><code>run-blocking(thunk)</code></li>
+      <li><code>BlockingTimerHandler_handle(self, op, resume)</code></li>
+    </ul>
+  </details>
+</section>
+<section class="namespace" id="beagle-regex">
+  <h2>beagle.regex</h2>
+  <div class="coverage good">9/9 functions documented (100%)</div>
+  <div class="functions-list">
+<div class="function" id="fn-compile">
+  <div class="function-header">
+    <code class="signature">compile(pattern)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Compile a regular expression pattern.
+
+Returns a Regex object that can be used with other regex functions.
+
+Examples:
+  (let re (regex/compile &quot;[0-9]+&quot;))</div>
+</div>
+<div class="function" id="fn-matches?">
+  <div class="function-header">
+    <code class="signature">matches?(regex, string)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Check if the entire string matches the regex.
+
+Examples:
+  (regex/matches? (regex/compile &quot;[0-9]+&quot;) &quot;123&quot;)  ; =&gt; true
+  (regex/matches? (regex/compile &quot;[0-9]+&quot;) &quot;abc&quot;)  ; =&gt; false</div>
+</div>
+<div class="function" id="fn-find">
+  <div class="function-header">
+    <code class="signature">find(regex, string)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Find the first match in the string.
+
+Returns a map with :start, :end, and :match keys, or null if no match.
+
+Examples:
+  (regex/find (regex/compile &quot;[0-9]+&quot;) &quot;abc123def&quot;)
+  ; =&gt; {:start 3 :end 6 :match &quot;123&quot;}</div>
+</div>
+<div class="function" id="fn-find-all">
+  <div class="function-header">
+    <code class="signature">find-all(regex, string)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Find all matches in the string.
+
+Returns a vector of match maps.
+
+Examples:
+  (regex/find-all (regex/compile &quot;[0-9]+&quot;) &quot;a1b2c3&quot;)
+  ; =&gt; [{:start 1 :end 2 :match &quot;1&quot;} ...]</div>
+</div>
+<div class="function" id="fn-replace">
+  <div class="function-header">
+    <code class="signature">replace(regex, string, replacement)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Replace the first match in the string with the replacement.
+
+Examples:
+  (regex/replace (regex/compile &quot;[0-9]+&quot;) &quot;a1b2c3&quot; &quot;X&quot;)
+  ; =&gt; &quot;aXb2c3&quot;</div>
+</div>
+<div class="function" id="fn-replace-all">
+  <div class="function-header">
+    <code class="signature">replace-all(regex, string, replacement)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Replace all matches in the string with the replacement.
+
+Examples:
+  (regex/replace-all (regex/compile &quot;[0-9]+&quot;) &quot;a1b2c3&quot; &quot;X&quot;)
+  ; =&gt; &quot;aXbXcX&quot;</div>
+</div>
+<div class="function" id="fn-split">
+  <div class="function-header">
+    <code class="signature">split(regex, string)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Split a string by the regex pattern.
+
+Returns a vector of strings.
+
+Examples:
+  (regex/split (regex/compile &quot;,\\s*&quot;) &quot;a, b, c&quot;)
+  ; =&gt; [&quot;a&quot; &quot;b&quot; &quot;c&quot;]</div>
+</div>
+<div class="function" id="fn-captures">
+  <div class="function-header">
+    <code class="signature">captures(regex, string)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Get capture groups from the first match.
+
+Returns a vector of captured strings (index 0 is the full match), or null if no match.
+
+Examples:
+  (regex/captures (regex/compile &quot;(\\w+)@(\\w+)&quot;) &quot;user@host&quot;)
+  ; =&gt; [&quot;user@host&quot; &quot;user&quot; &quot;host&quot;]</div>
+</div>
+<div class="function" id="fn-is-regex?">
+  <div class="function-header">
+    <code class="signature">is-regex?(value)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Check if a value is a compiled regex.
+
+Examples:
+  (regex/is-regex? (regex/compile &quot;test&quot;))  ; =&gt; true
+  (regex/is-regex? &quot;test&quot;)  ; =&gt; false</div>
+</div>
+  </div>
+</section>
+<section class="namespace" id="beagle-reflect">
+  <h2>beagle.reflect</h2>
+  <div class="coverage good">17/17 functions documented (100%)</div>
+  <div class="functions-list">
+<div class="function" id="fn-type-of">
+  <div class="function-header">
+    <code class="signature">type-of(value)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Get a type descriptor for any value.
+
+Returns a type descriptor that can be used with other reflect functions.
+
+Examples:
+  (reflect/type-of 42)        ; =&gt; &lt;type Int&gt;
+  (reflect/type-of &quot;hello&quot;)   ; =&gt; &lt;type String&gt;</div>
+</div>
+<div class="function" id="fn-kind">
+  <div class="function-header">
+    <code class="signature">kind(descriptor)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Get the type kind from a type descriptor.
+
+Returns a keyword: :struct, :enum, :function, or :primitive.
+
+Examples:
+  (reflect/kind (reflect/type-of some-struct))  ; =&gt; :struct</div>
+</div>
+<div class="function" id="fn-name">
+  <div class="function-header">
+    <code class="signature">name(descriptor)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Get the type name from a type descriptor.
+
+Returns the name as a string.
+
+Examples:
+  (reflect/name (reflect/type-of 42))  ; =&gt; &quot;Int&quot;</div>
+</div>
+<div class="function" id="fn-doc">
+  <div class="function-header">
+    <code class="signature">doc(descriptor)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Get the docstring for a type or function.
+
+Returns the documentation string or null if none available.
+
+Examples:
+  (reflect/doc (reflect/type-of some-fn))  ; =&gt; &quot;Documentation...&quot;
+  (reflect/doc (reflect/type-of 42))  ; =&gt; null</div>
+</div>
+<div class="function" id="fn-fields">
+  <div class="function-header">
+    <code class="signature">fields(descriptor)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Get the field names for a struct type.
+
+Returns a vector of field names, or null for non-struct types.
+
+Examples:
+  (reflect/fields (reflect/type-of my-struct))  ; =&gt; [&quot;field1&quot; &quot;field2&quot;]</div>
+</div>
+<div class="function" id="fn-variants">
+  <div class="function-header">
+    <code class="signature">variants(descriptor)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Get the variant names for an enum type.
+
+Returns a vector of variant names, or null for non-enum types.
+
+Examples:
+  (reflect/variants (reflect/type-of Result.Ok))  ; =&gt; [&quot;Ok&quot; &quot;Err&quot;]</div>
+</div>
+<div class="function" id="fn-args">
+  <div class="function-header">
+    <code class="signature">args(descriptor)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Get the argument names for a function.
+
+Returns a vector of argument names, or null for non-function types.
+
+Examples:
+  (reflect/args (reflect/type-of println))  ; =&gt; [&quot;value&quot;]</div>
+</div>
+<div class="function" id="fn-variadic?">
+  <div class="function-header">
+    <code class="signature">variadic?(descriptor)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Check if a function accepts variable arguments.
+
+Returns true if the function is variadic, false otherwise.
+
+Examples:
+  (reflect/variadic? (reflect/type-of +))  ; =&gt; true</div>
+</div>
+<div class="function" id="fn-info">
+  <div class="function-header">
+    <code class="signature">info(descriptor)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Get complete type information as a map.
+
+Returns a map containing all available metadata about the type,
+including kind, name, docstring, fields/variants/args as appropriate.
+
+Examples:
+  (reflect/info (reflect/type-of my-fn))
+  ; =&gt; {:kind :function :name &quot;my-fn&quot; :args [...] ...}</div>
+</div>
+<div class="function" id="fn-struct?">
+  <div class="function-header">
+    <code class="signature">struct?(value)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Check if a value is a struct type or instance.
+
+Examples:
+  (reflect/struct? my-struct-instance)  ; =&gt; true
+  (reflect/struct? 42)  ; =&gt; false</div>
+</div>
+<div class="function" id="fn-enum?">
+  <div class="function-header">
+    <code class="signature">enum?(value)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Check if a value is an enum type or variant.
+
+Examples:
+  (reflect/enum? Result.Ok)  ; =&gt; true
+  (reflect/enum? 42)  ; =&gt; false</div>
+</div>
+<div class="function" id="fn-function?">
+  <div class="function-header">
+    <code class="signature">function?(value)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Check if a value is a function.
+
+Examples:
+  (reflect/function? println)  ; =&gt; true
+  (reflect/function? 42)  ; =&gt; false</div>
+</div>
+<div class="function" id="fn-primitive?">
+  <div class="function-header">
+    <code class="signature">primitive?(value)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Check if a value is a primitive type (Int, Float, String, Bool, Null).
+
+Examples:
+  (reflect/primitive? 42)  ; =&gt; true
+  (reflect/primitive? [1 2 3])  ; =&gt; false</div>
+</div>
+<div class="function" id="fn-namespace-members">
+  <div class="function-header">
+    <code class="signature">namespace-members(namespace-name)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">List all members defined in a namespace.
+
+Returns a vector of member names.
+
+Examples:
+  (reflect/namespace-members &quot;beagle.core&quot;)  ; =&gt; [&quot;println&quot; &quot;map&quot; ...]</div>
+</div>
+<div class="function" id="fn-all-namespaces">
+  <div class="function-header">
+    <code class="signature">all-namespaces()</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">List all namespace names in the runtime.
+
+Returns a vector of namespace name strings.
+
+Examples:
+  (reflect/all-namespaces)  ; =&gt; [&quot;beagle.core&quot; &quot;beagle.fs&quot; ...]</div>
+</div>
+<div class="function" id="fn-apropos">
+  <div class="function-header">
+    <code class="signature">apropos(query)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Search for functions by name or docstring substring.
+
+Returns a vector of matching function names.
+
+Examples:
+  (reflect/apropos &quot;print&quot;)  ; =&gt; [&quot;println&quot; &quot;print&quot; ...]</div>
+</div>
+<div class="function" id="fn-namespace-info">
+  <div class="function-header">
+    <code class="signature">namespace-info(namespace-name)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Get detailed information about a namespace.
+
+Returns a map with the namespace's functions, structs, and enums.
+
+Examples:
+  (reflect/namespace-info &quot;beagle.core&quot;)
+  ; =&gt; {:functions [...] :structs [...] :enums [...]}</div>
+</div>
+  </div>
+</section>
+<section class="namespace" id="beagle-collections">
+  <h2>beagle.collections</h2>
+  <div class="coverage good">15/15 functions documented (100%)</div>
+  <div class="functions-list">
+<div class="function" id="fn-vec">
+  <div class="function-header">
+    <code class="signature">vec()</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Create a new empty persistent vector.
+
+Persistent vectors are immutable - all operations return new vectors.
+
+Examples:
+  (let v (collections/vec))</div>
+</div>
+<div class="function" id="fn-vec-count">
+  <div class="function-header">
+    <code class="signature">vec-count(vec)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the number of elements in the vector.
+
+Examples:
+  (vec-count (push [] 1 2 3))  ; =&gt; 3</div>
+</div>
+<div class="function" id="fn-vec-get">
+  <div class="function-header">
+    <code class="signature">vec-get(vec, index)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Get the element at index. Returns null if out of bounds.
+
+Examples:
+  (vec-get [1 2 3] 1)  ; =&gt; 2</div>
+</div>
+<div class="function" id="fn-vec-push">
+  <div class="function-header">
+    <code class="signature">vec-push(vec, value)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return a new vector with value appended.
+
+Examples:
+  (vec-push [1 2] 3)  ; =&gt; [1 2 3]</div>
+</div>
+<div class="function" id="fn-vec-assoc">
+  <div class="function-header">
+    <code class="signature">vec-assoc(vec, index, value)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return a new vector with the value at index replaced.
+
+Examples:
+  (vec-assoc [1 2 3] 1 99)  ; =&gt; [1 99 3]</div>
+</div>
+<div class="function" id="fn-map">
+  <div class="function-header">
+    <code class="signature">map()</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Create a new empty persistent map.
+
+Persistent maps are immutable - all operations return new maps.
+
+Examples:
+  (let m (collections/map))</div>
+</div>
+<div class="function" id="fn-map-count">
+  <div class="function-header">
+    <code class="signature">map-count(m)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the number of key-value pairs in the map.
+
+Examples:
+  (map-count {:a 1 :b 2})  ; =&gt; 2</div>
+</div>
+<div class="function" id="fn-map-get">
+  <div class="function-header">
+    <code class="signature">map-get(m, key)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Get the value for key. Returns null if not found.
+
+Examples:
+  (map-get {:a 1} :a)  ; =&gt; 1
+  (map-get {:a 1} :b)  ; =&gt; null</div>
+</div>
+<div class="function" id="fn-map-assoc">
+  <div class="function-header">
+    <code class="signature">map-assoc(m, key, value)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return a new map with the key-value pair added or updated.
+
+Examples:
+  (map-assoc {:a 1} :b 2)  ; =&gt; {:a 1 :b 2}</div>
+</div>
+<div class="function" id="fn-map-keys">
+  <div class="function-header">
+    <code class="signature">map-keys(m)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return a vector of all keys in the map.
+
+Examples:
+  (map-keys {:a 1 :b 2})  ; =&gt; [:a :b]</div>
+</div>
+<div class="function" id="fn-set">
+  <div class="function-header">
+    <code class="signature">set()</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Create a new empty persistent set.
+
+Persistent sets are immutable - all operations return new sets.
+
+Examples:
+  (let s (collections/set))</div>
+</div>
+<div class="function" id="fn-set-count">
+  <div class="function-header">
+    <code class="signature">set-count(s)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return the number of elements in the set.
+
+Examples:
+  (set-count #{1 2 3})  ; =&gt; 3</div>
+</div>
+<div class="function" id="fn-set-contains?">
+  <div class="function-header">
+    <code class="signature">set-contains?(s, element)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return true if the set contains the element.
+
+Examples:
+  (set-contains? #{1 2 3} 2)  ; =&gt; true</div>
+</div>
+<div class="function" id="fn-set-add">
+  <div class="function-header">
+    <code class="signature">set-add(s, element)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return a new set with the element added.
+
+Examples:
+  (set-add #{1 2} 3)  ; =&gt; #{1 2 3}</div>
+</div>
+<div class="function" id="fn-set-elements">
+  <div class="function-header">
+    <code class="signature">set-elements(s)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Return a vector of all elements in the set.
+
+Examples:
+  (set-elements #{1 2 3})  ; =&gt; [1 2 3]</div>
+</div>
+  </div>
+</section>
+<section class="namespace" id="beagle-effect">
+  <h2>beagle.effect</h2>
+  <div class="coverage low">0/1 functions documented (0%)</div>
+  <details class="undocumented-section">
+    <summary>Undocumented functions (1)</summary>
+    <ul class="undocumented-list">
+      <li><code>handle(self, op, resume)</code></li>
+    </ul>
+  </details>
+</section>
+<section class="namespace" id="beagle-ffi">
+  <h2>beagle.ffi</h2>
+  <div class="coverage good">19/21 functions documented (90%)</div>
+  <div class="functions-list">
+<div class="function" id="fn-load-library">
+  <div class="function-header">
+    <code class="signature">load-library(path)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Load a dynamic library (shared object) from the given path.
+
+Returns a Library struct that can be used with get-function.
+
+Examples:
+  (let lib (ffi/load-library &quot;libm.dylib&quot;))</div>
+</div>
+<div class="function" id="fn-get-function">
+  <div class="function-header">
+    <code class="signature">get-function(library, name, arg_types, return_type)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Get a function from a loaded library.
+
+arg_types is an array of Type values, return_type is a Type.
+
+Examples:
+  (let sqrt-fn (ffi/get-function lib &quot;sqrt&quot; [Type.F64] Type.F64))</div>
+</div>
+<div class="function" id="fn-allocate">
+  <div class="function-header">
+    <code class="signature">allocate(size)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Allocate size bytes of unmanaged memory.
+
+Returns a Pointer. Must be freed with deallocate.</div>
+</div>
+<div class="function" id="fn-deallocate">
+  <div class="function-header">
+    <code class="signature">deallocate(ptr)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Free memory allocated with allocate.</div>
+</div>
+<div class="function" id="fn-get-u32">
+  <div class="function-header">
+    <code class="signature">get-u32(ptr, offset)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Read an unsigned 32-bit integer from memory at ptr + offset.</div>
+</div>
+<div class="function" id="fn-set-i16">
+  <div class="function-header">
+    <code class="signature">set-i16(ptr, offset, value)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Write a signed 16-bit integer to memory at ptr + offset.</div>
+</div>
+<div class="function" id="fn-set-i32">
+  <div class="function-header">
+    <code class="signature">set-i32(ptr, offset, value)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Write a signed 32-bit integer to memory at ptr + offset.</div>
+</div>
+<div class="function" id="fn-set-u8">
+  <div class="function-header">
+    <code class="signature">set-u8(ptr, offset, value)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Write an unsigned 8-bit integer (byte) to memory at ptr + offset.</div>
+</div>
+<div class="function" id="fn-get-u8">
+  <div class="function-header">
+    <code class="signature">get-u8(ptr, offset)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Read an unsigned 8-bit integer (byte) from memory at ptr + offset.</div>
+</div>
+<div class="function" id="fn-get-i32">
+  <div class="function-header">
+    <code class="signature">get-i32(ptr, offset)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Read a signed 32-bit integer from memory at ptr + offset.</div>
+</div>
+<div class="function" id="fn-get-string">
+  <div class="function-header">
+    <code class="signature">get-string(buffer, offset, length)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Read a string from a buffer at the given offset with the specified length.
+
+Examples:
+  (ffi/get-string buf 0 10)  ; Read 10 bytes starting at offset 0</div>
+</div>
+<div class="function" id="fn-create-array">
+  <div class="function-header">
+    <code class="signature">create-array(size)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Create a new FFI buffer/array of the given size in bytes.</div>
+</div>
+<div class="function" id="fn-copy-bytes">
+  <div class="function-header">
+    <code class="signature">copy-bytes(src, src_offset, dest, dest_offset, length)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Copy length bytes from src+src_offset to dest+dest_offset.</div>
+</div>
+<div class="function" id="fn-realloc">
+  <div class="function-header">
+    <code class="signature">realloc(ptr, new_size)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Reallocate memory to a new size, preserving contents.</div>
+</div>
+<div class="function" id="fn-buffer-size">
+  <div class="function-header">
+    <code class="signature">buffer-size(buffer)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Get the size of a buffer in bytes.</div>
+</div>
+<div class="function" id="fn-write-buffer-offset">
+  <div class="function-header">
+    <code class="signature">write-buffer-offset(buffer, offset, value, size)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Write a value to a buffer at a given offset.</div>
+</div>
+<div class="function" id="fn-translate-bytes">
+  <div class="function-header">
+    <code class="signature">translate-bytes(buffer, offset, length, table)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Translate bytes using a lookup table.</div>
+</div>
+<div class="function" id="fn-reverse-bytes">
+  <div class="function-header">
+    <code class="signature">reverse-bytes(buffer, offset, length)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Reverse bytes in place in a buffer.</div>
+</div>
+<div class="function" id="fn-find-byte">
+  <div class="function-header">
+    <code class="signature">find-byte(buffer, offset, length, byte)</code>
+    <span class="badge builtin">builtin</span>
+  </div>
+  <div class="docstring">Find the first occurrence of a byte in a buffer.
+
+Returns the offset or -1 if not found.</div>
+</div>
+  </div>
+  <details class="undocumented-section">
+    <summary>Undocumented functions (2)</summary>
+    <ul class="undocumented-list">
+      <li><code>call-ffi-info()</code></li>
+      <li><code>copy-bytes_filter()</code></li>
+    </ul>
+  </details>
+</section>
+<section class="namespace" id="beagle-simple-socket">
+  <h2>beagle.simple-socket</h2>
+  <div class="coverage low">0/8 functions documented (0%)</div>
+  <details class="undocumented-section">
+    <summary>Undocumented functions (8)</summary>
+    <ul class="undocumented-list">
+      <li><code>create-continuation-handler(loop_id)</code></li>
+      <li><code>drive-continuation-loop(handler)</code></li>
+      <li><code>listen(host, port)</code></li>
+      <li><code>accept(listener)</code></li>
+      <li><code>read(client, n)</code></li>
+      <li><code>write(client, data)</code></li>
+      <li><code>close(client)</code></li>
+      <li><code>ContinuationHandler_handle(self, op, resume)</code></li>
+    </ul>
+  </details>
+</section>
+<section class="namespace" id="beagle-socket">
+  <h2>beagle.socket</h2>
+  <div class="coverage low">0/7 functions documented (0%)</div>
+  <details class="undocumented-section">
+    <summary>Undocumented functions (7)</summary>
+    <ul class="undocumented-list">
+      <li><code>listen(host, port)</code></li>
+      <li><code>connect(host, port)</code></li>
+      <li><code>accept(listener)</code></li>
+      <li><code>read(socket, n)</code></li>
+      <li><code>write(socket, data)</code></li>
+      <li><code>close(socket)</code></li>
+      <li><code>close-listener(listener)</code></li>
+    </ul>
+  </details>
+</section>
+<section class="namespace" id="global">
+  <h2>global</h2>
+  <div class="coverage low">0/42 functions documented (0%)</div>
+  <details class="undocumented-section">
+    <summary>Undocumented functions (42)</summary>
+    <ul class="undocumented-list">
+      <li><code>trampoline()</code></li>
+      <li><code>&lt;Anonymous&gt;(acc, x)</code></li>
+      <li><code>&lt;Anonymous&gt;(a, x)</code></li>
+      <li><code>&lt;Anonymous&gt;(acc, elem)</code></li>
+      <li><code>&lt;Anonymous&gt;(acc, pair)</code></li>
+      <li><code>&lt;Anonymous&gt;(acc, elem)</code></li>
+      <li><code>&lt;Anonymous&gt;(acc, x)</code></li>
+      <li><code>&lt;Anonymous&gt;(ignored)</code></li>
+      <li><code>&lt;Anonymous&gt;(x)</code></li>
+      <li><code>&lt;Anonymous&gt;(x)</code></li>
+      <li><code>&lt;Anonymous&gt;(b)</code></li>
+      <li><code>&lt;Anonymous&gt;(k)</code></li>
+      <li><code>&lt;Anonymous&gt;(k)</code></li>
+      <li><code>&lt;Anonymous&gt;(acc, k)</code></li>
+      <li><code>&lt;Anonymous&gt;(acc, k)</code></li>
+      <li><code>&lt;Anonymous&gt;(k)</code></li>
+      <li><code>&lt;Anonymous&gt;(acc, k)</code></li>
+      <li><code>&lt;Anonymous&gt;(acc, elem)</code></li>
+      <li><code>&lt;Anonymous&gt;(a1, a2, a3, a4, a5, a6)</code></li>
+      <li><code>&lt;Anonymous&gt;()</code></li>
+      <li><code>&lt;Anonymous&gt;()</code></li>
+      <li><code>&lt;Anonymous&gt;()</code></li>
+      <li><code>&lt;Anonymous&gt;(r)</code></li>
+      <li><code>&lt;Anonymous&gt;(r)</code></li>
+      <li><code>&lt;Anonymous&gt;(r)</code></li>
+      <li><code>&lt;Anonymous&gt;()</code></li>
+      <li><code>&lt;Anonymous&gt;()</code></li>
+      <li><code>&lt;Anonymous&gt;()</code></li>
+      <li><code>&lt;Anonymous&gt;()</code></li>
+      <li><code>&lt;Anonymous&gt;()</code></li>
+      <li><code>&lt;Anonymous&gt;()</code></li>
+      <li><code>&lt;Anonymous&gt;()</code></li>
+      <li><code>&lt;Anonymous&gt;()</code></li>
+      <li><code>&lt;Anonymous&gt;()</code></li>
+      <li><code>&lt;Anonymous&gt;()</code></li>
+      <li><code>&lt;Anonymous&gt;()</code></li>
+      <li><code>&lt;Anonymous&gt;()</code></li>
+      <li><code>&lt;Anonymous&gt;()</code></li>
+      <li><code>&lt;Anonymous&gt;()</code></li>
+      <li><code>&lt;Anonymous&gt;()</code></li>
+      <li><code>&lt;Anonymous&gt;()</code></li>
+      <li><code>&lt;Anonymous&gt;()</code></li>
+    </ul>
+  </details>
+</section>
+<section class="types-section" id="types">
+  <h2>Types</h2>
+  <p>Built-in struct types available in Beagle.</p>
+<div class="type-def">
+  <h4>beagle.core/NEVER</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.core/Struct</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>name</code></li>
+      <li><code>id</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/Protocol</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>name</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/Thread</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>closure</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/Atom</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>value</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/PersistentVectorSeq</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>vec</code></li>
+      <li><code>index</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/__Box__</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>value</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/SystemError</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>StructError</code></li>
+      <li><code>ParseError</code></li>
+      <li><code>CompileError</code></li>
+      <li><code>TypeError</code></li>
+      <li><code>ArityError</code></li>
+      <li><code>RuntimeError</code></li>
+      <li><code>ThreadError</code></li>
+      <li><code>FFIError</code></li>
+      <li><code>FunctionError</code></li>
+      <li><code>FieldError</code></li>
+      <li><code>IndexError</code></li>
+      <li><code>MutabilityError</code></li>
+      <li><code>JsonError</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/SystemError.StructError</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>message</code></li>
+      <li><code>location</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/SystemError.ParseError</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>message</code></li>
+      <li><code>location</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/SystemError.CompileError</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>message</code></li>
+      <li><code>location</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/SystemError.TypeError</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>message</code></li>
+      <li><code>location</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/SystemError.ArityError</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>message</code></li>
+      <li><code>location</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/SystemError.RuntimeError</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>message</code></li>
+      <li><code>location</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/SystemError.ThreadError</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>message</code></li>
+      <li><code>location</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/SystemError.FFIError</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>message</code></li>
+      <li><code>location</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/SystemError.FunctionError</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>message</code></li>
+      <li><code>location</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/SystemError.FieldError</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>message</code></li>
+      <li><code>location</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/SystemError.IndexError</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>message</code></li>
+      <li><code>location</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/SystemError.MutabilityError</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>message</code></li>
+      <li><code>location</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/SystemError.JsonError</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>message</code></li>
+      <li><code>location</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/DiagnosticSeverity</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>error</code></li>
+      <li><code>warning</code></li>
+      <li><code>info</code></li>
+      <li><code>hint</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/DiagnosticSeverity.error</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.core/DiagnosticSeverity.warning</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.core/DiagnosticSeverity.info</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.core/DiagnosticSeverity.hint</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.core/Diagnostic</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>severity</code></li>
+      <li><code>kind</code></li>
+      <li><code>file-name</code></li>
+      <li><code>line</code></li>
+      <li><code>column</code></li>
+      <li><code>message</code></li>
+      <li><code>enum-name</code></li>
+      <li><code>missing-variants</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/Range</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>current</code></li>
+      <li><code>end</code></li>
+      <li><code>step</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/StringSeq</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>str</code></li>
+      <li><code>index</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/PersistentSetSeq</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>elements</code></li>
+      <li><code>index</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/Error</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>NotFound</code></li>
+      <li><code>PermissionDenied</code></li>
+      <li><code>AlreadyExists</code></li>
+      <li><code>IsDirectory</code></li>
+      <li><code>NotDirectory</code></li>
+      <li><code>Timeout</code></li>
+      <li><code>Cancelled</code></li>
+      <li><code>IO</code></li>
+      <li><code>Other</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/Error.NotFound</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/Error.PermissionDenied</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/Error.AlreadyExists</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/Error.IsDirectory</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/Error.NotDirectory</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/Error.Timeout</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>operation</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/Error.Cancelled</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.core/Error.IO</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>message</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/Error.Other</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>code</code></li>
+      <li><code>message</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/Result</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>Ok</code></li>
+      <li><code>Err</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/Result.Ok</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>value</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/Result.Err</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>error</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.ffi/Library</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>id</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.ffi/Pointer</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>ptr</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.ffi/Buffer</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>ptr</code></li>
+      <li><code>size</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.ffi/StructReturn</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>low</code></li>
+      <li><code>high</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.ffi/Type</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>U8</code></li>
+      <li><code>U16</code></li>
+      <li><code>U32</code></li>
+      <li><code>U64</code></li>
+      <li><code>I32</code></li>
+      <li><code>F32</code></li>
+      <li><code>Pointer</code></li>
+      <li><code>MutablePointer</code></li>
+      <li><code>String</code></li>
+      <li><code>Void</code></li>
+      <li><code>Structure</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.ffi/Type.U8</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.ffi/Type.U16</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.ffi/Type.U32</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.ffi/Type.U64</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.ffi/Type.I32</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.ffi/Type.F32</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.ffi/Type.Pointer</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.ffi/Type.MutablePointer</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.ffi/Type.String</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.ffi/Type.Void</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.ffi/Type.Structure</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>types</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.io/File</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>handle</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.io/BufferResult</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>buffer</code></li>
+      <li><code>length</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/FutureState</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>Pending</code></li>
+      <li><code>Running</code></li>
+      <li><code>Resolved</code></li>
+      <li><code>Rejected</code></li>
+      <li><code>Cancelled</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/FutureState.Pending</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.async/FutureState.Running</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.async/FutureState.Resolved</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>value</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/FutureState.Rejected</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>error</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/FutureState.Cancelled</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Future</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>state_atom</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/CancellationToken</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>cancelled_atom</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/TaskScope</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>token</code></li>
+      <li><code>children_atom</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/RaceResult</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>Ok</code></li>
+      <li><code>AllFailed</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/RaceResult.Ok</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>value</code></li>
+      <li><code>index</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/RaceResult.AllFailed</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>errors</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/TimeoutResult</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>Ok</code></li>
+      <li><code>TimedOut</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/TimeoutResult.Ok</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>value</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/TimeoutResult.TimedOut</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.async/TcpListener</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>loop_id</code></li>
+      <li><code>listener_id</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/TcpSocket</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>loop_id</code></li>
+      <li><code>socket_id</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/IOAction</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>TcpListen</code></li>
+      <li><code>TcpConnect</code></li>
+      <li><code>TcpAccept</code></li>
+      <li><code>TcpRead</code></li>
+      <li><code>TcpWrite</code></li>
+      <li><code>TcpClose</code></li>
+      <li><code>TcpCloseListener</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/IOAction.TcpListen</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>host</code></li>
+      <li><code>port</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/IOAction.TcpConnect</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>host</code></li>
+      <li><code>port</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/IOAction.TcpAccept</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>listener</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/IOAction.TcpRead</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>socket</code></li>
+      <li><code>n</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/IOAction.TcpWrite</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>socket</code></li>
+      <li><code>data</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/IOAction.TcpClose</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>socket</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/IOAction.TcpCloseListener</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>listener</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>Await</code></li>
+      <li><code>AwaitAll</code></li>
+      <li><code>AwaitFirst</code></li>
+      <li><code>Cancel</code></li>
+      <li><code>IO</code></li>
+      <li><code>ReadFile</code></li>
+      <li><code>WriteFile</code></li>
+      <li><code>AppendFile</code></li>
+      <li><code>DeleteFile</code></li>
+      <li><code>FileExists</code></li>
+      <li><code>RenameFile</code></li>
+      <li><code>CopyFile</code></li>
+      <li><code>ReadDir</code></li>
+      <li><code>CreateDir</code></li>
+      <li><code>CreateDirAll</code></li>
+      <li><code>RemoveDir</code></li>
+      <li><code>RemoveDirAll</code></li>
+      <li><code>FileSize</code></li>
+      <li><code>IsDirectory</code></li>
+      <li><code>IsFile</code></li>
+      <li><code>Open</code></li>
+      <li><code>Close</code></li>
+      <li><code>Read</code></li>
+      <li><code>Write</code></li>
+      <li><code>ReadLine</code></li>
+      <li><code>Flush</code></li>
+      <li><code>Sleep</code></li>
+      <li><code>Spawn</code></li>
+      <li><code>SpawnWithToken</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.Await</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>future</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.AwaitAll</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>futures</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.AwaitFirst</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>futures</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.Cancel</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>future</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.IO</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>action</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.ReadFile</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.WriteFile</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+      <li><code>content</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.AppendFile</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+      <li><code>content</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.DeleteFile</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.FileExists</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.RenameFile</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>old_path</code></li>
+      <li><code>new_path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.CopyFile</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>src_path</code></li>
+      <li><code>dest_path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.ReadDir</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.CreateDir</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.CreateDirAll</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.RemoveDir</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.RemoveDirAll</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.FileSize</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.IsDirectory</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.IsFile</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.Open</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+      <li><code>mode</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.Close</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>file</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.Read</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>file</code></li>
+      <li><code>n</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.Write</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>file</code></li>
+      <li><code>content</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.ReadLine</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>file</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.Flush</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>file</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.Sleep</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>ms</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.Spawn</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>thunk</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async.SpawnWithToken</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>thunk</code></li>
+      <li><code>token</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/BlockingAsyncHandler</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.async/ThreadedAsyncHandler</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.async/EventLoopHandler</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>event_loop_id</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/ImplicitAsyncHandler</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.fs/Fs</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>ReadFile</code></li>
+      <li><code>WriteFile</code></li>
+      <li><code>AppendFile</code></li>
+      <li><code>DeleteFile</code></li>
+      <li><code>FileExists</code></li>
+      <li><code>FileSize</code></li>
+      <li><code>IsFile</code></li>
+      <li><code>RenameFile</code></li>
+      <li><code>CopyFile</code></li>
+      <li><code>ReadDir</code></li>
+      <li><code>CreateDir</code></li>
+      <li><code>CreateDirAll</code></li>
+      <li><code>RemoveDir</code></li>
+      <li><code>RemoveDirAll</code></li>
+      <li><code>IsDirectory</code></li>
+      <li><code>Open</code></li>
+      <li><code>Close</code></li>
+      <li><code>Read</code></li>
+      <li><code>Write</code></li>
+      <li><code>ReadLine</code></li>
+      <li><code>Flush</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.fs/Fs.ReadFile</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.fs/Fs.WriteFile</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+      <li><code>content</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.fs/Fs.AppendFile</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+      <li><code>content</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.fs/Fs.DeleteFile</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.fs/Fs.FileExists</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.fs/Fs.FileSize</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.fs/Fs.IsFile</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.fs/Fs.RenameFile</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>old_path</code></li>
+      <li><code>new_path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.fs/Fs.CopyFile</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>src_path</code></li>
+      <li><code>dest_path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.fs/Fs.ReadDir</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.fs/Fs.CreateDir</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.fs/Fs.CreateDirAll</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.fs/Fs.RemoveDir</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.fs/Fs.RemoveDirAll</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.fs/Fs.IsDirectory</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.fs/Fs.Open</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>path</code></li>
+      <li><code>mode</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.fs/Fs.Close</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>file</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.fs/Fs.Read</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>file</code></li>
+      <li><code>n</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.fs/Fs.Write</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>file</code></li>
+      <li><code>content</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.fs/Fs.ReadLine</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>file</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.fs/Fs.Flush</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>file</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.fs/BlockingFsHandler</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.timer/Timer</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>Sleep</code></li>
+      <li><code>Now</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.timer/Timer.Sleep</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>ms</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.timer/Timer.Now</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.timer/BlockingTimerHandler</h4>
+</div>
+<div class="type-def">
+  <h4>beagle.simple-socket/ContinuationHandler</h4>
+  <div class="fields"><strong>Fields:</strong>
+    <ul>
+      <li><code>loop_id</code></li>
+      <li><code>accept_continuations</code></li>
+      <li><code>pending_ops</code></li>
+    </ul>
+  </div>
+</div>
+</section>
+<section class="enums-section" id="enums">
+  <h2>Enums</h2>
+  <p>Built-in enum types available in Beagle.</p>
+<div class="type-def">
+  <h4>beagle.core/SystemError</h4>
+  <div class="variants"><strong>Variants:</strong>
+    <ul>
+      <li><code>StructError { message, location }</code></li>
+      <li><code>ParseError { message, location }</code></li>
+      <li><code>CompileError { message, location }</code></li>
+      <li><code>TypeError { message, location }</code></li>
+      <li><code>ArityError { message, location }</code></li>
+      <li><code>RuntimeError { message, location }</code></li>
+      <li><code>ThreadError { message, location }</code></li>
+      <li><code>FFIError { message, location }</code></li>
+      <li><code>FunctionError { message, location }</code></li>
+      <li><code>FieldError { message, location }</code></li>
+      <li><code>IndexError { message, location }</code></li>
+      <li><code>MutabilityError { message, location }</code></li>
+      <li><code>JsonError { message, location }</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/DiagnosticSeverity</h4>
+  <div class="variants"><strong>Variants:</strong>
+    <ul>
+      <li><code>error</code></li>
+      <li><code>warning</code></li>
+      <li><code>info</code></li>
+      <li><code>hint</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/Error</h4>
+  <div class="variants"><strong>Variants:</strong>
+    <ul>
+      <li><code>NotFound { path }</code></li>
+      <li><code>PermissionDenied { path }</code></li>
+      <li><code>AlreadyExists { path }</code></li>
+      <li><code>IsDirectory { path }</code></li>
+      <li><code>NotDirectory { path }</code></li>
+      <li><code>Timeout { operation }</code></li>
+      <li><code>Cancelled</code></li>
+      <li><code>IO { message }</code></li>
+      <li><code>Other { code, message }</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.core/Result</h4>
+  <div class="variants"><strong>Variants:</strong>
+    <ul>
+      <li><code>Ok { value }</code></li>
+      <li><code>Err { error }</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.ffi/Type</h4>
+  <div class="variants"><strong>Variants:</strong>
+    <ul>
+      <li><code>U8</code></li>
+      <li><code>U16</code></li>
+      <li><code>U32</code></li>
+      <li><code>U64</code></li>
+      <li><code>I32</code></li>
+      <li><code>F32</code></li>
+      <li><code>Pointer</code></li>
+      <li><code>MutablePointer</code></li>
+      <li><code>String</code></li>
+      <li><code>Void</code></li>
+      <li><code>Structure { types }</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/FutureState</h4>
+  <div class="variants"><strong>Variants:</strong>
+    <ul>
+      <li><code>Pending</code></li>
+      <li><code>Running</code></li>
+      <li><code>Resolved { value }</code></li>
+      <li><code>Rejected { error }</code></li>
+      <li><code>Cancelled</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/RaceResult</h4>
+  <div class="variants"><strong>Variants:</strong>
+    <ul>
+      <li><code>Ok { value, index }</code></li>
+      <li><code>AllFailed { errors }</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/TimeoutResult</h4>
+  <div class="variants"><strong>Variants:</strong>
+    <ul>
+      <li><code>Ok { value }</code></li>
+      <li><code>TimedOut</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/IOAction</h4>
+  <div class="variants"><strong>Variants:</strong>
+    <ul>
+      <li><code>TcpListen { host, port }</code></li>
+      <li><code>TcpConnect { host, port }</code></li>
+      <li><code>TcpAccept { listener }</code></li>
+      <li><code>TcpRead { socket, n }</code></li>
+      <li><code>TcpWrite { socket, data }</code></li>
+      <li><code>TcpClose { socket }</code></li>
+      <li><code>TcpCloseListener { listener }</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.async/Async</h4>
+  <div class="variants"><strong>Variants:</strong>
+    <ul>
+      <li><code>Await { future }</code></li>
+      <li><code>AwaitAll { futures }</code></li>
+      <li><code>AwaitFirst { futures }</code></li>
+      <li><code>Cancel { future }</code></li>
+      <li><code>IO { action }</code></li>
+      <li><code>ReadFile { path }</code></li>
+      <li><code>WriteFile { path, content }</code></li>
+      <li><code>AppendFile { path, content }</code></li>
+      <li><code>DeleteFile { path }</code></li>
+      <li><code>FileExists { path }</code></li>
+      <li><code>RenameFile { old_path, new_path }</code></li>
+      <li><code>CopyFile { src_path, dest_path }</code></li>
+      <li><code>ReadDir { path }</code></li>
+      <li><code>CreateDir { path }</code></li>
+      <li><code>CreateDirAll { path }</code></li>
+      <li><code>RemoveDir { path }</code></li>
+      <li><code>RemoveDirAll { path }</code></li>
+      <li><code>FileSize { path }</code></li>
+      <li><code>IsDirectory { path }</code></li>
+      <li><code>IsFile { path }</code></li>
+      <li><code>Open { path, mode }</code></li>
+      <li><code>Close { file }</code></li>
+      <li><code>Read { file, n }</code></li>
+      <li><code>Write { file, content }</code></li>
+      <li><code>ReadLine { file }</code></li>
+      <li><code>Flush { file }</code></li>
+      <li><code>Sleep { ms }</code></li>
+      <li><code>Spawn { thunk }</code></li>
+      <li><code>SpawnWithToken { thunk, token }</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.fs/Fs</h4>
+  <div class="variants"><strong>Variants:</strong>
+    <ul>
+      <li><code>ReadFile { path }</code></li>
+      <li><code>WriteFile { path, content }</code></li>
+      <li><code>AppendFile { path, content }</code></li>
+      <li><code>DeleteFile { path }</code></li>
+      <li><code>FileExists { path }</code></li>
+      <li><code>FileSize { path }</code></li>
+      <li><code>IsFile { path }</code></li>
+      <li><code>RenameFile { old_path, new_path }</code></li>
+      <li><code>CopyFile { src_path, dest_path }</code></li>
+      <li><code>ReadDir { path }</code></li>
+      <li><code>CreateDir { path }</code></li>
+      <li><code>CreateDirAll { path }</code></li>
+      <li><code>RemoveDir { path }</code></li>
+      <li><code>RemoveDirAll { path }</code></li>
+      <li><code>IsDirectory { path }</code></li>
+      <li><code>Open { path, mode }</code></li>
+      <li><code>Close { file }</code></li>
+      <li><code>Read { file, n }</code></li>
+      <li><code>Write { file, content }</code></li>
+      <li><code>ReadLine { file }</code></li>
+      <li><code>Flush { file }</code></li>
+    </ul>
+  </div>
+</div>
+<div class="type-def">
+  <h4>beagle.timer/Timer</h4>
+  <div class="variants"><strong>Variants:</strong>
+    <ul>
+      <li><code>Sleep { ms }</code></li>
+      <li><code>Now</code></li>
+    </ul>
+  </div>
+</div>
+</section>
+</main>
+</div>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const searchBox = document.querySelector('.search-box');
+    const functions = document.querySelectorAll('.function');
+
+    searchBox.addEventListener('input', function(e) {
+        const query = e.target.value.toLowerCase();
+
+        functions.forEach(function(fn) {
+            const signature = fn.querySelector('.signature');
+            const docstring = fn.querySelector('.docstring');
+            const sigText = signature ? signature.textContent.toLowerCase() : '';
+            const docText = docstring ? docstring.textContent.toLowerCase() : '';
+
+            if (query === '' || sigText.includes(query) || docText.includes(query)) {
+                fn.classList.remove('hidden');
+            } else {
+                fn.classList.add('hidden');
+            }
+        });
+    });
+
+    // Smooth scrolling for nav links
+    document.querySelectorAll('.nav-list a').forEach(function(link) {
+        link.addEventListener('click', function(e) {
+            const href = this.getAttribute('href');
+            if (href.startsWith('#')) {
+                e.preventDefault();
+                const target = document.querySelector(href);
+                if (target) {
+                    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
+            }
+        });
+    });
+});
+</script>
+</body>
+</html>

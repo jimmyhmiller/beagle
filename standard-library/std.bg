@@ -308,11 +308,26 @@ struct Atom {
     value
 }
 
+/// Dereference an atom to get its current value.
+///
+/// Atoms provide thread-safe mutable state. Use `deref` to read the value.
+///
+/// Examples:
+///   (let a (atom 0))
+///   (deref a)  ; => 0
 fn deref(atom) {
     // assert!(atom is Atom)
     primitive/deref(atom)
 }
 
+/// Atomically update an atom's value by applying a function.
+///
+/// Takes the current value, applies f to it, and attempts to set the new value.
+/// Retries if another thread changed the value concurrently.
+///
+/// Examples:
+///   (let counter (atom 0))
+///   (swap! counter fn(x) { x + 1 })  ; => 1
 fn swap!(atom, f) {
     let initial = deref(atom);
     let new = f(initial);
@@ -324,16 +339,41 @@ fn swap!(atom, f) {
     }
 }
 
+/// Reset an atom to a new value unconditionally.
+///
+/// Unlike `swap!`, this does not read the current value first.
+///
+/// Examples:
+///   (let a (atom 0))
+///   (reset! a 42)
+///   (deref a)  ; => 42
 fn reset!(atom, value) {
     // assert!(atom is Atom)
     primitive/reset!(atom, value)
 }
 
+/// Atomically compare and swap an atom's value.
+///
+/// If the atom's current value equals `old`, set it to `new` and return true.
+/// Otherwise return false without changing the value.
+///
+/// Examples:
+///   (let a (atom 0))
+///   (compare-and-swap! a 0 1)  ; => true, a is now 1
+///   (compare-and-swap! a 0 2)  ; => false, a is still 1
 fn compare-and-swap!(atom, old, new) {
     // assert!(atom is Atom)
     primitive/compare-and-swap!(atom, old, new)
 }
 
+/// Create a new atom with the given initial value.
+///
+/// Atoms provide thread-safe mutable state.
+///
+/// Examples:
+///   (let counter (atom 0))
+///   (swap! counter fn(x) { x + 1 })
+///   (deref counter)  ; => 1
 fn atom(value) {
     // TODO: Allow punning
     Atom { value: value }
@@ -479,8 +519,13 @@ extend PersistentVector with Format {
 // String Operations (Protocol-based)
 // ============================================================================
 
-// join: Joins elements of a collection into a string with a separator.
-// Works with any collection that implements Indexed and Length protocols.
+/// Join elements of a collection into a string with a separator.
+///
+/// Works with any collection that implements Indexed and Length protocols.
+///
+/// Examples:
+///   (join [1 2 3] ", ")  ; => "1, 2, 3"
+///   (join ["a" "b"] "-") ; => "a-b"
 fn join(coll, sep) {
     join-helper(coll, sep, 0, "")
 }
@@ -501,8 +546,15 @@ fn join-helper(coll, sep, idx, acc) {
     }
 }
 
-// parse-int: Parse a string into an integer
-// Returns null if the string is not a valid integer
+/// Parse a string into an integer.
+///
+/// Returns null if the string is not a valid integer.
+/// Supports negative numbers with leading '-'.
+///
+/// Examples:
+///   (parse-int "42")   ; => 42
+///   (parse-int "-5")   ; => -5
+///   (parse-int "abc")  ; => null
 fn parse-int(s) {
     let len = length(s)
     if len == 0 {
@@ -554,7 +606,13 @@ fn parse-int-helper(s, idx, acc) {
 //     persistent-vector/push(coll, value)
 // }
 
-// print: prints arguments separated by spaces, NO newline at end
+/// Print arguments separated by spaces without a trailing newline.
+///
+/// Accepts any number of arguments. Each is formatted and printed.
+/// Returns the last argument.
+///
+/// Examples:
+///   (print "Hello" "World")  ; prints: Hello World
 fn print(...args) {
     let len = length(args)
     if len == 0 {
@@ -574,7 +632,14 @@ fn print(...args) {
     }
 }
 
-// println: prints arguments separated by spaces, WITH newline at end
+/// Print arguments separated by spaces with a trailing newline.
+///
+/// Accepts any number of arguments. Each is formatted and printed.
+/// Returns the last argument.
+///
+/// Examples:
+///   (println "Hello" "World")  ; prints: Hello World\n
+///   (println 1 2 3)            ; prints: 1 2 3\n
 fn println(...args) {
     let len = length(args)
     if len == 0 {
@@ -596,15 +661,27 @@ fn println(...args) {
     }
 }
 
-// Keyword functions
+/// Check if a value is a keyword.
+///
+/// Examples:
+///   (keyword? :foo)  ; => true
+///   (keyword? "foo") ; => false
 fn keyword?(value) {
     builtin/is-keyword(value)
 }
 
+/// Convert a keyword to a string.
+///
+/// Examples:
+///   (keyword->string :foo)  ; => "foo"
 fn keyword->string(kw) {
     builtin/keyword-to-string(kw)
 }
 
+/// Convert a string to a keyword.
+///
+/// Examples:
+///   (string->keyword "foo")  ; => :foo
 fn string->keyword(str) {
     builtin/string-to-keyword(str)
 }
@@ -659,10 +736,21 @@ struct Range {
     step
 }
 
+/// Create a range from start (inclusive) to end (exclusive).
+///
+/// Ranges are iterable and can be used with for loops and seq functions.
+///
+/// Examples:
+///   (for i in (range 0 5) { println(i) })  ; prints 0, 1, 2, 3, 4
+///   (reduce (range 1 5) 0 fn(a x) { a + x })  ; => 10
 fn range(start, end) {
     Range { current: start, end: end, step: 1 }
 }
 
+/// Create a range with a custom step value.
+///
+/// Examples:
+///   (range-step 0 10 2)  ; => 0, 2, 4, 6, 8
 fn range-step(start, end, step) {
     Range { current: start, end: end, step: step }
 }
@@ -727,8 +815,14 @@ extend StringSeq with Seq {
 // Higher-Order Collection Functions
 // ============================================================================
 
-// reduce: Fold a collection with an accumulator
-// Works with any Seqable type
+/// Fold a collection with an accumulator function.
+///
+/// Calls (f acc elem) for each element, threading the accumulator through.
+/// Works with any Seqable type.
+///
+/// Examples:
+///   (reduce [1 2 3] 0 fn(acc x) { acc + x })  ; => 6
+///   (reduce [1 2 3] [] fn(acc x) { push acc (* x 2) })  ; => [2 4 6]
 fn reduce(coll, init, f) {
     let mut s = seq(coll)
     let mut acc = init
@@ -740,7 +834,13 @@ fn reduce(coll, init, f) {
     acc
 }
 
-// map: Apply f to each element, return new vector
+/// Apply a function to each element of a collection.
+///
+/// Returns a new vector with the transformed elements.
+///
+/// Examples:
+///   (map [1 2 3] fn(x) { x * 2 })  ; => [2 4 6]
+///   (map ["a" "b"] uppercase)      ; => ["A" "B"]
 fn map(coll, f) {
     let mut s = seq(coll)
     let mut acc = []
@@ -752,7 +852,13 @@ fn map(coll, f) {
     acc
 }
 
-// filter: Keep elements where pred returns true
+/// Keep elements where the predicate returns true.
+///
+/// Returns a new vector containing only matching elements.
+///
+/// Examples:
+///   (filter [1 2 3 4] even?)  ; => [2 4]
+///   (filter ["" "a" ""] fn(s) { length(s) > 0 })  ; => ["a"]
 fn filter(coll, pred) {
     let mut s = seq(coll)
     let mut acc = []
@@ -766,7 +872,13 @@ fn filter(coll, pred) {
     acc
 }
 
-// any?: True if any element matches predicate
+/// Check if any element matches the predicate.
+///
+/// Returns true if pred returns true for at least one element.
+///
+/// Examples:
+///   (any? [1 2 3] even?)  ; => true
+///   (any? [1 3 5] even?)  ; => false
 fn any?(coll, pred) {
     let mut s = seq(coll)
     let mut found = false
@@ -779,7 +891,13 @@ fn any?(coll, pred) {
     found
 }
 
-// all?: True if all elements match predicate
+/// Check if all elements match the predicate.
+///
+/// Returns true if pred returns true for every element.
+///
+/// Examples:
+///   (all? [2 4 6] even?)  ; => true
+///   (all? [1 2 3] even?)  ; => false
 fn all?(coll, pred) {
     let mut s = seq(coll)
     let mut all-match = true
@@ -792,7 +910,13 @@ fn all?(coll, pred) {
     all-match
 }
 
-// none?: True if no elements match predicate
+/// Check if no elements match the predicate.
+///
+/// Returns true if pred returns false for every element.
+///
+/// Examples:
+///   (none? [1 3 5] even?)  ; => true
+///   (none? [1 2 3] even?)  ; => false
 fn none?(coll, pred) {
     let mut s = seq(coll)
     let mut none-match = true
@@ -805,12 +929,24 @@ fn none?(coll, pred) {
     none-match
 }
 
-// not-every?: True if at least one element does NOT match predicate
+/// Check if at least one element does NOT match the predicate.
+///
+/// Equivalent to (not (all? coll pred)).
+///
+/// Examples:
+///   (not-every? [1 2 3] even?)  ; => true
+///   (not-every? [2 4 6] even?)  ; => false
 fn not-every?(coll, pred) {
     not(all?(coll, pred))
 }
 
-// find: Return first element matching predicate, or null
+/// Find the first element matching the predicate.
+///
+/// Returns the element or null if no match.
+///
+/// Examples:
+///   (find [1 2 3 4] even?)  ; => 2
+///   (find [1 3 5] even?)    ; => null
 fn find(coll, pred) {
     let mut s = seq(coll)
     let mut result = null
@@ -826,7 +962,13 @@ fn find(coll, pred) {
     result
 }
 
-// find-index: Return index of first element matching predicate, or -1
+/// Find the index of the first element matching the predicate.
+///
+/// Returns the index or -1 if no match.
+///
+/// Examples:
+///   (find-index [1 2 3 4] even?)  ; => 1
+///   (find-index [1 3 5] even?)    ; => -1
 fn find-index(coll, pred) {
     let mut s = seq(coll)
     let mut idx = 0
@@ -843,7 +985,13 @@ fn find-index(coll, pred) {
     result
 }
 
-// take: Return first n elements
+/// Take the first n elements from a collection.
+///
+/// Returns a new vector with at most n elements.
+///
+/// Examples:
+///   (take [1 2 3 4 5] 3)  ; => [1 2 3]
+///   (take [1 2] 5)        ; => [1 2]
 fn take(coll, n) {
     let mut s = seq(coll)
     let mut remaining = n
@@ -856,7 +1004,13 @@ fn take(coll, n) {
     acc
 }
 
-// drop: Skip first n elements, return rest
+/// Drop the first n elements from a collection.
+///
+/// Returns a new vector with the remaining elements.
+///
+/// Examples:
+///   (drop [1 2 3 4 5] 2)  ; => [3 4 5]
+///   (drop [1 2] 5)        ; => []
 fn drop(coll, n) {
     let mut s = seq(coll)
     let mut remaining = n
@@ -872,7 +1026,12 @@ fn drop(coll, n) {
     acc
 }
 
-// take-while: Take elements while predicate is true
+/// Take elements while the predicate returns true.
+///
+/// Stops at the first element where pred returns false.
+///
+/// Examples:
+///   (take-while [1 2 3 4 1] fn(x) { x < 4 })  ; => [1 2 3]
 fn take-while(coll, pred) {
     let mut s = seq(coll)
     let mut acc = []
@@ -889,7 +1048,12 @@ fn take-while(coll, pred) {
     acc
 }
 
-// drop-while: Drop elements while predicate is true, return rest
+/// Drop elements while the predicate returns true.
+///
+/// Returns elements starting from the first where pred returns false.
+///
+/// Examples:
+///   (drop-while [1 2 3 4 1] fn(x) { x < 3 })  ; => [3 4 1]
 fn drop-while(coll, pred) {
     let mut s = seq(coll)
     while s != null && pred(first(s)) {
@@ -903,12 +1067,18 @@ fn drop-while(coll, pred) {
     acc
 }
 
-// slice: Get sub-collection from start (inclusive) to end (exclusive)
+/// Get a sub-collection from start (inclusive) to end (exclusive).
+///
+/// Examples:
+///   (slice [0 1 2 3 4] 1 4)  ; => [1 2 3]
 fn slice(coll, start, end) {
     take(drop(coll, start), end - start)
 }
 
-// enumerate: Return pairs of [index, element] for each element
+/// Return pairs of [index, element] for each element.
+///
+/// Examples:
+///   (enumerate ["a" "b" "c"])  ; => [[0 "a"] [1 "b"] [2 "c"]]
 fn enumerate(coll) {
     let mut s = seq(coll)
     let mut idx = 0
@@ -921,7 +1091,12 @@ fn enumerate(coll) {
     acc
 }
 
-// remove-at: Remove element at the specified index
+/// Remove element at the specified index.
+///
+/// Returns the collection unchanged if index is out of bounds.
+///
+/// Examples:
+///   (remove-at [1 2 3 4] 1)  ; => [1 3 4]
 fn remove-at(coll, idx) {
     let len = length(coll)
     if idx < 0 || idx >= len {
@@ -935,18 +1110,35 @@ fn remove-at(coll, idx) {
 // Element Access Functions
 // ============================================================================
 
-// count: Alias for length (more idiomatic for collections)
+/// Return the number of elements in a collection.
+///
+/// Alias for length, more idiomatic for collections.
+///
+/// Examples:
+///   (count [1 2 3])  ; => 3
+///   (count "hello")  ; => 5
 fn count(coll) {
     length(coll)
 }
 
-// empty?: True if collection has no elements
+/// Check if a collection has no elements.
+///
+/// Examples:
+///   (empty? [])    ; => true
+///   (empty? [1])   ; => false
+///   (empty? "")    ; => true
 fn empty?(coll) {
     length(coll) == 0
 }
 
-// first-of: Get first element of a collection (works with any Seqable)
-// Named differently to avoid conflict with Seq protocol's first
+/// Get the first element of a collection.
+///
+/// Returns null if the collection is empty.
+/// Named differently to avoid conflict with Seq protocol's first.
+///
+/// Examples:
+///   (first-of [1 2 3])  ; => 1
+///   (first-of [])       ; => null
 fn first-of(coll) {
     let s = seq(coll)
     if s == null {
@@ -956,7 +1148,13 @@ fn first-of(coll) {
     }
 }
 
-// last: Get last element of a collection
+/// Get the last element of a collection.
+///
+/// Returns null if the collection is empty.
+///
+/// Examples:
+///   (last [1 2 3])  ; => 3
+///   (last [])       ; => null
 fn last(coll) {
     let mut s = seq(coll)
     let mut prev = null
@@ -967,12 +1165,20 @@ fn last(coll) {
     prev
 }
 
-// rest: All elements except the first
+/// Get all elements except the first.
+///
+/// Examples:
+///   (rest [1 2 3])  ; => [2 3]
+///   (rest [1])      ; => []
 fn rest(coll) {
     drop(coll, 1)
 }
 
-// butlast: All elements except the last
+/// Get all elements except the last one.
+///
+/// Examples:
+///   (butlast [1 2 3])  ; => [1 2]
+///   (butlast [1])      ; => []
 fn butlast(coll) {
     let len = length(coll)
     if len <= 1 {
@@ -982,17 +1188,29 @@ fn butlast(coll) {
     }
 }
 
-// nth: Get element at index with bounds checking (returns null if out of bounds)
+/// Get the element at index n with bounds checking.
+///
+/// Returns null if index is out of bounds.
+///
+/// Examples:
+///   (nth [1 2 3] 1)   ; => 2
+///   (nth [1 2 3] 10)  ; => null
 fn nth(coll, n) {
     get(coll, n)
 }
 
-// second: Get second element
+/// Get the second element of a collection.
+///
+/// Examples:
+///   (second [1 2 3])  ; => 2
 fn second(coll) {
     nth(coll, 1)
 }
 
-// third: Get third element
+/// Get the third element of a collection.
+///
+/// Examples:
+///   (third [1 2 3])  ; => 3
 fn third(coll) {
     nth(coll, 2)
 }
@@ -1001,7 +1219,13 @@ fn third(coll) {
 // Min/Max Functions
 // ============================================================================
 
-// min-of: Return minimum element in collection
+/// Return the minimum element in a collection.
+///
+/// Elements must be comparable with <.
+///
+/// Examples:
+///   (min-of [3 1 4 1 5])  ; => 1
+///   (min-of [])           ; => null
 fn min-of(coll) {
     let mut s = seq(coll)
     if s == null {
@@ -1020,7 +1244,13 @@ fn min-of(coll) {
     }
 }
 
-// max-of: Return maximum element in collection
+/// Return the maximum element in a collection.
+///
+/// Elements must be comparable with >.
+///
+/// Examples:
+///   (max-of [3 1 4 1 5])  ; => 5
+///   (max-of [])           ; => null
 fn max-of(coll) {
     let mut s = seq(coll)
     if s == null {
@@ -1039,7 +1269,12 @@ fn max-of(coll) {
     }
 }
 
-// min-by: Return element with minimum value of (f elem)
+/// Return the element with the minimum key value.
+///
+/// Compares elements by applying f to each and using < on the results.
+///
+/// Examples:
+///   (min-by ["abc" "a" "ab"] length)  ; => "a"
 fn min-by(coll, f) {
     let mut s = seq(coll)
     if s == null {
@@ -1061,7 +1296,12 @@ fn min-by(coll, f) {
     }
 }
 
-// max-by: Return element with maximum value of (f elem)
+/// Return the element with the maximum key value.
+///
+/// Compares elements by applying f to each and using > on the results.
+///
+/// Examples:
+///   (max-by ["a" "abc" "ab"] length)  ; => "abc"
 fn max-by(coll, f) {
     let mut s = seq(coll)
     if s == null {
@@ -1083,7 +1323,12 @@ fn max-by(coll, f) {
     }
 }
 
-// reduce-right: Reduce from right to left
+/// Reduce a collection from right to left.
+///
+/// Like reduce, but processes elements in reverse order.
+///
+/// Examples:
+///   (reduce-right [1 2 3] [] fn(acc x) { push(acc, x) })  ; => [3 2 1]
 fn reduce-right(coll, init, f) {
     // Convert to vector and iterate backwards
     let v = if instance-of(coll, PersistentVector) {
@@ -1105,7 +1350,12 @@ fn reduce-right(coll, init, f) {
 // Combining Functions
 // ============================================================================
 
-// concat: Combine two collections into one
+/// Concatenate two collections into one.
+///
+/// Returns a new vector with elements from both collections.
+///
+/// Examples:
+///   (concat [1 2] [3 4])  ; => [1 2 3 4]
 fn concat(coll1, coll2) {
     let mut acc = []
     let mut s = seq(coll1)
@@ -1121,7 +1371,10 @@ fn concat(coll1, coll2) {
     acc
 }
 
-// flatten: Flatten one level of nesting
+/// Flatten one level of nesting in a collection.
+///
+/// Examples:
+///   (flatten [[1 2] [3 4]])  ; => [1 2 3 4]
 fn flatten(coll) {
     let mut s = seq(coll)
     let mut acc = []
@@ -1133,12 +1386,18 @@ fn flatten(coll) {
     acc
 }
 
-// flat-map: Map then flatten
+/// Map a function over a collection then flatten the result.
+///
+/// Examples:
+///   (flat-map [1 2 3] fn(x) { [x, x] })  ; => [1 1 2 2 3 3]
 fn flat-map(coll, f) {
     flatten(map(coll, f))
 }
 
-// zip: Pair up elements from two collections
+/// Pair up elements from two collections into a vector of pairs.
+///
+/// Examples:
+///   (zip [1 2 3] ["a" "b" "c"])  ; => [[1 "a"] [2 "b"] [3 "c"]]
 fn zip(coll1, coll2) {
     let mut s1 = seq(coll1)
     let mut s2 = seq(coll2)
@@ -1151,7 +1410,12 @@ fn zip(coll1, coll2) {
     acc
 }
 
-// zip-with: Combine elements from two collections using a function
+/// Combine elements from two collections using a function.
+///
+/// Like zip, but applies f to each pair instead of creating tuples.
+///
+/// Examples:
+///   (zip-with [1 2 3] [10 20 30] fn(a b) { a + b })  ; => [11 22 33]
 fn zip-with(coll1, coll2, f) {
     let mut s1 = seq(coll1)
     let mut s2 = seq(coll2)
@@ -1164,7 +1428,12 @@ fn zip-with(coll1, coll2, f) {
     acc
 }
 
-// zipmap: Create a map from keys and values collections
+/// Create a map from parallel key and value collections.
+///
+/// Pairs up keys[i] with vals[i] to form map entries.
+///
+/// Examples:
+///   (zipmap [:a :b :c] [1 2 3])  ; => {:a 1, :b 2, :c 3}
 fn zipmap(keys-coll, vals-coll) {
     let mut ks = seq(keys-coll)
     let mut vs = seq(vals-coll)
@@ -1177,7 +1446,12 @@ fn zipmap(keys-coll, vals-coll) {
     acc
 }
 
-// interleave: Alternate elements from two collections
+/// Interleave elements from two collections.
+///
+/// Returns a vector alternating between elements of coll1 and coll2.
+///
+/// Examples:
+///   (interleave [1 2 3] [:a :b :c])  ; => [1 :a 2 :b 3 :c]
 fn interleave(coll1, coll2) {
     let mut s1 = seq(coll1)
     let mut s2 = seq(coll2)
@@ -1191,7 +1465,10 @@ fn interleave(coll1, coll2) {
     acc
 }
 
-// interpose: Insert separator between elements
+/// Insert a separator between each element of a collection.
+///
+/// Examples:
+///   (interpose [1 2 3] 0)  ; => [1 0 2 0 3]
 fn interpose(coll, sep) {
     let mut s = seq(coll)
     let mut acc = []
@@ -1213,10 +1490,15 @@ fn interpose(coll, sep) {
 // Collection Creation & Transformation
 // ============================================================================
 
-// into: Pour elements from source collection into target collection
-// For vectors: appends elements
-// For maps: source should be pairs [key, value] or a map
-// For sets: adds elements
+/// Pour elements from source collection into target collection.
+///
+/// For vectors: appends elements. For maps: source should be [key, value] pairs.
+/// For sets: adds elements.
+///
+/// Examples:
+///   (into [1 2] [3 4])          ; => [1 2 3 4]
+///   (into {} [[:a 1] [:b 2]])   ; => {:a 1, :b 2}
+///   (into #{1 2} [2 3 4])       ; => #{1 2 3 4}
 fn into(target, source) {
     if set?(target) {
         reduce(source, target, fn(acc, elem) { set-add(acc, elem) })
@@ -1233,7 +1515,12 @@ fn into(target, source) {
     }
 }
 
-// reverse: Reverse order of elements
+/// Reverse the order of elements in a collection.
+///
+/// Returns a new vector with elements in reverse order.
+///
+/// Examples:
+///   (reverse [1 2 3])  ; => [3 2 1]
 fn reverse(coll) {
     reduce(coll, [], fn(acc, x) {
         // Build reversed by prepending - but since we only have push,
@@ -1243,7 +1530,10 @@ fn reverse(coll) {
     })
 }
 
-// repeat: Create a vector with value repeated n times
+/// Create a vector with a value repeated n times.
+///
+/// Examples:
+///   (repeat "x" 3)  ; => ["x" "x" "x"]
 fn repeat(value, n) {
     let mut remaining = n
     let mut acc = []
@@ -1254,7 +1544,10 @@ fn repeat(value, n) {
     acc
 }
 
-// repeatedly: Call f n times, collect results
+/// Call a function n times and collect the results.
+///
+/// Examples:
+///   (repeatedly fn() { random() } 3)  ; => [0.1 0.7 0.4] (random values)
 fn repeatedly(f, n) {
     let mut remaining = n
     let mut acc = []
@@ -1265,7 +1558,12 @@ fn repeatedly(f, n) {
     acc
 }
 
-// iterate: Repeatedly apply f starting with init, collect n values
+/// Generate a sequence by repeatedly applying a function.
+///
+/// Starts with init, then f(init), f(f(init)), etc. for n values.
+///
+/// Examples:
+///   (iterate fn(x) { x * 2 } 1 5)  ; => [1 2 4 8 16]
 fn iterate(f, init, n) {
     let mut remaining = n
     let mut current = init
@@ -1278,7 +1576,10 @@ fn iterate(f, init, n) {
     acc
 }
 
-// partition: Split collection into groups of n elements
+/// Split a collection into groups of n elements.
+///
+/// Examples:
+///   (partition [1 2 3 4 5 6] 2)  ; => [[1 2] [3 4] [5 6]]
 fn partition(coll, n) {
     let mut remaining = coll
     let mut acc = []
@@ -1290,7 +1591,12 @@ fn partition(coll, n) {
     acc
 }
 
-// partition-by: Split collection when f(elem) changes value
+/// Split a collection when the key function's return value changes.
+///
+/// Groups consecutive elements with the same key value.
+///
+/// Examples:
+///   (partition-by [1 1 2 2 1] identity)  ; => [[1 1] [2 2] [1]]
 fn partition-by(coll, f) {
     let mut s = seq(coll)
     if s == null {
@@ -1316,7 +1622,12 @@ fn partition-by(coll, f) {
     }
 }
 
-// group-by: Group elements by result of key function
+/// Group elements by the result of a key function.
+///
+/// Returns a map from keys to vectors of elements with that key.
+///
+/// Examples:
+///   (group-by [1 2 3 4 5] even?)  ; => {true: [2 4], false: [1 3 5]}
 fn group-by(coll, f) {
     let mut s = seq(coll)
     let mut groups = {}
@@ -1335,7 +1646,12 @@ fn group-by(coll, f) {
     groups
 }
 
-// frequencies: Count occurrences of each value
+/// Count occurrences of each value in a collection.
+///
+/// Returns a map from values to their counts.
+///
+/// Examples:
+///   (frequencies [1 2 1 3 1 2])  ; => {1: 3, 2: 2, 3: 1}
 fn frequencies(coll) {
     let mut s = seq(coll)
     let mut counts = {}
@@ -1353,7 +1669,12 @@ fn frequencies(coll) {
     counts
 }
 
-// distinct: Remove duplicate values (keeps first occurrence)
+/// Remove duplicate values from a collection.
+///
+/// Keeps the first occurrence of each value.
+///
+/// Examples:
+///   (distinct [1 2 1 3 2 1])  ; => [1 2 3]
 fn distinct(coll) {
     let mut s = seq(coll)
     let mut seen = {}
@@ -1370,7 +1691,12 @@ fn distinct(coll) {
     acc
 }
 
-// dedupe: Remove consecutive duplicates (keeps first of each run)
+/// Remove consecutive duplicate elements.
+///
+/// Keeps the first occurrence of each run of duplicates.
+///
+/// Examples:
+///   (dedupe [1 1 2 2 2 1 1])  ; => [1 2 1]
 fn dedupe(coll) {
     let mut s = seq(coll)
     if s == null {
@@ -1427,8 +1753,12 @@ fn insert-sorted(sorted, elem) {
     result
 }
 
-// sort: Sort collection in ascending order (requires comparable elements)
-// Uses insertion sort for simplicity
+/// Sort a collection in ascending order.
+///
+/// Elements must be comparable. Uses insertion sort.
+///
+/// Examples:
+///   (sort [3 1 4 1 5])  ; => [1 1 3 4 5]
 fn sort(coll) {
     let mut s = seq(coll)
     let mut sorted = []
@@ -1473,7 +1803,13 @@ fn insert-sorted-by(sorted, elem, elem-key, key-fn) {
     result
 }
 
-// sort-by: Sort by key function result
+/// Sort a collection by a key function.
+///
+/// Elements are ordered by comparing (f elem) values.
+///
+/// Examples:
+///   (sort-by [{:name "bob" :age 30} {:name "alice" :age 25}] fn(x) { x.age })
+///   ; => [{:name "alice" :age 25} {:name "bob" :age 30}]
 fn sort-by(coll, f) {
     let mut s = seq(coll)
     let mut sorted = []
@@ -1490,27 +1826,53 @@ fn sort-by(coll, f) {
 // Function Utilities
 // ============================================================================
 
-// identity: Return the input unchanged
+/// Return the input unchanged.
+///
+/// Useful as a default function argument.
+///
+/// Examples:
+///   (identity 42)  ; => 42
+///   (map [1 2 3] identity)  ; => [1 2 3]
 fn identity(x) {
     x
 }
 
-// constantly: Return a function that always returns value
+/// Return a function that always returns the given value.
+///
+/// Ignores any arguments passed to the returned function.
+///
+/// Examples:
+///   (let always-42 (constantly 42))
+///   (always-42 "ignored")  ; => 42
 fn constantly(value) {
     fn(ignored) { value }
 }
 
-// complement: Return a function that negates the predicate
+/// Return a function that negates a predicate.
+///
+/// Examples:
+///   (let not-even? (complement even?))
+///   (not-even? 3)  ; => true
 fn complement(pred) {
     fn(x) { not(pred(x)) }
 }
 
-// compose: Return a function that applies g then f
+/// Compose two functions: (compose f g) returns fn(x) { f(g(x)) }.
+///
+/// The second function is applied first, then the first.
+///
+/// Examples:
+///   (let add1-then-double (compose fn(x) { x * 2 } fn(x) { x + 1 }))
+///   (add1-then-double 3)  ; => 8  (3+1=4, 4*2=8)
 fn compose(f, g) {
     fn(x) { f(g(x)) }
 }
 
-// partial: Return a function with the first argument pre-filled
+/// Partially apply a function by fixing its first argument.
+///
+/// Examples:
+///   (let add10 (partial fn(a b) { a + b } 10))
+///   (add10 5)  ; => 15
 fn partial(f, a) {
     fn(b) { f(a, b) }
 }
@@ -1519,7 +1881,14 @@ fn partial(f, a) {
 // Boolean/Logic Utilities
 // ============================================================================
 
-// not: Boolean negation
+/// Boolean negation.
+///
+/// Returns true if x is falsy, false if x is truthy.
+///
+/// Examples:
+///   (not true)   ; => false
+///   (not false)  ; => true
+///   (not null)   ; => true
 fn not(x) {
     if x {
         false
@@ -1528,12 +1897,22 @@ fn not(x) {
     }
 }
 
-// truthy?: Check if value is truthy (not null and not false)
+/// Check if a value is truthy (not null and not false).
+///
+/// Examples:
+///   (truthy? 1)      ; => true
+///   (truthy? null)   ; => false
+///   (truthy? false)  ; => false
 fn truthy?(x) {
     x != null && x != false
 }
 
-// falsy?: Check if value is falsy (null or false)
+/// Check if a value is falsy (null or false).
+///
+/// Examples:
+///   (falsy? null)   ; => true
+///   (falsy? false)  ; => true
+///   (falsy? 0)      ; => false
 fn falsy?(x) {
     x == null || x == false
 }
@@ -1542,12 +1921,20 @@ fn falsy?(x) {
 // Type Checking Predicates
 // ============================================================================
 
-// nil?: Check if value is null
+/// Check if a value is null.
+///
+/// Examples:
+///   (nil? null)  ; => true
+///   (nil? 0)     ; => false
 fn nil?(x) {
     x == null
 }
 
-// some?: Check if value is not null
+/// Check if a value is not null.
+///
+/// Examples:
+///   (some? 0)     ; => true
+///   (some? null)  ; => false
 fn some?(x) {
     x != null
 }
@@ -1556,27 +1943,44 @@ fn some?(x) {
 // Map Utilities
 // ============================================================================
 
-// vals: Get all values from a map as a vector
+/// Get all values from a map as a vector.
+///
+/// Examples:
+///   (vals {:a 1 :b 2})  ; => [1 2]
 fn vals(m) {
     let ks = keys(m)
     map(ks, fn(k) { get(m, k) })
 }
 
-// dissoc: Remove a key from a map (returns new map without the key)
-// For now, this is implemented by rebuilding the map without the removed key
+/// Remove a key from a map.
+///
+/// Returns a new map without the specified key.
+///
+/// Examples:
+///   (dissoc {:a 1 :b 2} :a)  ; => {:b 2}
 fn dissoc(m, key) {
     let ks = keys(m)
     let filtered-keys = filter(ks, fn(k) { k != key })
     reduce(filtered-keys, {}, fn(acc, k) { assoc(acc, k, get(m, k)) })
 }
 
-// merge: Combine two maps (m2's values take precedence for duplicate keys)
+/// Merge two maps together.
+///
+/// m2's values take precedence for duplicate keys.
+///
+/// Examples:
+///   (merge {:a 1 :b 2} {:b 3 :c 4})  ; => {:a 1 :b 3 :c 4}
 fn merge(m1, m2) {
     let ks = keys(m2)
     reduce(ks, m1, fn(acc, k) { assoc(acc, k, get(m2, k)) })
 }
 
-// merge-with: Combine two maps using a function to resolve conflicts
+/// Merge two maps using a function to resolve key conflicts.
+///
+/// When a key exists in both maps, calls f(v1, v2) to get the merged value.
+///
+/// Examples:
+///   (merge-with fn(a b) { a + b } {:a 1} {:a 2 :b 3})  ; => {:a 3, :b 3}
 fn merge-with(f, m1, m2) {
     merge-with-helper(f, m1, m2, keys(m2), 0, m1)
 }
@@ -1597,7 +2001,12 @@ fn merge-with-helper(f, m1, m2, ks, idx, acc) {
     }
 }
 
-// select-keys: Keep only the specified keys from a map
+/// Keep only the specified keys from a map.
+///
+/// Returns a new map with only the keys in ks.
+///
+/// Examples:
+///   (select-keys {:a 1 :b 2 :c 3} [:a :c])  ; => {:a 1, :c 3}
 fn select-keys(m, ks) {
     select-keys-helper(m, ks, 0, {})
 }
@@ -1617,13 +2026,24 @@ fn select-keys-helper(m, ks, idx, acc) {
     }
 }
 
-// update: Update a value at key using function f
+/// Update a value at a key using a function.
+///
+/// Applies f to the current value at key and associates the result.
+///
+/// Examples:
+///   (update {:a 1} :a fn(x) { x + 1 })  ; => {:a 2}
 fn update(m, key, f) {
     let old-val = get(m, key)
     assoc(m, key, f(old-val))
 }
 
-// get-in: Get nested value using path of keys
+/// Get a nested value using a path of keys.
+///
+/// Returns null if any key in the path is not found.
+///
+/// Examples:
+///   (get-in {:a {:b {:c 42}}} [:a :b :c])  ; => 42
+///   (get-in {:a {:b 1}} [:a :x])           ; => null
 fn get-in(m, path) {
     let mut current = m
     let mut s = seq(path)
@@ -1635,7 +2055,13 @@ fn get-in(m, path) {
     current
 }
 
-// assoc-in: Set nested value using path of keys
+/// Set a nested value using a path of keys.
+///
+/// Creates intermediate maps as needed.
+///
+/// Examples:
+///   (assoc-in {:a {:b 1}} [:a :b] 42)  ; => {:a {:b 42}}
+///   (assoc-in {} [:a :b :c] 1)         ; => {:a {:b {:c 1}}}
 fn assoc-in(m, path, val) {
     let len = length(path)
     if len == 0 {
@@ -1657,7 +2083,12 @@ fn assoc-in(m, path, val) {
     }
 }
 
-// update-in: Update nested value using path of keys and function
+/// Update a nested value using a path of keys and a function.
+///
+/// Applies f to the current value at the path.
+///
+/// Examples:
+///   (update-in {:a {:b 1}} [:a :b] fn(x) { x + 1 })  ; => {:a {:b 2}}
 fn update-in(m, path, f) {
     let len = length(path)
     if len == 0 {
@@ -1679,13 +2110,22 @@ fn update-in(m, path, f) {
     }
 }
 
-// contains-key?: Check if map contains a key
+/// Check if a map contains a key.
+///
+/// Examples:
+///   (contains-key? {:a 1 :b 2} :a)  ; => true
+///   (contains-key? {:a 1 :b 2} :c)  ; => false
 fn contains-key?(m, key) {
     let ks = keys(m)
     any?(ks, fn(k) { k == key })
 }
 
-// invert: Swap keys and values in a map
+/// Swap keys and values in a map.
+///
+/// Values become keys and keys become values.
+///
+/// Examples:
+///   (invert {:a 1 :b 2})  ; => {1: :a, 2: :b}
 fn invert(m) {
     let ks = keys(m)
     reduce(ks, {}, fn(acc, k) {
@@ -1694,7 +2134,12 @@ fn invert(m) {
     })
 }
 
-// map-keys: Apply function to all keys
+/// Apply a function to all keys in a map.
+///
+/// Returns a new map with transformed keys, same values.
+///
+/// Examples:
+///   (map-keys {:a 1 :b 2} keyword->string)  ; => {"a": 1, "b": 2}
 fn map-keys(m, f) {
     map-keys-helper(m, f, keys(m), 0, {})
 }
@@ -1710,7 +2155,12 @@ fn map-keys-helper(m, f, ks, idx, acc) {
     }
 }
 
-// map-vals: Apply function to all values
+/// Apply a function to all values in a map.
+///
+/// Returns a new map with same keys, transformed values.
+///
+/// Examples:
+///   (map-vals {:a 1 :b 2} fn(x) { x * 2 })  ; => {:a 2, :b 4}
 fn map-vals(m, f) {
     map-vals-helper(m, f, keys(m), 0, {})
 }
@@ -1726,7 +2176,11 @@ fn map-vals-helper(m, f, ks, idx, acc) {
     }
 }
 
-// filter-keys: Keep only keys where predicate returns true
+/// Keep only entries where the key satisfies the predicate.
+///
+/// Examples:
+///   (filter-keys {:a 1 :ab 2 :abc 3} fn(k) { length(keyword->string(k)) > 1 })
+///   ; => {:ab 2, :abc 3}
 fn filter-keys(m, pred) {
     filter-keys-helper(m, pred, keys(m), 0, {})
 }
@@ -1745,7 +2199,10 @@ fn filter-keys-helper(m, pred, ks, idx, acc) {
     }
 }
 
-// filter-vals: Keep only entries where value predicate returns true
+/// Keep only entries where the value satisfies the predicate.
+///
+/// Examples:
+///   (filter-vals {:a 1 :b 2 :c 3} fn(v) { v > 1 })  ; => {:b 2, :c 3}
 fn filter-vals(m, pred) {
     filter-vals-helper(m, pred, keys(m), 0, {})
 }
@@ -1837,22 +2294,41 @@ extend PersistentSet with Seqable {
 // Set Utility Functions
 // ============================================================================
 
-// set?: Check if a value is a PersistentSet
+/// Check if a value is a PersistentSet.
+///
+/// Examples:
+///   (set? #{1 2 3})  ; => true
+///   (set? [1 2 3])   ; => false
 fn set?(x) {
     instance-of(x, PersistentSet)
 }
 
-// set-contains?: Check if an element is in a set
+/// Check if an element is in a set.
+///
+/// Examples:
+///   (set-contains? #{1 2 3} 2)  ; => true
+///   (set-contains? #{1 2 3} 5)  ; => false
 fn set-contains?(set, elem) {
     rust-coll/set-contains?(set, elem)
 }
 
-// set-add: Add an element to a set
+/// Add an element to a set.
+///
+/// Returns a new set with the element added (no-op if already present).
+///
+/// Examples:
+///   (set-add #{1 2} 3)  ; => #{1 2 3}
+///   (set-add #{1 2} 2)  ; => #{1 2}
 fn set-add(set, elem) {
     rust-coll/set-add(set, elem)
 }
 
-// set-remove: Remove an element from a set (rebuilds the set)
+/// Remove an element from a set.
+///
+/// Returns a new set without the element.
+///
+/// Examples:
+///   (set-remove #{1 2 3} 2)  ; => #{1 3}
 fn set-remove(set, elem) {
     let elems = rust-coll/set-elements(set)
     set-remove-helper(elems, elem, 0, rust-coll/vec-count(elems), #{})
@@ -1872,7 +2348,12 @@ fn set-remove-helper(elems, to-remove, idx, len, acc) {
     }
 }
 
-// set-union: Return a set containing all elements from both sets
+/// Return the union of two sets.
+///
+/// Contains all elements from both sets.
+///
+/// Examples:
+///   (set-union #{1 2} #{2 3})  ; => #{1 2 3}
 fn set-union(s1, s2) {
     let elems2 = rust-coll/set-elements(s2)
     set-union-helper(s1, elems2, 0, rust-coll/vec-count(elems2))
@@ -1888,7 +2369,12 @@ fn set-union-helper(s1, elems2, idx, len) {
     }
 }
 
-// set-intersection: Return a set containing only elements in both sets
+/// Return the intersection of two sets.
+///
+/// Contains only elements present in both sets.
+///
+/// Examples:
+///   (set-intersection #{1 2 3} #{2 3 4})  ; => #{2 3}
 fn set-intersection(s1, s2) {
     let elems1 = rust-coll/set-elements(s1)
     set-intersection-helper(elems1, s2, 0, rust-coll/vec-count(elems1), #{})
@@ -1908,7 +2394,12 @@ fn set-intersection-helper(elems1, s2, idx, len, acc) {
     }
 }
 
-// set-difference: Return a set containing elements in s1 but not in s2
+/// Return the difference of two sets.
+///
+/// Contains elements in s1 but not in s2.
+///
+/// Examples:
+///   (set-difference #{1 2 3} #{2 3 4})  ; => #{1}
 fn set-difference(s1, s2) {
     let elems1 = rust-coll/set-elements(s1)
     set-difference-helper(elems1, s2, 0, rust-coll/vec-count(elems1), #{})
@@ -1928,7 +2419,13 @@ fn set-difference-helper(elems1, s2, idx, len, acc) {
     }
 }
 
-// set-subset?: Check if all elements of s1 are in s2
+/// Check if s1 is a subset of s2.
+///
+/// Returns true if all elements of s1 are also in s2.
+///
+/// Examples:
+///   (set-subset? #{1 2} #{1 2 3})  ; => true
+///   (set-subset? #{1 4} #{1 2 3})  ; => false
 fn set-subset?(s1, s2) {
     let elems1 = rust-coll/set-elements(s1)
     set-subset-helper(elems1, s2, 0, rust-coll/vec-count(elems1))
@@ -1947,7 +2444,12 @@ fn set-subset-helper(elems1, s2, idx, len) {
     }
 }
 
-// into-set: Convert a collection to a set
+/// Convert a collection to a set.
+///
+/// Removes duplicates since sets only contain unique elements.
+///
+/// Examples:
+///   (into-set [1 2 2 3 3 3])  ; => #{1 2 3}
 fn into-set(coll) {
     reduce(coll, #{}, fn(acc, elem) { rust-coll/set-add(acc, elem) })
 }
@@ -1966,12 +2468,20 @@ extend Regex with Format {
 // Character Code Functions
 // ============================================================================
 
-// char-code: Get the Unicode code point of the first character in a string
+/// Get the Unicode code point of the first character in a string.
+///
+/// Examples:
+///   (char-code "A")  ; => 65
+///   (char-code "a")  ; => 97
 fn char-code(s) {
     builtin/char-code(s)
 }
 
-// char-from-code: Create a single-character string from a Unicode code point
+/// Create a single-character string from a Unicode code point.
+///
+/// Examples:
+///   (char-from-code 65)  ; => "A"
+///   (char-from-code 97)  ; => "a"
 fn char-from-code(code) {
     builtin/char-from-code(code)
 }
@@ -2005,12 +2515,18 @@ enum Result {
     Err { error }
 }
 
-// Create a successful result
+/// Create a successful Result containing a value.
+///
+/// Examples:
+///   (ok 42)  ; => Result.Ok { value: 42 }
 fn ok(value) {
     Result.Ok { value: value }
 }
 
-// Create an error result from an Error enum variant
+/// Create an error Result containing an Error.
+///
+/// Examples:
+///   (err (Error.NotFound { path: "/missing" }))
 fn err(error) {
     Result.Err { error: error }
 }
@@ -2025,7 +2541,11 @@ fn err-code(code, message) {
     Result.Err { error: Error.Other { code: code, message: message } }
 }
 
-// Check if a result is successful
+/// Check if a Result is successful (Ok variant).
+///
+/// Examples:
+///   (ok? (ok 42))                      ; => true
+///   (ok? (err (Error.IO { message: "failed" })))  ; => false
 fn ok?(result) {
     match result {
         Result.Ok { value } => true,
@@ -2033,7 +2553,13 @@ fn ok?(result) {
     }
 }
 
-// Unwrap a result, returning the value or null on error
+/// Unwrap a Result, returning the value or null on error.
+///
+/// Prints an error message if the result is an Err.
+///
+/// Examples:
+///   (unwrap (ok 42))  ; => 42
+///   (unwrap (err (Error.NotFound { path: "/x" })))  ; prints error, returns null
 fn unwrap(result) {
     match result {
         Result.Ok { value } => value,
@@ -2054,7 +2580,11 @@ fn unwrap(result) {
     }
 }
 
-// Unwrap a result, returning the value or a default on error
+/// Unwrap a Result, returning the value or a default on error.
+///
+/// Examples:
+///   (unwrap-or (ok 42) 0)                        ; => 42
+///   (unwrap-or (err (Error.IO { message: "" })) 0)  ; => 0
 fn unwrap-or(result, default) {
     match result {
         Result.Ok { value } => value,
@@ -2096,3 +2626,33 @@ fn get-error(result) {
 // String Utility Functions
 // ============================================================================
 // Note: split() and starts-with?() are provided as builtins - see builtins.rs
+
+// ============================================================================
+// Reflection Utilities (aliases for beagle.reflect)
+// ============================================================================
+
+use beagle.reflect as reflect
+
+/// Get documentation for a function or type.
+///
+/// Returns the docstring associated with the value, or null if none exists.
+/// Works with functions, structs, enums, and other documented values.
+///
+/// Examples:
+///   doc(map)       ; => "Apply a function to each element..."
+///   doc(Result)    ; => documentation for Result enum
+fn doc(value) {
+    reflect/doc(value)
+}
+
+/// Search for functions by name or docstring.
+///
+/// Returns a list of fully-qualified function names that match the query.
+/// The query is matched against both function names and their docstrings.
+///
+/// Examples:
+///   apropos("file")    ; => ["beagle.fs/read-file", "beagle.fs/write-file", ...]
+///   apropos("reduce")  ; => ["beagle.core/reduce", "beagle.core/reduce-right"]
+fn apropos(query) {
+    reflect/apropos(query)
+}

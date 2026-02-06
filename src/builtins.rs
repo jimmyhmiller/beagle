@@ -8643,9 +8643,21 @@ impl Runtime {
             11,
         )?;
 
-        self.add_builtin_function("beagle.core/_println", println_value as *const u8, false, 1)?;
+        self.add_builtin_with_doc(
+            "beagle.core/_println",
+            println_value as *const u8,
+            false,
+            &["value"],
+            "Print a value followed by a newline to standard output.",
+        )?;
 
-        self.add_builtin_function("beagle.core/_print", print_value as *const u8, false, 1)?;
+        self.add_builtin_with_doc(
+            "beagle.core/_print",
+            print_value as *const u8,
+            false,
+            &["value"],
+            "Print a value to standard output without a trailing newline.",
+        )?;
 
         // Multi-arity dispatch builtin (needs stack/frame pointer for throwing ArityError)
         self.add_builtin_function_with_fp(
@@ -8656,21 +8668,22 @@ impl Runtime {
             4, // stack_pointer + frame_pointer + multi_arity_obj + arg_count
         )?;
 
-        // to_string now takes (stack_pointer, frame_pointer, value)
-        self.add_builtin_function_with_fp(
+        // to-string: Convert any value to its string representation
+        self.add_builtin_with_doc(
             "beagle.core/to-string",
             to_string as *const u8,
             true,
-            true,
-            3,
+            &["value"],
+            "Convert any value to its string representation.\n\nExamples:\n  (to-string 42)     ; => \"42\"\n  (to-string true)   ; => \"true\"\n  (to-string [1 2])  ; => \"[1, 2]\"",
         )?;
-        // to_number now takes (stack_pointer, frame_pointer, value)
-        self.add_builtin_function_with_fp(
+
+        // to-number: Parse a string into a number
+        self.add_builtin_with_doc(
             "beagle.core/to-number",
             to_number as *const u8,
             true,
-            true,
-            3,
+            &["string"],
+            "Parse a string into a number. Throws an error if the string is not a valid number.\n\nExamples:\n  (to-number \"42\")   ; => 42\n  (to-number \"-5\")   ; => -5",
         )?;
 
         // allocate now takes (stack_pointer, frame_pointer, size)
@@ -8763,33 +8776,41 @@ impl Runtime {
             5, // stack_pointer, frame_pointer, first_arg, cache_location, dispatch_table_ptr
         )?;
 
-        // type_of now takes (stack_pointer, frame_pointer, value)
-        self.add_builtin_function_with_fp(
+        // type-of: Get the type of a value
+        self.add_builtin_with_doc(
             "beagle.core/type-of",
             type_of as *const u8,
             true,
-            true,
-            3,
+            &["value"],
+            "Return a type descriptor for the given value.\n\nReturns a Struct instance representing the type (e.g., Int, String, Array).\n\nExamples:\n  (type-of 42)        ; => Int\n  (type-of \"hello\")   ; => String\n  (type-of [1 2 3])   ; => Array",
         )?;
 
-        // get_os now takes (stack_pointer, frame_pointer)
-        self.add_builtin_function_with_fp(
+        // get-os: Get the operating system name
+        self.add_builtin_with_doc(
             "beagle.core/get-os",
             get_os as *const u8,
             true,
-            true,
-            2,
+            &[],
+            "Return the name of the current operating system.\n\nReturns one of: \"macos\", \"linux\", \"windows\", or \"unknown\".",
         )?;
 
-        // atom-address returns the raw usize value of any value (useful for async coordination)
-        self.add_builtin_function(
+        // atom-address: Get the memory address of a value
+        self.add_builtin_with_doc(
             "beagle.core/atom-address",
             atom_address as *const u8,
             false,
-            1,
+            &["value"],
+            "Return the raw memory address of a value as an integer.\n\nUseful for identity comparisons and async coordination.",
         )?;
 
-        self.add_builtin_function("beagle.core/equal", equal as *const u8, false, 2)?;
+        // equal: Deep equality comparison
+        self.add_builtin_with_doc(
+            "beagle.core/equal",
+            equal as *const u8,
+            false,
+            &["a", "b"],
+            "Compare two values for deep equality.\n\nReturns true if the values are structurally equal, false otherwise.\n\nExamples:\n  (equal 1 1)           ; => true\n  (equal [1 2] [1 2])   ; => true\n  (equal {:a 1} {:a 1}) ; => true",
+        )?;
 
         // write_field now takes (stack_pointer, frame_pointer, struct_pointer, str_constant_ptr, property_cache_location, value)
         self.add_builtin_function_with_fp(
@@ -8868,13 +8889,13 @@ impl Runtime {
             6,
         )?;
 
-        // apply takes (stack_pointer, frame_pointer, function, args_array)
-        self.add_builtin_function_with_fp(
+        // Function application
+        self.add_builtin_with_doc(
             "beagle.core/apply",
             apply_function as *const u8,
             true,
-            true,
-            4, // stack_pointer + frame_pointer + function + args_array
+            &["f", "args"],
+            "Apply a function to an array of arguments.\n\nExamples:\n  (apply + [1 2 3])      ; => 6\n  (apply max [3 7 2])    ; => 7\n  (apply my-fn [a b c])  ; equivalent to (my-fn a b c)",
         )?;
 
         self.add_builtin_function(
@@ -8963,18 +8984,20 @@ impl Runtime {
             2,
         )?;
 
-        self.add_builtin_function(
+        self.add_builtin_with_doc(
             "beagle.core/set-thread-exception-handler!",
             set_thread_exception_handler as *const u8,
             false,
-            1, // handler_fn
+            &["handler"],
+            "Set an exception handler for the current thread.\n\nThe handler function receives the exception value when an uncaught exception occurs.",
         )?;
 
-        self.add_builtin_function(
+        self.add_builtin_with_doc(
             "beagle.core/set-default-exception-handler!",
             set_default_exception_handler as *const u8,
             false,
-            1, // handler_fn
+            &["handler"],
+            "Set the default exception handler for all threads.\n\nThis handler is used when a thread doesn't have its own handler set.",
         )?;
 
         self.add_builtin_function(
@@ -8986,217 +9009,308 @@ impl Runtime {
 
         self.add_builtin_function("beagle.builtin/assert!", placeholder as *const u8, false, 0)?;
 
-        // gc needs both stack_pointer and frame_pointer
-        // stack_pointer is arg 0, frame_pointer is arg 1
-        self.add_builtin_function_with_fp("beagle.core/gc", gc as *const u8, true, true, 2)?;
+        // Garbage collection
+        self.add_builtin_with_doc(
+            "beagle.core/gc",
+            gc as *const u8,
+            true,
+            &[],
+            "Trigger garbage collection manually.\n\nNormally GC runs automatically, but this can be useful for testing or freeing memory at specific points.",
+        )?;
 
-        // Math builtins - all now take (stack_pointer, frame_pointer, value)
-        self.add_builtin_function_with_fp(
+        // ============================================================================
+        // Math Functions
+        // ============================================================================
+
+        self.add_builtin_with_doc(
             "beagle.core/sqrt",
             sqrt_builtin as *const u8,
             true,
-            true,
-            3,
+            &["x"],
+            "Return the square root of x.\n\nExamples:\n  (sqrt 4)    ; => 2.0\n  (sqrt 2)    ; => 1.414...",
         )?;
-        self.add_builtin_function_with_fp(
+
+        self.add_builtin_with_doc(
             "beagle.core/floor",
             floor_builtin as *const u8,
             true,
-            true,
-            3,
+            &["x"],
+            "Return the largest integer less than or equal to x.\n\nExamples:\n  (floor 3.7)   ; => 3\n  (floor -2.3)  ; => -3",
         )?;
-        self.add_builtin_function_with_fp(
+
+        self.add_builtin_with_doc(
             "beagle.core/ceil",
             ceil_builtin as *const u8,
             true,
-            true,
-            3,
+            &["x"],
+            "Return the smallest integer greater than or equal to x.\n\nExamples:\n  (ceil 3.2)   ; => 4\n  (ceil -2.7)  ; => -2",
         )?;
-        self.add_builtin_function_with_fp(
+
+        self.add_builtin_with_doc(
             "beagle.core/abs",
             abs_builtin as *const u8,
             true,
-            true,
-            3,
+            &["x"],
+            "Return the absolute value of x.\n\nExamples:\n  (abs -5)   ; => 5\n  (abs 3.2)  ; => 3.2",
         )?;
-        self.add_builtin_function_with_fp(
+
+        self.add_builtin_with_doc(
             "beagle.core/round",
             round_builtin as *const u8,
             true,
-            true,
-            3,
+            &["x"],
+            "Round x to the nearest integer.\n\nExamples:\n  (round 3.4)  ; => 3\n  (round 3.6)  ; => 4",
         )?;
-        self.add_builtin_function_with_fp(
+
+        self.add_builtin_with_doc(
             "beagle.core/truncate",
             truncate_builtin as *const u8,
             true,
-            true,
-            3,
+            &["x"],
+            "Truncate x toward zero (remove the fractional part).\n\nExamples:\n  (truncate 3.7)   ; => 3\n  (truncate -3.7)  ; => -3",
         )?;
-        self.add_builtin_function_with_fp(
+
+        self.add_builtin_with_doc(
             "beagle.core/max",
             max_builtin as *const u8,
             true,
-            true,
-            4,
+            &["a", "b"],
+            "Return the larger of two numbers.\n\nExamples:\n  (max 3 7)  ; => 7\n  (max -1 -5)  ; => -1",
         )?;
-        self.add_builtin_function_with_fp(
+
+        self.add_builtin_with_doc(
             "beagle.core/min",
             min_builtin as *const u8,
             true,
-            true,
-            4,
+            &["a", "b"],
+            "Return the smaller of two numbers.\n\nExamples:\n  (min 3 7)  ; => 3\n  (min -1 -5)  ; => -5",
         )?;
-        self.add_builtin_function("beagle.core/even?", is_even as *const u8, false, 1)?;
-        self.add_builtin_function("beagle.core/odd?", is_odd as *const u8, false, 1)?;
-        self.add_builtin_function("beagle.core/positive?", is_positive as *const u8, false, 1)?;
-        self.add_builtin_function("beagle.core/negative?", is_negative as *const u8, false, 1)?;
-        self.add_builtin_function("beagle.core/zero?", is_zero as *const u8, false, 1)?;
-        self.add_builtin_function_with_fp(
+
+        self.add_builtin_with_doc(
+            "beagle.core/even?",
+            is_even as *const u8,
+            false,
+            &["n"],
+            "Return true if n is even.\n\nExamples:\n  (even? 4)  ; => true\n  (even? 3)  ; => false",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.core/odd?",
+            is_odd as *const u8,
+            false,
+            &["n"],
+            "Return true if n is odd.\n\nExamples:\n  (odd? 3)  ; => true\n  (odd? 4)  ; => false",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.core/positive?",
+            is_positive as *const u8,
+            false,
+            &["n"],
+            "Return true if n is positive (greater than zero).\n\nExamples:\n  (positive? 5)   ; => true\n  (positive? -3)  ; => false\n  (positive? 0)   ; => false",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.core/negative?",
+            is_negative as *const u8,
+            false,
+            &["n"],
+            "Return true if n is negative (less than zero).\n\nExamples:\n  (negative? -3)  ; => true\n  (negative? 5)   ; => false\n  (negative? 0)   ; => false",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.core/zero?",
+            is_zero as *const u8,
+            false,
+            &["n"],
+            "Return true if n is zero.\n\nExamples:\n  (zero? 0)  ; => true\n  (zero? 5)  ; => false",
+        )?;
+
+        self.add_builtin_with_doc(
             "beagle.core/clamp",
             clamp_builtin as *const u8,
             true,
-            true,
-            5,
+            &["x", "min_val", "max_val"],
+            "Clamp x to be within the range [min_val, max_val].\n\nExamples:\n  (clamp 5 0 10)   ; => 5\n  (clamp -5 0 10)  ; => 0\n  (clamp 15 0 10)  ; => 10",
         )?;
-        self.add_builtin_function("beagle.core/gcd", gcd_builtin as *const u8, false, 2)?;
-        self.add_builtin_function("beagle.core/lcm", lcm_builtin as *const u8, false, 2)?;
-        self.add_builtin_function_with_fp(
+
+        self.add_builtin_with_doc(
+            "beagle.core/gcd",
+            gcd_builtin as *const u8,
+            false,
+            &["a", "b"],
+            "Return the greatest common divisor of a and b.\n\nExamples:\n  (gcd 12 8)  ; => 4\n  (gcd 17 5)  ; => 1",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.core/lcm",
+            lcm_builtin as *const u8,
+            false,
+            &["a", "b"],
+            "Return the least common multiple of a and b.\n\nExamples:\n  (lcm 4 6)  ; => 12\n  (lcm 3 5)  ; => 15",
+        )?;
+
+        self.add_builtin_with_doc(
             "beagle.core/random",
             random_builtin as *const u8,
             true,
-            true,
-            2,
+            &[],
+            "Return a random floating-point number between 0.0 (inclusive) and 1.0 (exclusive).\n\nExamples:\n  (random)  ; => 0.7234... (varies)",
         )?;
-        self.add_builtin_function(
+
+        self.add_builtin_with_doc(
             "beagle.core/random-int",
             random_int_builtin as *const u8,
             false,
-            1,
+            &["max"],
+            "Return a random integer from 0 (inclusive) to max (exclusive).\n\nExamples:\n  (random-int 10)  ; => 7 (varies, 0-9)",
         )?;
-        self.add_builtin_function(
+
+        self.add_builtin_with_doc(
             "beagle.core/random-range",
             random_range_builtin as *const u8,
             false,
-            2,
+            &["min", "max"],
+            "Return a random integer from min (inclusive) to max (exclusive).\n\nExamples:\n  (random-range 5 10)  ; => 7 (varies, 5-9)",
         )?;
-        self.add_builtin_function_with_fp(
+
+        self.add_builtin_with_doc(
             "beagle.core/sin",
             sin_builtin as *const u8,
             true,
-            true,
-            3,
+            &["x"],
+            "Return the sine of x (in radians).\n\nExamples:\n  (sin 0)       ; => 0.0\n  (sin (/ PI 2))  ; => 1.0",
         )?;
-        self.add_builtin_function_with_fp(
+
+        self.add_builtin_with_doc(
             "beagle.core/cos",
             cos_builtin as *const u8,
             true,
-            true,
-            3,
+            &["x"],
+            "Return the cosine of x (in radians).\n\nExamples:\n  (cos 0)   ; => 1.0\n  (cos PI)  ; => -1.0",
         )?;
-        self.add_builtin_function_with_fp(
+
+        self.add_builtin_with_doc(
             "beagle.core/tan",
             tan_builtin as *const u8,
             true,
-            true,
-            3,
+            &["x"],
+            "Return the tangent of x (in radians).\n\nExamples:\n  (tan 0)  ; => 0.0",
         )?;
-        self.add_builtin_function_with_fp(
+
+        self.add_builtin_with_doc(
             "beagle.core/asin",
             asin_builtin as *const u8,
             true,
-            true,
-            3,
+            &["x"],
+            "Return the arc sine (inverse sine) of x in radians.\n\nThe result is in the range [-PI/2, PI/2]. x must be in [-1, 1].",
         )?;
-        self.add_builtin_function_with_fp(
+
+        self.add_builtin_with_doc(
             "beagle.core/acos",
             acos_builtin as *const u8,
             true,
-            true,
-            3,
+            &["x"],
+            "Return the arc cosine (inverse cosine) of x in radians.\n\nThe result is in the range [0, PI]. x must be in [-1, 1].",
         )?;
-        self.add_builtin_function_with_fp(
+
+        self.add_builtin_with_doc(
             "beagle.core/atan",
             atan_builtin as *const u8,
             true,
-            true,
-            3,
+            &["x"],
+            "Return the arc tangent (inverse tangent) of x in radians.\n\nThe result is in the range [-PI/2, PI/2].",
         )?;
-        self.add_builtin_function_with_fp(
+
+        self.add_builtin_with_doc(
             "beagle.core/atan2",
             atan2_builtin as *const u8,
             true,
-            true,
-            4,
+            &["y", "x"],
+            "Return the arc tangent of y/x in radians, using signs to determine the quadrant.\n\nThe result is in the range [-PI, PI].",
         )?;
-        self.add_builtin_function_with_fp(
+
+        self.add_builtin_with_doc(
             "beagle.core/exp",
             exp_builtin as *const u8,
             true,
-            true,
-            3,
+            &["x"],
+            "Return e raised to the power x (e^x).\n\nExamples:\n  (exp 0)  ; => 1.0\n  (exp 1)  ; => 2.718...",
         )?;
-        self.add_builtin_function_with_fp(
+
+        self.add_builtin_with_doc(
             "beagle.core/log",
             log_builtin as *const u8,
             true,
-            true,
-            3,
+            &["x"],
+            "Return the natural logarithm (base e) of x.\n\nExamples:\n  (log 1)  ; => 0.0\n  (log E)  ; => 1.0",
         )?;
-        self.add_builtin_function_with_fp(
+
+        self.add_builtin_with_doc(
             "beagle.core/log10",
             log10_builtin as *const u8,
             true,
-            true,
-            3,
+            &["x"],
+            "Return the base-10 logarithm of x.\n\nExamples:\n  (log10 10)   ; => 1.0\n  (log10 100)  ; => 2.0",
         )?;
-        self.add_builtin_function_with_fp(
+
+        self.add_builtin_with_doc(
             "beagle.core/log2",
             log2_builtin as *const u8,
             true,
-            true,
-            3,
+            &["x"],
+            "Return the base-2 logarithm of x.\n\nExamples:\n  (log2 2)  ; => 1.0\n  (log2 8)  ; => 3.0",
         )?;
-        self.add_builtin_function_with_fp(
+
+        self.add_builtin_with_doc(
             "beagle.core/pow",
             pow_builtin as *const u8,
             true,
-            true,
-            4,
+            &["base", "exponent"],
+            "Return base raised to the power exponent.\n\nExamples:\n  (pow 2 3)  ; => 8.0\n  (pow 10 2) ; => 100.0",
         )?;
-        self.add_builtin_function_with_fp(
+
+        self.add_builtin_with_doc(
             "beagle.core/to-float",
             to_float_builtin as *const u8,
             true,
-            true,
-            3,
+            &["x"],
+            "Convert an integer to a floating-point number.\n\nExamples:\n  (to-float 42)  ; => 42.0",
         )?;
 
-        // new_thread now takes (stack_pointer, frame_pointer, function)
-        self.add_builtin_function_with_fp(
+        // ============================================================================
+        // Threading
+        // ============================================================================
+
+        self.add_builtin_with_doc(
             "beagle.core/thread",
             new_thread as *const u8,
             true,
-            true,
-            3,
+            &["f"],
+            "Spawn a new thread to execute function f.\n\nReturns a Thread object that can be used with thread-join.\n\nExamples:\n  (let t (thread fn() { expensive-computation() }))\n  (thread-join t)  ; wait for result",
         )?;
 
-        self.add_builtin_function(
+        // ============================================================================
+        // FFI (Foreign Function Interface)
+        // ============================================================================
+
+        self.add_builtin_with_doc(
             "beagle.ffi/load-library",
             load_library as *const u8,
             false,
-            1,
+            &["path"],
+            "Load a dynamic library (shared object) from the given path.\n\nReturns a Library struct that can be used with get-function.\n\nExamples:\n  (let lib (ffi/load-library \"libm.dylib\"))",
         )?;
 
-        // get_function now takes (stack_pointer, frame_pointer, library_struct, function_name, types, return_type)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.ffi/get-function",
             get_function as *const u8,
             true,
-            true,
-            6,
+            &["library", "name", "arg_types", "return_type"],
+            "Get a function from a loaded library.\n\narg_types is an array of Type values, return_type is a Type.\n\nExamples:\n  (let sqrt-fn (ffi/get-function lib \"sqrt\" [Type.F64] Type.F64))",
         )?;
 
+        // Internal FFI call function
         self.add_builtin_function(
             "beagle.ffi/call-ffi-info",
             call_ffi_info as *const u8,
@@ -9204,78 +9318,141 @@ impl Runtime {
             8,
         )?;
 
-        self.add_builtin_function("beagle.ffi/allocate", ffi_allocate as *const u8, false, 1)?;
-        self.add_builtin_function(
+        self.add_builtin_with_doc(
+            "beagle.ffi/allocate",
+            ffi_allocate as *const u8,
+            false,
+            &["size"],
+            "Allocate size bytes of unmanaged memory.\n\nReturns a Pointer. Must be freed with deallocate.",
+        )?;
+
+        self.add_builtin_with_doc(
             "beagle.ffi/deallocate",
             ffi_deallocate as *const u8,
             false,
-            1,
+            &["ptr"],
+            "Free memory allocated with allocate.",
         )?;
 
-        self.add_builtin_function("beagle.ffi/get-u32", ffi_get_u32 as *const u8, false, 2)?;
+        self.add_builtin_with_doc(
+            "beagle.ffi/get-u32",
+            ffi_get_u32 as *const u8,
+            false,
+            &["ptr", "offset"],
+            "Read an unsigned 32-bit integer from memory at ptr + offset.",
+        )?;
 
-        self.add_builtin_function("beagle.ffi/set-i16", ffi_set_i16 as *const u8, false, 3)?;
+        self.add_builtin_with_doc(
+            "beagle.ffi/set-i16",
+            ffi_set_i16 as *const u8,
+            false,
+            &["ptr", "offset", "value"],
+            "Write a signed 16-bit integer to memory at ptr + offset.",
+        )?;
 
-        self.add_builtin_function("beagle.ffi/set-i32", ffi_set_i32 as *const u8, false, 3)?;
+        self.add_builtin_with_doc(
+            "beagle.ffi/set-i32",
+            ffi_set_i32 as *const u8,
+            false,
+            &["ptr", "offset", "value"],
+            "Write a signed 32-bit integer to memory at ptr + offset.",
+        )?;
 
-        self.add_builtin_function("beagle.ffi/set-u8", ffi_set_u8 as *const u8, false, 3)?;
+        self.add_builtin_with_doc(
+            "beagle.ffi/set-u8",
+            ffi_set_u8 as *const u8,
+            false,
+            &["ptr", "offset", "value"],
+            "Write an unsigned 8-bit integer (byte) to memory at ptr + offset.",
+        )?;
 
-        self.add_builtin_function("beagle.ffi/get-u8", ffi_get_u8 as *const u8, false, 2)?;
+        self.add_builtin_with_doc(
+            "beagle.ffi/get-u8",
+            ffi_get_u8 as *const u8,
+            false,
+            &["ptr", "offset"],
+            "Read an unsigned 8-bit integer (byte) from memory at ptr + offset.",
+        )?;
 
-        self.add_builtin_function("beagle.ffi/get-i32", ffi_get_i32 as *const u8, false, 2)?;
+        self.add_builtin_with_doc(
+            "beagle.ffi/get-i32",
+            ffi_get_i32 as *const u8,
+            false,
+            &["ptr", "offset"],
+            "Read a signed 32-bit integer from memory at ptr + offset.",
+        )?;
 
-        self.add_builtin_function(
+        self.add_builtin_with_doc(
             "beagle.ffi/get-string",
             ffi_get_string as *const u8,
             true,
-            4,
+            &["buffer", "offset", "length"],
+            "Read a string from a buffer at the given offset with the specified length.\n\nExamples:\n  (ffi/get-string buf 0 10)  ; Read 10 bytes starting at offset 0",
         )?;
 
-        self.add_builtin_function(
+        self.add_builtin_with_doc(
             "beagle.ffi/create-array",
             ffi_create_array as *const u8,
             true,
-            3,
+            &["size"],
+            "Create a new FFI buffer/array of the given size in bytes.",
         )?;
 
-        self.add_builtin_function(
+        self.add_builtin_with_doc(
             "beagle.ffi/copy-bytes",
             ffi_copy_bytes as *const u8,
             false,
-            5,
+            &["src", "src_offset", "dest", "dest_offset", "length"],
+            "Copy length bytes from src+src_offset to dest+dest_offset.",
         )?;
 
-        self.add_builtin_function("beagle.ffi/realloc", ffi_realloc as *const u8, false, 2)?;
+        self.add_builtin_with_doc(
+            "beagle.ffi/realloc",
+            ffi_realloc as *const u8,
+            false,
+            &["ptr", "new_size"],
+            "Reallocate memory to a new size, preserving contents.",
+        )?;
 
-        self.add_builtin_function(
+        self.add_builtin_with_doc(
             "beagle.ffi/buffer-size",
             ffi_buffer_size as *const u8,
             false,
-            1,
+            &["buffer"],
+            "Get the size of a buffer in bytes.",
         )?;
 
-        self.add_builtin_function(
+        self.add_builtin_with_doc(
             "beagle.ffi/write-buffer-offset",
             ffi_write_buffer_offset as *const u8,
             false,
-            4,
+            &["buffer", "offset", "value", "size"],
+            "Write a value to a buffer at a given offset.",
         )?;
 
-        self.add_builtin_function(
+        self.add_builtin_with_doc(
             "beagle.ffi/translate-bytes",
             ffi_translate_bytes as *const u8,
             false,
-            4,
+            &["buffer", "offset", "length", "table"],
+            "Translate bytes using a lookup table.",
         )?;
 
-        self.add_builtin_function(
+        self.add_builtin_with_doc(
             "beagle.ffi/reverse-bytes",
             ffi_reverse_bytes as *const u8,
             false,
-            3,
+            &["buffer", "offset", "length"],
+            "Reverse bytes in place in a buffer.",
         )?;
 
-        self.add_builtin_function("beagle.ffi/find-byte", ffi_find_byte as *const u8, false, 4)?;
+        self.add_builtin_with_doc(
+            "beagle.ffi/find-byte",
+            ffi_find_byte as *const u8,
+            false,
+            &["buffer", "offset", "length", "byte"],
+            "Find the first occurrence of a byte in a buffer.\n\nReturns the offset or -1 if not found.",
+        )?;
 
         self.add_builtin_function(
             "beagle.ffi/copy-bytes_filter",
@@ -9396,20 +9573,48 @@ impl Runtime {
             3,
         )?;
 
-        // eval now takes (stack_pointer, frame_pointer, code)
-        self.add_builtin_function_with_fp("beagle.core/eval", eval as *const u8, true, true, 3)?;
+        // ============================================================================
+        // Runtime Evaluation and Introspection
+        // ============================================================================
 
-        self.add_builtin_function("beagle.core/sleep", sleep as *const u8, false, 1)?;
+        self.add_builtin_with_doc(
+            "beagle.core/eval",
+            eval as *const u8,
+            true,
+            &["code"],
+            "Evaluate a string as Beagle code at runtime.\n\nReturns the result of the evaluated expression.\n\nExamples:\n  (eval \"(+ 1 2)\")  ; => 3",
+        )?;
 
-        self.add_builtin_function("beagle.core/time-now", time_now as *const u8, false, 0)?;
+        self.add_builtin_with_doc(
+            "beagle.core/sleep",
+            sleep as *const u8,
+            false,
+            &["ms"],
+            "Pause execution for the specified number of milliseconds.\n\nExamples:\n  (sleep 1000)  ; sleep for 1 second",
+        )?;
 
-        self.add_builtin_function("beagle.core/thread-id", thread_id as *const u8, false, 0)?;
+        self.add_builtin_with_doc(
+            "beagle.core/time-now",
+            time_now as *const u8,
+            false,
+            &[],
+            "Return the current time in milliseconds since the Unix epoch.\n\nUseful for timing operations or generating timestamps.",
+        )?;
 
-        self.add_builtin_function(
+        self.add_builtin_with_doc(
+            "beagle.core/thread-id",
+            thread_id as *const u8,
+            false,
+            &[],
+            "Return the ID of the current thread as an integer.",
+        )?;
+
+        self.add_builtin_with_doc(
             "beagle.core/get-cpu-count",
             get_cpu_count as *const u8,
             false,
-            0,
+            &[],
+            "Return the number of CPU cores available on the system.",
         )?;
 
         // Event loop builtins for async I/O
@@ -9669,164 +9874,157 @@ impl Runtime {
             4,
         )?;
 
-        // substring now takes (stack_pointer, frame_pointer, string, start, length)
-        self.add_builtin_function_with_fp(
+        // String functions
+        self.add_builtin_with_doc(
             "beagle.core/substring",
             substring as *const u8,
             true,
-            true,
-            5,
+            &["string", "start", "length"],
+            "Extract a substring from a string.\n\nArguments:\n  string - The source string\n  start  - Starting index (0-based)\n  length - Number of characters to extract\n\nExamples:\n  (substring \"hello\" 1 3)  ; => \"ell\"",
         )?;
-        // uppercase now takes (stack_pointer, frame_pointer, string)
-        self.add_builtin_function_with_fp(
+
+        self.add_builtin_with_doc(
             "beagle.core/uppercase",
             uppercase as *const u8,
             true,
-            true,
-            3,
+            &["string"],
+            "Convert a string to uppercase.\n\nExamples:\n  (uppercase \"hello\")  ; => \"HELLO\"",
         )?;
 
-        // lowercase now takes (stack_pointer, frame_pointer, string)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.core/lowercase",
             lowercase as *const u8,
             true,
-            true,
-            3,
+            &["string"],
+            "Convert a string to lowercase.\n\nExamples:\n  (lowercase \"HELLO\")  ; => \"hello\"",
         )?;
 
-        // split now takes (stack_pointer, frame_pointer, string, delimiter)
-        self.add_builtin_function_with_fp("beagle.core/split", split as *const u8, true, true, 4)?;
+        self.add_builtin_with_doc(
+            "beagle.core/split",
+            split as *const u8,
+            true,
+            &["string", "delimiter"],
+            "Split a string into an array of substrings.\n\nExamples:\n  (split \"a,b,c\" \",\")  ; => [\"a\", \"b\", \"c\"]",
+        )?;
 
-        // join is now implemented in std.bg using Indexed and Length protocols
+        self.add_builtin_with_doc(
+            "beagle.core/trim",
+            trim as *const u8,
+            true,
+            &["string"],
+            "Remove leading and trailing whitespace from a string.\n\nExamples:\n  (trim \"  hello  \")  ; => \"hello\"",
+        )?;
 
-        // trim now takes (stack_pointer, frame_pointer, string)
-        self.add_builtin_function_with_fp("beagle.core/trim", trim as *const u8, true, true, 3)?;
-
-        // trim-left now takes (stack_pointer, frame_pointer, string)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.core/trim-left",
             trim_left as *const u8,
             true,
-            true,
-            3,
+            &["string"],
+            "Remove leading whitespace from a string.\n\nExamples:\n  (trim-left \"  hello  \")  ; => \"hello  \"",
         )?;
 
-        // trim-right now takes (stack_pointer, frame_pointer, string)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.core/trim-right",
             trim_right as *const u8,
             true,
-            true,
-            3,
+            &["string"],
+            "Remove trailing whitespace from a string.\n\nExamples:\n  (trim-right \"  hello  \")  ; => \"  hello\"",
         )?;
 
-        // starts-with? now takes (stack_pointer, frame_pointer, string, prefix)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.core/starts-with?",
             starts_with as *const u8,
             true,
-            true,
-            4,
+            &["string", "prefix"],
+            "Check if a string starts with a given prefix.\n\nExamples:\n  (starts-with? \"hello\" \"he\")  ; => true",
         )?;
 
-        // ends-with? now takes (stack_pointer, frame_pointer, string, suffix)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.core/ends-with?",
             ends_with as *const u8,
             true,
-            true,
-            4,
+            &["string", "suffix"],
+            "Check if a string ends with a given suffix.\n\nExamples:\n  (ends-with? \"hello\" \"lo\")  ; => true",
         )?;
 
-        // contains? now takes (stack_pointer, frame_pointer, string, substr)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.core/contains?",
             string_contains as *const u8,
             true,
-            true,
-            4,
+            &["string", "substr"],
+            "Check if a string contains a substring.\n\nExamples:\n  (contains? \"hello\" \"ell\")  ; => true",
         )?;
 
-        // index-of now takes (stack_pointer, frame_pointer, string, substr)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.core/index-of",
             index_of as *const u8,
             true,
-            true,
-            4,
+            &["string", "substr"],
+            "Find the first index of a substring in a string.\n\nReturns -1 if not found.\n\nExamples:\n  (index-of \"hello\" \"l\")  ; => 2",
         )?;
 
-        // last-index-of now takes (stack_pointer, frame_pointer, string, substr)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.core/last-index-of",
             last_index_of as *const u8,
             true,
-            true,
-            4,
+            &["string", "substr"],
+            "Find the last index of a substring in a string.\n\nReturns -1 if not found.\n\nExamples:\n  (last-index-of \"hello\" \"l\")  ; => 3",
         )?;
 
-        // replace now takes (stack_pointer, frame_pointer, string, from, to)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.core/replace",
             replace_string as *const u8,
             true,
-            true,
-            5,
+            &["string", "from", "to"],
+            "Replace all occurrences of a substring.\n\nExamples:\n  (replace \"hello\" \"l\" \"L\")  ; => \"heLLo\"",
         )?;
 
-        // blank? now takes (stack_pointer, frame_pointer, string)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.core/blank?",
             blank_string as *const u8,
             true,
-            true,
-            3,
+            &["string"],
+            "Check if a string is empty or contains only whitespace.\n\nExamples:\n  (blank? \"\")       ; => true\n  (blank? \"  \")     ; => true\n  (blank? \"hello\")  ; => false",
         )?;
 
-        // replace-first now takes (stack_pointer, frame_pointer, string, from, to)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.core/replace-first",
             replace_first_string as *const u8,
             true,
-            true,
-            5,
+            &["string", "from", "to"],
+            "Replace the first occurrence of a substring.\n\nExamples:\n  (replace-first \"hello\" \"l\" \"L\")  ; => \"heLlo\"",
         )?;
 
-        // pad-left now takes (stack_pointer, frame_pointer, string, width, pad_char)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.core/pad-left",
             pad_left_string as *const u8,
             true,
-            true,
-            5,
+            &["string", "width", "pad_char"],
+            "Pad a string on the left to a given width.\n\nExamples:\n  (pad-left \"42\" 5 \"0\")  ; => \"00042\"",
         )?;
 
-        // pad-right now takes (stack_pointer, frame_pointer, string, width, pad_char)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.core/pad-right",
             pad_right_string as *const u8,
             true,
-            true,
-            5,
+            &["string", "width", "pad_char"],
+            "Pad a string on the right to a given width.\n\nExamples:\n  (pad-right \"42\" 5 \"0\")  ; => \"42000\"",
         )?;
 
-        // lines now takes (stack_pointer, frame_pointer, string)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.core/lines",
             lines_string as *const u8,
             true,
-            true,
-            3,
+            &["string"],
+            "Split a string into an array of lines.\n\nExamples:\n  (lines \"a\\nb\\nc\")  ; => [\"a\", \"b\", \"c\"]",
         )?;
 
-        // words now takes (stack_pointer, frame_pointer, string)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.core/words",
             words_string as *const u8,
             true,
-            true,
-            3,
+            &["string"],
+            "Split a string into an array of words (whitespace-separated).\n\nExamples:\n  (words \"hello world\")  ; => [\"hello\", \"world\"]",
         )?;
 
         // hash now takes (stack_pointer, frame_pointer, value)
@@ -10084,179 +10282,160 @@ impl Runtime {
         // Reflect API - Type-centric Introspection (beagle.reflect namespace)
         // ============================================================================
 
-        // reflect/type-of(value) - Get type descriptor for any value
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.reflect/type-of",
             reflect_type_of as *const u8,
             true,
-            true,
-            3, // stack_pointer, frame_pointer, value
+            &["value"],
+            "Get a type descriptor for any value.\n\nReturns a type descriptor that can be used with other reflect functions.\n\nExamples:\n  (reflect/type-of 42)        ; => <type Int>\n  (reflect/type-of \"hello\")   ; => <type String>",
         )?;
 
-        // reflect/kind(descriptor) - Get type kind as keyword (:struct, :enum, :function, :primitive)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.reflect/kind",
             reflect_kind as *const u8,
             true,
-            true,
-            3, // stack_pointer, frame_pointer, descriptor
+            &["descriptor"],
+            "Get the type kind from a type descriptor.\n\nReturns a keyword: :struct, :enum, :function, or :primitive.\n\nExamples:\n  (reflect/kind (reflect/type-of some-struct))  ; => :struct",
         )?;
 
-        // reflect/name(descriptor) - Get type name as string
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.reflect/name",
             reflect_name as *const u8,
             true,
-            true,
-            3, // stack_pointer, frame_pointer, descriptor
+            &["descriptor"],
+            "Get the type name from a type descriptor.\n\nReturns the name as a string.\n\nExamples:\n  (reflect/name (reflect/type-of 42))  ; => \"Int\"",
         )?;
 
-        // reflect/doc(descriptor) - Get docstring for type
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.reflect/doc",
             reflect_doc as *const u8,
             true,
-            true,
-            3, // stack_pointer, frame_pointer, descriptor
+            &["descriptor"],
+            "Get the docstring for a type or function.\n\nReturns the documentation string or null if none available.\n\nExamples:\n  (reflect/doc (reflect/type-of some-fn))  ; => \"Documentation...\"\n  (reflect/doc (reflect/type-of 42))  ; => null",
         )?;
 
-        // reflect/fields(descriptor) - Get field names for struct types
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.reflect/fields",
             reflect_fields as *const u8,
             true,
-            true,
-            3, // stack_pointer, frame_pointer, descriptor
+            &["descriptor"],
+            "Get the field names for a struct type.\n\nReturns a vector of field names, or null for non-struct types.\n\nExamples:\n  (reflect/fields (reflect/type-of my-struct))  ; => [\"field1\" \"field2\"]",
         )?;
 
-        // reflect/variants(descriptor) - Get variant names for enum types
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.reflect/variants",
             reflect_variants as *const u8,
             true,
-            true,
-            3, // stack_pointer, frame_pointer, descriptor
+            &["descriptor"],
+            "Get the variant names for an enum type.\n\nReturns a vector of variant names, or null for non-enum types.\n\nExamples:\n  (reflect/variants (reflect/type-of Result.Ok))  ; => [\"Ok\" \"Err\"]",
         )?;
 
-        // reflect/args(descriptor) - Get argument names for function types
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.reflect/args",
             reflect_args as *const u8,
             true,
-            true,
-            3, // stack_pointer, frame_pointer, descriptor
+            &["descriptor"],
+            "Get the argument names for a function.\n\nReturns a vector of argument names, or null for non-function types.\n\nExamples:\n  (reflect/args (reflect/type-of println))  ; => [\"value\"]",
         )?;
 
-        // reflect/variadic?(descriptor) - Check if function is variadic
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.reflect/variadic?",
             reflect_variadic as *const u8,
             true,
-            true,
-            3, // stack_pointer, frame_pointer, descriptor
+            &["descriptor"],
+            "Check if a function accepts variable arguments.\n\nReturns true if the function is variadic, false otherwise.\n\nExamples:\n  (reflect/variadic? (reflect/type-of +))  ; => true",
         )?;
 
-        // reflect/info(descriptor) - Get complete type info as a map
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.reflect/info",
             reflect_info as *const u8,
             true,
-            true,
-            3, // stack_pointer, frame_pointer, descriptor
+            &["descriptor"],
+            "Get complete type information as a map.\n\nReturns a map containing all available metadata about the type,\nincluding kind, name, docstring, fields/variants/args as appropriate.\n\nExamples:\n  (reflect/info (reflect/type-of my-fn))\n  ; => {:kind :function :name \"my-fn\" :args [...] ...}",
         )?;
 
-        // reflect/struct?(value) - Check if value is a struct type or instance
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.reflect/struct?",
             reflect_is_struct as *const u8,
             true,
-            true,
-            3, // stack_pointer, frame_pointer, value
+            &["value"],
+            "Check if a value is a struct type or instance.\n\nExamples:\n  (reflect/struct? my-struct-instance)  ; => true\n  (reflect/struct? 42)  ; => false",
         )?;
 
-        // reflect/enum?(value) - Check if value is an enum type or variant
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.reflect/enum?",
             reflect_is_enum as *const u8,
             true,
-            true,
-            3, // stack_pointer, frame_pointer, value
+            &["value"],
+            "Check if a value is an enum type or variant.\n\nExamples:\n  (reflect/enum? Result.Ok)  ; => true\n  (reflect/enum? 42)  ; => false",
         )?;
 
-        // reflect/function?(value) - Check if value is a function type or instance
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.reflect/function?",
             reflect_is_function as *const u8,
             true,
-            true,
-            3, // stack_pointer, frame_pointer, value
+            &["value"],
+            "Check if a value is a function.\n\nExamples:\n  (reflect/function? println)  ; => true\n  (reflect/function? 42)  ; => false",
         )?;
 
-        // reflect/primitive?(value) - Check if value is a primitive type or instance
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.reflect/primitive?",
             reflect_is_primitive as *const u8,
             true,
-            true,
-            3, // stack_pointer, frame_pointer, value
+            &["value"],
+            "Check if a value is a primitive type (Int, Float, String, Bool, Null).\n\nExamples:\n  (reflect/primitive? 42)  ; => true\n  (reflect/primitive? [1 2 3])  ; => false",
         )?;
 
-        // reflect/namespace-members(ns) - List all members in a namespace
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.reflect/namespace-members",
             reflect_namespace_members as *const u8,
             true,
-            true,
-            3, // stack_pointer, frame_pointer, namespace_name
+            &["namespace-name"],
+            "List all members defined in a namespace.\n\nReturns a vector of member names.\n\nExamples:\n  (reflect/namespace-members \"beagle.core\")  ; => [\"println\" \"map\" ...]",
         )?;
 
-        // reflect/all-namespaces() - List all namespace names
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.reflect/all-namespaces",
             reflect_all_namespaces as *const u8,
             true,
-            true,
-            2, // stack_pointer, frame_pointer
+            &[],
+            "List all namespace names in the runtime.\n\nReturns a vector of namespace name strings.\n\nExamples:\n  (reflect/all-namespaces)  ; => [\"beagle.core\" \"beagle.fs\" ...]",
         )?;
 
-        // reflect/apropos(query) - Search functions by name/doc substring
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.reflect/apropos",
             reflect_apropos as *const u8,
             true,
-            true,
-            3, // stack_pointer, frame_pointer, query
+            &["query"],
+            "Search for functions by name or docstring substring.\n\nReturns a vector of matching function names.\n\nExamples:\n  (reflect/apropos \"print\")  ; => [\"println\" \"print\" ...]",
         )?;
 
-        // reflect/namespace-info(ns) - Get detailed info about a namespace
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.reflect/namespace-info",
             reflect_namespace_info as *const u8,
             true,
-            true,
-            3, // stack_pointer, frame_pointer, namespace_name
+            &["namespace-name"],
+            "Get detailed information about a namespace.\n\nReturns a map with the namespace's functions, structs, and enums.\n\nExamples:\n  (reflect/namespace-info \"beagle.core\")\n  ; => {:functions [...] :structs [...] :enums [...]}",
         )?;
 
         // ============================================================================
         // JSON Serialization builtins
         // ============================================================================
 
-        // json-encode: Serialize a Beagle value to JSON string
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.core/json-encode",
             json_encode as *const u8,
             true,
-            true,
-            3, // stack_pointer, frame_pointer, value
+            &["value"],
+            "Serialize a Beagle value to a JSON string.\n\nSupports primitives, vectors, maps, and nested structures.\n\nExamples:\n  (json-encode {:name \"alice\" :age 30})\n  ; => \"{\\\"name\\\":\\\"alice\\\",\\\"age\\\":30}\"",
         )?;
 
-        // json-decode: Parse a JSON string to Beagle value
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.core/json-decode",
             json_decode as *const u8,
             true,
-            true,
-            3, // stack_pointer, frame_pointer, json_str
+            &["json-string"],
+            "Parse a JSON string to a Beagle value.\n\nJSON objects become maps with string keys (use `get` to access).\nJSON arrays become vectors.\n\nExamples:\n  (let data (json-decode \"{\\\"name\\\":\\\"alice\\\"}\"))\n  (get data \"name\")  ; => \"alice\"",
         )?;
 
         Ok(())
@@ -12251,137 +12430,136 @@ impl Runtime {
         // Register the namespace so it can be imported
         self.reserve_namespace("beagle.collections".to_string());
 
-        // rust-vec: Create empty vector (needs sp/fp for allocation)
-        self.add_builtin_function_with_fp(
+        // ============================================================================
+        // Persistent Vector (HAMT-based immutable vector)
+        // ============================================================================
+
+        self.add_builtin_with_doc(
             "beagle.collections/vec",
             rust_vec_empty as *const u8,
             true,
-            true,
-            2, // sp, fp (implicit to caller)
+            &[],
+            "Create a new empty persistent vector.\n\nPersistent vectors are immutable - all operations return new vectors.\n\nExamples:\n  (let v (collections/vec))",
         )?;
 
-        // rust-vec-count: Get count (no allocation needed)
-        self.add_builtin_function(
+        self.add_builtin_with_doc(
             "beagle.collections/vec-count",
             rust_vec_count as *const u8,
             false,
-            1, // vec
+            &["vec"],
+            "Return the number of elements in the vector.\n\nExamples:\n  (vec-count (push [] 1 2 3))  ; => 3",
         )?;
 
-        // rust-vec-get: Get by index (no allocation needed)
-        self.add_builtin_function(
+        self.add_builtin_with_doc(
             "beagle.collections/vec-get",
             rust_vec_get as *const u8,
             false,
-            2, // vec, index
+            &["vec", "index"],
+            "Get the element at index. Returns null if out of bounds.\n\nExamples:\n  (vec-get [1 2 3] 1)  ; => 2",
         )?;
 
-        // rust-vec-push: Push value (needs sp/fp for allocation)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.collections/vec-push",
             rust_vec_push as *const u8,
             true,
-            true,
-            4, // sp, fp, vec, value
+            &["vec", "value"],
+            "Return a new vector with value appended.\n\nExamples:\n  (vec-push [1 2] 3)  ; => [1 2 3]",
         )?;
 
-        // rust-vec-assoc: Update at index (needs sp/fp for allocation)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.collections/vec-assoc",
             rust_vec_assoc as *const u8,
             true,
-            true,
-            5, // sp, fp, vec, index, value
+            &["vec", "index", "value"],
+            "Return a new vector with the value at index replaced.\n\nExamples:\n  (vec-assoc [1 2 3] 1 99)  ; => [1 99 3]",
         )?;
 
-        // ========== Map builtins ==========
+        // ============================================================================
+        // Persistent Map (HAMT-based immutable hash map)
+        // ============================================================================
 
-        // rust-map: Create empty map (needs sp/fp for allocation)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.collections/map",
             rust_map_empty as *const u8,
             true,
-            true,
-            2, // sp, fp
+            &[],
+            "Create a new empty persistent map.\n\nPersistent maps are immutable - all operations return new maps.\n\nExamples:\n  (let m (collections/map))",
         )?;
 
-        // rust-map-count: Get count (no allocation needed)
-        self.add_builtin_function(
+        self.add_builtin_with_doc(
             "beagle.collections/map-count",
             rust_map_count as *const u8,
             false,
-            1, // map
+            &["m"],
+            "Return the number of key-value pairs in the map.\n\nExamples:\n  (map-count {:a 1 :b 2})  ; => 2",
         )?;
 
-        // rust-map-get: Get by key (no allocation needed)
-        self.add_builtin_function(
+        self.add_builtin_with_doc(
             "beagle.collections/map-get",
             rust_map_get as *const u8,
             false,
-            2, // map, key
+            &["m", "key"],
+            "Get the value for key. Returns null if not found.\n\nExamples:\n  (map-get {:a 1} :a)  ; => 1\n  (map-get {:a 1} :b)  ; => null",
         )?;
 
-        // rust-map-assoc: Associate key-value (needs sp/fp for allocation)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.collections/map-assoc",
             rust_map_assoc as *const u8,
             true,
-            true,
-            5, // sp, fp, map, key, value
+            &["m", "key", "value"],
+            "Return a new map with the key-value pair added or updated.\n\nExamples:\n  (map-assoc {:a 1} :b 2)  ; => {:a 1 :b 2}",
         )?;
 
-        // rust-map-keys: Get all keys as vector (needs sp/fp for allocation)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.collections/map-keys",
             rust_map_keys as *const u8,
             true,
-            true,
-            3, // sp, fp, map
+            &["m"],
+            "Return a vector of all keys in the map.\n\nExamples:\n  (map-keys {:a 1 :b 2})  ; => [:a :b]",
         )?;
 
-        // ========== Set builtins ==========
+        // ============================================================================
+        // Persistent Set (HAMT-based immutable hash set)
+        // ============================================================================
 
-        // rust-set: Create empty set (needs sp/fp for allocation)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.collections/set",
             rust_set_empty as *const u8,
             true,
-            true,
-            2, // sp, fp
+            &[],
+            "Create a new empty persistent set.\n\nPersistent sets are immutable - all operations return new sets.\n\nExamples:\n  (let s (collections/set))",
         )?;
 
-        // rust-set-count: Get count (no allocation needed)
-        self.add_builtin_function(
+        self.add_builtin_with_doc(
             "beagle.collections/set-count",
             rust_set_count as *const u8,
             false,
-            1, // set
+            &["s"],
+            "Return the number of elements in the set.\n\nExamples:\n  (set-count #{1 2 3})  ; => 3",
         )?;
 
-        // rust-set-contains?: Check if element is in set (no allocation needed)
-        self.add_builtin_function(
+        self.add_builtin_with_doc(
             "beagle.collections/set-contains?",
             rust_set_contains as *const u8,
             false,
-            2, // set, element
+            &["s", "element"],
+            "Return true if the set contains the element.\n\nExamples:\n  (set-contains? #{1 2 3} 2)  ; => true",
         )?;
 
-        // rust-set-add: Add element to set (needs sp/fp for allocation)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.collections/set-add",
             rust_set_add as *const u8,
             true,
-            true,
-            4, // sp, fp, set, element
+            &["s", "element"],
+            "Return a new set with the element added.\n\nExamples:\n  (set-add #{1 2} 3)  ; => #{1 2 3}",
         )?;
 
-        // rust-set-elements: Get all elements as vector (needs sp/fp for allocation)
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.collections/set-elements",
             rust_set_elements as *const u8,
             true,
-            true,
-            3, // sp, fp, set
+            &["s"],
+            "Return a vector of all elements in the set.\n\nExamples:\n  (set-elements #{1 2 3})  ; => [1 2 3]",
         )?;
 
         Ok(())
@@ -12393,92 +12571,80 @@ impl Runtime {
         // Register the namespace so it can be imported
         self.reserve_namespace("beagle.regex".to_string());
 
-        // regex/compile: Compile a regex pattern
-        // Signature: (stack_pointer, frame_pointer, pattern_string) -> regex_handle
-        self.add_builtin_function_with_fp(
+        // ============================================================================
+        // Regular Expressions
+        // ============================================================================
+
+        self.add_builtin_with_doc(
             "beagle.regex/compile",
             regex_compile as *const u8,
             true,
-            true,
-            3, // sp, fp, pattern
+            &["pattern"],
+            "Compile a regular expression pattern.\n\nReturns a Regex object that can be used with other regex functions.\n\nExamples:\n  (let re (regex/compile \"[0-9]+\"))",
         )?;
 
-        // regex/matches?: Check if string matches regex
-        // Signature: (regex, string) -> bool
-        self.add_builtin_function(
+        self.add_builtin_with_doc(
             "beagle.regex/matches?",
             regex_matches as *const u8,
             false,
-            2, // regex, string
+            &["regex", "string"],
+            "Check if the entire string matches the regex.\n\nExamples:\n  (regex/matches? (regex/compile \"[0-9]+\") \"123\")  ; => true\n  (regex/matches? (regex/compile \"[0-9]+\") \"abc\")  ; => false",
         )?;
 
-        // regex/find: Find first match in string
-        // Signature: (stack_pointer, frame_pointer, regex, string) -> match_info or null
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.regex/find",
             regex_find as *const u8,
             true,
-            true,
-            4, // sp, fp, regex, string
+            &["regex", "string"],
+            "Find the first match in the string.\n\nReturns a map with :start, :end, and :match keys, or null if no match.\n\nExamples:\n  (regex/find (regex/compile \"[0-9]+\") \"abc123def\")\n  ; => {:start 3 :end 6 :match \"123\"}",
         )?;
 
-        // regex/find-all: Find all matches in string
-        // Signature: (stack_pointer, frame_pointer, regex, string) -> vector of matches
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.regex/find-all",
             regex_find_all as *const u8,
             true,
-            true,
-            4, // sp, fp, regex, string
+            &["regex", "string"],
+            "Find all matches in the string.\n\nReturns a vector of match maps.\n\nExamples:\n  (regex/find-all (regex/compile \"[0-9]+\") \"a1b2c3\")\n  ; => [{:start 1 :end 2 :match \"1\"} ...]",
         )?;
 
-        // regex/replace: Replace first match
-        // Signature: (stack_pointer, frame_pointer, regex, string, replacement) -> new_string
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.regex/replace",
             regex_replace as *const u8,
             true,
-            true,
-            5, // sp, fp, regex, string, replacement
+            &["regex", "string", "replacement"],
+            "Replace the first match in the string with the replacement.\n\nExamples:\n  (regex/replace (regex/compile \"[0-9]+\") \"a1b2c3\" \"X\")\n  ; => \"aXb2c3\"",
         )?;
 
-        // regex/replace-all: Replace all matches
-        // Signature: (stack_pointer, frame_pointer, regex, string, replacement) -> new_string
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.regex/replace-all",
             regex_replace_all as *const u8,
             true,
-            true,
-            5, // sp, fp, regex, string, replacement
+            &["regex", "string", "replacement"],
+            "Replace all matches in the string with the replacement.\n\nExamples:\n  (regex/replace-all (regex/compile \"[0-9]+\") \"a1b2c3\" \"X\")\n  ; => \"aXbXcX\"",
         )?;
 
-        // regex/split: Split string by regex
-        // Signature: (stack_pointer, frame_pointer, regex, string) -> vector of strings
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.regex/split",
             regex_split as *const u8,
             true,
-            true,
-            4, // sp, fp, regex, string
+            &["regex", "string"],
+            "Split a string by the regex pattern.\n\nReturns a vector of strings.\n\nExamples:\n  (regex/split (regex/compile \",\\\\s*\") \"a, b, c\")\n  ; => [\"a\" \"b\" \"c\"]",
         )?;
 
-        // regex/captures: Get capture groups from first match
-        // Signature: (stack_pointer, frame_pointer, regex, string) -> vector of strings or null
-        self.add_builtin_function_with_fp(
+        self.add_builtin_with_doc(
             "beagle.regex/captures",
             regex_captures as *const u8,
             true,
-            true,
-            4, // sp, fp, regex, string
+            &["regex", "string"],
+            "Get capture groups from the first match.\n\nReturns a vector of captured strings (index 0 is the full match), or null if no match.\n\nExamples:\n  (regex/captures (regex/compile \"(\\\\w+)@(\\\\w+)\") \"user@host\")\n  ; => [\"user@host\" \"user\" \"host\"]",
         )?;
 
-        // regex/is-regex?: Check if value is a regex
-        // Signature: (value) -> bool
-        self.add_builtin_function(
+        self.add_builtin_with_doc(
             "beagle.regex/is-regex?",
             is_regex as *const u8,
             false,
-            1, // value
+            &["value"],
+            "Check if a value is a compiled regex.\n\nExamples:\n  (regex/is-regex? (regex/compile \"test\"))  ; => true\n  (regex/is-regex? \"test\")  ; => false",
         )?;
 
         Ok(())

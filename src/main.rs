@@ -992,6 +992,9 @@ pub struct CommandLineArguments {
     print_builtin_calls: bool,
     #[clap(long, default_value = "false")]
     repl: bool,
+    /// Export all documentation to JSON and exit
+    #[clap(long, default_value = "false")]
+    export_docs: bool,
 }
 
 fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Error>> {
@@ -1076,7 +1079,9 @@ fn find_stdlib_file(file_name: &str) -> Result<String, Box<dyn Error>> {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = CommandLineArguments::parse();
-    if args.all_tests {
+    if args.export_docs {
+        export_docs(args)
+    } else if args.all_tests {
         run_all_tests(args)
     } else if args.repl {
         run_repl(args)
@@ -1147,6 +1152,7 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             print_parse: args.print_parse,
             print_builtin_calls: args.print_builtin_calls,
             repl: false,
+            export_docs: false,
         };
         main_inner(args)?;
         RUNTIME.get().unwrap().get_mut().reset();
@@ -1282,6 +1288,34 @@ cfg_if::cfg_if! {
         // Default to generational GC
         pub type Alloc = MutexAllocator<GenerationalGC>;
     }
+}
+
+fn export_docs(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
+    let args_clone = args.clone();
+
+    RUNTIME.get_or_init(|| {
+        let allocator = Alloc::new(get_allocate_options(&args_clone));
+        let printer: Box<dyn Printer> = Box::new(DefaultPrinter);
+        let runtime = Runtime::new(args_clone, allocator, printer);
+        SyncUnsafeCell::new(runtime)
+    });
+
+    let runtime = RUNTIME.get().unwrap().get_mut();
+
+    runtime.start_compiler_thread();
+
+    compile_trampoline(runtime);
+    compile_apply_call_trampolines(runtime);
+    runtime.install_builtins()?;
+    if !args.no_std {
+        load_default_files(runtime)?;
+    }
+
+    // Export documentation as JSON
+    let docs = runtime.export_documentation();
+    println!("{}", docs);
+
+    Ok(())
 }
 
 fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
@@ -1566,6 +1600,7 @@ fn try_all_examples() -> Result<(), Box<dyn Error>> {
         print_parse: false,
         print_builtin_calls: false,
         repl: false,
+        export_docs: false,
     };
     run_all_tests(args)?;
     Ok(())
