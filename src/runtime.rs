@@ -1,5 +1,6 @@
 use libloading::Library;
 use mmap_rs::{Mmap, MmapMut, MmapOptions, Reserved};
+use nanoserde::SerJson;
 use regex::Regex;
 use std::{
     collections::HashMap,
@@ -1780,6 +1781,75 @@ pub struct Function {
     pub source_column: Option<usize>,
 }
 
+// ============================================================================
+// Documentation Export Types
+// ============================================================================
+
+/// Documentation for the entire codebase, exported as JSON
+#[derive(nanoserde::SerJson)]
+pub struct Documentation {
+    pub namespaces: Vec<NamespaceDoc>,
+    pub structs: Vec<StructDoc>,
+    pub enums: Vec<EnumDoc>,
+}
+
+/// Documentation for a namespace
+#[derive(nanoserde::SerJson)]
+pub struct NamespaceDoc {
+    pub name: String,
+    pub functions: Vec<FunctionDoc>,
+}
+
+/// Documentation for a function
+#[derive(nanoserde::SerJson)]
+pub struct FunctionDoc {
+    pub name: String,
+    pub full_name: String,
+    pub docstring: Option<String>,
+    pub arg_names: Vec<String>,
+    pub arity: usize,
+    pub is_variadic: bool,
+    pub min_args: usize,
+    pub is_builtin: bool,
+    pub source_file: Option<String>,
+    pub source_line: Option<usize>,
+}
+
+/// Documentation for a struct
+#[derive(nanoserde::SerJson)]
+pub struct StructDoc {
+    pub name: String,
+    pub docstring: Option<String>,
+    pub fields: Vec<FieldDoc>,
+    pub source_file: Option<String>,
+    pub source_line: Option<usize>,
+}
+
+/// Documentation for a struct field
+#[derive(nanoserde::SerJson)]
+pub struct FieldDoc {
+    pub name: String,
+    pub docstring: Option<String>,
+    pub mutable: bool,
+}
+
+/// Documentation for an enum
+#[derive(nanoserde::SerJson)]
+pub struct EnumDoc {
+    pub name: String,
+    pub docstring: Option<String>,
+    pub variants: Vec<VariantDoc>,
+    pub source_file: Option<String>,
+    pub source_line: Option<usize>,
+}
+
+/// Documentation for an enum variant
+#[derive(nanoserde::SerJson)]
+pub struct VariantDoc {
+    pub name: String,
+    pub fields: Vec<String>,
+}
+
 pub struct MMapMutWithOffset {
     mmap: MmapMut,
     offset: usize,
@@ -3003,6 +3073,110 @@ impl Runtime {
         self.stacks_for_continuation_swapping.clear();
         self.variant_to_enum.clear();
         self.compiled_regexes.clear();
+    }
+
+    /// Export all documentation as JSON for the documentation generator.
+    /// Returns a JSON string containing all namespaces, functions, structs, and enums.
+    pub fn export_documentation(&self) -> String {
+        use std::collections::BTreeMap;
+
+        // Collect all namespaces
+        let mut namespaces: BTreeMap<String, Vec<FunctionDoc>> = BTreeMap::new();
+
+        for function in &self.functions {
+            // Skip internal functions
+            if function.name.starts_with("__") || function.name.contains("/__") {
+                continue;
+            }
+
+            // Parse namespace from function name
+            let (namespace, fn_name) = if let Some(pos) = function.name.rfind('/') {
+                (
+                    function.name[..pos].to_string(),
+                    function.name[pos + 1..].to_string(),
+                )
+            } else {
+                ("global".to_string(), function.name.clone())
+            };
+
+            let doc = FunctionDoc {
+                name: fn_name,
+                full_name: function.name.clone(),
+                docstring: function.docstring.clone(),
+                arg_names: function.arg_names.clone(),
+                arity: function.number_of_args,
+                is_variadic: function.is_variadic,
+                min_args: function.min_args,
+                is_builtin: function.is_builtin,
+                source_file: function.source_file.clone(),
+                source_line: function.source_line,
+            };
+
+            namespaces.entry(namespace).or_default().push(doc);
+        }
+
+        // Collect structs
+        let mut struct_docs: Vec<StructDoc> = Vec::new();
+        for struct_info in self.structs.iter() {
+            let fields: Vec<FieldDoc> = struct_info
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(i, field_name)| FieldDoc {
+                    name: field_name.clone(),
+                    docstring: struct_info.field_docstrings.get(i).cloned().flatten(),
+                    mutable: struct_info.mutable_fields.get(i).copied().unwrap_or(false),
+                })
+                .collect();
+
+            struct_docs.push(StructDoc {
+                name: struct_info.name.clone(),
+                docstring: struct_info.docstring.clone(),
+                fields,
+                source_file: None, // Struct doesn't track source file yet
+                source_line: None,
+            });
+        }
+
+        // Collect enums
+        let mut enum_docs: Vec<EnumDoc> = Vec::new();
+        for enum_info in self.enums.iter() {
+            let variants: Vec<VariantDoc> = enum_info
+                .variants
+                .iter()
+                .map(|v| match v {
+                    crate::runtime::EnumVariant::StructVariant { name, fields } => VariantDoc {
+                        name: name.clone(),
+                        fields: fields.clone(),
+                    },
+                    crate::runtime::EnumVariant::StaticVariant { name } => VariantDoc {
+                        name: name.clone(),
+                        fields: vec![],
+                    },
+                })
+                .collect();
+
+            enum_docs.push(EnumDoc {
+                name: enum_info.name.clone(),
+                docstring: enum_info.docstring.clone(),
+                variants,
+                source_file: None, // Enum doesn't track source file yet
+                source_line: None,
+            });
+        }
+
+        // Build the documentation structure
+        let doc = Documentation {
+            namespaces: namespaces
+                .into_iter()
+                .map(|(name, functions)| NamespaceDoc { name, functions })
+                .collect(),
+            structs: struct_docs,
+            enums: enum_docs,
+        };
+
+        // Serialize to JSON
+        nanoserde::SerJson::serialize_json(&doc)
     }
 
     pub fn start_compiler_thread(&mut self) {
@@ -5577,6 +5751,64 @@ impl Runtime {
         )
         .expect("Failed to get function pointer - this is a fatal error");
         // self.namespaces.add_binding(name, pointer as usize);
+        debugger(Message {
+            kind: "builtin_function".to_string(),
+            data: Data::BuiltinFunction {
+                name: name.to_string(),
+                pointer: pointer as usize,
+            },
+        });
+        Ok(self.functions.len() - 1)
+    }
+
+    /// Add a builtin function with documentation.
+    /// This is the preferred way to register builtins as it includes docstrings and argument names.
+    pub fn add_builtin_with_doc(
+        &mut self,
+        name: &str,
+        function: *const u8,
+        needs_stack_pointer: bool,
+        arg_names: &[&str],
+        docstring: &str,
+    ) -> Result<usize, Box<dyn Error>> {
+        // When needs_stack_pointer is true, we also need frame_pointer for GC stack walking.
+        let adjusted_args = if needs_stack_pointer {
+            arg_names.len() + 2 // +2 for stack_pointer and frame_pointer
+        } else {
+            arg_names.len()
+        };
+        let index = self.functions.len();
+        let pointer = function;
+
+        let jump_table_offset = self.add_jump_table_entry(index, pointer)?;
+        self.functions.push(Function {
+            name: name.to_string(),
+            pointer: pointer.into(),
+            jump_table_offset,
+            is_foreign: true,
+            is_builtin: true,
+            needs_stack_pointer,
+            needs_frame_pointer: needs_stack_pointer,
+            is_defined: true,
+            number_of_locals: 0,
+            size: 0,
+            number_of_args: adjusted_args,
+            is_variadic: false,
+            min_args: adjusted_args,
+            docstring: Some(docstring.to_string()),
+            arg_names: arg_names.iter().map(|s| s.to_string()).collect(),
+            source_file: None,
+            source_line: None,
+            source_column: None,
+        });
+        let pointer = Self::get_function_pointer(
+            self,
+            self.functions
+                .last()
+                .expect("No functions in function table - this is a fatal error")
+                .clone(),
+        )
+        .expect("Failed to get function pointer - this is a fatal error");
         debugger(Message {
             kind: "builtin_function".to_string(),
             data: Data::BuiltinFunction {

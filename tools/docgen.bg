@@ -1,0 +1,409 @@
+/// Beagle Documentation Generator
+///
+/// Reads documentation JSON and generates markdown documentation.
+///
+/// Usage:
+///   beagle --export-docs > /tmp/docs.json
+///   beagle tools/docgen.bg /tmp/docs.json > docs/api.md
+
+namespace docgen
+
+use beagle.fs as fs
+
+// ============================================================================
+// Configuration
+// ============================================================================
+
+// Namespaces to exclude from documentation (internal/private)
+let EXCLUDED_NAMESPACES = [
+    "beagle.__internal_test__",
+    "beagle.builtin"
+]
+
+// User-facing namespaces to highlight first
+let PRIORITY_NAMESPACES = [
+    "beagle.core",
+    "beagle.fs",
+    "beagle.async",
+    "beagle.io",
+    "beagle.timer",
+    "beagle.regex",
+    "beagle.reflect",
+    "beagle.collections"
+]
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+/// Read and parse the JSON documentation from a file
+fn read-docs(path) {
+    let result = fs/blocking-read-file(path)
+    match result {
+        Result.Ok { value } => json-decode(value),
+        Result.Err { error } => {
+            println("Error reading file: {error}")
+            null
+        }
+    }
+}
+
+/// Generate markdown header
+fn header(level, text) {
+    let prefix = repeat-str("#", level)
+    prefix ++ " " ++ text ++ "\n\n"
+}
+
+/// Repeat a string n times
+fn repeat-str(s, n) {
+    if n <= 0 {
+        ""
+    } else {
+        s ++ repeat-str(s, n - 1)
+    }
+}
+
+/// Convert a string to lowercase kebab-case for anchor links
+fn lower-kebab(s) {
+    lowercase(replace(s, ".", "-"))
+}
+
+/// Check if namespace should be excluded
+fn excluded?(ns-name) {
+    any?(EXCLUDED_NAMESPACES, fn(excluded) { excluded == ns-name })
+}
+
+/// Check if a function has documentation
+fn documented?(func) {
+    get(func, "docstring") != null
+}
+
+/// Get namespace priority (lower = higher priority)
+fn namespace-priority(ns-name) {
+    let idx = find-index(PRIORITY_NAMESPACES, fn(p) { p == ns-name })
+    if idx == -1 { 999 } else { idx }
+}
+
+/// Sort namespaces by priority
+fn sort-namespaces(namespaces) {
+    sort-by(namespaces, fn(ns) { namespace-priority(get(ns, "name")) })
+}
+
+// ============================================================================
+// Function Formatting
+// ============================================================================
+
+/// Format function signature in modern Beagle style
+fn format-signature(func) {
+    let name = get(func, "name")
+    let args = get(func, "arg_names")
+    let is-variadic = get(func, "is_variadic")
+
+    if args == null || length(args) == 0 {
+        if is-variadic {
+            name ++ "(...args)"
+        } else {
+            name ++ "()"
+        }
+    } else {
+        let args-str = join(args, ", ")
+        if is-variadic {
+            name ++ "(" ++ args-str ++ ", ...)"
+        } else {
+            name ++ "(" ++ args-str ++ ")"
+        }
+    }
+}
+
+/// Format docstring - just return as-is for now
+fn format-docstring(doc) {
+    if doc == null {
+        ""
+    } else {
+        doc ++ "\n"
+    }
+}
+
+/// Generate documentation for a single function
+fn doc-function(func, show-undocumented) {
+    let sig = format-signature(func)
+    let doc = get(func, "docstring")
+    let is-builtin = get(func, "is_builtin")
+
+    // Skip undocumented if not showing them
+    if doc == null && show-undocumented == false {
+        ""
+    } else {
+        let badges = ""
+        let badges = if is-builtin { badges ++ " `builtin`" } else { badges }
+
+        let mut result = "#### `" ++ sig ++ "`" ++ badges ++ "\n\n"
+
+        if doc != null {
+            result = result ++ format-docstring(doc) ++ "\n"
+        } else {
+            result = result ++ "*No documentation available.*\n\n"
+        }
+
+        result
+    }
+}
+
+// ============================================================================
+// Namespace Formatting
+// ============================================================================
+
+/// Count documented functions in a namespace
+fn count-documented(functions) {
+    if functions == null {
+        0
+    } else {
+        length(filter(functions, documented?))
+    }
+}
+
+/// Count total functions in a namespace
+fn count-total(functions) {
+    if functions == null { 0 } else { length(functions) }
+}
+
+/// Generate documentation for a namespace
+fn doc-namespace(ns) {
+    let ns-name = get(ns, "name")
+    let functions = get(ns, "functions")
+
+    let documented-count = count-documented(functions)
+    let total-count = count-total(functions)
+
+    let mut result = header(2, ns-name)
+
+    // Add coverage info
+    if total-count > 0 {
+        let pct = (documented-count * 100) / total-count
+        result = result ++ "> **Documentation coverage:** " ++ to-string(documented-count)
+                       ++ "/" ++ to-string(total-count) ++ " functions (" ++ to-string(pct) ++ "%)\n\n"
+    }
+
+    if functions != null && length(functions) > 0 {
+        // First show documented functions
+        let documented-fns = filter(functions, documented?)
+        if length(documented-fns) > 0 {
+            for func in documented-fns {
+                result = result ++ doc-function(func, false)
+            }
+        }
+
+        // Then show undocumented functions in a collapsed section
+        let undocumented-fns = filter(functions, fn(f) { not(documented?(f)) })
+        if length(undocumented-fns) > 0 {
+            result = result ++ "<details>\n<summary><strong>Undocumented functions ("
+                           ++ to-string(length(undocumented-fns)) ++ ")</strong></summary>\n\n"
+            for func in undocumented-fns {
+                let sig = format-signature(func)
+                result = result ++ "- `" ++ sig ++ "`\n"
+            }
+            result = result ++ "\n</details>\n\n"
+        }
+    }
+
+    result
+}
+
+// ============================================================================
+// Struct and Enum Formatting
+// ============================================================================
+
+/// Generate documentation for a struct
+fn doc-struct(s) {
+    let s-name = get(s, "name")
+    let mut result = "#### " ++ s-name ++ "\n\n"
+
+    let docstring = get(s, "docstring")
+    if docstring != null {
+        result = result ++ docstring ++ "\n\n"
+    }
+
+    let fields = get(s, "fields")
+    if fields != null && length(fields) > 0 {
+        result = result ++ "**Fields:**\n\n"
+        for field in fields {
+            let field-name = get(field, "name")
+            let is-mutable = get(field, "mutable")
+            let mut-badge = if is-mutable { " `mutable`" } else { "" }
+            result = result ++ "- `" ++ field-name ++ "`" ++ mut-badge
+            let field-doc = get(field, "docstring")
+            if field-doc != null {
+                result = result ++ " - " ++ field-doc
+            }
+            result = result ++ "\n"
+        }
+        result = result ++ "\n"
+    }
+
+    result
+}
+
+/// Generate documentation for an enum
+fn doc-enum(e) {
+    let e-name = get(e, "name")
+    let mut result = "#### " ++ e-name ++ "\n\n"
+
+    let docstring = get(e, "docstring")
+    if docstring != null {
+        result = result ++ docstring ++ "\n\n"
+    }
+
+    let variants = get(e, "variants")
+    if variants != null && length(variants) > 0 {
+        result = result ++ "**Variants:**\n\n"
+        for variant in variants {
+            let v-name = get(variant, "name")
+            let v-fields = get(variant, "fields")
+            if v-fields != null && length(v-fields) > 0 {
+                let fields-str = join(v-fields, ", ")
+                result = result ++ "- `" ++ v-name ++ " { " ++ fields-str ++ " }`\n"
+            } else {
+                result = result ++ "- `" ++ v-name ++ "`\n"
+            }
+        }
+        result = result ++ "\n"
+    }
+
+    result
+}
+
+// ============================================================================
+// Main Documentation Generator
+// ============================================================================
+
+/// Calculate overall documentation statistics
+fn calc-stats(namespaces) {
+    let mut total = 0
+    let mut documented = 0
+
+    for ns in namespaces {
+        let ns-name = get(ns, "name")
+        if excluded?(ns-name) == false {
+            let functions = get(ns, "functions")
+            if functions != null {
+                total = total + length(functions)
+                documented = documented + count-documented(functions)
+            }
+        }
+    }
+
+    {:total total, :documented documented}
+}
+
+/// Generate the full documentation
+fn generate-docs(docs) {
+    let namespaces = get(docs, "namespaces")
+    let structs = get(docs, "structs")
+    let enums = get(docs, "enums")
+
+    // Filter and sort namespaces
+    let visible-namespaces = if namespaces != null {
+        filter(namespaces, fn(ns) { not(excluded?(get(ns, "name"))) })
+    } else {
+        []
+    }
+    let sorted-namespaces = sort-namespaces(visible-namespaces)
+
+    // Calculate stats
+    let stats = calc-stats(visible-namespaces)
+    let total = get(stats, :total)
+    let documented = get(stats, :documented)
+    let pct = if total > 0 { (documented * 100) / total } else { 0 }
+
+    // Start building output
+    let mut result = header(1, "Beagle API Reference")
+
+    result = result ++ "> Auto-generated documentation for the Beagle programming language.\n\n"
+    result = result ++ "**Overall documentation coverage:** " ++ to-string(documented) ++ "/"
+                    ++ to-string(total) ++ " functions (" ++ to-string(pct) ++ "%)\n\n"
+
+    // Quick start
+    result = result ++ header(2, "Quick Start")
+    result = result ++ "```beagle\n"
+    result = result ++ "// Hello World\n"
+    result = result ++ "fn main() {\n"
+    result = result ++ "    println(\"Hello, Beagle!\")\n"
+    result = result ++ "}\n"
+    result = result ++ "\n"
+    result = result ++ "// Using collections\n"
+    result = result ++ "let numbers = [1, 2, 3, 4, 5]\n"
+    result = result ++ "let doubled = map(numbers, fn(x) { x * 2 })\n"
+    result = result ++ "let sum = reduce(numbers, 0, fn(acc, x) { acc + x })\n"
+    result = result ++ "\n"
+    result = result ++ "// File I/O\n"
+    result = result ++ "use beagle.fs as fs\n"
+    result = result ++ "let content = fs/blocking-read-file(\"/tmp/test.txt\")\n"
+    result = result ++ "```\n\n"
+
+    // Table of contents
+    result = result ++ header(2, "Table of Contents")
+
+    result = result ++ "### Namespaces\n\n"
+    for ns in sorted-namespaces {
+        let ns-name = get(ns, "name")
+        let functions = get(ns, "functions")
+        let doc-count = count-documented(functions)
+        let total-count = count-total(functions)
+        result = result ++ "- [" ++ ns-name ++ "](#" ++ lower-kebab(ns-name) ++ ") ("
+                        ++ to-string(doc-count) ++ "/" ++ to-string(total-count) ++ " documented)\n"
+    }
+
+    if structs != null && length(structs) > 0 {
+        result = result ++ "\n### [Types](#types)\n\n"
+    }
+
+    if enums != null && length(enums) > 0 {
+        result = result ++ "### [Enums](#enums-1)\n\n"
+    }
+
+    result = result ++ "\n---\n\n"
+
+    // Namespace documentation
+    for ns in sorted-namespaces {
+        result = result ++ doc-namespace(ns)
+        result = result ++ "---\n\n"
+    }
+
+    // Types (Structs)
+    if structs != null && length(structs) > 0 {
+        result = result ++ header(2, "Types")
+        result = result ++ "These are the built-in struct types available in Beagle.\n\n"
+        for s in structs {
+            result = result ++ doc-struct(s)
+        }
+        result = result ++ "---\n\n"
+    }
+
+    // Enums
+    if enums != null && length(enums) > 0 {
+        result = result ++ header(2, "Enums")
+        result = result ++ "These are the built-in enum types available in Beagle.\n\n"
+        for e in enums {
+            result = result ++ doc-enum(e)
+        }
+    }
+
+    result
+}
+
+fn main(args) {
+    if length(args) == 0 {
+        println("Usage: beagle tools/docgen.bg <docs.json>")
+        println("")
+        println("Generate documentation from export-docs output:")
+        println("  beagle --export-docs > /tmp/docs.json")
+        println("  beagle tools/docgen.bg /tmp/docs.json > docs/api.md")
+    } else {
+        let path = get(args, 0)
+        let docs = read-docs(path)
+        if docs != null {
+            let markdown = generate-docs(docs)
+            print(markdown)
+        }
+    }
+}

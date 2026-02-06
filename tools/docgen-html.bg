@@ -1,0 +1,915 @@
+/// Beagle HTML Documentation Generator
+///
+/// Reads documentation JSON and generates a standalone HTML documentation page.
+///
+/// Usage:
+///   beagle --export-docs > /tmp/docs.json
+///   beagle tools/docgen-html.bg /tmp/docs.json > docs/api.html
+
+namespace docgen-html
+
+use beagle.fs as fs
+
+// ============================================================================
+// Configuration
+// ============================================================================
+
+// Namespaces to exclude from documentation (internal/private)
+let EXCLUDED_NAMESPACES = [
+    "beagle.__internal_test__",
+    "beagle.builtin"
+]
+
+// User-facing namespaces to highlight first
+let PRIORITY_NAMESPACES = [
+    "beagle.core",
+    "beagle.fs",
+    "beagle.async",
+    "beagle.io",
+    "beagle.timer",
+    "beagle.regex",
+    "beagle.reflect",
+    "beagle.collections"
+]
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+/// Read and parse the JSON documentation from a file
+fn read-docs(path) {
+    let result = fs/blocking-read-file(path)
+    match result {
+        Result.Ok { value } => json-decode(value),
+        Result.Err { error } => {
+            println("Error reading file: {error}")
+            null
+        }
+    }
+}
+
+/// Escape HTML special characters
+fn html-escape(s) {
+    if s == null {
+        ""
+    } else {
+        let s1 = replace(s, "&", "&amp;")
+        let s2 = replace(s1, "<", "&lt;")
+        let s3 = replace(s2, ">", "&gt;")
+        let s4 = replace(s3, "\"", "&quot;")
+        s4
+    }
+}
+
+/// Convert a string to lowercase kebab-case for anchor links
+fn lower-kebab(s) {
+    lowercase(replace(s, ".", "-"))
+}
+
+/// Check if namespace should be excluded
+fn excluded?(ns-name) {
+    any?(EXCLUDED_NAMESPACES, fn(excluded) { excluded == ns-name })
+}
+
+/// Check if a function has documentation
+fn documented?(func) {
+    get(func, "docstring") != null
+}
+
+/// Get namespace priority (lower = higher priority)
+fn namespace-priority(ns-name) {
+    let idx = find-index(PRIORITY_NAMESPACES, fn(p) { p == ns-name })
+    if idx == -1 { 999 } else { idx }
+}
+
+/// Sort namespaces by priority
+fn sort-namespaces(namespaces) {
+    sort-by(namespaces, fn(ns) { namespace-priority(get(ns, "name")) })
+}
+
+/// Count documented functions in a namespace
+fn count-documented(functions) {
+    if functions == null {
+        0
+    } else {
+        length(filter(functions, documented?))
+    }
+}
+
+/// Count total functions in a namespace
+fn count-total(functions) {
+    if functions == null { 0 } else { length(functions) }
+}
+
+// ============================================================================
+// Function Formatting
+// ============================================================================
+
+/// Format function signature
+fn format-signature(func) {
+    let name = get(func, "name")
+    let args = get(func, "arg_names")
+    let is-variadic = get(func, "is_variadic")
+
+    if args == null || length(args) == 0 {
+        if is-variadic {
+            name ++ "(...args)"
+        } else {
+            name ++ "()"
+        }
+    } else {
+        let args-str = join(args, ", ")
+        if is-variadic {
+            name ++ "(" ++ args-str ++ ", ...)"
+        } else {
+            name ++ "(" ++ args-str ++ ")"
+        }
+    }
+}
+
+/// Generate HTML for a single function
+fn html-function(func) {
+    let sig = format-signature(func)
+    let doc = get(func, "docstring")
+    let is-builtin = get(func, "is_builtin")
+    let name = get(func, "name")
+
+    let mut result = "<div class=\"function\" id=\"fn-" ++ html-escape(name) ++ "\">\n"
+    result = result ++ "  <div class=\"function-header\">\n"
+    result = result ++ "    <code class=\"signature\">" ++ html-escape(sig) ++ "</code>\n"
+
+    if is-builtin {
+        result = result ++ "    <span class=\"badge builtin\">builtin</span>\n"
+    }
+
+    result = result ++ "  </div>\n"
+
+    if doc != null {
+        result = result ++ "  <div class=\"docstring\">" ++ html-escape(doc) ++ "</div>\n"
+    } else {
+        result = result ++ "  <div class=\"docstring undocumented\">No documentation available.</div>\n"
+    }
+
+    result = result ++ "</div>\n"
+    result
+}
+
+// ============================================================================
+// Namespace Formatting
+// ============================================================================
+
+/// Generate HTML for a namespace
+fn html-namespace(ns) {
+    let ns-name = get(ns, "name")
+    let functions = get(ns, "functions")
+
+    let documented-count = count-documented(functions)
+    let total-count = count-total(functions)
+    let pct = if total-count > 0 { (documented-count * 100) / total-count } else { 0 }
+
+    let mut result = "<section class=\"namespace\" id=\"" ++ lower-kebab(ns-name) ++ "\">\n"
+    result = result ++ "  <h2>" ++ html-escape(ns-name) ++ "</h2>\n"
+
+    // Coverage badge
+    let badge-class = if pct >= 80 { "good" } else { if pct >= 50 { "medium" } else { "low" } }
+    result = result ++ "  <div class=\"coverage " ++ badge-class ++ "\">"
+    result = result ++ to-string(documented-count) ++ "/" ++ to-string(total-count)
+    result = result ++ " functions documented (" ++ to-string(pct) ++ "%)</div>\n"
+
+    if functions != null && length(functions) > 0 {
+        // Documented functions
+        let documented-fns = filter(functions, documented?)
+        if length(documented-fns) > 0 {
+            result = result ++ "  <div class=\"functions-list\">\n"
+            for func in documented-fns {
+                result = result ++ html-function(func)
+            }
+            result = result ++ "  </div>\n"
+        }
+
+        // Undocumented functions in collapsible section
+        let undocumented-fns = filter(functions, fn(f) { not(documented?(f)) })
+        if length(undocumented-fns) > 0 {
+            result = result ++ "  <details class=\"undocumented-section\">\n"
+            result = result ++ "    <summary>Undocumented functions (" ++ to-string(length(undocumented-fns)) ++ ")</summary>\n"
+            result = result ++ "    <ul class=\"undocumented-list\">\n"
+            for func in undocumented-fns {
+                let sig = format-signature(func)
+                result = result ++ "      <li><code>" ++ html-escape(sig) ++ "</code></li>\n"
+            }
+            result = result ++ "    </ul>\n"
+            result = result ++ "  </details>\n"
+        }
+    }
+
+    result = result ++ "</section>\n"
+    result
+}
+
+// ============================================================================
+// Struct and Enum Formatting
+// ============================================================================
+
+/// Generate HTML for a struct
+fn html-struct(s) {
+    let s-name = get(s, "name")
+    let mut result = "<div class=\"type-def\">\n"
+    result = result ++ "  <h4>" ++ html-escape(s-name) ++ "</h4>\n"
+
+    let docstring = get(s, "docstring")
+    if docstring != null {
+        result = result ++ "  <p class=\"type-doc\">" ++ html-escape(docstring) ++ "</p>\n"
+    }
+
+    let fields = get(s, "fields")
+    if fields != null && length(fields) > 0 {
+        result = result ++ "  <div class=\"fields\"><strong>Fields:</strong>\n"
+        result = result ++ "    <ul>\n"
+        for field in fields {
+            let field-name = get(field, "name")
+            let is-mutable = get(field, "mutable")
+            result = result ++ "      <li><code>" ++ html-escape(field-name) ++ "</code>"
+            if is-mutable {
+                result = result ++ " <span class=\"badge mutable\">mutable</span>"
+            }
+            let field-doc = get(field, "docstring")
+            if field-doc != null {
+                result = result ++ " - " ++ html-escape(field-doc)
+            }
+            result = result ++ "</li>\n"
+        }
+        result = result ++ "    </ul>\n"
+        result = result ++ "  </div>\n"
+    }
+
+    result = result ++ "</div>\n"
+    result
+}
+
+/// Generate HTML for an enum
+fn html-enum(e) {
+    let e-name = get(e, "name")
+    let mut result = "<div class=\"type-def\">\n"
+    result = result ++ "  <h4>" ++ html-escape(e-name) ++ "</h4>\n"
+
+    let docstring = get(e, "docstring")
+    if docstring != null {
+        result = result ++ "  <p class=\"type-doc\">" ++ html-escape(docstring) ++ "</p>\n"
+    }
+
+    let variants = get(e, "variants")
+    if variants != null && length(variants) > 0 {
+        result = result ++ "  <div class=\"variants\"><strong>Variants:</strong>\n"
+        result = result ++ "    <ul>\n"
+        for variant in variants {
+            let v-name = get(variant, "name")
+            let v-fields = get(variant, "fields")
+            if v-fields != null && length(v-fields) > 0 {
+                let fields-str = join(v-fields, ", ")
+                result = result ++ "      <li><code>" ++ html-escape(v-name) ++ " { " ++ html-escape(fields-str) ++ " }</code></li>\n"
+            } else {
+                result = result ++ "      <li><code>" ++ html-escape(v-name) ++ "</code></li>\n"
+            }
+        }
+        result = result ++ "    </ul>\n"
+        result = result ++ "  </div>\n"
+    }
+
+    result = result ++ "</div>\n"
+    result
+}
+
+// ============================================================================
+// CSS Styles
+// ============================================================================
+
+fn get-css() {
+    "
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: #ffffff;
+    color: #24292f;
+    line-height: 1.6;
+    font-size: 16px;
+}
+
+.container {
+    display: flex;
+    min-height: 100vh;
+}
+
+/* Sidebar */
+.sidebar {
+    width: 260px;
+    background: #f6f8fa;
+    border-right: 1px solid #d0d7de;
+    position: fixed;
+    height: 100vh;
+    overflow-y: auto;
+    padding: 20px;
+}
+
+.sidebar h1 {
+    font-size: 20px;
+    font-weight: 600;
+    margin-bottom: 16px;
+    color: #24292f;
+}
+
+.sidebar h1 span {
+    color: #0969da;
+}
+
+.search-box {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    background: #ffffff;
+    color: #24292f;
+    font-size: 14px;
+    margin-bottom: 16px;
+}
+
+.search-box:focus {
+    outline: none;
+    border-color: #0969da;
+    box-shadow: 0 0 0 3px rgba(9, 105, 218, 0.1);
+}
+
+.nav-section {
+    margin-bottom: 20px;
+}
+
+.nav-section h3 {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: #57606a;
+    margin-bottom: 8px;
+    letter-spacing: 0.5px;
+}
+
+.nav-list {
+    list-style: none;
+}
+
+.nav-list li {
+    margin: 2px 0;
+}
+
+.nav-list a {
+    display: block;
+    padding: 6px 10px;
+    color: #24292f;
+    text-decoration: none;
+    border-radius: 6px;
+    font-size: 14px;
+    transition: background 0.15s;
+}
+
+.nav-list a:hover {
+    background: #eaeef2;
+}
+
+.nav-list .coverage-indicator {
+    font-size: 12px;
+    color: #57606a;
+    margin-left: 4px;
+}
+
+/* Main content */
+.main {
+    margin-left: 260px;
+    padding: 40px 60px;
+    max-width: 1000px;
+    flex: 1;
+}
+
+.main h1 {
+    font-size: 32px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: #24292f;
+}
+
+.main .subtitle {
+    color: #57606a;
+    margin-bottom: 32px;
+    font-size: 16px;
+}
+
+.overall-coverage {
+    background: #f6f8fa;
+    padding: 16px 20px;
+    border-radius: 6px;
+    margin-bottom: 32px;
+    border: 1px solid #d0d7de;
+    font-size: 14px;
+}
+
+/* Quick start */
+.quick-start {
+    background: #f6f8fa;
+    border-radius: 6px;
+    padding: 20px 24px;
+    margin-bottom: 40px;
+    border: 1px solid #d0d7de;
+}
+
+.quick-start h2 {
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 16px;
+}
+
+.quick-start pre {
+    background: #24292f;
+    color: #e6edf3;
+    padding: 16px;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.quick-start code {
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+}
+
+/* Namespace sections */
+.namespace {
+    margin-bottom: 48px;
+    scroll-margin-top: 20px;
+}
+
+.namespace h2 {
+    font-size: 24px;
+    font-weight: 600;
+    color: #24292f;
+    padding-bottom: 8px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid #d0d7de;
+}
+
+.coverage {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 500;
+    margin-bottom: 16px;
+}
+
+.coverage.good { background: #dafbe1; color: #116329; }
+.coverage.medium { background: #fff8c5; color: #6c4f00; }
+.coverage.low { background: #ffebe9; color: #82071e; }
+
+/* Function entries */
+.function {
+    padding: 16px 0;
+    border-bottom: 1px solid #eaeef2;
+}
+
+.function:last-child {
+    border-bottom: none;
+}
+
+.function-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+
+.signature {
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-size: 14px;
+    font-weight: 600;
+    color: #0550ae;
+}
+
+.badge {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+}
+
+.badge.builtin {
+    background: #ddf4ff;
+    color: #0969da;
+}
+
+.badge.mutable {
+    background: #fff8c5;
+    color: #6c4f00;
+}
+
+.docstring {
+    color: #57606a;
+    white-space: pre-wrap;
+    font-size: 14px;
+    line-height: 1.6;
+    padding-left: 0;
+}
+
+.docstring.undocumented {
+    font-style: italic;
+    color: #8c959f;
+}
+
+/* Undocumented section */
+.undocumented-section {
+    margin-top: 20px;
+    background: #f6f8fa;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    padding: 12px 16px;
+}
+
+.undocumented-section summary {
+    cursor: pointer;
+    font-weight: 500;
+    font-size: 14px;
+    color: #57606a;
+}
+
+.undocumented-section summary:hover {
+    color: #24292f;
+}
+
+.undocumented-list {
+    margin-top: 12px;
+    padding-left: 20px;
+    columns: 2;
+    column-gap: 24px;
+}
+
+.undocumented-list li {
+    margin: 4px 0;
+    font-size: 13px;
+    break-inside: avoid;
+}
+
+.undocumented-list code {
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-size: 12px;
+    color: #57606a;
+}
+
+/* Types section */
+.types-section, .enums-section {
+    margin-bottom: 48px;
+    scroll-margin-top: 20px;
+}
+
+.types-section h2, .enums-section h2 {
+    font-size: 24px;
+    font-weight: 600;
+    padding-bottom: 8px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid #d0d7de;
+}
+
+.types-section > p, .enums-section > p {
+    color: #57606a;
+    margin-bottom: 16px;
+    font-size: 14px;
+}
+
+.type-def {
+    padding: 16px 0;
+    border-bottom: 1px solid #eaeef2;
+}
+
+.type-def:last-child {
+    border-bottom: none;
+}
+
+.type-def h4 {
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-size: 14px;
+    font-weight: 600;
+    color: #0550ae;
+    margin-bottom: 8px;
+}
+
+.type-doc {
+    color: #57606a;
+    margin-bottom: 8px;
+    font-size: 14px;
+}
+
+.fields, .variants {
+    margin-top: 8px;
+    font-size: 14px;
+}
+
+.fields strong, .variants strong {
+    font-weight: 500;
+    color: #24292f;
+}
+
+.fields ul, .variants ul {
+    margin-top: 4px;
+    padding-left: 20px;
+}
+
+.fields li, .variants li {
+    margin: 4px 0;
+    color: #57606a;
+}
+
+.fields code, .variants code {
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-size: 13px;
+}
+
+/* Responsive */
+@media (max-width: 900px) {
+    .sidebar {
+        width: 220px;
+    }
+    .main {
+        margin-left: 220px;
+        padding: 24px 32px;
+    }
+}
+
+@media (max-width: 700px) {
+    .container {
+        flex-direction: column;
+    }
+    .sidebar {
+        position: relative;
+        width: 100%;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid #d0d7de;
+    }
+    .main {
+        margin-left: 0;
+        padding: 24px;
+    }
+    .undocumented-list {
+        columns: 1;
+    }
+}
+
+/* Search */
+.function.hidden {
+    display: none;
+}
+
+/* Scrollbar styling */
+.sidebar::-webkit-scrollbar {
+    width: 8px;
+}
+
+.sidebar::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.sidebar::-webkit-scrollbar-thumb {
+    background: #d0d7de;
+    border-radius: 4px;
+}
+
+.sidebar::-webkit-scrollbar-thumb:hover {
+    background: #8c959f;
+}
+"
+}
+
+// ============================================================================
+// JavaScript for Search
+// ============================================================================
+
+fn get-js() {
+    "
+document.addEventListener('DOMContentLoaded', function() {
+    const searchBox = document.querySelector('.search-box');
+    const functions = document.querySelectorAll('.function');
+
+    searchBox.addEventListener('input', function(e) {
+        const query = e.target.value.toLowerCase();
+
+        functions.forEach(function(fn) {
+            const signature = fn.querySelector('.signature');
+            const docstring = fn.querySelector('.docstring');
+            const sigText = signature ? signature.textContent.toLowerCase() : '';
+            const docText = docstring ? docstring.textContent.toLowerCase() : '';
+
+            if (query === '' || sigText.includes(query) || docText.includes(query)) {
+                fn.classList.remove('hidden');
+            } else {
+                fn.classList.add('hidden');
+            }
+        });
+    });
+
+    // Smooth scrolling for nav links
+    document.querySelectorAll('.nav-list a').forEach(function(link) {
+        link.addEventListener('click', function(e) {
+            const href = this.getAttribute('href');
+            if (href.startsWith('#')) {
+                e.preventDefault();
+                const target = document.querySelector(href);
+                if (target) {
+                    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
+            }
+        });
+    });
+});
+"
+}
+
+// ============================================================================
+// Main HTML Generator
+// ============================================================================
+
+/// Calculate overall documentation statistics
+fn calc-stats(namespaces) {
+    let mut total = 0
+    let mut documented = 0
+
+    for ns in namespaces {
+        let ns-name = get(ns, "name")
+        if excluded?(ns-name) == false {
+            let functions = get(ns, "functions")
+            if functions != null {
+                total = total + length(functions)
+                documented = documented + count-documented(functions)
+            }
+        }
+    }
+
+    {:total total, :documented documented}
+}
+
+/// Generate sidebar navigation
+fn generate-sidebar(sorted-namespaces) {
+    let mut result = "<aside class=\"sidebar\">\n"
+    result = result ++ "  <h1><span>Beagle</span> Docs</h1>\n"
+    result = result ++ "  <input type=\"text\" class=\"search-box\" placeholder=\"Search functions...\">\n"
+
+    result = result ++ "  <nav class=\"nav-section\">\n"
+    result = result ++ "    <h3>Namespaces</h3>\n"
+    result = result ++ "    <ul class=\"nav-list\">\n"
+
+    for ns in sorted-namespaces {
+        let ns-name = get(ns, "name")
+        let functions = get(ns, "functions")
+        let doc-count = count-documented(functions)
+        let total-count = count-total(functions)
+        result = result ++ "      <li><a href=\"#" ++ lower-kebab(ns-name) ++ "\">"
+        result = result ++ html-escape(ns-name)
+        result = result ++ " <span class=\"coverage-indicator\">(" ++ to-string(doc-count) ++ "/" ++ to-string(total-count) ++ ")</span>"
+        result = result ++ "</a></li>\n"
+    }
+
+    result = result ++ "    </ul>\n"
+    result = result ++ "  </nav>\n"
+
+    result = result ++ "  <nav class=\"nav-section\">\n"
+    result = result ++ "    <h3>Reference</h3>\n"
+    result = result ++ "    <ul class=\"nav-list\">\n"
+    result = result ++ "      <li><a href=\"#types\">Types</a></li>\n"
+    result = result ++ "      <li><a href=\"#enums\">Enums</a></li>\n"
+    result = result ++ "    </ul>\n"
+    result = result ++ "  </nav>\n"
+
+    result = result ++ "</aside>\n"
+    result
+}
+
+/// Generate the full HTML documentation
+fn generate-html(docs) {
+    let namespaces = get(docs, "namespaces")
+    let structs = get(docs, "structs")
+    let enums = get(docs, "enums")
+
+    // Filter and sort namespaces
+    let visible-namespaces = if namespaces != null {
+        filter(namespaces, fn(ns) { not(excluded?(get(ns, "name"))) })
+    } else {
+        []
+    }
+    let sorted-namespaces = sort-namespaces(visible-namespaces)
+
+    // Calculate stats
+    let stats = calc-stats(visible-namespaces)
+    let total = get(stats, :total)
+    let documented = get(stats, :documented)
+    let pct = if total > 0 { (documented * 100) / total } else { 0 }
+
+    // Start HTML
+    let mut result = "<!DOCTYPE html>\n"
+    result = result ++ "<html lang=\"en\">\n"
+    result = result ++ "<head>\n"
+    result = result ++ "  <meta charset=\"UTF-8\">\n"
+    result = result ++ "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"
+    result = result ++ "  <title>Beagle API Reference</title>\n"
+    result = result ++ "  <style>" ++ get-css() ++ "</style>\n"
+    result = result ++ "</head>\n"
+    result = result ++ "<body>\n"
+    result = result ++ "<div class=\"container\">\n"
+
+    // Sidebar
+    result = result ++ generate-sidebar(sorted-namespaces)
+
+    // Main content
+    result = result ++ "<main class=\"main\">\n"
+    result = result ++ "  <h1>Beagle API Reference</h1>\n"
+    result = result ++ "  <p class=\"subtitle\">Auto-generated documentation for the Beagle programming language.</p>\n"
+
+    // Overall coverage
+    result = result ++ "  <div class=\"overall-coverage\">\n"
+    result = result ++ "    <strong>Overall documentation coverage:</strong> "
+    result = result ++ to-string(documented) ++ "/" ++ to-string(total) ++ " functions (" ++ to-string(pct) ++ "%)\n"
+    result = result ++ "  </div>\n"
+
+    // Quick start
+    result = result ++ "  <div class=\"quick-start\">\n"
+    result = result ++ "    <h2>Quick Start</h2>\n"
+    result = result ++ "    <pre><code>// Hello World\n"
+    result = result ++ "fn main() {\n"
+    result = result ++ "    println(\"Hello, Beagle!\")\n"
+    result = result ++ "}\n"
+    result = result ++ "\n"
+    result = result ++ "// Using collections\n"
+    result = result ++ "let numbers = [1, 2, 3, 4, 5]\n"
+    result = result ++ "let doubled = map(numbers, fn(x) { x * 2 })\n"
+    result = result ++ "let sum = reduce(numbers, 0, fn(acc, x) { acc + x })\n"
+    result = result ++ "\n"
+    result = result ++ "// File I/O\n"
+    result = result ++ "use beagle.fs as fs\n"
+    result = result ++ "let content = fs/blocking-read-file(\"/tmp/test.txt\")</code></pre>\n"
+    result = result ++ "  </div>\n"
+
+    // Namespace documentation
+    for ns in sorted-namespaces {
+        result = result ++ html-namespace(ns)
+    }
+
+    // Types (Structs)
+    if structs != null && length(structs) > 0 {
+        result = result ++ "<section class=\"types-section\" id=\"types\">\n"
+        result = result ++ "  <h2>Types</h2>\n"
+        result = result ++ "  <p>Built-in struct types available in Beagle.</p>\n"
+        for s in structs {
+            result = result ++ html-struct(s)
+        }
+        result = result ++ "</section>\n"
+    }
+
+    // Enums
+    if enums != null && length(enums) > 0 {
+        result = result ++ "<section class=\"enums-section\" id=\"enums\">\n"
+        result = result ++ "  <h2>Enums</h2>\n"
+        result = result ++ "  <p>Built-in enum types available in Beagle.</p>\n"
+        for e in enums {
+            result = result ++ html-enum(e)
+        }
+        result = result ++ "</section>\n"
+    }
+
+    result = result ++ "</main>\n"
+    result = result ++ "</div>\n"
+
+    // JavaScript
+    result = result ++ "<script>" ++ get-js() ++ "</script>\n"
+
+    result = result ++ "</body>\n"
+    result = result ++ "</html>\n"
+    result
+}
+
+fn main(args) {
+    if length(args) == 0 {
+        println("Beagle HTML Documentation Generator")
+        println("")
+        println("Usage: beagle tools/docgen-html.bg <docs.json>")
+        println("")
+        println("Generate HTML documentation from export-docs output:")
+        println("  beagle --export-docs > /tmp/docs.json")
+        println("  beagle tools/docgen-html.bg /tmp/docs.json > docs/api.html")
+    } else {
+        let path = get(args, 0)
+        let docs = read-docs(path)
+        if docs != null {
+            let html = generate-html(docs)
+            print(html)
+        }
+    }
+}

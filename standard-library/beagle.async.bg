@@ -38,38 +38,51 @@ struct Future {
     state_atom
 }
 
-// Helper to create a future with initial state
+/// Create a new future with an initial state.
+///
+/// Futures represent values that may not be available yet.
+///
+/// Examples:
+///   (let f (make-future (FutureState.Pending {})))
 fn make-future(initial_state) {
     Future { state_atom: atom(initial_state) }
 }
 
-// Helper to get current state of a future
+/// Get the current state of a future.
+///
+/// Returns a FutureState: Pending, Running, Resolved, Rejected, or Cancelled.
 fn future-state(future) {
     deref(future.state_atom)
 }
 
-// Helper to resolve a future
+/// Resolve a future with a successful value.
+///
+/// Notifies any threads waiting on this future.
 fn resolve-future!(future, value) {
     reset!(future.state_atom, FutureState.Resolved { value: value })
     // Notify any threads waiting on futures
     core/future-notify()
 }
 
-// Helper to reject a future
+/// Reject a future with an error.
+///
+/// Notifies any threads waiting on this future.
 fn reject-future!(future, error) {
     reset!(future.state_atom, FutureState.Rejected { error: error })
     // Notify any threads waiting on futures
     core/future-notify()
 }
 
-// Helper to cancel a future
+/// Cancel a future.
+///
+/// The future's state becomes Cancelled. Notifies any waiting threads.
 fn cancel-future!(future) {
     reset!(future.state_atom, FutureState.Cancelled {})
     // Notify any threads waiting on futures
     core/future-notify()
 }
 
-// Check if a future is cancelled
+/// Check if a future has been cancelled.
 fn future-cancelled?(future) {
     let state = future-state(future)
     match state {
@@ -88,19 +101,23 @@ struct CancellationToken {
     cancelled_atom
 }
 
-// Create a new cancellation token
+/// Create a new cancellation token.
+///
+/// Cancellation tokens provide cooperative cancellation for async tasks.
 fn make-cancellation-token() {
     CancellationToken { cancelled_atom: atom(false) }
 }
 
-// Cancel a token - all tasks watching this token should stop
+/// Cancel a cancellation token.
+///
+/// All tasks watching this token should stop.
 fn cancel!(token) {
     reset!(token.cancelled_atom, true)
     // Notify waiters so they can check cancellation
     core/future-notify()
 }
 
-// Check if a token has been cancelled
+/// Check if a cancellation token has been cancelled.
 fn cancelled?(token) {
     deref(token.cancelled_atom)
 }
@@ -170,8 +187,17 @@ fn scope-await-all-children(scope) {
     }
 }
 
-// Run a block with a scope - ensures cleanup on exit
-// Usage: with-scope(fn(scope) { ... spawn tasks using scope ... })
+/// Run a block with a task scope for structured concurrency.
+///
+/// Ensures all spawned tasks complete before the scope exits.
+/// On error or cancellation, all child tasks are cancelled.
+///
+/// Examples:
+///   (with-scope fn(scope) {
+///       let f1 = spawn(scope, fn() { compute1() })
+///       let f2 = spawn(scope, fn() { compute2() })
+///       [await(f1), await(f2)]
+///   })
 fn with-scope(body) {
     let scope = make-scope()
     let result = try {
@@ -1671,7 +1697,12 @@ fn flush(file) {
     perform Async.Flush { file: file }
 }
 
-// Sleep for a number of milliseconds (blocking version)
+/// Sleep for a number of milliseconds.
+///
+/// Must be called within an Async effect handler.
+///
+/// Examples:
+///   (sleep 1000)  ; Sleep for 1 second
 fn sleep(ms) {
     perform Async.Sleep { ms: ms }
 }
@@ -1685,22 +1716,36 @@ fn async(thunk) {
     perform Async.Spawn { thunk: thunk }
 }
 
-// Wait for a future to complete and return its value
+/// Wait for a future to complete and return its value.
+///
+/// Blocks until the future resolves, rejects, or is cancelled.
+///
+/// Examples:
+///   (let f (spawn fn() { compute() }))
+///   (await f)  ; => result of compute()
 fn await(future) {
     perform Async.Await { future: future }
 }
 
-// Wait for all futures to complete and return their values as a list
+/// Wait for all futures to complete and return their values as a vector.
+///
+/// Examples:
+///   (let fs [(spawn fn() { 1 }) (spawn fn() { 2 })])
+///   (await-all fs)  ; => [1 2]
 fn await-all(futures) {
     perform Async.AwaitAll { futures: futures }
 }
 
-// Wait for the first future to complete and return it
+/// Wait for the first future to complete and return its result.
+///
+/// Returns a RaceResult indicating which future completed first.
 fn await-first(futures) {
     perform Async.AwaitFirst { futures: futures }
 }
 
-// Wait for a future with a timeout (in milliseconds)
+/// Wait for a future with a timeout in milliseconds.
+///
+/// Returns TimeoutResult.Ok if completed, TimeoutResult.TimedOut if timeout.
 fn await-timeout(ms, future) {
     let start = time-now()
     let deadline_ns = start + (ms * 1000000)
@@ -1810,7 +1855,13 @@ fn time-now() {
     core/time-now()
 }
 
-// Legacy spawn function (for backwards compatibility)
+/// Spawn an async task and return a future.
+///
+/// The task runs concurrently. Use await to get the result.
+///
+/// Examples:
+///   (let f (spawn fn() { expensive-computation() }))
+///   (await f)  ; => result of computation
 fn spawn(thunk) {
     perform Async.Spawn { thunk: thunk }
 }

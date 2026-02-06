@@ -80,6 +80,16 @@ fn string-to-buffer(s) {
 
 // === FILE* based operations (for regular files) ===
 
+/// Open a file with the specified mode.
+///
+/// Modes: "r" (read), "w" (write), "a" (append), "r+" (read/write).
+/// Returns Result with a File handle or error.
+///
+/// Examples:
+///   (match (io/open "/tmp/test.txt" "r") {
+///       Result.Ok { value } => value,
+///       Result.Err { error } => println("Failed to open")
+///   })
 fn open(path, mode) {
     let handle = _fopen(path, mode, 0, 0, 0, 0)
     if is-null(handle) {
@@ -89,6 +99,7 @@ fn open(path, mode) {
     }
 }
 
+/// Close an open file handle.
 fn close(file) {
     let result = _fclose(file.handle, 0, 0, 0, 0, 0)
     if result == 0 {
@@ -98,12 +109,21 @@ fn close(file) {
     }
 }
 
+/// Read up to n bytes from a file.
+///
+/// Returns a BufferResult with buffer and actual length read.
+/// Read up to n bytes from a file into a buffer.
+///
+/// Returns a BufferResult with the buffer and bytes read.
 fn read-bytes(file, n) {
     let buf = ffi/allocate(n)
     let bytes-read = _fread(buf, 1, n, file.handle, 0, 0)
     ok(BufferResult { buffer: buf, length: bytes-read })
 }
 
+/// Read a single character from a file.
+///
+/// Returns Result.Ok with the character code, or Result.Err at EOF.
 fn read-char(file) {
     let c = _fgetc(file.handle, 0, 0, 0, 0, 0)
     if c == -1 {
@@ -113,11 +133,17 @@ fn read-char(file) {
     }
 }
 
+/// Write bytes from a buffer to a file.
+///
+/// Returns the number of bytes written.
 fn write-bytes(file, buf, len) {
     let written = _fwrite(buf, 1, len, file.handle, 0, 0)
     ok(written)
 }
 
+/// Write a string to a file.
+///
+/// Returns the number of bytes written.
 fn write-string(file, s) {
     let len = length(s)
     let buf = string-to-buffer(s)
@@ -126,6 +152,7 @@ fn write-string(file, s) {
     ok(written)
 }
 
+/// Flush a file's buffers to disk.
 fn flush(file) {
     let result = _fflush(file.handle, 0, 0, 0, 0, 0)
     if result == 0 {
@@ -135,11 +162,14 @@ fn flush(file) {
     }
 }
 
+/// Check if a file has reached end-of-file.
 fn eof?(file) {
     _feof(file.handle, 0, 0, 0, 0, 0) != 0
 }
 
-// Read a line from a file (up to newline or max-len bytes)
+/// Read a line from a file (up to newline or max-len bytes).
+///
+/// Returns Result with the line as a string.
 fn read-line(file, max-len) {
     let buf = ffi/allocate(max-len)
     let mut i = 0
@@ -171,6 +201,9 @@ fn read-line(file, max-len) {
 
 // === FD-based operations (for stdin/stdout/stderr) ===
 
+/// Read up to n bytes from standard input.
+///
+/// Returns a BufferResult with the buffer and bytes read.
 fn read-stdin(n) {
     let buf = ffi/allocate(n)
     let bytes-read = _read(STDIN-FD, buf, n, 0, 0, 0)
@@ -182,6 +215,9 @@ fn read-stdin(n) {
     }
 }
 
+/// Read up to n bytes from stdin and return as a string.
+///
+/// Convenience wrapper around read-stdin.
 fn read-stdin-string(n) {
     let result = read-stdin(n)
     match result {
@@ -194,6 +230,9 @@ fn read-stdin-string(n) {
     }
 }
 
+/// Write a string to standard output.
+///
+/// Returns the number of bytes written.
 fn write-stdout(s) {
     let len = length(s)
     let buf = string-to-buffer(s)
@@ -206,7 +245,9 @@ fn write-stdout(s) {
     }
 }
 
-// Write raw buffer to stdout - no string conversion overhead
+/// Write raw buffer bytes to standard output.
+///
+/// More efficient than write-stdout for binary data.
 fn write-stdout-buffer(buf, len) {
     let written = _write(STDOUT-FD, buf, len, 0, 0, 0)
     if written < 0 {
@@ -216,6 +257,9 @@ fn write-stdout-buffer(buf, len) {
     }
 }
 
+/// Write a string to standard error.
+///
+/// Returns the number of bytes written.
 fn write-stderr(s) {
     let len = length(s)
     let buf = string-to-buffer(s)
@@ -228,7 +272,9 @@ fn write-stderr(s) {
     }
 }
 
-// Write from buffer at offset to stdout - for efficient partial buffer writes
+/// Write part of a buffer to stdout starting at an offset.
+///
+/// Useful for efficiently writing portions of a buffer.
 fn write-stdout-buffer-offset(buf, offset, len) {
     let written = ffi/write-buffer-offset(STDOUT-FD, buf, offset, len)
     if written < 0 {
@@ -238,7 +284,9 @@ fn write-stdout-buffer-offset(buf, offset, len) {
     }
 }
 
-// Read a line from stdin (up to max-len bytes)
+/// Read a line from standard input (up to max-len bytes).
+///
+/// Reads until newline or max-len is reached.
 fn read-stdin-line(max-len) {
     let buf = ffi/allocate(max-len)
     let one-byte-buf = ffi/allocate(1)
