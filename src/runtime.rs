@@ -5875,6 +5875,8 @@ impl Runtime {
         min_args: usize,
         docstring: Option<String>,
         arg_names: Vec<String>,
+        source_file: Option<String>,
+        source_line: Option<usize>,
     ) -> Result<usize, Box<dyn Error>> {
         let mut already_defined = false;
         let mut function_pointer = 0;
@@ -5891,6 +5893,12 @@ impl Runtime {
                     }
                     if !arg_names.is_empty() {
                         self.functions[index].arg_names = arg_names.clone();
+                    }
+                    if source_file.is_some() {
+                        self.functions[index].source_file = source_file.clone();
+                    }
+                    if source_line.is_some() {
+                        self.functions[index].source_line = source_line;
                     }
                     // Tag and add the binding for reserved functions that are now being defined
                     let tagged_fn = BuiltInTypes::Function.tag(function_pointer as isize) as usize;
@@ -5911,6 +5919,8 @@ impl Runtime {
                 min_args,
                 docstring,
                 arg_names,
+                source_file,
+                source_line,
             )?;
         }
         assert!(function_pointer != 0);
@@ -5982,6 +5992,8 @@ impl Runtime {
         min_args: usize,
         docstring: Option<String>,
         arg_names: Vec<String>,
+        source_file: Option<String>,
+        source_line: Option<usize>,
     ) -> Result<usize, Box<dyn Error>> {
         let index = self.functions.len();
         self.functions.push(Function {
@@ -6000,8 +6012,8 @@ impl Runtime {
             min_args,
             docstring,
             arg_names,
-            source_file: None,
-            source_line: None,
+            source_file,
+            source_line,
             source_column: None,
         });
         let function_pointer = Self::get_function_pointer(

@@ -514,6 +514,8 @@ impl Compiler {
                 0,
                 None,
                 vec![],
+                Some(file_name.to_string()),
+                None,
             )?;
             debug_only! {
                 debugger(Message {
@@ -861,6 +863,8 @@ impl Compiler {
         min_args: usize,
         docstring: Option<String>,
         arg_names: Vec<String>,
+        source_file: Option<String>,
+        source_line: Option<usize>,
     ) -> Result<usize, Box<dyn Error>> {
         if let Some(name) = function_name {
             backend.set_function_name(name);
@@ -903,6 +907,8 @@ impl Compiler {
             min_args,
             docstring,
             arg_names,
+            source_file,
+            source_line,
         )
     }
 
@@ -929,6 +935,8 @@ impl Compiler {
             min_args,
             None, // No docstring for this path
             vec![],
+            None,
+            None,
         )
     }
 
@@ -948,6 +956,8 @@ impl Compiler {
             function.min_args,
             function.docstring.clone(),
             function.arg_names.clone(),
+            function.source_file.clone(),
+            function.source_line,
         )?;
         Ok(())
     }
