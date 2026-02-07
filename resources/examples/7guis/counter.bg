@@ -1,0 +1,42 @@
+namespace counter
+
+// 7GUIs Task 1: Counter
+// A label displaying a count and a button to increment it.
+
+use raylib_gui as gui
+
+fn main() {
+    gui/init-window(400, 200, "7GUIs - Counter")
+    gui/set-target-fps(60)
+
+    game-loop(0)
+
+    gui/close-window()
+}
+
+fn game-loop(count) {
+    if gui/window-should-close() {
+        count
+    } else {
+        gui/begin-drawing()
+        gui/clear-background(gui/RAYWHITE)
+
+        // Title
+        gui/draw-text("Counter", 150, 20, 24, gui/DARKGRAY)
+
+        // Display count
+        let count_text = to-string(count)
+        gui/draw-rectangle(50, 80, 140, 40, gui/WHITE)
+        gui/draw-rectangle-lines(50, 80, 140, 40, gui/DARKGRAY)
+        let tw = gui/measure-text(count_text, 24)
+        gui/draw-text(count_text, 50 + (140 - tw) / 2, 88, 24, gui/BLACK)
+
+        // Increment button
+        let clicked = gui/button(210, 80, 140, 40, "Count")
+
+        gui/end-drawing()
+
+        let new_count = if clicked { count + 1 } else { count }
+        game-loop(new_count)
+    }
+}

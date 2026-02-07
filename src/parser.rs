@@ -1269,10 +1269,11 @@ impl Parser {
             Token::Not => {
                 let start = self.position;
                 self.consume(); // consume the '!'
-                // Parse the operand as a full expression but with struct_creation_allowed=false.
-                // This allows: !x, !(a && b), !state.focused, !arr[0], !f()
-                // But prevents !x { } from treating { as struct creation.
-                let expr = self.parse_expression(0, true, false)?.ok_or_else(|| {
+                // Parse a single operand with high precedence so that binary operators
+                // like && and || are NOT consumed. This ensures !x && y parses as
+                // (!x) && y, not !(x && y). Precedence 99 allows postfix operators
+                // (dot, index at precedence 100) but excludes all binary operators.
+                let expr = self.parse_expression(99, true, false)?.ok_or_else(|| {
                     ParseError::UnexpectedEof {
                         expected: "expression after '!'".to_string(),
                     }

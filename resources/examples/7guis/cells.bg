@@ -1,0 +1,509 @@
+namespace cells
+
+// 7GUIs Task 7: Cells
+// A simple spreadsheet with 26 columns (A-Z) and 100 rows (0-99).
+// Cells can contain text, numbers, or formulas (=A1+B2, =sum(A1:A5), etc.)
+// Clicking a cell lets you edit it; change propagation updates dependents.
+
+use raylib_gui as gui
+
+// Grid dimensions
+let NUM_COLS = 26
+let NUM_ROWS = 100
+let CELL_W = 80
+let CELL_H = 24
+let HEADER_H = 24
+let ROW_HEADER_W = 40
+let VISIBLE_COLS = 7
+let VISIBLE_ROWS = 16
+
+// Offsets for the grid area
+let GRID_X = 20 + ROW_HEADER_W
+let GRID_Y = 50 + HEADER_H
+
+struct CellData {
+    raw       // string: what the user typed
+    value     // string: computed display value
+}
+
+struct CellRef {
+    col
+    row
+}
+
+struct EditingInfo {
+    col
+    row
+}
+
+struct SpreadsheetState {
+    cells          // flat array of CellData, index = row * NUM_COLS + col
+    editing        // EditingInfo or null
+    edit_box       // TextBoxState or null
+    scroll_col     // first visible column
+    scroll_row     // first visible row
+}
+
+fn cell-index(col, row) {
+    row * NUM_COLS + col
+}
+
+fn make-empty-cell() {
+    CellData { raw: "", value: "" }
+}
+
+fn make-initial-cells() {
+    let total = NUM_COLS * NUM_ROWS
+    let mut cells = []
+    let mut i = 0
+    while i < total {
+        cells = push(cells, make-empty-cell())
+        i = i + 1
+    }
+    cells
+}
+
+fn make-initial-state() {
+    SpreadsheetState {
+        cells: make-initial-cells(),
+        editing: null,
+        edit_box: null,
+        scroll_col: 0,
+        scroll_row: 0
+    }
+}
+
+// ============================================================
+// Formula Evaluation
+// ============================================================
+
+fn is-formula(text) {
+    length(text) > 0 && get(text, 0) == "="
+}
+
+// Parse a cell reference like "A1" or "Z99"
+// Returns CellRef or null
+fn parse-cell-ref(text) {
+    if length(text) < 2 {
+        null
+    } else {
+        let col_char = char-code(get(text, 0))
+        // Accept A-Z or a-z
+        let col = if col_char >= 65 && col_char <= 90 {
+            col_char - 65
+        } else if col_char >= 97 && col_char <= 122 {
+            col_char - 97
+        } else {
+            -1
+        }
+        if col < 0 {
+            null
+        } else {
+            let row_str = substring(text, 1, length(text) - 1)
+            let row = try-parse-int(row_str)
+            if row == null {
+                null
+            } else if row < 0 || row >= NUM_ROWS {
+                null
+            } else {
+                CellRef { col: col, row: row }
+            }
+        }
+    }
+}
+
+fn try-parse-int(s) {
+    try {
+        to-number(s)
+    } catch (e) {
+        null
+    }
+}
+
+fn try-parse-float(s) {
+    try {
+        let n = to-number(s)
+        to-float(n)
+    } catch (e) {
+        null
+    }
+}
+
+// Evaluate a cell's content
+// Returns a string (display value)
+fn evaluate-cell(text, cells) {
+    if is-formula(text) {
+        let expr = substring(text, 1, length(text) - 1)
+        eval-expr(expr, cells)
+    } else {
+        text
+    }
+}
+
+// Simple expression evaluator
+// Supports: numbers, cell references, +, -, *, sum(A1:A5)
+fn eval-expr(expr, cells) {
+    let trimmed = trim(expr)
+
+    // Check for sum function
+    if starts-with(trimmed, "sum(") && ends-with(trimmed, ")") {
+        eval-sum(trimmed, cells)
+    } else if contains?(trimmed, "+") {
+        eval-binary-op(trimmed, "+", cells)
+    } else if contains?(trimmed, "-") && not(starts-with(trimmed, "-")) {
+        eval-binary-op(trimmed, "-", cells)
+    } else if contains?(trimmed, "*") {
+        eval-binary-op(trimmed, "*", cells)
+    } else {
+        // Try as number
+        let num = try-parse-float(trimmed)
+        if num != null {
+            format-number(num)
+        } else {
+            // Try as cell reference
+            let ref = parse-cell-ref(trimmed)
+            if ref != null {
+                let idx = cell-index(ref.col, ref.row)
+                let cell = cells[idx]
+                cell.value
+            } else {
+                "#ERR"
+            }
+        }
+    }
+}
+
+fn eval-binary-op(expr, op, cells) {
+    let idx = index-of(expr, op)
+    if idx < 0 {
+        "#ERR"
+    } else {
+        let left_str = trim(substring(expr, 0, idx))
+        let right_str = trim(substring(expr, idx + 1, length(expr) - idx - 1))
+        let left_val = expr-to-number(left_str, cells)
+        let right_val = expr-to-number(right_str, cells)
+        if left_val == null || right_val == null {
+            "#ERR"
+        } else {
+            let result = if op == "+" {
+                left_val + right_val
+            } else if op == "-" {
+                left_val - right_val
+            } else if op == "*" {
+                left_val * right_val
+            } else {
+                0.0
+            }
+            format-number(result)
+        }
+    }
+}
+
+fn expr-to-number(s, cells) {
+    let num = try-parse-float(s)
+    if num != null {
+        num
+    } else {
+        let ref = parse-cell-ref(s)
+        if ref != null {
+            let idx = cell-index(ref.col, ref.row)
+            let cell = cells[idx]
+            try-parse-float(cell.value)
+        } else {
+            null
+        }
+    }
+}
+
+fn eval-sum(expr, cells) {
+    // Parse sum(A1:B5)
+    let inner = substring(expr, 4, length(expr) - 5)
+    let colon_idx = index-of(inner, ":")
+    if colon_idx < 0 {
+        "#ERR"
+    } else {
+        let start_ref = parse-cell-ref(trim(substring(inner, 0, colon_idx)))
+        let end_ref = parse-cell-ref(trim(substring(inner, colon_idx + 1, length(inner) - colon_idx - 1)))
+        if start_ref == null || end_ref == null {
+            "#ERR"
+        } else {
+            let mut total = 0.0
+            let min_col = min(start_ref.col, end_ref.col)
+            let max_col = max(start_ref.col, end_ref.col)
+            let min_row = min(start_ref.row, end_ref.row)
+            let max_row = max(start_ref.row, end_ref.row)
+            let mut r = min_row
+            while r <= max_row {
+                let mut c = min_col
+                while c <= max_col {
+                    let idx = cell-index(c, r)
+                    let cell = cells[idx]
+                    let val = try-parse-float(cell.value)
+                    if val != null {
+                        total = total + val
+                    }
+                    c = c + 1
+                }
+                r = r + 1
+            }
+            format-number(total)
+        }
+    }
+}
+
+fn format-number(val) {
+    let int_val = truncate(val)
+    if to-float(int_val) == val {
+        to-string(int_val)
+    } else {
+        let sign = if val < 0.0 { "-" } else { "" }
+        let abs_val = if val < 0.0 { 0.0 - val } else { val }
+        let hundredths = truncate(abs_val * 100.0 + 0.5)
+        let whole = hundredths / 100
+        let frac = hundredths % 100
+        let frac_str = if frac < 10 { "0" ++ to-string(frac) } else { to-string(frac) }
+        sign ++ to-string(whole) ++ "." ++ frac_str
+    }
+}
+
+// ============================================================
+// Helper functions
+// ============================================================
+
+fn trim(s) {
+    let mut start = 0
+    while start < length(s) && get(s, start) == " " {
+        start = start + 1
+    }
+    let mut end = length(s)
+    while end > start && get(s, end - 1) == " " {
+        end = end - 1
+    }
+    substring(s, start, end - start)
+}
+
+fn starts-with(s, prefix) {
+    if length(prefix) > length(s) {
+        false
+    } else {
+        substring(s, 0, length(prefix)) == prefix
+    }
+}
+
+fn ends-with(s, suffix) {
+    if length(suffix) > length(s) {
+        false
+    } else {
+        substring(s, length(s) - length(suffix), length(suffix)) == suffix
+    }
+}
+
+fn col-name(col) {
+    char-from-code(65 + col)
+}
+
+// Recompute all cell values
+fn recompute-all(cells) {
+    let mut new_cells = []
+    let mut i = 0
+    let total = NUM_COLS * NUM_ROWS
+    while i < total {
+        let cell = cells[i]
+        let new_value = evaluate-cell(cell.raw, cells)
+        new_cells = push(new_cells, CellData { raw: cell.raw, value: new_value })
+        i = i + 1
+    }
+    // Second pass for forward references
+    let mut final_cells = []
+    let mut j = 0
+    while j < total {
+        let cell = new_cells[j]
+        let new_value = evaluate-cell(cell.raw, new_cells)
+        final_cells = push(final_cells, CellData { raw: cell.raw, value: new_value })
+        j = j + 1
+    }
+    final_cells
+}
+
+// ============================================================
+// Main
+// ============================================================
+
+fn main() {
+    gui/init-window(640, 480, "7GUIs - Cells")
+    gui/set-target-fps(60)
+
+    game-loop(make-initial-state())
+
+    gui/close-window()
+}
+
+fn game-loop(state) {
+    if gui/window-should-close() {
+        "done"
+    } else {
+        let mx = gui/get-mouse-x()
+        let my = gui/get-mouse-y()
+
+        gui/begin-drawing()
+        gui/clear-background(gui/RAYWHITE)
+
+        gui/draw-text("Cells", 290, 8, 24, gui/DARKGRAY)
+        gui/draw-text("Click to edit. Formulas: =A0+B1, =sum(A0:A5)", 120, 32, 14, gui/GRAY)
+
+        // Draw column headers
+        let mut c = 0
+        while c < VISIBLE_COLS && (c + state.scroll_col) < NUM_COLS {
+            let cx = GRID_X + c * CELL_W
+            let col_idx = c + state.scroll_col
+            gui/draw-rectangle(cx, 50, CELL_W, HEADER_H, gui/LIGHTGRAY)
+            gui/draw-rectangle-lines(cx, 50, CELL_W, HEADER_H, gui/DARKGRAY)
+            gui/draw-text(col-name(col_idx), cx + CELL_W / 2 - 5, 53, 16, gui/BLACK)
+            c = c + 1
+        }
+
+        // Draw row headers
+        let mut r = 0
+        while r < VISIBLE_ROWS && (r + state.scroll_row) < NUM_ROWS {
+            let ry = GRID_Y + r * CELL_H
+            let row_idx = r + state.scroll_row
+            gui/draw-rectangle(20, ry, ROW_HEADER_W, CELL_H, gui/LIGHTGRAY)
+            gui/draw-rectangle-lines(20, ry, ROW_HEADER_W, CELL_H, gui/DARKGRAY)
+            gui/draw-text(to-string(row_idx), 24, ry + 4, 14, gui/BLACK)
+            r = r + 1
+        }
+
+        // Draw cells
+        let mut editing_result = null
+        let mut r2 = 0
+        while r2 < VISIBLE_ROWS && (r2 + state.scroll_row) < NUM_ROWS {
+            let mut c2 = 0
+            while c2 < VISIBLE_COLS && (c2 + state.scroll_col) < NUM_COLS {
+                let col_idx = c2 + state.scroll_col
+                let row_idx = r2 + state.scroll_row
+                let cx = GRID_X + c2 * CELL_W
+                let cy = GRID_Y + r2 * CELL_H
+                let idx = cell-index(col_idx, row_idx)
+                let cell = state.cells[idx]
+
+                let is_editing = state.editing != null &&
+                    state.editing.col == col_idx &&
+                    state.editing.row == row_idx
+
+                if is_editing {
+                    gui/draw-rectangle(cx, cy, CELL_W, CELL_H, gui/rgb(255, 255, 220))
+                    gui/draw-rectangle-lines(cx, cy, CELL_W, CELL_H, gui/FOCUS_COLOR)
+                    let eb = gui/text-box(cx, cy, CELL_W, CELL_H, state.edit_box)
+                    editing_result = eb
+                } else {
+                    gui/draw-rectangle(cx, cy, CELL_W, CELL_H, gui/WHITE)
+                    gui/draw-rectangle-lines(cx, cy, CELL_W, CELL_H, gui/rgb(220, 220, 220))
+                    let display = if length(cell.value) > 0 { cell.value } else { "" }
+                    gui/draw-text(display, cx + 3, cy + 4, 14, gui/BLACK)
+                }
+
+                c2 = c2 + 1
+            }
+            r2 = r2 + 1
+        }
+
+        gui/end-drawing()
+
+        // Handle cell click to start editing
+        let grid_clicked = gui/is-mouse-button-pressed(gui/MOUSE_LEFT) &&
+            gui/point-in-rect(mx, my, GRID_X, GRID_Y, VISIBLE_COLS * CELL_W, VISIBLE_ROWS * CELL_H)
+
+        let clicked_col = if grid_clicked {
+            (mx - GRID_X) / CELL_W + state.scroll_col
+        } else { -1 }
+        let clicked_row = if grid_clicked {
+            (my - GRID_Y) / CELL_H + state.scroll_row
+        } else { -1 }
+
+        // Handle enter to confirm edit
+        let enter_pressed = gui/is-key-pressed(gui/KEY_ENTER)
+        let escape_pressed = gui/is-key-pressed(gui/KEY_ESCAPE)
+
+        let new_state = if state.editing != null && (enter_pressed || escape_pressed) {
+            if enter_pressed && editing_result != null {
+                let idx = cell-index(state.editing.col, state.editing.row)
+                let new_raw = editing_result.text
+                let mut new_cells = set-cell(state.cells, idx, CellData { raw: new_raw, value: new_raw })
+                new_cells = recompute-all(new_cells)
+                SpreadsheetState {
+                    cells: new_cells,
+                    editing: null,
+                    edit_box: null,
+                    scroll_col: state.scroll_col,
+                    scroll_row: state.scroll_row
+                }
+            } else {
+                SpreadsheetState {
+                    cells: state.cells,
+                    editing: null,
+                    edit_box: null,
+                    scroll_col: state.scroll_col,
+                    scroll_row: state.scroll_row
+                }
+            }
+        } else if grid_clicked && clicked_col >= 0 && clicked_row >= 0 {
+            let idx = cell-index(clicked_col, clicked_row)
+            let cell = state.cells[idx]
+            let edit_text = cell.raw
+            SpreadsheetState {
+                cells: state.cells,
+                editing: EditingInfo { col: clicked_col, row: clicked_row },
+                edit_box: gui/TextBoxState { text: edit_text, cursor: length(edit_text), focused: true },
+                scroll_col: state.scroll_col,
+                scroll_row: state.scroll_row
+            }
+        } else if state.editing != null && editing_result != null {
+            SpreadsheetState {
+                cells: state.cells,
+                editing: state.editing,
+                edit_box: editing_result,
+                scroll_col: state.scroll_col,
+                scroll_row: state.scroll_row
+            }
+        } else {
+            // Handle scroll
+            let new_scroll_col = if gui/is-key-pressed(gui/KEY_RIGHT) && state.editing == null {
+                min(state.scroll_col + 1, NUM_COLS - VISIBLE_COLS)
+            } else if gui/is-key-pressed(gui/KEY_LEFT) && state.editing == null {
+                max(state.scroll_col - 1, 0)
+            } else {
+                state.scroll_col
+            }
+            let new_scroll_row = if gui/is-key-pressed(gui/KEY_DOWN) && state.editing == null {
+                min(state.scroll_row + 1, NUM_ROWS - VISIBLE_ROWS)
+            } else if gui/is-key-pressed(gui/KEY_UP) && state.editing == null {
+                max(state.scroll_row - 1, 0)
+            } else {
+                state.scroll_row
+            }
+            SpreadsheetState {
+                cells: state.cells,
+                editing: state.editing,
+                edit_box: state.edit_box,
+                scroll_col: new_scroll_col,
+                scroll_row: new_scroll_row
+            }
+        }
+
+        game-loop(new_state)
+    }
+}
+
+fn set-cell(cells, idx, new_cell) {
+    let mut result = []
+    let mut i = 0
+    while i < length(cells) {
+        if i == idx {
+            result = push(result, new_cell)
+        } else {
+            result = push(result, cells[i])
+        }
+        i = i + 1
+    }
+    result
+}

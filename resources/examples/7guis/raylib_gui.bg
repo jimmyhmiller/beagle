@@ -1,0 +1,855 @@
+namespace raylib_gui
+
+// Shared raylib FFI bindings and immediate-mode GUI widgets for 7GUIs
+// All widgets follow immediate-mode pattern: take state, return new state
+
+use beagle.ffi as ffi
+
+// ============================================================
+// Raylib Library Setup
+// ============================================================
+
+let raylib = ffi/load-library("/opt/homebrew/lib/libraylib.dylib")
+
+// Core window functions
+let rl_init_window = ffi/get-function(
+    raylib, "InitWindow",
+    [ffi/Type.I32, ffi/Type.I32, ffi/Type.String],
+    ffi/Type.Void
+)
+
+let rl_close_window = ffi/get-function(
+    raylib, "CloseWindow", [], ffi/Type.Void
+)
+
+let rl_window_should_close = ffi/get-function(
+    raylib, "WindowShouldClose", [], ffi/Type.I32
+)
+
+let rl_set_target_fps = ffi/get-function(
+    raylib, "SetTargetFPS", [ffi/Type.I32], ffi/Type.Void
+)
+
+let rl_get_screen_width = ffi/get-function(
+    raylib, "GetScreenWidth", [], ffi/Type.I32
+)
+
+let rl_get_screen_height = ffi/get-function(
+    raylib, "GetScreenHeight", [], ffi/Type.I32
+)
+
+// Drawing control
+let rl_begin_drawing = ffi/get-function(
+    raylib, "BeginDrawing", [], ffi/Type.Void
+)
+
+let rl_end_drawing = ffi/get-function(
+    raylib, "EndDrawing", [], ffi/Type.Void
+)
+
+let rl_clear_background = ffi/get-function(
+    raylib, "ClearBackground", [ffi/Type.U32], ffi/Type.Void
+)
+
+// Drawing shapes
+let rl_draw_rectangle = ffi/get-function(
+    raylib, "DrawRectangle",
+    [ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.U32],
+    ffi/Type.Void
+)
+
+let rl_draw_rectangle_lines = ffi/get-function(
+    raylib, "DrawRectangleLines",
+    [ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.U32],
+    ffi/Type.Void
+)
+
+let rl_draw_line = ffi/get-function(
+    raylib, "DrawLine",
+    [ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.U32],
+    ffi/Type.Void
+)
+
+let rl_draw_text = ffi/get-function(
+    raylib, "DrawText",
+    [ffi/Type.String, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.U32],
+    ffi/Type.Void
+)
+
+let rl_draw_circle = ffi/get-function(
+    raylib, "DrawCircle",
+    [ffi/Type.I32, ffi/Type.I32, ffi/Type.F32, ffi/Type.U32],
+    ffi/Type.Void
+)
+
+let rl_draw_circle_lines = ffi/get-function(
+    raylib, "DrawCircleLines",
+    [ffi/Type.I32, ffi/Type.I32, ffi/Type.F32, ffi/Type.U32],
+    ffi/Type.Void
+)
+
+// Input - keyboard
+let rl_is_key_down = ffi/get-function(
+    raylib, "IsKeyDown", [ffi/Type.I32], ffi/Type.I32
+)
+
+let rl_is_key_pressed = ffi/get-function(
+    raylib, "IsKeyPressed", [ffi/Type.I32], ffi/Type.I32
+)
+
+let rl_get_key_pressed = ffi/get-function(
+    raylib, "GetKeyPressed", [], ffi/Type.I32
+)
+
+let rl_get_char_pressed = ffi/get-function(
+    raylib, "GetCharPressed", [], ffi/Type.I32
+)
+
+// Input - mouse
+let rl_get_mouse_x = ffi/get-function(
+    raylib, "GetMouseX", [], ffi/Type.I32
+)
+
+let rl_get_mouse_y = ffi/get-function(
+    raylib, "GetMouseY", [], ffi/Type.I32
+)
+
+let rl_is_mouse_button_pressed = ffi/get-function(
+    raylib, "IsMouseButtonPressed", [ffi/Type.I32], ffi/Type.I32
+)
+
+let rl_is_mouse_button_down = ffi/get-function(
+    raylib, "IsMouseButtonDown", [ffi/Type.I32], ffi/Type.I32
+)
+
+let rl_is_mouse_button_released = ffi/get-function(
+    raylib, "IsMouseButtonReleased", [ffi/Type.I32], ffi/Type.I32
+)
+
+// Text measurement
+let rl_measure_text = ffi/get-function(
+    raylib, "MeasureText", [ffi/Type.String, ffi/Type.I32], ffi/Type.I32
+)
+
+// Timing
+let rl_get_frame_time = ffi/get-function(
+    raylib, "GetFrameTime", [], ffi/Type.F32
+)
+
+let rl_get_time = ffi/get-function(
+    raylib, "GetTime", [], ffi/Type.U64
+)
+
+// ============================================================
+// Color Helper
+// ============================================================
+
+fn color(r, g, b, a) {
+    r + (g * 256) + (b * 65536) + (a * 16777216)
+}
+
+fn rgb(r, g, b) {
+    color(r, g, b, 255)
+}
+
+fn rgba(r, g, b, a) {
+    color(r, g, b, a)
+}
+
+// Predefined colors
+let RAYWHITE = rgb(245, 245, 245)
+let BLACK = rgb(0, 0, 0)
+let WHITE = rgb(255, 255, 255)
+let RED = rgb(230, 41, 55)
+let GREEN = rgb(0, 228, 48)
+let BLUE = rgb(0, 121, 241)
+let YELLOW = rgb(253, 249, 0)
+let ORANGE = rgb(255, 161, 0)
+let PINK = rgb(255, 109, 194)
+let PURPLE = rgb(200, 122, 255)
+let DARKGRAY = rgb(80, 80, 80)
+let LIGHTGRAY = rgb(200, 200, 200)
+let GRAY = rgb(130, 130, 130)
+let SKYBLUE = rgb(102, 191, 255)
+let LIME = rgb(0, 158, 47)
+let GOLD = rgb(255, 203, 0)
+let MAROON = rgb(190, 33, 55)
+let DARKBLUE = rgb(0, 82, 172)
+let BEIGE = rgb(211, 176, 131)
+let BLANK = color(0, 0, 0, 0)
+
+// ============================================================
+// Key Codes
+// ============================================================
+
+let KEY_RIGHT = 262
+let KEY_LEFT = 263
+let KEY_DOWN = 264
+let KEY_UP = 265
+let KEY_SPACE = 32
+let KEY_ENTER = 257
+let KEY_BACKSPACE = 259
+let KEY_DELETE = 261
+let KEY_TAB = 258
+let KEY_ESCAPE = 256
+let KEY_HOME = 268
+let KEY_END = 269
+let KEY_A = 65
+let KEY_Z = 90
+let KEY_LEFT_SHIFT = 340
+let KEY_LEFT_CONTROL = 341
+let KEY_LEFT_SUPER = 343
+
+// Mouse buttons
+let MOUSE_LEFT = 0
+let MOUSE_RIGHT = 1
+let MOUSE_MIDDLE = 2
+
+// ============================================================
+// Wrapper Functions
+// ============================================================
+
+fn init-window(width, height, title) {
+    rl_init_window(width, height, title)
+}
+
+fn close-window() {
+    rl_close_window()
+}
+
+fn window-should-close() {
+    rl_window_should_close() != 0
+}
+
+fn set-target-fps(fps) {
+    rl_set_target_fps(fps)
+}
+
+fn get-screen-width() {
+    rl_get_screen_width()
+}
+
+fn get-screen-height() {
+    rl_get_screen_height()
+}
+
+fn begin-drawing() {
+    rl_begin_drawing()
+}
+
+fn end-drawing() {
+    rl_end_drawing()
+}
+
+fn clear-background(c) {
+    rl_clear_background(c)
+}
+
+fn draw-rectangle(x, y, w, h, c) {
+    rl_draw_rectangle(x, y, w, h, c)
+}
+
+fn draw-rectangle-lines(x, y, w, h, c) {
+    rl_draw_rectangle_lines(x, y, w, h, c)
+}
+
+fn draw-line(x1, y1, x2, y2, c) {
+    rl_draw_line(x1, y1, x2, y2, c)
+}
+
+fn draw-text(text, x, y, size, c) {
+    rl_draw_text(text, x, y, size, c)
+}
+
+fn draw-circle(cx, cy, radius, c) {
+    rl_draw_circle(cx, cy, radius, c)
+}
+
+fn draw-circle-lines(cx, cy, radius, c) {
+    rl_draw_circle_lines(cx, cy, radius, c)
+}
+
+fn is-key-down(key) {
+    rl_is_key_down(key) != 0
+}
+
+fn is-key-pressed(key) {
+    rl_is_key_pressed(key) != 0
+}
+
+fn get-key-pressed() {
+    rl_get_key_pressed()
+}
+
+fn get-char-pressed() {
+    rl_get_char_pressed()
+}
+
+fn get-mouse-x() {
+    rl_get_mouse_x()
+}
+
+fn get-mouse-y() {
+    rl_get_mouse_y()
+}
+
+fn is-mouse-button-pressed(button) {
+    rl_is_mouse_button_pressed(button) != 0
+}
+
+fn is-mouse-button-down(button) {
+    rl_is_mouse_button_down(button) != 0
+}
+
+fn is-mouse-button-released(button) {
+    rl_is_mouse_button_released(button) != 0
+}
+
+fn measure-text(text, size) {
+    rl_measure_text(text, size)
+}
+
+fn get-frame-time() {
+    rl_get_frame_time()
+}
+
+// ============================================================
+// Utility Functions
+// ============================================================
+
+fn point-in-rect(px, py, x, y, w, h) {
+    px >= x && px <= x + w && py >= y && py <= y + h
+}
+
+fn clamp(value, min_val, max_val) {
+    if value < min_val {
+        min_val
+    } else if value > max_val {
+        max_val
+    } else {
+        value
+    }
+}
+
+// ============================================================
+// GUI Widgets - Immediate Mode
+// ============================================================
+
+// Style constants
+let FONT_SIZE = 20
+let SMALL_FONT = 16
+let PADDING = 8
+let WIDGET_HEIGHT = 36
+let BORDER_COLOR = DARKGRAY
+let BG_COLOR = WHITE
+let HOVER_COLOR = rgb(230, 230, 230)
+let ACTIVE_COLOR = rgb(200, 200, 200)
+let FOCUS_COLOR = BLUE
+let TEXT_COLOR = BLACK
+let DISABLED_TEXT_COLOR = GRAY
+let DISABLED_BG_COLOR = rgb(220, 220, 220)
+
+// --- Label ---
+
+fn label(x, y, text) {
+    draw-text(text, x, y, FONT_SIZE, TEXT_COLOR)
+}
+
+fn label-colored(x, y, text, c) {
+    draw-text(text, x, y, FONT_SIZE, c)
+}
+
+fn label-sized(x, y, text, size) {
+    draw-text(text, x, y, size, TEXT_COLOR)
+}
+
+// --- Button ---
+// Returns true if clicked this frame
+
+fn button(x, y, w, h, text) {
+    let mx = get-mouse-x()
+    let my = get-mouse-y()
+    let hover = point-in-rect(mx, my, x, y, w, h)
+    let clicked = hover && is-mouse-button-pressed(MOUSE_LEFT)
+
+    let bg = if hover {
+        if is-mouse-button-down(MOUSE_LEFT) {
+            ACTIVE_COLOR
+        } else {
+            HOVER_COLOR
+        }
+    } else {
+        BG_COLOR
+    }
+
+    draw-rectangle(x, y, w, h, bg)
+    draw-rectangle-lines(x, y, w, h, BORDER_COLOR)
+
+    // Center text
+    let tw = measure-text(text, FONT_SIZE)
+    let tx = x + (w - tw) / 2
+    let ty = y + (h - FONT_SIZE) / 2
+    draw-text(text, tx, ty, FONT_SIZE, TEXT_COLOR)
+
+    clicked
+}
+
+fn button-enabled(x, y, w, h, text, enabled) {
+    if enabled {
+        button(x, y, w, h, text)
+    } else {
+        draw-rectangle(x, y, w, h, DISABLED_BG_COLOR)
+        draw-rectangle-lines(x, y, w, h, BORDER_COLOR)
+        let tw = measure-text(text, FONT_SIZE)
+        let tx = x + (w - tw) / 2
+        let ty = y + (h - FONT_SIZE) / 2
+        draw-text(text, tx, ty, FONT_SIZE, DISABLED_TEXT_COLOR)
+        false
+    }
+}
+
+// --- Text Box ---
+// State: { text: String, cursor: Int, focused: Bool }
+
+struct TextBoxState {
+    text
+    cursor
+    focused
+}
+
+fn make-text-box-state(initial_text) {
+    TextBoxState {
+        text: initial_text,
+        cursor: length(initial_text),
+        focused: false
+    }
+}
+
+fn text-box(x, y, w, h, state) {
+    let mx = get-mouse-x()
+    let my = get-mouse-y()
+    let hover = point-in-rect(mx, my, x, y, w, h)
+    let clicked = hover && is-mouse-button-pressed(MOUSE_LEFT)
+    let clicked_outside = !hover && is-mouse-button-pressed(MOUSE_LEFT)
+
+    // Focus management
+    let focused = if clicked {
+        true
+    } else if clicked_outside {
+        false
+    } else {
+        state.focused
+    }
+
+    // Handle text input when focused
+    let result = if focused {
+        handle-text-input(state.text, state.cursor)
+    } else {
+        TextInputResult { text: state.text, cursor: state.cursor }
+    }
+
+    // Draw
+    let border = if focused { FOCUS_COLOR } else { BORDER_COLOR }
+    draw-rectangle(x, y, w, h, BG_COLOR)
+    draw-rectangle-lines(x, y, w, h, border)
+
+    // Draw text with clipping (simple: just draw it)
+    let text_x = x + PADDING
+    let text_y = y + (h - FONT_SIZE) / 2
+    draw-text(result.text, text_x, text_y, FONT_SIZE, TEXT_COLOR)
+
+    // Draw cursor when focused (blinking based on frame count)
+    if focused {
+        let cursor_text = substring(result.text, 0, result.cursor)
+        let cursor_x = text_x + measure-text(cursor_text, FONT_SIZE)
+        draw-line(cursor_x, y + 4, cursor_x, y + h - 4, FOCUS_COLOR)
+    }
+
+    TextBoxState {
+        text: result.text,
+        cursor: result.cursor,
+        focused: focused
+    }
+}
+
+fn text-box-disabled(x, y, w, h, text) {
+    draw-rectangle(x, y, w, h, DISABLED_BG_COLOR)
+    draw-rectangle-lines(x, y, w, h, BORDER_COLOR)
+    let text_x = x + PADDING
+    let text_y = y + (h - FONT_SIZE) / 2
+    draw-text(text, text_x, text_y, FONT_SIZE, DISABLED_TEXT_COLOR)
+}
+
+struct TextInputResult {
+    text
+    cursor
+}
+
+fn handle-text-input(text, cursor) {
+    // Process character input
+    let char_code = get-char-pressed()
+    let result = if char_code > 0 {
+        consume-chars(text, cursor, char_code)
+    } else {
+        TextInputResult { text: text, cursor: cursor }
+    }
+
+    // Handle backspace
+    let result2 = if is-key-pressed(KEY_BACKSPACE) || (is-key-down(KEY_BACKSPACE) && is-key-down(KEY_LEFT_SUPER)) {
+        if result.cursor > 0 {
+            if is-key-down(KEY_LEFT_SUPER) {
+                // Delete all text before cursor
+                TextInputResult {
+                    text: substring(result.text, result.cursor, length(result.text) - result.cursor),
+                    cursor: 0
+                }
+            } else {
+                let before = substring(result.text, 0, result.cursor - 1)
+                let after = substring(result.text, result.cursor, length(result.text) - result.cursor)
+                TextInputResult {
+                    text: before ++ after,
+                    cursor: result.cursor - 1
+                }
+            }
+        } else {
+            result
+        }
+    } else {
+        result
+    }
+
+    // Handle delete key
+    let result3 = if is-key-pressed(KEY_DELETE) {
+        if result2.cursor < length(result2.text) {
+            let before = substring(result2.text, 0, result2.cursor)
+            let after = substring(result2.text, result2.cursor + 1, length(result2.text) - result2.cursor - 1)
+            TextInputResult {
+                text: before ++ after,
+                cursor: result2.cursor
+            }
+        } else {
+            result2
+        }
+    } else {
+        result2
+    }
+
+    // Handle left/right arrow
+    let result4 = if is-key-pressed(KEY_LEFT) {
+        TextInputResult {
+            text: result3.text,
+            cursor: clamp(result3.cursor - 1, 0, length(result3.text))
+        }
+    } else if is-key-pressed(KEY_RIGHT) {
+        TextInputResult {
+            text: result3.text,
+            cursor: clamp(result3.cursor + 1, 0, length(result3.text))
+        }
+    } else if is-key-pressed(KEY_HOME) {
+        TextInputResult { text: result3.text, cursor: 0 }
+    } else if is-key-pressed(KEY_END) {
+        TextInputResult { text: result3.text, cursor: length(result3.text) }
+    } else {
+        result3
+    }
+
+    result4
+}
+
+fn consume-chars(text, cursor, char_code) {
+    // Insert character at cursor position
+    let ch = char-from-code(char_code)
+    let before = substring(text, 0, cursor)
+    let after = substring(text, cursor, length(text) - cursor)
+    let new_text = before ++ ch ++ after
+    let new_cursor = cursor + 1
+
+    // Check for more chars
+    let next = get-char-pressed()
+    if next > 0 {
+        consume-chars(new_text, new_cursor, next)
+    } else {
+        TextInputResult { text: new_text, cursor: new_cursor }
+    }
+}
+
+// --- Slider ---
+// Returns new value (integer)
+
+fn slider(x, y, w, h, min_val, max_val, value) {
+    let mx = get-mouse-x()
+    let my = get-mouse-y()
+    let hover = point-in-rect(mx, my, x, y, w, h)
+
+    // Track background
+    let track_y = y + h / 2 - 2
+    draw-rectangle(x, y, w, h, BG_COLOR)
+    draw-rectangle(x, track_y, w, 4, LIGHTGRAY)
+
+    // Calculate handle position
+    let range = max_val - min_val
+    let ratio = if range > 0 {
+        to-float(value - min_val) / to-float(range)
+    } else {
+        0.0
+    }
+    let handle_w = 16
+    let usable_w = w - handle_w
+    let handle_x = x + truncate(ratio * to-float(usable_w))
+    let handle_y = y + 2
+
+    // Handle dragging
+    let new_value = if hover && is-mouse-button-down(MOUSE_LEFT) {
+        let relative_x = mx - x - handle_w / 2
+        let clamped = clamp(relative_x, 0, usable_w)
+        let new_ratio = to-float(clamped) / to-float(usable_w)
+        let result = min_val + truncate(new_ratio * to-float(range))
+        clamp(result, min_val, max_val)
+    } else {
+        value
+    }
+
+    // Draw handle
+    let new_ratio = if range > 0 {
+        to-float(new_value - min_val) / to-float(range)
+    } else {
+        0.0
+    }
+    let new_handle_x = x + truncate(new_ratio * to-float(usable_w))
+
+    // Filled portion
+    draw-rectangle(x, track_y, new_handle_x - x + handle_w / 2, 4, FOCUS_COLOR)
+
+    // Handle
+    let handle_color = if hover { HOVER_COLOR } else { WHITE }
+    draw-rectangle(new_handle_x, handle_y, handle_w, h - 4, handle_color)
+    draw-rectangle-lines(new_handle_x, handle_y, handle_w, h - 4, BORDER_COLOR)
+
+    new_value
+}
+
+// Float version of slider - returns float value
+fn slider-float(x, y, w, h, min_val, max_val, value) {
+    let mx = get-mouse-x()
+    let my = get-mouse-y()
+    let hover = point-in-rect(mx, my, x, y, w, h)
+
+    let track_y = y + h / 2 - 2
+    draw-rectangle(x, y, w, h, BG_COLOR)
+    draw-rectangle(x, track_y, w, 4, LIGHTGRAY)
+
+    let range = max_val - min_val
+    let ratio = if range > 0.0 {
+        (value - min_val) / range
+    } else {
+        0.0
+    }
+    let handle_w = 16
+    let usable_w = w - handle_w
+
+    let new_value = if hover && is-mouse-button-down(MOUSE_LEFT) {
+        let relative_x = mx - x - handle_w / 2
+        let clamped_x = clamp(relative_x, 0, usable_w)
+        let new_ratio = to-float(clamped_x) / to-float(usable_w)
+        min_val + new_ratio * range
+    } else {
+        value
+    }
+
+    let new_ratio = if range > 0.0 {
+        (new_value - min_val) / range
+    } else {
+        0.0
+    }
+    let new_handle_x = x + truncate(new_ratio * to-float(usable_w))
+
+    draw-rectangle(x, track_y, new_handle_x - x + handle_w / 2, 4, FOCUS_COLOR)
+
+    let handle_color = if hover { HOVER_COLOR } else { WHITE }
+    draw-rectangle(new_handle_x, y + 2, handle_w, h - 4, handle_color)
+    draw-rectangle-lines(new_handle_x, y + 2, handle_w, h - 4, BORDER_COLOR)
+
+    new_value
+}
+
+// --- Progress Bar ---
+
+fn progress-bar(x, y, w, h, value, max_val) {
+    draw-rectangle(x, y, w, h, LIGHTGRAY)
+    let fill_w = if max_val > 0 {
+        truncate(to-float(w) * to-float(value) / to-float(max_val))
+    } else {
+        0
+    }
+    let clamped_w = clamp(fill_w, 0, w)
+    draw-rectangle(x, y, clamped_w, h, SKYBLUE)
+    draw-rectangle-lines(x, y, w, h, BORDER_COLOR)
+}
+
+fn progress-bar-float(x, y, w, h, value, max_val) {
+    draw-rectangle(x, y, w, h, LIGHTGRAY)
+    let fill_w = if max_val > 0.0 {
+        truncate(to-float(w) * value / max_val)
+    } else {
+        0
+    }
+    let clamped_w = clamp(fill_w, 0, w)
+    draw-rectangle(x, y, clamped_w, h, SKYBLUE)
+    draw-rectangle-lines(x, y, w, h, BORDER_COLOR)
+}
+
+// --- Dropdown ---
+
+struct DropdownState {
+    selected
+    open
+}
+
+fn make-dropdown-state(initial_selected) {
+    DropdownState {
+        selected: initial_selected,
+        open: false
+    }
+}
+
+fn dropdown(x, y, w, h, options, state) {
+    let mx = get-mouse-x()
+    let my = get-mouse-y()
+    let hover_main = point-in-rect(mx, my, x, y, w, h)
+    let clicked_main = hover_main && is-mouse-button-pressed(MOUSE_LEFT)
+
+    if state.open {
+        // Draw main box
+        draw-rectangle(x, y, w, h, BG_COLOR)
+        draw-rectangle-lines(x, y, w, h, FOCUS_COLOR)
+        let selected_text = options[state.selected]
+        draw-text(selected_text, x + PADDING, y + (h - FONT_SIZE) / 2, FONT_SIZE, TEXT_COLOR)
+        // Draw dropdown arrow
+        draw-text("v", x + w - 20, y + (h - FONT_SIZE) / 2, FONT_SIZE, TEXT_COLOR)
+
+        // Draw dropdown list
+        let num_options = length(options)
+        let list_y = y + h
+        let mut new_selected = state.selected
+        let mut new_open = true
+        let mut i = 0
+        while i < num_options {
+            let opt_y = list_y + i * h
+            let hover_opt = point-in-rect(mx, my, x, opt_y, w, h)
+            let opt_bg = if hover_opt { HOVER_COLOR } else { BG_COLOR }
+            draw-rectangle(x, opt_y, w, h, opt_bg)
+            draw-rectangle-lines(x, opt_y, w, h, BORDER_COLOR)
+            draw-text(options[i], x + PADDING, opt_y + (h - FONT_SIZE) / 2, FONT_SIZE, TEXT_COLOR)
+
+            if hover_opt && is-mouse-button-pressed(MOUSE_LEFT) {
+                new_selected = i
+                new_open = false
+            }
+            i = i + 1
+        }
+
+        // Close if clicked outside
+        let total_h = h + num_options * h
+        let hover_any = point-in-rect(mx, my, x, y, w, total_h)
+        if !hover_any && is-mouse-button-pressed(MOUSE_LEFT) {
+            new_open = false
+        }
+
+        DropdownState { selected: new_selected, open: new_open }
+    } else {
+        // Closed state
+        let bg = if hover_main { HOVER_COLOR } else { BG_COLOR }
+        draw-rectangle(x, y, w, h, bg)
+        draw-rectangle-lines(x, y, w, h, BORDER_COLOR)
+        let selected_text = options[state.selected]
+        draw-text(selected_text, x + PADDING, y + (h - FONT_SIZE) / 2, FONT_SIZE, TEXT_COLOR)
+        draw-text("v", x + w - 20, y + (h - FONT_SIZE) / 2, FONT_SIZE, TEXT_COLOR)
+
+        let new_open = if clicked_main { true } else { false }
+        DropdownState { selected: state.selected, open: new_open }
+    }
+}
+
+// --- List View ---
+
+struct ListViewState {
+    selected
+    scroll_offset
+}
+
+fn make-list-view-state() {
+    ListViewState {
+        selected: -1,
+        scroll_offset: 0
+    }
+}
+
+fn list-view(x, y, w, h, items, state) {
+    let mx = get-mouse-x()
+    let my = get-mouse-y()
+    let item_h = 28
+    let num_items = length(items)
+    let visible_count = h / item_h
+
+    // Draw background
+    draw-rectangle(x, y, w, h, BG_COLOR)
+
+    // Draw items
+    let mut new_selected = state.selected
+    let mut i = 0
+    while i < num_items && i < visible_count + state.scroll_offset {
+        if i >= state.scroll_offset {
+            let draw_index = i - state.scroll_offset
+            let item_y = y + draw_index * item_h
+            if item_y + item_h <= y + h {
+                let hover = point-in-rect(mx, my, x, item_y, w, item_h)
+                let bg = if i == state.selected {
+                    SKYBLUE
+                } else if hover {
+                    HOVER_COLOR
+                } else {
+                    BG_COLOR
+                }
+                draw-rectangle(x, item_y, w, item_h, bg)
+                let text_color = if i == state.selected { WHITE } else { TEXT_COLOR }
+                draw-text(items[i], x + PADDING, item_y + (item_h - SMALL_FONT) / 2, SMALL_FONT, text_color)
+
+                if hover && is-mouse-button-pressed(MOUSE_LEFT) {
+                    new_selected = i
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    draw-rectangle-lines(x, y, w, h, BORDER_COLOR)
+
+    // Simple scroll with arrow keys when hovered
+    let hover_list = point-in-rect(mx, my, x, y, w, h)
+    let new_scroll = if hover_list {
+        if is-key-pressed(KEY_DOWN) {
+            clamp(state.scroll_offset + 1, 0, max(0, num_items - visible_count))
+        } else if is-key-pressed(KEY_UP) {
+            clamp(state.scroll_offset - 1, 0, max(0, num_items - visible_count))
+        } else {
+            state.scroll_offset
+        }
+    } else {
+        state.scroll_offset
+    }
+
+    ListViewState { selected: new_selected, scroll_offset: new_scroll }
+}
+
+// --- Separator ---
+
+fn separator(x, y, w) {
+    draw-line(x, y, x + w, y, LIGHTGRAY)
+}
+
+// --- Panel (just a background rectangle with border) ---
+
+fn panel(x, y, w, h) {
+    draw-rectangle(x, y, w, h, RAYWHITE)
+    draw-rectangle-lines(x, y, w, h, BORDER_COLOR)
+}

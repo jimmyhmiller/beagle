@@ -1,0 +1,16 @@
+namespace string-trim-test
+
+fn main() {
+    println(trim("  hello  "))
+    println(starts-with?("hello world", "hello"))
+    println(starts-with?("hello world", "world"))
+    println(ends-with?("hello world", "world"))
+    println(ends-with?("hello world", "hello"))
+}
+
+// Expect
+// hello
+// true
+// false
+// true
+// false

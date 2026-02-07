@@ -5575,25 +5575,8 @@ impl Runtime {
         length: usize,
     ) -> Result<Tagged, Box<dyn Error>> {
         let tag = BuiltInTypes::get_kind(string);
-        if tag == BuiltInTypes::String {
-            let string = self.get_str_literal(string);
-            let end = start + length;
-            if end > string.len() {
-                unsafe {
-                    crate::builtins::throw_runtime_error(
-                        stack_pointer,
-                        "IndexError",
-                        format!(
-                            "substring index out of bounds: start={}, length={}, but string length is {}",
-                            start,
-                            length,
-                            string.len()
-                        ),
-                    );
-                }
-            }
-            let string = string[start..end].to_string();
-            self.allocate_string(stack_pointer, string)
+        let s = if tag == BuiltInTypes::String {
+            self.get_str_literal(string).to_string()
         } else if tag == BuiltInTypes::HeapObject {
             let heap_object = HeapObject::from_tagged(string);
             if heap_object.get_type_id() != TYPE_ID_STRING as usize {
@@ -5609,24 +5592,7 @@ impl Runtime {
                 }
             }
             let bytes = heap_object.get_string_bytes();
-            let string = unsafe { std::str::from_utf8_unchecked(bytes) };
-            let end = start + length;
-            if end > string.len() {
-                unsafe {
-                    crate::builtins::throw_runtime_error(
-                        stack_pointer,
-                        "IndexError",
-                        format!(
-                            "substring index out of bounds: start={}, length={}, but string length is {}",
-                            start,
-                            length,
-                            string.len()
-                        ),
-                    );
-                }
-            }
-            let string = string[start..end].to_string();
-            self.allocate_string(stack_pointer, string)
+            unsafe { std::str::from_utf8_unchecked(bytes) }.to_string()
         } else {
             unsafe {
                 crate::builtins::throw_runtime_error(
@@ -5635,7 +5601,37 @@ impl Runtime {
                     format!("Expected string for substring, got {:?}", tag),
                 );
             }
+        };
+
+        let char_count = s.chars().count();
+        let end = start + length;
+        if end > char_count {
+            unsafe {
+                crate::builtins::throw_runtime_error(
+                    stack_pointer,
+                    "IndexError",
+                    format!(
+                        "substring index out of bounds: start={}, length={}, but string length is {}",
+                        start, length, char_count
+                    ),
+                );
+            }
         }
+
+        // Convert char indices to byte offsets
+        let byte_start = s
+            .char_indices()
+            .nth(start)
+            .map(|(i, _)| i)
+            .unwrap_or(s.len());
+        let byte_end = if length == 0 {
+            byte_start
+        } else {
+            s.char_indices().nth(end).map(|(i, _)| i).unwrap_or(s.len())
+        };
+
+        let result = s[byte_start..byte_end].to_string();
+        self.allocate_string(stack_pointer, result)
     }
 
     pub fn add_foreign_function(

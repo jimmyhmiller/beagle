@@ -1,0 +1,29 @@
+namespace tail_crash_test
+
+// Regression test: `!` (boolean negation) used to be parsed as part of the
+// identifier name (e.g. "!x" as one token), causing a segfault when the
+// compiler tried to resolve it as a free variable.
+
+fn work(a) {
+    let x = false
+    if x {
+        1
+    } else if !x {
+        2
+    } else {
+        a
+    }
+}
+
+fn main() {
+    println(work(0))
+    println(!true)
+    println(!false)
+    println(!(1 == 2))
+}
+
+// Expect
+// 2
+// false
+// true
+// true

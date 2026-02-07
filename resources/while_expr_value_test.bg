@@ -1,0 +1,22 @@
+namespace while_expr_value_test
+
+fn find(arr, target) {
+    let mut i = 0
+    while i < length(arr) {
+        if arr[i] == target {
+            break(i)
+        }
+        i = i + 1
+    }
+}
+
+fn main() {
+    println(find([10, 20, 30], 20))
+    println(find([10, 20, 30], 10))
+    println(find([10, 20, 30], 30))
+}
+
+// Expect
+// 1
+// 0
+// 2

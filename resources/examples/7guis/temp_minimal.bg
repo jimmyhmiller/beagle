@@ -1,0 +1,126 @@
+namespace temp_minimal
+
+// 7GUIs Task 2: Temperature Converter
+// Two text fields for Celsius and Fahrenheit with bidirectional conversion.
+// Editing one field updates the other.
+
+use raylib_gui as gui
+
+fn celsius-to-fahrenheit(c) {
+    c * 9.0 / 5.0 + 32.0
+}
+
+fn fahrenheit-to-celsius(f) {
+    (f - 32.0) * 5.0 / 9.0
+}
+
+fn format-temp(val) {
+    let sign = if val < 0.0 { "-" } else { "" }
+    let abs_val = if val < 0.0 { 0.0 - val } else { val }
+    let rounded = truncate(abs_val * 10.0 + 0.5)
+    let whole = rounded / 10
+    let frac = rounded % 10
+    sign ++ to-string(whole) ++ "." ++ to-string(frac)
+}
+
+fn try-parse-number(s) {
+    try {
+        to-number(s)
+    } catch (e) {
+        null
+    }
+}
+
+struct State {
+    celsius_box
+    fahrenheit_box
+}
+
+fn make-initial-state() {
+    State {
+        celsius_box: gui/make-text-box-state(""),
+        fahrenheit_box: gui/make-text-box-state("")
+    }
+}
+
+fn main() {
+    gui/init-window(500, 200, "7GUIs - Temperature Converter")
+    gui/set-target-fps(60)
+
+    game-loop(make-initial-state())
+
+    gui/close-window()
+}
+
+fn game-loop(state) {
+    if gui/window-should-close() {
+        "done"
+    } else {
+        gui/begin-drawing()
+        gui/clear-background(gui/RAYWHITE)
+
+        gui/draw-text("Temperature Converter", 130, 20, 24, gui/DARKGRAY)
+
+        // Celsius input
+        gui/draw-text("Celsius:", 30, 90, 20, gui/BLACK)
+        let new_celsius_box = gui/text-box(130, 82, 120, 36, state.celsius_box)
+
+        // = label
+        gui/draw-text("=", 265, 88, 24, gui/DARKGRAY)
+
+        // Fahrenheit input
+        gui/draw-text("Fahrenheit:", 295, 90, 20, gui/BLACK)
+        let new_fahrenheit_box = gui/text-box(410, 82, 120, 36, state.fahrenheit_box)
+
+        gui/end-drawing()
+
+        // Determine which field was edited
+        let celsius_changed = new_celsius_box.text != state.celsius_box.text
+        let fahrenheit_changed = new_fahrenheit_box.text != state.fahrenheit_box.text
+
+        let new_state = if celsius_changed {
+            let c_val = try-parse-number(new_celsius_box.text)
+            if c_val != null {
+                let f_val = celsius-to-fahrenheit(to-float(c_val))
+                State {
+                    celsius_box: new_celsius_box,
+                    fahrenheit_box: gui/TextBoxState {
+                        text: format-temp(f_val),
+                        cursor: new_fahrenheit_box.cursor,
+                        focused: new_fahrenheit_box.focused
+                    }
+                }
+            } else {
+                State {
+                    celsius_box: new_celsius_box,
+                    fahrenheit_box: new_fahrenheit_box
+                }
+            }
+        } else if fahrenheit_changed {
+            let f_val = try-parse-number(new_fahrenheit_box.text)
+            if f_val != null {
+                let c_val = fahrenheit-to-celsius(to-float(f_val))
+                State {
+                    celsius_box: gui/TextBoxState {
+                        text: format-temp(c_val),
+                        cursor: new_celsius_box.cursor,
+                        focused: new_celsius_box.focused
+                    },
+                    fahrenheit_box: new_fahrenheit_box
+                }
+            } else {
+                State {
+                    celsius_box: new_celsius_box,
+                    fahrenheit_box: new_fahrenheit_box
+                }
+            }
+        } else {
+            State {
+                celsius_box: new_celsius_box,
+                fahrenheit_box: new_fahrenheit_box
+            }
+        }
+
+        game-loop(new_state)
+    }
+}

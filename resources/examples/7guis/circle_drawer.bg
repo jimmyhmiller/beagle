@@ -1,0 +1,283 @@
+namespace circle_drawer
+
+// 7GUIs Task 6: Circle Drawer
+// A canvas where you can create circles by clicking, undo/redo,
+// and right-click a circle to adjust its radius via a popup slider.
+
+use raylib_gui as gui
+
+struct Circle {
+    x
+    y
+    radius
+}
+
+struct AppState {
+    circles        // array of Circle
+    undo_stack     // array of previous circle arrays (for undo)
+    redo_stack     // array of circle arrays (for redo)
+    hovered        // index of hovered circle, or -1
+    popup          // PopupState or null
+}
+
+struct PopupState {
+    circle_idx     // which circle is being edited
+    original_radius // radius before editing (for undo)
+    slider_value   // current slider value (int, mapped to radius)
+}
+
+fn make-initial-state() {
+    AppState {
+        circles: [],
+        undo_stack: [],
+        redo_stack: [],
+        hovered: -1,
+        popup: null
+    }
+}
+
+// Canvas bounds
+let CANVAS_X = 20
+let CANVAS_Y = 60
+let CANVAS_W = 560
+let CANVAS_H = 350
+
+fn distance(x1, y1, x2, y2) {
+    let dx = to-float(x1 - x2)
+    let dy = to-float(y1 - y2)
+    sqrt(dx * dx + dy * dy)
+}
+
+fn find-hovered-circle(circles, mx, my) {
+    let mut best = -1
+    let mut best_dist = 999999.0
+    let mut i = 0
+    while i < length(circles) {
+        let c = circles[i]
+        let d = distance(mx, my, c.x, c.y)
+        if d <= to-float(c.radius) && d < best_dist {
+            best = i
+            best_dist = d
+        }
+        i = i + 1
+    }
+    best
+}
+
+// Deep copy circles for undo stack
+fn copy-circles(circles) {
+    let mut result = []
+    let mut i = 0
+    while i < length(circles) {
+        let c = circles[i]
+        result = push(result, Circle { x: c.x, y: c.y, radius: c.radius })
+        i = i + 1
+    }
+    result
+}
+
+fn set-circle-radius(circles, idx, new_radius) {
+    let mut result = []
+    let mut i = 0
+    while i < length(circles) {
+        if i == idx {
+            let c = circles[i]
+            result = push(result, Circle { x: c.x, y: c.y, radius: new_radius })
+        } else {
+            result = push(result, circles[i])
+        }
+        i = i + 1
+    }
+    result
+}
+
+fn main() {
+    gui/init-window(600, 440, "7GUIs - Circle Drawer")
+    gui/set-target-fps(60)
+
+    game-loop(make-initial-state())
+
+    gui/close-window()
+}
+
+fn game-loop(state) {
+    if gui/window-should-close() {
+        "done"
+    } else {
+        let mx = gui/get-mouse-x()
+        let my = gui/get-mouse-y()
+        let in_canvas = gui/point-in-rect(mx, my, CANVAS_X, CANVAS_Y, CANVAS_W, CANVAS_H)
+
+        gui/begin-drawing()
+        gui/clear-background(gui/RAYWHITE)
+
+        gui/draw-text("Circle Drawer", 220, 8, 24, gui/DARKGRAY)
+
+        // Undo/Redo buttons
+        let can_undo = length(state.undo_stack) > 0
+        let can_redo = length(state.redo_stack) > 0
+        let undo_clicked = gui/button-enabled(200, 35, 90, 24, "Undo", can_undo)
+        let redo_clicked = gui/button-enabled(310, 35, 90, 24, "Redo", can_redo)
+
+        // Draw canvas
+        gui/draw-rectangle(CANVAS_X, CANVAS_Y, CANVAS_W, CANVAS_H, gui/WHITE)
+        gui/draw-rectangle-lines(CANVAS_X, CANVAS_Y, CANVAS_W, CANVAS_H, gui/DARKGRAY)
+
+        // Find hovered circle
+        let hovered_idx = if in_canvas && state.popup == null {
+            find-hovered-circle(state.circles, mx, my)
+        } else {
+            -1
+        }
+
+        // Draw circles
+        let mut i = 0
+        while i < length(state.circles) {
+            let c = state.circles[i]
+            let fill_color = if i == hovered_idx {
+                gui/LIGHTGRAY
+            } else {
+                gui/rgba(200, 200, 200, 80)
+            }
+            gui/draw-circle(c.x, c.y, to-float(c.radius), fill_color)
+            gui/draw-circle-lines(c.x, c.y, to-float(c.radius), gui/BLACK)
+            i = i + 1
+        }
+
+        // Draw popup if active
+        let popup_result = if state.popup != null {
+            draw-popup(state.popup, state.circles, mx, my)
+        } else {
+            null
+        }
+
+        gui/end-drawing()
+
+        // Handle interactions
+        let new_state = if undo_clicked && can_undo {
+            let prev = state.undo_stack[length(state.undo_stack) - 1]
+            let new_undo = take(state.undo_stack, length(state.undo_stack) - 1)
+            let new_redo = push(state.redo_stack, copy-circles(state.circles))
+            AppState {
+                circles: prev,
+                undo_stack: new_undo,
+                redo_stack: new_redo,
+                hovered: -1,
+                popup: null
+            }
+        } else if redo_clicked && can_redo {
+            let next_state = state.redo_stack[length(state.redo_stack) - 1]
+            let new_redo = take(state.redo_stack, length(state.redo_stack) - 1)
+            let new_undo = push(state.undo_stack, copy-circles(state.circles))
+            AppState {
+                circles: next_state,
+                undo_stack: new_undo,
+                redo_stack: new_redo,
+                hovered: -1,
+                popup: null
+            }
+        } else if state.popup != null {
+            // Popup is open - handle popup interactions
+            handle-popup-state(state, popup_result, mx, my)
+        } else if gui/is-mouse-button-pressed(gui/MOUSE_RIGHT) && hovered_idx >= 0 {
+            // Right-click on circle: open popup
+            let c = state.circles[hovered_idx]
+            AppState {
+                circles: state.circles,
+                undo_stack: state.undo_stack,
+                redo_stack: state.redo_stack,
+                hovered: hovered_idx,
+                popup: PopupState {
+                    circle_idx: hovered_idx,
+                    original_radius: c.radius,
+                    slider_value: c.radius
+                }
+            }
+        } else if gui/is-mouse-button-pressed(gui/MOUSE_LEFT) && in_canvas && hovered_idx == -1 {
+            // Left-click on empty canvas: create new circle
+            let new_circle = Circle { x: mx, y: my, radius: 30 }
+            let new_undo = push(state.undo_stack, copy-circles(state.circles))
+            AppState {
+                circles: push(state.circles, new_circle),
+                undo_stack: new_undo,
+                redo_stack: [],
+                hovered: -1,
+                popup: null
+            }
+        } else {
+            AppState {
+                circles: state.circles,
+                undo_stack: state.undo_stack,
+                redo_stack: state.redo_stack,
+                hovered: hovered_idx,
+                popup: null
+            }
+        }
+
+        game-loop(new_state)
+    }
+}
+
+fn draw-popup(popup, circles, mx, my) {
+    let c = circles[popup.circle_idx]
+    // Draw popup near the circle
+    let popup_x = c.x + 20
+    let popup_y = c.y - 30
+    let popup_w = 200
+    let popup_h = 70
+
+    gui/draw-rectangle(popup_x, popup_y, popup_w, popup_h, gui/RAYWHITE)
+    gui/draw-rectangle-lines(popup_x, popup_y, popup_w, popup_h, gui/DARKGRAY)
+
+    gui/draw-text("Adjust radius", popup_x + 10, popup_y + 5, 16, gui/BLACK)
+
+    // Slider for radius (10 to 100)
+    let new_val = gui/slider(popup_x + 10, popup_y + 30, popup_w - 20, 28, 10, 100, popup.slider_value)
+
+    // Show current value
+    gui/draw-text(to-string(new_val), popup_x + popup_w - 40, popup_y + 5, 16, gui/GRAY)
+
+    PopupState {
+        circle_idx: popup.circle_idx,
+        original_radius: popup.original_radius,
+        slider_value: new_val
+    }
+}
+
+fn handle-popup-state(state, popup_result, mx, my) {
+    // Check if clicked outside popup to close it
+    let c = state.circles[state.popup.circle_idx]
+    let popup_x = c.x + 20
+    let popup_y = c.y - 30
+    let in_popup = gui/point-in-rect(mx, my, popup_x, popup_y, 200, 70)
+
+    let new_circles = set-circle-radius(state.circles, state.popup.circle_idx, popup_result.slider_value)
+
+    if gui/is-mouse-button-pressed(gui/MOUSE_LEFT) && !in_popup {
+        // Close popup - save undo if radius changed
+        let changed = popup_result.slider_value != popup_result.original_radius
+        let new_undo = if changed {
+            // Undo to state with original radius
+            let original_circles = set-circle-radius(state.circles, state.popup.circle_idx, popup_result.original_radius)
+            push(state.undo_stack, original_circles)
+        } else {
+            state.undo_stack
+        }
+        let new_redo = if changed { [] } else { state.redo_stack }
+        AppState {
+            circles: new_circles,
+            undo_stack: new_undo,
+            redo_stack: new_redo,
+            hovered: -1,
+            popup: null
+        }
+    } else {
+        AppState {
+            circles: new_circles,
+            undo_stack: state.undo_stack,
+            redo_stack: state.redo_stack,
+            hovered: state.hovered,
+            popup: popup_result
+        }
+    }
+}

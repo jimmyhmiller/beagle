@@ -1,0 +1,24 @@
+namespace temp_crash
+
+use raylib_gui as gui
+
+fn main() {
+    gui/init-window(500, 200, "crash test")
+    gui/set-target-fps(60)
+    let s = gui/make-text-box-state("")
+    game-loop(s, s)
+    gui/close-window()
+}
+
+fn game-loop(box_state, original) {
+    if gui/window-should-close() {
+        "done"
+    } else {
+        gui/begin-drawing()
+        gui/clear-background(gui/RAYWHITE)
+        let new_box = gui/text-box(130, 82, 120, 36, box_state)
+        gui/end-drawing()
+
+        game-loop(original, original)
+    }
+}
