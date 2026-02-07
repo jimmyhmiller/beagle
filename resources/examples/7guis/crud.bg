@@ -1,0 +1,208 @@
+namespace crud
+
+// 7GUIs Task 5: CRUD
+// A list of names with filter prefix, create, update, and delete operations.
+
+use raylib_gui as gui
+
+struct CrudState {
+    names           // array of strings: "Surname, Name"
+    filter_box      // text box state for filter prefix
+    name_box        // text box state for name
+    surname_box     // text box state for surname
+    list_state      // list view state (selected, scroll)
+}
+
+fn make-initial-state() {
+    CrudState {
+        names: ["Müller, Hans", "Schmidt, Emil", "Schneider, Fritz"],
+        filter_box: gui/make-text-box-state(""),
+        name_box: gui/make-text-box-state(""),
+        surname_box: gui/make-text-box-state(""),
+        list_state: gui/make-list-view-state()
+    }
+}
+
+// Filter names that start with the given prefix (case-insensitive on surname)
+fn filter-names(names, prefix) {
+    if length(prefix) == 0 {
+        names
+    } else {
+        let mut result = []
+        let mut i = 0
+        while i < length(names) {
+            let name = names[i]
+            // Check if surname starts with prefix
+            let surname = get-surname(name)
+            if starts-with-ci(surname, prefix) {
+                result = push(result, name)
+            }
+            i = i + 1
+        }
+        result
+    }
+}
+
+fn get-surname(full_name) {
+    let comma_idx = index-of(full_name, ",")
+    if comma_idx >= 0 {
+        substring(full_name, 0, comma_idx)
+    } else {
+        full_name
+    }
+}
+
+// Case-insensitive starts-with (simple: lowercase both)
+fn starts-with-ci(s, prefix) {
+    if length(prefix) > length(s) {
+        false
+    } else {
+        let s_start = substring(s, 0, length(prefix))
+        lowercase(s_start) == lowercase(prefix)
+    }
+}
+
+fn lowercase(s) {
+    let mut result = ""
+    let mut i = 0
+    while i < length(s) {
+        let ch = get(s, i)
+        let code = char-code(ch)
+        let lower_ch = if code >= 65 && code <= 90 {
+            char-from-code(code + 32)
+        } else {
+            ch
+        }
+        result = result ++ lower_ch
+        i = i + 1
+    }
+    result
+}
+
+// Find the index in the full names list for a filtered item
+fn find-original-index(names, target) {
+    let mut i = 0
+    while i < length(names) {
+        if names[i] == target {
+            return(i)
+        }
+        i = i + 1
+    }
+    -1
+}
+
+// Replace an element in an array at index
+fn array-set(arr, idx, val) {
+    let mut result = []
+    let mut i = 0
+    while i < length(arr) {
+        if i == idx {
+            result = push(result, val)
+        } else {
+            result = push(result, arr[i])
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Remove an element from an array at index
+fn array-remove(arr, idx) {
+    let mut result = []
+    let mut i = 0
+    while i < length(arr) {
+        if i != idx {
+            result = push(result, arr[i])
+        }
+        i = i + 1
+    }
+    result
+}
+
+fn main() {
+    gui/init-window(600, 400, "7GUIs - CRUD")
+    gui/set-target-fps(60)
+
+    game-loop(make-initial-state())
+
+    gui/close-window()
+}
+
+fn game-loop(state) {
+    if gui/window-should-close() {
+        "done"
+    } else {
+        gui/begin-drawing()
+        gui/clear-background(gui/RAYWHITE)
+
+        gui/draw-text("CRUD", 265, 10, 24, gui/DARKGRAY)
+
+        // Filter prefix
+        gui/draw-text("Filter prefix:", 20, 45, 18, gui/BLACK)
+        let new_filter = gui/text-box(150, 40, 200, 30, state.filter_box)
+
+        // Filtered names list
+        let filtered = filter-names(state.names, new_filter.text)
+        let new_list = gui/list-view(20, 80, 250, 220, filtered, state.list_state)
+
+        // Name and Surname fields
+        gui/draw-text("Name:", 300, 85, 18, gui/BLACK)
+        let new_name = gui/text-box(390, 80, 190, 30, state.name_box)
+
+        gui/draw-text("Surname:", 300, 125, 18, gui/BLACK)
+        let new_surname = gui/text-box(390, 120, 190, 30, state.surname_box)
+
+        // Buttons
+        let has_selection = new_list.selected >= 0 && new_list.selected < length(filtered)
+        let has_name = length(new_name.text) > 0 && length(new_surname.text) > 0
+
+        let create_clicked = gui/button-enabled(300, 180, 85, 36, "Create", has_name)
+        let update_clicked = gui/button-enabled(395, 180, 85, 36, "Update", has_selection && has_name)
+        let delete_clicked = gui/button-enabled(490, 180, 85, 36, "Delete", has_selection)
+
+        gui/end-drawing()
+
+        // Process actions
+        let full_name = new_surname.text ++ ", " ++ new_name.text
+
+        let new_names = if create_clicked {
+            push(state.names, full_name)
+        } else if update_clicked && has_selection {
+            let selected_name = filtered[new_list.selected]
+            let orig_idx = find-original-index(state.names, selected_name)
+            if orig_idx >= 0 {
+                array-set(state.names, orig_idx, full_name)
+            } else {
+                state.names
+            }
+        } else if delete_clicked && has_selection {
+            let selected_name = filtered[new_list.selected]
+            let orig_idx = find-original-index(state.names, selected_name)
+            if orig_idx >= 0 {
+                array-remove(state.names, orig_idx)
+            } else {
+                state.names
+            }
+        } else {
+            state.names
+        }
+
+        // Adjust selection after delete
+        let adjusted_list = if delete_clicked && has_selection {
+            gui/ListViewState {
+                selected: -1,
+                scroll_offset: new_list.scroll_offset
+            }
+        } else {
+            new_list
+        }
+
+        game-loop(CrudState {
+            names: new_names,
+            filter_box: new_filter,
+            name_box: new_name,
+            surname_box: new_surname,
+            list_state: adjusted_list
+        })
+    }
+}

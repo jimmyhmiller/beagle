@@ -1,0 +1,90 @@
+namespace timer
+
+// 7GUIs Task 4: Timer
+// A gauge showing elapsed time, a label, a slider for duration, and a reset button.
+
+use raylib_gui as gui
+
+struct TimerState {
+    elapsed     // float: seconds elapsed
+    duration    // float: max duration in seconds
+}
+
+fn make-initial-state() {
+    TimerState {
+        elapsed: 0.0,
+        duration: 15.0
+    }
+}
+
+fn format-time(seconds) {
+    let tenths = truncate(seconds * 10.0)
+    let s = tenths / 10
+    let d = tenths % 10
+    to-string(s) ++ "." ++ to-string(d) ++ "s"
+}
+
+fn main() {
+    gui/init-window(450, 280, "7GUIs - Timer")
+    gui/set-target-fps(60)
+
+    game-loop(make-initial-state())
+
+    gui/close-window()
+}
+
+fn game-loop(state) {
+    if gui/window-should-close() {
+        "done"
+    } else {
+        let dt = gui/get-frame-time()
+
+        // Update elapsed time (capped at duration)
+        let new_elapsed = if state.elapsed < state.duration {
+            let next = state.elapsed + dt
+            if next > state.duration {
+                state.duration
+            } else {
+                next
+            }
+        } else {
+            state.elapsed
+        }
+
+        gui/begin-drawing()
+        gui/clear-background(gui/RAYWHITE)
+
+        gui/draw-text("Timer", 185, 15, 24, gui/DARKGRAY)
+
+        // Elapsed time gauge
+        gui/draw-text("Elapsed Time:", 30, 60, 20, gui/BLACK)
+        gui/progress-bar-float(30, 90, 390, 30, new_elapsed, state.duration)
+
+        // Elapsed time label
+        let elapsed_text = format-time(new_elapsed)
+        gui/draw-text(elapsed_text, 30, 130, 20, gui/DARKGRAY)
+
+        // Duration slider
+        gui/draw-text("Duration:", 30, 165, 20, gui/BLACK)
+        // Slider from 1 to 30 seconds, mapped to float
+        let duration_int = truncate(state.duration)
+        let new_duration_int = gui/slider(30, 195, 390, 30, 1, 30, duration_int)
+        let new_duration = to-float(new_duration_int)
+
+        // Duration label
+        let dur_text = format-time(new_duration)
+        gui/draw-text(dur_text, 370, 165, 16, gui/GRAY)
+
+        // Reset button
+        let reset_clicked = gui/button(160, 240, 130, 36, "Reset")
+
+        gui/end-drawing()
+
+        let final_elapsed = if reset_clicked { 0.0 } else { new_elapsed }
+
+        game-loop(TimerState {
+            elapsed: final_elapsed,
+            duration: new_duration
+        })
+    }
+}

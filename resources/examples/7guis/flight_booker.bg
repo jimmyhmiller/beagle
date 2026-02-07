@@ -1,0 +1,160 @@
+namespace flight_booker
+
+// 7GUIs Task 3: Flight Booker
+// Dropdown for one-way/return, start and return date fields,
+// validation, and a "Book" button.
+
+use raylib_gui as gui
+
+// Simple date validation: DD.MM.YYYY format
+// Returns the date as an integer YYYYMMDD for comparison, or -1 if invalid
+fn parse-date(s) {
+    // Expect format: DD.MM.YYYY (10 chars)
+    if length(s) != 10 {
+        -1
+    } else {
+        let dot1 = get(s, 2)
+        let dot2 = get(s, 5)
+        if dot1 != "." || dot2 != "." {
+            -1
+        } else {
+            let day_str = substring(s, 0, 2)
+            let month_str = substring(s, 3, 2)
+            let year_str = substring(s, 6, 4)
+            let day = try-parse(day_str)
+            let month = try-parse(month_str)
+            let year = try-parse(year_str)
+            if day == null || month == null || year == null {
+                -1
+            } else if day < 1 || day > 31 || month < 1 || month > 12 || year < 1900 {
+                -1
+            } else {
+                year * 10000 + month * 100 + day
+            }
+        }
+    }
+}
+
+fn try-parse(s) {
+    try {
+        to-number(s)
+    } catch (e) {
+        null
+    }
+}
+
+fn date-valid?(s) {
+    parse-date(s) > 0
+}
+
+struct FlightState {
+    flight_type   // dropdown state
+    start_date    // text box state
+    return_date   // text box state
+    booked        // bool - whether booking was confirmed
+    message       // string or null
+}
+
+fn make-initial-state() {
+    FlightState {
+        flight_type: gui/make-dropdown-state(0),
+        start_date: gui/make-text-box-state("27.03.2014"),
+        return_date: gui/make-text-box-state("27.03.2014"),
+        booked: false,
+        message: null
+    }
+}
+
+fn main() {
+    gui/init-window(350, 350, "7GUIs - Flight Booker")
+    gui/set-target-fps(60)
+
+    game-loop(make-initial-state())
+
+    gui/close-window()
+}
+
+fn game-loop(state) {
+    if gui/window-should-close() {
+        "done"
+    } else {
+        gui/begin-drawing()
+        gui/clear-background(gui/RAYWHITE)
+
+        gui/draw-text("Flight Booker", 100, 15, 24, gui/DARKGRAY)
+
+        let options = ["one-way flight", "return flight"]
+        let is_return = state.flight_type.selected == 1
+
+        // Start date (don't process input when dropdown is open)
+        let start_valid = date-valid?(state.start_date.text)
+        let start_bg = if start_valid { gui/WHITE } else { gui/rgb(255, 200, 200) }
+        gui/draw-rectangle(50, 105, 250, 36, start_bg)
+        let new_start = if state.flight_type.open {
+            // Just draw, don't process input while dropdown is open
+            gui/text-box-disabled(50, 105, 250, 36, state.start_date.text)
+            state.start_date
+        } else {
+            gui/text-box(50, 105, 250, 36, state.start_date)
+        }
+
+        // Return date (disabled for one-way, no input when dropdown open)
+        let new_return = if is_return {
+            let return_valid = date-valid?(state.return_date.text)
+            let return_bg = if return_valid { gui/WHITE } else { gui/rgb(255, 200, 200) }
+            gui/draw-rectangle(50, 155, 250, 36, return_bg)
+            if state.flight_type.open {
+                gui/text-box-disabled(50, 155, 250, 36, state.return_date.text)
+                state.return_date
+            } else {
+                gui/text-box(50, 155, 250, 36, state.return_date)
+            }
+        } else {
+            gui/text-box-disabled(50, 155, 250, 36, state.return_date.text)
+            state.return_date
+        }
+
+        // Validation
+        let start_ok = date-valid?(new_start.text)
+        let return_ok = date-valid?(new_return.text)
+        let dates_ok = if is_return {
+            start_ok && return_ok && parse-date(new_return.text) >= parse-date(new_start.text)
+        } else {
+            start_ok
+        }
+
+        // Book button
+        let book_enabled = dates_ok && !state.flight_type.open
+        let clicked = gui/button-enabled(50, 210, 250, 40, "Book", book_enabled)
+
+        // Dropdown drawn last so it appears on top of text boxes
+        let new_flight_type = gui/dropdown(50, 55, 250, 36, options, state.flight_type)
+
+        // Show message if booked
+        let new_message = if clicked {
+            if is_return {
+                "You have booked a return flight from " ++ new_start.text ++ " to " ++ new_return.text ++ "."
+            } else {
+                "You have booked a one-way flight on " ++ new_start.text ++ "."
+            }
+        } else {
+            state.message
+        }
+
+        if new_message != null {
+            // Word-wrap the message
+            gui/draw-text(new_message, 30, 270, 16, gui/DARKBLUE)
+        }
+
+        gui/end-drawing()
+
+        let new_state = FlightState {
+            flight_type: new_flight_type,
+            start_date: new_start,
+            return_date: new_return,
+            booked: state.booked || clicked,
+            message: new_message
+        }
+        game-loop(new_state)
+    }
+}

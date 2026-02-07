@@ -234,8 +234,16 @@ pub unsafe extern "C" fn to_number(
     if string.contains(".") {
         todo!()
     } else {
-        let result = string.parse::<isize>().unwrap();
-        BuiltInTypes::Int.tag(result) as usize
+        match string.parse::<isize>() {
+            Ok(result) => BuiltInTypes::Int.tag(result) as usize,
+            Err(e) => unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "ParseError",
+                    format!("Cannot parse '{}' as a number: {}", string, e),
+                );
+            },
+        }
     }
 }
 
@@ -341,9 +349,9 @@ extern "C" fn get_string_index(
         let string = HeapObject::from_tagged(string);
         assert!(string.get_type_id() == TYPE_ID_STRING as usize);
         let index = BuiltInTypes::untag(index);
-        let string = string.get_string_bytes();
-        // TODO: This will break with unicode
-        let result = string[index] as char;
+        let bytes = string.get_string_bytes();
+        let s = unsafe { std::str::from_utf8_unchecked(bytes) };
+        let result = s.chars().nth(index).unwrap();
         let result = result.to_string();
         let result = runtime
             .allocate_string(stack_pointer, result)
@@ -358,14 +366,14 @@ extern "C" fn get_string_length(string: usize) -> usize {
     print_call_builtin(get_runtime().get(), "get_string_length");
     let runtime = get_runtime().get_mut();
     if BuiltInTypes::get_kind(string) == BuiltInTypes::String {
-        // TODO: Make faster
         let string = runtime.get_string_literal(string);
-        BuiltInTypes::Int.tag(string.len() as isize) as usize
+        BuiltInTypes::Int.tag(string.chars().count() as isize) as usize
     } else {
         // we have a heap allocated string
         let string = HeapObject::from_tagged(string);
-        let length = string.get_type_data();
-        BuiltInTypes::Int.tag(length as isize) as usize
+        let bytes = string.get_string_bytes();
+        let s = unsafe { std::str::from_utf8_unchecked(bytes) };
+        BuiltInTypes::Int.tag(s.chars().count() as isize) as usize
     }
 }
 
@@ -2410,11 +2418,10 @@ pub unsafe extern "C" fn round_builtin(
 
 /// truncate builtin - truncates a float towards zero
 pub unsafe extern "C" fn truncate_builtin(
-    stack_pointer: usize,
-    frame_pointer: usize,
+    _stack_pointer: usize,
+    _frame_pointer: usize,
     value: usize,
 ) -> usize {
-    save_gc_context!(stack_pointer, frame_pointer);
     unsafe {
         let kind = BuiltInTypes::get_kind(value);
         if kind == BuiltInTypes::Int {
@@ -3852,6 +3859,27 @@ unsafe fn marshal_ffi_argument(
                 );
             },
         },
+        BuiltInTypes::Float => {
+            // Float is heap-allocated: untag to get pointer, read f64 at offset 1
+            let ptr = BuiltInTypes::untag(argument) as *const f64;
+            let f64_val = unsafe { *ptr.add(1) };
+            match ffi_type {
+                FFIType::F32 => {
+                    let f32_val = f64_val as f32;
+                    f32_val.to_bits() as u64
+                }
+                FFIType::U8 | FFIType::U16 | FFIType::U32 | FFIType::U64 | FFIType::I32 => {
+                    f64_val as i64 as u64
+                }
+                _ => unsafe {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "FFIError",
+                        format!("Cannot convert Float to FFI type {:?}", ffi_type),
+                    );
+                },
+            }
+        }
         _ => unsafe {
             runtime.print(argument);
             throw_runtime_error(
