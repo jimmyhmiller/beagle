@@ -3900,11 +3900,10 @@ pub unsafe extern "C" fn call_ffi_variadic(
 
 /// Rust helper that callback trampolines call into.
 /// Bridges from C calling convention back into Beagle.
-/// Called from generated ARM64 trampoline code.
+/// Called from generated trampoline code.
 ///
 /// # Safety
 /// Must be called from a callback trampoline with valid arguments.
-#[cfg(target_arch = "aarch64")]
 unsafe extern "C" fn invoke_beagle_callback(
     callback_index: usize,
     c_args_ptr: *const u64,
@@ -3920,7 +3919,10 @@ unsafe extern "C" fn invoke_beagle_callback(
         // Get a valid stack pointer for GC context.
         // We're being called from C code, so get the current stack pointer.
         let stack_pointer: usize;
+        #[cfg(target_arch = "aarch64")]
         std::arch::asm!("mov {}, sp", out(reg) stack_pointer);
+        #[cfg(target_arch = "x86_64")]
+        std::arch::asm!("mov {}, rsp", out(reg) stack_pointer);
 
         // Unmarshal C args to Beagle values
         let mut beagle_args = Vec::with_capacity(num_args);
@@ -4125,7 +4127,6 @@ unsafe extern "C" fn invoke_beagle_callback(
 }
 
 /// Helper to get a save_volatile_registers function pointer.
-#[cfg(target_arch = "aarch64")]
 unsafe fn get_svr<T>(runtime: &Runtime, n: usize) -> T {
     let name = format!("beagle.builtin/save_volatile_registers{}", n);
     let func = runtime.get_function_by_name(&name).unwrap();
@@ -4424,6 +4425,109 @@ fn build_callback_trampoline(
     }
 }
 
+/// Build a per-callback x86-64 trampoline that:
+/// 1. Saves C args (rdi, rsi, rdx, rcx, r8, r9) to the stack as u64 array
+/// 2. Calls invoke_beagle_callback(callback_index, c_args_ptr, num_args)
+/// 3. Returns the result in rax
+///
+/// Returns a pointer to executable memory containing the trampoline code.
+#[cfg(target_arch = "x86_64")]
+fn build_callback_trampoline(
+    callback_index: usize,
+    helper_fn_ptr: *const u8,
+    num_c_args: usize,
+) -> *const u8 {
+    let mut code: Vec<u8> = Vec::new();
+
+    // === Prologue ===
+    // push rbp
+    code.push(0x55);
+    // mov rbp, rsp
+    code.extend_from_slice(&[0x48, 0x89, 0xe5]);
+    // push rbx (callee-saved, we use it as scratch)
+    code.push(0x53);
+
+    // === Save C args to stack ===
+    // sub rsp, 56   (6 regs * 8 bytes + 8 bytes padding for 16-byte alignment)
+    // At entry: rsp % 16 == 8 (return addr pushed by caller).
+    // After push rbp + push rbx: rsp % 16 == 8.
+    // sub 56 (odd multiple of 8) restores rsp % 16 == 0 before 'call'.
+    code.extend_from_slice(&[0x48, 0x83, 0xec, 56]);
+
+    // Save C args at [rsp+8..rsp+55], leaving [rsp+0..7] as alignment padding
+    // mov [rsp+8], rdi
+    code.extend_from_slice(&[0x48, 0x89, 0x7c, 0x24, 0x08]);
+    // mov [rsp+16], rsi
+    code.extend_from_slice(&[0x48, 0x89, 0x74, 0x24, 0x10]);
+    // mov [rsp+24], rdx
+    code.extend_from_slice(&[0x48, 0x89, 0x54, 0x24, 0x18]);
+    // mov [rsp+32], rcx
+    code.extend_from_slice(&[0x48, 0x89, 0x4c, 0x24, 0x20]);
+    // mov [rsp+40], r8
+    code.extend_from_slice(&[0x4c, 0x89, 0x44, 0x24, 0x28]);
+    // mov [rsp+48], r9
+    code.extend_from_slice(&[0x4c, 0x89, 0x4c, 0x24, 0x30]);
+
+    // === Set up call to invoke_beagle_callback(callback_index, c_args_ptr, num_args) ===
+
+    // mov rdi, callback_index (64-bit immediate)
+    // movabs rdi, imm64
+    code.extend_from_slice(&[0x48, 0xbf]);
+    code.extend_from_slice(&(callback_index as u64).to_le_bytes());
+
+    // lea rsi, [rsp+8]  (pointer to saved args array, skipping alignment padding)
+    code.extend_from_slice(&[0x48, 0x8d, 0x74, 0x24, 0x08]);
+
+    // mov rdx, num_c_args (64-bit immediate)
+    // movabs rdx, imm64
+    code.extend_from_slice(&[0x48, 0xba]);
+    code.extend_from_slice(&(num_c_args as u64).to_le_bytes());
+
+    // Load helper function address into rax and call it
+    // movabs rax, imm64
+    code.extend_from_slice(&[0x48, 0xb8]);
+    code.extend_from_slice(&(helper_fn_ptr as u64).to_le_bytes());
+
+    // call rax
+    code.extend_from_slice(&[0xff, 0xd0]);
+
+    // rax now has the C return value
+
+    // === Epilogue ===
+    // add rsp, 56  (restore stack past saved args + padding)
+    code.extend_from_slice(&[0x48, 0x83, 0xc4, 56]);
+    // pop rbx
+    code.push(0x5b);
+    // pop rbp
+    code.push(0x5d);
+    // ret
+    code.push(0xc3);
+
+    // mmap as executable
+    let size = code.len();
+    let page_size = crate::mmap_utils::get_page_size();
+    let alloc_size = (size + page_size - 1) & !(page_size - 1);
+
+    unsafe {
+        let ptr = libc::mmap(
+            std::ptr::null_mut(),
+            alloc_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        );
+        assert!(
+            ptr != libc::MAP_FAILED,
+            "mmap failed for callback trampoline"
+        );
+        std::ptr::copy_nonoverlapping(code.as_ptr(), ptr as *mut u8, size);
+        let ret = libc::mprotect(ptr, alloc_size, libc::PROT_READ | libc::PROT_EXEC);
+        assert!(ret == 0, "mprotect failed for callback trampoline");
+        ptr as *const u8
+    }
+}
+
 /// Create an FFI callback (C → Beagle function pointer).
 /// Returns a Pointer struct whose raw pointer can be passed to C functions expecting callbacks.
 #[cfg(target_arch = "aarch64")]
@@ -4491,21 +4595,70 @@ pub extern "C" fn create_callback(
     }
 }
 
-/// Stub for x86-64: callback creation is not supported.
+/// Create an FFI callback (C → Beagle function pointer) on x86-64.
+/// Returns a Pointer struct whose raw pointer can be passed to C functions expecting callbacks.
 #[cfg(target_arch = "x86_64")]
 pub extern "C" fn create_callback(
     stack_pointer: usize,
-    _frame_pointer: usize,
-    _beagle_fn: usize,
-    _arg_types: usize,
-    _return_type_value: usize,
+    frame_pointer: usize,
+    beagle_fn: usize,
+    arg_types: usize,
+    return_type_value: usize,
 ) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+
+    // Parse argument types
+    let types_vec: Vec<usize> = persistent_vector_to_vec(arg_types);
+    let ffi_arg_types: Vec<FFIType> = types_vec
+        .iter()
+        .map(|t| match map_beagle_type_to_ffi_type(runtime, *t) {
+            Ok(ffi_type) => ffi_type,
+            Err(e) => unsafe {
+                throw_runtime_error(stack_pointer, "FFIError", e);
+            },
+        })
+        .collect();
+
+    // Parse return type
+    let ffi_return_type = match map_beagle_type_to_ffi_type(runtime, return_type_value) {
+        Ok(t) => t,
+        Err(e) => unsafe {
+            throw_runtime_error(stack_pointer, "FFIError", e);
+        },
+    };
+
+    let num_c_args = ffi_arg_types.len();
+
+    // Register beagle_fn as a GC root so it stays alive
+    let gc_root_id = runtime.register_temporary_root(beagle_fn);
+
+    // Build the trampoline first (before storing CallbackInfo)
+    let helper_fn_ptr = invoke_beagle_callback as *const u8;
+    let callback_index = runtime.callbacks.len(); // This will be the index
+    let trampoline_ptr = build_callback_trampoline(callback_index, helper_fn_ptr, num_c_args);
+
+    // Store callback info in runtime
+    let info = crate::runtime::CallbackInfo {
+        trampoline_ptr,
+        beagle_fn,
+        arg_types: ffi_arg_types,
+        return_type: ffi_return_type,
+        gc_root_id,
+    };
+    runtime.add_callback(info);
+
+    // Return trampoline pointer as a Pointer struct (lo/hi halves)
+    let raw = trampoline_ptr as u64;
+    let lo_tagged = BuiltInTypes::Int.tag((raw & 0xFFFFFFFF) as isize) as usize;
+    let hi_tagged = BuiltInTypes::Int.tag(((raw >> 32) & 0xFFFFFFFF) as isize) as usize;
     unsafe {
-        throw_runtime_error(
-            stack_pointer,
-            "FFIError",
-            "FFI callbacks are only supported on ARM64".to_string(),
-        );
+        call_fn_2(
+            runtime,
+            "beagle.ffi/__make_pointer_struct",
+            lo_tagged,
+            hi_tagged,
+        )
     }
 }
 
@@ -10533,7 +10686,7 @@ impl Runtime {
             create_callback as *const u8,
             true,
             &["fn", "arg_types", "return_type"],
-            "Create an FFI callback from a Beagle function.\n\nReturns a Pointer that can be passed to C functions expecting function pointers.\narg_types is an array of Type values for the C callback parameters.\nreturn_type is the C return type.\n\nNote: Only supported on ARM64. Callbacks must be called from the main thread.",
+            "Create an FFI callback from a Beagle function.\n\nReturns a Pointer that can be passed to C functions expecting function pointers.\narg_types is an array of Type values for the C callback parameters.\nreturn_type is the C return type.\n\nCallbacks must be called from the main thread.",
         )?;
 
         self.add_builtin_with_doc(
