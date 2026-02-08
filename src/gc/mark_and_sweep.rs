@@ -61,6 +61,7 @@ impl Space {
         let mut heap_object = HeapObject::from_untagged(unsafe { self.start.add(offset) });
 
         assert!(self.contains(heap_object.get_pointer()));
+
         heap_object.write_header(size);
 
         heap_object.get_pointer()
@@ -264,6 +265,7 @@ impl MarkAndSweep {
         &mut self,
         words: Word,
         data: Option<&[u8]>,
+        kind: crate::types::BuiltInTypes,
     ) -> Result<AllocateAction, Box<dyn Error>> {
         // Large objects need 16-byte header, small objects need 8-byte header
         let header_size = if words.to_words() > Header::MAX_INLINE_SIZE {
@@ -276,9 +278,31 @@ impl MarkAndSweep {
         let offset = self.free_list.allocate(size_bytes);
         if let Some(offset) = offset {
             self.space.update_highmark(offset);
-            let pointer = self.space.write_object(offset, words);
             if let Some(data) = data {
+                // When data is provided, copy it directly without first writing
+                // a temporary non-opaque header via write_object. The data already
+                // contains the correct header (e.g., opaque for floats).
+                assert_eq!(
+                    data.len(),
+                    size_bytes,
+                    "data.len()={} != size_bytes={} (words={}, header_size={})",
+                    data.len(),
+                    size_bytes,
+                    words.to_words(),
+                    header_size
+                );
+                let pointer = unsafe { self.space.start.add(offset) as *const u8 };
+                assert!(self.space.contains(pointer));
                 self.space.copy_data_to_offset(offset, data);
+                return Ok(AllocateAction::Allocated(pointer));
+            }
+            let pointer = self.space.write_object(offset, words);
+            // Float objects are opaque (their field is a raw f64, not a pointer).
+            // Set the opaque bit immediately so GC never sees a non-opaque float.
+            if kind == crate::types::BuiltInTypes::Float {
+                unsafe {
+                    *(pointer as *mut usize) |= 0x2; // Set opaque bit (bit 1)
+                }
             }
             return Ok(AllocateAction::Allocated(pointer));
         }
@@ -301,7 +325,11 @@ impl MarkAndSweep {
         };
 
         let pointer = self
-            .allocate_inner(Word::from_bytes(data.len() - header_size), Some(data))
+            .allocate_inner(
+                Word::from_bytes(data.len() - header_size),
+                Some(data),
+                crate::types::BuiltInTypes::HeapObject,
+            )
             .unwrap();
 
         if let AllocateAction::Allocated(pointer) = pointer {
@@ -521,10 +549,10 @@ impl Allocator for MarkAndSweep {
     fn try_allocate(
         &mut self,
         words: usize,
-        _kind: crate::types::BuiltInTypes,
+        kind: crate::types::BuiltInTypes,
     ) -> Result<super::AllocateAction, Box<dyn std::error::Error>> {
         if self.can_allocate(words) {
-            self.allocate_inner(Word::from_word(words), None)
+            self.allocate_inner(Word::from_word(words), None, kind)
         } else {
             Ok(AllocateAction::Gc)
         }

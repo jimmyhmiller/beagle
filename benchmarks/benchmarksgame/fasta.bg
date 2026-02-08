@@ -5,10 +5,10 @@ namespace fasta
 //
 // Beagle implementation - fast buffered I/O version
 
-import "beagle.ffi" as ffi
-import "beagle.io" as io
-import "beagle.builtin" as builtin
-import "raw-mutable-array" as arr
+use beagle.ffi as ffi
+use beagle.io as io
+use beagle.builtin as builtin
+use raw-mutable-array as arr
 
 let LINE_WIDTH = 60
 let IM = 139968
@@ -26,8 +26,8 @@ fn make_alu_buffer() {
     let mut i = 0
     while i < len {
         let char = get(ALU, i)
-        let byte = builtin/char_code(char)
-        ffi/set_u8(buf, i, byte)
+        let byte = builtin/char-code(char)
+        ffi/set-u8(buf, i, byte)
         i = i + 1
     }
     buf
@@ -40,8 +40,8 @@ fn make_codes_buffer(codes) {
     let mut i = 0
     while i < len {
         let char = get(codes, i)
-        let byte = builtin/char_code(char)
-        ffi/set_u8(buf, i, byte)
+        let byte = builtin/char-code(char)
+        ffi/set-u8(buf, i, byte)
         i = i + 1
     }
     buf
@@ -78,20 +78,7 @@ fn make_homo_probs() {
     probs
 }
 
-// Find code index using linear search
-fn find_code_index(probs, probs_len, r) {
-    let mut i = 0
-    let mut found = false
-    while i < probs_len && found == false {
-        let p = arr/read-field(probs, i)
-        if p > r {
-            found = true
-        } else {
-            i = i + 1
-        }
-    }
-    if i >= probs_len { probs_len - 1 } else { i }
-}
+// find_code_index inlined into write_random_fasta for performance
 
 // Write a header string to stdout
 fn write_header(s) {
@@ -100,11 +87,11 @@ fn write_header(s) {
     let mut i = 0
     while i < len {
         let char = get(s, i)
-        let byte = builtin/char_code(char)
-        ffi/set_u8(buf, i, byte)
+        let byte = builtin/char-code(char)
+        ffi/set-u8(buf, i, byte)
         i = i + 1
     }
-    ffi/set_u8(buf, len, 10)  // newline
+    ffi/set-u8(buf, len, 10)  // newline
     io/write-stdout-buffer(buf, len + 1)
     ffi/deallocate(buf)
     null
@@ -129,8 +116,8 @@ fn write_repeat_fasta(alu_buf, alu_len, size) {
         // Write one line
         let mut col = 0
         while col < line_len {
-            let byte = ffi/get_u8(alu_buf, alu_idx)
-            ffi/set_u8(out_buf, out_pos, byte)
+            let byte = ffi/get-u8(alu_buf, alu_idx)
+            ffi/set-u8(out_buf, out_pos, byte)
             out_pos = out_pos + 1
             alu_idx = alu_idx + 1
             if alu_idx >= alu_len {
@@ -140,7 +127,7 @@ fn write_repeat_fasta(alu_buf, alu_len, size) {
         }
 
         // Add newline
-        ffi/set_u8(out_buf, out_pos, 10)
+        ffi/set-u8(out_buf, out_pos, 10)
         out_pos = out_pos + 1
 
         remaining = remaining - line_len
@@ -176,10 +163,20 @@ fn write_random_fasta(codes_buf, probs, probs_len, size, seed, add_final_newline
         let mut col = 0
         while col < line_len {
             // Generate next random number
-            current_seed = (current_seed * IA + IC) - ((current_seed * IA + IC) / IM) * IM
-            let idx = find_code_index(probs, probs_len, current_seed)
-            let byte = ffi/get_u8(codes_buf, idx)
-            ffi/set_u8(out_buf, out_pos, byte)
+            current_seed = (current_seed * IA + IC) % IM
+
+            // Inline find_code_index - linear search for matching probability
+            let mut idx = 0
+            while idx < probs_len {
+                if arr/read-field(probs, idx) > current_seed {
+                    break()
+                }
+                idx = idx + 1
+            }
+            if idx >= probs_len { idx = probs_len - 1 }
+
+            let byte = ffi/get-u8(codes_buf, idx)
+            ffi/set-u8(out_buf, out_pos, byte)
             out_pos = out_pos + 1
             col = col + 1
         }
@@ -187,7 +184,7 @@ fn write_random_fasta(codes_buf, probs, probs_len, size, seed, add_final_newline
         // Add newline (except possibly for last line)
         remaining = remaining - line_len
         if remaining > 0 || add_final_newline {
-            ffi/set_u8(out_buf, out_pos, 10)
+            ffi/set-u8(out_buf, out_pos, 10)
             out_pos = out_pos + 1
         }
     }
@@ -231,7 +228,7 @@ fn run(n) {
 }
 
 fn main(args) {
-    let n = if length(args) > 0 { to_number(get(args, 0)) } else { 10 }
+    let n = if length(args) > 0 { to-number(get(args, 0)) } else { 10 }
     run(n)
     ""
 }

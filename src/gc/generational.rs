@@ -559,14 +559,37 @@ impl Allocator for GenerationalGC {
 }
 
 impl GenerationalGC {
+    /// Check if an object is too large to ever fit in the young generation,
+    /// even when it's completely empty.
+    fn too_large_for_young(&self, words: usize) -> bool {
+        let header_size = if words > Header::MAX_INLINE_SIZE {
+            16
+        } else {
+            8
+        };
+        let alloc_size = words * 8 + header_size;
+        alloc_size > self.young.byte_count()
+    }
+
     fn allocate_inner(
         &mut self,
         words: usize,
-        _kind: BuiltInTypes,
+        kind: BuiltInTypes,
     ) -> Result<AllocateAction, Box<dyn Error>> {
+        // Large objects that can never fit in young gen go directly to old gen
+        if self.too_large_for_young(words) {
+            return self.old.try_allocate(words, kind);
+        }
         let size = Word::from_word(words);
         if self.young.can_allocate(size) {
             let ptr = self.young.allocate(size);
+            // Float objects are opaque (their field is a raw f64, not a pointer).
+            // Set the opaque bit immediately so GC never sees a non-opaque float.
+            if kind == BuiltInTypes::Float {
+                unsafe {
+                    *(ptr as *mut usize) |= 0x2; // Set opaque bit (bit 1)
+                }
+            }
             Ok(AllocateAction::Allocated(ptr))
         } else {
             Ok(AllocateAction::Gc)
@@ -578,6 +601,10 @@ impl GenerationalGC {
         words: usize,
         _kind: BuiltInTypes,
     ) -> Result<AllocateAction, Box<dyn Error>> {
+        // Large objects that can never fit in young gen go directly to old gen
+        if self.too_large_for_young(words) {
+            return self.old.try_allocate_zeroed(words, _kind);
+        }
         let size = Word::from_word(words);
         if self.young.can_allocate(size) {
             let ptr = self.young.allocate_zeroed(size);
@@ -692,6 +719,7 @@ impl GenerationalGC {
 
             // Copy to old gen
             let new_value = self.copy(old_value);
+
             self.update_root(&root_ref, new_value);
         }
     }
@@ -850,6 +878,7 @@ impl GenerationalGC {
 
     // ==================== COPY LOGIC ====================
 
+    /// Scan all objects in young gen for corrupted float headers.
     fn copy(&mut self, root: usize) -> usize {
         if !BuiltInTypes::is_heap_pointer(root) {
             return root;

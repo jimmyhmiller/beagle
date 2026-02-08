@@ -1,0 +1,106 @@
+namespace crash_ffi_alloc_dealloc
+
+use beagle.ffi as ffi
+use beagle.io as io
+use beagle.builtin as builtin
+use raw-mutable-array as arr
+
+let READ_CHUNK = 65536
+
+fn read_sequence() {
+    let lines_cap = 1024
+    let state = arr/new-array(4)
+    arr/write-field(state, 0, arr/new-array(lines_cap))
+    arr/write-field(state, 1, 0)
+    arr/write-field(state, 2, lines_cap)
+    arr/write-field(state, 3, false)
+
+    read_loop(state)
+
+    let count = arr/read-field(state, 1)
+    println(count)
+    "done"
+}
+
+fn read_loop(state) {
+    let result = io/read-stdin-string(READ_CHUNK)
+    match result {
+        Result.Ok { value } => {
+            if length(value) == 0 {
+                null
+            } else {
+                process_chunk(state, value)
+                read_loop(state)
+            }
+        },
+        Result.Err { error } => {
+            null
+        }
+    }
+}
+
+fn process_chunk(state, chunk) {
+    let len = length(chunk)
+    let mut i = 0
+    let mut line_start = 0
+
+    while i < len {
+        let ch = get(chunk, i)
+        if ch == "\n" {
+            if i > line_start {
+                process_line(state, chunk, line_start, i - line_start)
+            }
+            line_start = i + 1
+        }
+        i = i + 1
+    }
+    if line_start < len {
+        process_line(state, chunk, line_start, len - line_start)
+    }
+}
+
+fn process_line(state, chunk, start, line_len) {
+    let reading = arr/read-field(state, 3)
+    if reading {
+        let first = get(chunk, start)
+        if first == ">" {
+            arr/write-field(state, 3, false)
+        } else {
+            let line = uppercase(substring(chunk, start, line_len))
+            add_line(state, line)
+        }
+    } else {
+        if line_len >= 6 {
+            let prefix = substring(chunk, start, 6)
+            if prefix == ">THREE" {
+                arr/write-field(state, 3, true)
+            }
+        }
+    }
+}
+
+fn add_line(state, line) {
+    let lines = arr/read-field(state, 0)
+    let count = arr/read-field(state, 1)
+    let capacity = arr/read-field(state, 2)
+
+    if count >= capacity {
+        let new_cap = capacity * 2
+        let new_lines = arr/new-array(new_cap)
+        let mut i = 0
+        while i < count {
+            arr/write-field(new_lines, i, arr/read-field(lines, i))
+            i = i + 1
+        }
+        arr/write-field(state, 0, new_lines)
+        arr/write-field(state, 2, new_cap)
+        arr/write-field(new_lines, count, line)
+    } else {
+        arr/write-field(lines, count, line)
+    }
+    arr/write-field(state, 1, count + 1)
+}
+
+fn main() {
+    read_sequence()
+}

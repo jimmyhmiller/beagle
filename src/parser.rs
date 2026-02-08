@@ -1763,7 +1763,7 @@ impl Parser {
     fn parse_break(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
         self.move_to_next_non_whitespace();
-        // Expect function call syntax: break(value)
+        // Expect function call syntax: break(value) or break()
         if self.current_token() != Token::OpenParen {
             return Err(ParseError::MissingToken {
                 expected: "'(' after break".to_string(),
@@ -1771,11 +1771,15 @@ impl Parser {
             });
         }
         self.move_to_next_non_whitespace();
-        let value =
+        // break() with no argument is implicitly null
+        let value = if self.current_token() == Token::CloseParen {
+            Ast::Null(self.position)
+        } else {
             self.parse_expression(0, true, true)?
                 .ok_or_else(|| ParseError::UnexpectedEof {
                     expected: "value in break()".to_string(),
-                })?;
+                })?
+        };
         // parse_expression should leave us at the closing paren
         if self.current_token() != Token::CloseParen {
             return Err(ParseError::MissingToken {

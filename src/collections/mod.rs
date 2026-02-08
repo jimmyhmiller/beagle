@@ -14,6 +14,7 @@
 
 mod gc_handle;
 mod handle_arena;
+pub mod mutable_map;
 mod persistent_map;
 mod persistent_set;
 mod persistent_vec;
@@ -21,6 +22,7 @@ mod type_ids;
 
 pub use gc_handle::GcHandle;
 pub use handle_arena::{Handle, HandleScope};
+pub use mutable_map::MutableMap;
 pub use persistent_map::PersistentMap;
 pub use persistent_set::PersistentSet;
 pub use persistent_vec::PersistentVec;

@@ -904,6 +904,14 @@ impl Ir {
 
         // Case: a is int, b is float - convert a to float
         {
+            // Allocate result heap object BEFORE computing the float result.
+            // This ensures no raw f64 values are live in GPRs across the
+            // allocation call, which could cause GC to misinterpret them
+            // as tagged heap pointers.
+            let size_reg = self.assign_new(1);
+            let float_pointer = self.allocate(size_reg.into());
+            let float_pointer_untagged = self.untag(float_pointer);
+            self.write_small_object_header(float_pointer_untagged);
             let a_untagged = self.shift_right_imm_raw(a.into(), 3);
             let a_float = self.int_to_float(a_untagged);
             let b_untagged = self.untag(b.into());
@@ -911,10 +919,6 @@ impl Ir {
             let b_float = self.fmov_general_to_float(b_val);
             let float_result = op_float(self, a_float, b_float);
             let float_result_general = self.fmov_float_to_general(float_result);
-            let size_reg = self.assign_new(1);
-            let float_pointer = self.allocate(size_reg.into());
-            let float_pointer_untagged = self.untag(float_pointer);
-            self.write_small_object_header(float_pointer_untagged);
             self.heap_store_offset(float_pointer_untagged, float_result_general, 1);
             let tagged = self.tag(float_pointer_untagged, BuiltInTypes::Float.get_tag());
             self.assign(result_register, tagged);
@@ -930,6 +934,11 @@ impl Ir {
 
         // Case: a is float, b is int - convert b to float
         {
+            // Allocate before float computation to avoid raw f64 in GPRs across GC safepoint
+            let size_reg = self.assign_new(1);
+            let float_pointer = self.allocate(size_reg.into());
+            let float_pointer_untagged = self.untag(float_pointer);
+            self.write_small_object_header(float_pointer_untagged);
             let a_untagged = self.untag(a.into());
             let a_val = self.load_from_heap(a_untagged, 1);
             let a_float = self.fmov_general_to_float(a_val);
@@ -937,10 +946,6 @@ impl Ir {
             let b_float = self.int_to_float(b_untagged);
             let float_result = op_float(self, a_float, b_float);
             let float_result_general = self.fmov_float_to_general(float_result);
-            let size_reg = self.assign_new(1);
-            let float_pointer = self.allocate(size_reg.into());
-            let float_pointer_untagged = self.untag(float_pointer);
-            self.write_small_object_header(float_pointer_untagged);
             self.heap_store_offset(float_pointer_untagged, float_result_general, 1);
             let tagged = self.tag(float_pointer_untagged, BuiltInTypes::Float.get_tag());
             self.assign(result_register, tagged);
@@ -952,6 +957,11 @@ impl Ir {
         self.guard_float(b.into(), self.after_return);
 
         {
+            // Allocate before float computation to avoid raw f64 in GPRs across GC safepoint
+            let size_reg = self.assign_new(1);
+            let float_pointer = self.allocate(size_reg.into());
+            let float_pointer_untagged = self.untag(float_pointer);
+            self.write_small_object_header(float_pointer_untagged);
             let a_untagged = self.untag(a.into());
             let b_untagged = self.untag(b.into());
             let a_val = self.load_from_heap(a_untagged, 1);
@@ -960,10 +970,6 @@ impl Ir {
             let b_float = self.fmov_general_to_float(b_val);
             let float_result = op_float(self, a_float, b_float);
             let float_result_general = self.fmov_float_to_general(float_result);
-            let size_reg = self.assign_new(1);
-            let float_pointer = self.allocate(size_reg.into());
-            let float_pointer_untagged = self.untag(float_pointer);
-            self.write_small_object_header(float_pointer_untagged);
             self.heap_store_offset(float_pointer_untagged, float_result_general, 1);
             let tagged = self.tag(float_pointer_untagged, BuiltInTypes::Float.get_tag());
             self.assign(result_register, tagged);

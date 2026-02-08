@@ -1,0 +1,27 @@
+namespace crash_read_only
+
+use beagle.io as io
+
+let READ_CHUNK = 65536
+
+fn read_loop(total) {
+    let result = io/read-stdin-string(READ_CHUNK)
+    match result {
+        Result.Ok { value } => {
+            if length(value) == 0 {
+                total
+            } else {
+                read_loop(total + length(value))
+            }
+        },
+        Result.Err { error } => {
+            total
+        }
+    }
+}
+
+fn main() {
+    let total = read_loop(0)
+    println(total)
+    "done"
+}

@@ -159,6 +159,7 @@ pub struct Header {
     pub opaque: bool,
     pub marked: bool,
     pub large: bool, // Large object flag - when set, actual size is stored in word after header
+    pub is_ascii: bool, // String is pure ASCII — enables O(1) byte-indexed substring
 }
 
 impl Header {
@@ -184,6 +185,10 @@ impl Header {
     /// When set, the actual size is stored in the word after the header.
     pub const LARGE_OBJECT_BIT_POSITION: u32 = 2;
 
+    /// Position of the is_ascii bit in the header.
+    /// When set, the string contains only ASCII bytes (byte index == char index).
+    const IS_ASCII_BIT_POSITION: u32 = 3;
+
     /// Maximum size that fits in the inline size field (u16)
     pub const MAX_INLINE_SIZE: usize = 0xFFFF;
 
@@ -201,6 +206,9 @@ impl Header {
         if self.large {
             data |= 1 << Self::LARGE_OBJECT_BIT_POSITION;
         }
+        if self.is_ascii {
+            data |= 1 << Self::IS_ASCII_BIT_POSITION;
+        }
         data
     }
 
@@ -211,6 +219,7 @@ impl Header {
         let opaque = (data & (1 << Self::OPAQUE_BIT_POSITION)) != 0;
         let marked = (data & (1 << Self::MARKED_BIT_POSITION)) != 0;
         let large = (data & (1 << Self::LARGE_OBJECT_BIT_POSITION)) != 0;
+        let is_ascii = (data & (1 << Self::IS_ASCII_BIT_POSITION)) != 0;
         Header {
             type_id: _type,
             type_data,
@@ -218,6 +227,7 @@ impl Header {
             opaque,
             marked,
             large,
+            is_ascii,
         }
     }
 
@@ -335,6 +345,7 @@ mod header_layout_tests {
             opaque: true,
             marked: false,
             large: false,
+            is_ascii: false,
         };
 
         let header_value = header.to_usize();
@@ -358,6 +369,7 @@ fn header() {
         opaque: true,
         marked: false,
         large: false,
+        is_ascii: false,
     };
     let data = header.to_usize();
     // println the binary representation of the data
@@ -375,6 +387,7 @@ fn header() {
                         opaque: *sm,
                         marked: *m,
                         large: false,
+                        is_ascii: false,
                     };
                     let data = header.to_usize();
                     let new_header = Header::from_usize(data);
@@ -395,7 +408,14 @@ pub struct HeapObject {
 impl HeapObject {
     pub fn from_tagged(pointer: usize) -> Self {
         assert!(BuiltInTypes::is_heap_pointer(pointer));
-        assert!(BuiltInTypes::untag(pointer).is_multiple_of(8));
+        assert!(
+            BuiltInTypes::untag(pointer).is_multiple_of(8),
+            "Misaligned heap pointer: tagged={:#x}, untagged={:#x}, tag={}, untagged%8={}",
+            pointer,
+            BuiltInTypes::untag(pointer),
+            pointer & 0b111,
+            BuiltInTypes::untag(pointer) % 8
+        );
         HeapObject {
             pointer,
             tagged: true,
@@ -585,6 +605,7 @@ impl HeapObject {
             opaque: false,
             marked: false,
             large: is_large,
+            is_ascii: false,
         };
 
         unsafe { *pointer.cast::<usize>() = header.to_usize() };
@@ -828,6 +849,7 @@ impl Ir {
             opaque: true,
             marked: false,
             large: false,
+            is_ascii: false,
         };
         self.heap_store(small_object_pointer, Value::RawValue(header.to_usize()));
     }

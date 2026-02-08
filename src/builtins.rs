@@ -5889,6 +5889,40 @@ unsafe extern "C" fn ffi_get_string(
     }
 }
 
+/// Combined get-string + deallocate: extracts string bytes and frees the native
+/// buffer BEFORE allocating the Beagle string (which can trigger GC).
+/// This avoids the caller needing to hold a Buffer struct reference across GC.
+unsafe extern "C" fn ffi_get_string_and_free(
+    stack_pointer: usize,
+    _frame_pointer: usize,
+    buffer: usize,
+    offset: usize,
+    len: usize,
+) -> usize {
+    unsafe {
+        let runtime = get_runtime().get_mut();
+        // Extract the raw pointer and size from the Buffer struct
+        let buffer_object = HeapObject::from_tagged(buffer);
+        let raw_ptr = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+        let buf_size = BuiltInTypes::untag(buffer_object.get_field(1));
+        let offset = BuiltInTypes::untag(offset);
+        let len = BuiltInTypes::untag(len);
+
+        // Copy string bytes into a Rust String (no GC)
+        let slice = std::slice::from_raw_parts(raw_ptr.add(offset), len);
+        let string_data = std::str::from_utf8(slice).unwrap().to_string();
+
+        // Free the native buffer NOW, before any GC can happen
+        let _ = Vec::from_raw_parts(raw_ptr, buf_size, buf_size);
+
+        // Allocate the Beagle string (may trigger GC, but Buffer is already freed)
+        (*runtime)
+            .allocate_string(stack_pointer, string_data)
+            .unwrap()
+            .into()
+    }
+}
+
 unsafe extern "C" fn ffi_create_array(
     stack_pointer: usize,
     _frame_pointer: usize, // Frame pointer for GC stack walking
@@ -8313,7 +8347,10 @@ pub extern "C" fn keyword_to_string(
             throw_runtime_error(
                 stack_pointer,
                 "TypeError",
-                format!("keyword->string expects a keyword, got {:?} (raw value: {:#x})", tag, keyword),
+                format!(
+                    "keyword->string expects a keyword, got {:?} (raw value: {:#x})",
+                    tag, keyword
+                ),
             );
         }
     }
@@ -8873,6 +8910,7 @@ pub unsafe extern "C" fn capture_continuation_runtime(
         opaque: true,
         marked: false,
         large: is_large,
+        is_ascii: false,
     });
     if is_large {
         let size_ptr = (segment_obj.untagged() + 8) as *mut usize;
@@ -10759,6 +10797,14 @@ impl Runtime {
             true,
             &["buffer", "offset", "length"],
             "Read a string from a buffer at the given offset with the specified length.\n\nExamples:\n  (ffi/get-string buf 0 10)  ; Read 10 bytes starting at offset 0",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.ffi/get-string-and-free",
+            ffi_get_string_and_free as *const u8,
+            true,
+            &["buffer", "offset", "length"],
+            "Read a string from a buffer and free the native buffer.\nCombines get-string + deallocate to avoid holding Buffer reference across GC.",
         )?;
 
         self.add_builtin_with_doc(
@@ -13499,7 +13545,7 @@ pub unsafe extern "C" fn clear_diagnostics(_stack_pointer: usize, frame_pointer:
 
 mod rust_collections {
     use super::*;
-    use crate::collections::{GcHandle, PersistentMap, PersistentSet, PersistentVec};
+    use crate::collections::{GcHandle, MutableMap, PersistentMap, PersistentSet, PersistentVec};
 
     /// Create an empty persistent vector
     /// Signature: (stack_pointer, frame_pointer) -> tagged_ptr
@@ -13792,6 +13838,142 @@ mod rust_collections {
             }
         }
     }
+
+    // ========== Mutable Map builtins ==========
+
+    /// Create an empty mutable map with default capacity (16)
+    /// Signature: (stack_pointer, frame_pointer) -> tagged_ptr
+    pub unsafe extern "C" fn rust_mutable_map_empty(
+        stack_pointer: usize,
+        frame_pointer: usize,
+    ) -> usize {
+        save_gc_context!(stack_pointer, frame_pointer);
+        let runtime = get_runtime().get_mut();
+
+        match MutableMap::empty(runtime, stack_pointer, 16) {
+            Ok(handle) => handle.as_tagged(),
+            Err(e) => {
+                eprintln!("rust_mutable_map_empty error: {}", e);
+                BuiltInTypes::null_value() as usize
+            }
+        }
+    }
+
+    /// Create an empty mutable map with specified capacity
+    /// Signature: (stack_pointer, frame_pointer, capacity) -> tagged_ptr
+    pub unsafe extern "C" fn rust_mutable_map_with_capacity(
+        stack_pointer: usize,
+        frame_pointer: usize,
+        capacity: usize,
+    ) -> usize {
+        save_gc_context!(stack_pointer, frame_pointer);
+        let runtime = get_runtime().get_mut();
+        let cap = BuiltInTypes::untag(capacity);
+
+        match MutableMap::empty(runtime, stack_pointer, cap) {
+            Ok(handle) => handle.as_tagged(),
+            Err(e) => {
+                eprintln!("rust_mutable_map_with_capacity error: {}", e);
+                BuiltInTypes::null_value() as usize
+            }
+        }
+    }
+
+    /// Put a key-value pair into a mutable map (mutates in place)
+    /// Signature: (stack_pointer, frame_pointer, map, key, value) -> null
+    pub unsafe extern "C" fn rust_mutable_map_put(
+        stack_pointer: usize,
+        frame_pointer: usize,
+        map_ptr: usize,
+        key: usize,
+        value: usize,
+    ) -> usize {
+        save_gc_context!(stack_pointer, frame_pointer);
+        let runtime = get_runtime().get_mut();
+
+        if !BuiltInTypes::is_heap_pointer(map_ptr) {
+            return BuiltInTypes::null_value() as usize;
+        }
+
+        match MutableMap::put(runtime, stack_pointer, map_ptr, key, value) {
+            Ok(()) => BuiltInTypes::null_value() as usize,
+            Err(e) => {
+                eprintln!("rust_mutable_map_put error: {}", e);
+                BuiltInTypes::null_value() as usize
+            }
+        }
+    }
+
+    /// Get a value from a mutable map by key
+    /// Signature: (map, key) -> tagged_value
+    pub unsafe extern "C" fn rust_mutable_map_get(map_ptr: usize, key: usize) -> usize {
+        if !BuiltInTypes::is_heap_pointer(map_ptr) {
+            return BuiltInTypes::null_value() as usize;
+        }
+        let runtime = get_runtime().get();
+        let map = GcHandle::from_tagged(map_ptr);
+        MutableMap::get(runtime, map, key)
+    }
+
+    /// Get the count of entries in a mutable map
+    /// Signature: (map) -> tagged_int
+    pub unsafe extern "C" fn rust_mutable_map_count(map_ptr: usize) -> usize {
+        if !BuiltInTypes::is_heap_pointer(map_ptr) {
+            return BuiltInTypes::construct_int(0) as usize;
+        }
+        let map = GcHandle::from_tagged(map_ptr);
+        let count = MutableMap::count(map);
+        BuiltInTypes::construct_int(count as isize) as usize
+    }
+
+    /// Increment a key's count (get-or-0 + 1)
+    /// Signature: (stack_pointer, frame_pointer, map, key) -> null
+    pub unsafe extern "C" fn rust_mutable_map_increment(
+        stack_pointer: usize,
+        frame_pointer: usize,
+        map_ptr: usize,
+        key: usize,
+    ) -> usize {
+        save_gc_context!(stack_pointer, frame_pointer);
+        let runtime = get_runtime().get_mut();
+
+        if !BuiltInTypes::is_heap_pointer(map_ptr) {
+            return BuiltInTypes::null_value() as usize;
+        }
+
+        match MutableMap::increment(runtime, stack_pointer, map_ptr, key) {
+            Ok(()) => BuiltInTypes::null_value() as usize,
+            Err(e) => {
+                eprintln!("rust_mutable_map_increment error: {}", e);
+                BuiltInTypes::null_value() as usize
+            }
+        }
+    }
+
+    /// Get all entries from a mutable map as array of [key, value] pairs
+    /// Signature: (stack_pointer, frame_pointer, map) -> tagged_ptr (array)
+    pub unsafe extern "C" fn rust_mutable_map_entries(
+        stack_pointer: usize,
+        frame_pointer: usize,
+        map_ptr: usize,
+    ) -> usize {
+        save_gc_context!(stack_pointer, frame_pointer);
+        let runtime = get_runtime().get_mut();
+
+        if !BuiltInTypes::is_heap_pointer(map_ptr) {
+            return BuiltInTypes::null_value() as usize;
+        }
+
+        let map = GcHandle::from_tagged(map_ptr);
+
+        match MutableMap::entries(runtime, stack_pointer, map) {
+            Ok(handle) => handle.as_tagged(),
+            Err(e) => {
+                eprintln!("rust_mutable_map_entries error: {}", e);
+                BuiltInTypes::null_value() as usize
+            }
+        }
+    }
 }
 
 impl Runtime {
@@ -13931,6 +14113,66 @@ impl Runtime {
             true,
             &["s"],
             "Return a vector of all elements in the set.\n\nExamples:\n  (set-elements #{1 2 3})  ; => [1 2 3]",
+        )?;
+
+        // ============================================================================
+        // Mutable Map (open-addressing hash table)
+        // ============================================================================
+
+        self.add_builtin_with_doc(
+            "beagle.collections/mutable-map",
+            rust_mutable_map_empty as *const u8,
+            true,
+            &[],
+            "Create a new empty mutable map with default capacity (16).\n\nMutable maps are modified in place for high-performance scenarios.\n\nExamples:\n  (let m (collections/mutable-map))",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.collections/mutable-map-with-capacity",
+            rust_mutable_map_with_capacity as *const u8,
+            true,
+            &["capacity"],
+            "Create a new empty mutable map with the given capacity hint.\n\nExamples:\n  (let m (collections/mutable-map-with-capacity 1024))",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.collections/mutable-map-put!",
+            rust_mutable_map_put as *const u8,
+            true,
+            &["m", "key", "value"],
+            "Insert or update a key-value pair in the mutable map. Mutates in place.\n\nExamples:\n  (mutable-map-put! m \"key\" 42)",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.collections/mutable-map-get",
+            rust_mutable_map_get as *const u8,
+            false,
+            &["m", "key"],
+            "Get the value for key. Returns null if not found.\n\nExamples:\n  (mutable-map-get m \"key\")  ; => 42",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.collections/mutable-map-count",
+            rust_mutable_map_count as *const u8,
+            false,
+            &["m"],
+            "Return the number of key-value pairs in the mutable map.\n\nExamples:\n  (mutable-map-count m)  ; => 3",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.collections/mutable-map-increment!",
+            rust_mutable_map_increment as *const u8,
+            true,
+            &["m", "key"],
+            "Increment the integer count for key (get-or-0 + 1). Optimized for frequency counting.\n\nExamples:\n  (mutable-map-increment! m \"word\")",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.collections/mutable-map-entries",
+            rust_mutable_map_entries as *const u8,
+            true,
+            &["m"],
+            "Return an array of [key, value] pairs from the mutable map.\n\nExamples:\n  (mutable-map-entries m)  ; => [[\"a\" 1] [\"b\" 2]]",
         )?;
 
         Ok(())

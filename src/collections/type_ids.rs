@@ -63,3 +63,6 @@ pub const TYPE_ID_CONTINUATION: u8 = 31;
 
 /// Type ID for continuation stack segment byte buffers (opaque)
 pub const TYPE_ID_CONTINUATION_SEGMENT: u8 = 32;
+
+/// Type ID for MutableMap (3 fields: keys_array, values_array, size)
+pub const TYPE_ID_MUTABLE_MAP: u8 = 33;

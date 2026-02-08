@@ -1,0 +1,13 @@
+namespace crash_big_string
+
+// Test: can we create a very large string?
+fn main() {
+    let mut s = "ACGT"
+    let mut i = 0
+    // Double the string 25 times: 4 * 2^25 = ~128M chars
+    while i < 25 {
+        s = s ++ s
+        i = i + 1
+    }
+    println(length(s))
+}

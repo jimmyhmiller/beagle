@@ -3,156 +3,15 @@ namespace knucleotide
 // The Computer Language Benchmarks Game
 // https://salsa.debian.org/benchmarksgame-team/benchmarksgame/
 //
-// Beagle implementation - optimized with mutable hash table
+// Beagle implementation - optimized with builtin mutable hash map
 
-import "beagle.ffi" as ffi
-import "beagle.io" as io
-import "beagle.builtin" as builtin
-import "raw-mutable-array" as arr
+use beagle.ffi as ffi
+use beagle.io as io
+use beagle.builtin as builtin
+use beagle.collections as c
+use raw-mutable-array as arr
 
 let READ_CHUNK = 65536
-let INITIAL_SEQ_SIZE = 1048576
-
-// Hash table constants
-let HT_KEYS = 0
-let HT_COUNTS = 1
-let HT_SIZE = 2
-let HT_CAPACITY = 3
-
-// Create a new hash table
-fn new_hash_table(capacity) {
-    let ht = arr/new-array(4)
-    arr/write-field(ht, HT_KEYS, arr/new-array(capacity))
-    arr/write-field(ht, HT_COUNTS, arr/new-array(capacity))
-    arr/write-field(ht, HT_SIZE, 0)
-    arr/write-field(ht, HT_CAPACITY, capacity)
-    ht
-}
-
-// Hash a string to get bucket index
-fn hash_string(s, capacity) {
-    let h = builtin/hash(s)
-    // Make sure it's positive
-    let h2 = if h < 0 { 0 - h } else { h }
-    h2 - (h2 / capacity) * capacity
-}
-
-// Find or insert a key, increment count
-fn ht_increment(ht, key) {
-    let keys = arr/read-field(ht, HT_KEYS)
-    let counts = arr/read-field(ht, HT_COUNTS)
-    let capacity = arr/read-field(ht, HT_CAPACITY)
-
-    let idx = hash_string(key, capacity)
-    ht_probe_and_increment(ht, keys, counts, capacity, key, idx, 0)
-}
-
-let DEBUG_COUNT_REF = 0
-
-fn ht_probe_and_increment(ht, keys, counts, capacity, key, idx, probes) {
-    if probes >= capacity {
-        null
-    } else {
-        let existing_key = arr/read-field(keys, idx)
-        if existing_key == null {
-            arr/write-field(keys, idx, key)
-            arr/write-field(counts, idx, 1)
-            let size = arr/read-field(ht, HT_SIZE)
-            arr/write-field(ht, HT_SIZE, size + 1)
-            null
-        } else {
-            let are_equal = existing_key == key
-            // Debug FAILED comparison
-            if are_equal == false {
-                let size = arr/read-field(ht, HT_SIZE)
-                if size < 20 {
-                    println("MISMATCH at size:")
-                    println(size)
-                    println("existing:")
-                    println(existing_key)
-                    println("new:")
-                    println(key)
-                    println("probes:")
-                    println(probes)
-                }
-            }
-            if are_equal {
-                let count = arr/read-field(counts, idx)
-                arr/write-field(counts, idx, count + 1)
-                null
-            } else {
-                let next_idx = idx + 1
-                let wrapped_idx = if next_idx >= capacity { 0 } else { next_idx }
-                ht_probe_and_increment(ht, keys, counts, capacity, key, wrapped_idx, probes + 1)
-            }
-        }
-    }
-}
-
-// Get count for a key
-fn ht_get(ht, key) {
-    let keys = arr/read-field(ht, HT_KEYS)
-    let counts = arr/read-field(ht, HT_COUNTS)
-    let capacity = arr/read-field(ht, HT_CAPACITY)
-
-    let idx = hash_string(key, capacity)
-    ht_probe_get(keys, counts, capacity, key, idx, 0)
-}
-
-fn ht_probe_get(keys, counts, capacity, key, idx, probes) {
-    if probes >= capacity {
-        0
-    } else {
-        let existing_key = arr/read-field(keys, idx)
-        if existing_key == null {
-            0
-        } else {
-            if existing_key == key {
-                arr/read-field(counts, idx)
-            } else {
-                let next_idx = idx + 1
-                let wrapped_idx = if next_idx >= capacity { 0 } else { next_idx }
-                ht_probe_get(keys, counts, capacity, key, wrapped_idx, probes + 1)
-            }
-        }
-    }
-}
-
-// Collect all key-count pairs from hash table
-fn ht_entries(ht) {
-    let keys = arr/read-field(ht, HT_KEYS)
-    let counts = arr/read-field(ht, HT_COUNTS)
-    let capacity = arr/read-field(ht, HT_CAPACITY)
-    let size = arr/read-field(ht, HT_SIZE)
-
-    println("ht_entries: capacity=")
-    println(capacity)
-    println("ht_entries: size=")
-    println(size)
-
-    // Create result array: each entry is [key, count]
-    let result = arr/new-array(size)
-    ht_collect_entries(keys, counts, capacity, result, 0, 0)
-    result
-}
-
-fn ht_collect_entries(keys, counts, capacity, result, src_idx, dest_idx) {
-    if src_idx >= capacity {
-        null
-    } else {
-        let key = arr/read-field(keys, src_idx)
-        if key == null {
-            ht_collect_entries(keys, counts, capacity, result, src_idx + 1, dest_idx)
-        } else {
-            let count = arr/read-field(counts, src_idx)
-            let pair = arr/new-array(2)
-            arr/write-field(pair, 0, key)
-            arr/write-field(pair, 1, count)
-            arr/write-field(result, dest_idx, pair)
-            ht_collect_entries(keys, counts, capacity, result, src_idx + 1, dest_idx + 1)
-        }
-    }
-}
 
 // Sort entries by count (descending), then by key (ascending)
 fn sort_entries(entries) {
@@ -203,166 +62,163 @@ fn bubble_sort_inner(entries, limit, j) {
     }
 }
 
-// State for reading sequence
-let STATE_SEQ = 0
-let STATE_READING = 1
-
-fn new_read_state() {
-    let state = arr/new-array(2)
-    arr/write-field(state, STATE_SEQ, "")
-    arr/write-field(state, STATE_READING, false)
-    state
-}
-
-// Process a chunk of input
-fn process_chunk(state, chunk) {
-    let lines = split_lines(chunk)
-    let num_lines = arr/count(lines)
-    process_lines(state, lines, 0, num_lines)
-}
-
-fn split_lines(s) {
-    let len = length(s)
-    if len == 0 {
-        arr/new-array(0)
-    } else {
-        // Count newlines to determine number of lines
-        let newline_count = count_newlines(s, 0, len, 0)
-        // If string doesn't end with newline, there's one more line
-        let last_char = get(s, len - 1)
-        let line_count = if last_char == "\n" { newline_count } else { newline_count + 1 }
-        let result = arr/new-array(line_count)
-        split_lines_into(s, 0, len, result, 0)
-        result
-    }
-}
-
-fn count_newlines(s, i, len, count) {
-    if i >= len {
-        count
-    } else {
-        let ch = get(s, i)
-        if ch == "\n" {
-            count_newlines(s, i + 1, len, count + 1)
-        } else {
-            count_newlines(s, i + 1, len, count)
-        }
-    }
-}
-
-fn split_lines_into(s, start, len, result, line_idx) {
-    if start >= len {
-        null
-    } else {
-        let end = find_newline(s, start, len)
-        let line = substring(s, start, end - start)
-        arr/write-field(result, line_idx, line)
-        split_lines_into(s, end + 1, len, result, line_idx + 1)
-    }
-}
-
-fn find_newline(s, i, len) {
-    if i >= len {
-        len
-    } else {
-        let ch = get(s, i)
-        if ch == "\n" {
-            i
-        } else {
-            find_newline(s, i + 1, len)
-        }
-    }
-}
-
-fn process_lines(state, lines, i, num_lines) {
-    if i >= num_lines {
-        null
-    } else {
-        let line = arr/read-field(lines, i)
-        let reading = arr/read-field(state, STATE_READING)
-
-        if reading {
-            let line_len = length(line)
-            if line_len > 0 {
-                let first = get(line, 0)
-                if first == ">" {
-                    // End of sequence
-                    null
-                } else {
-                    // Append uppercase line to sequence
-                    let seq = arr/read-field(state, STATE_SEQ)
-                    let upper_line = uppercase(line)
-                    arr/write-field(state, STATE_SEQ, seq ++ upper_line)
-                    process_lines(state, lines, i + 1, num_lines)
-                }
-            } else {
-                process_lines(state, lines, i + 1, num_lines)
-            }
-        } else {
-            // Looking for >THREE
-            let line_len = length(line)
-            if line_len >= 6 {
-                let prefix = substring(line, 0, 6)
-                if prefix == ">THREE" {
-                    arr/write-field(state, STATE_READING, true)
-                }
-            }
-            process_lines(state, lines, i + 1, num_lines)
-        }
-    }
-}
-
 // Read all input and extract the THREE sequence
+// Accumulates lines into a list, then joins once at the end to avoid O(n^2) concat
 fn read_sequence() {
-    let state = new_read_state()
+    // Growable array of lines: [lines_array, count, capacity]
+    let lines_cap = 1024
+    let state = arr/new-array(4)
+    arr/write-field(state, 0, arr/new-array(lines_cap)) // lines
+    arr/write-field(state, 1, 0)     // count
+    arr/write-field(state, 2, lines_cap) // capacity
+    arr/write-field(state, 3, false) // reading flag
+
     read_loop(state)
-    arr/read-field(state, STATE_SEQ)
+
+    // Join all collected lines into one string
+    let lines = arr/read-field(state, 0)
+    let count = arr/read-field(state, 1)
+
+    // Calculate total length
+    let mut total_len = 0
+    let mut i = 0
+    while i < count {
+        total_len = total_len + length(arr/read-field(lines, i))
+        i = i + 1
+    }
+
+    // Build result by concatenating into a buffer
+    let buf = ffi/allocate(total_len)
+    let mut pos = 0
+    i = 0
+    while i < count {
+        let line = arr/read-field(lines, i)
+        let line_len = length(line)
+        let mut j = 0
+        while j < line_len {
+            let ch = get(line, j)
+            let byte = builtin/char-code(ch)
+            ffi/set-u8(buf, pos, byte)
+            pos = pos + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Convert buffer back to string
+    let result = ffi/get-string(buf, 0, total_len)
+    ffi/deallocate(buf)
+    result
+}
+
+fn add_line(state, line) {
+    let lines = arr/read-field(state, 0)
+    let count = arr/read-field(state, 1)
+    let capacity = arr/read-field(state, 2)
+
+    // Grow if needed
+    if count >= capacity {
+        let new_cap = capacity * 2
+        let new_lines = arr/new-array(new_cap)
+        let mut i = 0
+        while i < count {
+            arr/write-field(new_lines, i, arr/read-field(lines, i))
+            i = i + 1
+        }
+        arr/write-field(state, 0, new_lines)
+        arr/write-field(state, 2, new_cap)
+        arr/write-field(new_lines, count, line)
+    } else {
+        arr/write-field(lines, count, line)
+    }
+    arr/write-field(state, 1, count + 1)
 }
 
 fn read_loop(state) {
     let result = io/read-stdin-string(READ_CHUNK)
     match result {
-        io/Result.Ok { value } => {
+        Result.Ok { value } => {
             if length(value) == 0 {
                 null
             } else {
                 process_chunk(state, value)
-                // Check if we're done (found a > after >THREE)
-                let reading = arr/read-field(state, STATE_READING)
-                if reading {
-                    read_loop(state)
-                } else {
-                    read_loop(state)
-                }
+                read_loop(state)
             }
         },
-        io/Result.Err { code, message } => {
+        Result.Err { error } => {
             null
         }
     }
 }
 
-// Count all k-mers of given length
+fn process_chunk(state, chunk) {
+    let len = length(chunk)
+    let mut i = 0
+    let mut line_start = 0
+
+    while i < len {
+        let ch = get(chunk, i)
+        if ch == "\n" {
+            if i > line_start {
+                process_line(state, chunk, line_start, i - line_start)
+            }
+            line_start = i + 1
+        }
+        i = i + 1
+    }
+    // Handle last line without newline
+    if line_start < len {
+        process_line(state, chunk, line_start, len - line_start)
+    }
+}
+
+fn process_line(state, chunk, start, line_len) {
+    let reading = arr/read-field(state, 3)
+    if reading {
+        let first = get(chunk, start)
+        if first == ">" {
+            // End of sequence - stop reading
+            arr/write-field(state, 3, false)
+        } else {
+            let line = uppercase(substring(chunk, start, line_len))
+            add_line(state, line)
+        }
+    } else {
+        if line_len >= 6 {
+            let prefix = substring(chunk, start, 6)
+            if prefix == ">THREE" {
+                arr/write-field(state, 3, true)
+            }
+        }
+    }
+}
+
+// Power of 4
+fn pow4(k) {
+    let mut result = 1
+    let mut i = 0
+    while i < k {
+        result = result * 4
+        i = i + 1
+    }
+    result
+}
+
+// Count all k-mers of given length using builtin mutable map
 fn count_kmers(seq, k) {
     let len = length(seq)
     let n = len - k + 1
-    // Use a hash table with capacity = 2 * expected unique kmers
-    // For DNA with 4 letters, max unique k-mers is 4^k
-    // But we'll use a simpler heuristic: capacity = n / 2 for small k
-    let capacity = if n < 100 { 64 } else { n }
-    let ht = new_hash_table(capacity)
-    count_kmers_loop(seq, k, n, ht, 0)
-    ht
-}
-
-fn count_kmers_loop(seq, k, n, ht, i) {
-    if i >= n {
-        null
-    } else {
+    // Capacity based on expected unique kmers
+    let max_unique = pow4(k)
+    let capacity = if max_unique * 4 < n * 2 { max_unique * 4 } else { n * 2 }
+    let ht = c/mutable-map-with-capacity(capacity)
+    let mut i = 0
+    while i < n {
         let kmer = substring(seq, i, k)
-        ht_increment(ht, kmer)
-        count_kmers_loop(seq, k, n, ht, i + 1)
+        c/mutable-map-increment!(ht, kmer)
+        i = i + 1
     }
+    ht
 }
 
 // Print frequency percentage with 3 decimal places
@@ -412,49 +268,27 @@ fn print_freq_loop(entries, total, i, len) {
 
 // Print count for a specific sequence
 fn print_count(seq, ht) {
-    let c = ht_get(ht, seq)
+    let v = c/mutable-map-get(ht, seq)
+    let c = if v == null { 0 } else { v }
     print(c)
     print("\t")
     println(seq)
 }
 
 fn main() {
-    // Read the sequence
     let seq = read_sequence()
     let len = length(seq)
 
-    // Debug
-    println("Sequence length:")
-    println(len)
-
-    println("First 20 chars:")
-    println(substring(seq, 0, 20))
-
-    println("Testing a few substrings:")
-    let s1 = substring(seq, 0, 1)
-    let s2 = substring(seq, 1, 1)
-    let s3 = substring(seq, 100, 1)
-    println(s1)
-    println(s2)
-    println(s3)
-    println("s1 == s3?")
-    println(s1 == s3)
-
     // 1-mer frequencies
     let ht1 = count_kmers(seq, 1)
-    println("Hash table created")
-    let entries1 = ht_entries(ht1)
-    println("Entries:")
-    println(entries1)
-    println("Entries count:")
-    println(arr/count(entries1))
+    let entries1 = c/mutable-map-entries(ht1)
     sort_entries(entries1)
     print_freq_table(entries1, len)
     println("")
 
     // 2-mer frequencies
     let ht2 = count_kmers(seq, 2)
-    let entries2 = ht_entries(ht2)
+    let entries2 = c/mutable-map-entries(ht2)
     sort_entries(entries2)
     print_freq_table(entries2, len - 1)
     println("")

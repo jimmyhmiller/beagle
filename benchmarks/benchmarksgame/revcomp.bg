@@ -6,9 +6,9 @@ namespace revcomp
 // Beagle implementation - fast single-threaded version
 // Uses bulk native operations for parsing
 
-import "beagle.ffi" as ffi
-import "beagle.io" as io
-import "raw-mutable-array" as arr
+use beagle.ffi as ffi
+use beagle.io as io
+use raw-mutable-array as arr
 
 let LINE_WIDTH = 60
 let READ_CHUNK = 65536
@@ -25,52 +25,52 @@ fn make_complement_table() {
     let tbl = ffi/allocate(256)
     let mut i = 0
     while i < 256 {
-        ffi/set_u8(tbl, i, i)
+        ffi/set-u8(tbl, i, i)
         i = i + 1
     }
 
     // A <-> T
-    ffi/set_u8(tbl, 65, 84)
-    ffi/set_u8(tbl, 97, 84)
-    ffi/set_u8(tbl, 84, 65)
-    ffi/set_u8(tbl, 116, 65)
+    ffi/set-u8(tbl, 65, 84)
+    ffi/set-u8(tbl, 97, 84)
+    ffi/set-u8(tbl, 84, 65)
+    ffi/set-u8(tbl, 116, 65)
     // C <-> G
-    ffi/set_u8(tbl, 67, 71)
-    ffi/set_u8(tbl, 99, 71)
-    ffi/set_u8(tbl, 71, 67)
-    ffi/set_u8(tbl, 103, 67)
+    ffi/set-u8(tbl, 67, 71)
+    ffi/set-u8(tbl, 99, 71)
+    ffi/set-u8(tbl, 71, 67)
+    ffi/set-u8(tbl, 103, 67)
     // U -> A
-    ffi/set_u8(tbl, 85, 65)
-    ffi/set_u8(tbl, 117, 65)
+    ffi/set-u8(tbl, 85, 65)
+    ffi/set-u8(tbl, 117, 65)
     // M <-> K
-    ffi/set_u8(tbl, 77, 75)
-    ffi/set_u8(tbl, 109, 75)
-    ffi/set_u8(tbl, 75, 77)
-    ffi/set_u8(tbl, 107, 77)
+    ffi/set-u8(tbl, 77, 75)
+    ffi/set-u8(tbl, 109, 75)
+    ffi/set-u8(tbl, 75, 77)
+    ffi/set-u8(tbl, 107, 77)
     // R <-> Y
-    ffi/set_u8(tbl, 82, 89)
-    ffi/set_u8(tbl, 114, 89)
-    ffi/set_u8(tbl, 89, 82)
-    ffi/set_u8(tbl, 121, 82)
+    ffi/set-u8(tbl, 82, 89)
+    ffi/set-u8(tbl, 114, 89)
+    ffi/set-u8(tbl, 89, 82)
+    ffi/set-u8(tbl, 121, 82)
     // W <-> W
-    ffi/set_u8(tbl, 87, 87)
-    ffi/set_u8(tbl, 119, 87)
+    ffi/set-u8(tbl, 87, 87)
+    ffi/set-u8(tbl, 119, 87)
     // S <-> S
-    ffi/set_u8(tbl, 83, 83)
-    ffi/set_u8(tbl, 115, 83)
+    ffi/set-u8(tbl, 83, 83)
+    ffi/set-u8(tbl, 115, 83)
     // V <-> B
-    ffi/set_u8(tbl, 86, 66)
-    ffi/set_u8(tbl, 118, 66)
-    ffi/set_u8(tbl, 66, 86)
-    ffi/set_u8(tbl, 98, 86)
+    ffi/set-u8(tbl, 86, 66)
+    ffi/set-u8(tbl, 118, 66)
+    ffi/set-u8(tbl, 66, 86)
+    ffi/set-u8(tbl, 98, 86)
     // H <-> D
-    ffi/set_u8(tbl, 72, 68)
-    ffi/set_u8(tbl, 104, 68)
-    ffi/set_u8(tbl, 68, 72)
-    ffi/set_u8(tbl, 100, 72)
+    ffi/set-u8(tbl, 72, 68)
+    ffi/set-u8(tbl, 104, 68)
+    ffi/set-u8(tbl, 68, 72)
+    ffi/set-u8(tbl, 100, 72)
     // N <-> N
-    ffi/set_u8(tbl, 78, 78)
-    ffi/set_u8(tbl, 110, 78)
+    ffi/set-u8(tbl, 78, 78)
+    ffi/set-u8(tbl, 110, 78)
 
     tbl
 }
@@ -112,9 +112,9 @@ fn output_sequence_wrapped(seq_buf, seq_len) {
         }
 
         // Copy line to output buffer
-        ffi/copy_bytes(seq_buf, pos, out_buf, out_pos, line_len)
+        ffi/copy-bytes(seq_buf, pos, out_buf, out_pos, line_len)
         out_pos = out_pos + line_len
-        ffi/set_u8(out_buf, out_pos, 10)
+        ffi/set-u8(out_buf, out_pos, 10)
         out_pos = out_pos + 1
 
         pos = pos + LINE_WIDTH
@@ -136,8 +136,8 @@ fn flush_sequence(state) {
         let seq_buf = arr/read-field(state, STATE_SEQ_BUF)
         let tbl = arr/read-field(state, STATE_TBL)
         // Bulk translate + reverse
-        ffi/translate_bytes(seq_buf, 0, seq_len, tbl)
-        ffi/reverse_bytes(seq_buf, 0, seq_len)
+        ffi/translate-bytes(seq_buf, 0, seq_len, tbl)
+        ffi/reverse-bytes(seq_buf, 0, seq_len)
         output_sequence_wrapped(seq_buf, seq_len)
     }
     arr/write-field(state, STATE_SEQ_LEN, 0)
@@ -157,8 +157,8 @@ fn new_state(tbl) {
 fn output_header_range(buf, start, end_pos) {
     let len = end_pos - start
     let header_buf = ffi/allocate(len + 1)
-    ffi/copy_bytes(buf, start, header_buf, 0, len)
-    ffi/set_u8(header_buf, len, 10)
+    ffi/copy-bytes(buf, start, header_buf, 0, len)
+    ffi/set-u8(header_buf, len, 10)
     io/write-stdout-buffer(header_buf, len + 1)
     ffi/deallocate(header_buf)
     null
@@ -170,7 +170,7 @@ fn process_chunk(state, input_buf, chunk_len) {
 
     while pos < chunk_len {
         // Find next '>' marker
-        let marker_pos = ffi/find_byte(input_buf, pos, chunk_len - pos, 62)
+        let marker_pos = ffi/find-byte(input_buf, pos, chunk_len - pos, 62)
 
         if marker_pos == -1 {
             // No '>' found - rest is sequence data
@@ -178,7 +178,7 @@ fn process_chunk(state, input_buf, chunk_len) {
             ensure_capacity(state, chunk_len - pos)
             let seq_buf = arr/read-field(state, STATE_SEQ_BUF)
             let seq_len = arr/read-field(state, STATE_SEQ_LEN)
-            let written = ffi/copy_bytes_filter(input_buf, pos, seq_buf, seq_len, chunk_len - pos, 10)
+            let written = ffi/copy-bytes_filter(input_buf, pos, seq_buf, seq_len, chunk_len - pos, 10)
             arr/write-field(state, STATE_SEQ_LEN, seq_len + written)
             pos = chunk_len
         } else {
@@ -188,7 +188,7 @@ fn process_chunk(state, input_buf, chunk_len) {
                 ensure_capacity(state, marker_pos - pos)
                 let seq_buf = arr/read-field(state, STATE_SEQ_BUF)
                 let seq_len = arr/read-field(state, STATE_SEQ_LEN)
-                let written = ffi/copy_bytes_filter(input_buf, pos, seq_buf, seq_len, marker_pos - pos, 10)
+                let written = ffi/copy-bytes_filter(input_buf, pos, seq_buf, seq_len, marker_pos - pos, 10)
                 arr/write-field(state, STATE_SEQ_LEN, seq_len + written)
             }
 
@@ -196,7 +196,7 @@ fn process_chunk(state, input_buf, chunk_len) {
             flush_sequence(state)
 
             // Find end of header line (newline after '>')
-            let newline_pos = ffi/find_byte(input_buf, marker_pos, chunk_len - marker_pos, 10)
+            let newline_pos = ffi/find-byte(input_buf, marker_pos, chunk_len - marker_pos, 10)
 
             if newline_pos == -1 {
                 // Header continues to next chunk - just output what we have
@@ -221,7 +221,7 @@ fn main() {
     while done == false {
         let result = io/read-stdin(READ_CHUNK)
         match result {
-            io/Result.Ok { value } => {
+            Result.Ok { value } => {
                 if value.length == 0 {
                     done = true
                 } else {
@@ -229,7 +229,7 @@ fn main() {
                     ffi/deallocate(value.buffer)
                 }
             },
-            io/Result.Err { code, message } => {
+            Result.Err { error } => {
                 done = true
             }
         }

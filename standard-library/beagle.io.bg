@@ -222,8 +222,10 @@ fn read-stdin-string(n) {
     let result = read-stdin(n)
     match result {
         Result.Ok { value } => {
-            let s = ffi/get-string(value.buffer, 0, value.length)
-            ffi/deallocate(value.buffer)
+            // Use get-string-and-free to avoid holding Buffer reference across GC.
+            // get-string-and-free extracts string bytes and frees the native buffer
+            // before allocating the Beagle string (which can trigger GC).
+            let s = ffi/get-string-and-free(value.buffer, 0, value.length)
             ok(s)
         },
         Result.Err { error } => err(error)

@@ -412,7 +412,7 @@ impl Allocator for CompactingHeap {
     fn try_allocate(
         &mut self,
         words: usize,
-        _kind: crate::types::BuiltInTypes,
+        kind: crate::types::BuiltInTypes,
     ) -> Result<super::AllocateAction, Box<dyn std::error::Error>> {
         if words > self.from_space.word_count() {
             // TODO: Grow should take an allocation size
@@ -425,6 +425,14 @@ impl Allocator for CompactingHeap {
 
         // TODO: Actually allocate
         let pointer = self.from_space.allocate(words);
+
+        // Float objects are opaque (their field is a raw f64, not a pointer).
+        // Set the opaque bit immediately so GC never sees a non-opaque float.
+        if kind == crate::types::BuiltInTypes::Float {
+            unsafe {
+                *(pointer as *mut usize) |= 0x2; // Set opaque bit (bit 1)
+            }
+        }
 
         Ok(AllocateAction::Allocated(pointer))
     }

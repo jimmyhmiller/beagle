@@ -4,18 +4,21 @@ namespace nbody
 // https://salsa.debian.org/benchmarksgame-team/benchmarksgame/
 //
 // Beagle implementation of the N-body simulation
+// Uses mutable structs and arrays to avoid allocation in the hot loop
+
+use raw-mutable-array as arr
 
 let PI = 3.141592653589793
 let SOLAR_MASS = 39.47841760435743
 let DAYS_PER_YEAR = 365.24
 
 struct Body {
-    x
-    y
-    z
-    vx
-    vy
-    vz
+    mut x
+    mut y
+    mut z
+    mut vx
+    mut vy
+    mut vz
     mass
 }
 
@@ -84,190 +87,132 @@ fn neptune() {
     }
 }
 
-fn offset_momentum(sun, bodies, n) {
-    let result = sum_momentum(bodies, n, 0, 0.0, 0.0, 0.0)
-    Body {
-        x: sun.x,
-        y: sun.y,
-        z: sun.z,
-        vx: (0.0 - result.px) / SOLAR_MASS,
-        vy: (0.0 - result.py) / SOLAR_MASS,
-        vz: (0.0 - result.pz) / SOLAR_MASS,
-        mass: sun.mass
+fn offset_momentum(bodies, n) {
+    let mut px = 0.0
+    let mut py = 0.0
+    let mut pz = 0.0
+    let mut i = 0
+    while i < n {
+        let b = arr/read-field(bodies, i)
+        px = px + b.vx * b.mass
+        py = py + b.vy * b.mass
+        pz = pz + b.vz * b.mass
+        i = i + 1
     }
-}
-
-struct Momentum {
-    px
-    py
-    pz
-}
-
-fn sum_momentum(bodies, n, i, px, py, pz) {
-    if i >= n {
-        Momentum { px: px, py: py, pz: pz }
-    } else {
-        let b = get_body(bodies, i)
-        sum_momentum(bodies, n, i + 1,
-            px + b.vx * b.mass,
-            py + b.vy * b.mass,
-            pz + b.vz * b.mass)
-    }
-}
-
-fn get_body(bodies, i) {
-    if i == 0 { bodies.b0 }
-    else if i == 1 { bodies.b1 }
-    else if i == 2 { bodies.b2 }
-    else if i == 3 { bodies.b3 }
-    else { bodies.b4 }
-}
-
-fn set_body(bodies, i, b) {
-    if i == 0 { Bodies { b0: b, b1: bodies.b1, b2: bodies.b2, b3: bodies.b3, b4: bodies.b4 } }
-    else if i == 1 { Bodies { b0: bodies.b0, b1: b, b2: bodies.b2, b3: bodies.b3, b4: bodies.b4 } }
-    else if i == 2 { Bodies { b0: bodies.b0, b1: bodies.b1, b2: b, b3: bodies.b3, b4: bodies.b4 } }
-    else if i == 3 { Bodies { b0: bodies.b0, b1: bodies.b1, b2: bodies.b2, b3: b, b4: bodies.b4 } }
-    else { Bodies { b0: bodies.b0, b1: bodies.b1, b2: bodies.b2, b3: bodies.b3, b4: b } }
-}
-
-struct Bodies {
-    b0
-    b1
-    b2
-    b3
-    b4
+    let s = arr/read-field(bodies, 0)
+    s.vx = (0.0 - px) / SOLAR_MASS
+    s.vy = (0.0 - py) / SOLAR_MASS
+    s.vz = (0.0 - pz) / SOLAR_MASS
 }
 
 fn advance(bodies, n, dt) {
-    advance_velocities(bodies, n, dt, 0)
-}
+    // Update velocities
+    let mut i = 0
+    while i < n {
+        let bi = arr/read-field(bodies, i)
+        let mut j = i + 1
+        while j < n {
+            let bj = arr/read-field(bodies, j)
+            let dx = bi.x - bj.x
+            let dy = bi.y - bj.y
+            let dz = bi.z - bj.z
+            let dist_sq = dx * dx + dy * dy + dz * dz
+            let distance = sqrt(dist_sq)
+            let mag = dt / (dist_sq * distance)
 
-fn advance_velocities(bodies, n, dt, i) {
-    if i >= n {
-        advance_positions(bodies, n, dt, 0)
-    } else {
-        let new_bodies = advance_velocity_pairs(bodies, n, dt, i, i + 1)
-        advance_velocities(new_bodies, n, dt, i + 1)
+            bi.vx = bi.vx - dx * bj.mass * mag
+            bi.vy = bi.vy - dy * bj.mass * mag
+            bi.vz = bi.vz - dz * bj.mass * mag
+            bj.vx = bj.vx + dx * bi.mass * mag
+            bj.vy = bj.vy + dy * bi.mass * mag
+            bj.vz = bj.vz + dz * bi.mass * mag
+
+            j = j + 1
+        }
+        i = i + 1
     }
-}
 
-fn advance_velocity_pairs(bodies, n, dt, i, j) {
-    if j >= n {
-        bodies
-    } else {
-        let bi = get_body(bodies, i)
-        let bj = get_body(bodies, j)
-        let dx = bi.x - bj.x
-        let dy = bi.y - bj.y
-        let dz = bi.z - bj.z
-        let dist_sq = dx * dx + dy * dy + dz * dz
-        let distance = sqrt(dist_sq)
-        let mag = dt / (dist_sq * distance)
-
-        let new_bi = Body {
-            x: bi.x, y: bi.y, z: bi.z,
-            vx: bi.vx - dx * bj.mass * mag,
-            vy: bi.vy - dy * bj.mass * mag,
-            vz: bi.vz - dz * bj.mass * mag,
-            mass: bi.mass
-        }
-        let new_bj = Body {
-            x: bj.x, y: bj.y, z: bj.z,
-            vx: bj.vx + dx * bi.mass * mag,
-            vy: bj.vy + dy * bi.mass * mag,
-            vz: bj.vz + dz * bi.mass * mag,
-            mass: bj.mass
-        }
-
-        let bodies2 = set_body(bodies, i, new_bi)
-        let bodies3 = set_body(bodies2, j, new_bj)
-        advance_velocity_pairs(bodies3, n, dt, i, j + 1)
-    }
-}
-
-fn advance_positions(bodies, n, dt, i) {
-    if i >= n {
-        bodies
-    } else {
-        let b = get_body(bodies, i)
-        let new_b = Body {
-            x: b.x + dt * b.vx,
-            y: b.y + dt * b.vy,
-            z: b.z + dt * b.vz,
-            vx: b.vx, vy: b.vy, vz: b.vz,
-            mass: b.mass
-        }
-        let new_bodies = set_body(bodies, i, new_b)
-        advance_positions(new_bodies, n, dt, i + 1)
+    // Update positions
+    i = 0
+    while i < n {
+        let b = arr/read-field(bodies, i)
+        b.x = b.x + dt * b.vx
+        b.y = b.y + dt * b.vy
+        b.z = b.z + dt * b.vz
+        i = i + 1
     }
 }
 
 fn energy(bodies, n) {
-    energy_loop(bodies, n, 0, 0.0)
+    let mut e = 0.0
+    let mut i = 0
+    while i < n {
+        let b = arr/read-field(bodies, i)
+        e = e + 0.5 * b.mass * (b.vx * b.vx + b.vy * b.vy + b.vz * b.vz)
+        let mut j = i + 1
+        while j < n {
+            let bj = arr/read-field(bodies, j)
+            let dx = b.x - bj.x
+            let dy = b.y - bj.y
+            let dz = b.z - bj.z
+            let distance = sqrt(dx * dx + dy * dy + dz * dz)
+            e = e - (b.mass * bj.mass) / distance
+            j = j + 1
+        }
+        i = i + 1
+    }
+    e
 }
 
-fn energy_loop(bodies, n, i, e) {
-    if i >= n {
-        e
+// Format float to 9 decimal places (matches benchmarksgame output format)
+fn print-fixed9(x) {
+    if x < 0.0 {
+        print("-")
+        print-fixed9(0.0 - x)
     } else {
-        let b = get_body(bodies, i)
-        let ke = 0.5 * b.mass * (b.vx * b.vx + b.vy * b.vy + b.vz * b.vz)
-        let pe = potential_energy(bodies, n, i, i + 1, 0.0)
-        energy_loop(bodies, n, i + 1, e + ke - pe)
+        let int-part = to-int(x)
+        let frac = x - to-float(int-part)
+        let frac-scaled = to-int(round(frac * 1000000000.0))
+        print(int-part)
+        print(".")
+        print-padded9(frac-scaled)
+        println("")
     }
 }
 
-fn potential_energy(bodies, n, i, j, e) {
-    if j >= n {
-        e
-    } else {
-        let bi = get_body(bodies, i)
-        let bj = get_body(bodies, j)
-        let dx = bi.x - bj.x
-        let dy = bi.y - bj.y
-        let dz = bi.z - bj.z
-        let distance = sqrt(dx * dx + dy * dy + dz * dz)
-        potential_energy(bodies, n, i, j + 1, e + (bi.mass * bj.mass) / distance)
-    }
-}
-
-fn run_simulation(bodies, n, steps, dt) {
-    if steps <= 0 {
-        bodies
-    } else {
-        let new_bodies = advance(bodies, n, dt)
-        run_simulation(new_bodies, n, steps - 1, dt)
-    }
+fn print-padded9(n) {
+    if n < 10 { print("00000000") }
+    else if n < 100 { print("0000000") }
+    else if n < 1000 { print("000000") }
+    else if n < 10000 { print("00000") }
+    else if n < 100000 { print("0000") }
+    else if n < 1000000 { print("000") }
+    else if n < 10000000 { print("00") }
+    else if n < 100000000 { print("0") }
+    print(n)
 }
 
 fn run(n) {
-    let sun_init = sun()
-    let bodies_init = Bodies {
-        b0: sun_init,
-        b1: jupiter(),
-        b2: saturn(),
-        b3: uranus(),
-        b4: neptune()
+    let bodies = arr/new-array(5)
+    arr/write-field(bodies, 0, sun())
+    arr/write-field(bodies, 1, jupiter())
+    arr/write-field(bodies, 2, saturn())
+    arr/write-field(bodies, 3, uranus())
+    arr/write-field(bodies, 4, neptune())
+
+    offset_momentum(bodies, 5)
+    print-fixed9(energy(bodies, 5))
+
+    let mut step = 0
+    while step < n {
+        advance(bodies, 5, 0.01)
+        step = step + 1
     }
 
-    // Offset sun's momentum
-    let sun_offset = offset_momentum(sun_init, bodies_init, 5)
-    let bodies = set_body(bodies_init, 0, sun_offset)
-
-    println(energy(bodies, 5))
-
-    let final_bodies = run_simulation(bodies, 5, n, 0.01)
-
-    println(energy(final_bodies, 5))
+    print-fixed9(energy(bodies, 5))
 }
 
 fn main(args) {
-    let n = if length(args) > 0 { to_number(get(args, 0)) } else { 1000 }
+    let n = if length(args) > 0 { to-number(get(args, 0)) } else { 1000 }
     run(n)
 }
-
-// Expect
-// -0.16907516382852442
-// -0.16908760523460603
-// -0.16908760523460603

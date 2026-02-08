@@ -1,0 +1,43 @@
+namespace nested_break_test
+
+fn main() {
+    // Test 1: break() with no arg in inner loop
+    let mut outer_count = 0
+    while outer_count < 3 {
+        let mut inner_count = 0
+        while inner_count < 5 {
+            if inner_count == 2 {
+                break()
+            }
+            inner_count = inner_count + 1
+        }
+        println(inner_count)
+        outer_count = outer_count + 1
+    }
+    println(outer_count)
+
+    // Test 2: break(value) to return a value from inner loop
+    let mut outer2 = 0
+    while outer2 < 3 {
+        let mut i = 0
+        let result = while i < 10 {
+            if i == 4 {
+                break(i)
+            }
+            i = i + 1
+        }
+        println(result)
+        outer2 = outer2 + 1
+    }
+    println(outer2)
+}
+
+// Expect
+// 2
+// 2
+// 2
+// 3
+// 4
+// 4
+// 4
+// 3

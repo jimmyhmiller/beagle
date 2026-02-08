@@ -2176,6 +2176,7 @@ impl Memory {
             opaque: true,
             marked: false,
             large: is_large,
+            is_ascii: bytes.is_ascii(),
         });
         // For large objects, write the actual size in the next word
         if is_large {
@@ -2209,6 +2210,7 @@ impl Memory {
             opaque: true,
             marked: false,
             large: is_large,
+            is_ascii: false,
         });
         // For large objects, write the actual size in the next word
         if is_large {
@@ -3415,6 +3417,18 @@ impl Runtime {
         stack_pointer: usize,
         kind: BuiltInTypes,
     ) -> Result<usize, Box<dyn Error>> {
+        self.allocate_with_retries(words, stack_pointer, kind, 0)
+    }
+
+    fn allocate_with_retries(
+        &mut self,
+        words: usize,
+        stack_pointer: usize,
+        kind: BuiltInTypes,
+        retries: usize,
+    ) -> Result<usize, Box<dyn Error>> {
+        const MAX_GROW_RETRIES: usize = 20;
+
         let options = self.memory.heap.get_allocation_options();
 
         // Get frame pointer from thread-local storage (set by builtin entry)
@@ -3441,9 +3455,15 @@ impl Runtime {
                     let result = kind.tag(result as isize);
                     Ok(result as usize)
                 } else {
+                    if retries >= MAX_GROW_RETRIES {
+                        return Err(format!(
+                            "Out of memory: failed to allocate {} words ({} bytes) after {} grow attempts",
+                            words, words * 8, retries
+                        ).into());
+                    }
                     self.memory.heap.grow();
-                    // TODO: Detect loop here
-                    let pointer = self.allocate(words, stack_pointer, kind)?;
+                    let pointer =
+                        self.allocate_with_retries(words, stack_pointer, kind, retries + 1)?;
                     // If we went down this path, our pointer is already tagged
                     Ok(pointer)
                 }
@@ -3459,6 +3479,18 @@ impl Runtime {
         stack_pointer: usize,
         kind: BuiltInTypes,
     ) -> Result<usize, Box<dyn Error>> {
+        self.allocate_zeroed_with_retries(words, stack_pointer, kind, 0)
+    }
+
+    fn allocate_zeroed_with_retries(
+        &mut self,
+        words: usize,
+        stack_pointer: usize,
+        kind: BuiltInTypes,
+        retries: usize,
+    ) -> Result<usize, Box<dyn Error>> {
+        const MAX_GROW_RETRIES: usize = 20;
+
         let options = self.memory.heap.get_allocation_options();
         let frame_pointer = crate::builtins::get_saved_frame_pointer();
 
@@ -3482,8 +3514,15 @@ impl Runtime {
                     let result = kind.tag(result as isize);
                     Ok(result as usize)
                 } else {
+                    if retries >= MAX_GROW_RETRIES {
+                        return Err(format!(
+                            "Out of memory: failed to allocate {} words ({} bytes) after {} grow attempts",
+                            words, words * 8, retries
+                        ).into());
+                    }
                     self.memory.heap.grow();
-                    let pointer = self.allocate_zeroed(words, stack_pointer, kind)?;
+                    let pointer =
+                        self.allocate_zeroed_with_retries(words, stack_pointer, kind, retries + 1)?;
                     Ok(pointer)
                 }
             }
@@ -5599,6 +5638,80 @@ impl Runtime {
         }
     }
 
+    /// Extract a substring efficiently from a `&str` without copying the source.
+    /// ASCII fast path: O(length). Unicode path: O(start + length).
+    fn compute_substring(
+        stack_pointer: usize,
+        s: &str,
+        start: usize,
+        length: usize,
+        is_ascii: bool,
+    ) -> String {
+        if length == 0 {
+            return String::new();
+        }
+
+        let end = start + length;
+
+        // Fast path for ASCII strings: byte index == char index
+        if is_ascii {
+            if end > s.len() {
+                unsafe {
+                    crate::builtins::throw_runtime_error(
+                        stack_pointer,
+                        "IndexError",
+                        format!(
+                            "substring index out of bounds: start={}, length={}, but string length is {}",
+                            start,
+                            length,
+                            s.len()
+                        ),
+                    );
+                }
+            }
+            return s[start..end].to_string();
+        }
+
+        // Unicode path: scan to start, then continue for length chars
+        let mut char_iter = s.char_indices();
+
+        let byte_start = match char_iter.nth(start) {
+            Some((i, _)) => i,
+            None => unsafe {
+                crate::builtins::throw_runtime_error(
+                    stack_pointer,
+                    "IndexError",
+                    format!(
+                        "substring index out of bounds: start={}, length={}, but string is shorter",
+                        start, length,
+                    ),
+                );
+            },
+        };
+
+        // Continue from current position for length-1 more chars to find end
+        // (nth(start) already consumed the char at `start`, so we need length-1 more)
+        let byte_end = if length == 1 {
+            byte_start + s[byte_start..].chars().next().unwrap().len_utf8()
+        } else {
+            match char_iter.nth(length - 2) {
+                Some((i, c)) => i + c.len_utf8(),
+                None => unsafe {
+                    crate::builtins::throw_runtime_error(
+                        stack_pointer,
+                        "IndexError",
+                        format!(
+                            "substring index out of bounds: start={}, length={}, but string is shorter",
+                            start, length,
+                        ),
+                    );
+                },
+            }
+        };
+
+        s[byte_start..byte_end].to_string()
+    }
+
     pub fn get_substring(
         &mut self,
         stack_pointer: usize,
@@ -5607,8 +5720,10 @@ impl Runtime {
         length: usize,
     ) -> Result<Tagged, Box<dyn Error>> {
         let tag = BuiltInTypes::get_kind(string);
-        let s = if tag == BuiltInTypes::String {
-            self.get_str_literal(string).to_string()
+
+        let result = if tag == BuiltInTypes::String {
+            let s = self.get_str_literal(string);
+            Self::compute_substring(stack_pointer, s, start, length, s.is_ascii())
         } else if tag == BuiltInTypes::HeapObject {
             let heap_object = HeapObject::from_tagged(string);
             if heap_object.get_type_id() != TYPE_ID_STRING as usize {
@@ -5623,8 +5738,10 @@ impl Runtime {
                     );
                 }
             }
+            let is_ascii = heap_object.get_header().is_ascii;
             let bytes = heap_object.get_string_bytes();
-            unsafe { std::str::from_utf8_unchecked(bytes) }.to_string()
+            let s = unsafe { std::str::from_utf8_unchecked(bytes) };
+            Self::compute_substring(stack_pointer, s, start, length, is_ascii)
         } else {
             unsafe {
                 crate::builtins::throw_runtime_error(
@@ -5635,34 +5752,6 @@ impl Runtime {
             }
         };
 
-        let char_count = s.chars().count();
-        let end = start + length;
-        if end > char_count {
-            unsafe {
-                crate::builtins::throw_runtime_error(
-                    stack_pointer,
-                    "IndexError",
-                    format!(
-                        "substring index out of bounds: start={}, length={}, but string length is {}",
-                        start, length, char_count
-                    ),
-                );
-            }
-        }
-
-        // Convert char indices to byte offsets
-        let byte_start = s
-            .char_indices()
-            .nth(start)
-            .map(|(i, _)| i)
-            .unwrap_or(s.len());
-        let byte_end = if length == 0 {
-            byte_start
-        } else {
-            s.char_indices().nth(end).map(|(i, _)| i).unwrap_or(s.len())
-        };
-
-        let result = s[byte_start..byte_end].to_string();
         self.allocate_string(stack_pointer, result)
     }
 

@@ -1,0 +1,18 @@
+namespace crash_big_array
+
+use raw-mutable-array as arr
+
+fn try_alloc(size) {
+    print("arr/new-array(")
+    print(size)
+    print(")... ")
+    let a = arr/new-array(size)
+    println("ok")
+}
+
+fn main() {
+    try_alloc(10000000)
+    try_alloc(50000000)
+    try_alloc(100000000)
+    try_alloc(125000000)
+}
