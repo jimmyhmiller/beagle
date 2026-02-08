@@ -1,0 +1,63 @@
+// gc-always
+namespace objc_gc_test
+
+use beagle.ffi as ffi
+
+let objc = ffi/load-library("libobjc.dylib")
+let appkit = ffi/load-library("/System/Library/Frameworks/AppKit.framework/AppKit")
+
+let objc_getClass = ffi/get-function(objc, "objc_getClass", [ffi/Type.String], ffi/Type.Pointer)
+let sel_registerName = ffi/get-function(objc, "sel_registerName", [ffi/Type.String], ffi/Type.Pointer)
+
+let msgSend = ffi/get-symbol(objc, "objc_msgSend")
+
+fn msg0(obj, sel_name, ret_type) {
+    let sel = sel_registerName(sel_name)
+    ffi/call-variadic(msgSend, [obj, sel], [ffi/Type.Pointer, ffi/Type.Pointer], ret_type)
+}
+
+fn msg1(obj, sel_name, a1, t1, ret_type) {
+    let sel = sel_registerName(sel_name)
+    ffi/call-variadic(msgSend, [obj, sel, a1], [ffi/Type.Pointer, ffi/Type.Pointer, t1], ret_type)
+}
+
+fn msg_initWithRect(obj, x, y, w, h, style, backing, defer_) {
+    let sel = sel_registerName("initWithContentRect:styleMask:backing:defer:")
+    ffi/call-variadic(msgSend,
+        [obj, sel, x, y, w, h, style, backing, defer_],
+        [ffi/Type.Pointer, ffi/Type.Pointer,
+         ffi/Type.F64, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64,
+         ffi/Type.U64, ffi/Type.U64, ffi/Type.U64],
+        ffi/Type.Pointer)
+}
+
+fn nsstring(str) {
+    let NSString = objc_getClass("NSString")
+    msg1(NSString, "stringWithUTF8String:", str, ffi/Type.String, ffi/Type.Pointer)
+}
+
+fn main() {
+    println("Step 1")
+    let NSApplication = objc_getClass("NSApplication")
+    let app = msg0(NSApplication, "sharedApplication", ffi/Type.Pointer)
+    msg1(app, "setActivationPolicy:", 0, ffi/Type.U64, ffi/Type.U8)
+    println("Step 2")
+
+    let NSWindow = objc_getClass("NSWindow")
+    let window = msg_initWithRect(
+        msg0(NSWindow, "alloc", ffi/Type.Pointer),
+        0.0, 0.0, 800.0, 500.0, 15, 2, 0
+    )
+    println("Step 3")
+
+    msg0(window, "center", ffi/Type.Void)
+    println("Step 4 - center done")
+
+    msg1(window, "setTitle:", nsstring("GC Test"), ffi/Type.Pointer, ffi/Type.Void)
+    println("Step 5 - title set")
+
+    msg1(window, "makeKeyAndOrderFront:", 0, ffi/Type.Pointer, ffi/Type.Void)
+    println("Step 6 - shown")
+
+    println("All done!")
+}

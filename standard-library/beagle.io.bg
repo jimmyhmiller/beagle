@@ -60,7 +60,7 @@ let STDERR-FD = 2
 
 // Helper: check if a pointer is null
 fn is-null(pointer) {
-    pointer.ptr == 0
+    pointer.lo == 0
 }
 
 // Helper: copy string bytes to a buffer

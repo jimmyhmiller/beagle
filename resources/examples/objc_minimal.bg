@@ -1,0 +1,192 @@
+namespace objc_minimal
+
+use beagle.ffi as ffi
+
+let objc = ffi/load-library("libobjc.dylib")
+let appkit = ffi/load-library("/System/Library/Frameworks/AppKit.framework/AppKit")
+
+let objc_getClass = ffi/get-function(objc, "objc_getClass", [ffi/Type.String], ffi/Type.Pointer)
+let sel_registerName = ffi/get-function(objc, "sel_registerName", [ffi/Type.String], ffi/Type.Pointer)
+let objc_allocateClassPair = ffi/get-function(objc, "objc_allocateClassPair",
+    [ffi/Type.Pointer, ffi/Type.String, ffi/Type.U64], ffi/Type.Pointer)
+let class_addMethod = ffi/get-function(objc, "class_addMethod",
+    [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.String], ffi/Type.U8)
+let objc_registerClassPair = ffi/get-function(objc, "objc_registerClassPair",
+    [ffi/Type.Pointer], ffi/Type.Void)
+
+let msgSend = ffi/get-symbol(objc, "objc_msgSend")
+
+fn msg0(obj, sel_name, ret_type) {
+    let sel = sel_registerName(sel_name)
+    ffi/call-variadic(msgSend, [obj, sel], [ffi/Type.Pointer, ffi/Type.Pointer], ret_type)
+}
+
+fn msg1(obj, sel_name, a1, t1, ret_type) {
+    let sel = sel_registerName(sel_name)
+    ffi/call-variadic(msgSend, [obj, sel, a1], [ffi/Type.Pointer, ffi/Type.Pointer, t1], ret_type)
+}
+
+fn msg3(obj, sel_name, a1, t1, a2, t2, a3, t3, ret_type) {
+    let sel = sel_registerName(sel_name)
+    ffi/call-variadic(msgSend, [obj, sel, a1, a2, a3],
+        [ffi/Type.Pointer, ffi/Type.Pointer, t1, t2, t3], ret_type)
+}
+
+fn nsstring(str) {
+    let NSString = objc_getClass("NSString")
+    msg1(NSString, "stringWithUTF8String:", str, ffi/Type.String, ffi/Type.Pointer)
+}
+
+fn msg_rgba(obj, sel_name, r, g, b, a, ret_type) {
+    let sel = sel_registerName(sel_name)
+    ffi/call-variadic(msgSend, [obj, sel, r, g, b, a],
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64],
+        ret_type)
+}
+
+fn msg_initWithFrame(obj, x, y, w, h) {
+    let sel = sel_registerName("initWithFrame:")
+    ffi/call-variadic(msgSend, [obj, sel, x, y, w, h],
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64],
+        ffi/Type.Pointer)
+}
+
+fn msg_initWithRect(obj, x, y, w, h, style, backing, defer_) {
+    let sel = sel_registerName("initWithContentRect:styleMask:backing:defer:")
+    ffi/call-variadic(msgSend,
+        [obj, sel, x, y, w, h, style, backing, defer_],
+        [ffi/Type.Pointer, ffi/Type.Pointer,
+         ffi/Type.F64, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64,
+         ffi/Type.U64, ffi/Type.U64, ffi/Type.U64],
+        ffi/Type.Pointer)
+}
+
+fn should_terminate(self_, sel, sender) { 1 }
+
+fn main() {
+    let NSApplication = objc_getClass("NSApplication")
+    let app = msg0(NSApplication, "sharedApplication", ffi/Type.Pointer)
+    msg1(app, "setActivationPolicy:", 0, ffi/Type.U64, ffi/Type.U8)
+
+    // Delegate
+    let NSObject = objc_getClass("NSObject")
+    let delegateCls = objc_allocateClassPair(NSObject, "BeagleAppDelegate", 0)
+    let terminateSel = sel_registerName("applicationShouldTerminateAfterLastWindowClosed:")
+    let cb = ffi/create-callback(should_terminate,
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer], ffi/Type.U8)
+    class_addMethod(delegateCls, terminateSel, cb, "B@:@")
+    objc_registerClassPair(delegateCls)
+    let delegate = msg0(msg0(delegateCls, "alloc", ffi/Type.Pointer), "init", ffi/Type.Pointer)
+    msg1(app, "setDelegate:", delegate, ffi/Type.Pointer, ffi/Type.Void)
+    println("Delegate done")
+
+    // Test nsstring
+    println("Testing nsstring...")
+    let s = nsstring("Hello")
+    println("nsstring result: " ++ to-string(s))
+
+    // Test menu item creation with msg3
+    println("Testing menu item creation...")
+    let NSMenuItem = objc_getClass("NSMenuItem")
+    println("Got NSMenuItem: " ++ to-string(NSMenuItem))
+
+    let item_alloc = msg0(NSMenuItem, "alloc", ffi/Type.Pointer)
+    println("Allocated NSMenuItem: " ++ to-string(item_alloc))
+
+    let title_ns = nsstring("About Beagle")
+    println("Title NSString: " ++ to-string(title_ns))
+
+    let action_sel = sel_registerName("orderFrontStandardAboutPanel:")
+    println("Action SEL: " ++ to-string(action_sel))
+
+    let key_ns = nsstring("")
+    println("Key NSString: " ++ to-string(key_ns))
+
+    println("Calling initWithTitle:action:keyEquivalent:...")
+    let item = msg3(
+        item_alloc,
+        "initWithTitle:action:keyEquivalent:",
+        title_ns, ffi/Type.Pointer,
+        action_sel, ffi/Type.Pointer,
+        key_ns, ffi/Type.Pointer,
+        ffi/Type.Pointer
+    )
+    println("Menu item created: " ++ to-string(item))
+
+    // Test NSColor
+    println("Testing NSColor...")
+    let NSColor = objc_getClass("NSColor")
+    let color = msg_rgba(NSColor, "colorWithRed:green:blue:alpha:",
+        0.12, 0.12, 0.15, 1.0, ffi/Type.Pointer)
+    println("Color created: " ++ to-string(color))
+
+    // Test NSTextField
+    println("Testing NSTextField...")
+    let NSTextField = objc_getClass("NSTextField")
+    let label = msg_initWithFrame(
+        msg0(NSTextField, "alloc", ffi/Type.Pointer),
+        0.0, 340.0, 800.0, 60.0
+    )
+    println("Label created: " ++ to-string(label))
+
+    msg1(label, "setStringValue:", nsstring("Hello from Beagle!"), ffi/Type.Pointer, ffi/Type.Void)
+    println("String value set")
+
+    msg1(label, "setBezeled:", 0, ffi/Type.U8, ffi/Type.Void)
+    println("setBezeled done")
+
+    msg1(label, "setDrawsBackground:", 0, ffi/Type.U8, ffi/Type.Void)
+    println("setDrawsBackground done")
+
+    msg1(label, "setEditable:", 0, ffi/Type.U8, ffi/Type.Void)
+    println("setEditable done")
+
+    msg1(label, "setSelectable:", 0, ffi/Type.U8, ffi/Type.Void)
+    println("setSelectable done")
+
+    // Test font
+    println("Testing NSFont...")
+    let NSFont = objc_getClass("NSFont")
+    let font = msg1(NSFont, "systemFontOfSize:", 42.0, ffi/Type.F64, ffi/Type.Pointer)
+    println("Font created: " ++ to-string(font))
+
+    msg1(label, "setFont:", font, ffi/Type.Pointer, ffi/Type.Void)
+    println("setFont done")
+
+    // Test window with content view
+    println("Testing window + contentView...")
+    let NSWindow = objc_getClass("NSWindow")
+    let window = msg_initWithRect(
+        msg0(NSWindow, "alloc", ffi/Type.Pointer),
+        0.0, 0.0, 800.0, 500.0, 15, 2, 0
+    )
+    println("Window: " ++ to-string(window))
+
+    let contentView = msg0(window, "contentView", ffi/Type.Pointer)
+    println("Content view: " ++ to-string(contentView))
+
+    msg1(contentView, "addSubview:", label, ffi/Type.Pointer, ffi/Type.Void)
+    println("Subview added")
+
+    // Test setWantsLayer + background color
+    println("Testing layer background color...")
+    msg1(contentView, "setWantsLayer:", 1, ffi/Type.U8, ffi/Type.Void)
+    println("setWantsLayer done")
+
+    let layer = msg0(contentView, "layer", ffi/Type.Pointer)
+    println("Layer: " ++ to-string(layer))
+
+    let cg_color = msg0(color, "CGColor", ffi/Type.Pointer)
+    println("CGColor: " ++ to-string(cg_color))
+
+    msg1(layer, "setBackgroundColor:", cg_color, ffi/Type.Pointer, ffi/Type.Void)
+    println("Background color set")
+
+    // Show
+    msg0(window, "center", ffi/Type.Void)
+    msg1(window, "setTitle:", nsstring("Beagle Test"), ffi/Type.Pointer, ffi/Type.Void)
+    msg1(window, "makeKeyAndOrderFront:", 0, ffi/Type.Pointer, ffi/Type.Void)
+    msg1(app, "activateIgnoringOtherApps:", 1, ffi/Type.U8, ffi/Type.Void)
+    println("Window shown! Running event loop...")
+    msg0(app, "run", ffi/Type.Void)
+}

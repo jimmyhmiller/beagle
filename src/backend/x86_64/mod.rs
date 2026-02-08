@@ -516,6 +516,10 @@ impl CodegenBackend for X86_64Backend {
         self.inner.stack_size
     }
 
+    fn num_callee_saved(&self) -> usize {
+        self.inner.num_callee_saved
+    }
+
     // === Pair operations ===
 
     fn store_pair(

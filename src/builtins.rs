@@ -3691,6 +3691,7 @@ pub fn map_beagle_type_to_ffi_type(runtime: &Runtime, value: usize) -> Result<FF
         "Type.U64" => Ok(FFIType::U64),
         "Type.I32" => Ok(FFIType::I32),
         "Type.F32" => Ok(FFIType::F32),
+        "Type.F64" => Ok(FFIType::F64),
         "Type.Pointer" => Ok(FFIType::Pointer),
         "Type.MutablePointer" => Ok(FFIType::MutablePointer),
         "Type.String" => Ok(FFIType::String),
@@ -3785,6 +3786,729 @@ pub extern "C" fn get_function(
     unsafe { call_fn_1(runtime, "beagle.ffi/__create_ffi_function", ffi_info_id) }
 }
 
+/// Get a raw function pointer (symbol) from a loaded library without binding arg types.
+/// Returns a Pointer struct wrapping the raw function address.
+/// Used for variadic FFI calls where arg types are specified per-call.
+pub extern "C" fn get_symbol(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    library_struct: usize,
+    function_name: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let library = runtime.get_library(library_struct);
+    let function_name = runtime.get_string_literal(function_name);
+
+    // Get the function pointer from the library
+    let func_ptr = unsafe {
+        library
+            .get::<fn()>(function_name.as_bytes())
+            .unwrap_or_else(|e| panic!("Failed to get symbol '{}': {}", function_name, e))
+    };
+    let code_ptr = unsafe { func_ptr.try_as_raw_ptr().unwrap() };
+
+    // Return as a Pointer struct (split into lo/hi halves to preserve all 64 bits)
+    let raw = code_ptr as u64;
+    let lo_tagged = BuiltInTypes::Int.tag((raw & 0xFFFFFFFF) as isize) as usize;
+    let hi_tagged = BuiltInTypes::Int.tag(((raw >> 32) & 0xFFFFFFFF) as isize) as usize;
+    unsafe {
+        call_fn_2(
+            runtime,
+            "beagle.ffi/__make_pointer_struct",
+            lo_tagged,
+            hi_tagged,
+        )
+    }
+}
+
+/// Call a raw function pointer with per-call type information (variadic FFI).
+/// Takes: func_pointer (Pointer struct), args_array (Beagle array), types_array (Beagle array of Type enum), return_type (Type enum).
+pub unsafe extern "C" fn call_ffi_variadic(
+    stack_pointer: usize,
+    _frame_pointer: usize,
+    func_pointer: usize,
+    args_array: usize,
+    types_array: usize,
+    return_type_value: usize,
+) -> usize {
+    unsafe {
+        let runtime = get_runtime().get_mut();
+
+        // Extract raw function pointer from the Pointer struct (lo/hi halves)
+        let ptr_object = HeapObject::from_tagged(func_pointer);
+        let lo = BuiltInTypes::untag(ptr_object.get_field(0)) as u64;
+        let hi = BuiltInTypes::untag(ptr_object.get_field(1)) as u64;
+        let raw_ptr = (lo | (hi << 32)) as *const u8;
+
+        // Parse argument types
+        let types_vec: Vec<usize> = persistent_vector_to_vec(types_array);
+        let arg_types: Vec<FFIType> = types_vec
+            .iter()
+            .map(|t| match map_beagle_type_to_ffi_type(runtime, *t) {
+                Ok(ffi_type) => ffi_type,
+                Err(e) => {
+                    throw_runtime_error(stack_pointer, "FFIError", e);
+                }
+            })
+            .collect();
+
+        // Parse return type
+        let return_type = match map_beagle_type_to_ffi_type(runtime, return_type_value) {
+            Ok(t) => t,
+            Err(e) => {
+                throw_runtime_error(stack_pointer, "FFIError", e);
+            }
+        };
+
+        // Read args from the Beagle persistent vector
+        let args_vec: Vec<usize> = persistent_vector_to_vec(args_array);
+
+        if args_vec.len() != arg_types.len() {
+            throw_runtime_error(
+                stack_pointer,
+                "FFIError",
+                format!(
+                    "Variadic FFI call: {} arguments provided but {} types specified",
+                    args_vec.len(),
+                    arg_types.len()
+                ),
+            );
+        }
+
+        // Marshal arguments to native u64 values
+        let mut native_args = Vec::with_capacity(arg_types.len());
+        for (argument, ffi_type) in args_vec.iter().zip(arg_types.iter()) {
+            native_args.push(marshal_ffi_argument(
+                runtime,
+                stack_pointer,
+                *argument,
+                ffi_type,
+            ));
+        }
+
+        // Call the native function using the dynamic trampoline
+        let (low, high) = dynamic_c_call(raw_ptr, &native_args, &arg_types, &return_type);
+
+        // Unmarshal the return value
+        let return_value = unmarshal_ffi_return(runtime, stack_pointer, low, high, &return_type);
+
+        runtime.memory.clear_native_arguments();
+        return_value
+    }
+}
+
+/// Rust helper that callback trampolines call into.
+/// Bridges from C calling convention back into Beagle.
+/// Called from generated ARM64 trampoline code.
+///
+/// # Safety
+/// Must be called from a callback trampoline with valid arguments.
+#[cfg(target_arch = "aarch64")]
+unsafe extern "C" fn invoke_beagle_callback(
+    callback_index: usize,
+    c_args_ptr: *const u64,
+    num_args: usize,
+) -> u64 {
+    unsafe {
+        let runtime = get_runtime().get_mut();
+        let (beagle_fn, arg_types, return_type) = {
+            let cb = runtime.get_callback(callback_index);
+            (cb.beagle_fn, cb.arg_types.clone(), cb.return_type.clone())
+        };
+
+        // Get a valid stack pointer for GC context.
+        // We're being called from C code, so get the current stack pointer.
+        let stack_pointer: usize;
+        std::arch::asm!("mov {}, sp", out(reg) stack_pointer);
+
+        // Unmarshal C args to Beagle values
+        let mut beagle_args = Vec::with_capacity(num_args);
+        for i in 0..num_args {
+            let c_val = *c_args_ptr.add(i);
+            let beagle_val = match &arg_types[i] {
+                FFIType::U8 | FFIType::U16 | FFIType::U32 | FFIType::U64 => {
+                    BuiltInTypes::Int.tag(c_val as isize) as usize
+                }
+                FFIType::I32 => {
+                    let signed = c_val as i32 as isize;
+                    BuiltInTypes::Int.tag(signed) as usize
+                }
+                FFIType::Pointer | FFIType::MutablePointer => {
+                    let raw = c_val;
+                    let lo_tagged = BuiltInTypes::Int.tag((raw & 0xFFFFFFFF) as isize) as usize;
+                    let hi_tagged =
+                        BuiltInTypes::Int.tag(((raw >> 32) & 0xFFFFFFFF) as isize) as usize;
+                    call_fn_2(
+                        runtime,
+                        "beagle.ffi/__make_pointer_struct",
+                        lo_tagged,
+                        hi_tagged,
+                    )
+                }
+                FFIType::F32 => {
+                    let f32_val = f32::from_bits(c_val as u32);
+                    let f64_val = f32_val as f64;
+                    let new_float_ptr = runtime
+                        .allocate(1, stack_pointer, BuiltInTypes::Float)
+                        .unwrap();
+                    let untagged_result = BuiltInTypes::untag(new_float_ptr);
+                    let result_ptr = untagged_result as *mut f64;
+                    *result_ptr.add(1) = f64_val;
+                    new_float_ptr
+                }
+                FFIType::F64 => {
+                    let f64_val = f64::from_bits(c_val);
+                    let new_float_ptr = runtime
+                        .allocate(1, stack_pointer, BuiltInTypes::Float)
+                        .unwrap();
+                    let untagged_result = BuiltInTypes::untag(new_float_ptr);
+                    let result_ptr = untagged_result as *mut f64;
+                    *result_ptr.add(1) = f64_val;
+                    new_float_ptr
+                }
+                _ => {
+                    // For types we can't unmarshal, pass as tagged int
+                    BuiltInTypes::Int.tag(c_val as isize) as usize
+                }
+            };
+            beagle_args.push(beagle_val);
+        }
+
+        // Call the Beagle function using the appropriate save_volatile_registers variant
+        let saved_ctx = save_current_gc_context();
+
+        let kind = BuiltInTypes::get_kind(beagle_fn);
+        let result = if matches!(kind, BuiltInTypes::Closure) {
+            // Closure: extract function pointer, pass closure as first implicit arg
+            let untagged = BuiltInTypes::untag(beagle_fn);
+            let closure = HeapObject::from_untagged(untagged as *const u8);
+            let fp_tagged = closure.get_field(0);
+            let function_pointer = BuiltInTypes::untag(fp_tagged);
+
+            // For closures, arg layout is: closure, arg1, arg2, ..., fn_ptr
+            // save_volatile_registersN takes N data args + fn_ptr
+            // closure counts as first data arg
+            let n = beagle_args.len() + 1; // +1 for closure itself
+            match n {
+                1 => {
+                    let svr = get_svr::<fn(usize, usize) -> usize>(runtime, 1);
+                    svr(beagle_fn, function_pointer)
+                }
+                2 => {
+                    let svr = get_svr::<fn(usize, usize, usize) -> usize>(runtime, 2);
+                    svr(beagle_fn, beagle_args[0], function_pointer)
+                }
+                3 => {
+                    let svr = get_svr::<fn(usize, usize, usize, usize) -> usize>(runtime, 3);
+                    svr(beagle_fn, beagle_args[0], beagle_args[1], function_pointer)
+                }
+                4 => {
+                    let svr = get_svr::<fn(usize, usize, usize, usize, usize) -> usize>(runtime, 4);
+                    svr(
+                        beagle_fn,
+                        beagle_args[0],
+                        beagle_args[1],
+                        beagle_args[2],
+                        function_pointer,
+                    )
+                }
+                5 => {
+                    let svr = get_svr::<fn(usize, usize, usize, usize, usize, usize) -> usize>(
+                        runtime, 5,
+                    );
+                    svr(
+                        beagle_fn,
+                        beagle_args[0],
+                        beagle_args[1],
+                        beagle_args[2],
+                        beagle_args[3],
+                        function_pointer,
+                    )
+                }
+                _ => panic!(
+                    "Callback with {} args not supported (max 4 for closures)",
+                    beagle_args.len()
+                ),
+            }
+        } else {
+            // Regular function pointer
+            let function_pointer = BuiltInTypes::untag(beagle_fn);
+            let n = beagle_args.len();
+            match n {
+                0 => {
+                    let svr = get_svr::<fn(usize) -> usize>(runtime, 0);
+                    svr(function_pointer)
+                }
+                1 => {
+                    let svr = get_svr::<fn(usize, usize) -> usize>(runtime, 1);
+                    svr(beagle_args[0], function_pointer)
+                }
+                2 => {
+                    let svr = get_svr::<fn(usize, usize, usize) -> usize>(runtime, 2);
+                    svr(beagle_args[0], beagle_args[1], function_pointer)
+                }
+                3 => {
+                    let svr = get_svr::<fn(usize, usize, usize, usize) -> usize>(runtime, 3);
+                    svr(
+                        beagle_args[0],
+                        beagle_args[1],
+                        beagle_args[2],
+                        function_pointer,
+                    )
+                }
+                4 => {
+                    let svr = get_svr::<fn(usize, usize, usize, usize, usize) -> usize>(runtime, 4);
+                    svr(
+                        beagle_args[0],
+                        beagle_args[1],
+                        beagle_args[2],
+                        beagle_args[3],
+                        function_pointer,
+                    )
+                }
+                5 => {
+                    let svr = get_svr::<fn(usize, usize, usize, usize, usize, usize) -> usize>(
+                        runtime, 5,
+                    );
+                    svr(
+                        beagle_args[0],
+                        beagle_args[1],
+                        beagle_args[2],
+                        beagle_args[3],
+                        beagle_args[4],
+                        function_pointer,
+                    )
+                }
+                _ => panic!(
+                    "Callback with {} args not supported (max 5 for functions)",
+                    n
+                ),
+            }
+        };
+
+        restore_gc_context(saved_ctx);
+
+        // Marshal Beagle return value back to C
+        let c_result = match &return_type {
+            FFIType::Void => 0u64,
+            FFIType::U8 | FFIType::U16 | FFIType::U32 | FFIType::U64 => {
+                BuiltInTypes::untag(result) as u64
+            }
+            FFIType::I32 => {
+                let val = BuiltInTypes::untag(result) as i64;
+                val as u64
+            }
+            FFIType::F32 => {
+                let ptr = BuiltInTypes::untag(result) as *const f64;
+                let f64_val = *ptr.add(1);
+                let f32_val = f64_val as f32;
+                f32_val.to_bits() as u64
+            }
+            FFIType::F64 => {
+                let ptr = BuiltInTypes::untag(result) as *const f64;
+                let f64_val = *ptr.add(1);
+                f64_val.to_bits()
+            }
+            FFIType::Pointer | FFIType::MutablePointer => {
+                // Reconstruct 64-bit raw pointer from lo/hi halves
+                let heap_object = HeapObject::from_tagged(result);
+                let lo = BuiltInTypes::untag(heap_object.get_field(0)) as u64;
+                let hi = BuiltInTypes::untag(heap_object.get_field(1)) as u64;
+                lo | (hi << 32)
+            }
+            _ => BuiltInTypes::untag(result) as u64,
+        };
+
+        c_result
+    } // unsafe
+}
+
+/// Helper to get a save_volatile_registers function pointer.
+#[cfg(target_arch = "aarch64")]
+unsafe fn get_svr<T>(runtime: &Runtime, n: usize) -> T {
+    let name = format!("beagle.builtin/save_volatile_registers{}", n);
+    let func = runtime.get_function_by_name(&name).unwrap();
+    let ptr = runtime.get_pointer(func).unwrap();
+    unsafe { std::mem::transmute_copy(&ptr) }
+}
+
+/// Build a per-callback ARM64 trampoline that:
+/// 1. Saves C args (x0-x7) to the stack
+/// 2. Calls invoke_beagle_callback(callback_index, args_ptr, num_args)
+/// 3. Returns the result in x0
+///
+/// Returns a pointer to executable memory containing the trampoline code.
+#[cfg(target_arch = "aarch64")]
+fn build_callback_trampoline(
+    callback_index: usize,
+    helper_fn_ptr: *const u8,
+    num_c_args: usize,
+) -> *const u8 {
+    use crate::machine_code::arm_codegen::*;
+
+    let mut code: Vec<u32> = Vec::new();
+
+    // === Prologue ===
+    // stp x29, x30, [sp, #-16]!
+    code.push(
+        ArmAsm::StpGen {
+            opc: 0b10,
+            imm7: -2,
+            rt2: X30,
+            rn: SP,
+            rt: X29,
+            class_selector: StpGenSelector::PreIndex,
+        }
+        .encode(),
+    );
+    // mov x29, sp
+    code.push(
+        ArmAsm::MovAddAddsubImm {
+            sf: 1,
+            rn: SP,
+            rd: X29,
+        }
+        .encode(),
+    );
+    // stp x19, x20, [sp, #-16]!  (save callee-saved)
+    code.push(
+        ArmAsm::StpGen {
+            opc: 0b10,
+            imm7: -2,
+            rt2: X20,
+            rn: SP,
+            rt: X19,
+            class_selector: StpGenSelector::PreIndex,
+        }
+        .encode(),
+    );
+
+    // === Save C args (x0-x7) to stack ===
+    // sub sp, sp, #64  (8 regs * 8 bytes)
+    code.push(
+        ArmAsm::SubAddsubImm {
+            sf: 1,
+            sh: 0,
+            imm12: 64,
+            rn: SP,
+            rd: SP,
+        }
+        .encode(),
+    );
+    // stp x0, x1, [sp]
+    code.push(
+        ArmAsm::StpGen {
+            opc: 0b10,
+            imm7: 0,
+            rt2: X1,
+            rn: SP,
+            rt: X0,
+            class_selector: StpGenSelector::SignedOffset,
+        }
+        .encode(),
+    );
+    // stp x2, x3, [sp, #16]
+    code.push(
+        ArmAsm::StpGen {
+            opc: 0b10,
+            imm7: 2,
+            rt2: X3,
+            rn: SP,
+            rt: X2,
+            class_selector: StpGenSelector::SignedOffset,
+        }
+        .encode(),
+    );
+    // stp x4, x5, [sp, #32]
+    code.push(
+        ArmAsm::StpGen {
+            opc: 0b10,
+            imm7: 4,
+            rt2: X5,
+            rn: SP,
+            rt: X4,
+            class_selector: StpGenSelector::SignedOffset,
+        }
+        .encode(),
+    );
+    // stp x6, x7, [sp, #48]
+    code.push(
+        ArmAsm::StpGen {
+            opc: 0b10,
+            imm7: 6,
+            rt2: X7,
+            rn: SP,
+            rt: X6,
+            class_selector: StpGenSelector::SignedOffset,
+        }
+        .encode(),
+    );
+
+    // === Set up call to invoke_beagle_callback(callback_index, c_args_ptr, num_args) ===
+
+    // mov x0, #callback_index  (load callback index via movz/movk)
+    let idx = callback_index as u64;
+    code.push(
+        ArmAsm::Movz {
+            sf: 1,
+            hw: 0,
+            imm16: (idx & 0xFFFF) as i32,
+            rd: X0,
+        }
+        .encode(),
+    );
+    if idx > 0xFFFF {
+        code.push(
+            ArmAsm::Movk {
+                sf: 1,
+                hw: 1,
+                imm16: ((idx >> 16) & 0xFFFF) as i32,
+                rd: X0,
+            }
+            .encode(),
+        );
+    }
+    if idx > 0xFFFF_FFFF {
+        code.push(
+            ArmAsm::Movk {
+                sf: 1,
+                hw: 2,
+                imm16: ((idx >> 32) & 0xFFFF) as i32,
+                rd: X0,
+            }
+            .encode(),
+        );
+    }
+    if idx > 0xFFFF_FFFF_FFFF {
+        code.push(
+            ArmAsm::Movk {
+                sf: 1,
+                hw: 3,
+                imm16: ((idx >> 48) & 0xFFFF) as i32,
+                rd: X0,
+            }
+            .encode(),
+        );
+    }
+
+    // mov x1, sp  (pointer to saved args)
+    code.push(
+        ArmAsm::AddAddsubImm {
+            sf: 1,
+            sh: 0,
+            imm12: 0,
+            rn: SP,
+            rd: X1,
+        }
+        .encode(),
+    );
+
+    // mov x2, #num_args
+    code.push(
+        ArmAsm::Movz {
+            sf: 1,
+            hw: 0,
+            imm16: num_c_args as i32,
+            rd: X2,
+        }
+        .encode(),
+    );
+
+    // Load helper function address (64-bit immediate via movz/movk into x9)
+    let addr = helper_fn_ptr as u64;
+    code.push(
+        ArmAsm::Movz {
+            sf: 1,
+            hw: 0,
+            imm16: (addr & 0xFFFF) as i32,
+            rd: X9,
+        }
+        .encode(),
+    );
+    code.push(
+        ArmAsm::Movk {
+            sf: 1,
+            hw: 1,
+            imm16: ((addr >> 16) & 0xFFFF) as i32,
+            rd: X9,
+        }
+        .encode(),
+    );
+    code.push(
+        ArmAsm::Movk {
+            sf: 1,
+            hw: 2,
+            imm16: ((addr >> 32) & 0xFFFF) as i32,
+            rd: X9,
+        }
+        .encode(),
+    );
+    code.push(
+        ArmAsm::Movk {
+            sf: 1,
+            hw: 3,
+            imm16: ((addr >> 48) & 0xFFFF) as i32,
+            rd: X9,
+        }
+        .encode(),
+    );
+
+    // blr x9  (call helper)
+    code.push(ArmAsm::Blr { rn: X9 }.encode());
+
+    // x0 now has C return value
+
+    // === Epilogue ===
+    // add sp, sp, #64  (restore stack past saved args)
+    code.push(
+        ArmAsm::AddAddsubImm {
+            sf: 1,
+            sh: 0,
+            imm12: 64,
+            rn: SP,
+            rd: SP,
+        }
+        .encode(),
+    );
+    // ldp x19, x20, [sp], #16
+    code.push(
+        ArmAsm::LdpGen {
+            opc: 0b10,
+            imm7: 2,
+            rt2: X20,
+            rn: SP,
+            rt: X19,
+            class_selector: LdpGenSelector::PostIndex,
+        }
+        .encode(),
+    );
+    // ldp x29, x30, [sp], #16
+    code.push(
+        ArmAsm::LdpGen {
+            opc: 0b10,
+            imm7: 2,
+            rt2: X30,
+            rn: SP,
+            rt: X29,
+            class_selector: LdpGenSelector::PostIndex,
+        }
+        .encode(),
+    );
+    // ret
+    code.push(ArmAsm::Ret { rn: X30 }.encode());
+
+    // Convert to bytes and mmap as executable
+    let bytes: Vec<u8> = code.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let size = bytes.len();
+    let page_size = crate::mmap_utils::get_page_size();
+    let alloc_size = (size + page_size - 1) & !(page_size - 1);
+
+    unsafe {
+        let ptr = libc::mmap(
+            std::ptr::null_mut(),
+            alloc_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_JIT,
+            -1,
+            0,
+        );
+        assert!(
+            ptr != libc::MAP_FAILED,
+            "mmap failed for callback trampoline"
+        );
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, size);
+        let ret = libc::mprotect(ptr, alloc_size, libc::PROT_READ | libc::PROT_EXEC);
+        assert!(ret == 0, "mprotect failed for callback trampoline");
+        ptr as *const u8
+    }
+}
+
+/// Create an FFI callback (C → Beagle function pointer).
+/// Returns a Pointer struct whose raw pointer can be passed to C functions expecting callbacks.
+#[cfg(target_arch = "aarch64")]
+pub extern "C" fn create_callback(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    beagle_fn: usize,
+    arg_types: usize,
+    return_type_value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+
+    // Parse argument types
+    let types_vec: Vec<usize> = persistent_vector_to_vec(arg_types);
+    let ffi_arg_types: Vec<FFIType> = types_vec
+        .iter()
+        .map(|t| match map_beagle_type_to_ffi_type(runtime, *t) {
+            Ok(ffi_type) => ffi_type,
+            Err(e) => unsafe {
+                throw_runtime_error(stack_pointer, "FFIError", e);
+            },
+        })
+        .collect();
+
+    // Parse return type
+    let ffi_return_type = match map_beagle_type_to_ffi_type(runtime, return_type_value) {
+        Ok(t) => t,
+        Err(e) => unsafe {
+            throw_runtime_error(stack_pointer, "FFIError", e);
+        },
+    };
+
+    let num_c_args = ffi_arg_types.len();
+
+    // Register beagle_fn as a GC root so it stays alive
+    let gc_root_id = runtime.register_temporary_root(beagle_fn);
+
+    // Build the trampoline first (before storing CallbackInfo)
+    let helper_fn_ptr = invoke_beagle_callback as *const u8;
+    let callback_index = runtime.callbacks.len(); // This will be the index
+    let trampoline_ptr = build_callback_trampoline(callback_index, helper_fn_ptr, num_c_args);
+
+    // Store callback info in runtime
+    let info = crate::runtime::CallbackInfo {
+        trampoline_ptr,
+        beagle_fn,
+        arg_types: ffi_arg_types,
+        return_type: ffi_return_type,
+        gc_root_id,
+    };
+    runtime.add_callback(info);
+
+    // Return trampoline pointer as a Pointer struct (lo/hi halves)
+    let raw = trampoline_ptr as u64;
+    let lo_tagged = BuiltInTypes::Int.tag((raw & 0xFFFFFFFF) as isize) as usize;
+    let hi_tagged = BuiltInTypes::Int.tag(((raw >> 32) & 0xFFFFFFFF) as isize) as usize;
+    unsafe {
+        call_fn_2(
+            runtime,
+            "beagle.ffi/__make_pointer_struct",
+            lo_tagged,
+            hi_tagged,
+        )
+    }
+}
+
+/// Stub for x86-64: callback creation is not supported.
+#[cfg(target_arch = "x86_64")]
+pub extern "C" fn create_callback(
+    stack_pointer: usize,
+    _frame_pointer: usize,
+    _beagle_fn: usize,
+    _arg_types: usize,
+    _return_type_value: usize,
+) -> usize {
+    unsafe {
+        throw_runtime_error(
+            stack_pointer,
+            "FFIError",
+            "FFI callbacks are only supported on ARM64".to_string(),
+        );
+    }
+}
+
 /// Marshal a Beagle value to a native u64 for FFI call.
 /// This function converts tagged Beagle values to raw C-compatible values.
 unsafe fn marshal_ffi_argument(
@@ -3815,6 +4539,11 @@ unsafe fn marshal_ffi_argument(
                 let f32_val = int_val as f32;
                 f32_val.to_bits() as u64
             }
+            FFIType::F64 => {
+                let int_val = BuiltInTypes::untag(argument) as i64;
+                let f64_val = int_val as f64;
+                f64_val.to_bits()
+            }
             FFIType::Pointer => {
                 if BuiltInTypes::untag(argument) == 0 {
                     0u64
@@ -3835,8 +4564,20 @@ unsafe fn marshal_ffi_argument(
         BuiltInTypes::HeapObject => match ffi_type {
             FFIType::Pointer | FFIType::MutablePointer => {
                 let heap_object = HeapObject::from_tagged(argument);
-                let buffer = BuiltInTypes::untag(heap_object.get_field(0));
-                buffer as u64
+                let struct_id = heap_object.get_struct_id();
+                let is_pointer_struct = runtime
+                    .get_struct_by_id(struct_id)
+                    .map(|s| s.name == "beagle.ffi/Pointer")
+                    .unwrap_or(false);
+                if is_pointer_struct {
+                    // Pointer struct: reconstruct 64-bit raw pointer from lo/hi halves
+                    let lo = BuiltInTypes::untag(heap_object.get_field(0)) as u64;
+                    let hi = BuiltInTypes::untag(heap_object.get_field(1)) as u64;
+                    lo | (hi << 32)
+                } else {
+                    // Buffer or other struct: field 0 is the full tagged pointer
+                    BuiltInTypes::untag(heap_object.get_field(0)) as u64
+                }
             }
             FFIType::String => {
                 let string = runtime.get_string(stack_pointer, argument);
@@ -3868,6 +4609,7 @@ unsafe fn marshal_ffi_argument(
                     let f32_val = f64_val as f32;
                     f32_val.to_bits() as u64
                 }
+                FFIType::F64 => f64_val.to_bits(),
                 FFIType::U8 | FFIType::U16 | FFIType::U32 | FFIType::U64 | FFIType::I32 => {
                     f64_val as i64 as u64
                 }
@@ -4143,37 +4885,40 @@ fn build_ffi_trampoline() -> *const u8 {
     ); // AL = 0b1110
 
     // .copy_done (instruction 21):
-    // === Load float args from x21 into s0-s7 ===
+    // === Load float args from x21 into d0-d7 ===
+    // We always load 64 bits via fmov dN, x9. This is backward-compatible:
+    // F32 values have upper 32 bits zero in the u64, and sN is bits[31:0] of dN,
+    // so callees reading sN still get the correct f32 value.
     for i in 0..8u8 {
         let float_reg = Register {
             index: i,
-            size: Size::S32,
+            size: Size::S64,
         };
-        // ldr w9, [x21, #i*8]
+        // ldr x9, [x21, #i*8]
         code.push(
             ArmAsm::LdrImmGen {
-                size: 2,
+                size: 3,
                 imm9: 0,
                 rn: X21,
                 rt: Register {
                     index: 9,
-                    size: Size::S32,
+                    size: Size::S64,
                 },
-                imm12: (i as i32) * 2,
+                imm12: i as i32,
                 class_selector: LdrImmGenSelector::UnsignedOffset,
             }
             .encode(),
         );
-        // fmov sN, w9
+        // fmov dN, x9
         code.push(
             ArmAsm::FmovFloatGen {
-                sf: 0,
-                ftype: 0b00,
+                sf: 1,
+                ftype: 0b01,
                 rmode: 0b00,
                 opcode: 0b111,
                 rn: Register {
                     index: 9,
-                    size: Size::S32,
+                    size: Size::S64,
                 },
                 rd: float_reg,
             }
@@ -4201,34 +4946,34 @@ fn build_ffi_trampoline() -> *const u8 {
     // === Call the function ===
     code.push(ArmAsm::Blr { rn: X19 }.encode());
 
-    // === Save float return value (s0) to int_args[0] via x20 ===
-    // fmov w9, s0  (move float return bits to w9)
+    // === Save float return value (d0) to int_args[0] via x20 ===
+    // fmov x9, d0  (move 64-bit float return bits to x9)
     code.push(
         ArmAsm::FmovFloatGen {
-            sf: 0,
-            ftype: 0b00,
+            sf: 1,
+            ftype: 0b01,
             rmode: 0b00,
             opcode: 0b110, // float-to-general
             rn: Register {
                 index: 0,
-                size: Size::S32,
-            }, // s0
+                size: Size::S64,
+            }, // d0
             rd: Register {
                 index: 9,
-                size: Size::S32,
-            }, // w9
+                size: Size::S64,
+            }, // x9
         }
         .encode(),
     );
-    // str w9, [x20]  (store float bits to int_args[0])
+    // str x9, [x20]  (store 64-bit float bits to int_args[0])
     code.push(
         ArmAsm::StrImmGen {
-            size: 2, // 32-bit store
+            size: 3, // 64-bit store
             imm9: 0,
             rn: X20,
             rt: Register {
                 index: 9,
-                size: Size::S32,
+                size: Size::S64,
             },
             imm12: 0,
             class_selector: StrImmGenSelector::UnsignedOffset,
@@ -4379,7 +5124,7 @@ unsafe fn dynamic_c_call(
 
     for (i, arg_type) in arg_types.iter().enumerate() {
         if i < args.len() {
-            if matches!(arg_type, FFIType::F32) {
+            if matches!(arg_type, FFIType::F32 | FFIType::F64) {
                 if float_idx < 8 {
                     float_args[float_idx] = args[i];
                     float_idx += 1;
@@ -4418,8 +5163,8 @@ unsafe fn dynamic_c_call(
     let low = result as u64;
     let high = (result >> 64) as u64;
 
-    // For F32 returns, the trampoline saved s0 bits into int_args[0]
-    if matches!(return_type, FFIType::F32) {
+    // For float returns, the trampoline saved d0 bits into int_args[0]
+    if matches!(return_type, FFIType::F32 | FFIType::F64) {
         return (int_args[0], 0);
     }
 
@@ -4440,7 +5185,9 @@ unsafe fn dynamic_c_call(
     // Float: xmm0-xmm7
     // For now, use the simple transmute approach for x86-64.
 
-    let has_float = arg_types.iter().any(|t| matches!(t, FFIType::F32));
+    let has_float = arg_types
+        .iter()
+        .any(|t| matches!(t, FFIType::F32 | FFIType::F64));
     let num_args = args.len();
 
     // Pad args to 8 for indexing safety
@@ -4453,10 +5200,55 @@ unsafe fn dynamic_c_call(
         fn to_f32(v: u64) -> f32 {
             f32::from_bits(v as u32)
         }
+        fn to_f64(v: u64) -> f64 {
+            f64::from_bits(v)
+        }
+        // float_mask tracks F32 args, double_mask tracks F64 args
         let mut float_mask: u8 = 0;
+        let mut double_mask: u8 = 0;
         for (i, t) in arg_types.iter().enumerate() {
             if matches!(t, FFIType::F32) {
                 float_mask |= 1 << i;
+            }
+            if matches!(t, FFIType::F64) {
+                double_mask |= 1 << i;
+            }
+        }
+        // If any F64 args, handle F64 patterns
+        if double_mask != 0 {
+            unsafe {
+                match (num_args, double_mask) {
+                    (1, 0b0001) => {
+                        let f: extern "C" fn(f64) -> u64 = transmute(func_ptr);
+                        return (f(to_f64(padded[0])), 0);
+                    }
+                    (2, 0b0010) => {
+                        let f: extern "C" fn(u64, f64) -> u64 = transmute(func_ptr);
+                        return (f(padded[0], to_f64(padded[1])), 0);
+                    }
+                    (2, 0b0011) => {
+                        let f: extern "C" fn(f64, f64) -> u64 = transmute(func_ptr);
+                        return (f(to_f64(padded[0]), to_f64(padded[1])), 0);
+                    }
+                    (4, 0b1111) => {
+                        let f: extern "C" fn(f64, f64, f64, f64) -> u64 = transmute(func_ptr);
+                        return (
+                            f(
+                                to_f64(padded[0]),
+                                to_f64(padded[1]),
+                                to_f64(padded[2]),
+                                to_f64(padded[3]),
+                            ),
+                            0,
+                        );
+                    }
+                    _ => {
+                        panic!(
+                            "Unsupported f64 argument pattern on x86-64: {} args, double_mask=0b{:08b}",
+                            num_args, double_mask
+                        );
+                    }
+                }
             }
         }
         // Handle common float patterns (same as old code)
@@ -4635,9 +5427,30 @@ unsafe fn unmarshal_ffi_return(
                 *result_ptr.add(1) = f64_val;
                 new_float_ptr
             }
+            FFIType::F64 => {
+                let f64_val = f64::from_bits(low);
+                let new_float_ptr = runtime
+                    .allocate(1, stack_pointer, BuiltInTypes::Float)
+                    .unwrap();
+                let untagged_result = BuiltInTypes::untag(new_float_ptr);
+                let result_ptr = untagged_result as *mut f64;
+                *result_ptr.add(1) = f64_val;
+                new_float_ptr
+            }
             FFIType::Pointer | FFIType::MutablePointer => {
-                let pointer_value = BuiltInTypes::Int.tag(low as isize) as usize;
-                call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", pointer_value)
+                // Split 64-bit raw pointer into two 32-bit halves to avoid
+                // truncation by Int.tag() (which shifts left by 3, losing top 3 bits).
+                // This is critical for ObjC tagged pointers which use bit 63.
+                let lo = (low & 0xFFFFFFFF) as isize;
+                let hi = ((low >> 32) & 0xFFFFFFFF) as isize;
+                let lo_tagged = BuiltInTypes::Int.tag(lo) as usize;
+                let hi_tagged = BuiltInTypes::Int.tag(hi) as usize;
+                call_fn_2(
+                    runtime,
+                    "beagle.ffi/__make_pointer_struct",
+                    lo_tagged,
+                    hi_tagged,
+                )
             }
             FFIType::String => {
                 if low == 0 {
@@ -4811,8 +5624,30 @@ unsafe extern "C" fn ffi_allocate(size: usize) -> usize {
     }
 }
 
+/// Extract a raw pointer from a Beagle struct (Pointer or Buffer).
+/// Pointer struct { lo, hi }: reconstruct from two 32-bit halves.
+/// Buffer struct { ptr, size }: field 0 is the full tagged pointer.
+unsafe fn extract_raw_ptr(tagged_struct: usize) -> *mut u8 {
+    let heap_object = HeapObject::from_tagged(tagged_struct);
+    let struct_id = heap_object.get_struct_id();
+    let runtime = get_runtime().get_mut();
+    let runtime = &*runtime;
+    let is_pointer = runtime
+        .get_struct_by_id(struct_id)
+        .map(|s| s.name == "beagle.ffi/Pointer")
+        .unwrap_or(false);
+    if is_pointer {
+        let lo = BuiltInTypes::untag(heap_object.get_field(0)) as u64;
+        let hi = BuiltInTypes::untag(heap_object.get_field(1)) as u64;
+        (lo | (hi << 32)) as *mut u8
+    } else {
+        BuiltInTypes::untag(heap_object.get_field(0)) as *mut u8
+    }
+}
+
 unsafe extern "C" fn ffi_deallocate(buffer: usize) -> usize {
     unsafe {
+        // deallocate is Buffer-only: field 0 = ptr, field 1 = size
         let buffer_object = HeapObject::from_tagged(buffer);
         let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
         let size = BuiltInTypes::untag(buffer_object.get_field(1));
@@ -4823,9 +5658,7 @@ unsafe extern "C" fn ffi_deallocate(buffer: usize) -> usize {
 
 unsafe extern "C" fn ffi_get_u32(buffer: usize, offset: usize) -> usize {
     unsafe {
-        // TODO: Make type safe
-        let buffer_object = HeapObject::from_tagged(buffer);
-        let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+        let buffer = extract_raw_ptr(buffer);
         let offset = BuiltInTypes::untag(offset);
         let value = *(buffer.add(offset) as *const u32);
         BuiltInTypes::Int.tag(value as isize) as usize
@@ -4834,8 +5667,7 @@ unsafe extern "C" fn ffi_get_u32(buffer: usize, offset: usize) -> usize {
 
 unsafe extern "C" fn ffi_set_u8(buffer: usize, offset: usize, value: usize) -> usize {
     unsafe {
-        let buffer_object = HeapObject::from_tagged(buffer);
-        let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+        let buffer = extract_raw_ptr(buffer);
         let offset = BuiltInTypes::untag(offset);
         let value = BuiltInTypes::untag(value);
         assert!(value <= u8::MAX as usize);
@@ -4847,8 +5679,7 @@ unsafe extern "C" fn ffi_set_u8(buffer: usize, offset: usize, value: usize) -> u
 
 unsafe extern "C" fn ffi_get_u8(buffer: usize, offset: usize) -> usize {
     unsafe {
-        let buffer_object = HeapObject::from_tagged(buffer);
-        let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+        let buffer = extract_raw_ptr(buffer);
         let offset = BuiltInTypes::untag(offset);
         let value = *(buffer.add(offset));
         BuiltInTypes::Int.tag(value as isize) as usize
@@ -4857,8 +5688,7 @@ unsafe extern "C" fn ffi_get_u8(buffer: usize, offset: usize) -> usize {
 
 unsafe extern "C" fn ffi_set_i32(buffer: usize, offset: usize, value: usize) -> usize {
     unsafe {
-        let buffer_object = HeapObject::from_tagged(buffer);
-        let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+        let buffer = extract_raw_ptr(buffer);
         let offset = BuiltInTypes::untag(offset);
         let value = BuiltInTypes::untag(value) as i32;
         *(buffer.add(offset) as *mut i32) = value;
@@ -4868,8 +5698,7 @@ unsafe extern "C" fn ffi_set_i32(buffer: usize, offset: usize, value: usize) -> 
 
 unsafe extern "C" fn ffi_set_i16(buffer: usize, offset: usize, value: usize) -> usize {
     unsafe {
-        let buffer_object = HeapObject::from_tagged(buffer);
-        let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+        let buffer = extract_raw_ptr(buffer);
         let offset = BuiltInTypes::untag(offset);
         let value = BuiltInTypes::untag(value) as i16;
         *(buffer.add(offset) as *mut i16) = value;
@@ -4879,8 +5708,7 @@ unsafe extern "C" fn ffi_set_i16(buffer: usize, offset: usize, value: usize) -> 
 
 unsafe extern "C" fn ffi_get_i32(buffer: usize, offset: usize) -> usize {
     unsafe {
-        let buffer_object = HeapObject::from_tagged(buffer);
-        let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+        let buffer = extract_raw_ptr(buffer);
         let offset = BuiltInTypes::untag(offset);
         let value = *(buffer.add(offset) as *const i32);
         BuiltInTypes::Int.tag(value as isize) as usize
@@ -4896,13 +5724,12 @@ unsafe extern "C" fn ffi_get_string(
 ) -> usize {
     unsafe {
         let runtime = get_runtime().get_mut();
-        let buffer_object = HeapObject::from_tagged(buffer);
-        let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+        let buffer = extract_raw_ptr(buffer);
         let offset = BuiltInTypes::untag(offset);
         let len = BuiltInTypes::untag(len);
         let slice = std::slice::from_raw_parts(buffer.add(offset), len);
         let string = std::str::from_utf8(slice).unwrap();
-        runtime
+        (*runtime)
             .allocate_string(stack_pointer, string.to_string())
             .unwrap()
             .into()
@@ -4935,6 +5762,7 @@ unsafe extern "C" fn ffi_create_array(
                 FFIType::U64 => todo!(),
                 FFIType::I32 => todo!(),
                 FFIType::F32 => todo!(),
+                FFIType::F64 => todo!(),
                 FFIType::Pointer => {
                     todo!()
                 }
@@ -4965,8 +5793,15 @@ unsafe extern "C" fn ffi_create_array(
 
         let buffer_ptr: *mut c_void = buffer.as_mut_ptr() as *mut c_void;
         std::mem::forget(buffer);
-        let buffer = BuiltInTypes::Int.tag(buffer_ptr as isize) as usize;
-        call_fn_1(runtime, "beagle.ffi/__make_pointer_struct", buffer)
+        let raw = buffer_ptr as u64;
+        let lo_tagged = BuiltInTypes::Int.tag((raw & 0xFFFFFFFF) as isize) as usize;
+        let hi_tagged = BuiltInTypes::Int.tag(((raw >> 32) & 0xFFFFFFFF) as isize) as usize;
+        call_fn_2(
+            runtime,
+            "beagle.ffi/__make_pointer_struct",
+            lo_tagged,
+            hi_tagged,
+        )
     }
 }
 
@@ -4980,12 +5815,10 @@ unsafe extern "C" fn ffi_copy_bytes(
     len: usize,
 ) -> usize {
     unsafe {
-        let src_object = HeapObject::from_tagged(src);
-        let src_ptr = BuiltInTypes::untag(src_object.get_field(0)) as *const u8;
+        let src_ptr = extract_raw_ptr(src) as *const u8;
         let src_off = BuiltInTypes::untag(src_off);
 
-        let dst_object = HeapObject::from_tagged(dst);
-        let dst_ptr = BuiltInTypes::untag(dst_object.get_field(0)) as *mut u8;
+        let dst_ptr = extract_raw_ptr(dst);
         let dst_off = BuiltInTypes::untag(dst_off);
 
         let len = BuiltInTypes::untag(len);
@@ -5049,8 +5882,7 @@ unsafe extern "C" fn ffi_write_buffer_offset(
 ) -> usize {
     unsafe {
         let fd = BuiltInTypes::untag(fd) as i32;
-        let buffer_object = HeapObject::from_tagged(buffer);
-        let buffer_ptr = BuiltInTypes::untag(buffer_object.get_field(0)) as *const u8;
+        let buffer_ptr = extract_raw_ptr(buffer) as *const u8;
         let offset = BuiltInTypes::untag(offset);
         let len = BuiltInTypes::untag(len);
 
@@ -5069,13 +5901,11 @@ unsafe extern "C" fn ffi_translate_bytes(
     table: usize,
 ) -> usize {
     unsafe {
-        let buffer_object = HeapObject::from_tagged(buffer);
-        let buffer_ptr = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+        let buffer_ptr = extract_raw_ptr(buffer);
         let offset = BuiltInTypes::untag(offset);
         let len = BuiltInTypes::untag(len);
 
-        let table_object = HeapObject::from_tagged(table);
-        let table_ptr = BuiltInTypes::untag(table_object.get_field(0)) as *const u8;
+        let table_ptr = extract_raw_ptr(table) as *const u8;
 
         for i in 0..len {
             let byte = *buffer_ptr.add(offset + i);
@@ -5091,8 +5921,7 @@ unsafe extern "C" fn ffi_translate_bytes(
 // ffi_reverse_bytes(buffer, offset, len) -> null
 unsafe extern "C" fn ffi_reverse_bytes(buffer: usize, offset: usize, len: usize) -> usize {
     unsafe {
-        let buffer_object = HeapObject::from_tagged(buffer);
-        let buffer_ptr = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+        let buffer_ptr = extract_raw_ptr(buffer);
         let offset = BuiltInTypes::untag(offset);
         let len = BuiltInTypes::untag(len);
 
@@ -5115,8 +5944,7 @@ unsafe extern "C" fn ffi_reverse_bytes(buffer: usize, offset: usize, len: usize)
 // ffi_find_byte(buffer, offset, len, byte) -> index or -1
 unsafe extern "C" fn ffi_find_byte(buffer: usize, offset: usize, len: usize, byte: usize) -> usize {
     unsafe {
-        let buffer_object = HeapObject::from_tagged(buffer);
-        let buffer_ptr = BuiltInTypes::untag(buffer_object.get_field(0)) as *const u8;
+        let buffer_ptr = extract_raw_ptr(buffer) as *const u8;
         let offset = BuiltInTypes::untag(offset);
         let len = BuiltInTypes::untag(len);
         let byte = BuiltInTypes::untag(byte) as u8;
@@ -5141,12 +5969,10 @@ unsafe extern "C" fn ffi_copy_bytes_filter(
     skip_byte: usize,
 ) -> usize {
     unsafe {
-        let src_object = HeapObject::from_tagged(src);
-        let src_ptr = BuiltInTypes::untag(src_object.get_field(0)) as *const u8;
+        let src_ptr = extract_raw_ptr(src) as *const u8;
         let src_off = BuiltInTypes::untag(src_off);
 
-        let dst_object = HeapObject::from_tagged(dst);
-        let dst_ptr = BuiltInTypes::untag(dst_object.get_field(0)) as *mut u8;
+        let dst_ptr = extract_raw_ptr(dst);
         let dst_off = BuiltInTypes::untag(dst_off);
 
         let len = BuiltInTypes::untag(len);
@@ -7334,7 +8160,7 @@ pub extern "C" fn keyword_to_string(
             throw_runtime_error(
                 stack_pointer,
                 "TypeError",
-                "keyword->string expects a keyword".to_string(),
+                format!("keyword->string expects a keyword, got {:?} (raw value: {:#x})", tag, keyword),
             );
         }
     }
@@ -7342,11 +8168,26 @@ pub extern "C" fn keyword_to_string(
     let heap_object = HeapObject::from_tagged(keyword);
 
     if heap_object.get_header().type_id != TYPE_ID_KEYWORD {
+        let type_id = heap_object.get_header().type_id;
+        let type_name = match type_id {
+            TYPE_ID_STRING => "String".to_string(),
+            TYPE_ID_KEYWORD => "Keyword".to_string(),
+            TYPE_ID_MULTI_ARITY_FUNCTION => "MultiArityFunction".to_string(),
+            _ => {
+                let struct_id = heap_object.get_struct_id();
+                let runtime2 = get_runtime().get();
+                if let Some(s) = runtime2.get_struct_by_id(struct_id) {
+                    format!("{} (type_id={}, struct_id={})", s.name, type_id, struct_id)
+                } else {
+                    format!("type_id={}, struct_id={}", type_id, struct_id)
+                }
+            }
+        };
         unsafe {
             throw_runtime_error(
                 stack_pointer,
                 "TypeError",
-                "keyword->string expects a keyword".to_string(),
+                format!("keyword->string expects a keyword, got {}", type_name),
             );
         }
     }
@@ -9669,6 +10510,30 @@ impl Runtime {
             call_ffi_info as *const u8,
             true,
             3,
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.ffi/get-symbol",
+            get_symbol as *const u8,
+            true,
+            &["library", "name"],
+            "Get a raw function pointer (symbol) from a loaded library.\n\nReturns a Pointer struct. Used with call-variadic for per-call type specification.",
+        )?;
+
+        // Internal variadic FFI call: (sp, fp, func_ptr, args_array, types_array, return_type)
+        self.add_builtin_function(
+            "beagle.ffi/call-variadic-raw",
+            call_ffi_variadic as *const u8,
+            true,
+            5,
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.ffi/create-callback",
+            create_callback as *const u8,
+            true,
+            &["fn", "arg_types", "return_type"],
+            "Create an FFI callback from a Beagle function.\n\nReturns a Pointer that can be passed to C functions expecting function pointers.\narg_types is an array of Type values for the C callback parameters.\nreturn_type is the C return type.\n\nNote: Only supported on ARM64. Callbacks must be called from the main thread.",
         )?;
 
         self.add_builtin_with_doc(

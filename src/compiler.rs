@@ -892,6 +892,7 @@ impl Compiler {
                         current_stack_size: *value,
                         number_of_locals: backend.max_locals() as usize,
                         max_stack_size: backend.max_stack_size() as usize,
+                        num_callee_saved: backend.num_callee_saved(),
                     },
                 )
             })

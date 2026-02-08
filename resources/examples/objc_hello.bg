@@ -1,0 +1,65 @@
+namespace objc_hello
+
+use appkit as ak
+
+fn main() {
+    let app = ak/app("Beagle Counter")
+    let window = ak/window("Beagle Counter", 800.0, 500.0)
+    let view = ak/content-view(window)
+
+    let title = ak/label("Beagle Counter", 0.0, 380.0, 800.0, 60.0)
+    ak/set-font(title, ak/bold-font(42.0))
+    ak/set-text-color(title, ak/white)
+    ak/add-to(view, title)
+
+    let sub = ak/label("Interactive ObjC interop demo", 0.0, 340.0, 800.0, 40.0)
+    ak/set-font(sub, ak/font(20.0))
+    ak/set-text-color(sub, ak/color(0.7, 0.7, 0.75, 1.0))
+    ak/add-to(view, sub)
+
+    let countLabel = ak/label("0", 0.0, 200.0, 800.0, 100.0)
+    ak/set-font(countLabel, ak/mono-digit-font(72.0))
+    ak/set-text-color(countLabel, ak/white)
+    ak/add-to(view, countLabel)
+
+    let counter = atom(0)
+
+    let handler = ak/handler("BeagleHandler")
+    ak/add-method(handler, "increment:", fn(self_, sel, sender) {
+        swap!(counter, fn(n) { n + 1 })
+        ak/set-text(countLabel, to-string(deref(counter)))
+    })
+    ak/add-method(handler, "decrement:", fn(self_, sel, sender) {
+        swap!(counter, fn(n) { n - 1 })
+        ak/set-text(countLabel, to-string(deref(counter)))
+    })
+    ak/add-method(handler, "resetCounter:", fn(self_, sel, sender) {
+        reset!(counter, 0)
+        ak/set-text(countLabel, "0")
+    })
+    let handler = ak/register(handler)
+
+    let minus = ak/button("  -  ", 200.0, 120.0, 100.0, 50.0)
+    ak/set-font(minus, ak/bold-font(24.0))
+    ak/on-click(minus, handler, "decrement:")
+    ak/add-to(view, minus)
+
+    let resetBtn = ak/button("Reset", 320.0, 120.0, 160.0, 50.0)
+    ak/set-font(resetBtn, ak/bold-font(24.0))
+    ak/on-click(resetBtn, handler, "resetCounter:")
+    ak/add-to(view, resetBtn)
+
+    let plus = ak/button("  +  ", 500.0, 120.0, 100.0, 50.0)
+    ak/set-font(plus, ak/bold-font(24.0))
+    ak/on-click(plus, handler, "increment:")
+    ak/add-to(view, plus)
+
+    let ft = ak/label("Press Cmd+Q or close the window to quit", 0.0, 30.0, 800.0, 25.0)
+    ak/set-font(ft, ak/font(12.0))
+    ak/set-text-color(ft, ak/color(0.5, 0.5, 0.55, 1.0))
+    ak/add-to(view, ft)
+
+    ak/show(window)
+    println("Counter app running! Click the buttons...")
+    ak/run(app)
+}

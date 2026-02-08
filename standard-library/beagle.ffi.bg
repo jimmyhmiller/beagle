@@ -14,7 +14,8 @@ fn __make_lib_struct(id) {
 
 
 struct Pointer {
-    ptr
+    lo
+    hi
 }
 
 struct Buffer {
@@ -22,8 +23,8 @@ struct Buffer {
     size
 }
 
-fn __make_pointer_struct(ptr) {
-    Pointer { ptr: ptr }
+fn __make_pointer_struct(lo, hi) {
+    Pointer { lo: lo, hi: hi }
 }
 
 fn __make_buffer_struct(ptr, size) {
@@ -48,6 +49,7 @@ enum Type {
     U64,
     I32,
     F32,
+    F64,
     Pointer,
     MutablePointer,
     String,
@@ -67,6 +69,15 @@ fn __create_ffi_function(ffi-info) {
         builtin/__unregister_c_call()
         result
     }
+}
+
+// Call a raw function pointer with per-call type specification.
+// Wraps the raw builtin with GC-safe register/unregister C call.
+fn call-variadic(func_ptr, args, types, return_type) {
+    builtin/__register_c_call()
+    let result = call-variadic-raw(func_ptr, args, types, return_type)
+    builtin/__unregister_c_call()
+    result
 }
 
 // These functions are implemented as builtins in Rust:

@@ -138,12 +138,13 @@ impl StackWalker {
             {
                 #[cfg(feature = "debug-gc")]
                 eprintln!(
-                    "[GC DEBUG] Scanning frame at FP={:#x}: fn={:?}, locals={}, max_stack={}, cur_stack={}",
+                    "[GC DEBUG] Scanning frame at FP={:#x}: fn={:?}, locals={}, max_stack={}, cur_stack={}, callee_saved={}",
                     fp,
                     details.function_name,
                     details.number_of_locals,
                     details.max_stack_size,
-                    details.current_stack_size
+                    details.current_stack_size,
+                    details.num_callee_saved
                 );
 
                 let active_slots = details.number_of_locals + details.current_stack_size;
@@ -195,6 +196,15 @@ impl StackWalker {
                         callback(slot_addr, slot_value);
                     }
                 }
+
+                // NOTE: Callee-saved register spill area is NOT scanned.
+                // The spill area at the bottom of the frame (near SP) contains values
+                // from the CALLER's registers, which may originate from Rust code
+                // anywhere up the call chain (not just the immediate caller). Since we
+                // can't reliably distinguish Beagle values from Rust values in these
+                // slots, scanning them can cause crashes (null deref, invalid pointers).
+                // The register allocator ensures all live Beagle values are backed by
+                // local/eval stack slots, which ARE scanned.
             }
 
             #[cfg(feature = "debug-gc")]

@@ -24,6 +24,7 @@ pub struct StackMapDetails {
     pub number_of_locals: usize,
     pub current_stack_size: usize,
     pub max_stack_size: usize,
+    pub num_callee_saved: usize,
 }
 
 pub const STACK_SIZE: usize = 1024 * 1024 * 128;

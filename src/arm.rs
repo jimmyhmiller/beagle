@@ -531,6 +531,9 @@ pub struct LowLevelArm {
     /// Tracks which callee-saved registers (X19-X28) are actually used in this function.
     /// This is a bitmask where bit 0 = X19, bit 1 = X20, etc.
     used_callee_saved_registers: u16,
+    /// Number of callee-saved registers actually saved in this function's frame.
+    /// Set by patch_prelude_and_epilogue().
+    pub num_callee_saved: usize,
 }
 
 impl Default for LowLevelArm {
@@ -561,6 +564,7 @@ impl LowLevelArm {
             max_locals: 0,
             stack_map: HashMap::new(),
             used_callee_saved_registers: 0,
+            num_callee_saved: 0,
         }
     }
 
@@ -1395,6 +1399,7 @@ impl LowLevelArm {
         // Get list of callee-saved registers that need to be saved
         let used_callee_saved = self.get_used_callee_saved_registers();
         let num_callee_saved = used_callee_saved.len() as u64;
+        self.num_callee_saved = num_callee_saved as usize;
 
         // Calculate total stack size including callee-saved area
         let mut max = self.max_stack_size as u64 + self.max_locals as u64 + num_callee_saved;

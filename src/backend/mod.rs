@@ -299,6 +299,7 @@ pub trait CodegenBackend: Sized {
     fn max_locals(&self) -> i32;
     fn max_stack_size(&self) -> i32;
     fn stack_size(&self) -> i32;
+    fn num_callee_saved(&self) -> usize;
 
     // === Pair operations (ARM64-specific but abstracted) ===
 

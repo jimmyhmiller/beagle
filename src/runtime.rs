@@ -518,6 +518,7 @@ pub enum FFIType {
     U32,
     I32,
     F32,
+    F64,
     Pointer,
     MutablePointer,
     String,
@@ -535,6 +536,22 @@ pub struct FFIInfo {
     pub argument_types: Vec<FFIType>,
     pub return_type: FFIType,
 }
+
+/// Information about a callback (C → Beagle function pointer).
+/// The trampoline uses `callback_index` to look up this info at call time,
+/// so the Beagle function can be relocated by GC without invalidating the trampoline.
+#[derive(Debug)]
+pub struct CallbackInfo {
+    pub trampoline_ptr: *const u8,
+    pub beagle_fn: usize,
+    pub arg_types: Vec<FFIType>,
+    pub return_type: FFIType,
+    pub gc_root_id: usize,
+}
+
+// Safety: CallbackInfo contains raw pointers that are only accessed from the main thread.
+unsafe impl Send for CallbackInfo {}
+unsafe impl Sync for CallbackInfo {}
 
 pub struct ThreadState {
     pub paused_threads: usize,
@@ -2893,6 +2910,10 @@ pub struct Runtime {
     /// Registry for mio-based event loops.
     /// Allows creating multiple event loops for different async contexts.
     pub event_loops: EventLoopRegistry,
+    /// Registered FFI callbacks (C → Beagle).
+    /// Each entry's `beagle_fn` is kept alive via GC root.
+    /// The trampoline code references callbacks by index.
+    pub callbacks: Vec<CallbackInfo>,
 }
 
 pub fn create_stack_with_protected_page_after(stack_size: usize) -> MmapMut {
@@ -3016,6 +3037,7 @@ impl Runtime {
             compiled_regexes: Vec::new(),
             future_wait_set: FutureWaitSet::new(),
             event_loops: EventLoopRegistry::new(),
+            callbacks: Vec::new(),
         }
     }
 
@@ -4814,6 +4836,16 @@ impl Runtime {
 
     pub fn add_ffi_info_by_name(&mut self, function_name: String, ffi_info_id: usize) {
         self.ffi_info_by_name.insert(function_name, ffi_info_id);
+    }
+
+    pub fn add_callback(&mut self, info: CallbackInfo) -> usize {
+        let index = self.callbacks.len();
+        self.callbacks.push(info);
+        index
+    }
+
+    pub fn get_callback(&self, index: usize) -> &CallbackInfo {
+        &self.callbacks[index]
     }
 
     pub fn find_ffi_info_by_name(&self, function_name: &str) -> Option<usize> {

@@ -1,0 +1,117 @@
+namespace ffi_variadic_test
+
+use beagle.ffi as ffi
+
+// Load libc
+fn get_libc_path() {
+    let os = get-os()
+    if os == "macos" {
+        "libSystem.B.dylib"
+    } else if os == "linux" {
+        "/lib/x86_64-linux-gnu/libc.so.6"
+    } else {
+        "libc.so.6"
+    }
+}
+
+let libc = ffi/load-library(get_libc_path())
+
+// Get raw symbols (no type binding)
+let strlen_ptr = ffi/get-symbol(libc, "strlen")
+let abs_ptr = ffi/get-symbol(libc, "abs")
+let strcmp_ptr = ffi/get-symbol(libc, "strcmp")
+let memset_ptr = ffi/get-symbol(libc, "memset")
+
+fn test_passed(name) {
+    println("PASS: " ++ name)
+}
+
+fn test_failed(name, expected, actual) {
+    println("FAIL: " ++ name ++ " expected=" ++ to-string(expected) ++ " actual=" ++ to-string(actual))
+}
+
+fn assert_eq(name, expected, actual) {
+    if expected == actual {
+        test_passed(name)
+    } else {
+        test_failed(name, expected, actual)
+    }
+}
+
+fn assert_true(name, condition) {
+    if condition {
+        test_passed(name)
+    } else {
+        println("FAIL: " ++ name)
+    }
+}
+
+fn main() {
+    println("=== FFI Variadic Call Tests ===")
+
+    // Test strlen via variadic path
+    println("\n--- strlen via call-variadic ---")
+    let len = ffi/call-variadic(strlen_ptr, ["hello"], [ffi/Type.String], ffi/Type.U64)
+    assert_eq("strlen('hello') == 5", 5, len)
+
+    let len2 = ffi/call-variadic(strlen_ptr, [""], [ffi/Type.String], ffi/Type.U64)
+    assert_eq("strlen('') == 0", 0, len2)
+
+    let len3 = ffi/call-variadic(strlen_ptr, ["hello world!"], [ffi/Type.String], ffi/Type.U64)
+    assert_eq("strlen('hello world!') == 12", 12, len3)
+
+    // Test abs via variadic path
+    println("\n--- abs via call-variadic ---")
+    let result = ffi/call-variadic(abs_ptr, [-42], [ffi/Type.I32], ffi/Type.I32)
+    assert_eq("abs(-42) == 42", 42, result)
+
+    let result2 = ffi/call-variadic(abs_ptr, [0], [ffi/Type.I32], ffi/Type.I32)
+    assert_eq("abs(0) == 0", 0, result2)
+
+    // Test strcmp via variadic path
+    println("\n--- strcmp via call-variadic ---")
+    let cmp = ffi/call-variadic(strcmp_ptr, ["abc", "abc"], [ffi/Type.String, ffi/Type.String], ffi/Type.I32)
+    assert_eq("strcmp('abc', 'abc') == 0", 0, cmp)
+
+    let cmp2 = ffi/call-variadic(strcmp_ptr, ["abc", "abd"], [ffi/Type.String, ffi/Type.String], ffi/Type.I32)
+    assert_true("strcmp('abc', 'abd') < 0", cmp2 < 0)
+
+    // Test memset via variadic path (3 args, pointer return)
+    println("\n--- memset via call-variadic ---")
+    let buf = ffi/allocate(16)
+    let result3 = ffi/call-variadic(
+        memset_ptr,
+        [buf, 65, 8],
+        [ffi/Type.Pointer, ffi/Type.I32, ffi/Type.U64],
+        ffi/Type.Pointer
+    )
+    assert_true("memset returns non-null", result3 != null)
+    assert_eq("memset byte 0 == 65", 65, ffi/get-u8(buf, 0))
+    assert_eq("memset byte 7 == 65", 65, ffi/get-u8(buf, 7))
+
+    println("\n=== All Variadic FFI Tests Completed ===")
+}
+
+// Expect
+// === FFI Variadic Call Tests ===
+//
+// --- strlen via call-variadic ---
+// PASS: strlen('hello') == 5
+// PASS: strlen('') == 0
+// PASS: strlen('hello world!') == 12
+//
+// --- abs via call-variadic ---
+// PASS: abs(-42) == 42
+// PASS: abs(0) == 0
+//
+// --- strcmp via call-variadic ---
+// PASS: strcmp('abc', 'abc') == 0
+// PASS: strcmp('abc', 'abd') < 0
+//
+// --- memset via call-variadic ---
+// PASS: memset returns non-null
+// PASS: memset byte 0 == 65
+// PASS: memset byte 7 == 65
+//
+// === All Variadic FFI Tests Completed ===
+//

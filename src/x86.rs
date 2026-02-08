@@ -37,6 +37,9 @@ pub struct LowLevelX86 {
     /// Tracks which callee-saved registers are actually used in this function.
     /// This is a bitmask for R12-R15 and RBX (indices 12-16).
     used_callee_saved_registers: u8,
+    /// Number of callee-saved registers actually saved in this function's frame.
+    /// Set by patch_prelude_and_epilogue().
+    pub num_callee_saved: usize,
 }
 
 impl Default for LowLevelX86 {
@@ -88,6 +91,7 @@ impl LowLevelX86 {
             stack_map: HashMap::new(),
             current_function_name: None,
             used_callee_saved_registers: 0,
+            num_callee_saved: 0,
         }
     }
 
@@ -1231,6 +1235,7 @@ impl LowLevelX86 {
         // Get callee-saved registers that need to be saved
         let used_callee_saved = self.get_used_callee_saved_registers();
         let num_callee_saved = used_callee_saved.len();
+        self.num_callee_saved = num_callee_saved;
 
         // Calculate stack size including space for callee-saved registers
         let mut slots = self.max_locals + self.max_stack_size + num_callee_saved as i32;

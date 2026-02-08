@@ -1,0 +1,153 @@
+namespace ffi_callback_test
+
+use beagle.ffi as ffi
+
+// Load libc
+fn get_libc_path() {
+    let os = get-os()
+    if os == "macos" {
+        "libSystem.B.dylib"
+    } else if os == "linux" {
+        "/lib/x86_64-linux-gnu/libc.so.6"
+    } else {
+        "libc.so.6"
+    }
+}
+
+let libc = ffi/load-library(get_libc_path())
+
+// Get qsort: void qsort(void *base, size_t nmemb, size_t size, int (*compar)(const void *, const void *))
+let c_qsort = ffi/get-function(
+    libc,
+    "qsort",
+    [ffi/Type.MutablePointer, ffi/Type.U64, ffi/Type.U64, ffi/Type.Pointer],
+    ffi/Type.Void
+)
+
+fn test_passed(name) {
+    println("PASS: " ++ name)
+}
+
+fn test_failed(name, expected, actual) {
+    println("FAIL: " ++ name ++ " expected=" ++ to-string(expected) ++ " actual=" ++ to-string(actual))
+}
+
+fn assert_eq(name, expected, actual) {
+    if expected == actual {
+        test_passed(name)
+    } else {
+        test_failed(name, expected, actual)
+    }
+}
+
+// Comparison function for qsort: int compare(const void *a, const void *b)
+// a and b are pointers to i32 values
+fn compare(a_ptr, b_ptr) {
+    let a = ffi/get-i32(a_ptr, 0)
+    let b = ffi/get-i32(b_ptr, 0)
+    if a < b { -1 } else if a > b { 1 } else { 0 }
+}
+
+fn test_qsort_ascending() {
+    println("\n--- qsort ascending test ---")
+
+    // Create a buffer with 5 i32 values: [5, 3, 1, 4, 2]
+    let buf = ffi/allocate(20) // 5 * 4 bytes
+    ffi/set-i32(buf, 0, 5)
+    ffi/set-i32(buf, 4, 3)
+    ffi/set-i32(buf, 8, 1)
+    ffi/set-i32(buf, 12, 4)
+    ffi/set-i32(buf, 16, 2)
+
+    // Create a callback from the comparison function
+    let cmp = ffi/create-callback(compare, [ffi/Type.Pointer, ffi/Type.Pointer], ffi/Type.I32)
+
+    // Call qsort
+    c_qsort(buf, 5, 4, cmp)
+
+    // Verify sorted: [1, 2, 3, 4, 5]
+    assert_eq("sorted[0] == 1", 1, ffi/get-i32(buf, 0))
+    assert_eq("sorted[1] == 2", 2, ffi/get-i32(buf, 4))
+    assert_eq("sorted[2] == 3", 3, ffi/get-i32(buf, 8))
+    assert_eq("sorted[3] == 4", 4, ffi/get-i32(buf, 12))
+    assert_eq("sorted[4] == 5", 5, ffi/get-i32(buf, 16))
+}
+
+fn test_qsort_with_closure() {
+    println("\n--- qsort with closure (descending) ---")
+
+    // Use a closure that captures nothing but demonstrates closure support
+    let descending_cmp = fn(a_ptr, b_ptr) {
+        let a = ffi/get-i32(a_ptr, 0)
+        let b = ffi/get-i32(b_ptr, 0)
+        if a > b { -1 } else if a < b { 1 } else { 0 }
+    }
+
+    let buf = ffi/allocate(20) // 5 * 4 bytes
+    ffi/set-i32(buf, 0, 10)
+    ffi/set-i32(buf, 4, 30)
+    ffi/set-i32(buf, 8, 20)
+    ffi/set-i32(buf, 12, 50)
+    ffi/set-i32(buf, 16, 40)
+
+    let cmp = ffi/create-callback(descending_cmp, [ffi/Type.Pointer, ffi/Type.Pointer], ffi/Type.I32)
+    c_qsort(buf, 5, 4, cmp)
+
+    // Verify sorted descending: [50, 40, 30, 20, 10]
+    assert_eq("desc[0] == 50", 50, ffi/get-i32(buf, 0))
+    assert_eq("desc[1] == 40", 40, ffi/get-i32(buf, 4))
+    assert_eq("desc[2] == 30", 30, ffi/get-i32(buf, 8))
+    assert_eq("desc[3] == 20", 20, ffi/get-i32(buf, 12))
+    assert_eq("desc[4] == 10", 10, ffi/get-i32(buf, 16))
+}
+
+fn test_qsort_already_sorted() {
+    println("\n--- qsort already sorted ---")
+
+    let buf = ffi/allocate(12) // 3 * 4 bytes
+    ffi/set-i32(buf, 0, 1)
+    ffi/set-i32(buf, 4, 2)
+    ffi/set-i32(buf, 8, 3)
+
+    let cmp = ffi/create-callback(compare, [ffi/Type.Pointer, ffi/Type.Pointer], ffi/Type.I32)
+    c_qsort(buf, 3, 4, cmp)
+
+    assert_eq("already[0] == 1", 1, ffi/get-i32(buf, 0))
+    assert_eq("already[1] == 2", 2, ffi/get-i32(buf, 4))
+    assert_eq("already[2] == 3", 3, ffi/get-i32(buf, 8))
+}
+
+fn main() {
+    println("=== FFI Callback Tests ===")
+
+    test_qsort_ascending()
+    test_qsort_with_closure()
+    test_qsort_already_sorted()
+
+    println("\n=== All Callback Tests Completed ===")
+}
+
+// Expect
+// === FFI Callback Tests ===
+//
+// --- qsort ascending test ---
+// PASS: sorted[0] == 1
+// PASS: sorted[1] == 2
+// PASS: sorted[2] == 3
+// PASS: sorted[3] == 4
+// PASS: sorted[4] == 5
+//
+// --- qsort with closure (descending) ---
+// PASS: desc[0] == 50
+// PASS: desc[1] == 40
+// PASS: desc[2] == 30
+// PASS: desc[3] == 20
+// PASS: desc[4] == 10
+//
+// --- qsort already sorted ---
+// PASS: already[0] == 1
+// PASS: already[1] == 2
+// PASS: already[2] == 3
+//
+// === All Callback Tests Completed ===
+//
