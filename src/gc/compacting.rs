@@ -437,7 +437,12 @@ impl Allocator for CompactingHeap {
         Ok(AllocateAction::Allocated(pointer))
     }
 
-    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
+    fn gc(
+        &mut self,
+        stack_map: &StackMap,
+        stack_pointers: &[(usize, usize, usize)],
+        extra_roots: &[(*mut usize, usize)],
+    ) {
         if !self.options.gc {
             return;
         }
@@ -459,6 +464,17 @@ impl Allocator for CompactingHeap {
                 );
                 unsafe {
                     *(*slot_addr as *mut usize) = new_roots[i];
+                }
+            }
+        }
+
+        // Process extra roots from shadow stacks
+        if !extra_roots.is_empty() {
+            let values: Vec<usize> = extra_roots.iter().map(|&(_, v)| v).collect();
+            let new_values = unsafe { self.copy_all(values, stack_map) };
+            for (i, &(slot_addr, _)) in extra_roots.iter().enumerate() {
+                unsafe {
+                    *slot_addr = new_values[i];
                 }
             }
         }

@@ -451,15 +451,20 @@ impl Allocator for GenerationalGC {
         Ok(pointer)
     }
 
-    fn gc(&mut self, stack_map: &super::StackMap, stack_pointers: &[(usize, usize, usize)]) {
+    fn gc(
+        &mut self,
+        stack_map: &super::StackMap,
+        stack_pointers: &[(usize, usize, usize)],
+        extra_roots: &[(*mut usize, usize)],
+    ) {
         if !self.options.gc {
             return;
         }
         if self.gc_count != 0 && self.gc_count.is_multiple_of(self.full_gc_frequency) {
             self.gc_count = 0;
-            self.full_gc(stack_map, stack_pointers);
+            self.full_gc(stack_map, stack_pointers, extra_roots);
         } else {
-            self.minor_gc(stack_map, stack_pointers);
+            self.minor_gc(stack_map, stack_pointers, extra_roots);
         }
         self.gc_count += 1;
     }
@@ -724,13 +729,33 @@ impl GenerationalGC {
         }
     }
 
-    fn minor_gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
+    fn minor_gc(
+        &mut self,
+        stack_map: &StackMap,
+        stack_pointers: &[(usize, usize, usize)],
+        extra_roots: &[(*mut usize, usize)],
+    ) {
         let start = std::time::Instant::now();
         usdt_probes::fire_gc_minor_start(self.gc_count);
 
         self.gc_count += 1;
 
-        let (stack_roots, stack_old_gen) = self.gather_stack_root_refs(stack_map, stack_pointers);
+        let (mut stack_roots, mut stack_old_gen) =
+            self.gather_stack_root_refs(stack_map, stack_pointers);
+
+        // Classify extra_roots (shadow stack handles) into young/old gen
+        for &(slot_addr, value) in extra_roots {
+            let untagged = BuiltInTypes::untag(value);
+            if untagged == 0 {
+                continue;
+            }
+            if self.young.contains(untagged as *const u8) {
+                stack_roots.push(RootRef(slot_addr));
+            } else {
+                stack_old_gen.push(value);
+            }
+        }
+
         self.process_all_roots(stack_roots);
 
         // Update continuation segments
@@ -963,10 +988,15 @@ impl GenerationalGC {
         );
     }
 
-    fn full_gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
+    fn full_gc(
+        &mut self,
+        stack_map: &StackMap,
+        stack_pointers: &[(usize, usize, usize)],
+        extra_roots: &[(*mut usize, usize)],
+    ) {
         usdt_probes::fire_gc_full_start(self.gc_count);
-        self.minor_gc(stack_map, stack_pointers);
-        self.old.gc(stack_map, stack_pointers);
+        self.minor_gc(stack_map, stack_pointers, extra_roots);
+        self.old.gc(stack_map, stack_pointers, extra_roots);
         usdt_probes::fire_gc_full_end(self.gc_count);
     }
 }

@@ -136,7 +136,16 @@ pub trait Allocator {
     /// gc_return_addr is the return address of the gc() call, which is the
     /// safepoint in the stack map describing the caller's frame.
     /// If gc_return_addr is 0, the stack walker falls back to [FP+8] lookup.
-    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]);
+    ///
+    /// `extra_roots` contains `(slot_address, value)` pairs from shadow stacks.
+    /// The slot address points into the Rust-side handle_stack Vec buffer,
+    /// allowing moving GCs to update pointers in-place.
+    fn gc(
+        &mut self,
+        stack_map: &StackMap,
+        stack_pointers: &[(usize, usize, usize)],
+        extra_roots: &[(*mut usize, usize)],
+    );
 
     fn grow(&mut self);
 

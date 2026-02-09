@@ -66,3 +66,8 @@ pub const TYPE_ID_CONTINUATION_SEGMENT: u8 = 32;
 
 /// Type ID for MutableMap (3 fields: keys_array, values_array, size)
 pub const TYPE_ID_MUTABLE_MAP: u8 = 33;
+
+/// Type ID for string slices (2 fields: parent_ptr, offset)
+/// A lightweight view into a parent string. Length is in header.type_data.
+/// Non-opaque so GC traces the parent pointer.
+pub const TYPE_ID_STRING_SLICE: u8 = 34;

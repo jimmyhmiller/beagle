@@ -35,10 +35,10 @@ use crate::collections::{
     GcHandle, HandleScope, PersistentMap, PersistentVec, TYPE_ID_ATOM, TYPE_ID_CONTINUATION,
     TYPE_ID_CONTINUATION_SEGMENT, TYPE_ID_FUNCTION_OBJECT, TYPE_ID_KEYWORD,
     TYPE_ID_MULTI_ARITY_FUNCTION, TYPE_ID_PERSISTENT_MAP, TYPE_ID_PERSISTENT_SET,
-    TYPE_ID_PERSISTENT_VEC, TYPE_ID_RAW_ARRAY, TYPE_ID_STRING,
+    TYPE_ID_PERSISTENT_VEC, TYPE_ID_RAW_ARRAY, TYPE_ID_STRING, TYPE_ID_STRING_SLICE,
 };
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::mpsc;
 use std::time::Instant;
 
@@ -193,6 +193,11 @@ pub struct ThreadGlobal {
     pub thread_id: ThreadId,
     /// Stack base address for this thread (to update stack slot when head_block changes)
     pub stack_base: usize,
+    /// Shadow stack for HandleScope: pre-allocated contiguous buffer of GC root values.
+    /// HandleScope saves/restores `handle_stack_top` for zero-cost scope enter/exit.
+    pub handle_stack: Vec<usize>,
+    /// Current top index into handle_stack (next free slot).
+    pub handle_stack_top: usize,
 }
 
 impl ThreadGlobal {
@@ -204,6 +209,8 @@ impl ThreadGlobal {
             next_free_slot: 0,
             thread_id,
             stack_base,
+            handle_stack: vec![0; 1024],
+            handle_stack_top: 0,
         }
     }
 
@@ -1984,6 +1991,18 @@ impl MMapMutWithOffset {
 
 thread_local! {
     pub static NATIVE_ARGUMENTS : RefCell<MMapMutWithOffset> = RefCell::new(MMapMutWithOffset::new());
+
+    /// Cached pointer to the current thread's ThreadGlobal.
+    /// Avoids locking the thread_globals mutex on every add_handle_root/remove_handle_root.
+    /// Safety: The ThreadGlobal is Box'd in the HashMap, so its address is stable.
+    /// GC updates head_block via AtomicUsize, which is visible when the thread resumes.
+    static CACHED_THREAD_GLOBAL: Cell<*mut ThreadGlobal> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+/// Get the cached ThreadGlobal pointer for the current thread.
+/// Returns null if the thread hasn't been initialized yet.
+pub(crate) fn cached_thread_global_ptr() -> *mut ThreadGlobal {
+    CACHED_THREAD_GLOBAL.with(|c| c.get())
 }
 
 // ============================================================================
@@ -2106,8 +2125,9 @@ pub struct Memory {
     pub threads: Vec<Thread>,
     pub stack_map: StackMap,
     /// Per-thread GlobalObject management (now owned by Memory, not GC)
-    /// Protected by Mutex for thread-safe access from multiple threads
-    pub thread_globals: Mutex<HashMap<ThreadId, ThreadGlobal>>,
+    /// Protected by Mutex for thread-safe access from multiple threads.
+    /// Box<ThreadGlobal> provides stable addresses so thread_locals can cache raw pointers.
+    pub thread_globals: Mutex<HashMap<ThreadId, Box<ThreadGlobal>>>,
     #[allow(unused)]
     command_line_arguments: CommandLineArguments,
 }
@@ -2131,6 +2151,8 @@ impl Memory {
         self.threads = vec![std::thread::current()];
         self.stack_map = StackMap::new();
         self.thread_globals.lock().unwrap().clear();
+        // Invalidate cached thread_local pointer since ThreadGlobals were cleared
+        CACHED_THREAD_GLOBAL.with(|c| c.set(std::ptr::null_mut()));
 
         // Clear the effect handler stack
         clear_handler_stack();
@@ -2167,23 +2189,33 @@ impl Memory {
 
     fn allocate_string(&mut self, bytes: &[u8], pointer: usize) -> Result<Tagged, Box<dyn Error>> {
         let mut heap_object = HeapObject::from_tagged(pointer);
-        let words = bytes.len() / 8 + 1;
-        let is_large = words > Header::MAX_INLINE_SIZE;
+        // Layout: [header][cached_hash: 8 bytes][string bytes]
+        let text_words = bytes.len().div_ceil(8);
+        let total_words = 1 + text_words; // 1 for hash + text
+        let is_large = total_words > Header::MAX_INLINE_SIZE;
         heap_object.writer_header_direct(Header {
             type_id: 2,
             type_data: bytes.len() as u32,
-            size: if is_large { 0xFFFF } else { words as u16 },
+            size: if is_large { 0xFFFF } else { total_words as u16 },
             opaque: true,
             marked: false,
             large: is_large,
-            is_ascii: bytes.is_ascii(),
+            type_flags: if bytes.is_ascii() { 1 } else { 0 },
         });
         // For large objects, write the actual size in the next word
         if is_large {
             let size_ptr = (heap_object.untagged() + 8) as *mut usize;
-            unsafe { *size_ptr = words };
+            unsafe { *size_ptr = total_words };
         }
-        heap_object.write_fields(bytes);
+        // Write hash=0 (not yet computed) then string bytes
+        let mut data = Vec::with_capacity(total_words * 8);
+        data.extend_from_slice(&0u64.to_le_bytes()); // cached hash = 0
+        data.extend_from_slice(bytes);
+        // Pad to word boundary
+        while data.len() < total_words * 8 {
+            data.push(0);
+        }
+        heap_object.write_fields(&data);
         Ok(BuiltInTypes::HeapObject.tagged(pointer))
     }
 
@@ -2210,7 +2242,7 @@ impl Memory {
             opaque: true,
             marked: false,
             large: is_large,
-            is_ascii: false,
+            type_flags: 0,
         });
         // For large objects, write the actual size in the next word
         if is_large {
@@ -2283,9 +2315,27 @@ impl Memory {
         NATIVE_ARGUMENTS.with(|memory| memory.borrow_mut().clear());
     }
 
-    /// Convenience method for Runtime to trigger GC using Memory's own stack_map and thread_globals
+    /// Convenience method for Runtime to trigger GC using Memory's own stack_map and thread_globals.
+    /// Collects shadow stack roots from all threads and passes them to the GC.
     pub fn run_gc(&mut self, stack_pointers: &[(usize, usize, usize)]) {
-        self.heap.gc(&self.stack_map, stack_pointers);
+        // Collect shadow stack entries from all threads as extra GC roots.
+        // Safety: world is stopped during GC, so no thread modifies handle_stack.
+        let extra_roots: Vec<(*mut usize, usize)> = {
+            let thread_globals = self.thread_globals.lock().unwrap();
+            let mut roots = Vec::new();
+            for tg in thread_globals.values() {
+                for i in 0..tg.handle_stack_top {
+                    let value = tg.handle_stack[i];
+                    if BuiltInTypes::is_heap_pointer(value) {
+                        let slot_addr = &tg.handle_stack[i] as *const usize as *mut usize;
+                        roots.push((slot_addr, value));
+                    }
+                }
+            }
+            roots
+        };
+
+        self.heap.gc(&self.stack_map, stack_pointers, &extra_roots);
 
         // Sync ThreadGlobal.head_block from stack slots (updated by GC)
         // Hold lock for entire operation to prevent concurrent modifications
@@ -2317,8 +2367,13 @@ impl Allocator for Memory {
         self.heap.try_allocate(words, kind)
     }
 
-    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
-        self.heap.gc(stack_map, stack_pointers);
+    fn gc(
+        &mut self,
+        stack_map: &StackMap,
+        stack_pointers: &[(usize, usize, usize)],
+        extra_roots: &[(*mut usize, usize)],
+    ) {
+        self.heap.gc(stack_map, stack_pointers, extra_roots);
     }
 
     fn grow(&mut self) {
@@ -2837,6 +2892,9 @@ pub struct Runtime {
     pub structs: StructManager,
     pub enums: EnumManager,
     pub string_constants: Vec<StringValue>,
+    /// Pre-interned tagged string literal values for ASCII chars 0..128.
+    /// Indexed by byte value. Avoids heap allocation for single-char string returns.
+    pub ascii_char_cache: [usize; 128],
     pub keyword_constants: Vec<StringValue>,
     pub keyword_heap_ptrs: Vec<Option<usize>>,
     pub diagnostic_store: Arc<Mutex<crate::compiler::DiagnosticStore>>,
@@ -2994,6 +3052,7 @@ impl Runtime {
             structs: StructManager::new(),
             enums: EnumManager::new(),
             string_constants: vec![],
+            ascii_char_cache: [0; 128],
             keyword_constants: vec![],
             keyword_heap_ptrs: vec![],
             jump_table_reserved,
@@ -3055,6 +3114,7 @@ impl Runtime {
         self.structs = StructManager::new();
         self.enums = EnumManager::new();
         self.string_constants.clear();
+        self.ascii_char_cache = [0; 128];
         self.keyword_constants.clear();
         self.keyword_heap_ptrs.clear();
         self.functions.clear();
@@ -3287,11 +3347,82 @@ impl Runtime {
         stack_pointer: usize,
         string: String,
     ) -> Result<Tagged, Box<dyn Error>> {
-        let bytes = string.as_bytes();
-        let words = bytes.len() / 8 + 1;
-        let pointer = self.allocate(words, stack_pointer, BuiltInTypes::HeapObject)?;
+        self.allocate_string_from_bytes(stack_pointer, string.as_bytes())
+    }
+
+    /// Allocate a string directly from a byte slice, avoiding an intermediate Rust String.
+    pub fn allocate_string_from_bytes(
+        &mut self,
+        stack_pointer: usize,
+        bytes: &[u8],
+    ) -> Result<Tagged, Box<dyn Error>> {
+        let text_words = bytes.len().div_ceil(8);
+        let total_words = 1 + text_words; // 1 for cached hash + text
+        let pointer = self.allocate(total_words, stack_pointer, BuiltInTypes::HeapObject)?;
         let pointer = self.memory.allocate_string(bytes, pointer)?;
         Ok(pointer)
+    }
+
+    /// Allocate a string slice: a lightweight view into a parent string.
+    /// Layout: [header][parent_ptr][offset_tagged]
+    /// The parent pointer is traced by GC (non-opaque object).
+    /// `parent` must be a tagged pointer to a flat string or string slice.
+    /// If parent is itself a slice, we resolve to the original flat string.
+    pub fn allocate_string_slice(
+        &mut self,
+        stack_pointer: usize,
+        parent: usize,
+        byte_offset: usize,
+        byte_length: usize,
+    ) -> Result<Tagged, Box<dyn Error>> {
+        // If parent is a slice, resolve to the original flat string
+        let (real_parent, real_offset) = if BuiltInTypes::is_heap_pointer(parent) {
+            let parent_obj = HeapObject::from_tagged(parent);
+            if parent_obj.is_string_slice() {
+                let grandparent = parent_obj.get_field(0);
+                let parent_offset = BuiltInTypes::untag(parent_obj.get_field(1));
+                (grandparent, parent_offset + byte_offset)
+            } else {
+                (parent, byte_offset)
+            }
+        } else {
+            (parent, byte_offset)
+        };
+
+        // Root the parent so GC doesn't collect it during allocation
+        let parent_root = self.register_temporary_root(real_parent);
+
+        // Allocate 3-field non-opaque object (field 2 = cached hash)
+        let pointer = self.allocate(3, stack_pointer, BuiltInTypes::HeapObject)?;
+
+        // Read back parent (may have moved during GC)
+        let real_parent = self.get_handle_root(parent_root);
+        self.unregister_temporary_root(parent_root);
+
+        let mut heap_object = HeapObject::from_tagged(pointer);
+        heap_object.writer_header_direct(Header {
+            type_id: TYPE_ID_STRING_SLICE,
+            type_data: byte_length as u32,
+            size: 3,
+            opaque: false, // GC must trace parent pointer
+            marked: false,
+            large: false,
+            type_flags: 0,
+        });
+        // Field 0: parent pointer (tagged heap pointer)
+        heap_object.write_field(0, real_parent);
+        // Field 1: byte offset (tagged int)
+        heap_object.write_field(
+            1,
+            BuiltInTypes::construct_int(real_offset as isize) as usize,
+        );
+        // Field 2: cached hash (0 = not yet computed, stored as tagged int for GC safety)
+        heap_object.write_field(2, 0);
+
+        // Write barrier: the slice points to the parent
+        self.write_barrier(pointer, real_parent);
+
+        Ok(BuiltInTypes::HeapObject.tagged(pointer))
     }
 
     /// Creates a Beagle array of strings from Rust strings.
@@ -3999,6 +4130,13 @@ impl Runtime {
     }
 
     pub fn unregister_temporary_root(&mut self, id: usize) -> usize {
+        // Fast path: use cached thread_local pointer (no mutex)
+        let cached = CACHED_THREAD_GLOBAL.with(|c| c.get());
+        if !cached.is_null() {
+            let tg = unsafe { &mut *cached };
+            return tg.remove_root(id);
+        }
+
         let thread_id = std::thread::current().id();
         self.memory
             .thread_globals
@@ -4041,19 +4179,27 @@ impl Runtime {
         let block = GlobalObjectBlock::from_tagged(head_block);
         block.initialize();
 
-        // Create the ThreadGlobal
-        let thread_global = ThreadGlobal::new(head_block, thread_id, stack_base);
+        // Create the ThreadGlobal (boxed for stable address)
+        let thread_global = Box::new(ThreadGlobal::new(head_block, thread_id, stack_base));
 
         // Atomically insert if not already present (entry API ensures atomicity)
         let mut thread_globals = self.memory.thread_globals.lock().unwrap();
         use std::collections::hash_map::Entry;
         let actual_head_block = match thread_globals.entry(thread_id) {
             Entry::Vacant(e) => {
-                e.insert(thread_global);
+                let tg_ptr: *mut ThreadGlobal = &mut **e.insert(thread_global);
+                // Cache in thread_local for lock-free access
+                if thread_id == std::thread::current().id() {
+                    CACHED_THREAD_GLOBAL.with(|c| c.set(tg_ptr));
+                }
                 head_block // Use the newly allocated block
             }
             Entry::Occupied(e) => {
                 // Already initialized by another thread, use existing head_block
+                let tg_ptr: *mut ThreadGlobal = &**e.get() as *const _ as *mut _;
+                if thread_id == std::thread::current().id() {
+                    CACHED_THREAD_GLOBAL.with(|c| c.set(tg_ptr));
+                }
                 e.get().head_block.load(Ordering::SeqCst)
             }
         };
@@ -4081,6 +4227,20 @@ impl Runtime {
             .lock()
             .unwrap()
             .contains_key(&thread_id)
+    }
+
+    /// Ensure the CACHED_THREAD_GLOBAL thread-local is populated for the current thread.
+    /// If not cached, looks up via mutex and caches. Returns the pointer.
+    pub fn ensure_cached_thread_global(&self) -> *mut ThreadGlobal {
+        let thread_id = std::thread::current().id();
+        let thread_globals = self.memory.thread_globals.lock().unwrap();
+        if let Some(tg) = thread_globals.get(&thread_id) {
+            let tg_ptr: *mut ThreadGlobal = &**tg as *const _ as *mut _;
+            CACHED_THREAD_GLOBAL.with(|c| c.set(tg_ptr));
+            tg_ptr
+        } else {
+            std::ptr::null_mut()
+        }
     }
 
     /// Initialize the namespaces atom in GlobalObject slot 0.
@@ -4298,22 +4458,35 @@ impl Runtime {
     /// Automatically allocates new GlobalObjectBlocks when needed.
     /// Returns the slot index, or None if allocation fails.
     pub fn add_handle_root(&mut self, value: usize) -> Option<usize> {
-        let thread_id = std::thread::current().id();
-
-        // First try to add to existing block
-        {
-            let mut thread_globals = self.memory.thread_globals.lock().unwrap();
-            if let Some(tg) = thread_globals.get_mut(&thread_id) {
-                if let Some(slot) = tg.add_root(value) {
-                    return Some(slot);
-                }
-                // Block is full, need to allocate a new one
-            } else {
-                // No ThreadGlobal for this thread
-                return None;
+        // Fast path: use cached thread_local pointer (no mutex)
+        let cached = CACHED_THREAD_GLOBAL.with(|c| c.get());
+        if !cached.is_null() {
+            let tg = unsafe { &mut *cached };
+            if let Some(slot) = tg.add_root(value) {
+                return Some(slot);
             }
+            // Block is full, fall through to slow path to allocate a new block
+            return self.add_handle_root_slow(value, cached);
         }
 
+        // No cached pointer — fall back to mutex lookup
+        let thread_id = std::thread::current().id();
+        let mut thread_globals = self.memory.thread_globals.lock().unwrap();
+        if let Some(tg) = thread_globals.get_mut(&thread_id) {
+            // Cache for future calls
+            let tg_ptr: *mut ThreadGlobal = &mut **tg;
+            CACHED_THREAD_GLOBAL.with(|c| c.set(tg_ptr));
+            if let Some(slot) = tg.add_root(value) {
+                return Some(slot);
+            }
+            drop(thread_globals);
+            return self.add_handle_root_slow(value, tg_ptr);
+        }
+        None
+    }
+
+    /// Slow path for add_handle_root: allocate a new GlobalObjectBlock and link it.
+    fn add_handle_root_slow(&mut self, value: usize, tg_ptr: *mut ThreadGlobal) -> Option<usize> {
         // Allocate new block using allocate_for_runtime (long-lived)
         let new_block = self
             .memory
@@ -4325,15 +4498,23 @@ impl Runtime {
         let block = GlobalObjectBlock::from_tagged(new_block);
         block.initialize();
 
-        // Link it and add the root
-        let mut thread_globals = self.memory.thread_globals.lock().unwrap();
-        let tg = thread_globals.get_mut(&thread_id)?;
+        // Link it and add the root (no mutex needed — only this thread touches its own ThreadGlobal)
+        let tg = unsafe { &mut *tg_ptr };
         tg.link_new_block(new_block);
         tg.add_root(value)
     }
 
     /// Remove a handle root from the current thread's GlobalObject.
     pub fn remove_handle_root(&mut self, slot: usize) {
+        // Fast path: use cached thread_local pointer (no mutex)
+        let cached = CACHED_THREAD_GLOBAL.with(|c| c.get());
+        if !cached.is_null() {
+            let tg = unsafe { &mut *cached };
+            tg.remove_root(slot);
+            return;
+        }
+
+        // Fallback: mutex lookup
         let thread_id = std::thread::current().id();
         let mut thread_globals = self.memory.thread_globals.lock().unwrap();
         if let Some(tg) = thread_globals.get_mut(&thread_id) {
@@ -4343,6 +4524,13 @@ impl Runtime {
 
     /// Get the value of a handle root from the current thread's GlobalObject.
     pub fn get_handle_root(&self, slot: usize) -> usize {
+        // Fast path: use cached thread_local pointer (no mutex)
+        let cached = CACHED_THREAD_GLOBAL.with(|c| c.get());
+        if !cached.is_null() {
+            let tg = unsafe { &*cached };
+            return tg.get_root(slot);
+        }
+
         let thread_id = std::thread::current().id();
         self.memory
             .thread_globals
@@ -5102,7 +5290,7 @@ impl Runtime {
                         repr.push_str(" ]");
                         Some(repr)
                     }
-                    2 => {
+                    2 | 34 => {
                         let bytes = object.get_string_bytes();
                         let string = unsafe { std::str::from_utf8_unchecked(bytes) };
                         if depth > 0 {
@@ -5337,7 +5525,11 @@ impl Runtime {
 
                 match type_id {
                     val if val == TYPE_ID_RAW_ARRAY as usize => "Array",
-                    val if val == TYPE_ID_STRING as usize => "String",
+                    val if val == TYPE_ID_STRING as usize
+                        || val == TYPE_ID_STRING_SLICE as usize =>
+                    {
+                        "String"
+                    }
                     val if val == TYPE_ID_KEYWORD as usize => "Keyword",
                     val if val == TYPE_ID_PERSISTENT_VEC as usize => "PersistentVector",
                     val if val == TYPE_ID_PERSISTENT_MAP as usize => "PersistentMap",
@@ -5395,7 +5587,8 @@ impl Runtime {
 
         if a_tag == BuiltInTypes::HeapObject && b_tag == BuiltInTypes::String {
             let a_object = HeapObject::from_tagged(a);
-            if a_object.get_type_id() != TYPE_ID_STRING as usize {
+            let a_type = a_object.get_type_id();
+            if a_type != TYPE_ID_STRING as usize && a_type != TYPE_ID_STRING_SLICE as usize {
                 return false;
             }
             let b_string = self.get_str_literal(b);
@@ -5432,10 +5625,18 @@ impl Runtime {
                     return a == b;
                 }
 
-                // Strings should also compare by byte content
-                if a_object.get_type_id() == TYPE_ID_STRING as usize
-                    && b_object.get_type_id() == TYPE_ID_STRING as usize
-                {
+                // Strings: compare cached hashes first, then byte content
+                let a_is_string = a_object.get_type_id() == TYPE_ID_STRING as usize
+                    || a_object.get_type_id() == TYPE_ID_STRING_SLICE as usize;
+                let b_is_string = b_object.get_type_id() == TYPE_ID_STRING as usize
+                    || b_object.get_type_id() == TYPE_ID_STRING_SLICE as usize;
+                if a_is_string && b_is_string {
+                    // If both have cached hashes and they differ, strings are definitely not equal
+                    let a_hash = a_object.get_string_hash();
+                    let b_hash = b_object.get_string_hash();
+                    if a_hash != 0 && b_hash != 0 && a_hash != b_hash {
+                        return false;
+                    }
                     let a_bytes = a_object.get_string_bytes();
                     let b_bytes = b_object.get_string_bytes();
                     return a_bytes == b_bytes;
@@ -5573,12 +5774,21 @@ impl Runtime {
             BuiltInTypes::HeapObject => {
                 let heap_object = HeapObject::from_tagged(value);
                 let type_id = heap_object.get_header().type_id;
-                if type_id == TYPE_ID_STRING {
+                if type_id == TYPE_ID_STRING || type_id == TYPE_ID_STRING_SLICE {
+                    // Check cached hash first (slices don't cache, so this returns 0 for them)
+                    let cached = heap_object.get_string_hash();
+                    if cached != 0 {
+                        return cached as usize;
+                    }
                     let bytes = heap_object.get_string_bytes();
                     let string = unsafe { std::str::from_utf8_unchecked(bytes) };
                     let mut s = DefaultHasher::new();
                     string.hash(&mut s);
-                    s.finish() as usize
+                    let hash = s.finish();
+                    // Cache it (0 is reserved for "not computed", so use 1 if hash happens to be 0)
+                    let hash = if hash == 0 { 1 } else { hash };
+                    heap_object.set_string_hash(hash);
+                    hash as usize
                 } else if type_id == TYPE_ID_KEYWORD {
                     // Keyword - use cached hash
                     heap_object.get_keyword_hash() as usize
@@ -5613,15 +5823,13 @@ impl Runtime {
             self.get_string_literal(value)
         } else if tag == BuiltInTypes::HeapObject {
             let heap_object = HeapObject::from_tagged(value);
-            if heap_object.get_type_id() != TYPE_ID_STRING as usize {
+            let tid = heap_object.get_type_id();
+            if tid != TYPE_ID_STRING as usize && tid != TYPE_ID_STRING_SLICE as usize {
                 unsafe {
                     crate::builtins::throw_runtime_error(
                         stack_pointer,
                         "TypeError",
-                        format!(
-                            "Expected string, got heap object with type_id {}",
-                            heap_object.get_type_id()
-                        ),
+                        format!("Expected string, got heap object with type_id {}", tid),
                     );
                 }
             }
@@ -5721,38 +5929,101 @@ impl Runtime {
     ) -> Result<Tagged, Box<dyn Error>> {
         let tag = BuiltInTypes::get_kind(string);
 
-        let result = if tag == BuiltInTypes::String {
-            let s = self.get_str_literal(string);
-            Self::compute_substring(stack_pointer, s, start, length, s.is_ascii())
-        } else if tag == BuiltInTypes::HeapObject {
+        if tag == BuiltInTypes::HeapObject {
             let heap_object = HeapObject::from_tagged(string);
-            if heap_object.get_type_id() != TYPE_ID_STRING as usize {
+            let type_id = heap_object.get_type_id();
+            if type_id != TYPE_ID_STRING as usize && type_id != TYPE_ID_STRING_SLICE as usize {
                 unsafe {
                     crate::builtins::throw_runtime_error(
                         stack_pointer,
                         "TypeError",
                         format!(
                             "Expected string for substring, got heap object with type_id {}",
-                            heap_object.get_type_id()
+                            type_id
                         ),
                     );
                 }
             }
-            let is_ascii = heap_object.get_header().is_ascii;
+
+            let is_ascii = if type_id == TYPE_ID_STRING_SLICE as usize {
+                // For slices, check the parent's ascii flag
+                let parent = HeapObject::from_tagged(heap_object.get_field(0));
+                parent.get_header().type_flags & 1 != 0
+            } else {
+                heap_object.get_header().type_flags & 1 != 0
+            };
+
+            if is_ascii {
+                // Fast path: create a string slice (no byte copying)
+                let str_bytes = heap_object.get_string_bytes();
+                let end = start + length;
+                if end > str_bytes.len() {
+                    unsafe {
+                        crate::builtins::throw_runtime_error(
+                            stack_pointer,
+                            "IndexError",
+                            format!(
+                                "substring index out of bounds: start={}, length={}, but string length is {}",
+                                start,
+                                length,
+                                str_bytes.len()
+                            ),
+                        );
+                    }
+                }
+
+                // For slices, resolve the real byte offset into the flat parent
+                let (parent_ptr, byte_offset) = if type_id == TYPE_ID_STRING_SLICE as usize {
+                    let parent_ptr = heap_object.get_field(0);
+                    let parent_offset = BuiltInTypes::untag(heap_object.get_field(1));
+                    (parent_ptr, parent_offset + start)
+                } else {
+                    (string, start)
+                };
+
+                return self.allocate_string_slice(stack_pointer, parent_ptr, byte_offset, length);
+            }
+            // Unicode heap string — use compute_substring (rare path)
             let bytes = heap_object.get_string_bytes();
             let s = unsafe { std::str::from_utf8_unchecked(bytes) };
-            Self::compute_substring(stack_pointer, s, start, length, is_ascii)
-        } else {
-            unsafe {
-                crate::builtins::throw_runtime_error(
-                    stack_pointer,
-                    "TypeError",
-                    format!("Expected string for substring, got {:?}", tag),
-                );
-            }
-        };
+            let result = Self::compute_substring(stack_pointer, s, start, length, false);
+            return self.allocate_string(stack_pointer, result);
+        }
 
-        self.allocate_string(stack_pointer, result)
+        if tag == BuiltInTypes::String {
+            // String literals can't be sliced (not on GC heap), so copy
+            let s = self.get_str_literal(string);
+            let is_ascii = s.is_ascii();
+            if is_ascii {
+                let end = start + length;
+                if end > s.len() {
+                    unsafe {
+                        crate::builtins::throw_runtime_error(
+                            stack_pointer,
+                            "IndexError",
+                            format!(
+                                "substring index out of bounds: start={}, length={}, but string length is {}",
+                                start,
+                                length,
+                                s.len()
+                            ),
+                        );
+                    }
+                }
+                let slice = s.as_bytes()[start..end].to_vec();
+                return self.allocate_string_from_bytes(stack_pointer, &slice);
+            }
+            let result = Self::compute_substring(stack_pointer, s, start, length, false);
+            return self.allocate_string(stack_pointer, result);
+        }
+
+        unsafe {
+            crate::builtins::throw_runtime_error(
+                stack_pointer,
+                "TypeError",
+                format!("Expected string for substring, got {:?}", tag),
+            );
+        }
     }
 
     pub fn add_foreign_function(
@@ -6400,6 +6671,24 @@ impl Runtime {
             .expect("Trampoline function not found - this is a fatal error");
 
         unsafe { std::mem::transmute(trampoline.pointer) }
+    }
+
+    /// Return a tagged string literal for a single ASCII byte.
+    /// Lazily interns the character on first use. O(1), no heap allocation.
+    #[inline]
+    pub fn get_ascii_char_literal(&mut self, byte: u8) -> usize {
+        debug_assert!(byte < 128);
+        let cached = self.ascii_char_cache[byte as usize];
+        if cached != 0 {
+            return cached;
+        }
+        let ch = byte as char;
+        let index = self.add_string(StringValue {
+            str: ch.to_string(),
+        });
+        let tagged = BuiltInTypes::String.tag(index as isize) as usize;
+        self.ascii_char_cache[byte as usize] = tagged;
+        tagged
     }
 
     pub fn add_string(&mut self, string_value: StringValue) -> usize {

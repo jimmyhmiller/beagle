@@ -1,0 +1,54 @@
+namespace gc_state_test
+
+use raw-mutable-array as arr
+
+// Simulate knucleotide's pattern: pass a mutable state array
+// through nested function calls, with allocations at each level
+
+fn process_inner(state, value) {
+    // Read from state
+    let count = arr/read-field(state, 0)
+    // Allocate a string (triggers GC)
+    let upper = uppercase(value)
+    // Write back to state
+    arr/write-field(state, 0, count + 1)
+    arr/write-field(state, 1, upper)
+    count + 1
+}
+
+fn process_outer(state, chunk) {
+    let len = length(chunk)
+    let mut i = 0
+    while i < len {
+        let ch = get(chunk, i)
+        // This creates a heap string via substring + uppercase
+        let sub = substring(chunk, i, 1)
+        process_inner(state, sub)
+        i = i + 1
+    }
+}
+
+fn loop_fn(state, n) {
+    if n <= 0 {
+        arr/read-field(state, 0)
+    } else {
+        // Allocate a string (triggers GC)
+        let chunk = "ABCDEFGHIJKLMNOP"
+        process_outer(state, chunk)
+        loop_fn(state, n - 1)
+    }
+}
+
+fn main() {
+    let state = arr/new-array(3)
+    arr/write-field(state, 0, 0)
+    arr/write-field(state, 1, "")
+    arr/write-field(state, 2, null)
+
+    let result = loop_fn(state, 100)
+    println(result)
+    "done"
+}
+
+// Expect
+// 1600

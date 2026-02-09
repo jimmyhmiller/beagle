@@ -159,19 +159,28 @@ pub struct Header {
     pub opaque: bool,
     pub marked: bool,
     pub large: bool, // Large object flag - when set, actual size is stored in word after header
-    pub is_ascii: bool, // String is pure ASCII — enables O(1) byte-indexed substring
+    pub type_flags: u8, // 4 bits (bits 4-7 of byte 0), per-type metadata flags
 }
 
 impl Header {
     // | Byte 7  | Bytes 3-6     | Bytes 1-2 | Byte 0                   |
     // |---------|---------------|-----------|--------------------------|
     // | Type    | Type Metadata | Size      | Flag bits                |
-    // |         | (4 bytes)     | (2 bytes) | Large object (bit 2)     |
+    // |         | (4 bytes)     | (2 bytes) | type_flags (bits 7-4)    |
+    // |         |               |           | [reserved: fwd bit] (3)  |
+    // |         |               |           | Large object (bit 2)     |
     // |         |               |           | Opaque object (bit 1)    |
     // |         |               |           | Marked (bit 0)           |
     //
     // For large objects (size > 65535 words), the large flag is set and the actual
     // size is stored in an 8-byte word immediately following the header.
+    //
+    // IMPORTANT: Bit 3 is reserved for the GC forwarding pointer marker.
+    // During GC, the header word is overwritten with a forwarding tagged pointer
+    // that has bit 3 set. No header flag may use bit 3.
+    //
+    // type_flags (bits 4-7): 4 per-type metadata bits. Each type can use these
+    // for its own purposes. E.g., strings use bit 0 (header bit 4) for is_ascii.
 
     /// Position of the marked bit in the header.
     /// IMPORTANT: This MUST be in the 3 least significant bits (0, 1, or 2) for
@@ -185,9 +194,7 @@ impl Header {
     /// When set, the actual size is stored in the word after the header.
     pub const LARGE_OBJECT_BIT_POSITION: u32 = 2;
 
-    /// Position of the is_ascii bit in the header.
-    /// When set, the string contains only ASCII bytes (byte index == char index).
-    const IS_ASCII_BIT_POSITION: u32 = 3;
+    // Bit 3 is RESERVED for GC forwarding pointer marker. Do not use.
 
     /// Maximum size that fits in the inline size field (u16)
     pub const MAX_INLINE_SIZE: usize = 0xFFFF;
@@ -197,6 +204,7 @@ impl Header {
         data |= (self.type_id as usize) << 56;
         data |= (self.type_data as usize) << 24;
         data |= (self.size as usize) << 8; // Size now uses bytes 1-2
+        data |= ((self.type_flags as usize) & 0xF) << 4; // type_flags in bits 4-7
         if self.opaque {
             data |= 1 << Self::OPAQUE_BIT_POSITION;
         }
@@ -206,9 +214,6 @@ impl Header {
         if self.large {
             data |= 1 << Self::LARGE_OBJECT_BIT_POSITION;
         }
-        if self.is_ascii {
-            data |= 1 << Self::IS_ASCII_BIT_POSITION;
-        }
         data
     }
 
@@ -216,10 +221,10 @@ impl Header {
         let _type = (data >> 56) as u8;
         let type_data = (data >> 24) as u32;
         let size = ((data >> 8) & 0xFFFF) as u16; // Extract 16 bits for size
+        let type_flags = ((data >> 4) & 0xF) as u8; // Extract 4 bits for type_flags
         let opaque = (data & (1 << Self::OPAQUE_BIT_POSITION)) != 0;
         let marked = (data & (1 << Self::MARKED_BIT_POSITION)) != 0;
         let large = (data & (1 << Self::LARGE_OBJECT_BIT_POSITION)) != 0;
-        let is_ascii = (data & (1 << Self::IS_ASCII_BIT_POSITION)) != 0;
         Header {
             type_id: _type,
             type_data,
@@ -227,7 +232,7 @@ impl Header {
             opaque,
             marked,
             large,
-            is_ascii,
+            type_flags,
         }
     }
 
@@ -345,7 +350,7 @@ mod header_layout_tests {
             opaque: true,
             marked: false,
             large: false,
-            is_ascii: false,
+            type_flags: 0,
         };
 
         let header_value = header.to_usize();
@@ -369,7 +374,7 @@ fn header() {
         opaque: true,
         marked: false,
         large: false,
-        is_ascii: false,
+        type_flags: 0,
     };
     let data = header.to_usize();
     // println the binary representation of the data
@@ -387,7 +392,7 @@ fn header() {
                         opaque: *sm,
                         marked: *m,
                         large: false,
-                        is_ascii: false,
+                        type_flags: 0,
                     };
                     let data = header.to_usize();
                     let new_header = Header::from_usize(data);
@@ -494,18 +499,83 @@ impl HeapObject {
         unsafe { std::slice::from_raw_parts(pointer, size / 8) }
     }
 
+    /// String slice type ID (must match TYPE_ID_STRING_SLICE in type_ids.rs)
+    const STRING_SLICE_TYPE_ID: u8 = 34;
+
     pub fn get_string_bytes(&self) -> &[u8] {
+        let header = self.get_header();
+        if header.type_id == Self::STRING_SLICE_TYPE_ID {
+            // String slice: resolve through parent
+            let parent_ptr = self.get_field(0);
+            let offset = BuiltInTypes::untag(self.get_field(1));
+            let length = header.type_data as usize;
+            let parent = HeapObject::from_tagged(parent_ptr);
+            // Parent is always a flat string (no nested slices).
+            // The data lives on the GC heap (not in `parent`), so the reference
+            // is valid for as long as the heap is stable (i.e., no GC).
+            let parent_bytes = parent.get_flat_string_bytes();
+            let parent_bytes: &[u8] =
+                unsafe { std::slice::from_raw_parts(parent_bytes.as_ptr(), parent_bytes.len()) };
+            &parent_bytes[offset..offset + length]
+        } else {
+            self.get_flat_string_bytes()
+        }
+    }
+
+    /// Get bytes from a flat (non-slice) string. Skips header + cached hash word.
+    #[inline]
+    fn get_flat_string_bytes(&self) -> &[u8] {
         let header = self.get_header();
         let bytes = header.type_data as usize;
         let untagged = self.untagged();
         let pointer = untagged as *mut u8;
-        let pointer = unsafe { pointer.add(self.header_size()) };
+        // Skip header + 8-byte cached hash
+        let pointer = unsafe { pointer.add(self.header_size() + 8) };
         unsafe { std::slice::from_raw_parts(pointer, bytes) }
     }
 
     pub fn get_str_unchecked(&self) -> &str {
         let bytes = self.get_string_bytes();
         unsafe { std::str::from_utf8_unchecked(bytes) }
+    }
+
+    /// Check if this is a string slice (vs flat string)
+    #[inline]
+    pub fn is_string_slice(&self) -> bool {
+        self.get_header().type_id == Self::STRING_SLICE_TYPE_ID
+    }
+
+    /// Get the cached hash for a heap string (first 8 bytes after header).
+    /// For string slices, reads field 2 (stored as tagged int to avoid GC confusion).
+    /// Returns 0 if hash has not been cached yet.
+    #[inline]
+    pub fn get_string_hash(&self) -> u64 {
+        if self.get_header().type_id == Self::STRING_SLICE_TYPE_ID {
+            // Field 2 stores hash as (hash << 3) — tagged int with tag 000.
+            // Decode: shift right by 3. 0 → 0 (uncached).
+            let raw = self.get_field(2);
+            return (raw >> 3) as u64;
+        }
+        let untagged = self.untagged();
+        let pointer = untagged as *mut u8;
+        let pointer = unsafe { pointer.add(self.header_size()) };
+        unsafe { *(pointer as *const u64) }
+    }
+
+    /// Set the cached hash for a heap string.
+    /// For string slices, writes to field 2 (stored as tagged int to avoid GC confusion).
+    #[inline]
+    pub fn set_string_hash(&self, hash: u64) {
+        if self.get_header().type_id == Self::STRING_SLICE_TYPE_ID {
+            // Store as (hash << 3) so GC sees tag 000 (Int), not a heap pointer
+            let encoded = (hash as usize) << 3;
+            self.write_field(2, encoded);
+            return;
+        }
+        let untagged = self.untagged();
+        let pointer = untagged as *mut u8;
+        let pointer = unsafe { pointer.add(self.header_size()) };
+        unsafe { *(pointer as *mut u64) = hash };
     }
 
     /// Get the cached hash for a keyword (first 8 bytes of keyword data)
@@ -605,7 +675,7 @@ impl HeapObject {
             opaque: false,
             marked: false,
             large: is_large,
-            is_ascii: false,
+            type_flags: 0,
         };
 
         unsafe { *pointer.cast::<usize>() = header.to_usize() };
@@ -849,7 +919,7 @@ impl Ir {
             opaque: true,
             marked: false,
             large: false,
-            is_ascii: false,
+            type_flags: 0,
         };
         self.heap_store(small_object_pointer, Value::RawValue(header.to_usize()));
     }

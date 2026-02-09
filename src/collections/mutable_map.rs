@@ -117,7 +117,67 @@ impl MutableMap {
     }
 
     /// Insert or update a key-value pair. Mutates in place.
+    ///
+    /// Uses a fast path that avoids HandleScope overhead when no resize is needed
+    /// (99.99% of calls). HandleScope is only needed during resize, which allocates
+    /// new arrays and may trigger GC. Without allocation, GC cannot run, so raw
+    /// pointers are safe.
     pub fn put(
+        runtime: &mut Runtime,
+        stack_pointer: usize,
+        map_ptr: usize,
+        key: usize,
+        value: usize,
+    ) -> Result<(), Box<dyn Error>> {
+        let map = GcHandle::from_tagged(map_ptr);
+        let size = Self::count(map);
+        let cap = Self::capacity(map);
+
+        if size * LOAD_FACTOR_DEN >= cap * LOAD_FACTOR_NUM {
+            // Slow path: need resize, which allocates → need HandleScope for GC safety
+            return Self::put_slow(runtime, stack_pointer, map_ptr, key, value);
+        }
+
+        // Fast path: no resize needed, no allocation, GC cannot trigger.
+        // Safe to use raw pointers directly.
+        let keys = GcHandle::from_tagged(map.get_field(FIELD_KEYS));
+        let values = GcHandle::from_tagged(map.get_field(FIELD_VALUES));
+        let cap = keys.field_count();
+        let null_val = BuiltInTypes::null_value() as usize;
+
+        let hash = runtime.hash_value(key);
+        let mut idx = hash % cap;
+
+        for _ in 0..cap {
+            let slot_key = keys.get_field(idx);
+            if slot_key == null_val {
+                // Empty slot — insert new entry
+                keys.set_field_with_barrier(runtime, idx, key);
+                values.set_field_with_barrier(runtime, idx, value);
+
+                let new_size = size + 1;
+                map.set_field(
+                    FIELD_SIZE,
+                    BuiltInTypes::construct_int(new_size as isize) as usize,
+                );
+                return Ok(());
+            }
+            if runtime.equal(slot_key, key) {
+                // Key exists — update value
+                values.set_field_with_barrier(runtime, idx, value);
+                return Ok(());
+            }
+            idx += 1;
+            if idx >= cap {
+                idx = 0;
+            }
+        }
+
+        Err("MutableMap::put: table full (should not happen)".into())
+    }
+
+    /// Slow path for put: resize is needed, so we use HandleScope.
+    fn put_slow(
         runtime: &mut Runtime,
         stack_pointer: usize,
         map_ptr: usize,
@@ -129,30 +189,21 @@ impl MutableMap {
         let key_h = scope.alloc(key);
         let value_h = scope.alloc(value);
 
-        // Check load factor and resize if needed
-        let map = map_h.to_gc_handle();
-        let size = Self::count(map);
-        let cap = Self::capacity(map);
+        Self::resize(&mut scope, map_h)?;
 
-        if size * LOAD_FACTOR_DEN >= cap * LOAD_FACTOR_NUM {
-            Self::resize(&mut scope, map_h)?;
-        }
-
-        // Now do the actual insert
+        // After resize, do the insert (no further resize possible)
         let map = map_h.to_gc_handle();
-        let keys_ptr = map.get_field(FIELD_KEYS);
-        let keys = GcHandle::from_tagged(keys_ptr);
+        let keys = GcHandle::from_tagged(map.get_field(FIELD_KEYS));
         let cap = keys.field_count();
+        let null_val = BuiltInTypes::null_value() as usize;
 
         let key_val = key_h.get();
         let hash = scope.runtime().hash_value(key_val);
-        let null_val = BuiltInTypes::null_value() as usize;
         let mut idx = hash % cap;
 
         for _ in 0..cap {
             let slot_key = keys.get_field(idx);
             if slot_key == null_val {
-                // Empty slot — insert new entry
                 let k = key_h.get();
                 let v = value_h.get();
                 let map = map_h.to_gc_handle();
@@ -171,7 +222,6 @@ impl MutableMap {
                 return Ok(());
             }
             if scope.runtime().equal(slot_key, key_val) {
-                // Key exists — update value
                 let v = value_h.get();
                 let map = map_h.to_gc_handle();
                 let values = GcHandle::from_tagged(map.get_field(FIELD_VALUES));
@@ -184,11 +234,69 @@ impl MutableMap {
             }
         }
 
-        Err("MutableMap::put: table full (should not happen after resize)".into())
+        Err("MutableMap::put_slow: table full (should not happen after resize)".into())
     }
 
-    /// Optimized increment: get-or-0 + 1 in a single probe.
+    /// Increment the integer value for a key by 1, inserting 1 if absent.
+    /// Combines get + put into a single probe for the common count_kmers pattern.
     pub fn increment(
+        runtime: &mut Runtime,
+        stack_pointer: usize,
+        map_ptr: usize,
+        key: usize,
+    ) -> Result<(), Box<dyn Error>> {
+        let map = GcHandle::from_tagged(map_ptr);
+        let size = Self::count(map);
+        let cap = Self::capacity(map);
+
+        if size * LOAD_FACTOR_DEN >= cap * LOAD_FACTOR_NUM {
+            // Need resize first, then do the increment
+            return Self::increment_slow(runtime, stack_pointer, map_ptr, key);
+        }
+
+        // Fast path: no resize needed
+        let keys = GcHandle::from_tagged(map.get_field(FIELD_KEYS));
+        let values = GcHandle::from_tagged(map.get_field(FIELD_VALUES));
+        let cap = keys.field_count();
+        let null_val = BuiltInTypes::null_value() as usize;
+
+        let hash = runtime.hash_value(key);
+        let mut idx = hash % cap;
+
+        for _ in 0..cap {
+            let slot_key = keys.get_field(idx);
+            if slot_key == null_val {
+                // Empty slot — insert with count = 1
+                keys.set_field_with_barrier(runtime, idx, key);
+                values.set_field_with_barrier(
+                    runtime,
+                    idx,
+                    BuiltInTypes::construct_int(1) as usize,
+                );
+                let new_size = size + 1;
+                map.set_field(
+                    FIELD_SIZE,
+                    BuiltInTypes::construct_int(new_size as isize) as usize,
+                );
+                return Ok(());
+            }
+            if runtime.equal(slot_key, key) {
+                // Key exists — increment value
+                let old_val = values.get_field(idx);
+                let old_int = BuiltInTypes::untag(old_val) as isize;
+                values.set_field(idx, BuiltInTypes::construct_int(old_int + 1) as usize);
+                return Ok(());
+            }
+            idx += 1;
+            if idx >= cap {
+                idx = 0;
+            }
+        }
+
+        Err("MutableMap::increment: table full (should not happen)".into())
+    }
+
+    fn increment_slow(
         runtime: &mut Runtime,
         stack_pointer: usize,
         map_ptr: usize,
@@ -198,39 +306,31 @@ impl MutableMap {
         let map_h = scope.alloc(map_ptr);
         let key_h = scope.alloc(key);
 
-        // Check load factor and resize if needed
-        let map = map_h.to_gc_handle();
-        let size = Self::count(map);
-        let cap = Self::capacity(map);
+        Self::resize(&mut scope, map_h)?;
 
-        if size * LOAD_FACTOR_DEN >= cap * LOAD_FACTOR_NUM {
-            Self::resize(&mut scope, map_h)?;
-        }
-
-        // Probe and increment
         let map = map_h.to_gc_handle();
-        let keys_ptr = map.get_field(FIELD_KEYS);
-        let values_ptr = map.get_field(FIELD_VALUES);
-        let keys = GcHandle::from_tagged(keys_ptr);
-        let values = GcHandle::from_tagged(values_ptr);
+        let keys = GcHandle::from_tagged(map.get_field(FIELD_KEYS));
         let cap = keys.field_count();
+        let null_val = BuiltInTypes::null_value() as usize;
 
         let key_val = key_h.get();
         let hash = scope.runtime().hash_value(key_val);
-        let null_val = BuiltInTypes::null_value() as usize;
         let mut idx = hash % cap;
 
         for _ in 0..cap {
             let slot_key = keys.get_field(idx);
             if slot_key == null_val {
-                // Empty slot — insert with count = 1
                 let k = key_h.get();
                 let map = map_h.to_gc_handle();
                 let keys = GcHandle::from_tagged(map.get_field(FIELD_KEYS));
                 let values = GcHandle::from_tagged(map.get_field(FIELD_VALUES));
 
                 keys.set_field_with_barrier(scope.runtime(), idx, k);
-                values.set_field(idx, BuiltInTypes::construct_int(1) as usize);
+                values.set_field_with_barrier(
+                    scope.runtime(),
+                    idx,
+                    BuiltInTypes::construct_int(1) as usize,
+                );
 
                 let map = map_h.to_gc_handle();
                 let new_size = Self::count(map) + 1;
@@ -241,12 +341,11 @@ impl MutableMap {
                 return Ok(());
             }
             if scope.runtime().equal(slot_key, key_val) {
-                // Key exists — increment count
-                let old_count = BuiltInTypes::untag(values.get_field(idx));
-                values.set_field(
-                    idx,
-                    BuiltInTypes::construct_int((old_count + 1) as isize) as usize,
-                );
+                let map = map_h.to_gc_handle();
+                let values = GcHandle::from_tagged(map.get_field(FIELD_VALUES));
+                let old_val = values.get_field(idx);
+                let old_int = BuiltInTypes::untag(old_val) as isize;
+                values.set_field(idx, BuiltInTypes::construct_int(old_int + 1) as usize);
                 return Ok(());
             }
             idx += 1;
@@ -255,7 +354,7 @@ impl MutableMap {
             }
         }
 
-        Err("MutableMap::increment: table full (should not happen after resize)".into())
+        Err("MutableMap::increment_slow: table full after resize".into())
     }
 
     /// Collect all entries as an array of [key, value] pair arrays.

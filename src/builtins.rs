@@ -13,7 +13,7 @@ use crate::{
     Message,
     collections::{
         GcHandle, PersistentVec, TYPE_ID_CONTINUATION_SEGMENT, TYPE_ID_KEYWORD,
-        TYPE_ID_MULTI_ARITY_FUNCTION, TYPE_ID_STRING,
+        TYPE_ID_MULTI_ARITY_FUNCTION, TYPE_ID_STRING, TYPE_ID_STRING_SLICE,
     },
     gc::STACK_SIZE,
     get_runtime,
@@ -334,25 +334,45 @@ extern "C" fn get_string_index(
     save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "get_string_index");
     let runtime = get_runtime().get_mut();
+    let index = BuiltInTypes::untag(index);
+
     if BuiltInTypes::get_kind(string) == BuiltInTypes::String {
-        let string = runtime.get_string_literal(string);
-        let index = BuiltInTypes::untag(index);
-        let result = string.chars().nth(index).unwrap();
-        let result = result.to_string();
+        let s = runtime.get_str_literal(string);
+        let bytes = s.as_bytes();
+        // ASCII fast path: O(1) byte indexing, return cached single-char literal
+        if s.is_ascii() {
+            let byte = bytes[index];
+            return runtime.get_ascii_char_literal(byte);
+        }
+        // Unicode: use char_indices to find the byte offset in one pass
+        let ch = s.chars().nth(index).unwrap();
+        let result = ch.to_string();
         runtime
             .allocate_string(stack_pointer, result)
             .unwrap()
             .into()
     } else {
+        let heap_obj = HeapObject::from_tagged(string);
+        let bytes = heap_obj.get_string_bytes();
+        let header = heap_obj.get_header();
+        let is_ascii = if header.type_id == TYPE_ID_STRING_SLICE {
+            let parent = HeapObject::from_tagged(heap_obj.get_field(0));
+            parent.get_header().type_flags & 1 != 0
+        } else {
+            header.type_flags & 1 != 0
+        };
+
+        if is_ascii {
+            // ASCII fast path: O(1), no heap allocation
+            let byte = bytes[index];
+            return runtime.get_ascii_char_literal(byte);
+        }
+
+        // Unicode path: find the char at the given index
         let object_pointer_id = runtime.register_temporary_root(string);
-        // we have a heap allocated string
-        let string = HeapObject::from_tagged(string);
-        assert!(string.get_type_id() == TYPE_ID_STRING as usize);
-        let index = BuiltInTypes::untag(index);
-        let bytes = string.get_string_bytes();
         let s = unsafe { std::str::from_utf8_unchecked(bytes) };
-        let result = s.chars().nth(index).unwrap();
-        let result = result.to_string();
+        let ch = s.chars().nth(index).unwrap();
+        let result = ch.to_string();
         let result = runtime
             .allocate_string(stack_pointer, result)
             .unwrap()
@@ -366,12 +386,26 @@ extern "C" fn get_string_length(string: usize) -> usize {
     print_call_builtin(get_runtime().get(), "get_string_length");
     let runtime = get_runtime().get_mut();
     if BuiltInTypes::get_kind(string) == BuiltInTypes::String {
-        let string = runtime.get_string_literal(string);
-        BuiltInTypes::Int.tag(string.chars().count() as isize) as usize
+        let s = runtime.get_str_literal(string);
+        if s.is_ascii() {
+            // ASCII: byte count == char count
+            return BuiltInTypes::Int.tag(s.len() as isize) as usize;
+        }
+        BuiltInTypes::Int.tag(s.chars().count() as isize) as usize
     } else {
-        // we have a heap allocated string
-        let string = HeapObject::from_tagged(string);
-        let bytes = string.get_string_bytes();
+        let heap_obj = HeapObject::from_tagged(string);
+        let bytes = heap_obj.get_string_bytes();
+        let header = heap_obj.get_header();
+        let is_ascii = if header.type_id == TYPE_ID_STRING_SLICE {
+            let parent = HeapObject::from_tagged(heap_obj.get_field(0));
+            parent.get_header().type_flags & 1 != 0
+        } else {
+            header.type_flags & 1 != 0
+        };
+        if is_ascii {
+            // ASCII: byte count == char count
+            return BuiltInTypes::Int.tag(bytes.len() as isize) as usize;
+        }
         let s = unsafe { std::str::from_utf8_unchecked(bytes) };
         BuiltInTypes::Int.tag(s.chars().count() as isize) as usize
     }
@@ -6483,8 +6517,8 @@ fn value_to_json(runtime: &Runtime, value: usize, depth: usize) -> Result<String
                     }
                     Ok(format!("[{}]", parts.join(",")))
                 }
-                2 => {
-                    // HeapObject string
+                2 | 34 => {
+                    // HeapObject string (or string slice)
                     let bytes = object.get_string_bytes();
                     let string = std::str::from_utf8(bytes).unwrap_or("");
                     Ok(format!("\"{}\"", escape_json_string(string)))
@@ -6570,8 +6604,8 @@ fn value_to_json_key(runtime: &Runtime, value: usize) -> Result<String, JsonErro
             let object = HeapObject::from_tagged(value);
             let header = object.get_header();
             match header.type_id {
-                2 => {
-                    // HeapObject string
+                2 | 34 => {
+                    // HeapObject string (or string slice)
                     let bytes = object.get_string_bytes();
                     let string = std::str::from_utf8(bytes).unwrap_or("");
                     Ok(format!("\"{}\"", escape_json_string(string)))
@@ -7344,7 +7378,9 @@ extern "C" fn eval(stack_pointer: usize, frame_pointer: usize, code: usize) -> u
         BuiltInTypes::String => runtime.get_string_literal(code),
         BuiltInTypes::HeapObject => {
             let code = HeapObject::from_tagged(code);
-            if code.get_header().type_id != TYPE_ID_STRING {
+            if code.get_header().type_id != TYPE_ID_STRING
+                && code.get_header().type_id != TYPE_ID_STRING_SLICE
+            {
                 unsafe {
                     throw_runtime_error(
                         stack_pointer,
@@ -8360,7 +8396,7 @@ pub extern "C" fn keyword_to_string(
     if heap_object.get_header().type_id != TYPE_ID_KEYWORD {
         let type_id = heap_object.get_header().type_id;
         let type_name = match type_id {
-            TYPE_ID_STRING => "String".to_string(),
+            TYPE_ID_STRING | TYPE_ID_STRING_SLICE => "String".to_string(),
             TYPE_ID_KEYWORD => "Keyword".to_string(),
             TYPE_ID_MULTI_ARITY_FUNCTION => "MultiArityFunction".to_string(),
             _ => {
@@ -8910,7 +8946,7 @@ pub unsafe extern "C" fn capture_continuation_runtime(
         opaque: true,
         marked: false,
         large: is_large,
-        is_ascii: false,
+        type_flags: 0,
     });
     if is_large {
         let size_ptr = (segment_obj.untagged() + 8) as *mut usize;
@@ -13402,7 +13438,8 @@ pub unsafe extern "C" fn diagnostics_for_file(
             return BuiltInTypes::null_value() as usize;
         }
         let heap_object = HeapObject::from_tagged(file_path);
-        if heap_object.get_type_id() != TYPE_ID_STRING as usize {
+        let tid = heap_object.get_type_id();
+        if tid != TYPE_ID_STRING as usize && tid != TYPE_ID_STRING_SLICE as usize {
             eprintln!("diagnostics_for_file: Invalid file path argument (not a string)");
             return BuiltInTypes::null_value() as usize;
         }
@@ -13904,29 +13941,7 @@ mod rust_collections {
         }
     }
 
-    /// Get a value from a mutable map by key
-    /// Signature: (map, key) -> tagged_value
-    pub unsafe extern "C" fn rust_mutable_map_get(map_ptr: usize, key: usize) -> usize {
-        if !BuiltInTypes::is_heap_pointer(map_ptr) {
-            return BuiltInTypes::null_value() as usize;
-        }
-        let runtime = get_runtime().get();
-        let map = GcHandle::from_tagged(map_ptr);
-        MutableMap::get(runtime, map, key)
-    }
-
-    /// Get the count of entries in a mutable map
-    /// Signature: (map) -> tagged_int
-    pub unsafe extern "C" fn rust_mutable_map_count(map_ptr: usize) -> usize {
-        if !BuiltInTypes::is_heap_pointer(map_ptr) {
-            return BuiltInTypes::construct_int(0) as usize;
-        }
-        let map = GcHandle::from_tagged(map_ptr);
-        let count = MutableMap::count(map);
-        BuiltInTypes::construct_int(count as isize) as usize
-    }
-
-    /// Increment a key's count (get-or-0 + 1)
+    /// Increment the integer value for a key by 1, inserting 1 if absent.
     /// Signature: (stack_pointer, frame_pointer, map, key) -> null
     pub unsafe extern "C" fn rust_mutable_map_increment(
         stack_pointer: usize,
@@ -13948,6 +13963,28 @@ mod rust_collections {
                 BuiltInTypes::null_value() as usize
             }
         }
+    }
+
+    /// Get a value from a mutable map by key
+    /// Signature: (map, key) -> tagged_value
+    pub unsafe extern "C" fn rust_mutable_map_get(map_ptr: usize, key: usize) -> usize {
+        if !BuiltInTypes::is_heap_pointer(map_ptr) {
+            return BuiltInTypes::null_value() as usize;
+        }
+        let runtime = get_runtime().get();
+        let map = GcHandle::from_tagged(map_ptr);
+        MutableMap::get(runtime, map, key)
+    }
+
+    /// Get the count of entries in a mutable map
+    /// Signature: (map) -> tagged_int
+    pub unsafe extern "C" fn rust_mutable_map_count(map_ptr: usize) -> usize {
+        if !BuiltInTypes::is_heap_pointer(map_ptr) {
+            return BuiltInTypes::construct_int(0) as usize;
+        }
+        let map = GcHandle::from_tagged(map_ptr);
+        let count = MutableMap::count(map);
+        BuiltInTypes::construct_int(count as isize) as usize
     }
 
     /// Get all entries from a mutable map as array of [key, value] pairs
@@ -14152,19 +14189,19 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
+            "beagle.collections/mutable-map-increment!",
+            rust_mutable_map_increment as *const u8,
+            true,
+            &["m", "key"],
+            "Increment the integer value for key by 1, inserting 1 if absent.\n\nExamples:\n  (mutable-map-increment! m \"key\")",
+        )?;
+
+        self.add_builtin_with_doc(
             "beagle.collections/mutable-map-count",
             rust_mutable_map_count as *const u8,
             false,
             &["m"],
             "Return the number of key-value pairs in the mutable map.\n\nExamples:\n  (mutable-map-count m)  ; => 3",
-        )?;
-
-        self.add_builtin_with_doc(
-            "beagle.collections/mutable-map-increment!",
-            rust_mutable_map_increment as *const u8,
-            true,
-            &["m", "key"],
-            "Increment the integer count for key (get-or-0 + 1). Optimized for frequency counting.\n\nExamples:\n  (mutable-map-increment! m \"word\")",
         )?;
 
         self.add_builtin_with_doc(
@@ -14348,7 +14385,8 @@ mod regex_builtins {
             runtime.get_string_literal(value)
         } else if tag == BuiltInTypes::HeapObject {
             let heap_object = HeapObject::from_tagged(value);
-            if heap_object.get_type_id() != TYPE_ID_STRING as usize {
+            let tid = heap_object.get_type_id();
+            if tid != TYPE_ID_STRING as usize && tid != TYPE_ID_STRING_SLICE as usize {
                 return String::new();
             }
             let bytes = heap_object.get_string_bytes();

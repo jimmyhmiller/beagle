@@ -3259,7 +3259,7 @@ impl AstCompiler<'_> {
                     opaque: false,
                     marked: false,
                     large: false,
-                    is_ascii: false,
+                    type_flags: 0,
                 };
                 self.ir.heap_store(untagged_obj, Value::RawValue(header.to_usize()));
 

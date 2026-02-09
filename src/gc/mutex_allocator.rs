@@ -66,12 +66,17 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         result
     }
 
-    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
+    fn gc(
+        &mut self,
+        stack_map: &StackMap,
+        stack_pointers: &[(usize, usize, usize)],
+        extra_roots: &[(*mut usize, usize)],
+    ) {
         if self.registered_threads.load(Ordering::Acquire) == 0 {
-            return self.alloc.gc(stack_map, stack_pointers);
+            return self.alloc.gc(stack_map, stack_pointers, extra_roots);
         }
         let lock = self.mutex.lock().unwrap();
-        self.alloc.gc(stack_map, stack_pointers);
+        self.alloc.gc(stack_map, stack_pointers, extra_roots);
         drop(lock)
     }
 

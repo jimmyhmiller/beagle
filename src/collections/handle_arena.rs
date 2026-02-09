@@ -1,31 +1,24 @@
-//! HandleScope - GC-safe handle allocation using GlobalObject slots.
+//! HandleScope - Zero-cost GC-safe handle allocation using a shadow stack.
 //!
-//! Provides stable handles (slot indices) into the thread's GlobalObject.
-//! GC updates GlobalObject entries directly, so handles remain valid across allocations.
-//!
-//! # Performance
-//!
-//! - Scope enter/exit: O(n) where n = handles in scope
-//! - Handle alloc: O(1) via GlobalObject.add_root
-//! - Handle get: O(1) via GlobalObject.get_root
-//! - No registration needed - GlobalObject is already traced by GC
+//! Each thread has a pre-allocated `handle_stack` in its ThreadGlobal.
+//! HandleScope saves/restores the stack top index — no heap allocation needed.
+//! Handle reads are a direct indexed read into the shadow stack.
 
 use std::error::Error;
 
-use crate::runtime::Runtime;
+use crate::runtime::{Runtime, ThreadGlobal, cached_thread_global_ptr};
 use crate::types::BuiltInTypes;
 
 use super::gc_handle::GcHandle;
 
-/// A handle to a value stored in GlobalObject.
+/// A handle to a value stored in the thread's shadow stack.
 ///
-/// Handles are slot indices - the underlying value may be updated by GC,
-/// but the handle itself remains valid until its scope exits.
+/// Handles are slot indices into the shadow stack. GC updates values in-place,
+/// so the handle remains valid until its scope exits.
 #[derive(Clone, Copy, Debug)]
 pub struct Handle {
     slot: usize,
-    /// Pointer to runtime for accessing the value (valid for scope lifetime)
-    runtime_ptr: *const Runtime,
+    tg_ptr: *mut ThreadGlobal,
 }
 
 impl Handle {
@@ -34,9 +27,10 @@ impl Handle {
     /// The value may have changed since allocation if GC ran and moved objects.
     #[inline]
     pub fn get(self) -> usize {
-        // Safety: runtime_ptr is valid for the scope lifetime
-        let runtime = unsafe { &*self.runtime_ptr };
-        runtime.get_handle_root(self.slot)
+        unsafe {
+            let tg = &*self.tg_ptr;
+            tg.handle_stack[self.slot]
+        }
     }
 
     /// Get as a GcHandle if this is a heap pointer.
@@ -62,40 +56,57 @@ impl Handle {
 /// RAII scope guard for handle allocation.
 ///
 /// Handles allocated within this scope are automatically released when
-/// the scope is dropped. Scopes can be nested.
+/// the scope is dropped. Scopes can be nested — drop simply restores
+/// the saved top index.
 pub struct HandleScope<'a> {
     runtime: &'a mut Runtime,
     stack_pointer: usize,
-    /// Slot indices allocated in this scope (dynamically sized)
-    slots: Vec<usize>,
+    saved_top: usize,
+    tg_ptr: *mut ThreadGlobal,
 }
 
 impl<'a> HandleScope<'a> {
     /// Create a new handle scope.
     ///
-    /// No registration needed - handles are stored in GlobalObject which
-    /// is automatically traced by GC.
+    /// Saves the current shadow stack top. On drop, restores it — freeing
+    /// all handles allocated in this scope.
     pub fn new(runtime: &'a mut Runtime, stack_pointer: usize) -> Self {
+        let mut tg_ptr = cached_thread_global_ptr();
+        if tg_ptr.is_null() {
+            // Thread-local cache not set yet (e.g., spawned thread).
+            // Fall back to mutex lookup and cache for future calls.
+            tg_ptr = runtime.ensure_cached_thread_global();
+            assert!(
+                !tg_ptr.is_null(),
+                "HandleScope::new called before thread is initialized"
+            );
+        }
+        let saved_top = unsafe { (*tg_ptr).handle_stack_top };
         Self {
             runtime,
             stack_pointer,
-            slots: Vec::with_capacity(16), // Start with reasonable capacity
+            saved_top,
+            tg_ptr,
         }
     }
 
     /// Allocate a handle for a raw value (may or may not be a heap pointer).
     #[inline]
     pub fn alloc(&mut self, value: usize) -> Handle {
-        let slot = self
-            .runtime
-            .add_handle_root(value)
-            .expect("HandleScope: GlobalObject full - allocation failed");
+        let tg = unsafe { &mut *self.tg_ptr };
+        let slot = tg.handle_stack_top;
 
-        self.slots.push(slot);
+        // Grow if needed
+        if slot >= tg.handle_stack.len() {
+            tg.handle_stack.resize(tg.handle_stack.len() * 2, 0);
+        }
+
+        tg.handle_stack[slot] = value;
+        tg.handle_stack_top = slot + 1;
 
         Handle {
             slot,
-            runtime_ptr: self.runtime as *const Runtime,
+            tg_ptr: self.tg_ptr,
         }
     }
 
@@ -107,7 +118,7 @@ impl<'a> HandleScope<'a> {
 
     /// Allocate a new heap object and return a handle to it.
     ///
-    /// This may trigger GC, which will update all handles in GlobalObject.
+    /// This may trigger GC, which will update all handles in the shadow stack.
     pub fn allocate(&mut self, num_fields: usize) -> Result<Handle, Box<dyn Error>> {
         // Check if GC is in progress before allocating
         if self.runtime.is_paused() {
@@ -205,9 +216,9 @@ impl<'a> HandleScope<'a> {
 
 impl Drop for HandleScope<'_> {
     fn drop(&mut self) {
-        // Free all slots allocated in this scope
-        for &slot in &self.slots {
-            self.runtime.remove_handle_root(slot);
+        // Restore the shadow stack top — all handles in this scope are now invalid.
+        unsafe {
+            (*self.tg_ptr).handle_stack_top = self.saved_top;
         }
     }
 }

@@ -411,6 +411,47 @@ impl MarkAndSweep {
         }
     }
 
+    /// Mark extra roots from shadow stacks (HandleScope handles).
+    /// These are heap pointers stored in Rust-side Vec buffers.
+    fn mark_extra_roots(&self, extra_roots: &[(*mut usize, usize)], stack_map: &StackMap) {
+        let mut to_mark: Vec<HeapObject> = Vec::new();
+        for &(_slot_addr, value) in extra_roots {
+            if BuiltInTypes::is_heap_pointer(value) {
+                to_mark.push(HeapObject::from_tagged(value));
+            }
+        }
+        // Same marking loop as in `mark` — transitively mark all reachable objects
+        while let Some(object) = to_mark.pop() {
+            if object.marked() {
+                continue;
+            }
+            object.mark();
+            if object.get_type_id() == TYPE_ID_CONTINUATION as usize {
+                let tagged = object.tagged_pointer();
+                if let Some(cont) = ContinuationObject::from_tagged(tagged) {
+                    cont.with_segment_bytes(|segment| {
+                        if segment.is_empty() {
+                            return;
+                        }
+                        ContinuationSegmentWalker::walk_segment_roots(
+                            segment,
+                            cont.original_sp(),
+                            cont.original_fp(),
+                            cont.prompt_stack_pointer(),
+                            stack_map,
+                            |_offset, pointer| {
+                                to_mark.push(HeapObject::from_tagged(pointer));
+                            },
+                        );
+                    });
+                }
+            }
+            for child in object.get_heap_references() {
+                to_mark.push(child);
+            }
+        }
+    }
+
     fn mark_continuation_roots(&self, stack_map: &StackMap, to_mark: &mut Vec<HeapObject>) {
         let runtime = crate::get_runtime().get();
 
@@ -578,7 +619,12 @@ impl Allocator for MarkAndSweep {
         }
     }
 
-    fn gc(&mut self, stack_map: &StackMap, stack_pointers: &[(usize, usize, usize)]) {
+    fn gc(
+        &mut self,
+        stack_map: &StackMap,
+        stack_pointers: &[(usize, usize, usize)],
+        extra_roots: &[(*mut usize, usize)],
+    ) {
         if !self.options.gc {
             return;
         }
@@ -586,6 +632,9 @@ impl Allocator for MarkAndSweep {
         for (stack_base, frame_pointer, gc_return_addr) in stack_pointers {
             self.mark(*stack_base, stack_map, *frame_pointer, *gc_return_addr);
         }
+
+        // Mark extra roots from shadow stacks
+        self.mark_extra_roots(extra_roots, stack_map);
 
         self.sweep();
         if self.options.print_stats {
