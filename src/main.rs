@@ -1008,7 +1008,6 @@ fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Erro
         "beagle.fs.bg",
         "beagle.timer.bg",
         "beagle.socket.bg",
-        "beagle.simple-socket.bg",
     ];
     let mut all_top_levels = vec![];
 

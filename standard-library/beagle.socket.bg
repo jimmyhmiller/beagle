@@ -4,7 +4,7 @@ namespace beagle.socket
 // Low-Level Socket API
 // ============================================================================
 // This module provides explicit control over TCP sockets with manual event
-// loop management. Use beagle.simple-socket for a higher-level API.
+// loop management.
 
 use beagle.async as async
 

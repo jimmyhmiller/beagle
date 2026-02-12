@@ -36,7 +36,6 @@ let content = fs/blocking-read-file("/tmp/test.txt")
 - [beagle.collections](#beagle-collections) (15/15 documented)
 - [beagle.effect](#beagle-effect) (0/1 documented)
 - [beagle.ffi](#beagle-ffi) (19/21 documented)
-- [beagle.simple-socket](#beagle-simple-socket) (0/8 documented)
 - [beagle.socket](#beagle-socket) (0/7 documented)
 - [global](#global) (0/42 documented)
 
@@ -2888,26 +2887,6 @@ Returns the offset or -1 if not found.
 
 ---
 
-## beagle.simple-socket
-
-> **Documentation coverage:** 0/8 functions (0%)
-
-<details>
-<summary><strong>Undocumented functions (8)</strong></summary>
-
-- `create-continuation-handler(loop_id)`
-- `drive-continuation-loop(handler)`
-- `listen(host, port)`
-- `accept(listener)`
-- `read(client, n)`
-- `write(client, data)`
-- `close(client)`
-- `ContinuationHandler_handle(self, op, resume)`
-
-</details>
-
----
-
 ## beagle.socket
 
 > **Documentation coverage:** 0/7 functions (0%)
@@ -3910,14 +3889,6 @@ These are the built-in struct types available in Beagle.
 #### beagle.timer/Timer.Now
 
 #### beagle.timer/BlockingTimerHandler
-
-#### beagle.simple-socket/ContinuationHandler
-
-**Fields:**
-
-- `loop_id`
-- `accept_continuations`
-- `pending_ops`
 
 ---
 
