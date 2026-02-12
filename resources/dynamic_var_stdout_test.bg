@@ -1,0 +1,25 @@
+namespace dynamic_var_stdout_test
+
+use beagle.core as core
+
+fn main() {
+    println("to stdout")
+
+    let buffer = core/new-string-buffer()
+    binding (core/out = buffer) {
+        println("captured line 1")
+        println("captured line 2")
+    }
+
+    println("back to stdout")
+
+    // Verify buffer contents (indices 0 and 2 contain the text, 1 and 3 are newlines)
+    println(nth(buffer.lines, 0))
+    println(nth(buffer.lines, 2))
+}
+
+// Expect
+// to stdout
+// back to stdout
+// captured line 1
+// captured line 2

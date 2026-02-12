@@ -1,0 +1,22 @@
+namespace dynamic_var_debug_test
+
+let dynamic dyn_x = 42
+
+fn main() {
+    println("before")
+    println(dyn_x)
+    binding (dyn_x = 100) {
+        println("inside binding")
+        println(dyn_x)
+    }
+    println("after")
+    println(dyn_x)
+}
+
+// Expect
+// before
+// 42
+// inside binding
+// 100
+// after
+// 42

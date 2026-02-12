@@ -172,6 +172,19 @@ pub enum Ast {
         value: Box<Ast>,
         token_range: TokenRange,
     },
+    /// Dynamic variable declaration (namespace-level only)
+    LetDynamic {
+        name: String,
+        value: Box<Ast>,
+        token_range: TokenRange,
+    },
+    /// Dynamic variable rebinding block
+    Binding {
+        var_name: String,
+        value_expr: Box<Ast>,
+        body: Vec<Ast>,
+        token_range: TokenRange,
+    },
     IntegerLiteral(i64, TokenPosition),
     FloatLiteral(String, TokenPosition),
     Identifier(String, TokenPosition),
@@ -537,6 +550,8 @@ impl Ast {
             | Ast::CallExpr { token_range, .. }
             | Ast::Let { token_range, .. }
             | Ast::LetMut { token_range, .. }
+            | Ast::LetDynamic { token_range, .. }
+            | Ast::Binding { token_range, .. }
             | Ast::Assignment { token_range, .. }
             | Ast::Namespace { token_range, .. }
             | Ast::Use { token_range, .. }
@@ -683,6 +698,7 @@ pub enum VariableLocation {
     BoxedMutableLocal(usize),
     BoxedFreeVariable(usize),
     MutableFreeVariable(usize),
+    DynamicVariable(usize, usize), // (namespace_id, slot)
 }
 impl VariableLocation {
     fn is_free(&self) -> bool {
@@ -2774,6 +2790,83 @@ impl AstCompiler<'_> {
                     Ok(value_reg.into())
                 }
             }
+            Ast::LetDynamic { name, value, .. } => {
+                // Dynamic vars must be defined at namespace level
+                if self.environment_stack.len() != 1 {
+                    return Err(CompileError::InternalError {
+                        message: "Dynamic variables can only be defined at namespace level".to_string(),
+                    });
+                }
+
+                // Compile the initial value
+                self.not_tail_position();
+                let value_compiled = self.call_compile(&value)?;
+                self.not_tail_position();
+                let reg = self.ir.assign_new(value_compiled);
+
+                // Reserve namespace slot and store the value
+                let namespace_id = self.compiler.current_namespace_id();
+                let slot = self.compiler.reserve_namespace_slot(&name);
+                self.store_namespaced_variable(
+                    Value::TaggedConstant(slot as isize),
+                    reg,
+                );
+
+                // Register as a dynamic var and add to variable map
+                self.compiler.register_dynamic_var(name.to_string(), namespace_id, slot);
+                self.insert_variable(
+                    name.to_string(),
+                    VariableLocation::DynamicVariable(namespace_id, slot),
+                );
+
+                Ok(reg.into())
+            }
+            Ast::Binding {
+                var_name,
+                value_expr,
+                body,
+                ..
+            } => {
+                // Look up the dynamic variable
+                let (namespace_id, slot) = self.compiler.lookup_dynamic_var(&var_name)
+                    .ok_or_else(|| CompileError::InternalError {
+                        message: format!("Dynamic variable '{}' not found", var_name),
+                    })?;
+
+                // Compile the new value for the binding
+                self.not_tail_position();
+                let value_compiled = self.call_compile(&value_expr)?;
+                let value_reg = self.ir.assign_new(value_compiled);
+
+                // Call builtin to push the binding
+                let ns_id_reg = self.ir.assign_new(Value::TaggedConstant(namespace_id as isize));
+                let slot_reg = self.ir.assign_new(Value::TaggedConstant(slot as isize));
+                let _push_result = self.call_builtin(
+                    "beagle.core/_push_dynamic_binding",
+                    vec![ns_id_reg.into(), slot_reg.into(), value_reg.into()],
+                )?;
+
+                // Compile the body
+                let mut body_result = Value::Null;
+                for (i, expr) in body.iter().enumerate() {
+                    if i == body.len() - 1 {
+                        // Last expression preserves tail position
+                        body_result = self.call_compile(expr)?;
+                    } else {
+                        self.not_tail_position();
+                        body_result = self.call_compile(expr)?;
+                        self.not_tail_position();
+                    }
+                }
+
+                // Pop the binding (exception safety handled by caller)
+                let _pop_result = self.call_builtin(
+                    "beagle.core/_pop_dynamic_binding",
+                    vec![ns_id_reg.into(), slot_reg.into()],
+                )?;
+
+                Ok(body_result)
+            }
             Ast::Assignment { name, value, .. } => {
                 // TODO: if not marked as mut error
                 // I will need to make it so that this gets heap allocated
@@ -2867,6 +2960,11 @@ impl AstCompiler<'_> {
                 let value = self.ir.assign_new(value);
                 let variable = self.get_variable_alloc_free_variable(name)?;
                 match variable {
+                    VariableLocation::DynamicVariable(_namespace_id, _slot) => {
+                        return Err(CompileError::InvalidAssignment {
+                            reason: format!("Cannot assign to dynamic variable '{}' - use binding to rebind", name),
+                        });
+                    }
                     // TODO: Do I have mutable namespace variables?
                     VariableLocation::NamespaceVariable(_namespace_id, _slott) => {
                         return Err(CompileError::InvalidAssignment {
@@ -4362,6 +4460,13 @@ impl AstCompiler<'_> {
                     let reg = self.ir.assign_new(val);
                     self.ir.push_to_stack(reg.into());
                 }
+                VariableLocation::DynamicVariable(namespace_id, slot) => {
+                    let val = self
+                        .resolve_variable(&VariableLocation::DynamicVariable(namespace_id, slot))
+                        .unwrap();
+                    let reg = self.ir.assign_new(val);
+                    self.ir.push_to_stack(reg.into());
+                }
                 VariableLocation::FreeVariable(_)
                 | VariableLocation::BoxedFreeVariable(_)
                 | VariableLocation::MutableFreeVariable(_) => {
@@ -4432,8 +4537,15 @@ impl AstCompiler<'_> {
             .compiler
             .find_binding(self.compiler.current_namespace_id(), name)
         {
+            let namespace_id = self.compiler.current_namespace_id();
+            // Check if this is a dynamic variable
+            if let Some((dyn_ns_id, dyn_slot)) = self.compiler.lookup_dynamic_var(name) {
+                if dyn_ns_id == namespace_id && dyn_slot == slot {
+                    return Some(VariableLocation::DynamicVariable(namespace_id, slot));
+                }
+            }
             Some(VariableLocation::NamespaceVariable(
-                self.compiler.current_namespace_id(),
+                namespace_id,
                 slot,
             ))
         } else {
@@ -4443,8 +4555,15 @@ impl AstCompiler<'_> {
                 .compiler
                 .find_binding(self.compiler.current_namespace_id(), &qualified_name)
             {
+                let namespace_id = self.compiler.current_namespace_id();
+                // Check if this is a dynamic variable
+                if let Some((dyn_ns_id, dyn_slot)) = self.compiler.lookup_dynamic_var(&qualified_name) {
+                    if dyn_ns_id == namespace_id && dyn_slot == slot {
+                        return Some(VariableLocation::DynamicVariable(namespace_id, slot));
+                    }
+                }
                 return Some(VariableLocation::NamespaceVariable(
-                    self.compiler.current_namespace_id(),
+                    namespace_id,
                     slot,
                 ));
             }
@@ -4533,6 +4652,9 @@ impl AstCompiler<'_> {
                 })?;
 
             Ok(VariableLocation::NamespaceVariable(namespace_id, slot))
+        } else if let Some((namespace_id, slot)) = self.compiler.lookup_dynamic_var(name) {
+            // Found a dynamic variable - return it directly
+            Ok(VariableLocation::DynamicVariable(namespace_id, slot))
         } else if let Some(free_var) = self.create_free_if_closable(&name.to_string()) {
             Ok(free_var)
         } else {
@@ -4967,6 +5089,14 @@ impl AstCompiler<'_> {
                 let value = self.ir.read_field(slot, Value::TaggedConstant(0));
                 Ok(value)
             }
+            VariableLocation::DynamicVariable(namespace_id, slot) => {
+                let ns_id_reg = self.ir.assign_new(*namespace_id);
+                let slot_reg = self.ir.assign_new(*slot);
+                self.call_builtin(
+                    "beagle.core/_get_dynamic_var",
+                    vec![ns_id_reg.into(), slot_reg.into()],
+                )
+            }
             VariableLocation::NamespaceVariable(namespace, slot) => {
                 let slot = self.ir.assign_new(*slot);
                 let namespace = self.ir.assign_new(*namespace);
@@ -5135,6 +5265,29 @@ impl AstCompiler<'_> {
                     self.add_variable_for_mutable_pass(&binding_name);
                 }
                 self.find_mutable_vars_that_need_boxing(value);
+            }
+
+            Ast::LetDynamic {
+                name,
+                value,
+                token_range: _,
+            } => {
+                // Dynamic vars don't need boxing since they're namespace-level
+                self.add_variable_for_mutable_pass(name);
+                self.find_mutable_vars_that_need_boxing(value);
+            }
+
+            Ast::Binding {
+                var_name: _,
+                value_expr,
+                body,
+                token_range: _,
+            } => {
+                // Recurse into value and body
+                self.find_mutable_vars_that_need_boxing(value_expr);
+                for expr in body.iter() {
+                    self.find_mutable_vars_that_need_boxing(expr);
+                }
             }
 
             Ast::Program {

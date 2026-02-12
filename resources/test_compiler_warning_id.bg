@@ -1,9 +1,0 @@
-namespace test
-
-use beagle.core as core
-
-fn main() {
-    println("Diagnostic.id:")
-    println(core/Diagnostic.id)
-    "done"
-}

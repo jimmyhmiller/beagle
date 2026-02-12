@@ -2,6 +2,9 @@ namespace beagle.core;
 use beagle.primitive as primitive
 use beagle.builtin as builtin
 use beagle.collections as rust-coll
+
+// ============================================================================
+
 // TODO: I need to figure out how I deal with the circular nature
 // of having persistent vector not be in this namespace
 // One answer is to have dynamic imports
@@ -606,6 +609,52 @@ fn parse-int-helper(s, idx, acc) {
 //     persistent-vector/push(coll, value)
 // }
 
+// ============================================================================
+// Writer Protocol for Stdout Rebinding
+// ============================================================================
+
+// Writer protocol - anything that can receive output
+protocol Writer {
+    fn write(self, s)
+}
+
+// Default stdout writer struct
+struct Stdout {}
+
+// Stdout implementation - calls builtin printer directly
+extend Stdout with Writer {
+    fn write(self, s) {
+        _print(s)
+        null
+    }
+}
+
+// StringBuffer - mutable accumulator for captured output
+struct StringBuffer {
+    mut lines
+}
+
+// Factory function to create a new StringBuffer
+fn new-string-buffer() {
+    StringBuffer {
+        lines: []
+    }
+}
+
+// StringBuffer implementation - appends to internal vector
+extend StringBuffer with Writer {
+    fn write(self, s) {
+        // Use rust-coll/vec-push directly
+        self.lines = rust-coll/vec-push(self.lines, s)
+        null
+    }
+}
+
+// Define *out* dynamic var, default to stdout
+let dynamic out = Stdout {}
+
+// ============================================================================
+
 /// Print arguments separated by spaces without a trailing newline.
 ///
 /// Accepts any number of arguments. Each is formatted and printed.
@@ -622,10 +671,10 @@ fn print(...args) {
         let mut i = 0
         while i < len {
             if i > 0 {
-                _print(" ")
+                write(out, " ")
             }
             last = get(args, i)
-            _print(format(last, 0))
+            write(out, format(last, 0))
             i = i + 1
         }
         last
@@ -643,20 +692,20 @@ fn print(...args) {
 fn println(...args) {
     let len = length(args)
     if len == 0 {
-        _print("\n")
+        write(out, "\n")
         null
     } else {
         let mut last = null
         let mut i = 0
         while i < len {
             if i > 0 {
-                _print(" ")
+                write(out, " ")
             }
             last = get(args, i)
-            _print(format(last, 0))
+            write(out, format(last, 0))
             i = i + 1
         }
-        _print("\n")
+        write(out, "\n")
         last
     }
 }
@@ -2656,3 +2705,5 @@ fn doc(value) {
 fn apropos(query) {
     reflect/apropos(query)
 }
+
+// Writer protocol definitions moved to beginning of file

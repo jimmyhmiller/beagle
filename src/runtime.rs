@@ -2118,6 +2118,123 @@ pub fn clear_handler_stack() {
     });
 }
 
+// ============================================================================
+// Dynamic Variable Stack (Thread-Local Rebinding)
+// ============================================================================
+
+/// An entry in the dynamic variable stack.
+/// Each entry maps a (namespace_id, slot) pair to a thread-local value.
+#[derive(Clone, Debug)]
+pub struct DynamicVarBinding {
+    /// Namespace ID where the dynamic var is defined
+    pub namespace_id: usize,
+    /// Slot within the namespace
+    pub slot: usize,
+    /// Slot in the GlobalObjectBlock that stores the bound value.
+    /// GC updates this slot when the value moves.
+    pub root_slot: usize,
+}
+
+/// Thread-local dynamic variable stack.
+/// Dynamic vars support thread-local rebinding with stack-like scoping.
+#[derive(Default)]
+pub struct DynamicVarStack {
+    bindings: Vec<DynamicVarBinding>,
+}
+
+impl DynamicVarStack {
+    pub fn new() -> Self {
+        DynamicVarStack {
+            bindings: Vec::new(),
+        }
+    }
+
+    /// Push a binding onto the stack
+    pub fn push(&mut self, namespace_id: usize, slot: usize, root_slot: usize) {
+        self.bindings.push(DynamicVarBinding {
+            namespace_id,
+            slot,
+            root_slot,
+        });
+    }
+
+    /// Pop the most recent binding for the given (namespace_id, slot)
+    pub fn pop(&mut self, namespace_id: usize, slot: usize) -> Option<DynamicVarBinding> {
+        // Find the last binding with matching namespace_id and slot
+        if let Some(idx) = self
+            .bindings
+            .iter()
+            .rposition(|b| b.namespace_id == namespace_id && b.slot == slot)
+        {
+            Some(self.bindings.remove(idx))
+        } else {
+            None
+        }
+    }
+
+    /// Find the most recent binding for the given (namespace_id, slot)
+    pub fn find(&self, namespace_id: usize, slot: usize) -> Option<&DynamicVarBinding> {
+        self.bindings
+            .iter()
+            .rfind(|b| b.namespace_id == namespace_id && b.slot == slot)
+    }
+
+    /// Clear all bindings (used on reset)
+    pub fn clear(&mut self) {
+        self.bindings.clear();
+    }
+}
+
+thread_local! {
+    /// Per-thread dynamic variable stack
+    pub static DYNAMIC_VAR_STACK: RefCell<DynamicVarStack> =
+        RefCell::new(DynamicVarStack::new());
+}
+
+/// Push a dynamic variable binding onto the current thread's stack
+pub fn push_dynamic_binding(namespace_id: usize, slot: usize, value: usize) {
+    // Register the value as a handle root so GC can update it when moved.
+    // This also keeps the value alive even though the stack entry lives in Rust memory.
+    let runtime = crate::get_runtime().get_mut();
+    let root_slot = runtime.register_temporary_root(value);
+    assert!(root_slot != 0, "Failed to register dynamic var binding as GC root");
+
+    DYNAMIC_VAR_STACK.with(|stack| stack.borrow_mut().push(namespace_id, slot, root_slot));
+}
+
+/// Pop a dynamic variable binding from the current thread's stack
+pub fn pop_dynamic_binding(namespace_id: usize, slot: usize) -> Option<usize> {
+    let runtime = crate::get_runtime().get_mut();
+    DYNAMIC_VAR_STACK.with(|stack| {
+        stack.borrow_mut().pop(namespace_id, slot).map(|binding| {
+            let value = runtime.get_handle_root(binding.root_slot);
+            runtime.remove_handle_root(binding.root_slot);
+            value
+        })
+    })
+}
+
+/// Find a dynamic variable binding in the current thread's stack
+pub fn find_dynamic_binding(namespace_id: usize, slot: usize) -> Option<usize> {
+    DYNAMIC_VAR_STACK.with(|stack| {
+        stack
+            .borrow()
+            .find(namespace_id, slot)
+            .map(|b| crate::get_runtime().get().get_handle_root(b.root_slot))
+    })
+}
+
+/// Clear the dynamic variable stack (called on reset)
+pub fn clear_dynamic_var_stack() {
+    let runtime = crate::get_runtime().get_mut();
+    DYNAMIC_VAR_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        for binding in stack.bindings.drain(..) {
+            runtime.remove_handle_root(binding.root_slot);
+        }
+    });
+}
+
 pub struct Memory {
     heap: Alloc,
     stacks: Mutex<Vec<(ThreadId, MmapMut)>>,
@@ -2130,6 +2247,11 @@ pub struct Memory {
     pub thread_globals: Mutex<HashMap<ThreadId, Box<ThreadGlobal>>>,
     #[allow(unused)]
     command_line_arguments: CommandLineArguments,
+    /// Temporary storage for namespace binding values during GC.
+    /// Provides stable pointers for copying GCs (like generational GC).
+    /// Values are copied here before GC, GC updates them in place, then they're
+    /// copied back to namespace HashMaps after GC.
+    namespace_root_storage: Vec<usize>,
 }
 
 impl Memory {
@@ -2156,6 +2278,9 @@ impl Memory {
 
         // Clear the effect handler stack
         clear_handler_stack();
+
+        // Clear the dynamic variable stack
+        clear_dynamic_var_stack();
 
         // Full memory barrier after reset to ensure all stores are visible
         std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
@@ -2317,10 +2442,16 @@ impl Memory {
 
     /// Convenience method for Runtime to trigger GC using Memory's own stack_map and thread_globals.
     /// Collects shadow stack roots from all threads and passes them to the GC.
-    pub fn run_gc(&mut self, stack_pointers: &[(usize, usize, usize)]) {
+    /// namespace_roots: Additional GC roots from namespace bindings (passed from Runtime)
+    /// Returns updated namespace root values after GC (for copying collectors)
+    pub fn run_gc(
+        &mut self,
+        stack_pointers: &[(usize, usize, usize)],
+        namespace_roots: &[usize],
+    ) -> Vec<usize> {
         // Collect shadow stack entries from all threads as extra GC roots.
         // Safety: world is stopped during GC, so no thread modifies handle_stack.
-        let extra_roots: Vec<(*mut usize, usize)> = {
+        let mut extra_roots: Vec<(*mut usize, usize)> = {
             let thread_globals = self.thread_globals.lock().unwrap();
             let mut roots = Vec::new();
             for tg in thread_globals.values() {
@@ -2334,6 +2465,21 @@ impl Memory {
             }
             roots
         };
+
+        // Store namespace roots in a Vec to provide stable pointers during GC
+        // This is required for copying collectors (like generational GC) that need to
+        // update pointers when objects move.
+        self.namespace_root_storage.clear();
+        self.namespace_root_storage.extend_from_slice(namespace_roots);
+
+        // Add pointers to namespace roots in our storage
+        for i in 0..self.namespace_root_storage.len() {
+            let value = self.namespace_root_storage[i];
+            if BuiltInTypes::is_heap_pointer(value) {
+                let slot_addr = &mut self.namespace_root_storage[i] as *mut usize;
+                extra_roots.push((slot_addr, value));
+            }
+        }
 
         self.heap.gc(&self.stack_map, stack_pointers, &extra_roots);
 
@@ -2351,6 +2497,9 @@ impl Memory {
                 }
             }
         }
+
+        // Return updated values (GC may have moved objects for copying collectors)
+        self.namespace_root_storage.clone()
     }
 }
 
@@ -2926,6 +3075,10 @@ pub struct Runtime {
     // This is incremented when continuations are fully invoked, to skip the
     // spurious return_from_shift calls that happen when handlers return.
     pub skip_return_from_shift: HashMap<ThreadId, usize>,
+    // Per-thread dynamic variable binding stacks
+    // Key = (namespace_id, slot), Value = stack of previous values
+    // Each thread has its own binding stacks for dynamic variable rebinding
+    pub dynamic_binding_stacks: HashMap<ThreadId, HashMap<(usize, usize), Vec<usize>>>,
     // Per-thread flag indicating pop_prompt is calling return_from_shift.
     // When set, return_from_shift should use InvocationReturnPoints.
     // When not set (handler return case), it should use the passed continuation pointer.
@@ -3033,6 +3186,7 @@ impl Runtime {
                 command_line_arguments,
                 stack_map: StackMap::new(),
                 thread_globals: Mutex::new(HashMap::new()),
+                namespace_root_storage: Vec::new(),
             },
             libraries: vec![],
             is_paused: AtomicUsize::new(0),
@@ -3085,6 +3239,11 @@ impl Runtime {
                 map
             },
             skip_return_from_shift: HashMap::new(),
+            dynamic_binding_stacks: {
+                let mut map = HashMap::new();
+                map.insert(std::thread::current().id(), HashMap::new());
+                map
+            },
             return_from_shift_via_pop_prompt: HashMap::new(),
             is_handler_return: HashMap::new(),
             saved_continuation_ptr: HashMap::new(),
@@ -3956,10 +4115,34 @@ impl Runtime {
             }
             drop(thread_globals);
 
-            self.memory.run_gc(&all_stack_pointers);
+            // Collect namespace bindings as GC roots
+            // IMPORTANT: Namespace bindings are NOT in a heap-based PersistentMap despite
+            // what old comments said. They're in HashMap<String, usize> and must be
+            // explicitly passed as GC roots to prevent dynamic variables from being collected.
+            let mut namespace_roots: Vec<usize> = Vec::new();
+            let mut namespace_keys: Vec<Vec<String>> = Vec::new();
+            for ns_mutex in &self.namespaces.namespaces {
+                let ns = ns_mutex.lock().expect("Failed to lock namespace for GC");
+                let keys: Vec<String> = ns.bindings.keys().cloned().collect();
+                let values: Vec<usize> = ns.bindings.values().copied().collect();
+                namespace_keys.push(keys);
+                namespace_roots.extend(values);
+            }
 
-            // Namespace bindings are now stored in heap-based PersistentMap
-            // which is automatically updated by GC during tracing
+            let updated_roots = self.memory.run_gc(&all_stack_pointers, &namespace_roots);
+
+            // Write updated namespace roots back to namespaces (for copying GC)
+            let mut root_index = 0;
+            for (ns_mutex, keys) in self.namespaces.namespaces.iter().zip(namespace_keys.iter()) {
+                let mut ns = ns_mutex.lock().expect("Failed to lock namespace after GC");
+                for key in keys {
+                    if root_index < updated_roots.len() {
+                        ns.bindings.insert(key.clone(), updated_roots[root_index]);
+                        root_index += 1;
+                    }
+                }
+            }
+
             return;
         }
 
@@ -4081,10 +4264,33 @@ impl Runtime {
 
         drop(thread_state);
 
-        self.memory.run_gc(&stack_pointers);
+        // Collect namespace bindings as GC roots
+        // IMPORTANT: Namespace bindings are NOT in a heap-based PersistentMap despite
+        // what old comments said. They're in HashMap<String, usize> and must be
+        // explicitly passed as GC roots to prevent dynamic variables from being collected.
+        let mut namespace_roots: Vec<usize> = Vec::new();
+        let mut namespace_keys: Vec<Vec<String>> = Vec::new();
+        for ns_mutex in &self.namespaces.namespaces {
+            let ns = ns_mutex.lock().expect("Failed to lock namespace for GC");
+            let keys: Vec<String> = ns.bindings.keys().cloned().collect();
+            let values: Vec<usize> = ns.bindings.values().copied().collect();
+            namespace_keys.push(keys);
+            namespace_roots.extend(values);
+        }
 
-        // Namespace bindings are now stored in heap-based PersistentMap
-        // which is automatically updated by GC during tracing
+        let updated_roots = self.memory.run_gc(&stack_pointers, &namespace_roots);
+
+        // Write updated namespace roots back to namespaces (for copying GC)
+        let mut root_index = 0;
+        for (ns_mutex, keys) in self.namespaces.namespaces.iter().zip(namespace_keys.iter()) {
+            let mut ns = ns_mutex.lock().expect("Failed to lock namespace after GC");
+            for key in keys {
+                if root_index < updated_roots.len() {
+                    ns.bindings.insert(key.clone(), updated_roots[root_index]);
+                    root_index += 1;
+                }
+            }
+        }
 
         // Memory barrier to ensure all GC writes are visible before continuing
         std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
@@ -4701,6 +4907,84 @@ impl Runtime {
         }))
     }
 
+    /// Call a Beagle function by name with arguments from Rust code
+    /// This is a general-purpose method for builtins to call user-defined functions
+    pub fn call_function_by_name(
+        &self,
+        name: &str,
+        args: &[usize],
+    ) -> Result<usize, Box<dyn Error>> {
+        let function = self
+            .get_function_by_name(name)
+            .ok_or_else(|| format!("Function '{}' not found", name))?;
+
+        let function_pointer = function.pointer;
+        let trampoline = self.get_trampoline();
+        let stack_pointer = self.get_stack_base();
+        let global_block_ptr = self.get_global_block_ptr();
+
+        // Write GlobalObjectBlock pointer to stack_base - 8
+        unsafe {
+            *((stack_pointer - 8) as *mut usize) = global_block_ptr;
+        }
+
+        // Call the function with the appropriate number of arguments
+        let result = match args.len() {
+            0 => {
+                let trampoline: fn(u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline) };
+                trampoline(stack_pointer as u64, function_pointer.into())
+            }
+            1 => {
+                let trampoline: fn(u64, u64, u64) -> u64 =
+                    unsafe { std::mem::transmute(trampoline) };
+                trampoline(stack_pointer as u64, function_pointer.into(), args[0] as u64)
+            }
+            2 => {
+                let trampoline: fn(u64, u64, u64, u64) -> u64 =
+                    unsafe { std::mem::transmute(trampoline) };
+                trampoline(
+                    stack_pointer as u64,
+                    function_pointer.into(),
+                    args[0] as u64,
+                    args[1] as u64,
+                )
+            }
+            3 => {
+                let trampoline: fn(u64, u64, u64, u64, u64) -> u64 =
+                    unsafe { std::mem::transmute(trampoline) };
+                trampoline(
+                    stack_pointer as u64,
+                    function_pointer.into(),
+                    args[0] as u64,
+                    args[1] as u64,
+                    args[2] as u64,
+                )
+            }
+            4 => {
+                let trampoline: fn(u64, u64, u64, u64, u64, u64) -> u64 =
+                    unsafe { std::mem::transmute(trampoline) };
+                trampoline(
+                    stack_pointer as u64,
+                    function_pointer.into(),
+                    args[0] as u64,
+                    args[1] as u64,
+                    args[2] as u64,
+                    args[3] as u64,
+                )
+            }
+            _ => {
+                return Err(format!(
+                    "call_function_by_name: unsupported arity {} for function '{}'",
+                    args.len(),
+                    name
+                )
+                .into())
+            }
+        };
+
+        Ok(result as usize)
+    }
+
     pub fn new_thread(&mut self, f: usize, stack_pointer: usize, frame_pointer: usize) {
         let trampoline = self.get_trampoline();
         let trampoline: fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline) };
@@ -5119,6 +5403,74 @@ impl Runtime {
         *ns.bindings
             .get(name)
             .expect("Binding not found in namespace - this is a fatal error")
+    }
+
+    /// Get namespace binding - alias for get_binding (used by dynamic vars)
+    pub fn get_namespace_binding(&self, namespace: usize, slot: usize) -> usize {
+        self.get_binding(namespace, slot)
+    }
+
+    /// Push a new dynamic binding (temporarily rebind a namespace variable)
+    /// Saves the current value on a per-thread stack and sets the new value
+    pub fn push_dynamic_binding(&mut self, namespace: usize, slot: usize, new_value: usize) {
+        let thread_id = std::thread::current().id();
+
+        // Get the current value before we change it
+        let old_value = self.get_binding(namespace, slot);
+
+        // Push the old value onto the binding stack for this thread
+        let thread_stacks = self.dynamic_binding_stacks
+            .entry(thread_id)
+            .or_insert_with(HashMap::new);
+        let stack = thread_stacks
+            .entry((namespace, slot))
+            .or_insert_with(Vec::new);
+        stack.push(old_value);
+
+        // Update the namespace binding with the new value
+        let ns_obj = self
+            .namespaces
+            .namespaces
+            .get(namespace)
+            .expect("Namespace not found in push_dynamic_binding");
+        let mut ns = ns_obj
+            .lock()
+            .expect("Failed to lock namespace in push_dynamic_binding");
+        let name = ns
+            .ids
+            .get(slot)
+            .expect("Namespace slot not found in push_dynamic_binding")
+            .clone();
+        ns.bindings.insert(name, new_value);
+    }
+
+    /// Pop a dynamic binding (restore previous value)
+    /// Restores the value from the per-thread binding stack
+    pub fn pop_dynamic_binding(&mut self, namespace: usize, slot: usize) {
+        let thread_id = std::thread::current().id();
+
+        // Pop the old value from the binding stack
+        let old_value = self.dynamic_binding_stacks
+            .get_mut(&thread_id)
+            .and_then(|thread_stacks| thread_stacks.get_mut(&(namespace, slot)))
+            .and_then(|stack| stack.pop())
+            .expect("Dynamic binding stack underflow - pop without matching push");
+
+        // Restore the old value to the namespace binding
+        let ns_obj = self
+            .namespaces
+            .namespaces
+            .get(namespace)
+            .expect("Namespace not found in pop_dynamic_binding");
+        let mut ns = ns_obj
+            .lock()
+            .expect("Failed to lock namespace in pop_dynamic_binding");
+        let name = ns
+            .ids
+            .get(slot)
+            .expect("Namespace slot not found in pop_dynamic_binding")
+            .clone();
+        ns.bindings.insert(name, old_value);
     }
 
     pub fn reserve_namespace(&mut self, name: String) -> usize {

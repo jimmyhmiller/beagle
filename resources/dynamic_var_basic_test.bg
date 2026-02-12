@@ -1,0 +1,16 @@
+namespace dynamic_var_basic_test
+
+let dynamic dyn_x = 42
+
+fn main() {
+    println(dyn_x)
+    binding (dyn_x = 100) {
+        println(dyn_x)
+    }
+    println(dyn_x)
+}
+
+// Expect
+// 42
+// 100
+// 42

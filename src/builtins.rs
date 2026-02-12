@@ -267,6 +267,36 @@ pub extern "C" fn print_byte(value: usize) -> usize {
     0b111
 }
 
+/// Get the current value of a dynamic variable
+pub unsafe extern "C" fn get_dynamic_var(namespace_id: usize, slot: usize) -> usize {
+    let namespace_id = BuiltInTypes::untag(namespace_id);
+    let slot = BuiltInTypes::untag(slot);
+    let runtime = get_runtime().get();
+    runtime.get_namespace_binding(namespace_id, slot)
+}
+
+/// Push a new binding for a dynamic variable
+pub unsafe extern "C" fn push_dynamic_binding(
+    namespace_id: usize,
+    slot: usize,
+    new_value: usize,
+) -> usize {
+    let namespace_id = BuiltInTypes::untag(namespace_id);
+    let slot = BuiltInTypes::untag(slot);
+    let runtime = get_runtime().get_mut();
+    runtime.push_dynamic_binding(namespace_id, slot, new_value);
+    0b111 // null
+}
+
+/// Pop a dynamic variable binding, restoring the previous value
+pub unsafe extern "C" fn pop_dynamic_binding(namespace_id: usize, slot: usize) -> usize {
+    let namespace_id = BuiltInTypes::untag(namespace_id);
+    let slot = BuiltInTypes::untag(slot);
+    let runtime = get_runtime().get_mut();
+    runtime.pop_dynamic_binding(namespace_id, slot);
+    0b111 // null
+}
+
 /// Mark the card containing an address as dirty for write barrier.
 /// Called from generated code after heap stores to old gen objects.
 /// Takes the untagged address of the object being written to.
@@ -10070,6 +10100,31 @@ impl Runtime {
             false,
             &["value"],
             "Print a value to standard output without a trailing newline.",
+        )?;
+
+        // Dynamic variable builtins
+        self.add_builtin_with_doc(
+            "beagle.core/_get_dynamic_var",
+            get_dynamic_var as *const u8,
+            false,
+            &["namespace_id", "slot"],
+            "Internal: Get the current value of a dynamic variable.",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.core/_push_dynamic_binding",
+            push_dynamic_binding as *const u8,
+            false,
+            &["namespace_id", "slot", "new_value"],
+            "Internal: Push a new binding for a dynamic variable.",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.core/_pop_dynamic_binding",
+            pop_dynamic_binding as *const u8,
+            false,
+            &["namespace_id", "slot"],
+            "Internal: Pop a dynamic variable binding.",
         )?;
 
         // Multi-arity dispatch builtin (needs stack/frame pointer for throwing ArityError)

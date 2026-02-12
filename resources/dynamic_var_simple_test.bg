@@ -1,0 +1,10 @@
+namespace dynamic_var_simple_test
+
+let dynamic dyn_x = 42
+
+fn main() {
+    println(dyn_x)
+}
+
+// Expect
+// 42

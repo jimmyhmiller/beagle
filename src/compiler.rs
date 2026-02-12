@@ -296,6 +296,8 @@ pub struct Compiler {
     pub protocol_dispatch_cache_offset: usize,
     /// Multi-arity function metadata for static dispatch
     pub multi_arity_functions: HashMap<String, MultiArityInfo>,
+    /// Dynamic variables: name -> (namespace_id, slot)
+    pub dynamic_vars: HashMap<String, (usize, usize)>,
 }
 
 impl Compiler {
@@ -323,6 +325,7 @@ impl Compiler {
         self.pause_atom_ptr = None;
         self.compiled_file_cache.clear();
         self.multi_arity_functions.clear();
+        self.dynamic_vars.clear();
         // If lock is poisoned, we can still clear by ignoring the error
         if let Ok(mut store) = self.diagnostic_store.lock() {
             store.clear_all();
@@ -336,6 +339,42 @@ impl Compiler {
 
     pub fn set_pause_atom_ptr(&mut self, pointer: usize) {
         self.pause_atom_ptr = Some(pointer);
+    }
+
+    pub fn register_dynamic_var(&mut self, name: String, namespace_id: usize, slot: usize) {
+        self.dynamic_vars.insert(name, (namespace_id, slot));
+    }
+
+    pub fn lookup_dynamic_var(&self, name: &str) -> Option<(usize, usize)> {
+        // First try direct lookup (for simple names like "out")
+        if let Some(result) = self.dynamic_vars.get(name).copied() {
+            return Some(result);
+        }
+
+        // If name contains "/", it's a qualified name like "core/out"
+        if name.contains("/") {
+            let parts: Vec<&str> = name.splitn(2, '/').collect();
+            if parts.len() == 2 {
+                let (namespace_alias, var_name) = (parts[0], parts[1]);
+
+                // Resolve alias to actual namespace name (e.g., "core" -> "beagle.core")
+                let namespace_name = self
+                    .get_namespace_from_alias(namespace_alias)
+                    .unwrap_or_else(|| namespace_alias.to_string());
+
+                // Resolve namespace name to ID
+                if let Some(namespace_id) = self.get_namespace_id(&namespace_name) {
+                    // Look for dynamic var with simple name that belongs to this namespace
+                    for (dyn_var_name, (ns_id, slot)) in &self.dynamic_vars {
+                        if dyn_var_name == var_name && *ns_id == namespace_id {
+                            return Some((*ns_id, *slot));
+                        }
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     pub fn allocate_fn_pointer(&mut self) -> Result<usize, CompileError> {
@@ -1278,6 +1317,7 @@ impl CompilerThread {
                 compiled_file_cache: HashSet::new(),
                 diagnostic_store,
                 multi_arity_functions: HashMap::new(),
+                dynamic_vars: HashMap::new(),
             },
             channel,
         })

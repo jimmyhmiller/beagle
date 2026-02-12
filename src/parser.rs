@@ -183,6 +183,8 @@ pub enum Token {
     BitWiseXor,
     Or,
     Let,
+    Dynamic,
+    Binding,
     Struct,
     Enum,
     Comment((usize, usize)),
@@ -306,6 +308,8 @@ impl Token {
             Token::If => Ok("if".to_string()),
             Token::Else => Ok("else".to_string()),
             Token::Let => Ok("let".to_string()),
+            Token::Dynamic => Ok("dynamic".to_string()),
+            Token::Binding => Ok("binding".to_string()),
             Token::Mut => Ok("mut".to_string()),
             Token::Struct => Ok("struct".to_string()),
             Token::Enum => Ok("enum".to_string()),
@@ -795,6 +799,8 @@ impl Tokenizer {
             b"infinity" => Token::Infinity,
             b"-infinity" => Token::NegativeInfinity,
             b"let" => Token::Let,
+            b"dynamic" => Token::Dynamic,
+            b"binding" => Token::Binding,
             b"mut" => Token::Mut,
             b"struct" => Token::Struct,
             b"enum" => Token::Enum,
@@ -1535,6 +1541,51 @@ impl Parser {
                 self.consume();
                 self.move_to_next_non_whitespace();
 
+                // Check for 'dynamic' keyword
+                if self.peek_next_non_whitespace() == Token::Dynamic {
+                    self.consume();
+                    self.move_to_next_non_whitespace();
+
+                    // Parse identifier name
+                    let name = match self.current_token() {
+                        Token::Atom((start, end)) => {
+                            String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                                .map_err(|_| ParseError::InvalidUtf8 {
+                                    location: self.current_source_location(),
+                                })?
+                        }
+                        _ => {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "identifier".to_string(),
+                                found: self.get_token_repr(),
+                                location: self.current_source_location(),
+                            });
+                        }
+                    };
+                    self.consume();
+                    self.skip_whitespace();
+
+                    // Parse optional value (defaults to null if not provided)
+                    let value = if self.current_token() == Token::Equal {
+                        self.consume();
+                        self.move_to_next_non_whitespace();
+                        self.parse_expression(0, true, true)?.ok_or_else(|| {
+                            ParseError::UnexpectedEof {
+                                expected: "value after '='".to_string(),
+                            }
+                        })?
+                    } else {
+                        Ast::Null(start_position)
+                    };
+
+                    let end_position = self.position;
+                    return Ok(Some(Ast::LetDynamic {
+                        name,
+                        value: Box::new(value),
+                        token_range: TokenRange::new(start_position, end_position),
+                    }));
+                }
+
                 if self.peek_next_non_whitespace() == Token::Mut {
                     self.consume();
                     self.move_to_next_non_whitespace();
@@ -1567,6 +1618,109 @@ impl Parser {
                 Ok(Some(Ast::Let {
                     pattern,
                     value: Box::new(value),
+                    token_range: TokenRange::new(start_position, end_position),
+                }))
+            }
+            Token::Binding => {
+                let start_position = self.position;
+                self.consume();
+                self.move_to_next_non_whitespace();
+
+                // Expect (
+                if self.current_token() != Token::OpenParen {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "'('".to_string(),
+                        found: self.get_token_repr(),
+                        location: self.current_source_location(),
+                    });
+                }
+                self.consume();
+                self.skip_whitespace();
+
+                // Parse var_name
+                let var_name = match self.current_token() {
+                    Token::Atom((start, end)) => {
+                        String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                            .map_err(|_| ParseError::InvalidUtf8 {
+                                location: self.current_source_location(),
+                            })?
+                    }
+                    _ => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "identifier".to_string(),
+                            found: self.get_token_repr(),
+                            location: self.current_source_location(),
+                        });
+                    }
+                };
+                self.consume();
+                self.skip_whitespace();
+
+                // Expect =
+                if self.current_token() != Token::Equal {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "'='".to_string(),
+                        found: self.get_token_repr(),
+                        location: self.current_source_location(),
+                    });
+                }
+                self.consume();
+                self.move_to_next_non_whitespace();
+
+                // Parse value expression
+                let value_expr = self.parse_expression(0, true, true)?.ok_or_else(|| {
+                    ParseError::UnexpectedEof {
+                        expected: "value expression".to_string(),
+                    }
+                })?;
+
+                // Expect )
+                self.skip_whitespace();
+                if self.current_token() != Token::CloseParen {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "')'".to_string(),
+                        found: self.get_token_repr(),
+                        location: self.current_source_location(),
+                    });
+                }
+                self.consume();
+                self.skip_whitespace();
+
+                // Expect {
+                if self.current_token() != Token::OpenCurly {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "'{'".to_string(),
+                        found: self.get_token_repr(),
+                        location: self.current_source_location(),
+                    });
+                }
+                self.consume();
+                self.move_to_next_non_whitespace();
+
+                // Parse body
+                let mut body = vec![];
+                while !self.at_end() && self.current_token() != Token::CloseCurly {
+                    if let Some(expr) = self.parse_expression(0, true, true)? {
+                        body.push(expr);
+                    }
+                    self.move_to_next_non_whitespace();
+                }
+
+                // Expect }
+                if self.current_token() != Token::CloseCurly {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "'}'".to_string(),
+                        found: self.get_token_repr(),
+                        location: self.current_source_location(),
+                    });
+                }
+                self.consume();
+
+                let end_position = self.position;
+                Ok(Some(Ast::Binding {
+                    var_name,
+                    value_expr: Box::new(value_expr),
+                    body,
                     token_range: TokenRange::new(start_position, end_position),
                 }))
             }
