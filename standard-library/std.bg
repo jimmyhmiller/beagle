@@ -630,22 +630,22 @@ extend Stdout with Writer {
 }
 
 // StringBuffer - mutable accumulator for captured output
+// With cons strings, each write() is O(1) concatenation.
 struct StringBuffer {
-    mut lines
+    mut content
 }
 
 // Factory function to create a new StringBuffer
 fn new-string-buffer() {
     StringBuffer {
-        lines: []
+        content: ""
     }
 }
 
-// StringBuffer implementation - appends to internal vector
+// StringBuffer implementation - concatenates to content string
 extend StringBuffer with Writer {
     fn write(self, s) {
-        // Use rust-coll/vec-push directly
-        self.lines = rust-coll/vec-push(self.lines, s)
+        self.content = self.content ++ s
         null
     }
 }

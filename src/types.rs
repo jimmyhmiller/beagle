@@ -502,8 +502,16 @@ impl HeapObject {
     /// String slice type ID (must match TYPE_ID_STRING_SLICE in type_ids.rs)
     const STRING_SLICE_TYPE_ID: u8 = 34;
 
+    /// Cons string type ID (must match TYPE_ID_CONS_STRING in type_ids.rs)
+    const CONS_STRING_TYPE_ID: u8 = 35;
+
     pub fn get_string_bytes(&self) -> &[u8] {
         let header = self.get_header();
+        if header.type_id == Self::CONS_STRING_TYPE_ID {
+            panic!(
+                "get_string_bytes() called on cons string - use collect_string_bytes_into() or runtime.get_string_bytes_vec() instead"
+            );
+        }
         if header.type_id == Self::STRING_SLICE_TYPE_ID {
             // String slice: resolve through parent
             let parent_ptr = self.get_field(0);
@@ -545,12 +553,30 @@ impl HeapObject {
         self.get_header().type_id == Self::STRING_SLICE_TYPE_ID
     }
 
+    /// Check if this is a cons string (lazy concatenation node)
+    #[inline]
+    pub fn is_cons_string(&self) -> bool {
+        self.get_header().type_id == Self::CONS_STRING_TYPE_ID
+    }
+
+    /// Collect all bytes from this heap string (flat or slice) into a buffer.
+    /// For cons strings, use `Runtime::get_string_bytes_vec()` instead.
+    pub fn collect_flat_string_bytes_into(&self, buf: &mut Vec<u8>) {
+        debug_assert!(
+            !self.is_cons_string(),
+            "Use Runtime::get_string_bytes_vec() for cons strings"
+        );
+        let bytes = self.get_string_bytes();
+        buf.extend_from_slice(bytes);
+    }
+
     /// Get the cached hash for a heap string (first 8 bytes after header).
-    /// For string slices, reads field 2 (stored as tagged int to avoid GC confusion).
+    /// For string slices and cons strings, reads field 2 (stored as tagged int to avoid GC confusion).
     /// Returns 0 if hash has not been cached yet.
     #[inline]
     pub fn get_string_hash(&self) -> u64 {
-        if self.get_header().type_id == Self::STRING_SLICE_TYPE_ID {
+        let type_id = self.get_header().type_id;
+        if type_id == Self::STRING_SLICE_TYPE_ID || type_id == Self::CONS_STRING_TYPE_ID {
             // Field 2 stores hash as (hash << 3) — tagged int with tag 000.
             // Decode: shift right by 3. 0 → 0 (uncached).
             let raw = self.get_field(2);
@@ -563,10 +589,11 @@ impl HeapObject {
     }
 
     /// Set the cached hash for a heap string.
-    /// For string slices, writes to field 2 (stored as tagged int to avoid GC confusion).
+    /// For string slices and cons strings, writes to field 2 (stored as tagged int to avoid GC confusion).
     #[inline]
     pub fn set_string_hash(&self, hash: u64) {
-        if self.get_header().type_id == Self::STRING_SLICE_TYPE_ID {
+        let type_id = self.get_header().type_id;
+        if type_id == Self::STRING_SLICE_TYPE_ID || type_id == Self::CONS_STRING_TYPE_ID {
             // Store as (hash << 3) so GC sees tag 000 (Int), not a heap pointer
             let encoded = (hash as usize) << 3;
             self.write_field(2, encoded);

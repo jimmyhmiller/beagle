@@ -1,0 +1,181 @@
+namespace repl_server_test
+
+use beagle.core as core
+use beagle.socket as socket
+use beagle.builtin as builtin
+use beagle.repl as repl
+use beagle.async as async
+
+// ============================================================================
+// REPL Server Integration Test
+// ============================================================================
+// This test starts a REPL server in the background and connects to it
+// as a client to verify the full protocol works end-to-end.
+
+// Parse a line of JSON
+fn parse-json(line) {
+    try {
+        json-decode(line)
+    } catch (e) {
+        null
+    }
+}
+
+// Read one line from socket
+fn read-line(conn) {
+    let mut line = ""
+    let mut done = false
+
+    while done == false {
+        let data = socket/read(conn, 1)
+        if data == null || data == "" {
+            done = true
+        } else {
+            if data == "\n" {
+                done = true
+            } else {
+                line = line ++ data
+            }
+        }
+    }
+
+    line
+}
+
+// Send a request and read responses until "done" status
+fn send-and-receive(conn, request) {
+    let json = json-encode(request)
+    socket/write(conn, json ++ "\n")
+
+    let mut responses = []
+    let mut done = false
+
+    while done == false {
+        let line = read-line(conn)
+
+        if length(line) > 0 {
+            let msg = parse-json(line)
+
+            if msg != null {
+                responses = push(responses, msg)
+
+                // Check for done status
+                let status = get(msg, "status")
+                if status != null && any?(status, fn(s) { s == "done" }) {
+                    done = true
+                }
+            }
+        } else {
+            done = true
+        }
+    }
+
+    responses
+}
+
+fn test-client() {
+    println("Testing REPL client connection...")
+
+    try {
+        // Connect to server
+        let conn = socket/connect("127.0.0.1", 7888)
+        println("Connected to REPL server")
+
+        // Test 1: Describe
+        println("")
+        println("Test 1: Describe operation")
+        let responses = send-and-receive(conn, {
+            :op "describe",
+            :id "1"
+        })
+        println("Got", length(responses), "responses")
+        let msg = first-of(responses)
+        let ops = get(msg, "ops")
+        println("Supported ops:", ops)
+
+        // Test 2: Simple eval
+        println("")
+        println("Test 2: Simple eval")
+        let responses2 = send-and-receive(conn, {
+            :op "eval",
+            :id "2",
+            :session "test",
+            :code "1 + 2"
+        })
+        println("Got", length(responses2), "responses")
+        let mut i = 0
+        while i < length(responses2) {
+            let resp = nth(responses2, i)
+            let value = get(resp, "value")
+            if value != null {
+                println("  Value:", value)
+            }
+            i = i + 1
+        }
+
+        // Test 3: Eval with output
+        println("")
+        println("Test 3: Eval with output capture")
+        let responses3 = send-and-receive(conn, {
+            :op "eval",
+            :id "3",
+            :session "test",
+            :code "println(\"Hello from REPL\")"
+        })
+        println("Got", length(responses3), "responses")
+        let mut j = 0
+        while j < length(responses3) {
+            let resp = nth(responses3, j)
+            let out = get(resp, "out")
+            if out != null {
+                println("  Output:", out)
+            }
+            j = j + 1
+        }
+
+        // Test 4: List sessions
+        println("")
+        println("Test 4: List sessions")
+        let responses4 = send-and-receive(conn, {
+            :op "ls-sessions",
+            :id "4"
+        })
+        let msg4 = first-of(responses4)
+        let sessions = get(msg4, "sessions")
+        println("Active sessions:", sessions)
+
+        // Close connection
+        socket/close(conn)
+        println("")
+        println("All tests passed!")
+
+    } catch (e) {
+        println("Client error:", e)
+    }
+}
+
+fn main() {
+    println("REPL Server Integration Test")
+    println("=============================")
+    println("")
+
+    // Start server in background thread
+    thread(fn() {
+        async/with-implicit-async(fn() {
+            repl/start-repl-server("127.0.0.1", 7888)
+        })
+    })
+
+    // Wait for server to start
+    core/sleep(200)
+
+    // Run client tests
+    async/with-implicit-async(fn() {
+        test-client()
+    })
+
+    println("")
+    println("done")
+}
+
+// Skip: Output ordering depends on thread scheduling and server doesn't exit

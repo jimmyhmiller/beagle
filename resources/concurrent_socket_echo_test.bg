@@ -1,0 +1,74 @@
+namespace concurrent_socket_echo_test
+
+use beagle.core as core
+use beagle.socket as socket
+use beagle.async as async
+
+fn main() {
+    // Use atoms as barriers and result collectors for deterministic output
+    let server_ready = atom(false)
+    let server_result = atom(null)
+    let client_result = atom(null)
+    let server_done = atom(false)
+
+    // Start server in background thread
+    thread(fn() {
+        async/with-implicit-async(fn() {
+            let listener = socket/listen("127.0.0.1", 19876)
+
+            // Signal that server is ready
+            reset!(server_ready, true)
+
+            let conn = socket/accept(listener)
+
+            // Read data from client
+            let data = socket/read(conn, 1024)
+            reset!(server_result, data)
+
+            // Echo it back
+            socket/write(conn, data)
+
+            socket/close(conn)
+            socket/close-listener(listener)
+            reset!(server_done, true)
+        })
+    })
+
+    // Wait for server to be ready using atom barrier
+    loop {
+        if deref(server_ready) {
+            break(null)
+        }
+        core/sleep(1)
+    }
+
+    // Client connects and exchanges data
+    async/with-implicit-async(fn() {
+        let conn = socket/connect("127.0.0.1", 19876)
+
+        socket/write(conn, "Hello World")
+
+        let response = socket/read(conn, 1024)
+        reset!(client_result, response)
+
+        socket/close(conn)
+    })
+
+    // Wait for server to finish
+    loop {
+        if deref(server_done) {
+            break(null)
+        }
+        core/sleep(1)
+    }
+
+    // Print results in deterministic order
+    println("Server received: " ++ deref(server_result))
+    println("Client received: " ++ deref(client_result))
+    println("done")
+}
+
+// Expect
+// Server received: Hello World
+// Client received: Hello World
+// done

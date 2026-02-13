@@ -1,0 +1,210 @@
+namespace beagle.repl-session
+
+use beagle.core as core
+use beagle.builtin as builtin
+use beagle.async as async
+
+// ============================================================================
+// Session Management for REPL Server
+// ============================================================================
+// Each session represents an isolated evaluation context with:
+// - Dedicated background thread for evaluation
+// - Message queue for pending requests
+// - Output capture via dynamic var binding
+// - Cancellation support for long-running evaluations
+
+// EvalRequest - message passed to eval thread
+struct EvalRequest {
+    id           // string: request id
+    code         // string: code to evaluate
+    callback     // function: fn(response-map) to send results
+}
+
+// Session - isolated evaluation context
+struct Session {
+    id              // string: unique session id
+    eval_thread     // OS thread handle
+    message_queue   // atom([EvalRequest]): pending evals
+    is_running      // atom(bool): eval in progress
+    cancel_token    // atom(bool): for interruption
+    ns              // string: current namespace
+}
+
+/// Create a new session with dedicated eval thread.
+///
+/// The session's thread runs session-eval-loop in the background,
+/// processing evaluation requests from the message queue.
+///
+/// Examples:
+///   let sess = create-session("sess-1")
+fn create-session(id) {
+    let queue = atom([])
+    let running = atom(false)
+    let cancel = atom(false)
+
+    // Spawn background eval thread with async I/O support
+    // (needed because callbacks may write to sockets)
+    let eval_thread = thread(fn() {
+        async/with-implicit-async(fn() {
+            session-eval-loop(queue, running, cancel)
+        })
+    })
+
+    Session {
+        id: id,
+        eval_thread: eval_thread,
+        message_queue: queue,
+        is_running: running,
+        cancel_token: cancel,
+        ns: "user"
+    }
+}
+
+/// Background loop that processes eval requests from the queue.
+///
+/// For each request:
+/// 1. Pop request from queue
+/// 2. Mark running = true
+/// 3. Create StringBuffer for output capture
+/// 4. Use dynamic var binding to capture println/print output
+/// 5. Evaluate code with try/catch
+/// 6. Send captured output to client
+/// 7. Send result value
+/// 8. Send status: done
+/// 9. Mark running = false
+///
+/// Checks cancel token and exits if cancelled.
+fn session-eval-loop(queue, running, cancel) {
+    while deref(cancel) == false {
+        // Check for pending requests
+        let requests = deref(queue)
+
+        if empty?(requests) {
+            // No work - sleep briefly
+            core/sleep(10)
+        } else {
+            // Pop first request
+            let request = first-of(requests)
+            let remaining = rest(requests)
+            reset!(queue, remaining)
+
+            // Mark as running
+            reset!(running, true)
+
+            // Process the request
+            process-eval-request(request, cancel)
+
+            // Mark as not running
+            reset!(running, false)
+        }
+    }
+}
+
+/// Process a single eval request with output capture.
+///
+/// Uses dynamic var binding to capture all println/print output
+/// to a StringBuffer, then sends the captured output to the client.
+fn process-eval-request(request, cancel) {
+    let buf = core/new-string-buffer()
+
+    // Evaluate with output capture
+    let result = binding (core/out = buf) {
+        try {
+            // Check if cancelled before eval
+            if deref(cancel) {
+                null
+            } else {
+                eval(request.code)
+            }
+        } catch (e) {
+            e
+        }
+    }
+
+    // Check if cancelled
+    if deref(cancel) {
+        // Send cancellation status
+        let req_id = request.id
+        let response_map = assoc({:id req_id}, :status, "cancelled")
+        request.callback(response_map)
+    } else {
+        // Send captured output (if any)
+        if buf.content != "" {
+            let output = core/trim-right(buf.content)
+            let req_id = request.id
+            let response_map = assoc({:id req_id}, :out, output)
+            request.callback(response_map)
+        }
+
+        // Send result value
+        let req_id = request.id
+        let val_str = to-string(result)
+        let response_map = assoc({:id req_id}, :value, val_str)
+        request.callback(response_map)
+
+        // Send done status
+        let req_id = request.id
+        let done_status = ["done"]
+        let response_map = assoc({:id req_id}, :status, done_status)
+        request.callback(response_map)
+    }
+}
+
+/// Submit code for evaluation in a session.
+///
+/// The request is queued and the eval thread will process it.
+/// The response_fn is called with each response message.
+///
+/// Examples:
+///   session-eval(sess, "req-1", "(+ 1 2)", fn(resp) {
+///       println("Response:", resp)
+///   })
+fn session-eval(session, request_id, code, response_fn) {
+    let request = EvalRequest {
+        id: request_id,
+        code: code,
+        callback: response_fn
+    }
+
+    // Add to queue
+    swap!(session.message_queue, fn(queue) {
+        push(queue, request)
+    })
+}
+
+/// Interrupt a running evaluation in a session.
+///
+/// Sets the cancel token, which the eval loop checks.
+/// The cancel token is reset after the current eval completes.
+///
+/// Examples:
+///   session-interrupt(sess)
+fn session-interrupt(session) {
+    reset!(session.cancel_token, true)
+
+    // Wait briefly for eval to notice cancellation
+    core/sleep(50)
+
+    // Reset token for next eval
+    reset!(session.cancel_token, false)
+}
+
+/// Close a session and stop its eval thread.
+///
+/// Sets the cancel token permanently, causing the eval loop to exit.
+///
+/// Examples:
+///   session-close(sess)
+fn session-close(session) {
+    reset!(session.cancel_token, true)
+}
+
+/// Check if a session is currently running an evaluation.
+///
+/// Examples:
+///   if session-busy?(sess) {
+///       println("Session is busy")
+///   }
+fn session-busy?(session) {
+    deref(session.is_running)
+}

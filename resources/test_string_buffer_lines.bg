@@ -1,0 +1,38 @@
+namespace test_string_buffer_lines
+
+use beagle.core as core
+
+fn main() {
+    // Test 1: StringBuffer captures println output correctly via content
+    let buffer = core/new-string-buffer()
+    binding (core/out = buffer) {
+        println("hello")
+        println("world")
+    }
+    // content should be "hello\nworld\n"
+    print(buffer.content)
+
+    // Test 2: print() accumulation works
+    let buffer2 = core/new-string-buffer()
+    binding (core/out = buffer2) {
+        print("a")
+        print("b")
+        print("c")
+    }
+    println(buffer2.content)
+
+    // Test 3: empty println produces just newline in content
+    let buffer3 = core/new-string-buffer()
+    binding (core/out = buffer3) {
+        println()
+    }
+    print(buffer3.content)
+    println("done")
+}
+
+// Expect
+// hello
+// world
+// abc
+//
+// done

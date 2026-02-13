@@ -2084,9 +2084,45 @@ let TCP_WRITE_ERR = 8
 fn get-io-loop() {
     let loop_id = deref(__io_loop_atom)
     if loop_id == null {
-        let new_loop = core/event-loop-create(4)
-        reset!(__io_loop_atom, new_loop)
-        new_loop
+        // Use threaded event loop by default for concurrent I/O safety.
+        // This prevents deadlocks when multiple threads perform socket I/O
+        // concurrently (e.g., server accepting + client connecting).
+        let new_loop = core/event-loop-create-threaded(4)
+        // Use CAS to avoid race where two threads both see null and both create loops
+        let swapped = compare-and-swap!(__io_loop_atom, null, new_loop)
+        if swapped {
+            new_loop
+        } else {
+            // Another thread won the race — destroy our loop, use theirs
+            core/event-loop-destroy(new_loop)
+            deref(__io_loop_atom)
+        }
+    } else {
+        loop_id
+    }
+}
+
+// Atom to store the threaded IO loop ID (for concurrent I/O)
+let __threaded_io_loop_atom = atom(null)
+
+// Get or create a threaded event loop for concurrent I/O operations.
+// Use this instead of get-io-loop() when multiple threads need to perform
+// socket I/O concurrently (e.g., REPL server with multiple connections).
+// The threaded event loop runs I/O polling on a dedicated thread, preventing
+// deadlocks that occur when multiple threads block on poll_once().
+fn get-io-loop-threaded() {
+    let loop_id = deref(__threaded_io_loop_atom)
+    if loop_id == null {
+        let new_loop = core/event-loop-create-threaded(4)
+        // Use CAS to avoid race where two threads both see null and both create loops
+        let swapped = compare-and-swap!(__threaded_io_loop_atom, null, new_loop)
+        if swapped {
+            new_loop
+        } else {
+            // Another thread won the race — destroy our loop, use theirs
+            core/event-loop-destroy(new_loop)
+            deref(__threaded_io_loop_atom)
+        }
     } else {
         loop_id
     }
@@ -2102,10 +2138,10 @@ struct ImplicitAsyncHandler {}
 
 // Handle an IO action synchronously (blocking current thread)
 fn handle-io-action(action) {
-    let loop_id = get-io-loop()
-
     match action {
+        // Listen and Connect create new resources - use the current thread's event loop
         IOAction.TcpListen { host, port } => {
+            let loop_id = get-io-loop()
             let listener_id = core/tcp-listen(loop_id, host, port, 128)
             if listener_id < 0 {
                 throw("Failed to create TCP listener on " ++ host ++ ":" ++ to-string(port))
@@ -2114,13 +2150,14 @@ fn handle-io-action(action) {
         },
 
         IOAction.TcpConnect { host, port } => {
+            let loop_id = get-io-loop()
             let result_atom = atom(null)
             core/tcp-connect-async(loop_id, host, port, result_atom)
 
-            // Poll until we get a result
+            // Poll until we get a result matching our future_atom
             loop {
                 core/event-loop-run-once(loop_id, 50)
-                let result_type = core/tcp-result-pop(loop_id)
+                let result_type = core/tcp-result-pop-for-atom(loop_id, result_atom)
                 if result_type == TCP_CONNECT_OK {
                     let socket_id = core/tcp-result-value(loop_id)
                     break(TcpSocket { loop_id: loop_id, socket_id: socket_id })
@@ -2131,14 +2168,18 @@ fn handle-io-action(action) {
             }
         },
 
+        // Accept, Read, Write, Close use the resource's owning event loop
+        // so operations go to the correct event loop thread regardless of
+        // which thread is calling
         IOAction.TcpAccept { listener } => {
+            let loop_id = listener.loop_id
             let result_atom = atom(null)
             core/tcp-accept-async(loop_id, listener.listener_id, result_atom)
 
-            // Poll until we get a result
+            // Poll until we get a result matching our future_atom
             loop {
                 core/event-loop-run-once(loop_id, 50)
-                let result_type = core/tcp-result-pop(loop_id)
+                let result_type = core/tcp-result-pop-for-atom(loop_id, result_atom)
                 if result_type == TCP_ACCEPT_OK {
                     let socket_id = core/tcp-result-value(loop_id)
                     break(TcpSocket { loop_id: loop_id, socket_id: socket_id })
@@ -2150,6 +2191,7 @@ fn handle-io-action(action) {
         },
 
         IOAction.TcpRead { socket, n } => {
+            let loop_id = socket.loop_id
             let result_atom = atom(null)
             let read_result = core/tcp-read-async(loop_id, socket.socket_id, n, result_atom)
             if read_result < 0 {
@@ -2158,7 +2200,7 @@ fn handle-io-action(action) {
 
             loop {
                 core/event-loop-run-once(loop_id, 50)
-                let result_type = core/tcp-result-pop(loop_id)
+                let result_type = core/tcp-result-pop-for-atom(loop_id, result_atom)
                 if result_type == TCP_READ_OK {
                     let data = core/tcp-result-data(loop_id)
                     break(data)
@@ -2170,12 +2212,13 @@ fn handle-io-action(action) {
         },
 
         IOAction.TcpWrite { socket, data } => {
+            let loop_id = socket.loop_id
             let result_atom = atom(null)
             core/tcp-write-async(loop_id, socket.socket_id, data, result_atom)
 
             loop {
                 core/event-loop-run-once(loop_id, 50)
-                let result_type = core/tcp-result-pop(loop_id)
+                let result_type = core/tcp-result-pop-for-atom(loop_id, result_atom)
                 if result_type == TCP_WRITE_OK {
                     let bytes_written = core/tcp-result-value(loop_id)
                     break(bytes_written)
@@ -2187,12 +2230,12 @@ fn handle-io-action(action) {
         },
 
         IOAction.TcpClose { socket } => {
-            core/tcp-close(loop_id, socket.socket_id)
+            core/tcp-close(socket.loop_id, socket.socket_id)
             null
         },
 
         IOAction.TcpCloseListener { listener } => {
-            core/tcp-close-listener(loop_id, listener.listener_id)
+            core/tcp-close-listener(listener.loop_id, listener.listener_id)
             null
         }
     }

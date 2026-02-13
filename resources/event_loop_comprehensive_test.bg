@@ -1,0 +1,136 @@
+namespace event_loop_comprehensive_test
+
+use beagle.async as async
+use beagle.effect as effect
+use beagle.core as core
+
+// Comprehensive test for the threaded event loop through the async API.
+// Events are captured in an atom and checked at the end, since ordering
+// of I/O completions is not guaranteed.
+
+fn has-event?(events, name) {
+    any?(events, fn(e) { e == name })
+}
+
+fn main() {
+    let events = atom([])
+    let handler = async/create-event-loop-handler(2)
+
+    handle effect/Handler(async/Async) with handler {
+
+        // --- Timer / Sleep ---
+        let before_sleep = core/time-now()
+        async/sleep(50)
+        let after_sleep = core/time-now()
+        let elapsed_ms = (after_sleep - before_sleep) / 1000000
+        if elapsed_ms >= 40 {
+            swap!(events, fn(es) { push(es, "sleep-ok") })
+        }
+
+        // --- File Write ---
+        let test_path = "/tmp/beagle_event_loop_comprehensive_test.txt"
+        let content = "hello from event loop test"
+        let write_result = async/write-file(test_path, content)
+        match write_result {
+            Result.Ok { value } => {
+                if value == 26 {
+                    swap!(events, fn(es) { push(es, "write-ok") })
+                }
+            },
+            _ => null
+        }
+
+        // --- File Read ---
+        let read_result = async/read-file(test_path)
+        match read_result {
+            Result.Ok { value } => {
+                if value == "hello from event loop test" {
+                    swap!(events, fn(es) { push(es, "read-ok") })
+                }
+            },
+            _ => null
+        }
+
+        // --- File Stat ---
+        let stat_result = async/file-size(test_path)
+        match stat_result {
+            Result.Ok { value } => {
+                if value == 26 {
+                    swap!(events, fn(es) { push(es, "stat-ok") })
+                }
+            },
+            _ => null
+        }
+
+        // --- File Exists ---
+        let exists_result = async/file-exists?(test_path)
+        let exists = async/async-unwrap(exists_result)
+        if exists == true {
+            swap!(events, fn(es) { push(es, "exists-ok") })
+        }
+
+        // --- File Delete ---
+        let delete_result = async/delete-file(test_path)
+        match delete_result {
+            Result.Ok { value } => {
+                swap!(events, fn(es) { push(es, "delete-ok") })
+            },
+            _ => null
+        }
+
+        // --- File not found after delete ---
+        let exists_result2 = async/file-exists?(test_path)
+        let exists2 = async/async-unwrap(exists_result2)
+        if exists2 == false {
+            swap!(events, fn(es) { push(es, "gone-ok") })
+        }
+
+        // --- Multiple sleeps ---
+        async/sleep(20)
+        async/sleep(20)
+        swap!(events, fn(es) { push(es, "multi-sleep-ok") })
+    }
+
+    // Check all expected events were captured
+    let collected = deref(events)
+    let expected = [
+        "sleep-ok",
+        "write-ok",
+        "read-ok",
+        "stat-ok",
+        "exists-ok",
+        "delete-ok",
+        "gone-ok",
+        "multi-sleep-ok"
+    ]
+
+    let all_passed = all?(expected, fn(name) { has-event?(collected, name) })
+    println("All events captured:", all_passed)
+
+    // Print count for debugging
+    println("Event count:", length(collected))
+
+    // Individual checks for clarity
+    println("sleep:", has-event?(collected, "sleep-ok"))
+    println("write:", has-event?(collected, "write-ok"))
+    println("read:", has-event?(collected, "read-ok"))
+    println("stat:", has-event?(collected, "stat-ok"))
+    println("exists:", has-event?(collected, "exists-ok"))
+    println("delete:", has-event?(collected, "delete-ok"))
+    println("gone:", has-event?(collected, "gone-ok"))
+    println("multi-sleep:", has-event?(collected, "multi-sleep-ok"))
+    println("done")
+}
+
+// Expect
+// All events captured: true
+// Event count: 8
+// sleep: true
+// write: true
+// read: true
+// stat: true
+// exists: true
+// delete: true
+// gone: true
+// multi-sleep: true
+// done

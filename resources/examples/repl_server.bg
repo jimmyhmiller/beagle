@@ -1,0 +1,34 @@
+namespace repl_server_example
+
+use beagle.repl as repl
+
+// ============================================================================
+// Example REPL Server
+// ============================================================================
+// This demonstrates starting a production-quality REPL server that:
+// - Listens on localhost:7888
+// - Supports multiple concurrent clients
+// - Provides session isolation
+// - Captures and streams output
+// - Allows interruption of long-running evaluations
+
+fn main() {
+    println("Beagle REPL Server Example")
+    println("===========================")
+    println("")
+    println("Starting server on port 7888...")
+    println("Connect with:")
+    println("  telnet localhost 7888")
+    println("")
+    println("Try these commands:")
+    println("  {\"op\":\"describe\",\"id\":\"1\"}")
+    println("  {\"op\":\"eval\",\"id\":\"2\",\"session\":\"test\",\"code\":\"(+ 1 2)\"}")
+    println("  {\"op\":\"eval\",\"id\":\"3\",\"session\":\"test\",\"code\":\"println(\\\"hello\\\")\"}")
+    println("  {\"op\":\"ls-sessions\",\"id\":\"4\"}")
+    println("  {\"op\":\"interrupt\",\"id\":\"5\",\"session\":\"test\"}")
+    println("  {\"op\":\"close\",\"id\":\"6\",\"session\":\"test\"}")
+    println("")
+
+    // Start the server (blocks forever)
+    repl/start-repl-server("127.0.0.1", 7888)
+}

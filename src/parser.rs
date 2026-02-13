@@ -1548,12 +1548,12 @@ impl Parser {
 
                     // Parse identifier name
                     let name = match self.current_token() {
-                        Token::Atom((start, end)) => {
-                            String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                                .map_err(|_| ParseError::InvalidUtf8 {
-                                    location: self.current_source_location(),
-                                })?
-                        }
+                        Token::Atom((start, end)) => String::from_utf8(
+                            self.source.as_bytes()[start..end].to_vec(),
+                        )
+                        .map_err(|_| ParseError::InvalidUtf8 {
+                            location: self.current_source_location(),
+                        })?,
                         _ => {
                             return Err(ParseError::UnexpectedToken {
                                 expected: "identifier".to_string(),
@@ -1639,12 +1639,12 @@ impl Parser {
 
                 // Parse var_name
                 let var_name = match self.current_token() {
-                    Token::Atom((start, end)) => {
-                        String::from_utf8(self.source.as_bytes()[start..end].to_vec())
-                            .map_err(|_| ParseError::InvalidUtf8 {
-                                location: self.current_source_location(),
-                            })?
-                    }
+                    Token::Atom((start, end)) => String::from_utf8(
+                        self.source.as_bytes()[start..end].to_vec(),
+                    )
+                    .map_err(|_| ParseError::InvalidUtf8 {
+                        location: self.current_source_location(),
+                    })?,
                     _ => {
                         return Err(ParseError::UnexpectedToken {
                             expected: "identifier".to_string(),

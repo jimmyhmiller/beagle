@@ -13,9 +13,8 @@ fn main() {
 
     println("back to stdout")
 
-    // Verify buffer contents (indices 0 and 2 contain the text, 1 and 3 are newlines)
-    println(nth(buffer.lines, 0))
-    println(nth(buffer.lines, 2))
+    // Verify buffer contents - content is a single string with newlines
+    print(buffer.content)
 }
 
 // Expect

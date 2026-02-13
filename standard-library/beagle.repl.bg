@@ -1,0 +1,244 @@
+namespace beagle.repl
+
+use beagle.core as core
+use beagle.socket as socket
+use beagle.async as async
+use beagle.builtin as builtin
+use beagle.repl-session as session
+
+// ============================================================================
+// Production-Quality REPL Server
+// ============================================================================
+
+// Global session registry
+let sessions_atom = atom({})
+
+fn get-or-create-session(session_id) {
+    let sessions = deref(sessions_atom)
+    let existing = get(sessions, session_id)
+
+    if existing != null {
+        existing
+    } else {
+        let new_session = session/create-session(session_id)
+        swap!(sessions_atom, fn(sessions) {
+            assoc(sessions, session_id, new_session)
+        })
+        new_session
+    }
+}
+
+fn remove-session(session_id) {
+    swap!(sessions_atom, fn(sessions) {
+        dissoc(sessions, session_id)
+    })
+}
+
+fn send-response(client, response) {
+    let json = json-encode(response)
+    socket/write(client, json ++ "\n")
+}
+
+fn parse-json-line(line) {
+    try {
+        json-decode(line)
+    } catch (e) {
+        null
+    }
+}
+
+fn handle-eval(client, msg) {
+    let session_id = get(msg, "session")
+    let request_id = get(msg, "id")
+    let code = get(msg, "code")
+
+    if session_id == null || request_id == null || code == null {
+        let err_status = ["error"]
+        send-response(client, {:id request_id, :status err_status, :error "Missing required fields: session, id, code"})
+    } else {
+        let sess = get-or-create-session(session_id)
+        session/session-eval(sess, request_id, code, fn(response) {
+            send-response(client, response)
+        })
+    }
+}
+
+fn handle-interrupt(client, msg) {
+    let session_id = get(msg, "session")
+    let request_id = get(msg, "id")
+
+    if session_id == null {
+        let err_status = ["error"]
+        send-response(client, {:id request_id, :status err_status, :error "Missing required field: session"})
+    } else {
+        let sessions = deref(sessions_atom)
+        let sess = get(sessions, session_id)
+
+        if sess == null {
+            let err_status = ["error"]
+            send-response(client, {:id request_id, :status err_status, :error "Session not found"})
+        } else {
+            session/session-interrupt(sess)
+            let done_status = ["done"]
+            send-response(client, {:id request_id, :status done_status})
+        }
+    }
+}
+
+fn handle-describe(client, msg) {
+    let request_id = get(msg, "id")
+    let ops = ["eval", "interrupt", "describe", "ls-sessions", "close"]
+    let versions = {:beagle "0.1.0", :protocol "1.0.0"}
+    let done_status = ["done"]
+    send-response(client, {:id request_id, :ops ops, :versions versions, :status done_status})
+}
+
+fn handle-ls-sessions(client, msg) {
+    let request_id = get(msg, "id")
+    let sessions = deref(sessions_atom)
+    let session_ids = keys(sessions)
+    let done_status = ["done"]
+    send-response(client, {:id request_id, :sessions session_ids, :status done_status})
+}
+
+fn handle-close(client, msg) {
+    let session_id = get(msg, "session")
+    let request_id = get(msg, "id")
+
+    if session_id == null {
+        let err_status = ["error"]
+        send-response(client, {:id request_id, :status err_status, :error "Missing required field: session"})
+    } else {
+        let sessions = deref(sessions_atom)
+        let sess = get(sessions, session_id)
+
+        if sess != null {
+            session/session-close(sess)
+            remove-session(session_id)
+        }
+
+        let done_status = ["done"]
+        send-response(client, {:id request_id, :status done_status})
+    }
+}
+
+fn handle-message(client, msg) {
+    let op = get(msg, "op")
+
+    if op == null {
+        let err_status = ["error"]
+        send-response(client, {:status err_status, :error "Missing 'op' field"})
+    } else {
+        if op == "eval" {
+            handle-eval(client, msg)
+        } else {
+            if op == "interrupt" {
+                handle-interrupt(client, msg)
+            } else {
+                if op == "describe" {
+                    handle-describe(client, msg)
+                } else {
+                    if op == "ls-sessions" {
+                        handle-ls-sessions(client, msg)
+                    } else {
+                        if op == "close" {
+                            handle-close(client, msg)
+                        } else {
+                            let err_status = ["error"]
+                            send-response(client, {:status err_status, :error "Unknown operation: " ++ op})
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn extract-lines(data, buffer) {
+    let combined = buffer ++ data
+    let parts = core/split(combined, "\n")
+    let len = length(parts)
+
+    if len == 0 {
+        let empty_lines = []
+        {:lines empty_lines, :buffer combined}
+    } else {
+        let last = nth(parts, len - 1)
+        let mut complete_lines = []
+        let mut i = 0
+        while i < len - 1 {
+            complete_lines = push(complete_lines, nth(parts, i))
+            i = i + 1
+        }
+        {:lines complete_lines, :buffer last}
+    }
+}
+
+fn handle-client(client) {
+    let mut buffer = ""
+    let mut running = true
+
+    while running {
+        try {
+            let data = socket/read(client, 4096)
+
+            if data == null || data == "" {
+                running = false
+            } else {
+                let result = extract-lines(data, buffer)
+                buffer = get(result, :buffer)
+                let lines = get(result, :lines)
+
+                let mut i = 0
+                while i < length(lines) {
+                    let line = nth(lines, i)
+
+                    if length(line) > 0 {
+                        let msg = parse-json-line(line)
+
+                        if msg == null {
+                            let err_status = ["error"]
+                            send-response(client, {:status err_status, :error "Invalid JSON"})
+                        } else {
+                            handle-message(client, msg)
+                        }
+                    }
+
+                    i = i + 1
+                }
+            }
+        } catch (e) {
+            println("Error handling client:", e)
+            running = false
+        }
+    }
+
+    try {
+        socket/close(client)
+    } catch (e) {
+        null
+    }
+}
+
+fn start-repl-server(host, port) {
+    println("Starting REPL server on " ++ host ++ ":" ++ to-string(port))
+
+    let server = socket/listen(host, port)
+    println("REPL server listening...")
+
+    let mut running = true
+    while running {
+        try {
+            let client = socket/accept(server)
+            println("Client connected")
+
+            thread(fn() {
+                async/with-implicit-async(fn() {
+                    handle-client(client)
+                })
+            })
+        } catch (e) {
+            println("Error accepting connection:", e)
+        }
+    }
+}

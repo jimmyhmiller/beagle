@@ -71,3 +71,8 @@ pub const TYPE_ID_MUTABLE_MAP: u8 = 33;
 /// A lightweight view into a parent string. Length is in header.type_data.
 /// Non-opaque so GC traces the parent pointer.
 pub const TYPE_ID_STRING_SLICE: u8 = 34;
+
+/// Type ID for cons strings (3 fields: left_ptr, right_ptr, cached_hash)
+/// A lazy concatenation node. Total byte length is in header.type_data.
+/// Non-opaque so GC traces left and right child pointers.
+pub const TYPE_ID_CONS_STRING: u8 = 35;

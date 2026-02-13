@@ -4544,10 +4544,7 @@ impl AstCompiler<'_> {
                     return Some(VariableLocation::DynamicVariable(namespace_id, slot));
                 }
             }
-            Some(VariableLocation::NamespaceVariable(
-                namespace_id,
-                slot,
-            ))
+            Some(VariableLocation::NamespaceVariable(namespace_id, slot))
         } else {
             // Try with the full qualified name (namespace/name) for the current namespace
             let qualified_name = self.compiler.current_namespace_name() + "/" + name;
@@ -4557,15 +4554,14 @@ impl AstCompiler<'_> {
             {
                 let namespace_id = self.compiler.current_namespace_id();
                 // Check if this is a dynamic variable
-                if let Some((dyn_ns_id, dyn_slot)) = self.compiler.lookup_dynamic_var(&qualified_name) {
+                if let Some((dyn_ns_id, dyn_slot)) =
+                    self.compiler.lookup_dynamic_var(&qualified_name)
+                {
                     if dyn_ns_id == namespace_id && dyn_slot == slot {
                         return Some(VariableLocation::DynamicVariable(namespace_id, slot));
                     }
                 }
-                return Some(VariableLocation::NamespaceVariable(
-                    namespace_id,
-                    slot,
-                ));
+                return Some(VariableLocation::NamespaceVariable(namespace_id, slot));
             }
             // TODO: The global vs beagle.core is ugly
             let global_id = self.compiler.global_namespace_id();

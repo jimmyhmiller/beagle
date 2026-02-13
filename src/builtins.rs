@@ -12,8 +12,8 @@ use std::{
 use crate::{
     Message,
     collections::{
-        GcHandle, PersistentVec, TYPE_ID_CONTINUATION_SEGMENT, TYPE_ID_KEYWORD,
-        TYPE_ID_MULTI_ARITY_FUNCTION, TYPE_ID_STRING, TYPE_ID_STRING_SLICE,
+        GcHandle, PersistentVec, TYPE_ID_CONS_STRING, TYPE_ID_CONTINUATION_SEGMENT,
+        TYPE_ID_KEYWORD, TYPE_ID_MULTI_ARITY_FUNCTION, TYPE_ID_STRING, TYPE_ID_STRING_SLICE,
     },
     gc::STACK_SIZE,
     get_runtime,
@@ -247,6 +247,22 @@ pub unsafe extern "C" fn to_number(
     }
 }
 
+/// Check if a value is a string-like type (string literal, heap string, string slice, or cons string)
+#[inline]
+fn is_string_like(value: usize) -> bool {
+    use crate::collections::{TYPE_ID_CONS_STRING, TYPE_ID_STRING, TYPE_ID_STRING_SLICE};
+    let tag = BuiltInTypes::get_kind(value);
+    if tag == BuiltInTypes::String {
+        return true;
+    }
+    if !BuiltInTypes::is_heap_pointer(value) {
+        return false;
+    }
+    let heap_obj = HeapObject::from_tagged(value);
+    let type_id = heap_obj.get_header().type_id;
+    type_id == TYPE_ID_STRING || type_id == TYPE_ID_STRING_SLICE || type_id == TYPE_ID_CONS_STRING
+}
+
 #[inline(always)]
 fn print_call_builtin(_runtime: &Runtime, _name: &str) {
     debug_only!(if _runtime.get_command_line_args().print_builtin_calls {
@@ -383,8 +399,26 @@ extern "C" fn get_string_index(
             .into()
     } else {
         let heap_obj = HeapObject::from_tagged(string);
-        let bytes = heap_obj.get_string_bytes();
         let header = heap_obj.get_header();
+
+        // Cons string: flatten then index
+        if header.type_id == TYPE_ID_CONS_STRING {
+            let bytes = runtime.get_string_bytes_vec(string);
+            let is_ascii = header.type_flags & 1 != 0;
+            if is_ascii {
+                let byte = bytes[index];
+                return runtime.get_ascii_char_literal(byte);
+            }
+            let s = unsafe { std::str::from_utf8_unchecked(&bytes) };
+            let ch = s.chars().nth(index).unwrap();
+            let result = ch.to_string();
+            return runtime
+                .allocate_string(stack_pointer, result)
+                .unwrap()
+                .into();
+        }
+
+        let bytes = heap_obj.get_string_bytes();
         let is_ascii = if header.type_id == TYPE_ID_STRING_SLICE {
             let parent = HeapObject::from_tagged(heap_obj.get_field(0));
             parent.get_header().type_flags & 1 != 0
@@ -393,12 +427,10 @@ extern "C" fn get_string_index(
         };
 
         if is_ascii {
-            // ASCII fast path: O(1), no heap allocation
             let byte = bytes[index];
             return runtime.get_ascii_char_literal(byte);
         }
 
-        // Unicode path: find the char at the given index
         let object_pointer_id = runtime.register_temporary_root(string);
         let s = unsafe { std::str::from_utf8_unchecked(bytes) };
         let ch = s.chars().nth(index).unwrap();
@@ -418,14 +450,25 @@ extern "C" fn get_string_length(string: usize) -> usize {
     if BuiltInTypes::get_kind(string) == BuiltInTypes::String {
         let s = runtime.get_str_literal(string);
         if s.is_ascii() {
-            // ASCII: byte count == char count
             return BuiltInTypes::Int.tag(s.len() as isize) as usize;
         }
         BuiltInTypes::Int.tag(s.chars().count() as isize) as usize
     } else {
         let heap_obj = HeapObject::from_tagged(string);
-        let bytes = heap_obj.get_string_bytes();
         let header = heap_obj.get_header();
+
+        // Cons string: use type_data for ASCII length, flatten for Unicode
+        if header.type_id == TYPE_ID_CONS_STRING {
+            let is_ascii = header.type_flags & 1 != 0;
+            if is_ascii {
+                return BuiltInTypes::Int.tag(header.type_data as isize) as usize;
+            }
+            let bytes = runtime.get_string_bytes_vec(string);
+            let s = unsafe { std::str::from_utf8_unchecked(&bytes) };
+            return BuiltInTypes::Int.tag(s.chars().count() as isize) as usize;
+        }
+
+        let bytes = heap_obj.get_string_bytes();
         let is_ascii = if header.type_id == TYPE_ID_STRING_SLICE {
             let parent = HeapObject::from_tagged(heap_obj.get_field(0));
             parent.get_header().type_flags & 1 != 0
@@ -433,7 +476,6 @@ extern "C" fn get_string_length(string: usize) -> usize {
             header.type_flags & 1 != 0
         };
         if is_ascii {
-            // ASCII: byte count == char count
             return BuiltInTypes::Int.tag(bytes.len() as isize) as usize;
         }
         let s = unsafe { std::str::from_utf8_unchecked(bytes) };
@@ -450,11 +492,49 @@ extern "C" fn string_concat(
     save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "string_concat");
     let runtime = get_runtime().get_mut();
-    let a = runtime.get_string(stack_pointer, a);
-    let b = runtime.get_string(stack_pointer, b);
-    let result = a + &b;
+
+    // If either argument is not a string, fall back to converting both to strings
+    let a_is_string = is_string_like(a);
+    let b_is_string = is_string_like(b);
+    if !a_is_string || !b_is_string {
+        let a_str = runtime.get_string(stack_pointer, a);
+        let b_str = runtime.get_string(stack_pointer, b);
+        let result = a_str + &b_str;
+        return runtime
+            .allocate_string(stack_pointer, result)
+            .unwrap()
+            .into();
+    }
+
+    let a_len = runtime.get_string_byte_length(a);
+    let b_len = runtime.get_string_byte_length(b);
+
+    // If either side is empty, return the other (O(1))
+    if a_len == 0 {
+        return b;
+    }
+    if b_len == 0 {
+        return a;
+    }
+
+    let total_len = a_len + b_len;
+
+    // For small strings (<= 128 bytes), create a flat string directly
+    if total_len <= 128 {
+        let a_bytes = runtime.get_string_bytes_vec(a);
+        let b_bytes = runtime.get_string_bytes_vec(b);
+        let mut result = Vec::with_capacity(total_len);
+        result.extend_from_slice(&a_bytes);
+        result.extend_from_slice(&b_bytes);
+        return runtime
+            .allocate_string_from_bytes(stack_pointer, &result)
+            .unwrap()
+            .into();
+    }
+
+    // For larger strings, create a cons string node (O(1))
     runtime
-        .allocate_string(stack_pointer, result)
+        .allocate_cons_string(stack_pointer, a, b)
         .unwrap()
         .into()
 }
@@ -983,8 +1063,12 @@ extern "C" fn protocol_dispatch(
             heap_obj.get_struct_id()
         } else {
             // Built-in heap type (Array=1, String=2, Keyword=3)
-            // Use primitive dispatch with header_type_id
-            0x8000_0000_0000_0000 | header_type_id
+            // Map variant type_ids to their base primitive index
+            let primitive_index = match header_type_id as u8 {
+                TYPE_ID_STRING_SLICE | TYPE_ID_CONS_STRING => 2, // → String
+                _ => header_type_id,
+            };
+            0x8000_0000_0000_0000 | primitive_index
         }
     } else {
         // Tagged primitive (Int, Float, Bool, String constant, etc.)
@@ -6547,10 +6631,10 @@ fn value_to_json(runtime: &Runtime, value: usize, depth: usize) -> Result<String
                     }
                     Ok(format!("[{}]", parts.join(",")))
                 }
-                2 | 34 => {
-                    // HeapObject string (or string slice)
-                    let bytes = object.get_string_bytes();
-                    let string = std::str::from_utf8(bytes).unwrap_or("");
+                2 | 34 | 35 => {
+                    // HeapObject string (flat, slice, or cons)
+                    let bytes = runtime.get_string_bytes_vec(value);
+                    let string = std::str::from_utf8(&bytes).unwrap_or("");
                     Ok(format!("\"{}\"", escape_json_string(string)))
                 }
                 3 => {
@@ -6634,10 +6718,10 @@ fn value_to_json_key(runtime: &Runtime, value: usize) -> Result<String, JsonErro
             let object = HeapObject::from_tagged(value);
             let header = object.get_header();
             match header.type_id {
-                2 | 34 => {
-                    // HeapObject string (or string slice)
-                    let bytes = object.get_string_bytes();
-                    let string = std::str::from_utf8(bytes).unwrap_or("");
+                2 | 34 | 35 => {
+                    // HeapObject string (flat, slice, or cons)
+                    let bytes = runtime.get_string_bytes_vec(value);
+                    let string = std::str::from_utf8(&bytes).unwrap_or("");
                     Ok(format!("\"{}\"", escape_json_string(string)))
                 }
                 3 => {
@@ -7407,9 +7491,10 @@ extern "C" fn eval(stack_pointer: usize, frame_pointer: usize, code: usize) -> u
     let code = match BuiltInTypes::get_kind(code) {
         BuiltInTypes::String => runtime.get_string_literal(code),
         BuiltInTypes::HeapObject => {
-            let code = HeapObject::from_tagged(code);
-            if code.get_header().type_id != TYPE_ID_STRING
-                && code.get_header().type_id != TYPE_ID_STRING_SLICE
+            let code_obj = HeapObject::from_tagged(code);
+            if code_obj.get_header().type_id != TYPE_ID_STRING
+                && code_obj.get_header().type_id != TYPE_ID_STRING_SLICE
+                && code_obj.get_header().type_id != TYPE_ID_CONS_STRING
             {
                 unsafe {
                     throw_runtime_error(
@@ -7417,14 +7502,14 @@ extern "C" fn eval(stack_pointer: usize, frame_pointer: usize, code: usize) -> u
                         "TypeError",
                         format!(
                             "Expected string, got heap object with type_id {}",
-                            code.get_header().type_id
+                            code_obj.get_header().type_id
                         ),
                     );
                 }
             }
-            let bytes = code.get_string_bytes();
-            let code = std::str::from_utf8(bytes).unwrap();
-            code.to_string()
+            let bytes = runtime.get_string_bytes_vec(code);
+            let code_str = std::str::from_utf8(&bytes).unwrap();
+            code_str.to_string()
         }
         _ => unsafe {
             throw_runtime_error(
@@ -7493,15 +7578,13 @@ extern "C" fn get_cpu_count() -> usize {
 
 /// Create a new event loop for async I/O operations
 /// Takes pool_size as argument - number of threads for file I/O
+/// Always spawns a dedicated I/O thread.
 extern "C" fn event_loop_create(pool_size: usize) -> usize {
     let pool_size = BuiltInTypes::untag(pool_size);
     let runtime = get_runtime().get_mut();
 
-    match crate::runtime::EventLoop::new(pool_size) {
-        Ok(event_loop) => {
-            let id = runtime.event_loops.register(event_loop);
-            BuiltInTypes::Int.tag(id as isize) as usize
-        }
+    match runtime.event_loops.create(pool_size) {
+        Ok(id) => BuiltInTypes::Int.tag(id as isize) as usize,
         Err(e) => {
             eprintln!("Failed to create event loop: {}", e);
             BuiltInTypes::Int.tag(-1) as usize
@@ -7509,24 +7592,43 @@ extern "C" fn event_loop_create(pool_size: usize) -> usize {
     }
 }
 
-/// Run the event loop once, processing events with given timeout in milliseconds
-/// Returns the number of events processed
+/// Create a new event loop (same as event_loop_create — kept for backward compatibility)
+extern "C" fn event_loop_create_threaded(pool_size: usize) -> usize {
+    event_loop_create(pool_size)
+}
+
+/// Run the event loop once, waiting for results with given timeout in milliseconds
+/// The dedicated I/O thread handles polling; this waits on Condvar for results.
+/// Returns the number of available results.
 extern "C" fn event_loop_run_once(loop_id: usize, timeout_ms: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
     let timeout_ms = BuiltInTypes::untag(timeout_ms) as u64;
     let runtime = get_runtime().get_mut();
 
-    if let Some(event_loop) = runtime.event_loops.get_mut(loop_id) {
-        match event_loop.poll_once(timeout_ms) {
-            Ok(count) => BuiltInTypes::Int.tag(count as isize) as usize,
-            Err(e) => {
-                eprintln!("Event loop poll error: {}", e);
-                BuiltInTypes::Int.tag(-1) as usize
+    let notify = {
+        let event_loop = match runtime.event_loops.get(loop_id) {
+            Some(el) => el,
+            None => return BuiltInTypes::Int.tag(-1) as usize,
+        };
+        event_loop.results_notify().clone()
+    };
+    // Block on Condvar (runtime borrow is no longer held)
+    {
+        let (lock, cvar) = &*notify;
+        if let Ok(guard) = lock.lock() {
+            let wait_time = std::time::Duration::from_millis(timeout_ms.min(50));
+            let result = cvar.wait_timeout(guard, wait_time);
+            if let Ok((mut ready, _)) = result {
+                *ready = false;
             }
         }
-    } else {
-        BuiltInTypes::Int.tag(-1) as usize
     }
+    let event_loop = match runtime.event_loops.get(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+    let count = event_loop.tcp_results_count();
+    BuiltInTypes::Int.tag(count as isize) as usize
 }
 
 /// Wake the event loop from another thread
@@ -7547,7 +7649,7 @@ extern "C" fn event_loop_wake(loop_id: usize) -> usize {
     }
 }
 
-/// Destroy an event loop
+/// Destroy an event loop and shut down its I/O thread
 extern "C" fn event_loop_destroy(loop_id: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
     let runtime = get_runtime().get_mut();
@@ -7564,7 +7666,8 @@ extern "C" fn event_loop_destroy(loop_id: usize) -> usize {
 // =============================================================================
 
 /// Start a non-blocking TCP connection
-/// Returns socket_id on success, -1 on error
+/// In InProcess mode: returns socket_id on success, -1 on error
+/// In Threaded mode: submits operation, returns 0 on success, -1 on error
 extern "C" fn tcp_connect_async(
     _stack_pointer: usize,
     _frame_pointer: usize,
@@ -7595,13 +7698,12 @@ extern "C" fn tcp_connect_async(
         }
     };
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(-1) as usize,
     };
-
-    match event_loop.tcp_connect(addr, future_atom) {
-        Ok((socket_id, _token, _op_id)) => BuiltInTypes::Int.tag(socket_id as isize) as usize,
+    match event_loop.submit_tcp_op(crate::runtime::TcpOperation::Connect { addr, future_atom }) {
+        Ok(()) => BuiltInTypes::Int.tag(0) as usize,
         Err(_) => BuiltInTypes::Int.tag(-1) as usize,
     }
 }
@@ -7629,12 +7731,11 @@ extern "C" fn tcp_listen(
         Err(_) => return BuiltInTypes::Int.tag(-1) as usize,
     };
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(-1) as usize,
     };
-
-    match event_loop.tcp_listen(addr, backlog) {
+    match event_loop.submit_tcp_listen(addr, backlog) {
         Ok(listener_id) => BuiltInTypes::Int.tag(listener_id as isize) as usize,
         Err(_) => BuiltInTypes::Int.tag(-1) as usize,
     }
@@ -7642,25 +7743,29 @@ extern "C" fn tcp_listen(
 
 /// Start accepting a connection on a listener
 /// Returns op_id on success (operation started), -1 on error
+/// In Threaded mode: submits operation, returns 0 on success
 extern "C" fn tcp_accept_async(loop_id: usize, listener_id: usize, future_atom: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
     let listener_id = BuiltInTypes::untag(listener_id);
     let future_atom = BuiltInTypes::untag(future_atom);
     let runtime = get_runtime().get_mut();
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(-1) as usize,
     };
-
-    match event_loop.tcp_accept(listener_id, future_atom) {
-        Ok((_token, op_id)) => BuiltInTypes::Int.tag(op_id as isize) as usize,
+    match event_loop.submit_tcp_op(crate::runtime::TcpOperation::Accept {
+        listener_id,
+        future_atom,
+    }) {
+        Ok(()) => BuiltInTypes::Int.tag(0) as usize,
         Err(_) => BuiltInTypes::Int.tag(-1) as usize,
     }
 }
 
 /// Start a read operation on a TCP socket
 /// Returns op_id on success (operation started), -1 on error
+/// In Threaded mode: submits operation, returns 0 on success
 extern "C" fn tcp_read_async(
     loop_id: usize,
     socket_id: usize,
@@ -7673,19 +7778,23 @@ extern "C" fn tcp_read_async(
     let future_atom = BuiltInTypes::untag(future_atom);
     let runtime = get_runtime().get_mut();
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(-1) as usize,
     };
-
-    match event_loop.tcp_read(socket_id, buffer_size, future_atom) {
-        Ok((_token, op_id)) => BuiltInTypes::Int.tag(op_id as isize) as usize,
+    match event_loop.submit_tcp_op(crate::runtime::TcpOperation::Read {
+        socket_id,
+        buffer_size,
+        future_atom,
+    }) {
+        Ok(()) => BuiltInTypes::Int.tag(0) as usize,
         Err(_) => BuiltInTypes::Int.tag(-1) as usize,
     }
 }
 
 /// Start a write operation on a TCP socket
 /// Returns op_id on success (operation started), -1 on error
+/// In Threaded mode: submits operation, returns 0 on success
 extern "C" fn tcp_write_async(
     stack_pointer: usize,
     _frame_pointer: usize,
@@ -7703,13 +7812,16 @@ extern "C" fn tcp_write_async(
     let data_str = runtime.get_string(stack_pointer, data);
     let data_bytes = data_str.as_bytes().to_vec();
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(-1) as usize,
     };
-
-    match event_loop.tcp_write(socket_id, data_bytes, future_atom) {
-        Ok((_token, op_id)) => BuiltInTypes::Int.tag(op_id as isize) as usize,
+    match event_loop.submit_tcp_op(crate::runtime::TcpOperation::Write {
+        socket_id,
+        data: data_bytes,
+        future_atom,
+    }) {
+        Ok(()) => BuiltInTypes::Int.tag(0) as usize,
         Err(_) => BuiltInTypes::Int.tag(-1) as usize,
     }
 }
@@ -7720,12 +7832,11 @@ extern "C" fn tcp_close(loop_id: usize, socket_id: usize) -> usize {
     let socket_id = BuiltInTypes::untag(socket_id);
     let runtime = get_runtime().get_mut();
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(-1) as usize,
     };
-
-    match event_loop.tcp_close(socket_id) {
+    match event_loop.submit_tcp_op(crate::runtime::TcpOperation::Close { socket_id }) {
         Ok(()) => BuiltInTypes::Int.tag(1) as usize,
         Err(_) => BuiltInTypes::Int.tag(-1) as usize,
     }
@@ -7737,12 +7848,11 @@ extern "C" fn tcp_close_listener(loop_id: usize, listener_id: usize) -> usize {
     let listener_id = BuiltInTypes::untag(listener_id);
     let runtime = get_runtime().get_mut();
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(-1) as usize,
     };
-
-    match event_loop.tcp_close_listener(listener_id) {
+    match event_loop.submit_tcp_op(crate::runtime::TcpOperation::CloseListener { listener_id }) {
         Ok(()) => BuiltInTypes::Int.tag(1) as usize,
         Err(_) => BuiltInTypes::Int.tag(-1) as usize,
     }
@@ -7754,12 +7864,11 @@ extern "C" fn tcp_results_count(loop_id: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
     let runtime = get_runtime().get_mut();
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(0) as usize,
     };
-
-    let count = event_loop.tcp_results_len();
+    let count = event_loop.tcp_results_count();
     BuiltInTypes::Int.tag(count as isize) as usize
 }
 
@@ -7772,14 +7881,50 @@ extern "C" fn tcp_result_pop(loop_id: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
     let runtime = get_runtime().get_mut();
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    use crate::runtime::TcpResult;
+
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(0) as usize,
     };
+    let maybe_result = event_loop.pop_tcp_result();
+
+    match maybe_result {
+        None => BuiltInTypes::Int.tag(0) as usize,
+        Some(result) => {
+            let type_code = match &result {
+                TcpResult::ConnectOk { .. } => 1,
+                TcpResult::ConnectErr { .. } => 2,
+                TcpResult::AcceptOk { .. } => 3,
+                TcpResult::AcceptErr { .. } => 4,
+                TcpResult::ReadOk { .. } => 5,
+                TcpResult::ReadErr { .. } => 6,
+                TcpResult::WriteOk { .. } => 7,
+                TcpResult::WriteErr { .. } => 8,
+            };
+            event_loop.set_current_result(result);
+            BuiltInTypes::Int.tag(type_code) as usize
+        }
+    }
+}
+
+/// Pop and get the next completed TCP result matching a specific future_atom
+/// This is used in threaded mode to ensure each thread only gets its own results.
+/// Returns 0 if no matching result, otherwise the type code (same as tcp_result_pop)
+extern "C" fn tcp_result_pop_for_atom(loop_id: usize, future_atom: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let future_atom = BuiltInTypes::untag(future_atom);
+    let runtime = get_runtime().get_mut();
 
     use crate::runtime::TcpResult;
 
-    match event_loop.pop_tcp_result() {
+    let event_loop = match runtime.event_loops.get(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(0) as usize,
+    };
+    let maybe_result = event_loop.pop_tcp_result_for_atom(future_atom);
+
+    match maybe_result {
         None => BuiltInTypes::Int.tag(0) as usize,
         Some(result) => {
             let type_code = match &result {
@@ -7803,7 +7948,7 @@ extern "C" fn tcp_result_future_atom(loop_id: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
     let runtime = get_runtime().get_mut();
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(0) as usize,
     };
@@ -7813,14 +7958,14 @@ extern "C" fn tcp_result_future_atom(loop_id: usize) -> usize {
     let atom = match event_loop.current_result() {
         None => 0,
         Some(result) => match result {
-            TcpResult::ConnectOk { future_atom, .. } => *future_atom,
-            TcpResult::ConnectErr { future_atom, .. } => *future_atom,
-            TcpResult::AcceptOk { future_atom, .. } => *future_atom,
-            TcpResult::AcceptErr { future_atom, .. } => *future_atom,
-            TcpResult::ReadOk { future_atom, .. } => *future_atom,
-            TcpResult::ReadErr { future_atom, .. } => *future_atom,
-            TcpResult::WriteOk { future_atom, .. } => *future_atom,
-            TcpResult::WriteErr { future_atom, .. } => *future_atom,
+            TcpResult::ConnectOk { future_atom, .. } => future_atom,
+            TcpResult::ConnectErr { future_atom, .. } => future_atom,
+            TcpResult::AcceptOk { future_atom, .. } => future_atom,
+            TcpResult::AcceptErr { future_atom, .. } => future_atom,
+            TcpResult::ReadOk { future_atom, .. } => future_atom,
+            TcpResult::ReadErr { future_atom, .. } => future_atom,
+            TcpResult::WriteOk { future_atom, .. } => future_atom,
+            TcpResult::WriteErr { future_atom, .. } => future_atom,
         },
     };
     BuiltInTypes::Int.tag(atom as isize) as usize
@@ -7832,7 +7977,7 @@ extern "C" fn tcp_result_value(loop_id: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
     let runtime = get_runtime().get_mut();
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(0) as usize,
     };
@@ -7842,9 +7987,9 @@ extern "C" fn tcp_result_value(loop_id: usize) -> usize {
     let value = match event_loop.current_result() {
         None => 0,
         Some(result) => match result {
-            TcpResult::ConnectOk { socket_id, .. } => *socket_id,
-            TcpResult::AcceptOk { socket_id, .. } => *socket_id,
-            TcpResult::WriteOk { bytes_written, .. } => *bytes_written,
+            TcpResult::ConnectOk { socket_id, .. } => socket_id,
+            TcpResult::AcceptOk { socket_id, .. } => socket_id,
+            TcpResult::WriteOk { bytes_written, .. } => bytes_written,
             _ => 0,
         },
     };
@@ -7857,29 +8002,30 @@ extern "C" fn tcp_result_data(stack_pointer: usize, loop_id: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
     let runtime = get_runtime().get_mut();
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
-        Some(el) => el,
-        None => {
-            let runtime = get_runtime().get_mut();
-            return runtime
-                .allocate_string(stack_pointer, String::new())
-                .map(|t| t.into())
-                .unwrap_or(0);
+    let data = {
+        let event_loop = match runtime.event_loops.get(loop_id) {
+            Some(el) => el,
+            None => {
+                return runtime
+                    .allocate_string(stack_pointer, String::new())
+                    .map(|t| t.into())
+                    .unwrap_or(0);
+            }
+        };
+
+        use crate::runtime::TcpResult;
+
+        match event_loop.current_result() {
+            None => String::new(),
+            Some(result) => match result {
+                TcpResult::ReadOk { data, .. } => String::from_utf8_lossy(&data).to_string(),
+                TcpResult::ConnectErr { error, .. } => error,
+                TcpResult::AcceptErr { error, .. } => error,
+                TcpResult::ReadErr { error, .. } => error,
+                TcpResult::WriteErr { error, .. } => error,
+                _ => String::new(),
+            },
         }
-    };
-
-    use crate::runtime::TcpResult;
-
-    let data = match event_loop.current_result() {
-        None => String::new(),
-        Some(result) => match result {
-            TcpResult::ReadOk { data, .. } => String::from_utf8_lossy(data).to_string(),
-            TcpResult::ConnectErr { error, .. } => error.clone(),
-            TcpResult::AcceptErr { error, .. } => error.clone(),
-            TcpResult::ReadErr { error, .. } => error.clone(),
-            TcpResult::WriteErr { error, .. } => error.clone(),
-            _ => String::new(),
-        },
     };
 
     let runtime = get_runtime().get_mut();
@@ -7895,7 +8041,7 @@ extern "C" fn tcp_result_op_id(loop_id: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
     let runtime = get_runtime().get_mut();
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(0) as usize,
     };
@@ -7905,14 +8051,14 @@ extern "C" fn tcp_result_op_id(loop_id: usize) -> usize {
     let op_id = match event_loop.current_result() {
         None => 0,
         Some(result) => match result {
-            TcpResult::ConnectOk { op_id, .. } => *op_id,
-            TcpResult::ConnectErr { op_id, .. } => *op_id,
-            TcpResult::AcceptOk { op_id, .. } => *op_id,
-            TcpResult::AcceptErr { op_id, .. } => *op_id,
-            TcpResult::ReadOk { op_id, .. } => *op_id,
-            TcpResult::ReadErr { op_id, .. } => *op_id,
-            TcpResult::WriteOk { op_id, .. } => *op_id,
-            TcpResult::WriteErr { op_id, .. } => *op_id,
+            TcpResult::ConnectOk { op_id, .. } => op_id,
+            TcpResult::ConnectErr { op_id, .. } => op_id,
+            TcpResult::AcceptOk { op_id, .. } => op_id,
+            TcpResult::AcceptErr { op_id, .. } => op_id,
+            TcpResult::ReadOk { op_id, .. } => op_id,
+            TcpResult::ReadErr { op_id, .. } => op_id,
+            TcpResult::WriteOk { op_id, .. } => op_id,
+            TcpResult::WriteErr { op_id, .. } => op_id,
         },
     };
     BuiltInTypes::Int.tag(op_id as isize) as usize
@@ -7924,7 +8070,7 @@ extern "C" fn tcp_result_listener_id(loop_id: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
     let runtime = get_runtime().get_mut();
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(0) as usize,
     };
@@ -7932,7 +8078,7 @@ extern "C" fn tcp_result_listener_id(loop_id: usize) -> usize {
     use crate::runtime::TcpResult;
 
     let listener_id = match event_loop.current_result() {
-        Some(TcpResult::AcceptOk { listener_id, .. }) => *listener_id,
+        Some(TcpResult::AcceptOk { listener_id, .. }) => listener_id,
         _ => 0,
     };
     BuiltInTypes::Int.tag(listener_id as isize) as usize
@@ -7950,7 +8096,7 @@ extern "C" fn timer_set(loop_id: usize, delay_ms: usize, future_atom: usize) -> 
     let future_atom = BuiltInTypes::untag(future_atom);
     let runtime = get_runtime().get_mut();
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(-1) as usize,
     };
@@ -7966,7 +8112,7 @@ extern "C" fn timer_cancel(loop_id: usize, timer_id: usize) -> usize {
     let timer_id = BuiltInTypes::untag(timer_id);
     let runtime = get_runtime().get_mut();
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(0) as usize,
     };
@@ -7980,7 +8126,7 @@ extern "C" fn timer_completed_count(loop_id: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
     let runtime = get_runtime().get_mut();
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(0) as usize,
     };
@@ -7995,7 +8141,7 @@ extern "C" fn timer_pop_completed(loop_id: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
     let runtime = get_runtime().get_mut();
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(0) as usize,
     };
@@ -8029,7 +8175,7 @@ extern "C" fn file_read_submit(
     let runtime = get_runtime().get_mut();
     let path_str = runtime.get_string(stack_pointer, path);
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(-1) as usize,
     };
@@ -8055,7 +8201,7 @@ extern "C" fn file_write_submit(
     let path_str = runtime.get_string(stack_pointer, path);
     let content_str = runtime.get_string(stack_pointer, content);
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(-1) as usize,
     };
@@ -8082,7 +8228,7 @@ extern "C" fn file_delete_submit(
     let runtime = get_runtime().get_mut();
     let path_str = runtime.get_string(stack_pointer, path);
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(-1) as usize,
     };
@@ -8106,7 +8252,7 @@ extern "C" fn file_stat_submit(
     let runtime = get_runtime().get_mut();
     let path_str = runtime.get_string(stack_pointer, path);
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(-1) as usize,
     };
@@ -8130,7 +8276,7 @@ extern "C" fn file_readdir_submit(
     let runtime = get_runtime().get_mut();
     let path_str = runtime.get_string(stack_pointer, path);
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(-1) as usize,
     };
@@ -8146,7 +8292,7 @@ extern "C" fn file_results_count(loop_id: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
     let runtime = get_runtime().get_mut();
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(0) as usize,
     };
@@ -8161,7 +8307,7 @@ extern "C" fn file_result_ready(loop_id: usize, handle: usize) -> usize {
     let handle = BuiltInTypes::untag(handle) as u64;
     let runtime = get_runtime().get_mut();
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::construct_boolean(false) as usize,
     };
@@ -8179,7 +8325,7 @@ extern "C" fn file_result_poll_type(loop_id: usize, handle: usize) -> usize {
     let handle = BuiltInTypes::untag(handle) as u64;
     let runtime = get_runtime().get_mut();
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(0) as usize,
     };
@@ -8208,7 +8354,7 @@ extern "C" fn file_result_get_string(
 
     // Get and remove the result
     let result_data = {
-        let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        let event_loop = match runtime.event_loops.get(loop_id) {
             Some(el) => el,
             None => return BuiltInTypes::null_value() as usize,
         };
@@ -8240,7 +8386,7 @@ extern "C" fn file_result_get_value(loop_id: usize, handle: usize) -> usize {
     let runtime = get_runtime().get_mut();
 
     // Get and remove the result
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(0) as usize,
     };
@@ -8261,7 +8407,7 @@ extern "C" fn file_result_consume(loop_id: usize, handle: usize) -> usize {
     let handle = BuiltInTypes::untag(handle) as u64;
     let runtime = get_runtime().get_mut();
 
-    let event_loop = match runtime.event_loops.get_mut(loop_id) {
+    let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::construct_boolean(false) as usize,
     };
@@ -8287,7 +8433,7 @@ extern "C" fn file_result_get_entries(
 
     // Get and remove the result
     let result_data = {
-        let event_loop = match runtime.event_loops.get_mut(loop_id) {
+        let event_loop = match runtime.event_loops.get(loop_id) {
             Some(el) => el,
             None => return BuiltInTypes::null_value() as usize,
         };
@@ -8426,7 +8572,7 @@ pub extern "C" fn keyword_to_string(
     if heap_object.get_header().type_id != TYPE_ID_KEYWORD {
         let type_id = heap_object.get_header().type_id;
         let type_name = match type_id {
-            TYPE_ID_STRING | TYPE_ID_STRING_SLICE => "String".to_string(),
+            TYPE_ID_STRING | TYPE_ID_STRING_SLICE | TYPE_ID_CONS_STRING => "String".to_string(),
             TYPE_ID_KEYWORD => "Keyword".to_string(),
             TYPE_ID_MULTI_ARITY_FUNCTION => "MultiArityFunction".to_string(),
             _ => {
@@ -11133,6 +11279,12 @@ impl Runtime {
             1,
         )?;
         self.add_builtin_function(
+            "beagle.core/event-loop-create-threaded",
+            event_loop_create_threaded as *const u8,
+            false,
+            1,
+        )?;
+        self.add_builtin_function(
             "beagle.core/event-loop-run-once",
             event_loop_run_once as *const u8,
             false,
@@ -11210,6 +11362,12 @@ impl Runtime {
             tcp_result_pop as *const u8,
             false,
             1, // loop_id
+        )?;
+        self.add_builtin_function(
+            "beagle.core/tcp-result-pop-for-atom",
+            tcp_result_pop_for_atom as *const u8,
+            false,
+            2, // loop_id, future_atom
         )?;
         self.add_builtin_function(
             "beagle.core/tcp-result-future-atom",
@@ -13103,8 +13261,12 @@ pub extern "C" fn call_handler_builtin(
             // Custom struct - use struct_id from type_data (raw value)
             heap_obj.get_struct_id()
         } else {
-            // Built-in heap type
-            0x8000_0000_0000_0000 | header_type_id
+            // Built-in heap type - map variant type_ids to base primitive index
+            let primitive_index = match header_type_id as u8 {
+                TYPE_ID_STRING_SLICE | TYPE_ID_CONS_STRING => 2, // → String
+                _ => header_type_id,
+            };
+            0x8000_0000_0000_0000 | primitive_index
         }
     } else {
         // Tagged primitive
@@ -13494,12 +13656,15 @@ pub unsafe extern "C" fn diagnostics_for_file(
         }
         let heap_object = HeapObject::from_tagged(file_path);
         let tid = heap_object.get_type_id();
-        if tid != TYPE_ID_STRING as usize && tid != TYPE_ID_STRING_SLICE as usize {
+        if tid != TYPE_ID_STRING as usize
+            && tid != TYPE_ID_STRING_SLICE as usize
+            && tid != TYPE_ID_CONS_STRING as usize
+        {
             eprintln!("diagnostics_for_file: Invalid file path argument (not a string)");
             return BuiltInTypes::null_value() as usize;
         }
-        let bytes = heap_object.get_string_bytes();
-        unsafe { std::str::from_utf8_unchecked(bytes).to_string() }
+        let bytes = runtime.get_string_bytes_vec(file_path);
+        unsafe { String::from_utf8_unchecked(bytes) }
     };
 
     // Clone diagnostics for the specific file
@@ -14441,11 +14606,14 @@ mod regex_builtins {
         } else if tag == BuiltInTypes::HeapObject {
             let heap_object = HeapObject::from_tagged(value);
             let tid = heap_object.get_type_id();
-            if tid != TYPE_ID_STRING as usize && tid != TYPE_ID_STRING_SLICE as usize {
+            if tid != TYPE_ID_STRING as usize
+                && tid != TYPE_ID_STRING_SLICE as usize
+                && tid != TYPE_ID_CONS_STRING as usize
+            {
                 return String::new();
             }
-            let bytes = heap_object.get_string_bytes();
-            unsafe { std::str::from_utf8_unchecked(bytes).to_string() }
+            let bytes = runtime.get_string_bytes_vec(value);
+            unsafe { String::from_utf8_unchecked(bytes) }
         } else {
             String::new()
         }

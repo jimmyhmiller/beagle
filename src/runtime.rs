@@ -32,8 +32,8 @@ use crate::{
 };
 
 use crate::collections::{
-    GcHandle, HandleScope, PersistentMap, PersistentVec, TYPE_ID_ATOM, TYPE_ID_CONTINUATION,
-    TYPE_ID_CONTINUATION_SEGMENT, TYPE_ID_FUNCTION_OBJECT, TYPE_ID_KEYWORD,
+    GcHandle, HandleScope, PersistentMap, PersistentVec, TYPE_ID_ATOM, TYPE_ID_CONS_STRING,
+    TYPE_ID_CONTINUATION, TYPE_ID_CONTINUATION_SEGMENT, TYPE_ID_FUNCTION_OBJECT, TYPE_ID_KEYWORD,
     TYPE_ID_MULTI_ARITY_FUNCTION, TYPE_ID_PERSISTENT_MAP, TYPE_ID_PERSISTENT_SET,
     TYPE_ID_PERSISTENT_VEC, TYPE_ID_RAW_ARRAY, TYPE_ID_STRING, TYPE_ID_STRING_SLICE,
 };
@@ -665,21 +665,6 @@ pub enum PendingOperation {
         listener_id: usize,
         op_id: usize,
     },
-    /// TCP read operation
-    TcpRead {
-        future_atom: usize,
-        socket_id: usize,
-        buffer_size: usize,
-        op_id: usize,
-    },
-    /// TCP write operation
-    TcpWrite {
-        future_atom: usize,
-        socket_id: usize,
-        data: Vec<u8>,
-        bytes_written: usize,
-        op_id: usize,
-    },
     /// Timer (deadline-based)
     Timer {
         future_atom: usize,
@@ -788,53 +773,70 @@ pub struct FileTask {
     pub handle: OperationHandle,
 }
 
+/// TCP operation to be submitted to a threaded event loop via channel
+#[derive(Debug)]
+pub enum TcpOperation {
+    Connect {
+        addr: std::net::SocketAddr,
+        future_atom: usize,
+    },
+    Accept {
+        listener_id: usize,
+        future_atom: usize,
+    },
+    Read {
+        socket_id: usize,
+        buffer_size: usize,
+        future_atom: usize,
+    },
+    Write {
+        socket_id: usize,
+        data: Vec<u8>,
+        future_atom: usize,
+    },
+    Listen {
+        addr: std::net::SocketAddr,
+        backlog: u32,
+        response_tx: mpsc::SyncSender<Result<usize, String>>,
+    },
+    Close {
+        socket_id: usize,
+    },
+    CloseListener {
+        listener_id: usize,
+    },
+}
+
+/// Task submitted to a threaded event loop
+pub struct TcpTask {
+    pub op: TcpOperation,
+}
+
 /// Event loop for async I/O operations using mio
+/// Always runs a dedicated I/O thread that handles polling and TCP operations.
+/// State is shared via Arc<Mutex<EventLoopState>> for access from both the
+/// I/O thread and calling threads.
 pub struct EventLoop {
-    /// mio Poll instance for event notification
-    poll: Poll,
+    /// Shared I/O state — accessible from both I/O thread and callers via lock
+    state: Arc<Mutex<EventLoopState>>,
     /// Waker to wake the event loop from other threads
     waker: Arc<Waker>,
-    /// Pending operations indexed by token
-    pending_ops: HashMap<usize, PendingOperation>,
-    /// Next token to assign
-    next_token: usize,
-    /// Channel to receive completed file operations from thread pool
-    /// Wrapped in Mutex to satisfy Sync trait for static storage
-    file_result_rx: Mutex<mpsc::Receiver<CompletedResult>>,
+    /// Current result being inspected (after pop), per-thread for concurrent safety.
+    current_results: Mutex<HashMap<ThreadId, TcpResult>>,
     /// Channel to send file operations to thread pool
     file_task_tx: mpsc::Sender<FileTask>,
-    /// Events buffer for polling
-    events: Events,
-    /// TCP streams indexed by socket ID
-    tcp_streams: HashMap<usize, TcpStream>,
-    /// TCP listeners indexed by listener ID
-    tcp_listeners: HashMap<usize, mio::net::TcpListener>,
-    /// Next socket/listener ID to assign
-    next_socket_id: usize,
-    /// Mapping from token to socket ID (for looking up socket when event fires)
-    token_to_socket: HashMap<usize, usize>,
-    /// Mapping from token to listener ID
-    token_to_listener: HashMap<usize, usize>,
-    /// Completed TCP results waiting to be retrieved
-    completed_tcp_results: Vec<TcpResult>,
-    /// Current result being inspected (after pop)
-    current_result: Option<TcpResult>,
-    /// Active timers: timer_id -> (deadline, future_atom)
-    timers: HashMap<usize, (Instant, usize)>,
-    /// Next timer ID
-    next_timer_id: usize,
-    /// Completed timer future_atoms (ready to be resolved)
-    completed_timers: Vec<usize>,
-    /// Counter for generating unique operation handles (thread-safe)
-    next_handle: AtomicU64,
-    /// Completed file results indexed by handle for O(1) lookup
-    completed_file_results: HashMap<OperationHandle, FileResultData>,
-    /// Counter for generating unique operation IDs for TCP operations
-    next_op_id: usize,
+    /// Channel sender for submitting TCP operations to the event loop thread
+    tcp_task_tx: mpsc::Sender<TcpTask>,
+    /// Shutdown flag for the event loop thread
+    shutdown: Arc<AtomicBool>,
+    /// Handle to the event loop thread
+    event_loop_thread: Mutex<Option<JoinHandle<()>>>,
+    /// Condvar to notify consumers when results are available
+    results_notify: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl EventLoop {
-    /// Create a new event loop with a file I/O thread pool
+    /// Create a new event loop with a file I/O thread pool and a dedicated I/O thread
     pub fn new(pool_size: usize) -> std::io::Result<Self> {
         let poll = Poll::new()?;
         let waker = Arc::new(Waker::new(poll.registry(), WAKER_TOKEN)?);
@@ -860,53 +862,162 @@ impl EventLoop {
             });
         }
 
-        Ok(Self {
-            poll,
-            waker,
+        let state = EventLoopState {
+            poll: Some(poll),
+            events: Some(Events::with_capacity(128)),
             pending_ops: HashMap::new(),
             next_token: 1, // Start at 1, 0 is reserved for waker
-            file_result_rx: Mutex::new(file_result_rx),
-            file_task_tx,
-            events: Events::with_capacity(128),
             tcp_streams: HashMap::new(),
             tcp_listeners: HashMap::new(),
             next_socket_id: 1,
             token_to_socket: HashMap::new(),
             token_to_listener: HashMap::new(),
             completed_tcp_results: Vec::new(),
-            current_result: None,
             timers: HashMap::new(),
             next_timer_id: 1,
             completed_timers: Vec::new(),
-            next_handle: AtomicU64::new(1), // Start at 1, 0 could be used as "no handle"
+            next_handle: AtomicU64::new(1),
             completed_file_results: HashMap::new(),
-            next_op_id: 1, // Start at 1, 0 could be used as "no op_id"
+            next_op_id: 1,
+            file_result_rx: Mutex::new(file_result_rx),
+            socket_tokens: HashMap::new(),
+            pending_reads: HashMap::new(),
+            pending_writes: HashMap::new(),
+        };
+
+        let state = Arc::new(Mutex::new(state));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let results_notify = Arc::new((Mutex::new(false), Condvar::new()));
+
+        // Create TCP task channel
+        let (tcp_task_tx, tcp_task_rx) = mpsc::channel::<TcpTask>();
+
+        // Spawn I/O thread immediately
+        let thread_state = state.clone();
+        let thread_shutdown = shutdown.clone();
+        let thread_notify = results_notify.clone();
+        let thread_waker = waker.clone();
+
+        let handle = std::thread::Builder::new()
+            .name("event-loop-thread".to_string())
+            .spawn(move || {
+                event_loop_thread_main(
+                    thread_state,
+                    tcp_task_rx,
+                    thread_waker,
+                    thread_shutdown,
+                    thread_notify,
+                );
+            })
+            .expect("Failed to spawn event loop thread");
+
+        Ok(Self {
+            state,
+            waker,
+            current_results: Mutex::new(HashMap::new()),
+            file_task_tx,
+            tcp_task_tx,
+            shutdown,
+            event_loop_thread: Mutex::new(Some(handle)),
+            results_notify,
         })
     }
 
-    /// Get the next available token
-    pub fn next_token(&mut self) -> Token {
-        let token = Token(self.next_token);
-        self.next_token += 1;
-        token
+    /// Submit a TCP operation to the event loop thread
+    pub fn submit_tcp_op(&self, op: TcpOperation) -> Result<(), String> {
+        self.tcp_task_tx
+            .send(TcpTask { op })
+            .map_err(|e| format!("Failed to submit TCP operation: {}", e))?;
+        // Wake the event loop thread so it drains the queue promptly
+        let _ = self.waker.wake();
+        Ok(())
     }
 
-    /// Get the next unique operation ID for TCP operations
-    pub fn next_op_id(&mut self) -> usize {
-        let op_id = self.next_op_id;
-        self.next_op_id += 1;
-        op_id
+    /// Submit a TCP listen operation synchronously (blocks until listener_id is returned)
+    pub fn submit_tcp_listen(
+        &self,
+        addr: std::net::SocketAddr,
+        backlog: u32,
+    ) -> Result<usize, String> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.submit_tcp_op(TcpOperation::Listen {
+            addr,
+            backlog,
+            response_tx,
+        })?;
+        response_rx
+            .recv()
+            .map_err(|e| format!("Failed to receive listen response: {}", e))?
     }
 
-    /// Generate a new unique operation handle
-    pub fn next_operation_handle(&self) -> OperationHandle {
-        self.next_handle.fetch_add(1, Ordering::SeqCst)
+    /// Get the count of completed TCP results
+    pub fn tcp_results_count(&self) -> usize {
+        self.state
+            .lock()
+            .map(|s| s.completed_tcp_results.len())
+            .unwrap_or(0)
+    }
+
+    /// Pop the next completed TCP result
+    pub fn pop_tcp_result(&self) -> Option<TcpResult> {
+        let mut state = self.state.lock().ok()?;
+        if state.completed_tcp_results.is_empty() {
+            None
+        } else {
+            Some(state.completed_tcp_results.remove(0))
+        }
+    }
+
+    /// Pop a completed TCP result matching a specific future_atom
+    /// This ensures each thread only retrieves its own results when multiple
+    /// threads share the same event loop.
+    pub fn pop_tcp_result_for_atom(&self, future_atom: usize) -> Option<TcpResult> {
+        let mut state = self.state.lock().ok()?;
+        let pos = state.completed_tcp_results.iter().position(|r| match r {
+            TcpResult::ConnectOk {
+                future_atom: fa, ..
+            } => *fa == future_atom,
+            TcpResult::ConnectErr {
+                future_atom: fa, ..
+            } => *fa == future_atom,
+            TcpResult::AcceptOk {
+                future_atom: fa, ..
+            } => *fa == future_atom,
+            TcpResult::AcceptErr {
+                future_atom: fa, ..
+            } => *fa == future_atom,
+            TcpResult::ReadOk {
+                future_atom: fa, ..
+            } => *fa == future_atom,
+            TcpResult::ReadErr {
+                future_atom: fa, ..
+            } => *fa == future_atom,
+            TcpResult::WriteOk {
+                future_atom: fa, ..
+            } => *fa == future_atom,
+            TcpResult::WriteErr {
+                future_atom: fa, ..
+            } => *fa == future_atom,
+        });
+        pos.map(|i| state.completed_tcp_results.remove(i))
+    }
+
+    /// Shutdown the event loop thread gracefully
+    pub fn shutdown_thread(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        // Wake the thread so it sees the shutdown flag
+        let _ = self.waker.wake();
+        if let Ok(mut guard) = self.event_loop_thread.lock() {
+            if let Some(handle) = guard.take() {
+                let _ = handle.join();
+            }
+        }
     }
 
     /// Submit a file operation to the thread pool
     /// Returns the operation handle that can be used to poll for results
     pub fn submit_file_op(&self, op: FileOperation) -> Result<OperationHandle, String> {
-        let handle = self.next_operation_handle();
+        let handle = self.state.lock().unwrap().next_operation_handle();
         self.file_task_tx
             .send(FileTask { op, handle })
             .map_err(|e| format!("Failed to submit file operation: {}", e))?;
@@ -923,149 +1034,52 @@ impl EventLoop {
         self.waker.clone()
     }
 
-    /// Poll for events with timeout (in milliseconds)
-    /// Returns the number of events processed
-    pub fn poll_once(&mut self, timeout_ms: u64) -> std::io::Result<usize> {
-        // Calculate effective timeout (minimum of requested and time to nearest timer)
-        let now = Instant::now();
-        let effective_timeout = if self.timers.is_empty() {
-            Duration::from_millis(timeout_ms)
-        } else {
-            let nearest_deadline = self
-                .timers
-                .values()
-                .map(|(deadline, _)| *deadline)
-                .min()
-                .unwrap();
-            let time_to_timer = nearest_deadline.saturating_duration_since(now);
-            std::cmp::min(Duration::from_millis(timeout_ms), time_to_timer)
-        };
-
-        self.poll.poll(&mut self.events, Some(effective_timeout))?;
-
-        let mut processed = 0;
-        let mut tokens_to_process = Vec::new();
-
-        // Process mio events (network I/O)
-        for event in self.events.iter() {
-            if event.token() == WAKER_TOKEN {
-                // Waker was triggered - check for file results
-                processed += 1;
-            } else {
-                // Network event - handle based on token
-                tokens_to_process.push(event.token().0);
-            }
-        }
-
-        // Process collected network tokens
-        for token_id in tokens_to_process {
-            if let Some(op) = self.pending_ops.remove(&token_id) {
-                self.handle_tcp_event(token_id, op);
-                processed += 1;
-            }
-        }
-
-        // Process completed file operations
-        // Collect all results first to avoid borrowing issues
-        let results: Vec<CompletedResult> = {
-            if let Ok(rx) = self.file_result_rx.lock() {
-                let mut results = Vec::new();
-                while let Ok(result) = rx.try_recv() {
-                    results.push(result);
-                }
-                results
-            } else {
-                Vec::new()
-            }
-        };
-        for result in results {
-            self.handle_file_result(result);
-            processed += 1;
-        }
-
-        // Process expired timers
-        let now = Instant::now();
-        let expired_timer_ids: Vec<usize> = self
-            .timers
-            .iter()
-            .filter(|(_, (deadline, _))| *deadline <= now)
-            .map(|(id, _)| *id)
-            .collect();
-
-        for timer_id in expired_timer_ids {
-            if let Some((_, future_atom)) = self.timers.remove(&timer_id) {
-                self.completed_timers.push(future_atom);
-                processed += 1;
-            }
-        }
-
-        Ok(processed)
+    /// Get a reference to the results_notify Condvar
+    pub fn results_notify(&self) -> &Arc<(Mutex<bool>, Condvar)> {
+        &self.results_notify
     }
 
     /// Set a timer that fires after delay_ms milliseconds
-    /// Returns the timer ID
-    pub fn timer_set(&mut self, delay_ms: u64, future_atom: usize) -> usize {
-        let timer_id = self.next_timer_id;
-        self.next_timer_id += 1;
-        let deadline = Instant::now() + Duration::from_millis(delay_ms);
-        self.timers.insert(timer_id, (deadline, future_atom));
-        timer_id
+    pub fn timer_set(&self, delay_ms: u64, future_atom: usize) -> usize {
+        self.state.lock().unwrap().timer_set(delay_ms, future_atom)
     }
 
     /// Cancel a timer by ID
-    /// Returns true if the timer was cancelled, false if not found
-    pub fn timer_cancel(&mut self, timer_id: usize) -> bool {
-        self.timers.remove(&timer_id).is_some()
+    pub fn timer_cancel(&self, timer_id: usize) -> bool {
+        self.state.lock().unwrap().timer_cancel(timer_id)
     }
 
     /// Get the number of pending completed timers
     pub fn completed_timers_len(&self) -> usize {
-        self.completed_timers.len()
+        self.state.lock().unwrap().completed_timers_len()
     }
 
     /// Pop the next completed timer's future_atom
-    pub fn pop_completed_timer(&mut self) -> Option<usize> {
-        if self.completed_timers.is_empty() {
-            None
-        } else {
-            Some(self.completed_timers.remove(0))
-        }
-    }
-
-    /// Handle a completed file operation result
-    fn handle_file_result(&mut self, result: CompletedResult) {
-        // Store the result indexed by handle for O(1) lookup
-        self.completed_file_results
-            .insert(result.handle, result.data);
+    pub fn pop_completed_timer(&self) -> Option<usize> {
+        self.state.lock().unwrap().pop_completed_timer()
     }
 
     /// Get the number of completed file results waiting
     pub fn file_results_count(&self) -> usize {
-        self.completed_file_results.len()
+        self.state.lock().unwrap().file_results_count()
     }
 
-    /// Check if a result is ready for the given handle (without removing it)
+    /// Check if a result is ready for the given handle
     pub fn file_result_ready(&self, handle: OperationHandle) -> bool {
-        self.completed_file_results.contains_key(&handle)
+        self.state.lock().unwrap().file_result_ready(handle)
     }
 
-    /// Poll for a result by handle
-    /// Returns Some(data) and removes the result if found, None otherwise
-    pub fn file_result_poll(&mut self, handle: OperationHandle) -> Option<FileResultData> {
-        self.completed_file_results.remove(&handle)
+    /// Poll for a file result by handle
+    pub fn file_result_poll(&self, handle: OperationHandle) -> Option<FileResultData> {
+        self.state.lock().unwrap().file_result_poll(handle)
     }
 
-    /// Peek at a result's type code without removing it
-    /// Returns Some(type_code) if found, None otherwise
+    /// Peek at a file result's type code without removing it
     pub fn file_result_peek_type(&self, handle: OperationHandle) -> Option<usize> {
-        self.completed_file_results
-            .get(&handle)
-            .map(Self::file_result_type_code)
+        self.state.lock().unwrap().file_result_peek_type(handle)
     }
 
     /// Get the type code for a FileResultData
-    /// 1 = ReadOk, 2 = ReadErr, 3 = WriteOk, 4 = WriteErr,
-    /// 5 = DeleteOk, 6 = DeleteErr, 7 = StatOk, 8 = StatErr, 9 = ReadDirOk, 10 = ReadDirErr
     pub fn file_result_type_code(data: &FileResultData) -> usize {
         match data {
             FileResultData::ReadOk { .. } => 1,
@@ -1081,7 +1095,7 @@ impl EventLoop {
         }
     }
 
-    /// Get the string data from a FileResultData (content for read, error for errors)
+    /// Get the string data from a FileResultData
     pub fn file_result_string_data(data: &FileResultData) -> Option<&str> {
         match data {
             FileResultData::ReadOk { content } => Some(content),
@@ -1094,7 +1108,7 @@ impl EventLoop {
         }
     }
 
-    /// Get the numeric value from a FileResultData (bytes_written or file size)
+    /// Get the numeric value from a FileResultData
     pub fn file_result_value(data: &FileResultData) -> usize {
         match data {
             FileResultData::WriteOk { bytes_written } => *bytes_written,
@@ -1111,475 +1125,16 @@ impl EventLoop {
         }
     }
 
-    /// Handle a TCP event
-    fn handle_tcp_event(&mut self, _token_id: usize, op: PendingOperation) {
-        use std::io::{Read, Write};
-
-        match op {
-            PendingOperation::TcpConnect {
-                future_atom,
-                socket_id,
-                op_id,
-            } => {
-                // Connection completed - check if it succeeded
-                if let Some(stream) = self.tcp_streams.get(&socket_id) {
-                    match stream.peer_addr() {
-                        Ok(_) => {
-                            self.completed_tcp_results.push(TcpResult::ConnectOk {
-                                future_atom,
-                                socket_id,
-                                op_id,
-                            });
-                        }
-                        Err(e) => {
-                            self.completed_tcp_results.push(TcpResult::ConnectErr {
-                                future_atom,
-                                error: e.to_string(),
-                                op_id,
-                            });
-                        }
-                    }
-                } else {
-                    self.completed_tcp_results.push(TcpResult::ConnectErr {
-                        future_atom,
-                        error: "Socket not found".to_string(),
-                        op_id,
-                    });
-                }
-            }
-            PendingOperation::TcpAccept {
-                future_atom,
-                listener_id,
-                op_id,
-            } => {
-                // Listener is ready - accept the connection
-                if let Some(listener) = self.tcp_listeners.get(&listener_id) {
-                    match listener.accept() {
-                        Ok((stream, _addr)) => {
-                            let socket_id = self.next_socket_id();
-                            self.tcp_streams.insert(socket_id, stream);
-                            self.completed_tcp_results.push(TcpResult::AcceptOk {
-                                future_atom,
-                                socket_id,
-                                listener_id,
-                                op_id,
-                            });
-                        }
-                        Err(e) => {
-                            self.completed_tcp_results.push(TcpResult::AcceptErr {
-                                future_atom,
-                                error: e.to_string(),
-                                op_id,
-                            });
-                        }
-                    }
-                } else {
-                    self.completed_tcp_results.push(TcpResult::AcceptErr {
-                        future_atom,
-                        error: "Listener not found".to_string(),
-                        op_id,
-                    });
-                }
-            }
-            PendingOperation::TcpRead {
-                future_atom,
-                socket_id,
-                buffer_size,
-                op_id,
-            } => {
-                // Socket is ready for reading - remove to avoid borrow conflicts
-                if let Some(mut stream) = self.tcp_streams.remove(&socket_id) {
-                    let mut buffer = vec![0u8; buffer_size];
-                    let result = stream.read(&mut buffer);
-
-                    // Put the stream back
-                    self.tcp_streams.insert(socket_id, stream);
-
-                    match result {
-                        Ok(n) => {
-                            buffer.truncate(n);
-                            self.completed_tcp_results.push(TcpResult::ReadOk {
-                                future_atom,
-                                data: buffer,
-                                op_id,
-                            });
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            // Not ready yet, re-register for read
-                            let token = self.next_token();
-                            if let Some(stream) = self.tcp_streams.get_mut(&socket_id) {
-                                let _ = self.poll.registry().reregister(
-                                    stream,
-                                    token,
-                                    Interest::READABLE,
-                                );
-                            }
-                            self.token_to_socket.insert(token.0, socket_id);
-                            self.pending_ops.insert(
-                                token.0,
-                                PendingOperation::TcpRead {
-                                    future_atom,
-                                    socket_id,
-                                    buffer_size,
-                                    op_id,
-                                },
-                            );
-                        }
-                        Err(e) => {
-                            self.completed_tcp_results.push(TcpResult::ReadErr {
-                                future_atom,
-                                error: e.to_string(),
-                                op_id,
-                            });
-                        }
-                    }
-                } else {
-                    self.completed_tcp_results.push(TcpResult::ReadErr {
-                        future_atom,
-                        error: "Socket not found".to_string(),
-                        op_id,
-                    });
-                }
-            }
-            PendingOperation::TcpWrite {
-                future_atom,
-                socket_id,
-                data,
-                bytes_written,
-                op_id,
-            } => {
-                // Socket is ready for writing - remove to avoid borrow conflicts
-                if let Some(mut stream) = self.tcp_streams.remove(&socket_id) {
-                    let result = stream.write(&data[bytes_written..]);
-
-                    // Put the stream back
-                    self.tcp_streams.insert(socket_id, stream);
-
-                    match result {
-                        Ok(n) => {
-                            let total_written = bytes_written + n;
-                            if total_written >= data.len() {
-                                // All data written
-                                self.completed_tcp_results.push(TcpResult::WriteOk {
-                                    future_atom,
-                                    bytes_written: total_written,
-                                    op_id,
-                                });
-                            } else {
-                                // More data to write, re-register
-                                let token = self.next_token();
-                                if let Some(stream) = self.tcp_streams.get_mut(&socket_id) {
-                                    let _ = self.poll.registry().reregister(
-                                        stream,
-                                        token,
-                                        Interest::WRITABLE,
-                                    );
-                                }
-                                self.token_to_socket.insert(token.0, socket_id);
-                                self.pending_ops.insert(
-                                    token.0,
-                                    PendingOperation::TcpWrite {
-                                        future_atom,
-                                        socket_id,
-                                        data,
-                                        bytes_written: total_written,
-                                        op_id,
-                                    },
-                                );
-                            }
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            // Not ready yet, re-register
-                            let token = self.next_token();
-                            if let Some(stream) = self.tcp_streams.get_mut(&socket_id) {
-                                let _ = self.poll.registry().reregister(
-                                    stream,
-                                    token,
-                                    Interest::WRITABLE,
-                                );
-                            }
-                            self.token_to_socket.insert(token.0, socket_id);
-                            self.pending_ops.insert(
-                                token.0,
-                                PendingOperation::TcpWrite {
-                                    future_atom,
-                                    socket_id,
-                                    data,
-                                    bytes_written,
-                                    op_id,
-                                },
-                            );
-                        }
-                        Err(e) => {
-                            self.completed_tcp_results.push(TcpResult::WriteErr {
-                                future_atom,
-                                error: e.to_string(),
-                                op_id,
-                            });
-                        }
-                    }
-                } else {
-                    self.completed_tcp_results.push(TcpResult::WriteErr {
-                        future_atom,
-                        error: "Socket not found".to_string(),
-                        op_id,
-                    });
-                }
-            }
-            // Other operations don't need TCP-specific handling
-            _ => {}
-        }
+    /// Set the current result for the calling thread (for inspection after pop)
+    pub fn set_current_result(&self, result: TcpResult) {
+        let tid = std::thread::current().id();
+        self.current_results.lock().unwrap().insert(tid, result);
     }
 
-    /// Get completed TCP results
-    pub fn take_tcp_results(&mut self) -> Vec<TcpResult> {
-        std::mem::take(&mut self.completed_tcp_results)
-    }
-
-    /// Get the number of pending TCP results
-    pub fn tcp_results_len(&self) -> usize {
-        self.completed_tcp_results.len()
-    }
-
-    /// Pop the next TCP result
-    pub fn pop_tcp_result(&mut self) -> Option<TcpResult> {
-        if self.completed_tcp_results.is_empty() {
-            None
-        } else {
-            Some(self.completed_tcp_results.remove(0))
-        }
-    }
-
-    /// Set the current result (for inspection after pop)
-    pub fn set_current_result(&mut self, result: TcpResult) {
-        self.current_result = Some(result);
-    }
-
-    /// Get a reference to the current result
-    pub fn current_result(&self) -> &Option<TcpResult> {
-        &self.current_result
-    }
-
-    /// Allocate a new socket ID
-    fn next_socket_id(&mut self) -> usize {
-        let id = self.next_socket_id;
-        self.next_socket_id += 1;
-        id
-    }
-
-    /// Start a non-blocking TCP connection
-    /// Returns (socket_id, token, op_id) on success
-    pub fn tcp_connect(
-        &mut self,
-        addr: std::net::SocketAddr,
-        future_atom: usize,
-    ) -> std::io::Result<(usize, Token, usize)> {
-        let mut stream = TcpStream::connect(addr)?;
-        let socket_id = self.next_socket_id();
-        let token = self.next_token();
-        let op_id = self.next_op_id();
-
-        self.poll
-            .registry()
-            .register(&mut stream, token, Interest::WRITABLE)?;
-
-        self.tcp_streams.insert(socket_id, stream);
-        self.token_to_socket.insert(token.0, socket_id);
-        self.pending_ops.insert(
-            token.0,
-            PendingOperation::TcpConnect {
-                future_atom,
-                socket_id,
-                op_id,
-            },
-        );
-
-        Ok((socket_id, token, op_id))
-    }
-
-    /// Create a TCP listener
-    /// Returns listener_id on success
-    pub fn tcp_listen(
-        &mut self,
-        addr: std::net::SocketAddr,
-        _backlog: u32,
-    ) -> std::io::Result<usize> {
-        let listener = mio::net::TcpListener::bind(addr)?;
-        let listener_id = self.next_socket_id();
-        self.tcp_listeners.insert(listener_id, listener);
-        Ok(listener_id)
-    }
-
-    /// Start accepting a connection on a listener
-    /// Returns (token, op_id) on success
-    pub fn tcp_accept(
-        &mut self,
-        listener_id: usize,
-        future_atom: usize,
-    ) -> std::io::Result<(Token, usize)> {
-        // Remove the listener temporarily to avoid borrow conflicts
-        let mut listener = self.tcp_listeners.remove(&listener_id).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "Listener not found")
-        })?;
-
-        let token = self.next_token();
-        let op_id = self.next_op_id();
-
-        // Try register first, fall back to reregister for subsequent accepts
-        let result = self
-            .poll
-            .registry()
-            .register(&mut listener, token, Interest::READABLE)
-            .or_else(|_| {
-                self.poll
-                    .registry()
-                    .reregister(&mut listener, token, Interest::READABLE)
-            });
-
-        // Put the listener back
-        self.tcp_listeners.insert(listener_id, listener);
-
-        result?;
-
-        self.token_to_listener.insert(token.0, listener_id);
-        self.pending_ops.insert(
-            token.0,
-            PendingOperation::TcpAccept {
-                future_atom,
-                listener_id,
-                op_id,
-            },
-        );
-
-        Ok((token, op_id))
-    }
-
-    /// Start a read operation on a socket
-    /// Returns (token, op_id) on success
-    pub fn tcp_read(
-        &mut self,
-        socket_id: usize,
-        buffer_size: usize,
-        future_atom: usize,
-    ) -> std::io::Result<(Token, usize)> {
-        // Remove the stream temporarily to avoid borrow conflicts
-        let mut stream = self
-            .tcp_streams
-            .remove(&socket_id)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "Socket not found"))?;
-
-        let token = self.next_token();
-        let op_id = self.next_op_id();
-
-        // Try register first (for new sockets from accept), fall back to reregister
-        let result = self
-            .poll
-            .registry()
-            .register(&mut stream, token, Interest::READABLE)
-            .or_else(|_| {
-                self.poll
-                    .registry()
-                    .reregister(&mut stream, token, Interest::READABLE)
-            });
-
-        // Put the stream back
-        self.tcp_streams.insert(socket_id, stream);
-
-        result?;
-
-        self.token_to_socket.insert(token.0, socket_id);
-        self.pending_ops.insert(
-            token.0,
-            PendingOperation::TcpRead {
-                future_atom,
-                socket_id,
-                buffer_size,
-                op_id,
-            },
-        );
-
-        Ok((token, op_id))
-    }
-
-    /// Start a write operation on a socket
-    /// Returns (token, op_id) on success
-    pub fn tcp_write(
-        &mut self,
-        socket_id: usize,
-        data: Vec<u8>,
-        future_atom: usize,
-    ) -> std::io::Result<(Token, usize)> {
-        // Remove the stream temporarily to avoid borrow conflicts
-        let mut stream = self
-            .tcp_streams
-            .remove(&socket_id)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "Socket not found"))?;
-
-        let token = self.next_token();
-        let op_id = self.next_op_id();
-
-        // Try register first (for new sockets from accept), fall back to reregister
-        let result = self
-            .poll
-            .registry()
-            .register(&mut stream, token, Interest::WRITABLE)
-            .or_else(|_| {
-                self.poll
-                    .registry()
-                    .reregister(&mut stream, token, Interest::WRITABLE)
-            });
-
-        // Put the stream back
-        self.tcp_streams.insert(socket_id, stream);
-
-        result?;
-
-        self.token_to_socket.insert(token.0, socket_id);
-        self.pending_ops.insert(
-            token.0,
-            PendingOperation::TcpWrite {
-                future_atom,
-                socket_id,
-                data,
-                bytes_written: 0,
-                op_id,
-            },
-        );
-
-        Ok((token, op_id))
-    }
-
-    /// Close a TCP socket
-    pub fn tcp_close(&mut self, socket_id: usize) -> std::io::Result<()> {
-        if let Some(mut stream) = self.tcp_streams.remove(&socket_id) {
-            let _ = self.poll.registry().deregister(&mut stream);
-        }
-        Ok(())
-    }
-
-    /// Close a TCP listener
-    pub fn tcp_close_listener(&mut self, listener_id: usize) -> std::io::Result<()> {
-        if let Some(mut listener) = self.tcp_listeners.remove(&listener_id) {
-            let _ = self.poll.registry().deregister(&mut listener);
-        }
-        Ok(())
-    }
-
-    /// Get an immutable reference to a TCP stream
-    pub fn get_tcp_stream(&self, socket_id: usize) -> Option<&TcpStream> {
-        self.tcp_streams.get(&socket_id)
-    }
-
-    /// Get a mutable reference to a TCP stream
-    pub fn get_tcp_stream_mut(&mut self, socket_id: usize) -> Option<&mut TcpStream> {
-        self.tcp_streams.get_mut(&socket_id)
-    }
-
-    /// Store a new TCP stream (e.g., from accept) and return its socket_id
-    pub fn store_tcp_stream(&mut self, stream: TcpStream) -> usize {
-        let socket_id = self.next_socket_id();
-        self.tcp_streams.insert(socket_id, stream);
-        socket_id
+    /// Get the current result for the calling thread (cloned)
+    pub fn current_result(&self) -> Option<TcpResult> {
+        let tid = std::thread::current().id();
+        self.current_results.lock().unwrap().get(&tid).cloned()
     }
 }
 
@@ -1665,6 +1220,696 @@ fn execute_file_op(op: FileOperation) -> FileResultData {
 }
 
 // ============================================================================
+// EventLoopState - Unified mutable I/O state for both modes
+// ============================================================================
+
+/// Mutable I/O state used by both InProcess and Threaded event loop modes.
+/// In InProcess mode, this lives inside EventLoop via Option<EventLoopState>.
+/// In Threaded mode, this is moved to the dedicated event loop thread.
+
+/// Pending read operation on a socket
+struct PendingReadOp {
+    future_atom: usize,
+    buffer_size: usize,
+    op_id: usize,
+}
+
+/// Pending write operation on a socket
+#[allow(dead_code)]
+struct PendingWriteOp {
+    future_atom: usize,
+    data: Vec<u8>,
+    bytes_written: usize,
+    op_id: usize,
+}
+
+pub struct EventLoopState {
+    /// Poll and Events are Option so the I/O thread can temporarily take them
+    /// out during the blocking poll() call, allowing other threads to access
+    /// the rest of the state without contention.
+    poll: Option<Poll>,
+    events: Option<Events>,
+    pending_ops: HashMap<usize, PendingOperation>,
+    next_token: usize,
+    tcp_streams: HashMap<usize, TcpStream>,
+    tcp_listeners: HashMap<usize, mio::net::TcpListener>,
+    next_socket_id: usize,
+    token_to_socket: HashMap<usize, usize>,
+    token_to_listener: HashMap<usize, usize>,
+    completed_tcp_results: Vec<TcpResult>,
+    timers: HashMap<usize, (Instant, usize)>,
+    next_timer_id: usize,
+    completed_timers: Vec<usize>,
+    next_op_id: usize,
+    file_result_rx: Mutex<mpsc::Receiver<CompletedResult>>,
+    completed_file_results: HashMap<OperationHandle, FileResultData>,
+    next_handle: AtomicU64,
+    // Per-socket tracking for concurrent read/write
+    socket_tokens: HashMap<usize, Token>, // socket_id → stable Token
+    pending_reads: HashMap<usize, PendingReadOp>, // socket_id → pending read
+    pending_writes: HashMap<usize, PendingWriteOp>, // socket_id → pending write
+}
+
+impl EventLoopState {
+    /// Get a mutable reference to the poll (panics if taken by I/O thread during poll)
+    fn poll_mut(&mut self) -> &mut Poll {
+        self.poll
+            .as_mut()
+            .expect("Poll temporarily taken by I/O thread")
+    }
+
+    fn next_token(&mut self) -> Token {
+        let token = Token(self.next_token);
+        self.next_token += 1;
+        token
+    }
+
+    fn next_socket_id(&mut self) -> usize {
+        let id = self.next_socket_id;
+        self.next_socket_id += 1;
+        id
+    }
+
+    fn next_op_id(&mut self) -> usize {
+        let op_id = self.next_op_id;
+        self.next_op_id += 1;
+        op_id
+    }
+
+    /// Get or create a stable token for a socket
+    fn get_or_create_socket_token(&mut self, socket_id: usize) -> Token {
+        if let Some(&token) = self.socket_tokens.get(&socket_id) {
+            token
+        } else {
+            let token = self.next_token();
+            self.socket_tokens.insert(socket_id, token);
+            self.token_to_socket.insert(token.0, socket_id);
+            token
+        }
+    }
+
+    /// Compute the combined interest for a socket based on pending operations
+    fn socket_interest(&self, socket_id: usize) -> Option<Interest> {
+        let has_read = self.pending_reads.contains_key(&socket_id);
+        let has_write = self.pending_writes.contains_key(&socket_id);
+        match (has_read, has_write) {
+            (true, true) => Some(Interest::READABLE | Interest::WRITABLE),
+            (true, false) => Some(Interest::READABLE),
+            (false, true) => Some(Interest::WRITABLE),
+            (false, false) => None,
+        }
+    }
+
+    /// Register/reregister a socket with its current combined interest
+    fn update_socket_registration(&mut self, socket_id: usize) -> Result<(), String> {
+        let interest = match self.socket_interest(socket_id) {
+            Some(i) => i,
+            None => return Ok(()), // No pending ops, nothing to register
+        };
+        let token = self.get_or_create_socket_token(socket_id);
+        if let Some(mut stream) = self.tcp_streams.remove(&socket_id) {
+            let registry = self.poll_mut().registry();
+            let result = registry
+                .register(&mut stream, token, interest)
+                .or_else(|_| registry.reregister(&mut stream, token, interest));
+            self.tcp_streams.insert(socket_id, stream);
+            result.map_err(|e| e.to_string())
+        } else {
+            Err("Socket not found".to_string())
+        }
+    }
+
+    /// Handle a TCP task submitted via channel
+    fn handle_tcp_task(&mut self, task: TcpTask) {
+        match task.op {
+            TcpOperation::Connect { addr, future_atom } => match TcpStream::connect(addr) {
+                Ok(mut stream) => {
+                    let socket_id = self.next_socket_id();
+                    let token = self.next_token();
+                    let op_id = self.next_op_id();
+
+                    if let Err(e) =
+                        self.poll_mut()
+                            .registry()
+                            .register(&mut stream, token, Interest::WRITABLE)
+                    {
+                        self.completed_tcp_results.push(TcpResult::ConnectErr {
+                            future_atom,
+                            error: e.to_string(),
+                            op_id,
+                        });
+                        return;
+                    }
+
+                    self.tcp_streams.insert(socket_id, stream);
+                    self.token_to_socket.insert(token.0, socket_id);
+                    self.pending_ops.insert(
+                        token.0,
+                        PendingOperation::TcpConnect {
+                            future_atom,
+                            socket_id,
+                            op_id,
+                        },
+                    );
+                }
+                Err(e) => {
+                    let op_id = self.next_op_id();
+                    self.completed_tcp_results.push(TcpResult::ConnectErr {
+                        future_atom,
+                        error: e.to_string(),
+                        op_id,
+                    });
+                }
+            },
+            TcpOperation::Listen {
+                addr,
+                backlog: _,
+                response_tx,
+            } => match mio::net::TcpListener::bind(addr) {
+                Ok(listener) => {
+                    let listener_id = self.next_socket_id();
+                    self.tcp_listeners.insert(listener_id, listener);
+                    let _ = response_tx.send(Ok(listener_id));
+                }
+                Err(e) => {
+                    let _ = response_tx.send(Err(e.to_string()));
+                }
+            },
+            TcpOperation::Accept {
+                listener_id,
+                future_atom,
+            } => {
+                if let Some(mut listener) = self.tcp_listeners.remove(&listener_id) {
+                    let token = self.next_token();
+                    let op_id = self.next_op_id();
+
+                    let registry = self.poll_mut().registry();
+                    let result = registry
+                        .register(&mut listener, token, Interest::READABLE)
+                        .or_else(|_| registry.reregister(&mut listener, token, Interest::READABLE));
+
+                    self.tcp_listeners.insert(listener_id, listener);
+
+                    if let Err(e) = result {
+                        self.completed_tcp_results.push(TcpResult::AcceptErr {
+                            future_atom,
+                            error: e.to_string(),
+                            op_id,
+                        });
+                        return;
+                    }
+
+                    self.token_to_listener.insert(token.0, listener_id);
+                    self.pending_ops.insert(
+                        token.0,
+                        PendingOperation::TcpAccept {
+                            future_atom,
+                            listener_id,
+                            op_id,
+                        },
+                    );
+                } else {
+                    let op_id = self.next_op_id();
+                    self.completed_tcp_results.push(TcpResult::AcceptErr {
+                        future_atom,
+                        error: "Listener not found".to_string(),
+                        op_id,
+                    });
+                }
+            }
+            TcpOperation::Read {
+                socket_id,
+                buffer_size,
+                future_atom,
+            } => {
+                if self.tcp_streams.contains_key(&socket_id) {
+                    let op_id = self.next_op_id();
+                    self.pending_reads.insert(
+                        socket_id,
+                        PendingReadOp {
+                            future_atom,
+                            buffer_size,
+                            op_id,
+                        },
+                    );
+                    if let Err(e) = self.update_socket_registration(socket_id) {
+                        self.pending_reads.remove(&socket_id);
+                        self.completed_tcp_results.push(TcpResult::ReadErr {
+                            future_atom,
+                            error: e,
+                            op_id,
+                        });
+                    }
+                } else {
+                    let op_id = self.next_op_id();
+                    self.completed_tcp_results.push(TcpResult::ReadErr {
+                        future_atom,
+                        error: "Socket not found".to_string(),
+                        op_id,
+                    });
+                }
+            }
+            TcpOperation::Write {
+                socket_id,
+                data,
+                future_atom,
+            } => {
+                if self.tcp_streams.contains_key(&socket_id) {
+                    let op_id = self.next_op_id();
+                    self.pending_writes.insert(
+                        socket_id,
+                        PendingWriteOp {
+                            future_atom,
+                            data,
+                            bytes_written: 0,
+                            op_id,
+                        },
+                    );
+                    if let Err(e) = self.update_socket_registration(socket_id) {
+                        self.pending_writes.remove(&socket_id);
+                        self.completed_tcp_results.push(TcpResult::WriteErr {
+                            future_atom,
+                            error: e,
+                            op_id,
+                        });
+                    }
+                } else {
+                    let op_id = self.next_op_id();
+                    self.completed_tcp_results.push(TcpResult::WriteErr {
+                        future_atom,
+                        error: "Socket not found".to_string(),
+                        op_id,
+                    });
+                }
+            }
+            TcpOperation::Close { socket_id } => {
+                if let Some(mut stream) = self.tcp_streams.remove(&socket_id) {
+                    let _ = self.poll_mut().registry().deregister(&mut stream);
+                }
+                self.pending_reads.remove(&socket_id);
+                self.pending_writes.remove(&socket_id);
+                if let Some(token) = self.socket_tokens.remove(&socket_id) {
+                    self.token_to_socket.remove(&token.0);
+                }
+            }
+            TcpOperation::CloseListener { listener_id } => {
+                if let Some(mut listener) = self.tcp_listeners.remove(&listener_id) {
+                    let _ = self.poll_mut().registry().deregister(&mut listener);
+                }
+            }
+        }
+    }
+
+    /// Compute the effective poll timeout based on pending timers
+    fn compute_poll_timeout(&self, max_ms: u64) -> Duration {
+        if self.timers.is_empty() {
+            Duration::from_millis(max_ms)
+        } else {
+            let now = Instant::now();
+            let nearest_deadline = self
+                .timers
+                .values()
+                .map(|(deadline, _)| *deadline)
+                .min()
+                .unwrap();
+            let time_to_timer = nearest_deadline.saturating_duration_since(now);
+            std::cmp::min(Duration::from_millis(max_ms), time_to_timer)
+        }
+    }
+
+    /// Process polled events, file results, and expired timers.
+    /// Called by the I/O thread after poll() returns with the events.
+    fn process_events_and_timers(&mut self, events: &Events) -> usize {
+        let mut processed = 0;
+        let mut tokens_to_process: Vec<(usize, bool, bool)> = Vec::new();
+
+        for event in events.iter() {
+            if event.token() == WAKER_TOKEN {
+                processed += 1;
+            } else {
+                tokens_to_process.push((event.token().0, event.is_readable(), event.is_writable()));
+            }
+        }
+
+        for (token_id, is_readable, is_writable) in tokens_to_process {
+            // First check pending_ops for Connect/Accept operations
+            if let Some(op) = self.pending_ops.remove(&token_id) {
+                self.handle_tcp_event(token_id, op);
+                processed += 1;
+                continue;
+            }
+
+            // Check per-socket read/write operations
+            if let Some(&socket_id) = self.token_to_socket.get(&token_id) {
+                if is_readable {
+                    if let Some(read_op) = self.pending_reads.remove(&socket_id) {
+                        self.handle_socket_read(socket_id, read_op);
+                        processed += 1;
+                    }
+                }
+                if is_writable {
+                    if let Some(write_op) = self.pending_writes.remove(&socket_id) {
+                        self.handle_socket_write(socket_id, write_op);
+                        processed += 1;
+                    }
+                }
+                // Re-register with remaining interest if any ops still pending
+                let _ = self.update_socket_registration(socket_id);
+            }
+        }
+
+        // Process completed file operations
+        let results: Vec<CompletedResult> = {
+            if let Ok(rx) = self.file_result_rx.lock() {
+                let mut results = Vec::new();
+                while let Ok(result) = rx.try_recv() {
+                    results.push(result);
+                }
+                results
+            } else {
+                Vec::new()
+            }
+        };
+        for result in results {
+            self.completed_file_results
+                .insert(result.handle, result.data);
+            processed += 1;
+        }
+
+        // Process expired timers
+        let now = Instant::now();
+        let expired_timer_ids: Vec<usize> = self
+            .timers
+            .iter()
+            .filter(|(_, (deadline, _))| *deadline <= now)
+            .map(|(id, _)| *id)
+            .collect();
+
+        for timer_id in expired_timer_ids {
+            if let Some((_deadline, future_atom)) = self.timers.remove(&timer_id) {
+                self.completed_timers.push(future_atom);
+                processed += 1;
+            }
+        }
+
+        processed
+    }
+
+    /// Set a timer that fires after delay_ms milliseconds
+    /// Returns the timer ID
+    pub fn timer_set(&mut self, delay_ms: u64, future_atom: usize) -> usize {
+        let timer_id = self.next_timer_id;
+        self.next_timer_id += 1;
+        let deadline = Instant::now() + Duration::from_millis(delay_ms);
+        self.timers.insert(timer_id, (deadline, future_atom));
+        timer_id
+    }
+
+    /// Cancel a timer by ID
+    pub fn timer_cancel(&mut self, timer_id: usize) -> bool {
+        self.timers.remove(&timer_id).is_some()
+    }
+
+    /// Get the number of pending completed timers
+    pub fn completed_timers_len(&self) -> usize {
+        self.completed_timers.len()
+    }
+
+    /// Pop the next completed timer's future_atom
+    pub fn pop_completed_timer(&mut self) -> Option<usize> {
+        if self.completed_timers.is_empty() {
+            None
+        } else {
+            Some(self.completed_timers.remove(0))
+        }
+    }
+
+    /// Get the number of completed file results waiting
+    pub fn file_results_count(&self) -> usize {
+        self.completed_file_results.len()
+    }
+
+    /// Check if a result is ready for the given handle
+    pub fn file_result_ready(&self, handle: OperationHandle) -> bool {
+        self.completed_file_results.contains_key(&handle)
+    }
+
+    /// Poll for a result by handle
+    pub fn file_result_poll(&mut self, handle: OperationHandle) -> Option<FileResultData> {
+        self.completed_file_results.remove(&handle)
+    }
+
+    /// Peek at a result's type code without removing it
+    pub fn file_result_peek_type(&self, handle: OperationHandle) -> Option<usize> {
+        self.completed_file_results
+            .get(&handle)
+            .map(EventLoop::file_result_type_code)
+    }
+
+    /// Generate a new unique operation handle
+    pub fn next_operation_handle(&self) -> OperationHandle {
+        self.next_handle.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Handle a TCP event for Connect/Accept (Read/Write handled by per-socket methods)
+    fn handle_tcp_event(&mut self, _token_id: usize, op: PendingOperation) {
+        match op {
+            PendingOperation::TcpConnect {
+                future_atom,
+                socket_id,
+                op_id,
+            } => {
+                if let Some(stream) = self.tcp_streams.get(&socket_id) {
+                    match stream.peer_addr() {
+                        Ok(_) => {
+                            self.completed_tcp_results.push(TcpResult::ConnectOk {
+                                future_atom,
+                                socket_id,
+                                op_id,
+                            });
+                        }
+                        Err(e) => {
+                            self.completed_tcp_results.push(TcpResult::ConnectErr {
+                                future_atom,
+                                error: e.to_string(),
+                                op_id,
+                            });
+                        }
+                    }
+                } else {
+                    self.completed_tcp_results.push(TcpResult::ConnectErr {
+                        future_atom,
+                        error: "Socket not found".to_string(),
+                        op_id,
+                    });
+                }
+            }
+            PendingOperation::TcpAccept {
+                future_atom,
+                listener_id,
+                op_id,
+            } => {
+                if let Some(listener) = self.tcp_listeners.get(&listener_id) {
+                    match listener.accept() {
+                        Ok((stream, _addr)) => {
+                            let socket_id = self.next_socket_id();
+                            self.tcp_streams.insert(socket_id, stream);
+                            self.completed_tcp_results.push(TcpResult::AcceptOk {
+                                future_atom,
+                                socket_id,
+                                listener_id,
+                                op_id,
+                            });
+                        }
+                        Err(e) => {
+                            self.completed_tcp_results.push(TcpResult::AcceptErr {
+                                future_atom,
+                                error: e.to_string(),
+                                op_id,
+                            });
+                        }
+                    }
+                } else {
+                    self.completed_tcp_results.push(TcpResult::AcceptErr {
+                        future_atom,
+                        error: "Listener not found".to_string(),
+                        op_id,
+                    });
+                }
+            }
+            // Read and Write are handled by handle_socket_read/handle_socket_write
+            _ => {}
+        }
+    }
+
+    /// Handle a readable event for a socket
+    fn handle_socket_read(&mut self, socket_id: usize, read_op: PendingReadOp) {
+        use std::io::Read;
+        let PendingReadOp {
+            future_atom,
+            buffer_size,
+            op_id,
+        } = read_op;
+
+        if let Some(mut stream) = self.tcp_streams.remove(&socket_id) {
+            let mut buffer = vec![0u8; buffer_size];
+            let result = stream.read(&mut buffer);
+            self.tcp_streams.insert(socket_id, stream);
+
+            match result {
+                Ok(n) => {
+                    buffer.truncate(n);
+                    self.completed_tcp_results.push(TcpResult::ReadOk {
+                        future_atom,
+                        data: buffer,
+                        op_id,
+                    });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // Put the read op back - it will be re-registered by the caller
+                    self.pending_reads.insert(
+                        socket_id,
+                        PendingReadOp {
+                            future_atom,
+                            buffer_size,
+                            op_id,
+                        },
+                    );
+                }
+                Err(e) => {
+                    self.completed_tcp_results.push(TcpResult::ReadErr {
+                        future_atom,
+                        error: e.to_string(),
+                        op_id,
+                    });
+                }
+            }
+        } else {
+            self.completed_tcp_results.push(TcpResult::ReadErr {
+                future_atom,
+                error: "Socket not found".to_string(),
+                op_id,
+            });
+        }
+    }
+
+    /// Handle a writable event for a socket
+    fn handle_socket_write(&mut self, socket_id: usize, write_op: PendingWriteOp) {
+        use std::io::Write;
+        let PendingWriteOp {
+            future_atom,
+            data,
+            bytes_written,
+            op_id,
+        } = write_op;
+
+        if let Some(mut stream) = self.tcp_streams.remove(&socket_id) {
+            let result = stream.write(&data[bytes_written..]);
+            self.tcp_streams.insert(socket_id, stream);
+
+            match result {
+                Ok(n) => {
+                    let total_written = bytes_written + n;
+                    if total_written >= data.len() {
+                        self.completed_tcp_results.push(TcpResult::WriteOk {
+                            future_atom,
+                            bytes_written: total_written,
+                            op_id,
+                        });
+                    } else {
+                        // Partial write - put the write op back for more
+                        self.pending_writes.insert(
+                            socket_id,
+                            PendingWriteOp {
+                                future_atom,
+                                data,
+                                bytes_written: total_written,
+                                op_id,
+                            },
+                        );
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // Put the write op back - it will be re-registered by the caller
+                    self.pending_writes.insert(
+                        socket_id,
+                        PendingWriteOp {
+                            future_atom,
+                            data,
+                            bytes_written,
+                            op_id,
+                        },
+                    );
+                }
+                Err(e) => {
+                    self.completed_tcp_results.push(TcpResult::WriteErr {
+                        future_atom,
+                        error: e.to_string(),
+                        op_id,
+                    });
+                }
+            }
+        } else {
+            self.completed_tcp_results.push(TcpResult::WriteErr {
+                future_atom,
+                error: "Socket not found".to_string(),
+                op_id,
+            });
+        }
+    }
+}
+
+/// Main loop for the dedicated event loop thread.
+/// The lock is only held briefly for task draining and event processing.
+/// The blocking poll() call happens WITHOUT the lock, preventing contention.
+fn event_loop_thread_main(
+    state: Arc<Mutex<EventLoopState>>,
+    rx: mpsc::Receiver<TcpTask>,
+    _waker: Arc<Waker>,
+    shutdown: Arc<AtomicBool>,
+    results_notify: Arc<(Mutex<bool>, Condvar)>,
+) {
+    loop {
+        // Phase 1: Lock state briefly — drain tasks and take poll/events out
+        let (mut poll, mut events, effective_timeout) = {
+            let mut s = state.lock().unwrap();
+            // Drain operation queue (non-blocking)
+            while let Ok(task) = rx.try_recv() {
+                s.handle_tcp_task(task);
+            }
+            let timeout = s.compute_poll_timeout(50);
+            let poll = s.poll.take().expect("Poll must be present");
+            let events = s.events.take().expect("Events must be present");
+            (poll, events, timeout)
+        }; // lock released — other threads can now access state freely
+
+        // Phase 2: Poll I/O events WITHOUT holding the lock
+        let _ = poll.poll(&mut events, Some(effective_timeout));
+
+        // Phase 3: Lock state briefly — put poll/events back and process results
+        let should_notify = {
+            let mut s = state.lock().unwrap();
+            s.process_events_and_timers(&events);
+            s.poll = Some(poll);
+            s.events = Some(events);
+            !s.completed_tcp_results.is_empty() || !s.completed_timers.is_empty()
+        }; // lock released
+
+        if should_notify {
+            if let Ok(mut ready) = results_notify.0.lock() {
+                *ready = true;
+                results_notify.1.notify_all();
+            }
+        }
+
+        // Phase 4: Check shutdown
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+    }
+}
+
+// ============================================================================
 // EventLoopHandle - Stored in Runtime for access from builtins
 // ============================================================================
 
@@ -1684,6 +1929,7 @@ impl EventLoopRegistry {
     }
 
     /// Create a new event loop and return its ID
+    /// Always spawns a dedicated I/O thread.
     pub fn create(&mut self, pool_size: usize) -> Result<usize, String> {
         let event_loop =
             EventLoop::new(pool_size).map_err(|e| format!("Failed to create event loop: {}", e))?;
@@ -1691,11 +1937,6 @@ impl EventLoopRegistry {
         self.next_id += 1;
         self.loops.insert(id, event_loop);
         Ok(id)
-    }
-
-    /// Get a mutable reference to an event loop by ID
-    pub fn get_mut(&mut self, id: usize) -> Option<&mut EventLoop> {
-        self.loops.get_mut(&id)
     }
 
     /// Get an immutable reference to an event loop by ID
@@ -1712,13 +1953,17 @@ impl EventLoopRegistry {
     }
 
     /// Unregister (remove) an event loop by ID
+    /// Automatically shuts down the I/O thread.
     pub fn unregister(&mut self, id: usize) -> Option<EventLoop> {
+        if let Some(el) = self.loops.get(&id) {
+            el.shutdown_thread();
+        }
         self.loops.remove(&id)
     }
 
     /// Remove an event loop (alias for unregister)
     pub fn remove(&mut self, id: usize) -> Option<EventLoop> {
-        self.loops.remove(&id)
+        self.unregister(id)
     }
 }
 
@@ -2197,7 +2442,10 @@ pub fn push_dynamic_binding(namespace_id: usize, slot: usize, value: usize) {
     // This also keeps the value alive even though the stack entry lives in Rust memory.
     let runtime = crate::get_runtime().get_mut();
     let root_slot = runtime.register_temporary_root(value);
-    assert!(root_slot != 0, "Failed to register dynamic var binding as GC root");
+    assert!(
+        root_slot != 0,
+        "Failed to register dynamic var binding as GC root"
+    );
 
     DYNAMIC_VAR_STACK.with(|stack| stack.borrow_mut().push(namespace_id, slot, root_slot));
 }
@@ -2470,7 +2718,8 @@ impl Memory {
         // This is required for copying collectors (like generational GC) that need to
         // update pointers when objects move.
         self.namespace_root_storage.clear();
-        self.namespace_root_storage.extend_from_slice(namespace_roots);
+        self.namespace_root_storage
+            .extend_from_slice(namespace_roots);
 
         // Add pointers to namespace roots in our storage
         for i in 0..self.namespace_root_storage.len() {
@@ -3582,6 +3831,116 @@ impl Runtime {
         self.write_barrier(pointer, real_parent);
 
         Ok(BuiltInTypes::HeapObject.tagged(pointer))
+    }
+
+    /// Allocate a cons string: a lazy concatenation node.
+    /// Layout: [header][left_ptr][right_ptr][cached_hash=0], 3 fields, opaque=false.
+    /// `type_data` = total byte length (sum of children).
+    /// `type_flags` bit 0 = is_ascii (AND of children's ascii flags).
+    pub fn allocate_cons_string(
+        &mut self,
+        stack_pointer: usize,
+        left: usize,
+        right: usize,
+    ) -> Result<Tagged, Box<dyn Error>> {
+        let left_root = self.register_temporary_root(left);
+        let right_root = self.register_temporary_root(right);
+
+        let left_len = self.get_string_byte_length(left);
+        let right_len = self.get_string_byte_length(right);
+        let total_len = left_len + right_len;
+
+        let left_ascii = self.is_string_ascii(left);
+        let right_ascii = self.is_string_ascii(right);
+        let is_ascii = left_ascii && right_ascii;
+
+        let pointer = self.allocate(3, stack_pointer, BuiltInTypes::HeapObject)?;
+
+        let left = self.get_handle_root(left_root);
+        let right = self.get_handle_root(right_root);
+        self.unregister_temporary_root(left_root);
+        self.unregister_temporary_root(right_root);
+
+        let mut heap_object = HeapObject::from_tagged(pointer);
+        heap_object.writer_header_direct(Header {
+            type_id: TYPE_ID_CONS_STRING,
+            type_data: total_len as u32,
+            size: 3,
+            opaque: false,
+            marked: false,
+            large: false,
+            type_flags: if is_ascii { 1 } else { 0 },
+        });
+        heap_object.write_field(0, left);
+        heap_object.write_field(1, right);
+        heap_object.write_field(2, 0);
+
+        self.write_barrier(pointer, left);
+        self.write_barrier(pointer, right);
+
+        Ok(BuiltInTypes::HeapObject.tagged(pointer))
+    }
+
+    /// Get the byte length of any string value (constant, flat, slice, or cons).
+    pub fn get_string_byte_length(&self, value: usize) -> usize {
+        let tag = BuiltInTypes::get_kind(value);
+        if tag == BuiltInTypes::String {
+            let s = self.get_str_literal(value);
+            return s.len();
+        }
+        let heap_object = HeapObject::from_tagged(value);
+        heap_object.get_header().type_data as usize
+    }
+
+    /// Check if a string value is ASCII (constant, flat, slice, or cons).
+    pub fn is_string_ascii(&self, value: usize) -> bool {
+        let tag = BuiltInTypes::get_kind(value);
+        if tag == BuiltInTypes::String {
+            let s = self.get_str_literal(value);
+            return s.is_ascii();
+        }
+        let heap_object = HeapObject::from_tagged(value);
+        let header = heap_object.get_header();
+        if header.type_id == TYPE_ID_STRING_SLICE {
+            let parent = HeapObject::from_tagged(heap_object.get_field(0));
+            parent.get_header().type_flags & 1 != 0
+        } else {
+            header.type_flags & 1 != 0
+        }
+    }
+
+    /// Collect all bytes from any string value into a Vec.
+    /// Handles constants, flat strings, slices, and cons strings.
+    /// Uses an explicit stack for cons trees to avoid stack overflow.
+    pub fn get_string_bytes_vec(&self, value: usize) -> Vec<u8> {
+        let tag = BuiltInTypes::get_kind(value);
+        if tag == BuiltInTypes::String {
+            let s = self.get_str_literal(value);
+            return s.as_bytes().to_vec();
+        }
+        let heap_object = HeapObject::from_tagged(value);
+        if !heap_object.is_cons_string() {
+            return heap_object.get_string_bytes().to_vec();
+        }
+        let total_len = heap_object.get_header().type_data as usize;
+        let mut buf = Vec::with_capacity(total_len);
+        let mut work_stack: Vec<usize> = vec![value];
+        while let Some(val) = work_stack.pop() {
+            let val_tag = BuiltInTypes::get_kind(val);
+            if val_tag == BuiltInTypes::String {
+                let s = self.get_str_literal(val);
+                buf.extend_from_slice(s.as_bytes());
+            } else {
+                let obj = HeapObject::from_tagged(val);
+                if obj.is_cons_string() {
+                    work_stack.push(obj.get_field(1));
+                    work_stack.push(obj.get_field(0));
+                } else {
+                    buf.extend_from_slice(obj.get_string_bytes());
+                }
+            }
+        }
+        buf
     }
 
     /// Creates a Beagle array of strings from Rust strings.
@@ -4937,7 +5296,11 @@ impl Runtime {
             1 => {
                 let trampoline: fn(u64, u64, u64) -> u64 =
                     unsafe { std::mem::transmute(trampoline) };
-                trampoline(stack_pointer as u64, function_pointer.into(), args[0] as u64)
+                trampoline(
+                    stack_pointer as u64,
+                    function_pointer.into(),
+                    args[0] as u64,
+                )
             }
             2 => {
                 let trampoline: fn(u64, u64, u64, u64) -> u64 =
@@ -4978,7 +5341,7 @@ impl Runtime {
                     args.len(),
                     name
                 )
-                .into())
+                .into());
             }
         };
 
@@ -5199,8 +5562,20 @@ impl Runtime {
             .map(|tg| tg.get_root(thread_temp_id))
             .unwrap_or(0);
 
+        // CRITICAL: Share the main thread's namespaces atom with the child thread.
+        // Namespaces, keywords, and function bindings are global and must be shared
+        // across all threads. Only temporary roots (local variables) are per-thread.
+        let main_namespaces_atom = thread_globals
+            .get(&main_thread_id)
+            .map(|tg| tg.get_namespaces_atom())
+            .unwrap_or(GLOBAL_BLOCK_FREE_SLOT);
+
         if let Some(child_tg) = thread_globals.get(&thread_id) {
             child_tg.set_thread_object(current_thread_obj);
+            // Share the namespaces atom (don't create a new one!)
+            if main_namespaces_atom != GLOBAL_BLOCK_FREE_SLOT {
+                child_tg.set_namespaces_atom(main_namespaces_atom);
+            }
         }
         drop(thread_globals);
 
@@ -5419,7 +5794,8 @@ impl Runtime {
         let old_value = self.get_binding(namespace, slot);
 
         // Push the old value onto the binding stack for this thread
-        let thread_stacks = self.dynamic_binding_stacks
+        let thread_stacks = self
+            .dynamic_binding_stacks
             .entry(thread_id)
             .or_insert_with(HashMap::new);
         let stack = thread_stacks
@@ -5450,7 +5826,8 @@ impl Runtime {
         let thread_id = std::thread::current().id();
 
         // Pop the old value from the binding stack
-        let old_value = self.dynamic_binding_stacks
+        let old_value = self
+            .dynamic_binding_stacks
             .get_mut(&thread_id)
             .and_then(|thread_stacks| thread_stacks.get_mut(&(namespace, slot)))
             .and_then(|stack| stack.pop())
@@ -5642,9 +6019,9 @@ impl Runtime {
                         repr.push_str(" ]");
                         Some(repr)
                     }
-                    2 | 34 => {
-                        let bytes = object.get_string_bytes();
-                        let string = unsafe { std::str::from_utf8_unchecked(bytes) };
+                    2 | 34 | 35 => {
+                        let bytes = self.get_string_bytes_vec(value);
+                        let string = unsafe { std::str::from_utf8_unchecked(&bytes) };
                         if depth > 0 {
                             return Some(format!("\"{}\"", string));
                         }
@@ -5878,7 +6255,8 @@ impl Runtime {
                 match type_id {
                     val if val == TYPE_ID_RAW_ARRAY as usize => "Array",
                     val if val == TYPE_ID_STRING as usize
-                        || val == TYPE_ID_STRING_SLICE as usize =>
+                        || val == TYPE_ID_STRING_SLICE as usize
+                        || val == TYPE_ID_CONS_STRING as usize =>
                     {
                         "String"
                     }
@@ -5940,12 +6318,15 @@ impl Runtime {
         if a_tag == BuiltInTypes::HeapObject && b_tag == BuiltInTypes::String {
             let a_object = HeapObject::from_tagged(a);
             let a_type = a_object.get_type_id();
-            if a_type != TYPE_ID_STRING as usize && a_type != TYPE_ID_STRING_SLICE as usize {
+            if a_type != TYPE_ID_STRING as usize
+                && a_type != TYPE_ID_STRING_SLICE as usize
+                && a_type != TYPE_ID_CONS_STRING as usize
+            {
                 return false;
             }
             let b_string = self.get_str_literal(b);
-            let a_string = a_object.get_string_bytes();
-            let a_string = unsafe { std::str::from_utf8_unchecked(a_string) };
+            let a_bytes = self.get_string_bytes_vec(a);
+            let a_string = unsafe { std::str::from_utf8_unchecked(&a_bytes) };
             return a_string == b_string;
         }
         if a_tag != b_tag {
@@ -5978,10 +6359,18 @@ impl Runtime {
                 }
 
                 // Strings: compare cached hashes first, then byte content
-                let a_is_string = a_object.get_type_id() == TYPE_ID_STRING as usize
-                    || a_object.get_type_id() == TYPE_ID_STRING_SLICE as usize;
-                let b_is_string = b_object.get_type_id() == TYPE_ID_STRING as usize
-                    || b_object.get_type_id() == TYPE_ID_STRING_SLICE as usize;
+                let a_is_string = matches!(
+                    a_object.get_type_id(),
+                    x if x == TYPE_ID_STRING as usize
+                        || x == TYPE_ID_STRING_SLICE as usize
+                        || x == TYPE_ID_CONS_STRING as usize
+                );
+                let b_is_string = matches!(
+                    b_object.get_type_id(),
+                    x if x == TYPE_ID_STRING as usize
+                        || x == TYPE_ID_STRING_SLICE as usize
+                        || x == TYPE_ID_CONS_STRING as usize
+                );
                 if a_is_string && b_is_string {
                     // If both have cached hashes and they differ, strings are definitely not equal
                     let a_hash = a_object.get_string_hash();
@@ -5989,8 +6378,8 @@ impl Runtime {
                     if a_hash != 0 && b_hash != 0 && a_hash != b_hash {
                         return false;
                     }
-                    let a_bytes = a_object.get_string_bytes();
-                    let b_bytes = b_object.get_string_bytes();
+                    let a_bytes = self.get_string_bytes_vec(a);
+                    let b_bytes = self.get_string_bytes_vec(b);
                     return a_bytes == b_bytes;
                 }
 
@@ -6126,18 +6515,19 @@ impl Runtime {
             BuiltInTypes::HeapObject => {
                 let heap_object = HeapObject::from_tagged(value);
                 let type_id = heap_object.get_header().type_id;
-                if type_id == TYPE_ID_STRING || type_id == TYPE_ID_STRING_SLICE {
-                    // Check cached hash first (slices don't cache, so this returns 0 for them)
+                if type_id == TYPE_ID_STRING
+                    || type_id == TYPE_ID_STRING_SLICE
+                    || type_id == TYPE_ID_CONS_STRING
+                {
                     let cached = heap_object.get_string_hash();
                     if cached != 0 {
                         return cached as usize;
                     }
-                    let bytes = heap_object.get_string_bytes();
-                    let string = unsafe { std::str::from_utf8_unchecked(bytes) };
+                    let bytes = self.get_string_bytes_vec(value);
+                    let string = unsafe { std::str::from_utf8_unchecked(&bytes) };
                     let mut s = DefaultHasher::new();
                     string.hash(&mut s);
                     let hash = s.finish();
-                    // Cache it (0 is reserved for "not computed", so use 1 if hash happens to be 0)
                     let hash = if hash == 0 { 1 } else { hash };
                     heap_object.set_string_hash(hash);
                     hash as usize
@@ -6176,7 +6566,10 @@ impl Runtime {
         } else if tag == BuiltInTypes::HeapObject {
             let heap_object = HeapObject::from_tagged(value);
             let tid = heap_object.get_type_id();
-            if tid != TYPE_ID_STRING as usize && tid != TYPE_ID_STRING_SLICE as usize {
+            if tid != TYPE_ID_STRING as usize
+                && tid != TYPE_ID_STRING_SLICE as usize
+                && tid != TYPE_ID_CONS_STRING as usize
+            {
                 unsafe {
                     crate::builtins::throw_runtime_error(
                         stack_pointer,
@@ -6185,8 +6578,8 @@ impl Runtime {
                     );
                 }
             }
-            let bytes = heap_object.get_string_bytes();
-            unsafe { std::str::from_utf8_unchecked(bytes).to_string() }
+            let bytes = self.get_string_bytes_vec(value);
+            unsafe { String::from_utf8_unchecked(bytes) }
         } else {
             unsafe {
                 crate::builtins::throw_runtime_error(
@@ -6284,7 +6677,10 @@ impl Runtime {
         if tag == BuiltInTypes::HeapObject {
             let heap_object = HeapObject::from_tagged(string);
             let type_id = heap_object.get_type_id();
-            if type_id != TYPE_ID_STRING as usize && type_id != TYPE_ID_STRING_SLICE as usize {
+            if type_id != TYPE_ID_STRING as usize
+                && type_id != TYPE_ID_STRING_SLICE as usize
+                && type_id != TYPE_ID_CONS_STRING as usize
+            {
                 unsafe {
                     crate::builtins::throw_runtime_error(
                         stack_pointer,
@@ -6297,8 +6693,16 @@ impl Runtime {
                 }
             }
 
+            // Cons strings: flatten first, then take substring
+            if type_id == TYPE_ID_CONS_STRING as usize {
+                let bytes = self.get_string_bytes_vec(string);
+                let s = unsafe { std::str::from_utf8_unchecked(&bytes) };
+                let is_ascii = heap_object.get_header().type_flags & 1 != 0;
+                let result = Self::compute_substring(stack_pointer, s, start, length, is_ascii);
+                return self.allocate_string(stack_pointer, result);
+            }
+
             let is_ascii = if type_id == TYPE_ID_STRING_SLICE as usize {
-                // For slices, check the parent's ascii flag
                 let parent = HeapObject::from_tagged(heap_object.get_field(0));
                 parent.get_header().type_flags & 1 != 0
             } else {
@@ -6306,7 +6710,6 @@ impl Runtime {
             };
 
             if is_ascii {
-                // Fast path: create a string slice (no byte copying)
                 let str_bytes = heap_object.get_string_bytes();
                 let end = start + length;
                 if end > str_bytes.len() {
@@ -6324,7 +6727,6 @@ impl Runtime {
                     }
                 }
 
-                // For slices, resolve the real byte offset into the flat parent
                 let (parent_ptr, byte_offset) = if type_id == TYPE_ID_STRING_SLICE as usize {
                     let parent_ptr = heap_object.get_field(0);
                     let parent_offset = BuiltInTypes::untag(heap_object.get_field(1));
@@ -6335,7 +6737,6 @@ impl Runtime {
 
                 return self.allocate_string_slice(stack_pointer, parent_ptr, byte_offset, length);
             }
-            // Unicode heap string — use compute_substring (rare path)
             let bytes = heap_object.get_string_bytes();
             let s = unsafe { std::str::from_utf8_unchecked(bytes) };
             let result = Self::compute_substring(stack_pointer, s, start, length, false);

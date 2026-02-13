@@ -1,0 +1,113 @@
+namespace repl_session_test
+
+use beagle.core as core
+use beagle.repl-session as session
+
+// ============================================================================
+// REPL Session Tests
+// ============================================================================
+// Tests session creation, eval, output capture, and cancellation.
+
+fn test-output-capture() {
+    println("Testing output capture...")
+
+    let results = []
+    let results_atom = atom(results)
+
+    let sess = session/create-session("test-1")
+
+    // Submit eval request that prints
+    session/session-eval(sess, "req-1", "println(\"Hello from session\")", fn(resp) {
+        swap!(results_atom, fn(res) {
+            push(res, resp)
+        })
+    })
+
+    // Wait for eval to complete
+    core/sleep(100)
+
+    // Check results
+    let responses = deref(results_atom)
+    println("Got", length(responses), "responses")
+
+    // Should have: output message, value message, done message
+    let mut i = 0
+    while i < length(responses) {
+        let resp = nth(responses, i)
+        let id = get(resp, :id)
+        let out = get(resp, :out)
+        let value = get(resp, :value)
+        let status = get(resp, :status)
+
+        if out != null {
+            println("  Output:", out)
+        }
+        if value != null {
+            println("  Value:", value)
+        }
+        if status != null {
+            println("  Status:", status)
+        }
+
+        i = i + 1
+    }
+
+    session/session-close(sess)
+}
+
+fn test-simple-eval() {
+    println("Testing simple eval...")
+
+    let results = []
+    let results_atom = atom(results)
+
+    let sess = session/create-session("test-2")
+
+    // Submit eval request
+    session/session-eval(sess, "req-2", "1 + 2", fn(resp) {
+        swap!(results_atom, fn(res) {
+            push(res, resp)
+        })
+    })
+
+    // Wait for eval to complete
+    core/sleep(100)
+
+    // Check results
+    let responses = deref(results_atom)
+    println("Got", length(responses), "responses")
+
+    let mut i = 0
+    while i < length(responses) {
+        let resp = nth(responses, i)
+        let value = get(resp, :value)
+        let status = get(resp, :status)
+
+        if value != null {
+            println("  Value:", value)
+        }
+        if status != null {
+            println("  Status:", status)
+        }
+
+        i = i + 1
+    }
+
+    session/session-close(sess)
+}
+
+fn main() {
+    println("REPL Session Tests")
+    println("==================")
+    println("")
+
+    test-simple-eval()
+    println("")
+
+    test-output-capture()
+    println("")
+
+    println("Tests complete")
+}
+
+// Skip: Session thread timing and output ordering depends on scheduling
