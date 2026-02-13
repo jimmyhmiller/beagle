@@ -8,43 +8,36 @@ use beagle.core as core
 // Test beagle.timer namespace with async/sleep (which uses Async effect)
 
 fn main() {
-    // Create an event loop handler
-    let handler = async/create-event-loop-handler(4)
-
-    handle effect/Handler(async/Async) with handler {
-        // Test sleep using async/sleep (which performs Async.Sleep, handled by EventLoopHandler)
-        println("Testing timer/sleep...")
-        let start = core/time-now()
-        let sleep_result = async/sleep(50)  // 50ms - uses Async effect
-        let elapsed = (core/time-now() - start) / 1000000  // Convert to ms
-        match sleep_result {
-            Result.Ok { value } => {
-                println("Sleep OK")
-                // Check that we slept at least 40ms (allowing some variance)
-                if elapsed >= 40 {
-                    println("Elapsed OK")
-                } else {
-                    println("Elapsed too short:", elapsed)
-                }
-            },
-            Result.Err { error } => {
-                println("Sleep ERROR:", error)
+    // Test sleep using async/sleep (handled by ImplicitAsyncHandler)
+    println("Testing timer/sleep...")
+    let start = core/time-now()
+    let sleep_result = async/sleep(50)  // 50ms - uses Async effect
+    let elapsed = (core/time-now() - start) / 1000000  // Convert to ms
+    match sleep_result {
+        Result.Ok { value } => {
+            println("Sleep OK")
+            // Check that we slept at least 40ms (allowing some variance)
+            if elapsed >= 40 {
+                println("Elapsed OK")
+            } else {
+                println("Elapsed too short:", elapsed)
             }
+        },
+        Result.Err { error } => {
+            println("Sleep ERROR:", error)
         }
-
-        // Test deadline functions (these are pure calculations, no effects)
-        println("Testing deadline functions...")
-        let deadline = timer/deadline(100)  // 100ms from now
-        let passed1 = timer/deadline-passed?(deadline)
-        println("Deadline passed (should be false):", passed1)
-
-        let remaining = timer/deadline-remaining(deadline)
-        println("Remaining > 0:", remaining > 0)
-
-        println("Done!")
     }
 
-    "done"
+    // Test deadline functions (these are pure calculations, no effects)
+    println("Testing deadline functions...")
+    let deadline = timer/deadline(100)  // 100ms from now
+    let passed1 = timer/deadline-passed?(deadline)
+    println("Deadline passed (should be false):", passed1)
+
+    let remaining = timer/deadline-remaining(deadline)
+    println("Remaining > 0:", remaining > 0)
+
+    println("Done!")
 }
 
 // Expect

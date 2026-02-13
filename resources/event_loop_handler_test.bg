@@ -5,33 +5,21 @@ use beagle.effect as effect
 use beagle.core as core
 
 fn main() {
-    // Create an event loop handler
-    let handler = async/create-event-loop-handler(2)
-    println("Handler created:", handler != null)
-
-    // Test sleep with event loop
-    // sleep blocks and returns a Result directly with EventLoopHandler
+    // Test sleep with implicit async handler
     let start = core/time-now()
-    handle effect/Handler(async/Async) with handler {
-        let sleep_result = async/sleep(50)
-        // sleep returns Result.Ok { value: null } directly, no await needed
-    }
+    let sleep_result = async/sleep(50)
     let elapsed = (core/time-now() - start) / 1000000  // Convert to ms
     println("Sleep worked:", elapsed >= 40)
 
-    // Test file exists with event loop handler
-    // file-exists? returns Result directly with EventLoopHandler
-    handle effect/Handler(async/Async) with handler {
-        let result = async/file-exists?("/etc/hosts")
-        let exists = async/async-unwrap(result)
-        println("File exists:", exists == true)
-    }
+    // Test file exists with implicit async handler
+    let result = async/file-exists?("/etc/hosts")
+    let exists = async/async-unwrap(result)
+    println("File exists:", exists == true)
 
     println("done")
 }
 
 // Expect
-// Handler created: true
 // Sleep worked: true
 // File exists: true
 // done

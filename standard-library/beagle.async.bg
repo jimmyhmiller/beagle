@@ -10,13 +10,13 @@ use beagle.core as core
 // Async Effect System
 // ============================================================================
 // This module provides the core async/await mechanism via the Async effect.
-// The Async effect handles awaiting futures and cancellation.
+// Users write normal code; the event loop and threading are invisible.
 //
-// For file I/O, you can also use beagle.fs (Fs effect) for cleaner separation.
-// For timers, you can also use beagle.timer (Timer effect).
-// For spawning tasks, you can also use beagle.spawn (Spawn effect).
+// The ImplicitAsyncHandler is the primary production handler, automatically
+// wrapped around main() by __main__. It combines threaded spawn/await with
+// event-loop-based sleep and async file I/O for best-of-both-worlds behavior.
 //
-// This module maintains backwards compatibility by handling all legacy operations.
+// BlockingAsyncHandler is available for deterministic testing.
 
 // ============================================================================
 // Future Data Types
@@ -867,111 +867,10 @@ fn handle-spawn-with-token-blocking(thunk, token) {
 }
 
 // ============================================================================
-// ThreadedAsyncHandler
+// Threaded Implementation Functions
 // ============================================================================
-// This handler spawns actual threads for parallel execution.
-
-struct ThreadedAsyncHandler {}
-
-extend ThreadedAsyncHandler with effect/Handler(Async) {
-    fn handle(self, op, resume) {
-        let result = match op {
-            // Core async operations
-            Async.Await { future } => {
-                handle-await-threaded(future)
-            },
-            Async.AwaitAll { futures } => {
-                handle-await-all-threaded(futures)
-            },
-            Async.AwaitFirst { futures } => {
-                handle-await-first-threaded(futures)
-            },
-            Async.Cancel { future } => {
-                handle-cancel(future)
-            },
-
-            // Generic IO operations
-            Async.IO { action } => {
-                handle-io-action(action)
-            },
-
-            // File operations
-            Async.ReadFile { path } => {
-                handle-read-file(path)
-            },
-            Async.WriteFile { path, content } => {
-                handle-write-file(path, content)
-            },
-            Async.AppendFile { path, content } => {
-                handle-append-file(path, content)
-            },
-            Async.DeleteFile { path } => {
-                handle-delete-file(path)
-            },
-            Async.FileExists { path } => {
-                handle-file-exists(path)
-            },
-            Async.RenameFile { old_path, new_path } => {
-                handle-rename-file(old_path, new_path)
-            },
-            Async.CopyFile { src_path, dest_path } => {
-                handle-copy-file(src_path, dest_path)
-            },
-            Async.ReadDir { path } => {
-                handle-read-dir(path)
-            },
-            Async.CreateDir { path } => {
-                handle-create-dir(path)
-            },
-            Async.CreateDirAll { path } => {
-                handle-create-dir-all(path)
-            },
-            Async.RemoveDir { path } => {
-                handle-remove-dir(path)
-            },
-            Async.RemoveDirAll { path } => {
-                handle-remove-dir-all(path)
-            },
-            Async.FileSize { path } => {
-                handle-file-size(path)
-            },
-            Async.IsDirectory { path } => {
-                handle-is-directory(path)
-            },
-            Async.IsFile { path } => {
-                handle-is-file(path)
-            },
-            Async.Open { path, mode } => {
-                handle-open(path, mode)
-            },
-            Async.Close { file } => {
-                handle-close(file)
-            },
-            Async.Read { file, n } => {
-                handle-read(file, n)
-            },
-            Async.Write { file, content } => {
-                handle-write(file, content)
-            },
-            Async.ReadLine { file } => {
-                handle-read-line(file)
-            },
-            Async.Flush { file } => {
-                handle-flush(file)
-            },
-            Async.Sleep { ms } => {
-                handle-sleep(ms)
-            },
-            Async.Spawn { thunk } => {
-                handle-spawn-threaded(thunk)
-            },
-            Async.SpawnWithToken { thunk, token } => {
-                handle-spawn-with-token-threaded(thunk, token)
-            }
-        }
-        resume(result)
-    }
-}
+// These functions provide thread-based spawn, await, and polling.
+// Used by ImplicitAsyncHandler for production-ready async/concurrency.
 
 // Spawn a thread to execute the thunk
 fn handle-spawn-threaded(thunk) {
@@ -1156,142 +1055,10 @@ fn handle-await-first-threaded(futures) {
 }
 
 // ============================================================================
-// EventLoopHandler - mio-based async handler
+// Event Loop Functions
 // ============================================================================
-// This handler uses the mio-based event loop for efficient async I/O.
-
-struct EventLoopHandler {
-    event_loop_id
-}
-
-// Create an EventLoopHandler with a given thread pool size for file I/O
-fn create-event-loop-handler(pool_size) {
-    let loop_id = core/event-loop-create(pool_size)
-    if loop_id < 0 {
-        throw("Failed to create event loop")
-    }
-    EventLoopHandler { event_loop_id: loop_id }
-}
-
-// Create an EventLoopHandler with default pool size (based on CPU count)
-fn create-event-loop-handler-default() {
-    let cpu_count = core/get-cpu-count()
-    create-event-loop-handler(cpu_count)
-}
-
-extend EventLoopHandler with effect/Handler(Async) {
-    fn handle(self, op, resume) {
-        let loop_id = self.event_loop_id
-        let result = match op {
-            // Core async operations
-            Async.Await { future } => {
-                handle-await-event-loop(loop_id, future)
-            },
-            Async.AwaitAll { futures } => {
-                handle-await-all-event-loop(loop_id, futures)
-            },
-            Async.AwaitFirst { futures } => {
-                handle-await-first-event-loop(loop_id, futures)
-            },
-            Async.Cancel { future } => {
-                handle-cancel(future)
-            },
-
-            // Generic IO operations
-            Async.IO { action } => {
-                handle-io-action(action)
-            },
-
-            // File operations - use async thread pool I/O
-            Async.ReadFile { path } => {
-                handle-read-file-async(loop_id, path)
-            },
-            Async.WriteFile { path, content } => {
-                handle-write-file-async(loop_id, path, content)
-            },
-            Async.AppendFile { path, content } => {
-                // Append not yet implemented in async - fall back to blocking
-                handle-append-file(path, content)
-            },
-            Async.DeleteFile { path } => {
-                handle-delete-file-async(loop_id, path)
-            },
-            Async.FileExists { path } => {
-                // FileExists uses stat internally - fall back for now
-                handle-file-exists(path)
-            },
-            Async.RenameFile { old_path, new_path } => {
-                // Fall back to blocking
-                handle-rename-file(old_path, new_path)
-            },
-            Async.CopyFile { src_path, dest_path } => {
-                // Fall back to blocking
-                handle-copy-file(src_path, dest_path)
-            },
-            Async.ReadDir { path } => {
-                handle-read-dir-async(loop_id, path)
-            },
-            Async.CreateDir { path } => {
-                // Not yet implemented in async - fall back to blocking
-                handle-create-dir(path)
-            },
-            Async.CreateDirAll { path } => {
-                // Not yet implemented in async - fall back to blocking
-                handle-create-dir-all(path)
-            },
-            Async.RemoveDir { path } => {
-                // Not yet implemented in async - fall back to blocking
-                handle-remove-dir(path)
-            },
-            Async.RemoveDirAll { path } => {
-                // Not yet implemented in async - fall back to blocking
-                handle-remove-dir-all(path)
-            },
-            Async.FileSize { path } => {
-                handle-file-size-async(loop_id, path)
-            },
-            Async.IsDirectory { path } => {
-                // Fall back to blocking
-                handle-is-directory(path)
-            },
-            Async.IsFile { path } => {
-                // Fall back to blocking
-                handle-is-file(path)
-            },
-            Async.Open { path, mode } => {
-                // Low-level file handle - fall back to blocking
-                handle-open(path, mode)
-            },
-            Async.Close { file } => {
-                handle-close(file)
-            },
-            Async.Read { file, n } => {
-                handle-read(file, n)
-            },
-            Async.Write { file, content } => {
-                handle-write(file, content)
-            },
-            Async.ReadLine { file } => {
-                handle-read-line(file)
-            },
-            Async.Flush { file } => {
-                handle-flush(file)
-            },
-            // Sleep uses event loop timers
-            Async.Sleep { ms } => {
-                handle-sleep-event-loop(loop_id, ms)
-            },
-            // Spawn creates a future but doesn't use threads
-            Async.Spawn { thunk } => {
-                handle-spawn-event-loop(loop_id, thunk)
-            },
-            Async.SpawnWithToken { thunk, token } => {
-                handle-spawn-with-token-threaded(thunk, token)
-            }
-        }
-        resume(result)
-    }
-}
+// Timer-based sleep and async file I/O using the event loop.
+// Used by ImplicitAsyncHandler for non-blocking sleep and file operations.
 
 // Sleep using event loop timers
 fn handle-sleep-event-loop(loop_id, ms) {
@@ -1317,52 +1084,6 @@ fn handle-sleep-event-loop(loop_id, ms) {
         }
 
         // If we got a different marker, it's for another timer - ignore
-    }
-}
-
-// Spawn using event loop (currently still uses threads for compute tasks)
-fn handle-spawn-event-loop(loop_id, thunk) {
-    // For compute tasks, we still use threads
-    handle-spawn-threaded(thunk)
-}
-
-// Await using event loop polling
-fn handle-await-event-loop(loop_id, future) {
-    // Handle null futures - nothing to await, just return null
-    if future == null {
-        null
-    } else {
-        loop {
-            // Process events (network I/O, timers, etc.)
-            core/event-loop-run-once(loop_id, 50)
-
-            // Process any completed TCP results
-            process-tcp-results(loop_id)
-
-            // Process any completed timers
-            process-timer-results(loop_id)
-
-            // Check if our future is resolved
-            let state = future-state(future)
-            match state {
-                FutureState.Resolved { value } => break(value),
-                FutureState.Rejected { error } => throw(error),
-                FutureState.Cancelled {} => throw("Future was cancelled"),
-                _ => {}
-            }
-        }
-    }
-}
-
-// Process completed TCP results (placeholder for future implementation)
-fn process-tcp-results(loop_id) {
-    // Just drain completed results for now
-    loop {
-        let result_type = core/tcp-result-pop(loop_id)
-        if result_type == 0 {
-            break(null)
-        }
-        // Results are discarded - proper implementation would resolve futures
     }
 }
 
@@ -1443,7 +1164,7 @@ fn wait-for-file-result(loop_id, handle) {
 }
 
 // ============================================================================
-// Async File Handler Functions for EventLoopHandler
+// Async File Handler Functions
 // ============================================================================
 
 fn handle-read-file-async(loop_id, path) {
@@ -1484,108 +1205,6 @@ fn handle-read-dir-async(loop_id, path) {
         throw("Failed to submit readdir operation")
     }
     wait-for-file-result(loop_id, handle)
-}
-
-// Process completed timer results
-fn process-timer-results(loop_id) {
-    loop {
-        let completed_atom = core/timer-pop-completed(loop_id)
-        if completed_atom == 0 {
-            break(null)
-        }
-        // Timer completed - the future associated with this atom
-        // should be resolved
-    }
-}
-
-// Wait for all futures using event loop
-fn handle-await-all-event-loop(loop_id, futures) {
-    let mut results = []
-    let mut s = seq(futures)
-    while s != null {
-        let f = first(s)
-        let value = handle-await-event-loop(loop_id, f)
-        results = push(results, value)
-        s = next(s)
-    }
-    results
-}
-
-// Wait for first future using event loop
-fn handle-await-first-event-loop(loop_id, futures) {
-    let len = length(futures)
-    if len == 0 {
-        RaceResult.AllFailed { errors: [] }
-    } else {
-        loop {
-            // Process events
-            core/event-loop-run-once(loop_id, 50)
-            process-tcp-results(loop_id)
-            process-timer-results(loop_id)
-
-            // Check for resolved futures
-            let mut i = 0
-            let mut found = false
-            let mut resolved_value = null
-            let mut resolved_index = 0
-
-            while i < len && found == false {
-                let f = get(futures, i)
-                let state = future-state(f)
-                match state {
-                    FutureState.Resolved { value } => {
-                        found = true
-                        resolved_value = value
-                        resolved_index = i
-                    },
-                    _ => {}
-                }
-                i = i + 1
-            }
-
-            if found {
-                break(RaceResult.Ok { value: resolved_value, index: resolved_index })
-            }
-
-            // Check if all failed (rejected or cancelled)
-            let mut all_failed = true
-            let mut j = 0
-            while j < len {
-                let f = get(futures, j)
-                let state = future-state(f)
-                match state {
-                    FutureState.Running {} => { all_failed = false },
-                    FutureState.Pending {} => { all_failed = false },
-                    FutureState.Resolved { value } => { all_failed = false },
-                    FutureState.Rejected { error } => {},
-                    FutureState.Cancelled {} => {}
-                }
-                j = j + 1
-            }
-
-            if all_failed {
-                let mut errors = []
-                let mut k = 0
-                while k < len {
-                    let f = get(futures, k)
-                    let state = future-state(f)
-                    match state {
-                        FutureState.Rejected { error } => {
-                            errors = push(errors, error)
-                        },
-                        FutureState.Cancelled {} => {
-                            errors = push(errors, "Cancelled")
-                        },
-                        FutureState.Pending {} => {},
-                        FutureState.Running {} => {},
-                        FutureState.Resolved { value } => {}
-                    }
-                    k = k + 1
-                }
-                break(RaceResult.AllFailed { errors: errors })
-            }
-        }
-    }
 }
 
 // ============================================================================
@@ -2129,10 +1748,12 @@ fn get-io-loop-threaded() {
 }
 
 // ============================================================================
-// ImplicitAsyncHandler - the default handler for main()
+// ImplicitAsyncHandler - the primary production handler for main()
 // ============================================================================
 // This handler provides the implicit async context for main functions.
-// It uses the blocking handler for simplicity, but also supports IO operations.
+// It combines threaded spawn/await (for correct concurrent futures) with
+// event-loop-based sleep and async file I/O (for non-blocking operations).
+// Automatically wrapped around main() by __main__.
 
 struct ImplicitAsyncHandler {}
 
@@ -2244,15 +1865,15 @@ fn handle-io-action(action) {
 extend ImplicitAsyncHandler with effect/Handler(Async) {
     fn handle(self, op, resume) {
         let result = match op {
-            // Core async operations
+            // Core async operations - use threaded await (polls with future-wait)
             Async.Await { future } => {
-                handle-await-blocking(future)
+                handle-await-threaded(future)
             },
             Async.AwaitAll { futures } => {
-                handle-await-all-blocking(futures)
+                handle-await-all-threaded(futures)
             },
             Async.AwaitFirst { futures } => {
-                handle-await-first-blocking(futures)
+                handle-await-first-threaded(futures)
             },
             Async.Cancel { future } => {
                 handle-cancel(future)
@@ -2263,18 +1884,18 @@ extend ImplicitAsyncHandler with effect/Handler(Async) {
                 handle-io-action(action)
             },
 
-            // File operations
+            // File operations - use async thread pool I/O where available
             Async.ReadFile { path } => {
-                handle-read-file(path)
+                handle-read-file-async(get-io-loop(), path)
             },
             Async.WriteFile { path, content } => {
-                handle-write-file(path, content)
+                handle-write-file-async(get-io-loop(), path, content)
             },
             Async.AppendFile { path, content } => {
                 handle-append-file(path, content)
             },
             Async.DeleteFile { path } => {
-                handle-delete-file(path)
+                handle-delete-file-async(get-io-loop(), path)
             },
             Async.FileExists { path } => {
                 handle-file-exists(path)
@@ -2286,7 +1907,7 @@ extend ImplicitAsyncHandler with effect/Handler(Async) {
                 handle-copy-file(src_path, dest_path)
             },
             Async.ReadDir { path } => {
-                handle-read-dir(path)
+                handle-read-dir-async(get-io-loop(), path)
             },
             Async.CreateDir { path } => {
                 handle-create-dir(path)
@@ -2301,7 +1922,7 @@ extend ImplicitAsyncHandler with effect/Handler(Async) {
                 handle-remove-dir-all(path)
             },
             Async.FileSize { path } => {
-                handle-file-size(path)
+                handle-file-size-async(get-io-loop(), path)
             },
             Async.IsDirectory { path } => {
                 handle-is-directory(path)
@@ -2328,7 +1949,7 @@ extend ImplicitAsyncHandler with effect/Handler(Async) {
                 handle-flush(file)
             },
             Async.Sleep { ms } => {
-                handle-sleep(ms)
+                handle-sleep-event-loop(get-io-loop(), ms)
             },
             Async.Spawn { thunk } => {
                 handle-spawn-threaded(thunk)

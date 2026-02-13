@@ -4,69 +4,61 @@ use beagle.async as async
 use beagle.effect as effect
 use beagle.core as core
 
-// Test async file I/O using the EventLoopHandler
+// Test async file I/O using the implicit async handler
 
 fn main() {
-    // Create an event loop handler
-    let handler = async/create-event-loop-handler(4)  // 4 worker threads
+    let test_path = "/tmp/beagle_async_test.txt"
+    let content = "Hello from async file I/O!"
 
-    // Test 1: Write and read a file
-    handle effect/Handler(async/Async) with handler {
-        let test_path = "/tmp/beagle_async_test.txt"
-        let content = "Hello from async file I/O!"
-
-        // Write file - EventLoopHandler polls internally and returns Result directly
-        println("Writing file...")
-        let write_result = async/write-file(test_path, content)
-        match write_result {
-            Result.Ok { value } => {
-                println("Write OK, bytes: ", value)
-            },
-            Result.Err { error } => {
-                println("Write ERROR: ", error)
-            }
+    // Write file
+    println("Writing file...")
+    let write_result = async/write-file(test_path, content)
+    match write_result {
+        Result.Ok { value } => {
+            println("Write OK, bytes: ", value)
+        },
+        Result.Err { error } => {
+            println("Write ERROR: ", error)
         }
-
-        // Read file
-        println("Reading file...")
-        let read_result = async/read-file(test_path)
-        match read_result {
-            Result.Ok { value } => {
-                println("Read OK: ", value)
-            },
-            Result.Err { error } => {
-                println("Read ERROR: ", error)
-            }
-        }
-
-        // Get file size
-        println("Getting file size...")
-        let size_result = async/file-size(test_path)
-        match size_result {
-            Result.Ok { value } => {
-                println("Size: ", value)
-            },
-            Result.Err { error } => {
-                println("Size ERROR: ", error)
-            }
-        }
-
-        // Delete file
-        println("Deleting file...")
-        let delete_result = async/delete-file(test_path)
-        match delete_result {
-            Result.Ok { value } => {
-                println("Delete OK")
-            },
-            Result.Err { error } => {
-                println("Delete ERROR: ", error)
-            }
-        }
-
-        println("Done!")
     }
 
-    "done"
+    // Read file
+    println("Reading file...")
+    let read_result = async/read-file(test_path)
+    match read_result {
+        Result.Ok { value } => {
+            println("Read OK: ", value)
+        },
+        Result.Err { error } => {
+            println("Read ERROR: ", error)
+        }
+    }
+
+    // Get file size
+    println("Getting file size...")
+    let size_result = async/file-size(test_path)
+    match size_result {
+        Result.Ok { value } => {
+            println("Size: ", value)
+        },
+        Result.Err { error } => {
+            println("Size ERROR: ", error)
+        }
+    }
+
+    // Delete file
+    println("Deleting file...")
+    let delete_result = async/delete-file(test_path)
+    match delete_result {
+        Result.Ok { value } => {
+            println("Delete OK")
+        },
+        Result.Err { error } => {
+            println("Delete ERROR: ", error)
+        }
+    }
+
+    println("Done!")
 }
 
 // Expect

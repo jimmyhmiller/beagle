@@ -5,22 +5,15 @@ use beagle.effect as effect
 use beagle.core as core
 
 fn main() {
-    // Create an event loop handler
-    let handler = async/create-event-loop-handler(2)
-    println("Handler created:", handler != null)
-
-    // Test just the sleep without await
-    handle effect/Handler(async/Async) with handler {
-        println("Before sleep")
-        async/sleep(50)
-        println("After sleep")
-    }
+    // Test sleep through the implicit async handler
+    println("Before sleep")
+    async/sleep(50)
+    println("After sleep")
 
     println("done")
 }
 
 // Expect
-// Handler created: true
 // Before sleep
 // After sleep
 // done

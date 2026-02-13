@@ -6,92 +6,85 @@ use beagle.effect as effect
 use beagle.core as core
 
 // Test beagle.fs namespace with file system operations
-// Now using the new Fs effect with EventLoopHandler
+// Uses the implicit async handler provided by __main__
 
 fn main() {
-    // Create an event loop handler for async operations
-    let async_handler = async/create-event-loop-handler(4)
+    let test_path = "/tmp/beagle_fs_test.txt"
+    let content = "Hello from beagle.fs!"
 
-    handle effect/Handler(async/Async) with async_handler {
-        let test_path = "/tmp/beagle_fs_test.txt"
-        let content = "Hello from beagle.fs!"
-
-        // Test write-file - returns Result directly with EventLoopHandler
-        println("Testing fs/write-file...")
-        let write_result = async/write-file(test_path, content)
-        match write_result {
-            Result.Ok { value } => {
-                println("Write OK, bytes:", value)
-            },
-            Result.Err { error } => {
-                println("Write ERROR:", error)
-            }
+    // Test write-file
+    println("Testing fs/write-file...")
+    let write_result = async/write-file(test_path, content)
+    match write_result {
+        Result.Ok { value } => {
+            println("Write OK, bytes:", value)
+        },
+        Result.Err { error } => {
+            println("Write ERROR:", error)
         }
-
-        // Test read-file
-        println("Testing fs/read-file...")
-        let read_result = async/read-file(test_path)
-        match read_result {
-            Result.Ok { value } => {
-                println("Read OK:", value)
-            },
-            Result.Err { error } => {
-                println("Read ERROR:", error)
-            }
-        }
-
-        // Test file-size
-        println("Testing fs/file-size...")
-        let size_result = async/file-size(test_path)
-        match size_result {
-            Result.Ok { value } => {
-                println("Size:", value)
-            },
-            Result.Err { error } => {
-                println("Size ERROR:", error)
-            }
-        }
-
-        // Test exists?
-        println("Testing fs/exists?...")
-        let exists_result = async/file-exists?(test_path)
-        match exists_result {
-            Result.Ok { value } => {
-                println("Exists:", value)
-            },
-            Result.Err { error } => {
-                println("Exists ERROR:", error)
-            }
-        }
-
-        // Test is-file?
-        println("Testing fs/is-file?...")
-        let isfile_result = async/is-file?(test_path)
-        match isfile_result {
-            Result.Ok { value } => {
-                println("Is file:", value)
-            },
-            Result.Err { error } => {
-                println("Is file ERROR:", error)
-            }
-        }
-
-        // Test delete-file
-        println("Testing fs/delete-file...")
-        let delete_result = async/delete-file(test_path)
-        match delete_result {
-            Result.Ok { value } => {
-                println("Delete OK")
-            },
-            Result.Err { error } => {
-                println("Delete ERROR:", error)
-            }
-        }
-
-        println("Done!")
     }
 
-    "done"
+    // Test read-file
+    println("Testing fs/read-file...")
+    let read_result = async/read-file(test_path)
+    match read_result {
+        Result.Ok { value } => {
+            println("Read OK:", value)
+        },
+        Result.Err { error } => {
+            println("Read ERROR:", error)
+        }
+    }
+
+    // Test file-size
+    println("Testing fs/file-size...")
+    let size_result = async/file-size(test_path)
+    match size_result {
+        Result.Ok { value } => {
+            println("Size:", value)
+        },
+        Result.Err { error } => {
+            println("Size ERROR:", error)
+        }
+    }
+
+    // Test exists?
+    println("Testing fs/exists?...")
+    let exists_result = async/file-exists?(test_path)
+    match exists_result {
+        Result.Ok { value } => {
+            println("Exists:", value)
+        },
+        Result.Err { error } => {
+            println("Exists ERROR:", error)
+        }
+    }
+
+    // Test is-file?
+    println("Testing fs/is-file?...")
+    let isfile_result = async/is-file?(test_path)
+    match isfile_result {
+        Result.Ok { value } => {
+            println("Is file:", value)
+        },
+        Result.Err { error } => {
+            println("Is file ERROR:", error)
+        }
+    }
+
+    // Test delete-file
+    println("Testing fs/delete-file...")
+    let delete_result = async/delete-file(test_path)
+    match delete_result {
+        Result.Ok { value } => {
+            println("Delete OK")
+        },
+        Result.Err { error } => {
+            println("Delete ERROR:", error)
+        }
+    }
+
+    println("Done!")
 }
 
 // Expect
