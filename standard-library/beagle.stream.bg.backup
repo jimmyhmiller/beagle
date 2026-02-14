@@ -48,13 +48,13 @@ protocol StreamSource {
     /// Returns StreamResult.Error { error } on failure (stream is terminated)
     ///
     /// May perform async operations (file I/O, network calls, etc.)
-    fn source-next(self)
+    fn next(self)
 
     /// Optional: cleanup resources when stream is abandoned
     ///
     /// Called automatically when stream is closed or errors occur.
     /// Multiple calls should be safe (idempotent).
-    fn source-close(self)
+    fn close(self)
 }
 
 // ============================================================================
@@ -89,7 +89,7 @@ fn ensure-closed(stream) {
     if was_closed == false {
         // We won the race - we're responsible for cleanup
         try {
-            source-close(stream.source)
+            stream.source.close()
         } catch (e) {
             // Ignore close errors to match standard library conventions
             null
@@ -111,7 +111,7 @@ fn next(stream) {
     if deref(stream.closed) {
         StreamResult.Done {}
     } else {
-        let result = source-next(stream.source)
+        let result = stream.source.next()
         match result {
             StreamResult.Done {} => {
                 ensure-closed(stream)
@@ -151,7 +151,7 @@ fn map(stream, f) {
 struct MapSource { upstream, mapper }
 
 extend MapSource with StreamSource {
-    fn source-next(self) {
+    fn next(self) {
         let result = next(self.upstream)
         match result {
             StreamResult.Value { value } => {
@@ -165,7 +165,7 @@ extend MapSource with StreamSource {
         }
     }
 
-    fn source-close(self) {
+    fn close(self) {
         close(self.upstream)
     }
 }
@@ -185,7 +185,7 @@ fn filter(stream, pred) {
 struct FilterSource { upstream, predicate }
 
 extend FilterSource with StreamSource {
-    fn source-next(self) {
+    fn next(self) {
         let mut found = false
         let mut final_result = null
         loop {
@@ -215,7 +215,7 @@ extend FilterSource with StreamSource {
         }
     }
 
-    fn source-close(self) {
+    fn close(self) {
         close(self.upstream)
     }
 }
@@ -233,7 +233,7 @@ fn take(stream, n) {
 struct TakeSource { upstream, remaining }
 
 extend TakeSource with StreamSource {
-    fn source-next(self) {
+    fn next(self) {
         let count = deref(self.remaining)
         if count <= 0 {
             StreamResult.Done {}
@@ -249,7 +249,7 @@ extend TakeSource with StreamSource {
         }
     }
 
-    fn source-close(self) {
+    fn close(self) {
         close(self.upstream)
     }
 }
@@ -269,7 +269,7 @@ fn take-while(stream, pred) {
 struct TakeWhileSource { upstream, predicate, done }
 
 extend TakeWhileSource with StreamSource {
-    fn source-next(self) {
+    fn next(self) {
         if deref(self.done) {
             StreamResult.Done {}
         } else {
@@ -302,7 +302,7 @@ extend TakeWhileSource with StreamSource {
         }
     }
 
-    fn source-close(self) {
+    fn close(self) {
         close(self.upstream)
     }
 }
@@ -320,7 +320,7 @@ fn skip(stream, n) {
 struct SkipSource { upstream, to_skip }
 
 extend SkipSource with StreamSource {
-    fn source-next(self) {
+    fn next(self) {
         let skip_count = deref(self.to_skip)
         if skip_count > 0 {
             // Keep skipping until we've skipped enough or stream ends
@@ -350,7 +350,7 @@ extend SkipSource with StreamSource {
         }
     }
 
-    fn source-close(self) {
+    fn close(self) {
         close(self.upstream)
     }
 }
@@ -370,7 +370,7 @@ fn flat-map(stream, f) {
 struct FlatMapSource { upstream, mapper, current_inner }
 
 extend FlatMapSource with StreamSource {
-    fn source-next(self) {
+    fn next(self) {
         let mut done = false
         let mut final_result = null
         loop {
@@ -421,7 +421,7 @@ extend FlatMapSource with StreamSource {
         }
     }
 
-    fn source-close(self) {
+    fn close(self) {
         let inner = deref(self.current_inner)
         if inner != null {
             close(inner)
@@ -598,27 +598,104 @@ fn count(stream) {
 }
 
 // ============================================================================
-// Stream Sources - Raw Byte Sources
+// Stream Sources - File I/O
 // ============================================================================
 
-/// Stream file as raw byte chunks
+/// Stream file lines (lazy, pull-based)
 ///
-/// Opens the file on first pull, reads in fixed-size chunks.
-/// Just emits raw bytes - the consumer decides how to interpret.
-/// Last chunk may be smaller if EOF is reached.
+/// Opens the file on first pull, reads line-by-line on demand.
+/// Lines are returned without the trailing newline.
 /// Automatically closes the file when done or on error.
 ///
-/// Typically used with decoders like lines() or by-size():
-///   file-stream("/var/log/app.log")
-///     |> stream/lines()           // Split on newlines
-///     |> stream/map(parse)
-///     |> stream/for-each(process)
-fn file-stream(path) {
-    file-stream-sized(path, 4096)
+/// Example:
+///   stream/lines("/var/log/app.log")
+///     |> stream/filter(fn(line) { core/contains?(line, "ERROR") })
+///     |> stream/collect()
+fn lines(path) {
+    from-source(FileLineSource {
+        path: path,
+        file_handle: atom(null),
+        eof: atom(false)
+    })
 }
 
-/// Stream file with custom chunk size
-fn file-stream-sized(path, chunk_size) {
+struct FileLineSource {
+    path
+    file_handle    // Atom holding the file handle (null until first read)
+    eof            // Atom tracking if we hit EOF
+}
+
+extend FileLineSource with StreamSource {
+    fn next(self) {
+        let is_eof = deref(self.eof)
+        if is_eof {
+            StreamResult.Done {}
+        } else {
+            // Lazy open - only open file on first read
+            let handle = deref(self.file_handle)
+            let open_result = if handle == null {
+                async/open(self.path, "r")
+            } else {
+                core/Result.Ok { value: handle }
+            }
+
+            match open_result {
+                core/Result.Ok { value } => {
+                    let file = value
+                    if handle == null {
+                        reset!(self.file_handle, file)
+                    }
+
+                    // Read next line
+                    let read_result = async/read-line(file)
+                    match read_result {
+                        core/Result.Ok { value } => {
+                            if value == null || value == "" {
+                                // EOF reached
+                                reset!(self.eof, true)
+                                StreamResult.Done {}
+                            } else {
+                                StreamResult.Value { value: value }
+                            }
+                        },
+                        core/Result.Err { error } => {
+                            reset!(self.eof, true)
+                            StreamResult.Error { error: error }
+                        }
+                    }
+                },
+                core/Result.Err { error } => {
+                    reset!(self.eof, true)
+                    StreamResult.Error { error: error }
+                }
+            }
+        }
+    }
+
+    fn close(self) {
+        let handle = deref(self.file_handle)
+        if handle != null {
+            try {
+                async/close(handle)
+            } catch (e) {
+                null
+            }
+            reset!(self.file_handle, null)
+        }
+    }
+}
+
+/// Stream file in chunks of n bytes
+///
+/// Opens the file on first pull, reads in fixed-size chunks.
+/// Last chunk may be smaller than n if file size is not a multiple of n.
+/// Automatically closes the file when done or on error.
+///
+/// Example:
+///   stream/chunks("/data/file.bin", 8192)
+///     |> stream/map(process-chunk)
+///     |> stream/for-each(write-result)
+fn chunks(path, chunk_size) {
     from-source(FileChunkSource {
         path: path,
         chunk_size: chunk_size,
@@ -635,7 +712,7 @@ struct FileChunkSource {
 }
 
 extend FileChunkSource with StreamSource {
-    fn source-next(self) {
+    fn next(self) {
         let is_eof = deref(self.eof)
         if is_eof {
             StreamResult.Done {}
@@ -680,7 +757,7 @@ extend FileChunkSource with StreamSource {
         }
     }
 
-    fn source-close(self) {
+    fn close(self) {
         let handle = deref(self.file_handle)
         if handle != null {
             try {
@@ -723,7 +800,7 @@ struct DirSource {
 }
 
 extend DirSource with StreamSource {
-    fn source-next(self) {
+    fn next(self) {
         // Lazy load directory entries on first call
         let is_loaded = deref(self.loaded)
         let load_result = if is_loaded == false {
@@ -761,186 +838,9 @@ extend DirSource with StreamSource {
         }
     }
 
-    fn source-close(self) {
+    fn close(self) {
         // No resources to clean up (entries are just data)
         null
-    }
-}
-
-// ============================================================================
-// Composable Decoders/Splitters
-// ============================================================================
-// These transform raw byte streams by splitting, batching, or decoding data.
-// They work with any stream, not just raw sources.
-
-/// Split incoming byte stream on a delimiter
-///
-/// Buffers incoming bytes and yields complete messages separated by delimiter.
-/// Works with file-stream, socket-stream, or any byte stream.
-///
-/// Example:
-///   file-stream("/data.csv")
-///     |> stream/split-on(",")  // Split on comma
-///     |> stream/collect()
-///
-///   socket-stream(conn)
-///     |> stream/split-on("\r\n\r\n")  // Split on double CRLF
-///     |> stream/map(parse-headers)
-fn split-on(stream, delimiter) {
-    from-source(SplitOnSource {
-        upstream: stream,
-        delimiter: delimiter,
-        buffer: atom("")
-    })
-}
-
-struct SplitOnSource {
-    upstream
-    delimiter
-    buffer
-}
-
-extend SplitOnSource with StreamSource {
-    fn source-next(self) {
-        let mut found = false
-        let mut final_result = null
-
-        loop {
-            if found {
-                break(final_result)
-            }
-
-            // Check if buffer contains a complete message
-            let buf = deref(self.buffer)
-            let sep_idx = core/index-of(buf, self.delimiter)
-
-            if sep_idx >= 0 {
-                // Found delimiter - return message
-                let message = core/substring(buf, 0, sep_idx)
-                let sep_len = core/length(self.delimiter)
-                let buf_len = core/length(buf)
-                let rest = core/substring(buf, sep_idx + sep_len, buf_len - (sep_idx + sep_len))
-                reset!(self.buffer, rest)
-                final_result = StreamResult.Value { value: message }
-                found = true
-            } else {
-                // Need more data - pull from upstream
-                let result = next(self.upstream)
-                match result {
-                    StreamResult.Value { value } => {
-                        // Append chunk to buffer and continue loop
-                        reset!(self.buffer, buf ++ value)
-                    },
-                    StreamResult.Done {} => {
-                        // Upstream ended - return buffered data if any
-                        if buf == "" {
-                            final_result = StreamResult.Done {}
-                            found = true
-                        } else {
-                            reset!(self.buffer, "")
-                            final_result = StreamResult.Value { value: buf }
-                            found = true
-                        }
-                    },
-                    StreamResult.Error { error } => {
-                        final_result = result
-                        found = true
-                    }
-                }
-            }
-        }
-    }
-
-    fn source-close(self) {
-        close(self.upstream)
-    }
-}
-
-/// Convenience: split on newlines
-///
-/// Equivalent to split-on(stream, "\n")
-///
-/// Example:
-///   file-stream("/var/log/app.log")
-///     |> stream/lines()
-///     |> stream/filter(has-error)
-///     |> stream/map(parse)
-fn lines(stream) {
-    split-on(stream, "\n")
-}
-
-/// Batch stream into fixed-size chunks
-///
-/// Groups data into chunks of specified size.
-/// Useful when you want fixed message sizes rather than delimiters.
-///
-/// Example:
-///   socket-stream(conn)
-///     |> stream/by-size(1024)  // 1KB chunks
-///     |> stream/map(parse-packet)
-fn by-size(stream, size) {
-    from-source(BySizeSource {
-        upstream: stream,
-        size: size,
-        buffer: atom("")
-    })
-}
-
-struct BySizeSource {
-    upstream
-    size
-    buffer
-}
-
-extend BySizeSource with StreamSource {
-    fn source-next(self) {
-        let mut found = false
-        let mut final_result = null
-
-        loop {
-            if found {
-                break(final_result)
-            }
-
-            let buf = deref(self.buffer)
-            let buf_len = core/length(buf)
-
-            if buf_len >= self.size {
-                // Have enough bytes - emit chunk
-                let chunk = core/substring(buf, 0, self.size)
-                let rest = core/substring(buf, self.size, buf_len - self.size)
-                reset!(self.buffer, rest)
-                final_result = StreamResult.Value { value: chunk }
-                found = true
-            } else {
-                // Need more data
-                let result = next(self.upstream)
-                match result {
-                    StreamResult.Value { value } => {
-                        reset!(self.buffer, buf ++ value)
-                    },
-                    StreamResult.Done {} => {
-                        // Upstream ended - return leftover if any
-                        if buf == "" {
-                            final_result = StreamResult.Done {}
-                            found = true
-                        } else {
-                            reset!(self.buffer, "")
-                            final_result = StreamResult.Value { value: buf }
-                            found = true
-                        }
-                    },
-                    StreamResult.Error { error } => {
-                        final_result = result
-                        found = true
-                    }
-                }
-            }
-        }
-    }
-
-    fn source-close(self) {
-        close(self.upstream)
     }
 }
 
@@ -965,7 +865,7 @@ struct GeneratorSource {
 }
 
 extend GeneratorSource with StreamSource {
-    fn source-next(self) {
+    fn next(self) {
         if deref(self.stopped) {
             StreamResult.Done {}
         } else {
@@ -984,7 +884,7 @@ extend GeneratorSource with StreamSource {
         }
     }
 
-    fn source-close(self) {
+    fn close(self) {
         reset!(self.stopped, true)
     }
 }
@@ -1054,7 +954,7 @@ fn merge(stream1, stream2) {
 struct MergeSource { left, right, left_done, right_done }
 
 extend MergeSource with StreamSource {
-    fn source-next(self) {
+    fn next(self) {
         let l_done = deref(self.left_done)
         let r_done = deref(self.right_done)
 
@@ -1081,7 +981,7 @@ extend MergeSource with StreamSource {
         }
     }
 
-    fn source-close(self) {
+    fn close(self) {
         close(self.left)
         close(self.right)
     }
@@ -1101,7 +1001,7 @@ fn zip(stream1, stream2) {
 struct ZipSource { left, right }
 
 extend ZipSource with StreamSource {
-    fn source-next(self) {
+    fn next(self) {
         let left_result = next(self.left)
         match left_result {
             StreamResult.Value { value } => {
@@ -1118,7 +1018,7 @@ extend ZipSource with StreamSource {
         }
     }
 
-    fn source-close(self) {
+    fn close(self) {
         close(self.left)
         close(self.right)
     }
@@ -1146,7 +1046,7 @@ struct BufferedSource {
 }
 
 extend BufferedSource with StreamSource {
-    fn source-next(self) {
+    fn next(self) {
         let buf = deref(self.buffer)
         if core/length(buf) > 0 {
             // Return buffered value
@@ -1185,7 +1085,7 @@ extend BufferedSource with StreamSource {
         }
     }
 
-    fn source-close(self) {
+    fn close(self) {
         close(self.upstream)
     }
 }
@@ -1208,7 +1108,7 @@ fn catch-default(stream, default_value) {
 struct CatchSource { upstream, default }
 
 extend CatchSource with StreamSource {
-    fn source-next(self) {
+    fn next(self) {
         let result = next(self.upstream)
         match result {
             StreamResult.Error { error } => {
@@ -1219,7 +1119,7 @@ extend CatchSource with StreamSource {
         }
     }
 
-    fn source-close(self) {
+    fn close(self) {
         close(self.upstream)
     }
 }
@@ -1240,7 +1140,7 @@ fn retry(stream, max_retries) {
 struct RetrySource { upstream, max_retries, retries }
 
 extend RetrySource with StreamSource {
-    fn source-next(self) {
+    fn next(self) {
         loop {
             let result = next(self.upstream)
             match result {
@@ -1261,73 +1161,155 @@ extend RetrySource with StreamSource {
         }
     }
 
-    fn source-close(self) {
+    fn close(self) {
         close(self.upstream)
     }
 }
 
-/// Stream TCP socket as raw byte chunks
+// ============================================================================
+// Stream Sources - TCP Socket I/O
+// ============================================================================
+
+/// Stream newline-delimited messages from a TCP socket
 ///
-/// Reads from the socket and yields chunks as they arrive.
-/// Just emits raw bytes - the consumer decides how to interpret.
-/// Last chunk may be smaller if EOF is reached.
+/// Reads from a socket and yields complete messages separated by a delimiter.
+/// Handles partial messages by buffering incomplete data internally.
+/// Ends when the connection closes or an error occurs.
 ///
-/// Typically used with decoders like lines() or split-on():
-///   socket-stream(conn)
-///     |> stream/lines()              // Split on newlines
+/// Example:
+///   let conn = socket/connect("localhost", 8080)
+///   stream/socket-lines(conn, "\n")
 ///     |> stream/map(json-decode)
-///     |> stream/for-each(handle-msg)
-fn socket-stream(sock) {
-    socket-stream-sized(sock, 4096)
+///     |> stream/for-each(handle-message)
+///   socket/close(conn)
+fn socket-lines(sock, separator) {
+    from-source(TcpLineSource {
+        socket: sock,
+        separator: separator,
+        buffer: atom(""),
+        eof: atom(false)
+    })
 }
 
-/// Stream socket with custom chunk size
-fn socket-stream-sized(sock, chunk_size) {
-    from-source(SocketChunkSource {
+struct TcpLineSource {
+    socket
+    separator      // Delimiter string (e.g., "\n")
+    buffer         // Atom holding incomplete data
+    eof            // Atom tracking if connection closed
+}
+
+extend TcpLineSource with StreamSource {
+    fn next(self) {
+        let is_eof = deref(self.eof)
+        if is_eof {
+            StreamResult.Done {}
+        } else {
+            // Loop until we find a separator or hit EOF
+            let mut found_separator = false
+            let mut result_value = null
+            loop {
+                if found_separator {
+                    break(StreamResult.Value { value: result_value })
+                }
+                // Check if buffer contains a complete message
+                let buf = deref(self.buffer)
+                let sep_idx = core/index-of(buf, self.separator)
+
+                if sep_idx >= 0 {
+                    // Found separator - return message
+                    let message = core/substring(buf, 0, sep_idx)
+                    let rest = core/substring(buf, sep_idx + core/length(self.separator), core/length(buf))
+                    reset!(self.buffer, rest)
+                    result_value = message
+                    found_separator = true
+                } else {
+                    // Need more data - read from socket
+                    let read_result = try {
+                        socket/read(self.socket, 4096)
+                    } catch (e) {
+                        reset!(self.eof, true)
+                        break(StreamResult.Error { error: e })
+                    }
+
+                    if read_result == null || read_result == "" {
+                        // EOF - return buffered data if any
+                        reset!(self.eof, true)
+                        if buf == "" {
+                            break(StreamResult.Done {})
+                        } else {
+                            reset!(self.buffer, "")
+                            result_value = buf
+                            found_separator = true
+                        }
+                    } else {
+                        // Append to buffer and loop
+                        reset!(self.buffer, buf ++ read_result)
+                    }
+                }
+            }
+        }
+    }
+
+    fn close(self) {
+        // Socket is managed by caller
+        reset!(self.eof, true)
+    }
+}
+
+/// Stream raw bytes from a TCP socket in fixed-size chunks
+///
+/// Reads from the socket and yields chunks of up to chunk_size bytes.
+/// Useful for binary protocols or streaming binary data.
+/// Last chunk may be smaller if fewer bytes are available at EOF.
+///
+/// Example:
+///   let conn = socket/connect("localhost", 9000)
+///   stream/socket-chunks(conn, 8192)
+///     |> stream/for-each(process-chunk)
+///   socket/close(conn)
+fn socket-chunks(sock, chunk_size) {
+    from-source(TcpChunkSource {
         socket: sock,
         chunk_size: chunk_size,
         eof: atom(false)
     })
 }
 
-struct SocketChunkSource {
+struct TcpChunkSource {
     socket
     chunk_size
     eof            // Atom tracking if connection closed
 }
 
-extend SocketChunkSource with StreamSource {
-    fn source-next(self) {
+extend TcpChunkSource with StreamSource {
+    fn next(self) {
         let is_eof = deref(self.eof)
         if is_eof {
             StreamResult.Done {}
         } else {
             let read_result = try {
-                core/Result.Ok { value: socket/read(self.socket, self.chunk_size) }
+                socket/read(self.socket, self.chunk_size)
             } catch (e) {
-                core/Result.Err { error: e }
+                reset!(self.eof, true)
+                StreamResult.Error { error: e }
             }
 
-            match read_result {
-                core/Result.Ok { value } => {
-                    let data = value
-                    if data == null || data == "" {
-                        reset!(self.eof, true)
-                        StreamResult.Done {}
-                    } else {
-                        StreamResult.Value { value: data }
-                    }
-                },
-                core/Result.Err { error } => {
-                    reset!(self.eof, true)
-                    StreamResult.Error { error: error }
+            if read_result == null || read_result == "" {
+                reset!(self.eof, true)
+                if read_result == null {
+                    StreamResult.Done {}
+                } else {
+                    // Empty read on error
+                    StreamResult.Done {}
                 }
+            } else {
+                StreamResult.Value { value: read_result }
             }
         }
     }
 
-    fn source-close(self) {
-        // Socket is managed by caller, just mark as EOF
+    fn close(self) {
+        // Socket is managed by caller, but mark as EOF
         reset!(self.eof, true)
     }
 }

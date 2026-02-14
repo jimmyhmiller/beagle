@@ -303,7 +303,7 @@ pub struct Compiler {
 impl Compiler {
     pub fn reset(&mut self) -> Result<(), CompileError> {
         self.code_allocator = CodeAllocator::new();
-        self.property_look_up_cache = MmapOptions::new(MmapOptions::page_size())
+        self.property_look_up_cache = MmapOptions::new(MmapOptions::page_size() * 256)  // 1MB cache for property lookups
             .map_err(|e| CompileError::MemoryMapping(format!("Failed to create mmap: {}", e)))?
             .map_mut()
             .map_err(|e| CompileError::MemoryMapping(format!("Failed to map mmap: {}", e)))?
@@ -1295,7 +1295,7 @@ impl CompilerThread {
         Ok(CompilerThread {
             compiler: Compiler {
                 code_allocator: CodeAllocator::new(),
-                property_look_up_cache: MmapOptions::new(MmapOptions::page_size())
+                property_look_up_cache: MmapOptions::new(MmapOptions::page_size() * 256)  // 1MB cache for property lookups
                     .map_err(|e| {
                         CompileError::MemoryMapping(format!("Failed to create mmap: {}", e))
                     })?

@@ -295,24 +295,33 @@ fn range(start, end) {
     })
 }
 
-// File I/O Streams
+// ============================================
+// RAW BYTE SOURCES
+// ============================================
 use beagle.async as async
 
-struct FileLineSource {
+// File stream - emits raw chunks of bytes
+struct FileChunkSource {
     path
     file_handle    // Atom holding the file handle (null until first read)
     eof            // Atom tracking if we hit EOF
+    chunk_size     // How many bytes to read at once
 }
 
-fn lines(path) {
-    from-source(FileLineSource {
+fn file-stream(path) {
+    file-stream-sized(path, 4096)  // Default 4KB chunks
+}
+
+fn file-stream-sized(path, chunk_size) {
+    from-source(FileChunkSource {
         path: path,
         file_handle: atom(null),
-        eof: atom(false)
+        eof: atom(false),
+        chunk_size: chunk_size
     })
 }
 
-extend FileLineSource with StreamSource {
+extend FileChunkSource with StreamSource {
     fn source-next(self) {
         let is_eof = deref(self.eof)
         if is_eof {
@@ -333,8 +342,8 @@ extend FileLineSource with StreamSource {
                         reset!(self.file_handle, file)
                     }
 
-                    // Read next line
-                    let read_result = async/read-line(file)
+                    // Read next chunk of bytes
+                    let read_result = async/read(file, self.chunk_size)
                     match read_result {
                         Result.Ok { value } => {
                             if value == null || value == "" {
@@ -433,21 +442,66 @@ extend DirSource with StreamSource {
 // TCP Socket Streams
 use beagle.socket as socket
 
-struct SocketLineSource {
+// Socket stream - emits raw chunks of bytes
+struct SocketChunkSource {
     socket
-    separator      // e.g., "\n" for line-delimited
-    buffer         // Atom holding incomplete data
+    chunk_size     // How many bytes to read at once
     eof            // Atom tracking if connection closed
 }
 
-fn socket-lines(sock, separator) {
-    from-source(SocketLineSource {
+fn socket-stream(sock) {
+    socket-stream-sized(sock, 4096)  // Default 4KB chunks
+}
+
+fn socket-stream-sized(sock, chunk_size) {
+    from-source(SocketChunkSource {
         socket: sock,
-        separator: separator,
-        buffer: atom(""),
+        chunk_size: chunk_size,
         eof: atom(false)
     })
 }
+
+extend SocketChunkSource with StreamSource {
+    fn source-next(self) {
+        if deref(self.eof) {
+            StreamResult.Done {}
+        } else {
+            // Read chunk from socket
+            let read_result = try {
+                ok(socket/read(self.socket, self.chunk_size))
+            } catch (e) {
+                err(e)
+            }
+
+            match read_result {
+                Result.Ok { value } => {
+                    let data = value
+                    if data == null || data == "" {
+                        // EOF
+                        reset!(self.eof, true)
+                        StreamResult.Done {}
+                    } else {
+                        StreamResult.Value { value: data }
+                    }
+                },
+                Result.Err { error } => {
+                    reset!(self.eof, true)
+                    StreamResult.Error { error: error }
+                }
+            }
+        }
+    }
+
+    fn source-close(self) {
+        // Optionally close socket (or let caller manage)
+        // socket/close(self.socket)
+        null
+    }
+}
+
+// ============================================
+// COMPOSABLE DECODERS
+// ============================================
 
 // Helper: find separator in string, return index or -1
 fn find-separator(s, sep) {
@@ -484,63 +538,65 @@ fn extract-substring(s, start, end_pos) {
     result
 }
 
-extend SocketLineSource with StreamSource {
+// Split-on decoder - buffers upstream chunks and splits on delimiter
+struct SplitOnSource {
+    upstream       // Stream emitting byte chunks
+    delimiter      // Delimiter to split on
+    buffer         // Atom holding incomplete data
+}
+
+fn split-on(stream, delimiter) {
+    from-source(SplitOnSource {
+        upstream: stream,
+        delimiter: delimiter,
+        buffer: atom("")
+    })
+}
+
+extend SplitOnSource with StreamSource {
     fn source-next(self) {
-        if deref(self.eof) {
-            StreamResult.Done {}
-        } else {
-            let mut found = false
-            let mut final_result = null
+        let mut found = false
+        let mut final_result = null
 
-            loop {
-                if found {
-                    break(final_result)
-                }
+        loop {
+            if found {
+                break(final_result)
+            }
 
-                // Check if buffer contains a complete message
-                let buf = deref(self.buffer)
-                let sep_idx = find-separator(buf, self.separator)
+            // Check if buffer contains a complete message
+            let buf = deref(self.buffer)
+            let sep_idx = find-separator(buf, self.delimiter)
 
-                if sep_idx >= 0 {
-                    // Found separator - return message
-                    let message = extract-substring(buf, 0, sep_idx)
-                    let sep_len = length(self.separator)
-                    let rest = extract-substring(buf, sep_idx + sep_len, length(buf))
-                    reset!(self.buffer, rest)
-                    final_result = StreamResult.Value { value: message }
-                    found = true
-                } else {
-                    // Need more data - read from socket
-                    let read_result = try {
-                        ok(socket/read(self.socket, 4096))
-                    } catch (e) {
-                        err(e)
-                    }
-
-                    match read_result {
-                        Result.Ok { value } => {
-                            let data = value
-                            if data == null || data == "" {
-                                // EOF - return buffered data if any
-                                reset!(self.eof, true)
-                                if buf == "" {
-                                    final_result = StreamResult.Done {}
-                                    found = true
-                                } else {
-                                    reset!(self.buffer, "")
-                                    final_result = StreamResult.Value { value: buf }
-                                    found = true
-                                }
-                            } else {
-                                // Append to buffer and loop
-                                reset!(self.buffer, buf ++ data)
-                            }
-                        },
-                        Result.Err { error } => {
-                            reset!(self.eof, true)
-                            final_result = StreamResult.Error { error: error }
+            if sep_idx >= 0 {
+                // Found delimiter - return message
+                let message = extract-substring(buf, 0, sep_idx)
+                let sep_len = length(self.delimiter)
+                let rest = extract-substring(buf, sep_idx + sep_len, length(buf))
+                reset!(self.buffer, rest)
+                final_result = StreamResult.Value { value: message }
+                found = true
+            } else {
+                // Need more data - read from upstream
+                let result = next(self.upstream)
+                match result {
+                    StreamResult.Value { value } => {
+                        // Append to buffer and loop
+                        reset!(self.buffer, buf ++ value)
+                    },
+                    StreamResult.Done {} => {
+                        // EOF - return buffered data if any
+                        if buf == "" {
+                            final_result = StreamResult.Done {}
+                            found = true
+                        } else {
+                            reset!(self.buffer, "")
+                            final_result = StreamResult.Value { value: buf }
                             found = true
                         }
+                    },
+                    StreamResult.Error { error } => {
+                        final_result = result
+                        found = true
                     }
                 }
             }
@@ -548,8 +604,79 @@ extend SocketLineSource with StreamSource {
     }
 
     fn source-close(self) {
-        // Optionally close socket (or let caller manage)
-        // socket/close(self.socket)
-        null
+        close(self.upstream)
+    }
+}
+
+// Lines decoder - splits on newline
+fn lines(stream) {
+    split-on(stream, "\n")
+}
+
+// By-size decoder - chunks upstream into fixed-size pieces
+struct BySizeSource {
+    upstream       // Stream emitting byte chunks
+    size           // Target size for each chunk
+    buffer         // Atom holding incomplete data
+}
+
+fn by-size(stream, size) {
+    from-source(BySizeSource {
+        upstream: stream,
+        size: size,
+        buffer: atom("")
+    })
+}
+
+extend BySizeSource with StreamSource {
+    fn source-next(self) {
+        let mut found = false
+        let mut final_result = null
+
+        loop {
+            if found {
+                break(final_result)
+            }
+
+            let buf = deref(self.buffer)
+            let buf_len = length(buf)
+
+            if buf_len >= self.size {
+                // We have enough data - extract chunk
+                let chunk = extract-substring(buf, 0, self.size)
+                let rest = extract-substring(buf, self.size, buf_len)
+                reset!(self.buffer, rest)
+                final_result = StreamResult.Value { value: chunk }
+                found = true
+            } else {
+                // Need more data - read from upstream
+                let result = next(self.upstream)
+                match result {
+                    StreamResult.Value { value } => {
+                        // Append to buffer and loop
+                        reset!(self.buffer, buf ++ value)
+                    },
+                    StreamResult.Done {} => {
+                        // EOF - return buffered data if any
+                        if buf == "" {
+                            final_result = StreamResult.Done {}
+                            found = true
+                        } else {
+                            reset!(self.buffer, "")
+                            final_result = StreamResult.Value { value: buf }
+                            found = true
+                        }
+                    },
+                    StreamResult.Error { error } => {
+                        final_result = result
+                        found = true
+                    }
+                }
+            }
+        }
+    }
+
+    fn source-close(self) {
+        close(self.upstream)
     }
 }
