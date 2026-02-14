@@ -614,7 +614,7 @@ fn count(stream) {
 ///     |> stream/map(parse)
 ///     |> stream/for-each(process)
 fn file-stream(path) {
-    file-stream-sized(path, 4096)
+    file-stream-sized(path, 65536)  // 64KB chunks for better performance
 }
 
 /// Stream file with custom chunk size
@@ -1278,7 +1278,7 @@ extend RetrySource with StreamSource {
 ///     |> stream/map(json-decode)
 ///     |> stream/for-each(handle-msg)
 fn socket-stream(sock) {
-    socket-stream-sized(sock, 4096)
+    socket-stream-sized(sock, 65536)  // 64KB chunks for better performance
 }
 
 /// Stream socket with custom chunk size
