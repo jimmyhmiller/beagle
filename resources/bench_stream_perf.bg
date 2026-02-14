@@ -1,0 +1,61 @@
+namespace bench_stream_perf
+
+use beagle.async as async
+use beagle.core as core
+use beagle.stream as stream
+
+// Benchmark streaming I/O performance
+fn main() {
+    println("=== Beagle Stream Performance Benchmark ===")
+
+    let handler = async/BlockingAsyncHandler {}
+
+    // Create 10MB test file
+    println("Creating 10MB test file...")
+    let handler = async/BlockingAsyncHandler {}
+    let line = "This is a test line for streaming performance benchmarking. It's repeated to create a larger file.\n"
+    let mut content = ""
+    let mut i = 0
+    while i < 100000 {
+        content = content ++ line
+        i = i + 1
+    }
+
+    let test_file = "/tmp/beagle_stream_10mb.txt"
+    handle effect/Handler(async/Async) with handler {
+        async/write-file(test_file, content)
+    }
+    println("Test file created (", length(content), "bytes)")
+
+    // Benchmark: Stream with split-on decoder (lines)
+    println("\nBenchmarking stream with lines decoder...")
+    let start = core/time-now()
+    handle effect/Handler(async/Async) with handler {
+        let line_count = stream/file-stream(test_file)
+            |> stream/lines()
+            |> stream/count()
+        println("Lines read:", line_count)
+    }
+    let elapsed = core/time-now() - start
+    let ms = elapsed / 1000000
+    println("Stream lines: ", ms, " ms")
+
+    // Benchmark: Direct file read (baseline)
+    println("\nBenchmarking direct file read...")
+    let start2 = core/time-now()
+    handle effect/Handler(async/Async) with handler {
+        let content = async/read-file(test_file)
+        println("File size:", length(content), "bytes")
+    }
+    let elapsed2 = core/time-now() - start2
+    let ms2 = elapsed2 / 1000000
+    println("Direct read: ", ms2, " ms")
+
+    // Cleanup
+    handle effect/Handler(async/Async) with handler {
+        async/delete-file(test_file)
+    }
+
+    println("\n=== Complete ===")
+    println("Stream overhead: ", (ms - ms2), " ms (", (ms / ms2), "x slower)")
+}

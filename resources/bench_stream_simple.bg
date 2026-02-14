@@ -1,0 +1,48 @@
+namespace bench_stream_simple
+
+use beagle.async as async
+use beagle.core as core
+use beagle.stream as stream
+
+// Simple benchmark - read existing file
+fn main() {
+    println("=== Beagle Stream Simple Benchmark ===")
+
+    let handler = async/BlockingAsyncHandler {}
+
+    // Read a reasonable file
+    let test_file = "/etc/passwd"
+
+    // Benchmark 1: Direct file read
+    println("\nBenchmarking direct file read (100 iterations)...")
+    let start1 = core/time-now()
+    let mut i = 0
+    handle effect/Handler(async/Async) with handler {
+        while i < 100 {
+            let content = async/read-file(test_file)
+            i = i + 1
+        }
+    }
+    let elapsed1 = core/time-now() - start1
+    let ms1 = elapsed1 / 1000000
+    println("Direct read (100x): ", ms1, " ms")
+
+    // Benchmark 2: Stream with lines (should be similar now with blocking)
+    println("\nBenchmarking stream with lines decoder (100 iterations)...")
+    let start2 = core/time-now()
+    let mut j = 0
+    handle effect/Handler(async/Async) with handler {
+        while j < 100 {
+            let line_count = stream/file-stream(test_file)
+                |> stream/lines()
+                |> stream/count()
+            j = j + 1
+        }
+    }
+    let elapsed2 = core/time-now() - start2
+    let ms2 = elapsed2 / 1000000
+    println("Stream lines (100x): ", ms2, " ms")
+
+    println("\n=== Complete ===")
+    println("Stream overhead: ", (ms2 - ms1), " ms")
+}
