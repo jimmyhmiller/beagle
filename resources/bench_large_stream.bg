@@ -1,0 +1,68 @@
+namespace bench_large_stream
+
+use beagle.async as async
+use beagle.core as core
+use beagle.stream as stream
+
+// Create a large test file and benchmark streaming through it
+fn main() {
+    println("=== Large File Streaming Benchmark ===\n")
+
+    let handler = async/BlockingAsyncHandler {}
+
+    // Create 10MB test file
+    let test_file = "/tmp/beagle_benchmark_10mb.txt"
+
+    println("Creating 10MB test file...")
+    let line = "This is a benchmark line for testing large file streaming performance. Lorem ipsum dolor sit amet, consectetur adipiscing elit.\n"
+    let mut content = ""
+    let mut i = 0
+    while i < 70000 {
+        content = content ++ line
+        i = i + 1
+    }
+
+    let file_size = length(content)
+    println("File size: ", file_size, " bytes (", (file_size / 1048576.0), " MB)\n")
+
+    // Write test file
+    handle effect/Handler(async/Async) with handler {
+        async/write-file(test_file, content)
+    }
+
+    // Benchmark 1: Direct file read
+    println("Benchmark 1: Direct file read")
+    let start1 = core/time-now()
+    handle effect/Handler(async/Async) with handler {
+        async/read-file(test_file)
+    }
+    let time1 = core/time-now() - start1
+    let ms1 = time1 / 1000000
+    let mb_per_sec1 = (file_size / 1048576.0) / (ms1 / 1000.0)
+    println("  Time: ", ms1, " ms")
+    println("  Throughput: ", mb_per_sec1, " MB/s\n")
+
+    // Benchmark 2: Stream with lines decoder
+    println("Benchmark 2: Stream with lines decoder")
+    let start2 = core/time-now()
+    handle effect/Handler(async/Async) with handler {
+        stream/file-stream(test_file)
+            |> stream/lines()
+            |> stream/count()
+    }
+    let time2 = core/time-now() - start2
+    let ms2 = time2 / 1000000
+    let mb_per_sec2 = (file_size / 1048576.0) / (ms2 / 1000.0)
+    println("  Time: ", ms2, " ms")
+    println("  Throughput: ", mb_per_sec2, " MB/s\n")
+
+    // Cleanup
+    handle effect/Handler(async/Async) with handler {
+        async/delete-file(test_file)
+    }
+
+    println("=== Summary ===")
+    println("Direct read: ", ms1, " ms (", mb_per_sec1, " MB/s)")
+    println("Stream:      ", ms2, " ms (", mb_per_sec2, " MB/s)")
+    println("Overhead:    ", (ms2 - ms1), " ms")
+}
