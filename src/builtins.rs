@@ -8287,6 +8287,380 @@ extern "C" fn file_readdir_submit(
     }
 }
 
+/// Submit a file append operation, returns the operation handle
+extern "C" fn file_append_submit(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    loop_id: usize,
+    path: usize,
+    content: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+    let path_str = runtime.get_string(stack_pointer, path);
+    let content_str = runtime.get_string(stack_pointer, content);
+
+    let event_loop = match runtime.event_loops.get(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.submit_file_op(crate::runtime::FileOperation::Append {
+        path: path_str,
+        content: content_str.into_bytes(),
+    }) {
+        Ok(handle) => BuiltInTypes::Int.tag(handle as isize) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Submit a file exists check, returns the operation handle
+extern "C" fn file_exists_submit(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    loop_id: usize,
+    path: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+    let path_str = runtime.get_string(stack_pointer, path);
+
+    let event_loop = match runtime.event_loops.get(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.submit_file_op(crate::runtime::FileOperation::Exists { path: path_str }) {
+        Ok(handle) => BuiltInTypes::Int.tag(handle as isize) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Submit a file rename operation, returns the operation handle
+extern "C" fn file_rename_submit(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    loop_id: usize,
+    old_path: usize,
+    new_path: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+    let old_path_str = runtime.get_string(stack_pointer, old_path);
+    let new_path_str = runtime.get_string(stack_pointer, new_path);
+
+    let event_loop = match runtime.event_loops.get(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.submit_file_op(crate::runtime::FileOperation::Rename {
+        old_path: old_path_str,
+        new_path: new_path_str,
+    }) {
+        Ok(handle) => BuiltInTypes::Int.tag(handle as isize) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Submit a file copy operation, returns the operation handle
+extern "C" fn file_copy_submit(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    loop_id: usize,
+    src_path: usize,
+    dest_path: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+    let src_path_str = runtime.get_string(stack_pointer, src_path);
+    let dest_path_str = runtime.get_string(stack_pointer, dest_path);
+
+    let event_loop = match runtime.event_loops.get(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.submit_file_op(crate::runtime::FileOperation::Copy {
+        src_path: src_path_str,
+        dest_path: dest_path_str,
+    }) {
+        Ok(handle) => BuiltInTypes::Int.tag(handle as isize) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Submit a mkdir operation, returns the operation handle
+extern "C" fn file_mkdir_submit(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    loop_id: usize,
+    path: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+    let path_str = runtime.get_string(stack_pointer, path);
+
+    let event_loop = match runtime.event_loops.get(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.submit_file_op(crate::runtime::FileOperation::Mkdir { path: path_str }) {
+        Ok(handle) => BuiltInTypes::Int.tag(handle as isize) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Submit a mkdir-all operation, returns the operation handle
+extern "C" fn file_mkdir_all_submit(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    loop_id: usize,
+    path: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+    let path_str = runtime.get_string(stack_pointer, path);
+
+    let event_loop = match runtime.event_loops.get(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.submit_file_op(crate::runtime::FileOperation::MkdirAll { path: path_str }) {
+        Ok(handle) => BuiltInTypes::Int.tag(handle as isize) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Submit a rmdir operation, returns the operation handle
+extern "C" fn file_rmdir_submit(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    loop_id: usize,
+    path: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+    let path_str = runtime.get_string(stack_pointer, path);
+
+    let event_loop = match runtime.event_loops.get(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.submit_file_op(crate::runtime::FileOperation::Rmdir { path: path_str }) {
+        Ok(handle) => BuiltInTypes::Int.tag(handle as isize) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Submit a rmdir-all operation, returns the operation handle
+extern "C" fn file_rmdir_all_submit(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    loop_id: usize,
+    path: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+    let path_str = runtime.get_string(stack_pointer, path);
+
+    let event_loop = match runtime.event_loops.get(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.submit_file_op(crate::runtime::FileOperation::RmdirAll { path: path_str }) {
+        Ok(handle) => BuiltInTypes::Int.tag(handle as isize) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Submit an is-directory check, returns the operation handle
+extern "C" fn file_is_dir_submit(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    loop_id: usize,
+    path: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+    let path_str = runtime.get_string(stack_pointer, path);
+
+    let event_loop = match runtime.event_loops.get(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.submit_file_op(crate::runtime::FileOperation::IsDir { path: path_str }) {
+        Ok(handle) => BuiltInTypes::Int.tag(handle as isize) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Submit an is-file check, returns the operation handle
+extern "C" fn file_is_file_submit(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    loop_id: usize,
+    path: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+    let path_str = runtime.get_string(stack_pointer, path);
+
+    let event_loop = match runtime.event_loops.get(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.submit_file_op(crate::runtime::FileOperation::IsFile { path: path_str }) {
+        Ok(handle) => BuiltInTypes::Int.tag(handle as isize) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Submit a file open operation, returns the operation handle
+extern "C" fn file_open_submit(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    loop_id: usize,
+    path: usize,
+    mode: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let runtime = get_runtime().get_mut();
+    let path_str = runtime.get_string(stack_pointer, path);
+    let mode_str = runtime.get_string(stack_pointer, mode);
+
+    let event_loop = match runtime.event_loops.get(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.submit_file_op(crate::runtime::FileOperation::FileOpen {
+        path: path_str,
+        mode: mode_str,
+    }) {
+        Ok(handle) => BuiltInTypes::Int.tag(handle as isize) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Submit a file close operation, returns the operation handle
+extern "C" fn file_close_submit(loop_id: usize, handle_key: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let handle_key = BuiltInTypes::untag(handle_key) as u64;
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.submit_file_op(crate::runtime::FileOperation::FileClose { handle_key }) {
+        Ok(handle) => BuiltInTypes::Int.tag(handle as isize) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Submit a file handle read operation, returns the operation handle
+extern "C" fn file_handle_read_submit(loop_id: usize, handle_key: usize, count: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let handle_key = BuiltInTypes::untag(handle_key) as u64;
+    let count = BuiltInTypes::untag(count);
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop
+        .submit_file_op(crate::runtime::FileOperation::FileHandleRead { handle_key, count })
+    {
+        Ok(handle) => BuiltInTypes::Int.tag(handle as isize) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Submit a file handle write operation, returns the operation handle
+extern "C" fn file_handle_write_submit(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    loop_id: usize,
+    handle_key: usize,
+    content: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let handle_key = BuiltInTypes::untag(handle_key) as u64;
+    let runtime = get_runtime().get_mut();
+    let content_str = runtime.get_string(stack_pointer, content);
+
+    let event_loop = match runtime.event_loops.get(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.submit_file_op(crate::runtime::FileOperation::FileHandleWrite {
+        handle_key,
+        content: content_str.into_bytes(),
+    }) {
+        Ok(handle) => BuiltInTypes::Int.tag(handle as isize) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Submit a file handle readline operation, returns the operation handle
+extern "C" fn file_handle_readline_submit(loop_id: usize, handle_key: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let handle_key = BuiltInTypes::untag(handle_key) as u64;
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop
+        .submit_file_op(crate::runtime::FileOperation::FileHandleReadLine { handle_key })
+    {
+        Ok(handle) => BuiltInTypes::Int.tag(handle as isize) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Submit a file handle flush operation, returns the operation handle
+extern "C" fn file_handle_flush_submit(loop_id: usize, handle_key: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let handle_key = BuiltInTypes::untag(handle_key) as u64;
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+
+    match event_loop.submit_file_op(crate::runtime::FileOperation::FileHandleFlush { handle_key }) {
+        Ok(handle) => BuiltInTypes::Int.tag(handle as isize) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
 /// Get the count of completed file operations
 extern "C" fn file_results_count(loop_id: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
@@ -11462,6 +11836,114 @@ impl Runtime {
             true,
             true,
             4, // stack_pointer, frame_pointer, loop_id, path -> handle
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/file-append-submit",
+            file_append_submit as *const u8,
+            true,
+            true,
+            5, // stack_pointer, frame_pointer, loop_id, path, content -> handle
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/file-exists-submit",
+            file_exists_submit as *const u8,
+            true,
+            true,
+            4, // stack_pointer, frame_pointer, loop_id, path -> handle
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/file-rename-submit",
+            file_rename_submit as *const u8,
+            true,
+            true,
+            5, // stack_pointer, frame_pointer, loop_id, old_path, new_path -> handle
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/file-copy-submit",
+            file_copy_submit as *const u8,
+            true,
+            true,
+            5, // stack_pointer, frame_pointer, loop_id, src_path, dest_path -> handle
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/file-mkdir-submit",
+            file_mkdir_submit as *const u8,
+            true,
+            true,
+            4, // stack_pointer, frame_pointer, loop_id, path -> handle
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/file-mkdir-all-submit",
+            file_mkdir_all_submit as *const u8,
+            true,
+            true,
+            4, // stack_pointer, frame_pointer, loop_id, path -> handle
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/file-rmdir-submit",
+            file_rmdir_submit as *const u8,
+            true,
+            true,
+            4, // stack_pointer, frame_pointer, loop_id, path -> handle
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/file-rmdir-all-submit",
+            file_rmdir_all_submit as *const u8,
+            true,
+            true,
+            4, // stack_pointer, frame_pointer, loop_id, path -> handle
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/file-is-dir-submit",
+            file_is_dir_submit as *const u8,
+            true,
+            true,
+            4, // stack_pointer, frame_pointer, loop_id, path -> handle
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/file-is-file-submit",
+            file_is_file_submit as *const u8,
+            true,
+            true,
+            4, // stack_pointer, frame_pointer, loop_id, path -> handle
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/file-open-submit",
+            file_open_submit as *const u8,
+            true,
+            true,
+            5, // stack_pointer, frame_pointer, loop_id, path, mode -> handle
+        )?;
+        self.add_builtin_function(
+            "beagle.core/file-close-submit",
+            file_close_submit as *const u8,
+            false,
+            2, // loop_id, handle_key -> handle
+        )?;
+        self.add_builtin_function(
+            "beagle.core/file-handle-read-submit",
+            file_handle_read_submit as *const u8,
+            false,
+            3, // loop_id, handle_key, count -> handle
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/file-handle-write-submit",
+            file_handle_write_submit as *const u8,
+            true,
+            true,
+            5, // stack_pointer, frame_pointer, loop_id, handle_key, content -> handle
+        )?;
+        self.add_builtin_function(
+            "beagle.core/file-handle-readline-submit",
+            file_handle_readline_submit as *const u8,
+            false,
+            2, // loop_id, handle_key -> handle
+        )?;
+        self.add_builtin_function(
+            "beagle.core/file-handle-flush-submit",
+            file_handle_flush_submit as *const u8,
+            false,
+            2, // loop_id, handle_key -> handle
         )?;
         self.add_builtin_function(
             "beagle.core/file-results-count",

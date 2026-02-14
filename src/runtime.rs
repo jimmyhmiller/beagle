@@ -747,6 +747,10 @@ pub enum FileResultData {
     StatErr { error: String },
     ReadDirOk { entries: Vec<String> },
     ReadDirErr { error: String },
+    BoolOk { value: bool },
+    BoolErr { error: String },
+    HandleOk { handle: u64 },
+    HandleErr { error: String },
 }
 
 /// Completed result with its handle for lookup
@@ -764,6 +768,22 @@ pub enum FileOperation {
     Delete { path: String },
     Stat { path: String },
     ReadDir { path: String },
+    Append { path: String, content: Vec<u8> },
+    Exists { path: String },
+    Rename { old_path: String, new_path: String },
+    Copy { src_path: String, dest_path: String },
+    Mkdir { path: String },
+    MkdirAll { path: String },
+    Rmdir { path: String },
+    RmdirAll { path: String },
+    IsDir { path: String },
+    IsFile { path: String },
+    FileOpen { path: String, mode: String },
+    FileClose { handle_key: u64 },
+    FileHandleRead { handle_key: u64, count: usize },
+    FileHandleWrite { handle_key: u64, content: Vec<u8> },
+    FileHandleReadLine { handle_key: u64 },
+    FileHandleFlush { handle_key: u64 },
 }
 
 /// Task for the file I/O thread pool
@@ -1092,6 +1112,10 @@ impl EventLoop {
             FileResultData::StatErr { .. } => 8,
             FileResultData::ReadDirOk { .. } => 9,
             FileResultData::ReadDirErr { .. } => 10,
+            FileResultData::BoolOk { .. } => 11,
+            FileResultData::BoolErr { .. } => 12,
+            FileResultData::HandleOk { .. } => 13,
+            FileResultData::HandleErr { .. } => 14,
         }
     }
 
@@ -1104,6 +1128,8 @@ impl EventLoop {
             FileResultData::DeleteErr { error } => Some(error),
             FileResultData::StatErr { error } => Some(error),
             FileResultData::ReadDirErr { error } => Some(error),
+            FileResultData::BoolErr { error } => Some(error),
+            FileResultData::HandleErr { error } => Some(error),
             _ => None,
         }
     }
@@ -1113,6 +1139,14 @@ impl EventLoop {
         match data {
             FileResultData::WriteOk { bytes_written } => *bytes_written,
             FileResultData::StatOk { size } => *size as usize,
+            FileResultData::BoolOk { value } => {
+                if *value {
+                    1
+                } else {
+                    0
+                }
+            }
+            FileResultData::HandleOk { handle } => *handle as usize,
             _ => 0,
         }
     }
@@ -1137,6 +1171,20 @@ impl EventLoop {
         self.current_results.lock().unwrap().get(&tid).cloned()
     }
 }
+
+// ============================================================================
+// File Handle Registry - global registry for handle-based file operations
+// ============================================================================
+// Stores open file handles accessible from worker threads.
+// Keys are u64 identifiers, values are BufReader<File> for buffered I/O.
+
+static FILE_HANDLE_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+use std::io::{BufRead, BufReader};
+use std::sync::LazyLock;
+
+static FILE_REGISTRY: LazyLock<Mutex<HashMap<u64, BufReader<std::fs::File>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Worker loop for file I/O threads with shared receiver
 fn file_worker_loop_shared(
@@ -1216,6 +1264,199 @@ fn execute_file_op(op: FileOperation) -> FileResultData {
                 error: e.to_string(),
             },
         },
+        FileOperation::Append { path, content } => {
+            use std::io::Write as IoWrite;
+            match std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&path)
+            {
+                Ok(mut file) => match file.write_all(&content) {
+                    Ok(()) => FileResultData::WriteOk {
+                        bytes_written: content.len(),
+                    },
+                    Err(e) => FileResultData::WriteErr {
+                        error: e.to_string(),
+                    },
+                },
+                Err(e) => FileResultData::WriteErr {
+                    error: e.to_string(),
+                },
+            }
+        }
+        FileOperation::Exists { path } => FileResultData::BoolOk {
+            value: std::path::Path::new(&path).exists(),
+        },
+        FileOperation::Rename { old_path, new_path } => match std::fs::rename(&old_path, &new_path)
+        {
+            Ok(()) => FileResultData::DeleteOk,
+            Err(e) => FileResultData::DeleteErr {
+                error: e.to_string(),
+            },
+        },
+        FileOperation::Copy {
+            src_path,
+            dest_path,
+        } => match std::fs::copy(&src_path, &dest_path) {
+            Ok(bytes) => FileResultData::WriteOk {
+                bytes_written: bytes as usize,
+            },
+            Err(e) => FileResultData::WriteErr {
+                error: e.to_string(),
+            },
+        },
+        FileOperation::Mkdir { path } => match std::fs::create_dir(&path) {
+            Ok(()) => FileResultData::DeleteOk,
+            Err(e) => FileResultData::DeleteErr {
+                error: e.to_string(),
+            },
+        },
+        FileOperation::MkdirAll { path } => match std::fs::create_dir_all(&path) {
+            Ok(()) => FileResultData::DeleteOk,
+            Err(e) => FileResultData::DeleteErr {
+                error: e.to_string(),
+            },
+        },
+        FileOperation::Rmdir { path } => match std::fs::remove_dir(&path) {
+            Ok(()) => FileResultData::DeleteOk,
+            Err(e) => FileResultData::DeleteErr {
+                error: e.to_string(),
+            },
+        },
+        FileOperation::RmdirAll { path } => match std::fs::remove_dir_all(&path) {
+            Ok(()) => FileResultData::DeleteOk,
+            Err(e) => FileResultData::DeleteErr {
+                error: e.to_string(),
+            },
+        },
+        FileOperation::IsDir { path } => FileResultData::BoolOk {
+            value: std::path::Path::new(&path).is_dir(),
+        },
+        FileOperation::IsFile { path } => FileResultData::BoolOk {
+            value: std::path::Path::new(&path).is_file(),
+        },
+        FileOperation::FileOpen { path, mode } => {
+            let file_result = match mode.as_str() {
+                "r" => std::fs::File::open(&path),
+                "w" => std::fs::File::create(&path),
+                "a" => std::fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(&path),
+                _ => {
+                    return FileResultData::HandleErr {
+                        error: format!("Unknown file mode: {}", mode),
+                    };
+                }
+            };
+            match file_result {
+                Ok(file) => {
+                    let key = FILE_HANDLE_COUNTER.fetch_add(1, Ordering::Relaxed);
+                    let reader = BufReader::new(file);
+                    FILE_REGISTRY.lock().unwrap().insert(key, reader);
+                    FileResultData::HandleOk { handle: key }
+                }
+                Err(e) => FileResultData::HandleErr {
+                    error: e.to_string(),
+                },
+            }
+        }
+        FileOperation::FileClose { handle_key } => {
+            match FILE_REGISTRY.lock().unwrap().remove(&handle_key) {
+                Some(_) => FileResultData::DeleteOk,
+                None => FileResultData::DeleteErr {
+                    error: format!("Invalid file handle: {}", handle_key),
+                },
+            }
+        }
+        FileOperation::FileHandleRead { handle_key, count } => {
+            use std::io::Read as IoRead;
+            let mut registry = FILE_REGISTRY.lock().unwrap();
+            match registry.get_mut(&handle_key) {
+                Some(reader) => {
+                    let mut buf = vec![0u8; count];
+                    match reader.read(&mut buf) {
+                        Ok(n) => {
+                            buf.truncate(n);
+                            match String::from_utf8(buf) {
+                                Ok(s) => FileResultData::ReadOk { content: s },
+                                Err(e) => FileResultData::ReadErr {
+                                    error: e.to_string(),
+                                },
+                            }
+                        }
+                        Err(e) => FileResultData::ReadErr {
+                            error: e.to_string(),
+                        },
+                    }
+                }
+                None => FileResultData::ReadErr {
+                    error: format!("Invalid file handle: {}", handle_key),
+                },
+            }
+        }
+        FileOperation::FileHandleWrite {
+            handle_key,
+            content,
+        } => {
+            use std::io::Write as IoWrite;
+            let mut registry = FILE_REGISTRY.lock().unwrap();
+            match registry.get_mut(&handle_key) {
+                Some(reader) => {
+                    // Get the underlying file from BufReader to write
+                    let file = reader.get_mut();
+                    match file.write_all(&content) {
+                        Ok(()) => FileResultData::WriteOk {
+                            bytes_written: content.len(),
+                        },
+                        Err(e) => FileResultData::WriteErr {
+                            error: e.to_string(),
+                        },
+                    }
+                }
+                None => FileResultData::WriteErr {
+                    error: format!("Invalid file handle: {}", handle_key),
+                },
+            }
+        }
+        FileOperation::FileHandleReadLine { handle_key } => {
+            let mut registry = FILE_REGISTRY.lock().unwrap();
+            match registry.get_mut(&handle_key) {
+                Some(reader) => {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) => FileResultData::ReadOk {
+                            content: String::new(),
+                        },
+                        Ok(_) => FileResultData::ReadOk { content: line },
+                        Err(e) => FileResultData::ReadErr {
+                            error: e.to_string(),
+                        },
+                    }
+                }
+                None => FileResultData::ReadErr {
+                    error: format!("Invalid file handle: {}", handle_key),
+                },
+            }
+        }
+        FileOperation::FileHandleFlush { handle_key } => {
+            use std::io::Write as IoWrite;
+            let mut registry = FILE_REGISTRY.lock().unwrap();
+            match registry.get_mut(&handle_key) {
+                Some(reader) => {
+                    let file = reader.get_mut();
+                    match file.flush() {
+                        Ok(()) => FileResultData::DeleteOk,
+                        Err(e) => FileResultData::DeleteErr {
+                            error: e.to_string(),
+                        },
+                    }
+                }
+                None => FileResultData::DeleteErr {
+                    error: format!("Invalid file handle: {}", handle_key),
+                },
+            }
+        }
     }
 }
 

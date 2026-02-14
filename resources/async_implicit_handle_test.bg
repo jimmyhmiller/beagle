@@ -1,0 +1,187 @@
+namespace async_implicit_handle_test
+
+use beagle.async as async
+use beagle.core as core
+use beagle.effect as effect
+
+// Test handle-based file operations (open/close/read/write/readline/flush)
+// through ImplicitAsyncHandler (normal main, no explicit handler)
+
+fn main() {
+    let path = "/tmp/beagle_implicit_handle_test.txt"
+
+    // Open for writing
+    println("open for write...")
+    let open_w = async/open(path, "w")
+    match open_w {
+        Result.Ok { value } => {
+            let handle = value
+            println("OK")
+
+            // Write content
+            println("write...")
+            let write_result = async/write(handle, "line one\nline two\nline three\n")
+            match write_result {
+                Result.Ok { value } => println("OK"),
+                Result.Err { error } => println("FAIL:", error)
+            }
+
+            // Flush
+            println("flush...")
+            let flush_result = async/flush(handle)
+            match flush_result {
+                Result.Ok { value } => println("OK"),
+                Result.Err { error } => println("FAIL:", error)
+            }
+
+            // Close
+            println("close write...")
+            let close_result = async/close(handle)
+            match close_result {
+                Result.Ok { value } => println("OK"),
+                Result.Err { error } => println("FAIL:", error)
+            }
+        },
+        Result.Err { error } => println("FAIL:", error)
+    }
+
+    // Open for reading
+    println("open for read...")
+    let open_r = async/open(path, "r")
+    match open_r {
+        Result.Ok { value } => {
+            let handle = value
+            println("OK")
+
+            // Read line
+            println("readline 1...")
+            let line1 = async/read-line(handle)
+            match line1 {
+                Result.Ok { value } => println(value),
+                Result.Err { error } => println("FAIL:", error)
+            }
+
+            // Read line 2
+            println("readline 2...")
+            let line2 = async/read-line(handle)
+            match line2 {
+                Result.Ok { value } => println(value),
+                Result.Err { error } => println("FAIL:", error)
+            }
+
+            // Close
+            println("close read...")
+            let close_result = async/close(handle)
+            match close_result {
+                Result.Ok { value } => println("OK"),
+                Result.Err { error } => println("FAIL:", error)
+            }
+        },
+        Result.Err { error } => println("FAIL:", error)
+    }
+
+    // Open for reading again, test read (byte count)
+    println("open for read bytes...")
+    let open_r2 = async/open(path, "r")
+    match open_r2 {
+        Result.Ok { value } => {
+            let handle = value
+            println("OK")
+
+            // Read 8 bytes ("line one")
+            println("read 8...")
+            let read_result = async/read(handle, 8)
+            match read_result {
+                Result.Ok { value } => println(value),
+                Result.Err { error } => println("FAIL:", error)
+            }
+
+            // Close
+            println("close read2...")
+            let close_result = async/close(handle)
+            match close_result {
+                Result.Ok { value } => println("OK"),
+                Result.Err { error } => println("FAIL:", error)
+            }
+        },
+        Result.Err { error } => println("FAIL:", error)
+    }
+
+    // Open for append
+    println("open for append...")
+    let open_a = async/open(path, "a")
+    match open_a {
+        Result.Ok { value } => {
+            let handle = value
+            println("OK")
+
+            // Write appended content
+            println("write append...")
+            let write_result = async/write(handle, "appended\n")
+            match write_result {
+                Result.Ok { value } => println("OK"),
+                Result.Err { error } => println("FAIL:", error)
+            }
+
+            // Close
+            println("close append...")
+            let close_result = async/close(handle)
+            match close_result {
+                Result.Ok { value } => println("OK"),
+                Result.Err { error } => println("FAIL:", error)
+            }
+        },
+        Result.Err { error } => println("FAIL:", error)
+    }
+
+    // Verify append by reading entire file
+    println("verify append...")
+    let verify = async/read-file(path)
+    match verify {
+        Result.Ok { value } => println(value),
+        Result.Err { error } => println("FAIL:", error)
+    }
+
+    // Cleanup
+    async/delete-file(path)
+    println("Done")
+}
+
+// Expect
+// open for write...
+// OK
+// write...
+// OK
+// flush...
+// OK
+// close write...
+// OK
+// open for read...
+// OK
+// readline 1...
+// line one
+//
+// readline 2...
+// line two
+//
+// close read...
+// OK
+// open for read bytes...
+// OK
+// read 8...
+// line one
+// close read2...
+// OK
+// open for append...
+// OK
+// write append...
+// OK
+// close append...
+// OK
+// verify append...
+// line one
+// line two
+// line three
+// appended
+//
+// Done

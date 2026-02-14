@@ -1145,6 +1145,22 @@ fn poll-file-result(loop_id, handle) {
         // ReadDirErr - get error message
         let error_msg = core/file-result-get-string(loop_id, handle)
         async-err(-1, error_msg)
+    } else if type_code == 11 {
+        // BoolOk - get boolean value (1 = true, 0 = false)
+        let bool_val = core/file-result-get-value(loop_id, handle)
+        async-ok(bool_val == 1)
+    } else if type_code == 12 {
+        // BoolErr - get error message
+        let error_msg = core/file-result-get-string(loop_id, handle)
+        async-err(-1, error_msg)
+    } else if type_code == 13 {
+        // HandleOk - get handle key
+        let handle_key = core/file-result-get-value(loop_id, handle)
+        async-ok(handle_key)
+    } else if type_code == 14 {
+        // HandleErr - get error message
+        let error_msg = core/file-result-get-string(loop_id, handle)
+        async-err(-1, error_msg)
     } else {
         // Unknown type code - consume and return error
         core/file-result-consume(loop_id, handle)
@@ -1203,6 +1219,134 @@ fn handle-read-dir-async(loop_id, path) {
     let handle = core/file-readdir-submit(loop_id, path)
     if handle < 0 {
         throw("Failed to submit readdir operation")
+    }
+    wait-for-file-result(loop_id, handle)
+}
+
+fn handle-append-file-async(loop_id, path, content) {
+    let handle = core/file-append-submit(loop_id, path, content)
+    if handle < 0 {
+        throw("Failed to submit append operation")
+    }
+    wait-for-file-result(loop_id, handle)
+}
+
+fn handle-file-exists-async(loop_id, path) {
+    let handle = core/file-exists-submit(loop_id, path)
+    if handle < 0 {
+        throw("Failed to submit exists operation")
+    }
+    wait-for-file-result(loop_id, handle)
+}
+
+fn handle-rename-file-async(loop_id, old_path, new_path) {
+    let handle = core/file-rename-submit(loop_id, old_path, new_path)
+    if handle < 0 {
+        throw("Failed to submit rename operation")
+    }
+    wait-for-file-result(loop_id, handle)
+}
+
+fn handle-copy-file-async(loop_id, src_path, dest_path) {
+    let handle = core/file-copy-submit(loop_id, src_path, dest_path)
+    if handle < 0 {
+        throw("Failed to submit copy operation")
+    }
+    wait-for-file-result(loop_id, handle)
+}
+
+fn handle-create-dir-async(loop_id, path) {
+    let handle = core/file-mkdir-submit(loop_id, path)
+    if handle < 0 {
+        throw("Failed to submit mkdir operation")
+    }
+    wait-for-file-result(loop_id, handle)
+}
+
+fn handle-create-dir-all-async(loop_id, path) {
+    let handle = core/file-mkdir-all-submit(loop_id, path)
+    if handle < 0 {
+        throw("Failed to submit mkdir-all operation")
+    }
+    wait-for-file-result(loop_id, handle)
+}
+
+fn handle-remove-dir-async(loop_id, path) {
+    let handle = core/file-rmdir-submit(loop_id, path)
+    if handle < 0 {
+        throw("Failed to submit rmdir operation")
+    }
+    wait-for-file-result(loop_id, handle)
+}
+
+fn handle-remove-dir-all-async(loop_id, path) {
+    let handle = core/file-rmdir-all-submit(loop_id, path)
+    if handle < 0 {
+        throw("Failed to submit rmdir-all operation")
+    }
+    wait-for-file-result(loop_id, handle)
+}
+
+fn handle-is-directory-async(loop_id, path) {
+    let handle = core/file-is-dir-submit(loop_id, path)
+    if handle < 0 {
+        throw("Failed to submit is-directory operation")
+    }
+    wait-for-file-result(loop_id, handle)
+}
+
+fn handle-is-file-async(loop_id, path) {
+    let handle = core/file-is-file-submit(loop_id, path)
+    if handle < 0 {
+        throw("Failed to submit is-file operation")
+    }
+    wait-for-file-result(loop_id, handle)
+}
+
+fn handle-open-async(loop_id, path, mode) {
+    let handle = core/file-open-submit(loop_id, path, mode)
+    if handle < 0 {
+        throw("Failed to submit open operation")
+    }
+    wait-for-file-result(loop_id, handle)
+}
+
+fn handle-close-async(loop_id, handle_key) {
+    let handle = core/file-close-submit(loop_id, handle_key)
+    if handle < 0 {
+        throw("Failed to submit close operation")
+    }
+    wait-for-file-result(loop_id, handle)
+}
+
+fn handle-handle-read-async(loop_id, handle_key, n) {
+    let handle = core/file-handle-read-submit(loop_id, handle_key, n)
+    if handle < 0 {
+        throw("Failed to submit handle-read operation")
+    }
+    wait-for-file-result(loop_id, handle)
+}
+
+fn handle-handle-write-async(loop_id, handle_key, content) {
+    let handle = core/file-handle-write-submit(loop_id, handle_key, content)
+    if handle < 0 {
+        throw("Failed to submit handle-write operation")
+    }
+    wait-for-file-result(loop_id, handle)
+}
+
+fn handle-handle-readline-async(loop_id, handle_key) {
+    let handle = core/file-handle-readline-submit(loop_id, handle_key)
+    if handle < 0 {
+        throw("Failed to submit handle-readline operation")
+    }
+    wait-for-file-result(loop_id, handle)
+}
+
+fn handle-handle-flush-async(loop_id, handle_key) {
+    let handle = core/file-handle-flush-submit(loop_id, handle_key)
+    if handle < 0 {
+        throw("Failed to submit handle-flush operation")
     }
     wait-for-file-result(loop_id, handle)
 }
@@ -1892,61 +2036,61 @@ extend ImplicitAsyncHandler with effect/Handler(Async) {
                 handle-write-file-async(get-io-loop(), path, content)
             },
             Async.AppendFile { path, content } => {
-                handle-append-file(path, content)
+                handle-append-file-async(get-io-loop(), path, content)
             },
             Async.DeleteFile { path } => {
                 handle-delete-file-async(get-io-loop(), path)
             },
             Async.FileExists { path } => {
-                handle-file-exists(path)
+                handle-file-exists-async(get-io-loop(), path)
             },
             Async.RenameFile { old_path, new_path } => {
-                handle-rename-file(old_path, new_path)
+                handle-rename-file-async(get-io-loop(), old_path, new_path)
             },
             Async.CopyFile { src_path, dest_path } => {
-                handle-copy-file(src_path, dest_path)
+                handle-copy-file-async(get-io-loop(), src_path, dest_path)
             },
             Async.ReadDir { path } => {
                 handle-read-dir-async(get-io-loop(), path)
             },
             Async.CreateDir { path } => {
-                handle-create-dir(path)
+                handle-create-dir-async(get-io-loop(), path)
             },
             Async.CreateDirAll { path } => {
-                handle-create-dir-all(path)
+                handle-create-dir-all-async(get-io-loop(), path)
             },
             Async.RemoveDir { path } => {
-                handle-remove-dir(path)
+                handle-remove-dir-async(get-io-loop(), path)
             },
             Async.RemoveDirAll { path } => {
-                handle-remove-dir-all(path)
+                handle-remove-dir-all-async(get-io-loop(), path)
             },
             Async.FileSize { path } => {
                 handle-file-size-async(get-io-loop(), path)
             },
             Async.IsDirectory { path } => {
-                handle-is-directory(path)
+                handle-is-directory-async(get-io-loop(), path)
             },
             Async.IsFile { path } => {
-                handle-is-file(path)
+                handle-is-file-async(get-io-loop(), path)
             },
             Async.Open { path, mode } => {
-                handle-open(path, mode)
+                handle-open-async(get-io-loop(), path, mode)
             },
             Async.Close { file } => {
-                handle-close(file)
+                handle-close-async(get-io-loop(), file)
             },
             Async.Read { file, n } => {
-                handle-read(file, n)
+                handle-handle-read-async(get-io-loop(), file, n)
             },
             Async.Write { file, content } => {
-                handle-write(file, content)
+                handle-handle-write-async(get-io-loop(), file, content)
             },
             Async.ReadLine { file } => {
-                handle-read-line(file)
+                handle-handle-readline-async(get-io-loop(), file)
             },
             Async.Flush { file } => {
-                handle-flush(file)
+                handle-handle-flush-async(get-io-loop(), file)
             },
             Async.Sleep { ms } => {
                 handle-sleep-event-loop(get-io-loop(), ms)

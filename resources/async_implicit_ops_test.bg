@@ -1,0 +1,181 @@
+namespace async_implicit_ops_test
+
+use beagle.async as async
+use beagle.core as core
+use beagle.effect as effect
+
+// Test that all path-based file operations work through ImplicitAsyncHandler
+// (normal main() without explicit handler setup)
+
+fn main() {
+    let base = "/tmp/beagle_implicit_ops_test"
+    let file_path = base ++ "/test.txt"
+    let copy_path = base ++ "/copy.txt"
+    let renamed_path = base ++ "/renamed.txt"
+
+    // create-dir-all
+    println("create-dir-all...")
+    let mkdir_result = async/create-dir-all(base)
+    match mkdir_result {
+        Result.Ok { value } => println("OK"),
+        Result.Err { error } => println("FAIL:", error)
+    }
+
+    // is-directory?
+    println("is-directory?...")
+    let isdir_result = async/is-directory?(base)
+    match isdir_result {
+        Result.Ok { value } => println(value),
+        Result.Err { error } => println("FAIL:", error)
+    }
+
+    // write-file
+    println("write-file...")
+    let write_result = async/write-file(file_path, "hello world")
+    match write_result {
+        Result.Ok { value } => println("OK"),
+        Result.Err { error } => println("FAIL:", error)
+    }
+
+    // append-file
+    println("append-file...")
+    let append_result = async/append-file(file_path, "\nsecond line")
+    match append_result {
+        Result.Ok { value } => println("OK"),
+        Result.Err { error } => println("FAIL:", error)
+    }
+
+    // read-file (verify append worked)
+    println("read after append...")
+    let read_result = async/read-file(file_path)
+    match read_result {
+        Result.Ok { value } => println(value),
+        Result.Err { error } => println("FAIL:", error)
+    }
+
+    // copy-file
+    println("copy-file...")
+    let copy_result = async/copy-file(file_path, copy_path)
+    match copy_result {
+        Result.Ok { value } => println("OK"),
+        Result.Err { error } => println("FAIL:", error)
+    }
+
+    // file-exists? on copy
+    println("copy exists?...")
+    let exists_result = async/file-exists?(copy_path)
+    match exists_result {
+        Result.Ok { value } => println(value),
+        Result.Err { error } => println("FAIL:", error)
+    }
+
+    // rename-file
+    println("rename-file...")
+    let rename_result = async/rename-file(copy_path, renamed_path)
+    match rename_result {
+        Result.Ok { value } => println("OK"),
+        Result.Err { error } => println("FAIL:", error)
+    }
+
+    // old gone, new exists
+    println("old gone?...")
+    let old_exists = async/file-exists?(copy_path)
+    match old_exists {
+        Result.Ok { value } => println(!value),
+        Result.Err { error } => println("FAIL:", error)
+    }
+
+    println("new exists?...")
+    let new_exists = async/file-exists?(renamed_path)
+    match new_exists {
+        Result.Ok { value } => println(value),
+        Result.Err { error } => println("FAIL:", error)
+    }
+
+    // is-file?
+    println("is-file?...")
+    let isfile_result = async/is-file?(renamed_path)
+    match isfile_result {
+        Result.Ok { value } => println(value),
+        Result.Err { error } => println("FAIL:", error)
+    }
+
+    // is-directory? on file (should be false)
+    println("is-directory? on file...")
+    let isdir2_result = async/is-directory?(renamed_path)
+    match isdir2_result {
+        Result.Ok { value } => println(value),
+        Result.Err { error } => println("FAIL:", error)
+    }
+
+    // create-dir (single level, inside existing dir)
+    let sub_dir = base ++ "/subdir"
+    println("create-dir...")
+    let mkdir2_result = async/create-dir(sub_dir)
+    match mkdir2_result {
+        Result.Ok { value } => println("OK"),
+        Result.Err { error } => println("FAIL:", error)
+    }
+
+    // remove-dir (empty dir)
+    println("remove-dir...")
+    let rmdir_result = async/remove-dir(sub_dir)
+    match rmdir_result {
+        Result.Ok { value } => println("OK"),
+        Result.Err { error } => println("FAIL:", error)
+    }
+
+    // remove-dir-all (recursive cleanup)
+    println("remove-dir-all...")
+    let rmdir_all_result = async/remove-dir-all(base)
+    match rmdir_all_result {
+        Result.Ok { value } => println("OK"),
+        Result.Err { error } => println("FAIL:", error)
+    }
+
+    // verify cleanup
+    println("cleaned up?...")
+    let gone = async/file-exists?(base)
+    match gone {
+        Result.Ok { value } => println(!value),
+        Result.Err { error } => println("FAIL:", error)
+    }
+
+    println("Done")
+}
+
+// Expect
+// create-dir-all...
+// OK
+// is-directory?...
+// true
+// write-file...
+// OK
+// append-file...
+// OK
+// read after append...
+// hello world
+// second line
+// copy-file...
+// OK
+// copy exists?...
+// true
+// rename-file...
+// OK
+// old gone?...
+// true
+// new exists?...
+// true
+// is-file?...
+// true
+// is-directory? on file...
+// false
+// create-dir...
+// OK
+// remove-dir...
+// OK
+// remove-dir-all...
+// OK
+// cleaned up?...
+// true
+// Done
