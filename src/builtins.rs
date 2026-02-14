@@ -7616,10 +7616,17 @@ extern "C" fn event_loop_run_once(loop_id: usize, timeout_ms: usize) -> usize {
     {
         let (lock, cvar) = &*notify;
         if let Ok(guard) = lock.lock() {
-            let wait_time = std::time::Duration::from_millis(timeout_ms.min(50));
-            let result = cvar.wait_timeout(guard, wait_time);
-            if let Ok((mut ready, _)) = result {
-                *ready = false;
+            if timeout_ms == 0 {
+                // timeout_ms=0 means wait forever until notified (like Node.js epoll_wait)
+                if let Ok(mut guard) = cvar.wait(guard) {
+                    *guard = false;
+                }
+            } else {
+                // timeout_ms>0 means wait up to N milliseconds (cap at 50ms for safety)
+                let wait_time = std::time::Duration::from_millis(timeout_ms.min(50));
+                if let Ok((mut guard, _)) = cvar.wait_timeout(guard, wait_time) {
+                    *guard = false;
+                }
             }
         }
     }

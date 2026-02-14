@@ -1171,7 +1171,10 @@ fn poll-file-result(loop_id, handle) {
 // Wait for a file operation to complete by handle
 fn wait-for-file-result(loop_id, handle) {
     loop {
-        core/event-loop-run-once(loop_id, 10)
+        // Block until notified (timeout=0 means wait forever)
+        // Workers notify immediately when results are ready
+        // This eliminates polling overhead and matches Node.js libuv pattern
+        core/event-loop-run-once(loop_id, 0)
         let result = poll-file-result(loop_id, handle)
         if result != null {
             break(result)
@@ -1919,9 +1922,10 @@ fn handle-io-action(action) {
             let result_atom = atom(null)
             core/tcp-connect-async(loop_id, host, port, result_atom)
 
-            // Poll until we get a result matching our future_atom
+            // Block until notified (timeout=0 means wait forever)
+            // Workers notify immediately when connection result is ready
             loop {
-                core/event-loop-run-once(loop_id, 50)
+                core/event-loop-run-once(loop_id, 0)
                 let result_type = core/tcp-result-pop-for-atom(loop_id, result_atom)
                 if result_type == TCP_CONNECT_OK {
                     let socket_id = core/tcp-result-value(loop_id)
@@ -1941,9 +1945,10 @@ fn handle-io-action(action) {
             let result_atom = atom(null)
             core/tcp-accept-async(loop_id, listener.listener_id, result_atom)
 
-            // Poll until we get a result matching our future_atom
+            // Block until notified (timeout=0 means wait forever)
+            // Workers notify immediately when accept result is ready
             loop {
-                core/event-loop-run-once(loop_id, 50)
+                core/event-loop-run-once(loop_id, 0)
                 let result_type = core/tcp-result-pop-for-atom(loop_id, result_atom)
                 if result_type == TCP_ACCEPT_OK {
                     let socket_id = core/tcp-result-value(loop_id)
@@ -1963,8 +1968,10 @@ fn handle-io-action(action) {
                 throw("Failed to start read operation")
             }
 
+            // Block until notified (timeout=0 means wait forever)
+            // Workers notify immediately when read result is ready
             loop {
-                core/event-loop-run-once(loop_id, 50)
+                core/event-loop-run-once(loop_id, 0)
                 let result_type = core/tcp-result-pop-for-atom(loop_id, result_atom)
                 if result_type == TCP_READ_OK {
                     let data = core/tcp-result-data(loop_id)
@@ -1981,8 +1988,10 @@ fn handle-io-action(action) {
             let result_atom = atom(null)
             core/tcp-write-async(loop_id, socket.socket_id, data, result_atom)
 
+            // Block until notified (timeout=0 means wait forever)
+            // Workers notify immediately when write result is ready
             loop {
-                core/event-loop-run-once(loop_id, 50)
+                core/event-loop-run-once(loop_id, 0)
                 let result_type = core/tcp-result-pop-for-atom(loop_id, result_atom)
                 if result_type == TCP_WRITE_OK {
                     let bytes_written = core/tcp-result-value(loop_id)

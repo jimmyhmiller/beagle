@@ -2130,10 +2130,13 @@ fn event_loop_thread_main(
         // Phase 3: Lock state briefly — put poll/events back and process results
         let should_notify = {
             let mut s = state.lock().unwrap();
+            let initial_file_count = s.completed_file_results.len();
             s.process_events_and_timers(&events);
             s.poll = Some(poll);
             s.events = Some(events);
-            !s.completed_tcp_results.is_empty() || !s.completed_timers.is_empty()
+            // Notify if TCP results, timers, or new file results arrived
+            !s.completed_tcp_results.is_empty() || !s.completed_timers.is_empty() ||
+            s.completed_file_results.len() > initial_file_count
         }; // lock released
 
         if should_notify {
