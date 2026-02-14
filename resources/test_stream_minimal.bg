@@ -1,0 +1,7 @@
+namespace test_stream_minimal
+
+use beagle.stream as stream
+
+fn main() {
+    println("Stream module loaded successfully!")
+}

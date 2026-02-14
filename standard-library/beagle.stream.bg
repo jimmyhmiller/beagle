@@ -1,0 +1,1315 @@
+namespace beagle.stream
+
+use beagle.async as async
+use beagle.effect as effect
+use beagle.core as core
+use beagle.socket as socket
+
+// ============================================================================
+// Stream Protocol - Pull-based iterator with async support
+// ============================================================================
+//
+// Streams provide a composable, memory-efficient way to process sequences
+// of values. Based on a pull-based model where the consumer drives I/O.
+//
+// Key properties:
+// - Lazy evaluation: values are computed on-demand
+// - Memory efficient: no implicit buffering (unless explicit)
+// - Composable: functional combinators (map, filter, etc.)
+// - Resource safe: automatic cleanup via close()
+// - Async-aware: integrates with async/await effect system
+//
+// Example:
+//   stream/lines("/var/log/app.log")
+//     |> stream/filter(fn(line) { core/contains?(line, "ERROR") })
+//     |> stream/map(parse-log-entry)
+//     |> stream/take(100)
+//     |> stream/for-each(fn(entry) { println(entry) })
+
+/// Stream result - outcome of pulling the next value
+enum StreamResult {
+    /// Stream produced a value
+    Value { value },
+
+    /// Stream has ended normally (no more values)
+    Done {},
+
+    /// Stream encountered an error and is terminated
+    Error { error }
+}
+
+/// StreamSource protocol - implement this to create custom streams
+/// The source controls pulling values from the underlying data.
+protocol StreamSource {
+    /// Pull the next value from the stream
+    ///
+    /// Returns StreamResult.Value { value } to yield a value
+    /// Returns StreamResult.Done {} when stream is exhausted
+    /// Returns StreamResult.Error { error } on failure (stream is terminated)
+    ///
+    /// May perform async operations (file I/O, network calls, etc.)
+    fn next(self)
+
+    /// Optional: cleanup resources when stream is abandoned
+    ///
+    /// Called automatically when stream is closed or errors occur.
+    /// Multiple calls should be safe (idempotent).
+    fn close(self)
+}
+
+// ============================================================================
+// Stream Type and Wrapper Functions
+// ============================================================================
+
+/// Stream wrapper - provides functional combinators over a StreamSource
+///
+/// Never instantiate directly; use from-source() or combinator functions.
+struct Stream {
+    source        // The underlying StreamSource implementation
+    closed        // Atom tracking if close() was called (prevent double-close)
+}
+
+/// Create a stream from any StreamSource implementation
+///
+/// This is the base constructor for all streams. Combinators wrap and
+/// extend streams created by this function.
+fn from-source(source) {
+    Stream {
+        source: source,
+        closed: atom(false)
+    }
+}
+
+/// Ensure cleanup happens exactly once, even if called multiple times
+///
+/// Uses atomic compare-and-swap to guarantee idempotency. Multiple threads
+/// can safely call this; only one will actually close the resource.
+fn ensure-closed(stream) {
+    let was_closed = compare-and-swap!(stream.closed, false, true)
+    if was_closed == false {
+        // We won the race - we're responsible for cleanup
+        try {
+            stream.source.close()
+        } catch (e) {
+            // Ignore close errors to match standard library conventions
+            null
+        }
+    }
+}
+
+// ============================================================================
+// Core Stream Operations
+// ============================================================================
+
+/// Pull the next value from the stream
+///
+/// Returns StreamResult.Value { value }, StreamResult.Done {}, or
+/// StreamResult.Error { error }.
+///
+/// Automatically calls close() if stream ends or errors occur.
+fn next(stream) {
+    if deref(stream.closed) {
+        StreamResult.Done {}
+    } else {
+        let result = stream.source.next()
+        match result {
+            StreamResult.Done {} => {
+                ensure-closed(stream)
+                result
+            },
+            StreamResult.Error { error } => {
+                ensure-closed(stream)
+                result
+            },
+            _ => result
+        }
+    }
+}
+
+/// Close the stream early, releasing resources
+///
+/// Safe to call multiple times. If already closed, does nothing.
+fn close(stream) {
+    ensure-closed(stream)
+}
+
+// ============================================================================
+// Stream Combinators - Lazy, Composable Transformations
+// ============================================================================
+
+/// Transform stream values with a function
+///
+/// The function is called for each value the source produces.
+/// If the function throws, the error propagates to the consumer.
+fn map(stream, f) {
+    from-source(MapSource {
+        upstream: stream,
+        mapper: f
+    })
+}
+
+struct MapSource { upstream, mapper }
+
+extend MapSource with StreamSource {
+    fn next(self) {
+        let result = next(self.upstream)
+        match result {
+            StreamResult.Value { value } => {
+                try {
+                    StreamResult.Value { value: self.mapper(value) }
+                } catch (e) {
+                    StreamResult.Error { error: e }
+                }
+            },
+            _ => result
+        }
+    }
+
+    fn close(self) {
+        close(self.upstream)
+    }
+}
+
+/// Keep only stream values that satisfy a predicate
+///
+/// The predicate function is called for each value. If it returns true,
+/// the value is yielded; if false, the next value is fetched.
+/// If the predicate throws, the error propagates.
+fn filter(stream, pred) {
+    from-source(FilterSource {
+        upstream: stream,
+        predicate: pred
+    })
+}
+
+struct FilterSource { upstream, predicate }
+
+extend FilterSource with StreamSource {
+    fn next(self) {
+        let mut found = false
+        let mut final_result = null
+        loop {
+            if found {
+                break(final_result)
+            }
+            let result = next(self.upstream)
+            match result {
+                StreamResult.Value { value } => {
+                    let keep = try {
+                        self.predicate(value)
+                    } catch (e) {
+                        final_result = StreamResult.Error { error: e }
+                        found = true
+                    }
+                    if keep {
+                        final_result = result
+                        found = true
+                    }
+                    // else continue loop to get next value
+                },
+                _ => {
+                    final_result = result
+                    found = true
+                }
+            }
+        }
+    }
+
+    fn close(self) {
+        close(self.upstream)
+    }
+}
+
+/// Take the first n values from the stream
+///
+/// After yielding n values, returns Done and closes the stream.
+fn take(stream, n) {
+    from-source(TakeSource {
+        upstream: stream,
+        remaining: atom(n)
+    })
+}
+
+struct TakeSource { upstream, remaining }
+
+extend TakeSource with StreamSource {
+    fn next(self) {
+        let count = deref(self.remaining)
+        if count <= 0 {
+            StreamResult.Done {}
+        } else {
+            let result = next(self.upstream)
+            match result {
+                StreamResult.Value { value } => {
+                    swap!(self.remaining, fn(c) { c - 1 })
+                    result
+                },
+                _ => result
+            }
+        }
+    }
+
+    fn close(self) {
+        close(self.upstream)
+    }
+}
+
+/// Take values while a predicate is true
+///
+/// Once the predicate returns false for a value, the stream stops
+/// and the upstream is closed.
+fn take-while(stream, pred) {
+    from-source(TakeWhileSource {
+        upstream: stream,
+        predicate: pred,
+        done: atom(false)
+    })
+}
+
+struct TakeWhileSource { upstream, predicate, done }
+
+extend TakeWhileSource with StreamSource {
+    fn next(self) {
+        if deref(self.done) {
+            StreamResult.Done {}
+        } else {
+            let result = next(self.upstream)
+            match result {
+                StreamResult.Value { value } => {
+                    let pred_result = try {
+                        ok(self.predicate(value))
+                    } catch (e) {
+                        err(e)
+                    }
+                    match pred_result {
+                        Result.Ok { value } => {
+                            let keep = value
+                            if keep {
+                                result
+                            } else {
+                                reset!(self.done, true)
+                                close(self.upstream)
+                                StreamResult.Done {}
+                            }
+                        },
+                        Result.Err { error } => {
+                            StreamResult.Error { error: error }
+                        }
+                    }
+                },
+                _ => result
+            }
+        }
+    }
+
+    fn close(self) {
+        close(self.upstream)
+    }
+}
+
+/// Skip the first n values
+///
+/// Consumes and discards the first n values, then yields from the stream.
+fn skip(stream, n) {
+    from-source(SkipSource {
+        upstream: stream,
+        to_skip: atom(n)
+    })
+}
+
+struct SkipSource { upstream, to_skip }
+
+extend SkipSource with StreamSource {
+    fn next(self) {
+        let skip_count = deref(self.to_skip)
+        if skip_count > 0 {
+            // Keep skipping until we've skipped enough or stream ends
+            let mut remaining = skip_count
+            let mut skip_done = false
+            loop {
+                if skip_done {
+                    break(next(self.upstream))
+                }
+                let result = next(self.upstream)
+                match result {
+                    StreamResult.Value { value } => {
+                        remaining = remaining - 1
+                        if remaining <= 0 {
+                            skip_done = true
+                            reset!(self.to_skip, 0)
+                        }
+                    },
+                    _ => {
+                        skip_done = true
+                        break(result)
+                    }
+                }
+            }
+        } else {
+            next(self.upstream)
+        }
+    }
+
+    fn close(self) {
+        close(self.upstream)
+    }
+}
+
+/// Map each value to a stream and flatten the results
+///
+/// For each value from the source, calls f to get a stream.
+/// Yields all values from that stream before moving to the next source value.
+fn flat-map(stream, f) {
+    from-source(FlatMapSource {
+        upstream: stream,
+        mapper: f,
+        current_inner: atom(null)
+    })
+}
+
+struct FlatMapSource { upstream, mapper, current_inner }
+
+extend FlatMapSource with StreamSource {
+    fn next(self) {
+        let mut done = false
+        let mut final_result = null
+        loop {
+            if done {
+                break(final_result)
+            }
+            let inner = deref(self.current_inner)
+            if inner != null {
+                // We have an active inner stream
+                let result = next(inner)
+                match result {
+                    StreamResult.Done {} => {
+                        // Inner stream finished, get next outer value
+                        reset!(self.current_inner, null)
+                        // continue loop
+                    },
+                    StreamResult.Error { error } => {
+                        final_result = result
+                        done = true
+                    },
+                    StreamResult.Value { value } => {
+                        final_result = result
+                        done = true
+                    }
+                }
+            } else {
+                // Get next value from upstream
+                let outer_result = next(self.upstream)
+                match outer_result {
+                    StreamResult.Value { value } => {
+                        let new_inner = try {
+                            self.mapper(value)
+                        } catch (e) {
+                            final_result = StreamResult.Error { error: e }
+                            done = true
+                        }
+                        if done == false {
+                            reset!(self.current_inner, new_inner)
+                        }
+                        // continue loop to pull from new inner stream
+                    },
+                    _ => {
+                        final_result = outer_result
+                        done = true
+                    }
+                }
+            }
+        }
+    }
+
+    fn close(self) {
+        let inner = deref(self.current_inner)
+        if inner != null {
+            close(inner)
+        }
+        close(self.upstream)
+    }
+}
+
+// ============================================================================
+// Stream Consumers - Terminal Operations
+// ============================================================================
+// These operations consume the entire stream and return a result.
+
+/// Collect all stream values into a vector
+///
+/// WARNING: This loads the entire stream into memory. Use with caution
+/// on large or infinite streams. Consider take() to limit size.
+fn collect(stream) {
+    let mut results = []
+    loop {
+        let result = next(stream)
+        match result {
+            StreamResult.Value { value } => {
+                results = push(results, value)
+            },
+            StreamResult.Done {} => {
+                break(results)
+            },
+            StreamResult.Error { error } => {
+                close(stream)
+                throw(error)
+            }
+        }
+    }
+}
+
+/// Reduce stream to a single value using an accumulator function
+///
+/// Calls f(accumulator, value) for each stream value.
+/// Returns the final accumulator value.
+fn reduce(stream, init, f) {
+    let mut acc = init
+    loop {
+        let result = next(stream)
+        match result {
+            StreamResult.Value { value } => {
+                acc = f(acc, value)
+            },
+            StreamResult.Done {} => {
+                break(acc)
+            },
+            StreamResult.Error { error } => {
+                close(stream)
+                throw(error)
+            }
+        }
+    }
+}
+
+/// Fold with early termination support
+///
+/// Calls f(accumulator, value) for each value. f should return:
+/// - Result.Ok { value: new_accumulator } to continue
+/// - Result.Err to stop and return the current accumulator
+fn fold(stream, init, f) {
+    let mut acc = init
+    let mut should_continue = true
+    loop {
+        if should_continue == false {
+            break(acc)
+        }
+        let result = next(stream)
+        match result {
+            StreamResult.Value { value } => {
+                let fold_result = f(acc, value)
+                match fold_result {
+                    core/Result.Ok { value } => {
+                        acc = value
+                    },
+                    core/Result.Err { error } => {
+                        close(stream)
+                        should_continue = false
+                    }
+                }
+            },
+            StreamResult.Done {} => {
+                should_continue = false
+            },
+            StreamResult.Error { error } => {
+                close(stream)
+                throw(error)
+            }
+        }
+    }
+}
+
+/// Execute a side effect for each stream value
+///
+/// The return values from f are discarded. If f throws, the error
+/// propagates and the stream is closed.
+fn for-each(stream, f) {
+    loop {
+        let result = next(stream)
+        match result {
+            StreamResult.Value { value } => {
+                f(value)
+            },
+            StreamResult.Done {} => {
+                break(null)
+            },
+            StreamResult.Error { error } => {
+                close(stream)
+                throw(error)
+            }
+        }
+    }
+}
+
+/// Find the first value matching a predicate
+///
+/// Returns the value if found, null if stream ends without match.
+fn find(stream, pred) {
+    loop {
+        let result = next(stream)
+        match result {
+            StreamResult.Value { value } => {
+                if pred(value) {
+                    close(stream)
+                    break(value)
+                }
+            },
+            StreamResult.Done {} => {
+                break(null)
+            },
+            StreamResult.Error { error } => {
+                close(stream)
+                throw(error)
+            }
+        }
+    }
+}
+
+/// Check if any value satisfies a predicate
+fn any?(stream, pred) {
+    let result = find(stream, pred)
+    result != null
+}
+
+/// Check if all values satisfy a predicate
+fn all?(stream, pred) {
+    loop {
+        let result = next(stream)
+        match result {
+            StreamResult.Value { value } => {
+                if pred(value) == false {
+                    close(stream)
+                    break(false)
+                }
+            },
+            StreamResult.Done {} => {
+                break(true)
+            },
+            StreamResult.Error { error } => {
+                close(stream)
+                throw(error)
+            }
+        }
+    }
+}
+
+/// Count the number of values in the stream
+fn count(stream) {
+    reduce(stream, 0, fn(acc, _) { acc + 1 })
+}
+
+// ============================================================================
+// Stream Sources - File I/O
+// ============================================================================
+
+/// Stream file lines (lazy, pull-based)
+///
+/// Opens the file on first pull, reads line-by-line on demand.
+/// Lines are returned without the trailing newline.
+/// Automatically closes the file when done or on error.
+///
+/// Example:
+///   stream/lines("/var/log/app.log")
+///     |> stream/filter(fn(line) { core/contains?(line, "ERROR") })
+///     |> stream/collect()
+fn lines(path) {
+    from-source(FileLineSource {
+        path: path,
+        file_handle: atom(null),
+        eof: atom(false)
+    })
+}
+
+struct FileLineSource {
+    path
+    file_handle    // Atom holding the file handle (null until first read)
+    eof            // Atom tracking if we hit EOF
+}
+
+extend FileLineSource with StreamSource {
+    fn next(self) {
+        let is_eof = deref(self.eof)
+        if is_eof {
+            StreamResult.Done {}
+        } else {
+            // Lazy open - only open file on first read
+            let handle = deref(self.file_handle)
+            let open_result = if handle == null {
+                async/open(self.path, "r")
+            } else {
+                core/Result.Ok { value: handle }
+            }
+
+            match open_result {
+                core/Result.Ok { value } => {
+                    let file = value
+                    if handle == null {
+                        reset!(self.file_handle, file)
+                    }
+
+                    // Read next line
+                    let read_result = async/read-line(file)
+                    match read_result {
+                        core/Result.Ok { value } => {
+                            if value == null || value == "" {
+                                // EOF reached
+                                reset!(self.eof, true)
+                                StreamResult.Done {}
+                            } else {
+                                StreamResult.Value { value: value }
+                            }
+                        },
+                        core/Result.Err { error } => {
+                            reset!(self.eof, true)
+                            StreamResult.Error { error: error }
+                        }
+                    }
+                },
+                core/Result.Err { error } => {
+                    reset!(self.eof, true)
+                    StreamResult.Error { error: error }
+                }
+            }
+        }
+    }
+
+    fn close(self) {
+        let handle = deref(self.file_handle)
+        if handle != null {
+            try {
+                async/close(handle)
+            } catch (e) {
+                null
+            }
+            reset!(self.file_handle, null)
+        }
+    }
+}
+
+/// Stream file in chunks of n bytes
+///
+/// Opens the file on first pull, reads in fixed-size chunks.
+/// Last chunk may be smaller than n if file size is not a multiple of n.
+/// Automatically closes the file when done or on error.
+///
+/// Example:
+///   stream/chunks("/data/file.bin", 8192)
+///     |> stream/map(process-chunk)
+///     |> stream/for-each(write-result)
+fn chunks(path, chunk_size) {
+    from-source(FileChunkSource {
+        path: path,
+        chunk_size: chunk_size,
+        file_handle: atom(null),
+        eof: atom(false)
+    })
+}
+
+struct FileChunkSource {
+    path
+    chunk_size
+    file_handle    // Atom holding file handle
+    eof            // Atom tracking EOF
+}
+
+extend FileChunkSource with StreamSource {
+    fn next(self) {
+        let is_eof = deref(self.eof)
+        if is_eof {
+            StreamResult.Done {}
+        } else {
+            // Lazy open
+            let handle = deref(self.file_handle)
+            let open_result = if handle == null {
+                async/open(self.path, "r")
+            } else {
+                core/Result.Ok { value: handle }
+            }
+
+            match open_result {
+                core/Result.Ok { value } => {
+                    let file = value
+                    if handle == null {
+                        reset!(self.file_handle, file)
+                    }
+
+                    // Read chunk
+                    let read_result = async/read(file, self.chunk_size)
+                    match read_result {
+                        core/Result.Ok { value } => {
+                            if value == null || value == "" {
+                                reset!(self.eof, true)
+                                StreamResult.Done {}
+                            } else {
+                                StreamResult.Value { value: value }
+                            }
+                        },
+                        core/Result.Err { error } => {
+                            reset!(self.eof, true)
+                            StreamResult.Error { error: error }
+                        }
+                    }
+                },
+                core/Result.Err { error } => {
+                    reset!(self.eof, true)
+                    StreamResult.Error { error: error }
+                }
+            }
+        }
+    }
+
+    fn close(self) {
+        let handle = deref(self.file_handle)
+        if handle != null {
+            try {
+                async/close(handle)
+            } catch (e) {
+                null
+            }
+            reset!(self.file_handle, null)
+        }
+    }
+}
+
+// ============================================================================
+// Stream Sources - Directory Iteration
+// ============================================================================
+
+/// Stream directory entries (lazy iteration)
+///
+/// Loads the directory contents once on first pull, then iterates lazily.
+/// Returns just the filenames, not full paths.
+///
+/// Example:
+///   stream/read-dir-stream("/data")
+///     |> stream/filter(fn(name) { core/ends-with?(name, ".txt") })
+///     |> stream/collect()
+fn read-dir-stream(path) {
+    from-source(DirSource {
+        path: path,
+        entries: atom([]),
+        index: atom(0),
+        loaded: atom(false)
+    })
+}
+
+struct DirSource {
+    path
+    entries        // Atom holding the entries vector
+    index          // Atom tracking current position
+    loaded         // Atom tracking if we've loaded entries
+}
+
+extend DirSource with StreamSource {
+    fn next(self) {
+        // Lazy load directory entries on first call
+        let is_loaded = deref(self.loaded)
+        let load_result = if is_loaded == false {
+            let read_result = async/read-dir(self.path)
+            match read_result {
+                core/Result.Ok { value } => {
+                    reset!(self.entries, value)
+                    reset!(self.loaded, true)
+                    core/Result.Ok { value: null }
+                },
+                core/Result.Err { error } => {
+                    reset!(self.loaded, true)
+                    core/Result.Err { error: error }
+                }
+            }
+        } else {
+            core/Result.Ok { value: null }
+        }
+
+        match load_result {
+            core/Result.Ok { value } => {
+                // Get next entry
+                let entries = deref(self.entries)
+                let idx = deref(self.index)
+                if idx >= core/length(entries) {
+                    StreamResult.Done {}
+                } else {
+                    reset!(self.index, idx + 1)
+                    StreamResult.Value { value: core/get(entries, idx) }
+                }
+            },
+            core/Result.Err { error } => {
+                StreamResult.Error { error: error }
+            }
+        }
+    }
+
+    fn close(self) {
+        // No resources to clean up (entries are just data)
+        null
+    }
+}
+
+// ============================================================================
+// Stream Sources - Generator Functions
+// ============================================================================
+
+/// Create a stream from a generator function
+///
+/// Generator is called repeatedly until it returns null or throws StopIteration.
+/// Any other exception is propagated as a stream error.
+fn from-generator(gen) {
+    from-source(GeneratorSource {
+        generator: gen,
+        stopped: atom(false)
+    })
+}
+
+struct GeneratorSource {
+    generator
+    stopped        // Atom tracking if generator stopped
+}
+
+extend GeneratorSource with StreamSource {
+    fn next(self) {
+        if deref(self.stopped) {
+            StreamResult.Done {}
+        } else {
+            try {
+                let value = self.generator()
+                if value == null {
+                    reset!(self.stopped, true)
+                    StreamResult.Done {}
+                } else {
+                    StreamResult.Value { value: value }
+                }
+            } catch (e) {
+                reset!(self.stopped, true)
+                StreamResult.Error { error: e }
+            }
+        }
+    }
+
+    fn close(self) {
+        reset!(self.stopped, true)
+    }
+}
+
+/// Create a stream from a range [start, end)
+///
+/// Yields integers starting from start, incrementing by 1, up to but not
+/// including end.
+///
+/// Example:
+///   stream/range(0, 5) |> stream/collect()  ; [0, 1, 2, 3, 4]
+fn range(start, end) {
+    let current = atom(start)
+    from-generator(fn() {
+        let val = deref(current)
+        if val >= end {
+            null
+        } else {
+            reset!(current, val + 1)
+            val
+        }
+    })
+}
+
+/// Create an infinite stream by repeatedly calling a function
+///
+/// WARNING: Infinite stream. Must use take() or find() to limit results.
+fn repeat(f) {
+    from-generator(fn() {
+        f()
+    })
+}
+
+/// Create a stream from a vector
+///
+/// Yields each element of the vector in order.
+fn from-vector(vec) {
+    let index = atom(0)
+    from-generator(fn() {
+        let idx = deref(index)
+        if idx >= core/length(vec) {
+            null
+        } else {
+            reset!(index, idx + 1)
+            core/get(vec, idx)
+        }
+    })
+}
+
+// ============================================================================
+// Advanced Combinators
+// ============================================================================
+
+/// Merge two streams (interleaved)
+///
+/// Pulls from both streams, alternating. If one stream ends, continues
+/// with the other. If one errors, propagates the error.
+fn merge(stream1, stream2) {
+    from-source(MergeSource {
+        left: stream1,
+        right: stream2,
+        left_done: atom(false),
+        right_done: atom(false)
+    })
+}
+
+struct MergeSource { left, right, left_done, right_done }
+
+extend MergeSource with StreamSource {
+    fn next(self) {
+        let l_done = deref(self.left_done)
+        let r_done = deref(self.right_done)
+
+        if l_done && r_done {
+            StreamResult.Done {}
+        } else if l_done {
+            next(self.right)
+        } else if r_done {
+            next(self.left)
+        } else {
+            // Both active - alternate (simple round-robin)
+            let result = next(self.left)
+            match result {
+                StreamResult.Done {} => {
+                    reset!(self.left_done, true)
+                    next(self.right)
+                },
+                StreamResult.Error { error } => {
+                    reset!(self.left_done, true)
+                    result
+                },
+                _ => result
+            }
+        }
+    }
+
+    fn close(self) {
+        close(self.left)
+        close(self.right)
+    }
+}
+
+/// Zip two streams into [value1, value2] pairs
+///
+/// Yields pairs from both streams until one ends.
+/// If one stream ends before the other, the zip ends too.
+fn zip(stream1, stream2) {
+    from-source(ZipSource {
+        left: stream1,
+        right: stream2
+    })
+}
+
+struct ZipSource { left, right }
+
+extend ZipSource with StreamSource {
+    fn next(self) {
+        let left_result = next(self.left)
+        match left_result {
+            StreamResult.Value { value } => {
+                let left_val = value
+                let right_result = next(self.right)
+                match right_result {
+                    StreamResult.Value { value } => {
+                        StreamResult.Value { value: [left_val, value] }
+                    },
+                    _ => right_result
+                }
+            },
+            _ => left_result
+        }
+    }
+
+    fn close(self) {
+        close(self.left)
+        close(self.right)
+    }
+}
+
+/// Buffer stream values to enable batching
+///
+/// Collects up to size values from the source before yielding them.
+/// Useful for reducing context switches or enabling bulk processing.
+///
+/// Note: This buffers eagerly to reach the specified size, so it may
+/// block longer than direct pulls from the source.
+fn buffered(stream, size) {
+    from-source(BufferedSource {
+        upstream: stream,
+        buffer_size: size,
+        buffer: atom([])
+    })
+}
+
+struct BufferedSource {
+    upstream
+    buffer_size
+    buffer         // Atom holding queued values
+}
+
+extend BufferedSource with StreamSource {
+    fn next(self) {
+        let buf = deref(self.buffer)
+        if core/length(buf) > 0 {
+            // Return buffered value
+            let value = core/first(buf)
+            reset!(self.buffer, core/rest(buf))
+            StreamResult.Value { value: value }
+        } else {
+            // Fill buffer
+            let mut new_buf = []
+            let mut i = 0
+            let mut done = false
+
+            while i < self.buffer_size && done == false {
+                let result = next(self.upstream)
+                match result {
+                    StreamResult.Value { value } => {
+                        new_buf = core/push(new_buf, value)
+                        i = i + 1
+                    },
+                    StreamResult.Done {} => {
+                        done = true
+                    },
+                    StreamResult.Error { error } => {
+                        break(result)
+                    }
+                }
+            }
+
+            if core/length(new_buf) == 0 {
+                StreamResult.Done {}
+            } else {
+                let value = core/first(new_buf)
+                reset!(self.buffer, core/rest(new_buf))
+                StreamResult.Value { value: value }
+            }
+        }
+    }
+
+    fn close(self) {
+        close(self.upstream)
+    }
+}
+
+// ============================================================================
+// Error Handling Combinators
+// ============================================================================
+
+/// Catch stream errors and substitute a default value
+///
+/// If an error occurs, yields the default value and continues with Done.
+/// Useful for graceful degradation in the face of I/O errors.
+fn catch-default(stream, default_value) {
+    from-source(CatchSource {
+        upstream: stream,
+        default: default_value
+    })
+}
+
+struct CatchSource { upstream, default }
+
+extend CatchSource with StreamSource {
+    fn next(self) {
+        let result = next(self.upstream)
+        match result {
+            StreamResult.Error { error } => {
+                // Replace error with default value, end stream
+                StreamResult.Value { value: self.default }
+            },
+            _ => result
+        }
+    }
+
+    fn close(self) {
+        close(self.upstream)
+    }
+}
+
+/// Retry on error up to n times before propagating
+///
+/// If a stream operation fails, automatically retries the same operation
+/// up to max_retries times. After all retries are exhausted, the error
+/// is propagated.
+fn retry(stream, max_retries) {
+    from-source(RetrySource {
+        upstream: stream,
+        max_retries: max_retries,
+        retries: atom(0)
+    })
+}
+
+struct RetrySource { upstream, max_retries, retries }
+
+extend RetrySource with StreamSource {
+    fn next(self) {
+        loop {
+            let result = next(self.upstream)
+            match result {
+                StreamResult.Error { error } => {
+                    let retry_count = deref(self.retries)
+                    if retry_count < self.max_retries {
+                        reset!(self.retries, retry_count + 1)
+                        // Loop to retry the operation
+                    } else {
+                        break(result)
+                    }
+                },
+                _ => {
+                    reset!(self.retries, 0)
+                    break(result)
+                }
+            }
+        }
+    }
+
+    fn close(self) {
+        close(self.upstream)
+    }
+}
+
+// ============================================================================
+// Stream Sources - TCP Socket I/O
+// ============================================================================
+
+/// Stream newline-delimited messages from a TCP socket
+///
+/// Reads from a socket and yields complete messages separated by a delimiter.
+/// Handles partial messages by buffering incomplete data internally.
+/// Ends when the connection closes or an error occurs.
+///
+/// Example:
+///   let conn = socket/connect("localhost", 8080)
+///   stream/socket-lines(conn, "\n")
+///     |> stream/map(json-decode)
+///     |> stream/for-each(handle-message)
+///   socket/close(conn)
+fn socket-lines(sock, separator) {
+    from-source(TcpLineSource {
+        socket: sock,
+        separator: separator,
+        buffer: atom(""),
+        eof: atom(false)
+    })
+}
+
+struct TcpLineSource {
+    socket
+    separator      // Delimiter string (e.g., "\n")
+    buffer         // Atom holding incomplete data
+    eof            // Atom tracking if connection closed
+}
+
+extend TcpLineSource with StreamSource {
+    fn next(self) {
+        let is_eof = deref(self.eof)
+        if is_eof {
+            StreamResult.Done {}
+        } else {
+            // Loop until we find a separator or hit EOF
+            let mut found_separator = false
+            let mut result_value = null
+            loop {
+                if found_separator {
+                    break(StreamResult.Value { value: result_value })
+                }
+                // Check if buffer contains a complete message
+                let buf = deref(self.buffer)
+                let sep_idx = core/index-of(buf, self.separator)
+
+                if sep_idx >= 0 {
+                    // Found separator - return message
+                    let message = core/substring(buf, 0, sep_idx)
+                    let rest = core/substring(buf, sep_idx + core/length(self.separator), core/length(buf))
+                    reset!(self.buffer, rest)
+                    result_value = message
+                    found_separator = true
+                } else {
+                    // Need more data - read from socket
+                    let read_result = try {
+                        socket/read(self.socket, 4096)
+                    } catch (e) {
+                        reset!(self.eof, true)
+                        break(StreamResult.Error { error: e })
+                    }
+
+                    if read_result == null || read_result == "" {
+                        // EOF - return buffered data if any
+                        reset!(self.eof, true)
+                        if buf == "" {
+                            break(StreamResult.Done {})
+                        } else {
+                            reset!(self.buffer, "")
+                            result_value = buf
+                            found_separator = true
+                        }
+                    } else {
+                        // Append to buffer and loop
+                        reset!(self.buffer, buf ++ read_result)
+                    }
+                }
+            }
+        }
+    }
+
+    fn close(self) {
+        // Socket is managed by caller
+        reset!(self.eof, true)
+    }
+}
+
+/// Stream raw bytes from a TCP socket in fixed-size chunks
+///
+/// Reads from the socket and yields chunks of up to chunk_size bytes.
+/// Useful for binary protocols or streaming binary data.
+/// Last chunk may be smaller if fewer bytes are available at EOF.
+///
+/// Example:
+///   let conn = socket/connect("localhost", 9000)
+///   stream/socket-chunks(conn, 8192)
+///     |> stream/for-each(process-chunk)
+///   socket/close(conn)
+fn socket-chunks(sock, chunk_size) {
+    from-source(TcpChunkSource {
+        socket: sock,
+        chunk_size: chunk_size,
+        eof: atom(false)
+    })
+}
+
+struct TcpChunkSource {
+    socket
+    chunk_size
+    eof            // Atom tracking if connection closed
+}
+
+extend TcpChunkSource with StreamSource {
+    fn next(self) {
+        let is_eof = deref(self.eof)
+        if is_eof {
+            StreamResult.Done {}
+        } else {
+            let read_result = try {
+                socket/read(self.socket, self.chunk_size)
+            } catch (e) {
+                reset!(self.eof, true)
+                StreamResult.Error { error: e }
+            }
+
+            if read_result == null || read_result == "" {
+                reset!(self.eof, true)
+                if read_result == null {
+                    StreamResult.Done {}
+                } else {
+                    // Empty read on error
+                    StreamResult.Done {}
+                }
+            } else {
+                StreamResult.Value { value: read_result }
+            }
+        }
+    }
+
+    fn close(self) {
+        // Socket is managed by caller, but mark as EOF
+        reset!(self.eof, true)
+    }
+}

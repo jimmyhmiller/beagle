@@ -1008,6 +1008,7 @@ fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Erro
         "beagle.fs.bg",
         "beagle.timer.bg",
         "beagle.socket.bg",
+        "beagle.stream.bg",
         "beagle.repl-session.bg",
         "beagle.repl.bg",
     ];

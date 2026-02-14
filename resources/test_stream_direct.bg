@@ -1,0 +1,20 @@
+namespace test_stream_direct
+
+fn main() {
+    println("Test 1: Basic vector stream")
+
+    // Create a stream directly
+    let vec = [1, 2, 3, 4, 5]
+    let s = beagle.stream/from-vector(vec)
+
+    // Pull first value
+    let r1 = beagle.stream/next(s)
+    match r1 {
+        StreamResult.Value { value } => {
+            println("  ✓ First value is", value)
+        },
+        _ => println("  ✗ Unexpected result")
+    }
+
+    println("done")
+}

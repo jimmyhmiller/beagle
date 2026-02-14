@@ -1,0 +1,11 @@
+namespace beagle.ministream
+
+enum StreamResult {
+    Value { value },
+    Done {}
+}
+
+fn from-vector(vec) {
+    println("from-vector called!")
+    null
+}

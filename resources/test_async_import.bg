@@ -1,0 +1,7 @@
+namespace test_async_import
+
+use beagle.async as async
+
+fn main() {
+    println("async imported successfully!")
+}

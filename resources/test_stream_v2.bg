@@ -1,0 +1,117 @@
+namespace test_stream_v2
+
+fn main() {
+    println("=================================")
+    println("Beagle Stream Module Test Suite")
+    println("=================================")
+
+    // Test 1: Basic vector stream
+    println("")
+    println("Test 1: Basic vector stream")
+
+    let vec = [1, 2, 3, 4, 5]
+    let s = beagle.stream/from-vector(vec)
+
+    let r1 = beagle.stream/next(s)
+    match r1 {
+        StreamResult.Value { value } => {
+            if value == 1 {
+                println("  ✓ First value is 1")
+            } else {
+                println("  ✗ Expected 1, got", value)
+            }
+        },
+        _ => println("  ✗ Expected Value, got Done or Error")
+    }
+
+    let r2 = beagle.stream/next(s)
+    match r2 {
+        StreamResult.Value { value } => {
+            if value == 2 {
+                println("  ✓ Second value is 2")
+            } else {
+                println("  ✗ Expected 2, got", value)
+            }
+        },
+        _ => println("  ✗ Expected Value")
+    }
+
+    // Test 2: Collect
+    println("")
+    println("Test 2: Collect stream to vector")
+
+    let s2 = beagle.stream/from-vector([10, 20, 30])
+    let collected = beagle.stream/collect(s2)
+
+    if length(collected) == 3 {
+        println("  ✓ Length is 3")
+    } else {
+        println("  ✗ Expected length 3, got", length(collected))
+    }
+
+    // Test 3: Map
+    println("")
+    println("Test 3: Map combinator")
+
+    let s3 = beagle.stream/from-vector([1, 2, 3, 4])
+    let doubled = beagle.stream/map(s3, fn(x) { x * 2 })
+    let result = beagle.stream/collect(doubled)
+
+    if length(result) == 4 {
+        println("  ✓ Length is 4")
+    } else {
+        println("  ✗ Expected length 4, got", length(result))
+    }
+
+    if get(result, 0) == 2 && get(result, 1) == 4 {
+        println("  ✓ Values are doubled correctly")
+    } else {
+        println("  ✗ Values incorrect")
+    }
+
+    // Test 4: Filter
+    println("")
+    println("Test 4: Filter combinator")
+
+    let s4 = beagle.stream/from-vector([1, 2, 3, 4, 5, 6, 7, 8])
+    let evens = beagle.stream/filter(s4, fn(x) { x % 2 == 0 })
+    let result2 = beagle.stream/collect(evens)
+
+    if length(result2) == 4 {
+        println("  ✓ Found 4 even numbers")
+    } else {
+        println("  ✗ Expected 4, got", length(result2))
+    }
+
+    // Test 5: Take
+    println("")
+    println("Test 5: Take combinator")
+
+    let s5 = beagle.stream/from-vector([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    let first3 = beagle.stream/take(s5, 3)
+    let result3 = beagle.stream/collect(first3)
+
+    if length(result3) == 3 {
+        println("  ✓ Take returned 3 items")
+    } else {
+        println("  ✗ Expected 3, got", length(result3))
+    }
+
+    // Test 6: Count
+    println("")
+    println("Test 6: Count operation")
+
+    let s6 = beagle.stream/from-vector([1, 2, 3, 4, 5])
+    let c = beagle.stream/count(s6)
+
+    if c == 5 {
+        println("  ✓ Count is 5")
+    } else {
+        println("  ✗ Expected 5, got", c)
+    }
+
+    println("")
+    println("=================================")
+    println("All basic tests completed!")
+    println("=================================")
+}

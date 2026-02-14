@@ -1,0 +1,7 @@
+namespace test_testmod
+
+use beagle.testmod as testmod
+
+fn main() {
+    testmod/hello()
+}

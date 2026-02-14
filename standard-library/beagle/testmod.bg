@@ -1,0 +1,5 @@
+namespace beagle.testmod
+
+fn hello() {
+    println("Hello from testmod")
+}

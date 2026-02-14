@@ -1,0 +1,349 @@
+namespace test_stream
+
+use beagle.stream as stream
+use beagle.async as async
+use beagle.core as core
+
+fn test-basic-vector-stream() {
+    println("Test 1: Basic vector stream")
+
+    let s = stream/from-vector([1, 2, 3, 4, 5])
+
+    // Pull values manually
+    let r1 = stream/next(s)
+    match r1 {
+        StreamResult.Value { value } => {
+            if value == 1 {
+                println("  ✓ First value is 1")
+            } else {
+                println("  ✗ Expected 1, got", value)
+            }
+        },
+        _ => println("  ✗ Expected Value, got", r1)
+    }
+
+    let r2 = stream/next(s)
+    match r2 {
+        StreamResult.Value { value } => {
+            if value == 2 {
+                println("  ✓ Second value is 2")
+            } else {
+                println("  ✗ Expected 2, got", value)
+            }
+        },
+        _ => println("  ✗ Expected Value, got", r2)
+    }
+}
+
+fn test-collect() {
+    println("")
+    println("Test 2: Collect stream to vector")
+
+    let s = stream/from-vector([10, 20, 30])
+    let collected = stream/collect(s)
+
+    if length(collected) == 3 {
+        println("  ✓ Length is 3")
+    } else {
+        println("  ✗ Expected length 3, got", length(collected))
+    }
+
+    if get(collected, 0) == 10 && get(collected, 1) == 20 && get(collected, 2) == 30 {
+        println("  ✓ Values are correct")
+    } else {
+        println("  ✗ Values are incorrect:", collected)
+    }
+}
+
+fn test-map() {
+    println("")
+    println("Test 3: Map combinator")
+
+    let s = stream/from-vector([1, 2, 3, 4])
+    let doubled = stream/map(s, fn(x) { x * 2 })
+    let result = stream/collect(doubled)
+
+    if length(result) == 4 {
+        println("  ✓ Length is 4")
+    } else {
+        println("  ✗ Expected length 4, got", length(result))
+    }
+
+    if get(result, 0) == 2 && get(result, 1) == 4 && get(result, 2) == 6 && get(result, 3) == 8 {
+        println("  ✓ Values are doubled correctly")
+    } else {
+        println("  ✗ Values are incorrect:", result)
+    }
+}
+
+fn test-filter() {
+    println("")
+    println("Test 4: Filter combinator")
+
+    let s = stream/from-vector([1, 2, 3, 4, 5, 6, 7, 8])
+    let evens = stream/filter(s, fn(x) { x % 2 == 0 })
+    let result = stream/collect(evens)
+
+    if length(result) == 4 {
+        println("  ✓ Length is 4 (4 even numbers)")
+    } else {
+        println("  ✗ Expected length 4, got", length(result))
+    }
+
+    if get(result, 0) == 2 && get(result, 1) == 4 && get(result, 2) == 6 && get(result, 3) == 8 {
+        println("  ✓ Even numbers filtered correctly")
+    } else {
+        println("  ✗ Values are incorrect:", result)
+    }
+}
+
+fn test-take() {
+    println("")
+    println("Test 5: Take combinator")
+
+    let s = stream/from-vector([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    let first3 = stream/take(s, 3)
+    let result = stream/collect(first3)
+
+    if length(result) == 3 {
+        println("  ✓ Length is 3")
+    } else {
+        println("  ✗ Expected length 3, got", length(result))
+    }
+
+    if get(result, 0) == 1 && get(result, 1) == 2 && get(result, 2) == 3 {
+        println("  ✓ First 3 values are correct")
+    } else {
+        println("  ✗ Values are incorrect:", result)
+    }
+}
+
+fn test-chained-combinators() {
+    println("")
+    println("Test 6: Chained combinators")
+
+    let s = stream/from-vector([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    let result = s
+        |> stream/filter(fn(x) { x % 2 == 0 })
+        |> stream/map(fn(x) { x * 10 })
+        |> stream/take(3)
+        |> stream/collect()
+
+    if length(result) == 3 {
+        println("  ✓ Length is 3")
+    } else {
+        println("  ✗ Expected length 3, got", length(result))
+    }
+
+    if get(result, 0) == 20 && get(result, 1) == 40 && get(result, 2) == 60 {
+        println("  ✓ Chained operations work correctly")
+    } else {
+        println("  ✗ Values are incorrect:", result)
+    }
+}
+
+fn test-count() {
+    println("")
+    println("Test 7: Count operation")
+
+    let s = stream/from-vector([1, 2, 3, 4, 5])
+    let c = stream/count(s)
+
+    if c == 5 {
+        println("  ✓ Count is 5")
+    } else {
+        println("  ✗ Expected count 5, got", c)
+    }
+}
+
+fn test-for-each() {
+    println("")
+    println("Test 8: For-each operation")
+
+    let sum = atom(0)
+    let s = stream/from-vector([1, 2, 3, 4, 5])
+    stream/for-each(s, fn(x) {
+        swap!(sum, fn(s) { s + x })
+    })
+
+    let total = deref(sum)
+    if total == 15 {
+        println("  ✓ For-each computed sum correctly (15)")
+    } else {
+        println("  ✗ Expected sum 15, got", total)
+    }
+}
+
+fn test-file-lines() {
+    println("")
+    println("Test 9: File line reading")
+
+    // Create test file
+    let test_path = "/tmp/beagle_stream_test.txt"
+    let content = "line 1\nline 2\nline 3\n"
+    let write_result = async/write-file(test_path, content)
+
+    match write_result {
+        Result.Ok { value } => {
+            println("  ✓ Test file created")
+        },
+        Result.Err { error } => {
+            println("  ✗ Failed to create test file:", error)
+            break(null)
+        }
+    }
+
+    // Read using stream
+    let s = stream/lines(test_path)
+    let lines = stream/collect(s)
+
+    if length(lines) == 3 {
+        println("  ✓ Read 3 lines")
+    } else {
+        println("  ✗ Expected 3 lines, got", length(lines))
+    }
+
+    if get(lines, 0) == "line 1\n" {
+        println("  ✓ First line is correct")
+    } else {
+        println("  ✗ First line is incorrect:", get(lines, 0))
+    }
+
+    if get(lines, 1) == "line 2\n" {
+        println("  ✓ Second line is correct")
+    } else {
+        println("  ✗ Second line is incorrect:", get(lines, 1))
+    }
+
+    if get(lines, 2) == "line 3\n" {
+        println("  ✓ Third line is correct")
+    } else {
+        println("  ✗ Third line is incorrect:", get(lines, 2))
+    }
+
+    // Clean up
+    async/delete-file(test_path)
+}
+
+fn test-file-with-filter() {
+    println("")
+    println("Test 10: File reading with filter")
+
+    // Create test file with mixed content
+    let test_path = "/tmp/beagle_stream_filter_test.txt"
+    let content = "INFO: starting\nERROR: failed\nINFO: processing\nERROR: timeout\nINFO: done\n"
+    async/write-file(test_path, content)
+
+    // Read only ERROR lines
+    let s = stream/lines(test_path)
+    let errors = s
+        |> stream/filter(fn(line) { core/starts-with?(line, "ERROR") })
+        |> stream/collect()
+
+    if length(errors) == 2 {
+        println("  ✓ Found 2 ERROR lines")
+    } else {
+        println("  ✗ Expected 2 ERROR lines, got", length(errors))
+    }
+
+    // Clean up
+    async/delete-file(test_path)
+}
+
+fn test-early-termination() {
+    println("")
+    println("Test 11: Early termination with take")
+
+    // Create file with many lines
+    let test_path = "/tmp/beagle_stream_early_term.txt"
+    let content = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n"
+    async/write-file(test_path, content)
+
+    // Only read first 3 lines
+    let s = stream/lines(test_path)
+    let first3 = stream/take(s, 3)
+    let lines = stream/collect(first3)
+
+    if length(lines) == 3 {
+        println("  ✓ Early termination works (only 3 lines read)")
+    } else {
+        println("  ✗ Expected 3 lines, got", length(lines))
+    }
+
+    // Clean up
+    async/delete-file(test_path)
+}
+
+fn main() {
+    println("=================================")
+    println("Beagle Stream Module Test Suite")
+    println("=================================")
+
+    test-basic-vector-stream()
+    test-collect()
+    test-map()
+    test-filter()
+    test-take()
+    test-chained-combinators()
+    test-count()
+    test-for-each()
+    test-file-lines()
+    test-file-with-filter()
+    test-early-termination()
+
+    println("")
+    println("=================================")
+    println("All tests completed!")
+    println("=================================")
+}
+
+// Expected output:
+// =================================
+// Beagle Stream Module Test Suite
+// =================================
+// Test 1: Basic vector stream
+//   ✓ First value is 1
+//   ✓ Second value is 2
+//
+// Test 2: Collect stream to vector
+//   ✓ Length is 3
+//   ✓ Values are correct
+//
+// Test 3: Map combinator
+//   ✓ Length is 4
+//   ✓ Values are doubled correctly
+//
+// Test 4: Filter combinator
+//   ✓ Length is 4 (4 even numbers)
+//   ✓ Even numbers filtered correctly
+//
+// Test 5: Take combinator
+//   ✓ Length is 3
+//   ✓ First 3 values are correct
+//
+// Test 6: Chained combinators
+//   ✓ Length is 3
+//   ✓ Chained operations work correctly
+//
+// Test 7: Count operation
+//   ✓ Count is 5
+//
+// Test 8: For-each operation
+//   ✓ For-each computed sum correctly (15)
+//
+// Test 9: File line reading
+//   ✓ Test file created
+//   ✓ Read 3 lines
+//   ✓ First line is correct
+//   ✓ Second line is correct
+//   ✓ Third line is correct
+//
+// Test 10: File reading with filter
+//   ✓ Found 2 ERROR lines
+//
+// Test 11: Early termination with take
+//   ✓ Early termination works (only 3 lines read)
+//
+// =================================
+// All tests completed!
+// =================================

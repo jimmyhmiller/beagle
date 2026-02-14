@@ -1,0 +1,9 @@
+namespace test_ministream
+
+use beagle.ministream as stream
+
+fn main() {
+    println("Testing mini stream")
+    stream/from-vector([1, 2, 3])
+    println("done")
+}

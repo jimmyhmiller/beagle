@@ -724,15 +724,21 @@ impl Compiler {
         // 1. Full path: com/foo/bar.bg
         candidates.push(format!("{}.bg", parts.join("/")));
 
-        // 2. Drop first segment: foo/bar.bg (if there are at least 2 parts)
+        // 2. Dotted path: com.foo.bar.bg (for standard library modules)
+        candidates.push(format!("{}.bg", namespace_name));
+
+        // 3. Drop first segment: foo/bar.bg (if there are at least 2 parts)
         if parts.len() >= 2 {
             candidates.push(format!("{}.bg", parts[1..].join("/")));
         }
 
-        // 3. Just last segment: bar.bg
+        // 4. Just last segment: bar.bg
         if let Some(last) = parts.last() {
             candidates.push(format!("{}.bg", last));
         }
+
+        // Debug: print candidates
+        eprintln!("Looking for namespace '{}', candidates: {:?}", namespace_name, candidates);
 
         // Try each candidate in each search location
         for candidate in &candidates {

@@ -1,0 +1,20 @@
+namespace test_stream_final
+
+use beagle.stream as stream
+
+fn main() {
+    println("Testing stream module...")
+
+    let vec = [1, 2, 3, 4, 5]
+    let s = stream/from-vector(vec)
+
+    let r1 = stream/next(s)
+    match r1 {
+        StreamResult.Value { value } => {
+            println("Got value:", value)
+        },
+        _ => println("No value")
+    }
+
+    println("done")
+}

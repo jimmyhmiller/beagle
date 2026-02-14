@@ -1,0 +1,5 @@
+namespace beagle.simple
+
+fn hello() {
+    println("Hello from beagle.simple!")
+}

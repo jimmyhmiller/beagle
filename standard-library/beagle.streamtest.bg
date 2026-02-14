@@ -1,0 +1,555 @@
+namespace beagle.streamtest
+
+// Minimal stream implementation for testing
+
+enum StreamResult {
+    Value { value },
+    Done {},
+    Error { error }
+}
+
+protocol StreamSource {
+    fn source-next(self)
+    fn source-close(self)
+}
+
+struct Stream {
+    source
+    closed
+}
+
+fn from-source(source) {
+    Stream {
+        source: source,
+        closed: atom(false)
+    }
+}
+
+fn ensure-closed(stream) {
+    let was_closed = compare-and-swap!(stream.closed, false, true)
+    if was_closed == false {
+        try {
+            source-close(stream.source)
+        } catch (e) {
+            null
+        }
+    }
+}
+
+fn stream-next(stream) {
+    if deref(stream.closed) {
+        StreamResult.Done {}
+    } else {
+        let result = source-next(stream.source)
+        match result {
+            StreamResult.Done {} => {
+                ensure-closed(stream)
+                result
+            },
+            StreamResult.Error { error } => {
+                ensure-closed(stream)
+                result
+            },
+            _ => result
+        }
+    }
+}
+
+fn next(stream) {
+    stream-next(stream)
+}
+
+fn close(stream) {
+    ensure-closed(stream)
+}
+
+// Map combinator
+fn map(stream, f) {
+    from-source(MapSource {
+        upstream: stream,
+        mapper: f
+    })
+}
+
+struct MapSource { upstream, mapper }
+
+extend MapSource with StreamSource {
+    fn source-next(self) {
+        let result = next(self.upstream)
+        match result {
+            StreamResult.Value { value } => {
+                try {
+                    StreamResult.Value { value: self.mapper(value) }
+                } catch (e) {
+                    StreamResult.Error { error: e }
+                }
+            },
+            _ => result
+        }
+    }
+
+    fn source-close(self) {
+        close(self.upstream)
+    }
+}
+
+// Filter combinator
+fn filter(stream, pred) {
+    from-source(FilterSource {
+        upstream: stream,
+        predicate: pred
+    })
+}
+
+struct FilterSource { upstream, predicate }
+
+extend FilterSource with StreamSource {
+    fn source-next(self) {
+        let mut found = false
+        let mut final_result = null
+        loop {
+            if found {
+                break(final_result)
+            }
+            let result = next(self.upstream)
+            match result {
+                StreamResult.Value { value } => {
+                    let keep = try {
+                        self.predicate(value)
+                    } catch (e) {
+                        final_result = StreamResult.Error { error: e }
+                        found = true
+                    }
+                    if keep {
+                        final_result = result
+                        found = true
+                    }
+                },
+                _ => {
+                    final_result = result
+                    found = true
+                }
+            }
+        }
+    }
+
+    fn source-close(self) {
+        close(self.upstream)
+    }
+}
+
+// Take combinator
+fn take(stream, n) {
+    from-source(TakeSource {
+        upstream: stream,
+        remaining: atom(n)
+    })
+}
+
+struct TakeSource { upstream, remaining }
+
+extend TakeSource with StreamSource {
+    fn source-next(self) {
+        let count = deref(self.remaining)
+        if count <= 0 {
+            StreamResult.Done {}
+        } else {
+            let result = next(self.upstream)
+            match result {
+                StreamResult.Value { value } => {
+                    swap!(self.remaining, fn(c) { c - 1 })
+                    result
+                },
+                _ => result
+            }
+        }
+    }
+
+    fn source-close(self) {
+        close(self.upstream)
+    }
+}
+
+// Collect all values into a vector
+fn collect(stream) {
+    let mut results = []
+    loop {
+        let result = next(stream)
+        match result {
+            StreamResult.Value { value } => {
+                results = push(results, value)
+            },
+            StreamResult.Done {} => {
+                break(results)
+            },
+            StreamResult.Error { error } => {
+                close(stream)
+                throw(error)
+            }
+        }
+    }
+}
+
+// Count values
+fn count(stream) {
+    let mut c = 0
+    loop {
+        let result = next(stream)
+        match result {
+            StreamResult.Value { value } => {
+                c = c + 1
+            },
+            StreamResult.Done {} => {
+                break(c)
+            },
+            StreamResult.Error { error } => {
+                close(stream)
+                throw(error)
+            }
+        }
+    }
+}
+
+// For-each side effect
+fn for-each(stream, f) {
+    loop {
+        let result = next(stream)
+        match result {
+            StreamResult.Value { value } => {
+                f(value)
+            },
+            StreamResult.Done {} => {
+                break(null)
+            },
+            StreamResult.Error { error } => {
+                close(stream)
+                throw(error)
+            }
+        }
+    }
+}
+
+// Generator-based streams
+struct GeneratorSource {
+    generator
+    stopped
+}
+
+fn from-generator(gen) {
+    from-source(GeneratorSource {
+        generator: gen,
+        stopped: atom(false)
+    })
+}
+
+extend GeneratorSource with StreamSource {
+    fn source-next(self) {
+        if deref(self.stopped) {
+            StreamResult.Done {}
+        } else {
+            try {
+                let value = self.generator()
+                if value == null {
+                    reset!(self.stopped, true)
+                    StreamResult.Done {}
+                } else {
+                    StreamResult.Value { value: value }
+                }
+            } catch (e) {
+                reset!(self.stopped, true)
+                StreamResult.Error { error: e }
+            }
+        }
+    }
+
+    fn source-close(self) {
+        reset!(self.stopped, true)
+    }
+}
+
+// Create stream from vector
+fn from-vector(vec) {
+    let index = atom(0)
+    from-generator(fn() {
+        let idx = deref(index)
+        if idx >= length(vec) {
+            null
+        } else {
+            reset!(index, idx + 1)
+            get(vec, idx)
+        }
+    })
+}
+
+// Create range stream
+fn range(start, end) {
+    let current = atom(start)
+    from-generator(fn() {
+        let val = deref(current)
+        if val >= end {
+            null
+        } else {
+            reset!(current, val + 1)
+            val
+        }
+    })
+}
+
+// File I/O Streams
+use beagle.async as async
+
+struct FileLineSource {
+    path
+    file_handle    // Atom holding the file handle (null until first read)
+    eof            // Atom tracking if we hit EOF
+}
+
+fn lines(path) {
+    from-source(FileLineSource {
+        path: path,
+        file_handle: atom(null),
+        eof: atom(false)
+    })
+}
+
+extend FileLineSource with StreamSource {
+    fn source-next(self) {
+        let is_eof = deref(self.eof)
+        if is_eof {
+            StreamResult.Done {}
+        } else {
+            // Lazy open - only open file on first read
+            let handle = deref(self.file_handle)
+            let open_result = if handle == null {
+                async/open(self.path, "r")
+            } else {
+                ok(handle)
+            }
+
+            match open_result {
+                Result.Ok { value } => {
+                    let file = value
+                    if handle == null {
+                        reset!(self.file_handle, file)
+                    }
+
+                    // Read next line
+                    let read_result = async/read-line(file)
+                    match read_result {
+                        Result.Ok { value } => {
+                            if value == null || value == "" {
+                                // EOF reached
+                                reset!(self.eof, true)
+                                StreamResult.Done {}
+                            } else {
+                                StreamResult.Value { value: value }
+                            }
+                        },
+                        Result.Err { error } => {
+                            reset!(self.eof, true)
+                            StreamResult.Error { error: error }
+                        }
+                    }
+                },
+                Result.Err { error } => {
+                    reset!(self.eof, true)
+                    StreamResult.Error { error: error }
+                }
+            }
+        }
+    }
+
+    fn source-close(self) {
+        let handle = deref(self.file_handle)
+        if handle != null {
+            try {
+                async/close(handle)
+            } catch (e) {
+                null
+            }
+            reset!(self.file_handle, null)
+        }
+    }
+}
+
+// Directory stream
+struct DirSource {
+    path
+    entries        // Atom holding the entries vector
+    index          // Atom tracking current position
+    loaded         // Atom tracking if we've loaded entries
+}
+
+fn read-dir-stream(path) {
+    from-source(DirSource {
+        path: path,
+        entries: atom([]),
+        index: atom(0),
+        loaded: atom(false)
+    })
+}
+
+extend DirSource with StreamSource {
+    fn source-next(self) {
+        // Lazy load directory entries on first call
+        let is_loaded = deref(self.loaded)
+
+        let load_result = if is_loaded == false {
+            async/read-dir(self.path)
+        } else {
+            ok(deref(self.entries))
+        }
+
+        match load_result {
+            Result.Ok { value } => {
+                if is_loaded == false {
+                    reset!(self.entries, value)
+                    reset!(self.loaded, true)
+                }
+
+                // Get next entry
+                let entries = deref(self.entries)
+                let idx = deref(self.index)
+                if idx >= length(entries) {
+                    StreamResult.Done {}
+                } else {
+                    reset!(self.index, idx + 1)
+                    StreamResult.Value { value: get(entries, idx) }
+                }
+            },
+            Result.Err { error } => {
+                reset!(self.loaded, true)
+                StreamResult.Error { error: error }
+            }
+        }
+    }
+
+    fn source-close(self) {
+        // No resources to clean up (entries are just data)
+        null
+    }
+}
+
+// TCP Socket Streams
+use beagle.socket as socket
+
+struct SocketLineSource {
+    socket
+    separator      // e.g., "\n" for line-delimited
+    buffer         // Atom holding incomplete data
+    eof            // Atom tracking if connection closed
+}
+
+fn socket-lines(sock, separator) {
+    from-source(SocketLineSource {
+        socket: sock,
+        separator: separator,
+        buffer: atom(""),
+        eof: atom(false)
+    })
+}
+
+// Helper: find separator in string, return index or -1
+fn find-separator(s, sep) {
+    let slen = length(s)
+    let seplen = length(sep)
+    let mut i = 0
+    let mut found_idx = -1
+
+    while i <= slen - seplen && found_idx == -1 {
+        let mut matches = true
+        let mut j = 0
+        while j < seplen && matches {
+            if get(s, i + j) != get(sep, j) {
+                matches = false
+            }
+            j = j + 1
+        }
+        if matches {
+            found_idx = i
+        }
+        i = i + 1
+    }
+    found_idx
+}
+
+// Helper: substring extraction
+fn extract-substring(s, start, end_pos) {
+    let mut result = ""
+    let mut i = start
+    while i < end_pos {
+        result = result ++ get(s, i)
+        i = i + 1
+    }
+    result
+}
+
+extend SocketLineSource with StreamSource {
+    fn source-next(self) {
+        if deref(self.eof) {
+            StreamResult.Done {}
+        } else {
+            let mut found = false
+            let mut final_result = null
+
+            loop {
+                if found {
+                    break(final_result)
+                }
+
+                // Check if buffer contains a complete message
+                let buf = deref(self.buffer)
+                let sep_idx = find-separator(buf, self.separator)
+
+                if sep_idx >= 0 {
+                    // Found separator - return message
+                    let message = extract-substring(buf, 0, sep_idx)
+                    let sep_len = length(self.separator)
+                    let rest = extract-substring(buf, sep_idx + sep_len, length(buf))
+                    reset!(self.buffer, rest)
+                    final_result = StreamResult.Value { value: message }
+                    found = true
+                } else {
+                    // Need more data - read from socket
+                    let read_result = try {
+                        ok(socket/read(self.socket, 4096))
+                    } catch (e) {
+                        err(e)
+                    }
+
+                    match read_result {
+                        Result.Ok { value } => {
+                            let data = value
+                            if data == null || data == "" {
+                                // EOF - return buffered data if any
+                                reset!(self.eof, true)
+                                if buf == "" {
+                                    final_result = StreamResult.Done {}
+                                    found = true
+                                } else {
+                                    reset!(self.buffer, "")
+                                    final_result = StreamResult.Value { value: buf }
+                                    found = true
+                                }
+                            } else {
+                                // Append to buffer and loop
+                                reset!(self.buffer, buf ++ data)
+                            }
+                        },
+                        Result.Err { error } => {
+                            reset!(self.eof, true)
+                            final_result = StreamResult.Error { error: error }
+                            found = true
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn source-close(self) {
+        // Optionally close socket (or let caller manage)
+        // socket/close(self.socket)
+        null
+    }
+}

@@ -1,0 +1,7 @@
+namespace test_simple
+
+use beagle.simple as simple
+
+fn main() {
+    simple/hello()
+}
