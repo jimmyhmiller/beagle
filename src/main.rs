@@ -1427,7 +1427,8 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             f();
         } else {
             panic!(
-                "We are supposed to have top level, but didn't find the function {}",
+                "Internal error: top-level initializer '{}' was compiled but not found at runtime. \
+                This is a compiler bug.",
                 top_level
             );
         }
@@ -1485,7 +1486,14 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             let f = runtime.get_function1(&fully_qualified_main).unwrap();
             f(args_array as u64)
         } else {
-            panic!("main() must take 0 or 1 arguments, got {}", arity);
+            eprintln!(
+                "Error: main() must take 0 or 1 arguments, but yours takes {}.\n\
+                Valid signatures:\n  \
+                fn main() {{ ... }}\n  \
+                fn main(args) {{ ... }}",
+                arity
+            );
+            std::process::exit(1);
         };
 
         // Force cleanup of all continuation state before main returns

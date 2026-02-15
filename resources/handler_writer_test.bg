@@ -26,7 +26,6 @@ fn tell(msg) {
     perform Writer.Tell { message: msg }
 }
 
-// BUG: Calling tell() from inside another function causes a crash
 fn log-operation(name) {
     tell("Starting operation")
     tell(name)

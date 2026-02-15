@@ -232,7 +232,16 @@ pub unsafe extern "C" fn to_number(
     let runtime = get_runtime().get_mut();
     let string = runtime.get_string(stack_pointer, value);
     if string.contains(".") {
-        todo!()
+        match string.parse::<f64>() {
+            Ok(result) => BuiltInTypes::construct_float(result) as usize,
+            Err(e) => unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "ParseError",
+                    format!("Cannot parse '{}' as a float: {}", string, e),
+                );
+            },
+        }
     } else {
         match string.parse::<isize>() {
             Ok(result) => BuiltInTypes::Int.tag(result) as usize,
@@ -387,10 +396,29 @@ extern "C" fn get_string_index(
         let bytes = s.as_bytes();
         // ASCII fast path: O(1) byte indexing, return cached single-char literal
         if s.is_ascii() {
+            if index >= bytes.len() {
+                unsafe {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "IndexError",
+                        format!("String index {} out of bounds (length {})", index, bytes.len()),
+                    );
+                }
+            }
             let byte = bytes[index];
             return runtime.get_ascii_char_literal(byte);
         }
         // Unicode: use char_indices to find the byte offset in one pass
+        let char_count = s.chars().count();
+        if index >= char_count {
+            unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "IndexError",
+                    format!("String index {} out of bounds (length {})", index, char_count),
+                );
+            }
+        }
         let ch = s.chars().nth(index).unwrap();
         let result = ch.to_string();
         runtime
@@ -406,10 +434,29 @@ extern "C" fn get_string_index(
             let bytes = runtime.get_string_bytes_vec(string);
             let is_ascii = header.type_flags & 1 != 0;
             if is_ascii {
+                if index >= bytes.len() {
+                    unsafe {
+                        throw_runtime_error(
+                            stack_pointer,
+                            "IndexError",
+                            format!("String index {} out of bounds (length {})", index, bytes.len()),
+                        );
+                    }
+                }
                 let byte = bytes[index];
                 return runtime.get_ascii_char_literal(byte);
             }
             let s = unsafe { std::str::from_utf8_unchecked(&bytes) };
+            let char_count = s.chars().count();
+            if index >= char_count {
+                unsafe {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "IndexError",
+                        format!("String index {} out of bounds (length {})", index, char_count),
+                    );
+                }
+            }
             let ch = s.chars().nth(index).unwrap();
             let result = ch.to_string();
             return runtime
@@ -427,12 +474,32 @@ extern "C" fn get_string_index(
         };
 
         if is_ascii {
+            if index >= bytes.len() {
+                unsafe {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "IndexError",
+                        format!("String index {} out of bounds (length {})", index, bytes.len()),
+                    );
+                }
+            }
             let byte = bytes[index];
             return runtime.get_ascii_char_literal(byte);
         }
 
         let object_pointer_id = runtime.register_temporary_root(string);
         let s = unsafe { std::str::from_utf8_unchecked(bytes) };
+        let char_count = s.chars().count();
+        if index >= char_count {
+            runtime.unregister_temporary_root(object_pointer_id);
+            unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "IndexError",
+                    format!("String index {} out of bounds (length {})", index, char_count),
+                );
+            }
+        }
         let ch = s.chars().nth(index).unwrap();
         let result = ch.to_string();
         let result = runtime
@@ -552,11 +619,19 @@ extern "C" fn substring(
     let string_pointer = runtime.register_temporary_root(string);
     let start = BuiltInTypes::untag(start);
     let length = BuiltInTypes::untag(length);
-    let string = runtime
-        .get_substring(stack_pointer, string, start, length)
-        .unwrap();
+    let result = match runtime.get_substring(stack_pointer, string, start, length) {
+        Ok(s) => s.into(),
+        Err(e) => unsafe {
+            runtime.unregister_temporary_root(string_pointer);
+            throw_runtime_error(
+                stack_pointer,
+                "StringError",
+                format!("substring failed: {}", e),
+            );
+        },
+    };
     runtime.unregister_temporary_root(string_pointer);
-    string.into()
+    result
 }
 
 extern "C" fn uppercase(stack_pointer: usize, frame_pointer: usize, string: usize) -> usize {
@@ -1673,7 +1748,8 @@ pub unsafe extern "C" fn call_variadic_function_value(
                 )
             }
             _ => panic!(
-                "Unsupported min_args value {} for variadic function call through function value",
+                "Unsupported min_args value {} for variadic function call (max supported: 7). \
+                Consider reducing the number of required parameters.",
                 min_args
             ),
         }
@@ -1726,7 +1802,10 @@ pub unsafe extern "C" fn apply_function(
                 (fields.to_vec(), fields.len())
             }
         } else {
-            panic!("apply: expected array or vector as second argument");
+            panic!(
+                "apply: expected array or vector as second argument, got {:?}",
+                BuiltInTypes::get_kind(args_array)
+            );
         };
 
     unsafe {
@@ -3938,12 +4017,12 @@ pub extern "C" fn get_function(
 /// Returns a Pointer struct wrapping the raw function address.
 /// Used for variadic FFI calls where arg types are specified per-call.
 pub extern "C" fn get_symbol(
-    stack_pointer: usize,
+    _stack_pointer: usize,
     frame_pointer: usize,
     library_struct: usize,
     function_name: usize,
 ) -> usize {
-    save_gc_context!(stack_pointer, frame_pointer);
+    save_gc_context!(_stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let library = runtime.get_library(library_struct);
     let function_name = runtime.get_string_literal(function_name);
@@ -5690,7 +5769,10 @@ unsafe fn dynamic_c_call(
                     padded[0], padded[1], padded[2], padded[3], padded[4], padded[5],
                 )
             }
-            _ => panic!("Too many arguments for FFI call on x86-64: {}", num_args),
+            _ => panic!(
+                "Too many arguments ({}) for FFI call on x86-64. Maximum supported: 6 integer/pointer args.",
+                num_args
+            ),
         };
         (result, 0)
     }
@@ -6091,21 +6173,56 @@ unsafe extern "C" fn ffi_create_array(
         let mut buffer: Vec<*mut i8> = Vec::with_capacity(size);
         for field in fields {
             match ffi_type {
-                FFIType::U8 => todo!(),
-                FFIType::U16 => todo!(),
-                FFIType::U32 => todo!(),
-                FFIType::U64 => todo!(),
-                FFIType::I32 => todo!(),
-                FFIType::F32 => todo!(),
-                FFIType::F64 => todo!(),
+                FFIType::U8 => {
+                    let val = BuiltInTypes::untag(*field) as u8;
+                    buffer.push(val as *mut i8);
+                }
+                FFIType::U16 => {
+                    let val = BuiltInTypes::untag(*field) as u16;
+                    buffer.push(val as *mut i8);
+                }
+                FFIType::U32 => {
+                    let val = BuiltInTypes::untag(*field) as u32;
+                    buffer.push(val as *mut i8);
+                }
+                FFIType::U64 => {
+                    let val = BuiltInTypes::untag(*field) as u64;
+                    buffer.push(val as *mut i8);
+                }
+                FFIType::I32 => {
+                    let val = BuiltInTypes::untag(*field) as i32;
+                    buffer.push(val as *mut i8);
+                }
+                FFIType::F32 => {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "FFIError",
+                        "FFI arrays of f32 not yet implemented".to_string(),
+                    );
+                }
+                FFIType::F64 => {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "FFIError",
+                        "FFI arrays of f64 not yet implemented".to_string(),
+                    );
+                }
                 FFIType::Pointer => {
-                    todo!()
+                    // Treat as raw pointer value
+                    let val = BuiltInTypes::untag(*field);
+                    buffer.push(val as *mut i8);
                 }
                 FFIType::MutablePointer => {
-                    todo!()
+                    // Treat as raw pointer value
+                    let val = BuiltInTypes::untag(*field);
+                    buffer.push(val as *mut i8);
                 }
                 FFIType::Structure(_) => {
-                    todo!()
+                    throw_runtime_error(
+                        stack_pointer,
+                        "FFIError",
+                        "FFI arrays of structures not yet implemented".to_string(),
+                    );
                 }
                 FFIType::String => {
                     let string = runtime.get_string(stack_pointer, *field);
@@ -6400,10 +6517,20 @@ extern "C" fn read_full_file(
 ) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
-    let file_name = runtime.get_string(stack_pointer, file_name);
-    let file = std::fs::read_to_string(file_name).unwrap();
-    let string = runtime.allocate_string(stack_pointer, file);
-    string.unwrap().into()
+    let file_name_str = runtime.get_string(stack_pointer, file_name);
+    match std::fs::read_to_string(&file_name_str) {
+        Ok(content) => {
+            let string = runtime.allocate_string(stack_pointer, content);
+            string.unwrap().into()
+        }
+        Err(e) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "IOError",
+                format!("Failed to read file '{}': {}", file_name_str, e),
+            );
+        },
+    }
 }
 
 /// Write string content directly to a file (fast path)
@@ -10005,7 +10132,7 @@ pub unsafe extern "C" fn return_from_shift_handler_runtime(
 /// This restores the stack segment and resumes execution.
 /// The callee_saved_regs parameter contains the callee-saved registers that Beagle was using
 /// when it called k() - these are saved at the very start of continuation_trampoline.
-#[allow(improper_ctypes_definitions)]
+#[allow(improper_ctypes_definitions, unused_variables)]
 pub unsafe extern "C" fn invoke_continuation_runtime(
     stack_pointer: usize,
     frame_pointer: usize,

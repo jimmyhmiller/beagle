@@ -832,7 +832,10 @@ impl LowLevelX86 {
             self.allocated_temporary_registers.push(reg);
             reg
         } else {
-            panic!("No free temporary registers")
+            panic!(
+                "No free temporary registers. Currently allocated: {:?}",
+                self.allocated_temporary_registers
+            )
         }
     }
 

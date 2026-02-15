@@ -1,13 +1,7 @@
 namespace nested_closure_bug2
 
-// BUG: 3-level nested closure captures Closure object instead of variable
-// When variable is in main scope (not inside another closure), the inner
-// closure gets the closure object itself instead of the captured value.
-//
-// ACTUAL OUTPUT:
-//   a=Closure { function, 0, 32, [] } b=200
-//
-// EXPECTED OUTPUT:
+// Test that closures capture variables from main scope correctly
+// Expected output:
 //   a=100 b=200
 
 fn main() {

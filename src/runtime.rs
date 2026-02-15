@@ -1,6 +1,5 @@
 use libloading::Library;
 use mmap_rs::{Mmap, MmapMut, MmapOptions, Reserved};
-use nanoserde::SerJson;
 use regex::Regex;
 use std::{
     collections::HashMap,
@@ -6450,7 +6449,7 @@ impl Runtime {
                 let forwarded_to = Header::clear_forwarding_bit(raw_header);
                 eprintln!("Object was forwarded to {:#x}", forwarded_to);
             }
-            panic!("Struct not found by ID - this is a fatal error");
+            panic!("Struct not found by ID {} - this is a fatal error", struct_type_id);
         }
         let struct_value = struct_value.unwrap();
         let field_index = struct_value

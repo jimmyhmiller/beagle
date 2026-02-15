@@ -325,36 +325,44 @@ impl AstCompiler<'_> {
         args: Vec<Ast>,
     ) -> Result<Value, CompileError> {
         if name != "beagle.primitive/set!" {
-            panic!("Unknown macro-like primitive {}", name);
+            return Err(CompileError::InternalError {
+                message: format!("Unknown macro-like primitive {}", name),
+            });
         }
 
         if args.len() != 2 {
-            // TODO: Error handling properly
-            panic!("set! expects 2 arguments, got {}", args.len());
+            return Err(CompileError::ArityMismatch {
+                function_name: "set!".to_string(),
+                expected: 2,
+                got: args.len(),
+                is_variadic: false,
+            });
         }
 
         let property_access = &args[0];
-        if !matches!(property_access, Ast::PropertyAccess { .. }) {
-            panic!("set! expects a property access as the first argument");
-        };
-
         let Ast::PropertyAccess {
             object,
             property,
             token_range: _,
         } = property_access
         else {
-            panic!("set! expects a property access as the first argument");
+            return Err(CompileError::InvalidAssignment {
+                reason: "set! expects a property access (e.g., obj.field) as the first argument".to_string(),
+            });
         };
 
         let object = object.deref();
         if !matches!(object, Ast::Identifier { .. }) {
-            panic!("set! expects an identifier as the first argument for now");
+            return Err(CompileError::InvalidAssignment {
+                reason: "set! expects an identifier as the object (e.g., obj.field, not expr.field)".to_string(),
+            });
         }
 
         let property = property.deref();
         if !matches!(property, Ast::Identifier { .. }) {
-            panic!("set! expects an identifier as the second argument for now");
+            return Err(CompileError::InvalidAssignment {
+                reason: "set! expects an identifier as the property name".to_string(),
+            });
         }
 
         let object = self.call_compile(object)?;
@@ -400,11 +408,12 @@ impl AstCompiler<'_> {
         self.ir.jump(exit_property_access);
 
         self.ir.write_label(slow_property_path);
-        let property = if let Ast::Identifier(name, _) = property {
-            name.clone()
-        } else {
-            panic!("Expected identifier")
+        let Ast::Identifier(property, _) = property else {
+            return Err(CompileError::ExpectedIdentifier {
+                got: format!("{:?}", property),
+            });
         };
+        let property = property.clone();
         let constant_ptr = self.string_constant(property);
         let constant_ptr = self.ir.assign_new(constant_ptr);
         let call_result = self.call_builtin(

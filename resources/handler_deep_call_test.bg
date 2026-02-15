@@ -3,7 +3,6 @@ namespace handler_deep_call_test
 use beagle.effect as effect
 
 // Test effects through deep call stacks
-// This test exposes a bug: effects through multiple call levels crash
 
 enum Trace {
     Log { depth, message }
@@ -26,7 +25,6 @@ fn trace(depth, msg) {
     perform Trace.Log { depth: depth, message: msg }
 }
 
-// BUG: Effects through 3+ levels of nested calls crash
 fn level1() {
     trace(1, "In level1")
     let r = level2()

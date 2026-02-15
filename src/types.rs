@@ -79,7 +79,7 @@ impl BuiltInTypes {
             0b101 => BuiltInTypes::Closure,
             0b110 => BuiltInTypes::HeapObject,
             0b111 => BuiltInTypes::Null,
-            _ => panic!("Invalid tag {}", pointer & 0b111),
+            _ => unreachable!("All 3-bit patterns are covered"),
         }
     }
 

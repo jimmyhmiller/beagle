@@ -26,7 +26,6 @@ fn yield-val(v) {
     perform Gen.Yield { value: v }
 }
 
-// BUG: Effects in a loop through a nested function call crash
 fn range-gen(start, end) {
     let mut i = start
     while i < end {

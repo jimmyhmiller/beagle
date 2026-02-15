@@ -364,6 +364,7 @@ enum Associativity {
 static ZERO: u8 = b'0';
 static NINE: u8 = b'9';
 static SPACE: u8 = b' ';
+static TAB: u8 = b'\t';
 static NEW_LINE: u8 = b'\n';
 static DOUBLE_QUOTE: u8 = b'"';
 static OPEN_PAREN: u8 = b'(';
@@ -399,6 +400,9 @@ fn stripslashes(s: &str) -> String {
                         'r' => '\r',
                         't' => '\t',
                         '0' => '\0',
+                        '\\' => '\\',
+                        '"' => '"',
+                        '\'' => '\'',
                         _ => c,
                     }
                 } else {
@@ -486,7 +490,8 @@ impl Tokenizer {
     }
 
     pub fn is_space(&self, input_bytes: &[u8]) -> bool {
-        self.current_byte(input_bytes) == SPACE
+        let b = self.current_byte(input_bytes);
+        b == SPACE || b == TAB
     }
 
     pub fn at_end(&self, input_bytes: &[u8]) -> bool {
@@ -635,11 +640,11 @@ impl Tokenizer {
     pub fn is_valid_number_char(&mut self, input_bytes: &[u8]) -> bool {
         (self.current_byte(input_bytes) >= ZERO && self.current_byte(input_bytes) <= NINE)
             || (self.current_byte(input_bytes) == PERIOD
-                && self.peek(input_bytes).unwrap() >= ZERO
-                && self.peek(input_bytes).unwrap() <= NINE)
+                && self.peek(input_bytes).unwrap_or(0) >= ZERO
+                && self.peek(input_bytes).unwrap_or(0) <= NINE)
             || (self.current_byte(input_bytes) == NEGATIVE
-                && self.peek(input_bytes).unwrap() >= ZERO
-                && self.peek(input_bytes).unwrap() <= NINE)
+                && self.peek(input_bytes).unwrap_or(0) >= ZERO
+                && self.peek(input_bytes).unwrap_or(0) <= NINE)
     }
 
     /// Check if a byte is a valid hex digit
@@ -1415,10 +1420,15 @@ impl Parser {
 
                         // Create a new parser for the expression
                         let mut expr_parser =
-                            Parser::new("<interpolation>".to_string(), expr_source)?;
+                            Parser::new("<interpolation>".to_string(), expr_source.clone())?;
                         let expr_ast = expr_parser.parse_expression(0, true, true)?;
                         if let Some(ast) = expr_ast {
                             parts.push(StringInterpolationPart::Expression(Box::new(ast)));
+                        } else {
+                            return Err(ParseError::InvalidExpression {
+                                message: format!("Empty or invalid expression in string interpolation: ${{{}}}", expr_source),
+                                location: self.current_source_location(),
+                            });
                         }
                     } else {
                         // String literal segment
@@ -2822,7 +2832,6 @@ impl Parser {
         }
     }
 
-    // TODO: Deal with tabs (People shouldn't use them though lol)
     fn skip_spaces(&mut self) {
         while !self.at_end() && (self.is_space() || self.is_comment()) {
             self.consume();

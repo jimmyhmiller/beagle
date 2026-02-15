@@ -3,7 +3,6 @@ namespace handler_stateful_test
 use beagle.effect as effect
 
 // Test stateful handlers with field mutation
-// This test exposes a bug: self.field = value in handler causes compiler panic
 
 enum Counter {
     Inc {},
@@ -18,7 +17,6 @@ extend CounterHandler with effect/Handler(Counter) {
     fn handle(self, op, resume) {
         match op {
             Counter.Inc {} => {
-                // BUG: This line causes compiler panic: "Expected string"
                 self.count = self.count + 1
                 resume(self.count)
             },

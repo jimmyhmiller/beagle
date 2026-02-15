@@ -1,14 +1,7 @@
 namespace nested_closure_bug
 
-// BUG: 3-level nested closure captures wrong variable
-// Inner closure gets sibling variable instead of grandparent variable
-//
-// ACTUAL OUTPUT:
-//   x = 20
-//   y = 20
-//   Result: 40
-//
-// EXPECTED OUTPUT:
+// Test that 3-level nested closures capture variables correctly
+// Expected output:
 //   x = 10
 //   y = 20
 //   Result: 30

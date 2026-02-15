@@ -196,7 +196,10 @@ impl FreeList {
             if r.can_hold(size) {
                 let addr = r.offset;
                 if addr % 8 != 0 {
-                    panic!("Heap offset is not aligned");
+                    panic!(
+                        "GC internal error: free list entry at {:#x} is not 8-byte aligned",
+                        addr
+                    );
                 }
 
                 r.offset += size;
@@ -514,11 +517,18 @@ impl MarkAndSweep {
             offset += size;
             offset = (offset + 7) & !7;
             if offset % 8 != 0 {
-                panic!("Heap offset is not aligned");
+                panic!(
+                    "GC internal error: heap offset {:#x} is not 8-byte aligned after sweep",
+                    offset
+                );
             }
 
             if offset > self.space.byte_count() {
-                panic!("Heap offset is out of bounds");
+                panic!(
+                    "GC internal error: heap offset {:#x} exceeds heap size {:#x}",
+                    offset,
+                    self.space.byte_count()
+                );
             }
         }
     }

@@ -42,9 +42,6 @@ extend HandlerB with effect/Handler(EffectB) {
 fn main() {
     println("=== Sequential Handler Blocks Test ===")
 
-    // BUG: Having two separate handle blocks causes an infinite loop
-    // The second handle block loops forever
-
     let handler_a = HandlerA {}
     let result_a = handle effect/Handler(EffectA) with handler_a {
         let x = perform EffectA.DoA {}

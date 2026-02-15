@@ -51,7 +51,7 @@ impl Value {
     fn as_local(&self) -> usize {
         match self {
             Value::Local(local) => *local,
-            _ => panic!("Expected local"),
+            _ => panic!("Expected local, got {:?}", self),
         }
     }
 }

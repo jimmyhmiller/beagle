@@ -1922,7 +1922,7 @@ impl AstCompiler<'_> {
                 // Check if this protocol has multi-arity methods by looking at the method name
                 // We need to determine if the protocol method is multi-arity to decide
                 // whether to use arity suffix in registration
-                let full_protocol_name = format!("{}/{}", protocol_ns, protocol_name_only);
+                let _full_protocol_name = format!("{}/{}", protocol_ns, protocol_name_only);
 
                 for ast in body.iter() {
                     if let Ast::Function {
@@ -5758,7 +5758,10 @@ impl AstCompiler<'_> {
                 );
             }
         } else {
-            panic!("Can't find variable {:?}", name);
+            panic!(
+                "Can't find variable '{}' in mutable variable pass. This is a compiler bug - the variable should have been registered.",
+                name.get_string()
+            );
         }
     }
 

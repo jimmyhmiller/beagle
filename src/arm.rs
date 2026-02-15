@@ -1178,10 +1178,12 @@ impl LowLevelArm {
     }
 
     pub fn volatile_register(&mut self) -> Register {
-        let next_register = self
-            .free_volatile_registers
-            .pop()
-            .expect("No free registers!");
+        let next_register = self.free_volatile_registers.pop().unwrap_or_else(|| {
+            panic!(
+                "No free volatile registers! Currently allocated: {:?}",
+                self.allocated_volatile_registers
+            )
+        });
         self.allocated_volatile_registers.push(next_register);
         // Track that this callee-saved register is used (for AAPCS64 compliance)
         self.mark_callee_saved_used(next_register);
@@ -1189,10 +1191,12 @@ impl LowLevelArm {
     }
 
     pub fn temporary_register(&mut self) -> Register {
-        let next_register = self
-            .free_temporary_registers
-            .pop()
-            .expect("No free registers!");
+        let next_register = self.free_temporary_registers.pop().unwrap_or_else(|| {
+            panic!(
+                "No free temporary registers! Currently allocated: {:?}",
+                self.allocated_temporary_registers
+            )
+        });
         self.allocated_temporary_registers.push(next_register);
         next_register
     }
