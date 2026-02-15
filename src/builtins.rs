@@ -15171,17 +15171,22 @@ mod regex_builtins {
                         heap_obj.write_field(0, BuiltInTypes::Int.tag(index as isize) as usize);
                         ptr
                     }
-                    Err(e) => {
-                        eprintln!("regex_compile allocation error: {}", e);
-                        BuiltInTypes::null_value() as usize
-                    }
+                    Err(e) => unsafe {
+                        throw_runtime_error(
+                            stack_pointer,
+                            "AllocationError",
+                            format!("Failed to allocate regex object: {}", e),
+                        );
+                    },
                 }
             }
-            Err(e) => {
-                // Return null on invalid regex (could also throw)
-                eprintln!("regex compile error: {}", e);
-                BuiltInTypes::null_value() as usize
-            }
+            Err(e) => unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "RegexError",
+                    format!("Invalid regex pattern '{}': {}", pattern_str, e),
+                );
+            },
         }
     }
 
