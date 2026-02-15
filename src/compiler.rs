@@ -1058,6 +1058,11 @@ impl Compiler {
         self.multi_arity_functions.get(name)
     }
 
+    /// Check if a function is registered as multi-arity.
+    pub fn is_multi_arity_function(&self, name: &str) -> bool {
+        self.multi_arity_functions.contains_key(name)
+    }
+
     /// Find the appropriate arity variant for a multi-arity function call.
     /// Returns the name of the specific arity function to call.
     pub fn resolve_multi_arity_call(&self, name: &str, arg_count: usize) -> Option<String> {

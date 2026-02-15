@@ -126,7 +126,17 @@ struct Protocol {
 }
 
 protocol Indexed {
-    fn get(coll, index)
+    fn get {
+        (coll, index)
+        (coll, index, default) => {
+            let result = get(coll, index)
+            if result == null {
+                default
+            } else {
+                result
+            }
+        }
+    }
 }
 
 protocol Push {
@@ -601,10 +611,6 @@ fn parse-int-helper(s, idx, acc) {
 }
 
 // // TODO: Need a way to re-export rather than wrap
-// fn get(coll, i) {
-//     persistent-vector/get(coll, i)
-// }
-
 // fn push(coll, value) {
 //     persistent-vector/push(coll, value)
 // }

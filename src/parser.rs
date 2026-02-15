@@ -2218,6 +2218,13 @@ impl Parser {
                     }
                 };
                 self.move_to_next_non_whitespace();
+
+                // Check for multi-arity syntax: fn name { ... }
+                if self.is_open_curly() {
+                    // Multi-arity protocol method
+                    return self.parse_multi_arity_protocol_member(name);
+                }
+
                 self.expect_open_paren()?;
                 let (args, rest_param) = self.parse_args()?;
                 self.expect_close_paren()?;
@@ -2249,6 +2256,72 @@ impl Parser {
                 location: self.current_source_location(),
             }),
         }
+    }
+
+    /// Parse a multi-arity protocol member: fn name { (args) => body, (args) => body, ... }
+    /// Allows stubs (no body) for arities that must be implemented by extenders.
+    fn parse_multi_arity_protocol_member(&mut self, name: String) -> ParseResult<Ast> {
+        let start_position = self.position;
+        self.expect_open_curly()?;
+        self.skip_whitespace();
+
+        let mut cases = Vec::new();
+
+        while !self.at_end() && !self.is_close_curly() {
+            let case_start = self.position;
+            self.expect_open_paren()?;
+            let (args, rest_param) = self.parse_args()?;
+            self.expect_close_paren()?;
+            self.skip_whitespace();
+
+            // Check if this is a stub (no =>) or has a body
+            let body = if matches!(self.current_token(), Token::Arrow) {
+                self.move_to_next_non_whitespace(); // consume => and skip whitespace
+                if self.current_token() == Token::OpenCurly {
+                    self.parse_block()?
+                } else {
+                    // Single expression body
+                    let expr = self.parse_expression(0, true, false)?.ok_or_else(|| {
+                        ParseError::UnexpectedEof {
+                            expected: "expression after '=>'".to_string(),
+                        }
+                    })?;
+                    vec![expr]
+                }
+            } else {
+                // Stub - no body, must be implemented
+                // Create a placeholder that throws an error
+                vec![Ast::Call {
+                    name: "beagle.builtin/throw-error".to_string(),
+                    args: vec![],
+                    token_range: TokenRange::new(case_start, self.position),
+                }]
+            };
+
+            cases.push(ArityCase {
+                args,
+                rest_param,
+                body,
+                token_range: TokenRange::new(case_start, self.position),
+            });
+
+            self.skip_spaces();
+            // Allow optional comma or newline between cases
+            if self.current_token() == Token::Comma {
+                self.consume();
+            }
+            self.skip_whitespace();
+        }
+
+        self.expect_close_curly()?;
+        let end_position = self.position;
+
+        Ok(Ast::MultiArityFunction {
+            name: Some(name),
+            cases,
+            token_range: TokenRange::new(start_position, end_position),
+            docstring: None,
+        })
     }
 
     fn parse_extend(&mut self) -> ParseResult<Ast> {

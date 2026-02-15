@@ -1791,6 +1791,64 @@ impl AstCompiler<'_> {
                         let _ = self
                             .compiler
                             .add_function_alias(&fully_qualified_name, function);
+                    } else if matches!(ast, Ast::MultiArityFunction { .. }) {
+                        // Multi-arity protocol method
+                        let Ast::MultiArityFunction {
+                            name: function_name,
+                            cases,
+                            ..
+                        } = ast
+                        else {
+                            return Err(CompileError::InternalError {
+                                message: "Expected MultiArityFunction in Protocol".to_string(),
+                            });
+                        };
+                        let method_name = function_name.clone().unwrap();
+
+                        // Compile each arity case as a separate function
+                        for case in cases.iter() {
+                            let arity = case.args.len();
+                            let arity_function_name = format!("{}${}", method_name, arity);
+
+                            // Create and compile the arity-specific function
+                            let arity_function = Ast::Function {
+                                name: Some(arity_function_name.clone()),
+                                args: case.args.clone(),
+                                rest_param: case.rest_param.clone(),
+                                body: case.body.clone(),
+                                token_range: case.token_range,
+                                docstring: None,
+                            };
+                            self.call_compile(&arity_function)?;
+
+                            // Create alias: Protocol_method$arity -> method$arity
+                            let full_arity_name = format!(
+                                "{}/{}",
+                                self.compiler.current_namespace_name(),
+                                arity_function_name
+                            );
+                            if let Some(function) = self.compiler.get_function_by_name(&full_arity_name) {
+                                let alias_name = format!(
+                                    "{}/${}_{}",
+                                    self.compiler.current_namespace_name(),
+                                    name,
+                                    arity_function_name
+                                );
+                                let _ = self.compiler.add_function_alias(&alias_name, function);
+                            }
+                        }
+
+                        // Register as multi-arity function for call resolution
+                        let full_method_name = format!(
+                            "{}/{}",
+                            self.compiler.current_namespace_name(),
+                            method_name
+                        );
+                        let arities: Vec<(usize, bool)> = cases
+                            .iter()
+                            .map(|case| (case.args.len(), case.rest_param.is_some()))
+                            .collect();
+                        self.compiler.register_multi_arity_function(&full_method_name, arities);
                     } else {
                         self.call_compile(ast)?;
                     }
@@ -1841,6 +1899,31 @@ impl AstCompiler<'_> {
                 body,
                 token_range: _,
             } => {
+                // Helper to compute the mangled protocol string
+                let (protocol_ns, protocol_name_only) = self.get_namespace_name_and_name(&protocol).unwrap_or_else(|_| {
+                    (self.compiler.current_namespace_name(), protocol.clone())
+                });
+                let qualified_protocol = format!("{}/{}", protocol_ns, protocol_name_only);
+                let qualified_type_args: Vec<String> = protocol_type_args
+                    .iter()
+                    .map(|arg| {
+                        let (ns, name) = self.get_namespace_name_and_name(arg).unwrap_or_else(|_| {
+                            (self.compiler.current_namespace_name(), arg.clone())
+                        });
+                        format!("{}/{}", ns, name)
+                    })
+                    .collect();
+                let protocol_mangled = if qualified_type_args.is_empty() {
+                    qualified_protocol.clone()
+                } else {
+                    format!("{}<{}>", qualified_protocol, qualified_type_args.join(","))
+                };
+
+                // Check if this protocol has multi-arity methods by looking at the method name
+                // We need to determine if the protocol method is multi-arity to decide
+                // whether to use arity suffix in registration
+                let full_protocol_name = format!("{}/{}", protocol_ns, protocol_name_only);
+
                 for ast in body.iter() {
                     if let Ast::Function {
                         name,
@@ -1851,8 +1934,19 @@ impl AstCompiler<'_> {
                     } = ast
                     {
                         let name = name.clone().unwrap();
-                        // TODO: Hygiene
-                        let new_name = format!("{}_{}", target_type, name);
+                        let arity = args.len();
+
+                        // Check if this method is part of a multi-arity protocol
+                        let full_method_name = format!("{}/{}", protocol_ns, name);
+                        let is_multi_arity = self.compiler.is_multi_arity_function(&full_method_name);
+
+                        // Use arity suffix only for multi-arity protocol methods
+                        let (method_name_for_register, new_name) = if is_multi_arity {
+                            (format!("{}${}", name, arity), format!("{}_{}${}", target_type, name, arity))
+                        } else {
+                            (name.clone(), format!("{}_{}", target_type, name))
+                        };
+
                         self.call_compile(&Ast::Function {
                             name: Some(new_name.clone()),
                             args: args.clone(),
@@ -1874,47 +1968,72 @@ impl AstCompiler<'_> {
                         let function_pointer = Value::RawValue(
                             BuiltInTypes::Function.tag(function_pointer as isize) as usize,
                         );
-                        // builtin/register_extension(PersistentVector.name, Indexed.name, "get", get)
-                        // TODO: I need to fully resolve the target_type and protocol if they are aliased
-                        let target_type = self.string_constant(target_type.clone());
-                        let target_type = self.ir.assign_new(target_type);
-                        // Mangle protocol name with type args: e.g., Handler(Async) -> Handler<Async>
-                        // Fully resolve the protocol name through the namespace system
-                        let (protocol_ns, protocol_name) = self.get_namespace_name_and_name(&protocol).unwrap_or_else(|_| {
-                            (self.compiler.current_namespace_name(), protocol.clone())
-                        });
-                        let qualified_protocol = format!("{}/{}", protocol_ns, protocol_name);
-
-                        // Fully qualify the type args so they match what perform looks up
-                        let qualified_type_args: Vec<String> = protocol_type_args
-                            .iter()
-                            .map(|arg| {
-                                let (ns, name) = self.get_namespace_name_and_name(arg).unwrap_or_else(|_| {
-                                    (self.compiler.current_namespace_name(), arg.clone())
-                                });
-                                format!("{}/{}", ns, name)
-                            })
-                            .collect();
-                        let protocol_mangled = if qualified_type_args.is_empty() {
-                            qualified_protocol.clone()
-                        } else {
-                            format!("{}<{}>", qualified_protocol, qualified_type_args.join(","))
-                        };
-                        let protocol = self.string_constant(protocol_mangled);
-                        let protocol = self.ir.assign_new(protocol);
-                        let name = self.string_constant(name.clone());
-                        let name = self.ir.assign_new(name);
-                        let function_pointer = self.ir.assign_new(function_pointer);
-                        // self.ir.breakpoint();
+                        let target_type_const = self.string_constant(target_type.clone());
+                        let target_type_reg = self.ir.assign_new(target_type_const);
+                        let protocol_const = self.string_constant(protocol_mangled.clone());
+                        let protocol_reg = self.ir.assign_new(protocol_const);
+                        let method_name_const = self.string_constant(method_name_for_register);
+                        let method_name_reg = self.ir.assign_new(method_name_const);
+                        let function_pointer_reg = self.ir.assign_new(function_pointer);
                         let _ = self.call_builtin(
                             "beagle.builtin/register-extension",
                             vec![
-                                target_type.into(),
-                                protocol.into(),
-                                name.into(),
-                                function_pointer.into(),
+                                target_type_reg.into(),
+                                protocol_reg.into(),
+                                method_name_reg.into(),
+                                function_pointer_reg.into(),
                             ],
                         );
+                    } else if let Ast::MultiArityFunction {
+                        name,
+                        cases,
+                        ..
+                    } = ast
+                    {
+                        // Multi-arity function in extend block - always use arity suffix
+                        let method_name = name.clone().unwrap();
+                        for case in cases.iter() {
+                            let arity = case.args.len();
+                            let method_name_with_arity = format!("{}${}", method_name, arity);
+                            let new_name = format!("{}_{}${}", target_type, method_name, arity);
+                            self.call_compile(&Ast::Function {
+                                name: Some(new_name.clone()),
+                                args: case.args.clone(),
+                                rest_param: case.rest_param.clone(),
+                                body: case.body.clone(),
+                                token_range: case.token_range,
+                                docstring: None,
+                            })?;
+                            let fully_qualified_name =
+                                format!("{}/{}", self.compiler.current_namespace_name(), new_name);
+                            let function = self
+                                .compiler
+                                .get_function_by_name(&fully_qualified_name)
+                                .unwrap();
+                            let function_pointer = self
+                                .compiler
+                                .get_function_pointer(function.clone())
+                                .unwrap();
+                            let function_pointer = Value::RawValue(
+                                BuiltInTypes::Function.tag(function_pointer as isize) as usize,
+                            );
+                            let target_type_const = self.string_constant(target_type.clone());
+                            let target_type_reg = self.ir.assign_new(target_type_const);
+                            let protocol_const = self.string_constant(protocol_mangled.clone());
+                            let protocol_reg = self.ir.assign_new(protocol_const);
+                            let method_name_const = self.string_constant(method_name_with_arity);
+                            let method_name_reg = self.ir.assign_new(method_name_const);
+                            let function_pointer_reg = self.ir.assign_new(function_pointer);
+                            let _ = self.call_builtin(
+                                "beagle.builtin/register-extension",
+                                vec![
+                                    target_type_reg.into(),
+                                    protocol_reg.into(),
+                                    method_name_reg.into(),
+                                    function_pointer_reg.into(),
+                                ],
+                            );
+                        }
                     } else {
                         return Err(CompileError::InternalError {
                             message: "Expected function in Extend".to_string(),
