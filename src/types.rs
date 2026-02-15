@@ -98,7 +98,11 @@ impl BuiltInTypes {
 
     pub fn construct_int(value: isize) -> isize {
         if value > isize::MAX >> 3 {
-            panic!("Integer overflow")
+            panic!(
+                "Integer overflow: {} exceeds maximum tagged integer value {}",
+                value,
+                isize::MAX >> 3
+            )
         }
         BuiltInTypes::Int.tag(value)
     }

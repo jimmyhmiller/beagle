@@ -454,8 +454,7 @@ impl PersistentVec {
         let count = Self::count(vec);
 
         if index >= count {
-            // For now, panic on out of bounds. Could return Result instead.
-            panic!("Index out of bounds: {} >= {}", index, count);
+            return Err(format!("Index out of bounds: {} >= {}", index, count).into());
         }
 
         let tail_offset = Self::tail_offset(count);
