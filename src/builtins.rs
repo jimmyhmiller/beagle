@@ -14428,10 +14428,13 @@ mod rust_collections {
 
         match PersistentVec::empty(runtime, stack_pointer) {
             Ok(handle) => handle.as_tagged(),
-            Err(e) => {
-                eprintln!("rust_vec_empty error: {}", e);
-                BuiltInTypes::null_value() as usize
-            }
+            Err(e) => unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    format!("Failed to create empty vector: {}", e),
+                );
+            },
         }
     }
 
@@ -14476,10 +14479,13 @@ mod rust_collections {
 
         match PersistentVec::push(runtime, stack_pointer, vec, value) {
             Ok(handle) => handle.as_tagged(),
-            Err(e) => {
-                eprintln!("rust_vec_push error: {}", e);
-                BuiltInTypes::null_value() as usize
-            }
+            Err(e) => unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    format!("Failed to push to vector: {}", e),
+                );
+            },
         }
     }
 
@@ -14504,10 +14510,13 @@ mod rust_collections {
 
         match PersistentVec::assoc(runtime, stack_pointer, vec, idx, value) {
             Ok(handle) => handle.as_tagged(),
-            Err(e) => {
-                eprintln!("rust_vec_assoc error: {}", e);
-                BuiltInTypes::null_value() as usize
-            }
+            Err(e) => unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    format!("Failed to update vector at index {}: {}", idx, e),
+                );
+            },
         }
     }
 
@@ -14523,10 +14532,13 @@ mod rust_collections {
 
         match PersistentMap::empty(runtime, stack_pointer) {
             Ok(handle) => handle.as_tagged(),
-            Err(e) => {
-                eprintln!("rust_map_empty error: {}", e);
-                BuiltInTypes::null_value() as usize
-            }
+            Err(e) => unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    format!("Failed to create empty map: {}", e),
+                );
+            },
         }
     }
 
@@ -14572,10 +14584,13 @@ mod rust_collections {
 
         match PersistentMap::assoc(runtime, stack_pointer, map_ptr, key, value) {
             Ok(handle) => handle.as_tagged(),
-            Err(e) => {
-                eprintln!("rust_map_assoc error: {}", e);
-                BuiltInTypes::null_value() as usize
-            }
+            Err(e) => unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    format!("Failed to associate key in map: {}", e),
+                );
+            },
         }
     }
 
@@ -14593,10 +14608,13 @@ mod rust_collections {
             // Empty map or invalid - return empty vector
             match PersistentVec::empty(runtime, stack_pointer) {
                 Ok(handle) => return handle.as_tagged(),
-                Err(e) => {
-                    eprintln!("rust_map_keys empty vec error: {}", e);
-                    return BuiltInTypes::null_value() as usize;
-                }
+                Err(e) => unsafe {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "AllocationError",
+                        format!("Failed to create empty vector for map keys: {}", e),
+                    );
+                },
             }
         }
 
@@ -14606,10 +14624,13 @@ mod rust_collections {
 
         match PersistentMap::keys(runtime, stack_pointer, map) {
             Ok(handle) => handle.as_tagged(),
-            Err(e) => {
-                eprintln!("rust_map_keys error: {}", e);
-                BuiltInTypes::null_value() as usize
-            }
+            Err(e) => unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    format!("Failed to get map keys: {}", e),
+                );
+            },
         }
     }
 
@@ -14623,10 +14644,13 @@ mod rust_collections {
 
         match PersistentSet::empty(runtime, stack_pointer) {
             Ok(handle) => handle.as_tagged(),
-            Err(e) => {
-                eprintln!("rust_set_empty error: {}", e);
-                BuiltInTypes::null_value() as usize
-            }
+            Err(e) => unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    format!("Failed to create empty set: {}", e),
+                );
+            },
         }
     }
 
@@ -14673,10 +14697,13 @@ mod rust_collections {
 
         match PersistentSet::add(runtime, stack_pointer, set_ptr, element) {
             Ok(handle) => handle.as_tagged(),
-            Err(e) => {
-                eprintln!("rust_set_add error: {}", e);
-                BuiltInTypes::null_value() as usize
-            }
+            Err(e) => unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    format!("Failed to add element to set: {}", e),
+                );
+            },
         }
     }
 
@@ -14694,10 +14721,13 @@ mod rust_collections {
             // Empty set or invalid - return empty vector
             match PersistentVec::empty(runtime, stack_pointer) {
                 Ok(handle) => return handle.as_tagged(),
-                Err(e) => {
-                    eprintln!("rust_set_elements empty vec error: {}", e);
-                    return BuiltInTypes::null_value() as usize;
-                }
+                Err(e) => unsafe {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "AllocationError",
+                        format!("Failed to create empty vector for set elements: {}", e),
+                    );
+                },
             }
         }
 
@@ -14705,10 +14735,13 @@ mod rust_collections {
 
         match PersistentSet::elements(runtime, stack_pointer, set) {
             Ok(handle) => handle.as_tagged(),
-            Err(e) => {
-                eprintln!("rust_set_elements error: {}", e);
-                BuiltInTypes::null_value() as usize
-            }
+            Err(e) => unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    format!("Failed to get set elements: {}", e),
+                );
+            },
         }
     }
 
@@ -14725,10 +14758,13 @@ mod rust_collections {
 
         match MutableMap::empty(runtime, stack_pointer, 16) {
             Ok(handle) => handle.as_tagged(),
-            Err(e) => {
-                eprintln!("rust_mutable_map_empty error: {}", e);
-                BuiltInTypes::null_value() as usize
-            }
+            Err(e) => unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    format!("Failed to create empty mutable map: {}", e),
+                );
+            },
         }
     }
 
@@ -14745,10 +14781,13 @@ mod rust_collections {
 
         match MutableMap::empty(runtime, stack_pointer, cap) {
             Ok(handle) => handle.as_tagged(),
-            Err(e) => {
-                eprintln!("rust_mutable_map_with_capacity error: {}", e);
-                BuiltInTypes::null_value() as usize
-            }
+            Err(e) => unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    format!("Failed to create mutable map with capacity {}: {}", cap, e),
+                );
+            },
         }
     }
 
@@ -14770,10 +14809,13 @@ mod rust_collections {
 
         match MutableMap::put(runtime, stack_pointer, map_ptr, key, value) {
             Ok(()) => BuiltInTypes::null_value() as usize,
-            Err(e) => {
-                eprintln!("rust_mutable_map_put error: {}", e);
-                BuiltInTypes::null_value() as usize
-            }
+            Err(e) => unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    format!("Failed to put value in mutable map: {}", e),
+                );
+            },
         }
     }
 
@@ -14794,10 +14836,13 @@ mod rust_collections {
 
         match MutableMap::increment(runtime, stack_pointer, map_ptr, key) {
             Ok(()) => BuiltInTypes::null_value() as usize,
-            Err(e) => {
-                eprintln!("rust_mutable_map_increment error: {}", e);
-                BuiltInTypes::null_value() as usize
-            }
+            Err(e) => unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    format!("Failed to increment value in mutable map: {}", e),
+                );
+            },
         }
     }
 
@@ -14841,10 +14886,13 @@ mod rust_collections {
 
         match MutableMap::entries(runtime, stack_pointer, map) {
             Ok(handle) => handle.as_tagged(),
-            Err(e) => {
-                eprintln!("rust_mutable_map_entries error: {}", e);
-                BuiltInTypes::null_value() as usize
-            }
+            Err(e) => unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    format!("Failed to get mutable map entries: {}", e),
+                );
+            },
         }
     }
 }
