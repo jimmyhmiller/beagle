@@ -1463,11 +1463,8 @@ fn execute_file_op(op: FileOperation) -> FileResultData {
 // EventLoopState - Unified mutable I/O state for both modes
 // ============================================================================
 
-/// Mutable I/O state used by both InProcess and Threaded event loop modes.
-/// In InProcess mode, this lives inside EventLoop via Option<EventLoopState>.
-/// In Threaded mode, this is moved to the dedicated event loop thread.
-
 /// Pending read operation on a socket
+#[allow(dead_code)]
 struct PendingReadOp {
     future_atom: usize,
     buffer_size: usize,
@@ -1483,6 +1480,9 @@ struct PendingWriteOp {
     op_id: usize,
 }
 
+/// Mutable I/O state used by both InProcess and Threaded event loop modes.
+/// In InProcess mode, this lives inside EventLoop via Option<EventLoopState>.
+/// In Threaded mode, this is moved to the dedicated event loop thread.
 pub struct EventLoopState {
     /// Poll and Events are Option so the I/O thread can temporarily take them
     /// out during the blocking poll() call, allowing other threads to access

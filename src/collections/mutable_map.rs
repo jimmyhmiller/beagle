@@ -73,7 +73,7 @@ impl MutableMap {
         map.set_field_with_barrier(scope.runtime(), FIELD_VALUES, values.as_tagged());
         map.set_field(FIELD_SIZE, BuiltInTypes::construct_int(0) as usize);
 
-        Ok(map.clone())
+        Ok(map)
     }
 
     /// Get the number of entries in the map.
