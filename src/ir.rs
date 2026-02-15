@@ -1353,7 +1353,7 @@ impl Ir {
 
         backend.epilogue();
         backend.ret();
-        // TODO: ugly
+        // Error handler code placed after normal return
         let backend_after_return = backend.get_label_by_name("after_return");
         backend.write_label(backend_after_return);
         let register = backend.get_volatile_register(0);

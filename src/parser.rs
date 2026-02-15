@@ -1193,7 +1193,6 @@ impl Parser {
             Some(ast) => ast,
             None => return Ok(None),
         };
-        // TODO: this is ugly
         self.skip_spaces();
 
         let old_min_precedence = min_precedence;
@@ -1213,8 +1212,6 @@ impl Parser {
             self.skip_spaces();
         }
         min_precedence = old_min_precedence;
-
-        // TODO: This is ugly
         self.skip_spaces();
         loop {
             // Check if we should look ahead across newlines for a binary operator.
@@ -1373,15 +1370,9 @@ impl Parser {
                         location: self.current_source_location(),
                     },
                 )?;
-                // TODO: Make better
+                // Double-colon identifiers (e.g., Enum::Variant) are parsed as enum creation
                 self.consume();
                 self.skip_spaces();
-                // self.move_to_next_non_whitespace();
-                // I probably don't want to do this forever
-                // But for right now I'm assuming that all double colon
-                // Identifiers are creating enums
-                // I really need to start thinking about namespacing
-                // and if I want double colon for that.
                 if self.is_open_paren() {
                     Ok(Some(self.parse_call(name, start_position)?))
                 } else if self.is_open_curly() && struct_creation_allowed {
@@ -1396,9 +1387,7 @@ impl Parser {
                         .map_err(|_| ParseError::InvalidUtf8 {
                             location: self.current_source_location(),
                         })?;
-                // TODO: Test escapes properly
-                // Maybe token shouldn't have a range but an actual string value
-                // Or I do both
+                // Process escape sequences: \n, \r, \t, \0, \\, \", \'
                 value = stripslashes(&value);
                 let position = self.consume();
                 Ok(Some(Ast::String(value, position)))
@@ -2497,9 +2486,7 @@ impl Parser {
         }
     }
 
-    // TODO: These two are similar and one of them should be removed
-    // but also, why does this one only use is_space and the other
-    // doesn't care about comments?
+    /// Consume current token and skip to next non-whitespace token (skips spaces and comments)
     fn move_to_next_non_whitespace(&mut self) {
         self.consume();
         while !self.at_end() && (self.is_space() || self.is_comment()) {
@@ -4886,10 +4873,8 @@ impl Parser {
         self.current_token() == Token::CloseBracket
     }
 
-    // TODO: I tried to fix this parse, I completely broke lots of things
-    // need to get it back into working order around postfix operations and
-    // my hacks for struct creation
-
+    /// Check if current token starts a postfix operation (method call, property access, etc.)
+    /// The struct_creation_allowed flag disambiguates `Foo { ... }` as struct creation vs block.
     fn is_postfix(&self, lhs: &Ast, struct_creation_allowed: bool) -> bool {
         match self.current_token() {
             Token::Dot | Token::OpenParen | Token::OpenBracket => true,
@@ -5131,7 +5116,7 @@ impl Parser {
                         property,
                         token_range,
                     } => {
-                        // TODO: Ugly
+                        // Extract enum name and variant from property access (e.g., Enum.Variant)
                         let enum_name = match *property {
                             Ast::Identifier(name, _) => name,
                             _ => {

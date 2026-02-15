@@ -576,8 +576,7 @@ impl LowLevelArm {
     }
 
     pub fn prelude(&mut self) {
-        // self.breakpoint();
-        // TODO: make better/faster/fewer instructions
+        // Save frame pointer and link register, then set up new frame
         self.store_pair(X29, X30, SP, -2);
         self.mov_reg(X29, SP);
         // Add placeholder SUB instruction - will be replaced in patch_prelude_and_epilogue()
@@ -761,8 +760,8 @@ impl LowLevelArm {
                 rt: reg,
             })
         } else {
-            // Offset doesn't fit - use multi-instruction sequence
-            // TODO: We're using X16 as a temp register - need to ensure it's not in use
+            // Offset doesn't fit in LDR immediate - use multi-instruction sequence
+            // X16 is reserved as intra-procedure-call scratch register in AAPCS64
             let temp_reg = X16;
 
             // Load offset into temp register
@@ -1587,8 +1586,8 @@ impl LowLevelArm {
         }
     }
 
+    /// Load a 64-bit immediate value using MOVZ/MOVK sequence (up to 4 instructions)
     pub fn mov_64_bit_num(register: Register, num: isize) -> Vec<ArmAsm> {
-        // TODO: This is not optimal, but it works
         let mut num = num;
         let mut result = vec![];
 
