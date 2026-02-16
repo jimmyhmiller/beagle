@@ -34,11 +34,12 @@ type TrampolineFn10 =
 type TrampolineFn11 =
     fn(usize, usize, usize, usize, usize, usize, usize, usize, usize, usize, usize) -> usize;
 
-// Thread-local storage for the frame pointer and gc return address at builtin entry.
+// Thread-local storage for the frame pointer, stack pointer, and gc return address at builtin entry.
 // This is set by builtins that receive frame_pointer from Beagle code.
 // Used by gc() when triggered internally (e.g., during allocation).
 thread_local! {
     static SAVED_FRAME_POINTER: Cell<usize> = const { Cell::new(0) };
+    static SAVED_STACK_POINTER: Cell<usize> = const { Cell::new(0) };
     static SAVED_GC_RETURN_ADDR: Cell<usize> = const { Cell::new(0) };
 }
 
@@ -54,6 +55,18 @@ pub fn get_saved_frame_pointer() -> usize {
     SAVED_FRAME_POINTER.with(|cell| cell.get())
 }
 
+/// Save the stack pointer for later use by throw_runtime_error.
+/// Called by builtins that receive stack_pointer from Beagle.
+pub fn save_stack_pointer(sp: usize) {
+    SAVED_STACK_POINTER.with(|cell| cell.set(sp));
+}
+
+/// Get the saved stack pointer.
+/// Returns 0 if none has been saved (shouldn't happen in normal operation).
+pub fn get_saved_stack_pointer() -> usize {
+    SAVED_STACK_POINTER.with(|cell| cell.get())
+}
+
 /// Save the gc return address for later use by gc().
 /// Called by builtins that receive frame_pointer/stack_pointer from Beagle.
 pub fn save_gc_return_addr(addr: usize) {
@@ -66,16 +79,18 @@ pub fn get_saved_gc_return_addr() -> usize {
     SAVED_GC_RETURN_ADDR.with(|cell| cell.get())
 }
 
-/// Reset the saved frame pointer and gc return address.
+/// Reset the saved frame pointer, stack pointer, and gc return address.
 /// Called by Runtime::reset() to clear stale values between test runs.
 pub fn reset_saved_gc_context() {
     SAVED_FRAME_POINTER.with(|cell| cell.set(0));
+    SAVED_STACK_POINTER.with(|cell| cell.set(0));
     SAVED_GC_RETURN_ADDR.with(|cell| cell.set(0));
 }
 
 /// Saved GC context - used to save/restore around calls back into Beagle
 pub struct SavedGcContext {
     pub frame_pointer: usize,
+    pub stack_pointer: usize,
     pub gc_return_addr: usize,
 }
 
@@ -85,6 +100,7 @@ pub struct SavedGcContext {
 pub fn save_current_gc_context() -> SavedGcContext {
     SavedGcContext {
         frame_pointer: get_saved_frame_pointer(),
+        stack_pointer: get_saved_stack_pointer(),
         gc_return_addr: get_saved_gc_return_addr(),
     }
 }
@@ -94,20 +110,23 @@ pub fn save_current_gc_context() -> SavedGcContext {
 /// correct (non-stale) frame pointer.
 pub fn restore_gc_context(ctx: SavedGcContext) {
     save_frame_pointer(ctx.frame_pointer);
+    save_stack_pointer(ctx.stack_pointer);
     save_gc_return_addr(ctx.gc_return_addr);
 }
 
-/// Macro to save frame pointer and gc return address for GC stack walking.
+/// Macro to save frame pointer, stack pointer, and gc return address for GC stack walking.
 /// The gc_return_addr is the return address from the Beagle code that called
 /// this builtin. On ARM64, this was in LR and is now saved at [Rust_FP + 8]
 /// by Rust's prologue. On x86-64, it's also at [Rust_FP + 8].
 ///
 /// The saved frame_pointer (Beagle FP) is used by __pause to check if the
 /// saved gc_return_addr is still valid for the current call.
+/// The saved stack_pointer is used by throw_runtime_error for error handling.
 #[macro_export]
 macro_rules! save_gc_context {
     ($stack_pointer:expr, $frame_pointer:expr) => {{
         $crate::builtins::save_frame_pointer($frame_pointer);
+        $crate::builtins::save_stack_pointer($stack_pointer);
         // Get the return address from where Rust's prologue saved it
         // This is the address in Beagle code right after the builtin call
         let rust_fp = $crate::builtins::get_current_rust_frame_pointer();
@@ -640,10 +659,7 @@ extern "C" fn uppercase(stack_pointer: usize, frame_pointer: usize, string: usiz
     let runtime = get_runtime().get_mut();
     let string_value = runtime.get_string(stack_pointer, string);
     let uppercased = string_value.to_uppercase();
-    runtime
-        .allocate_string(stack_pointer, uppercased)
-        .unwrap()
-        .into()
+    unsafe { allocate_string_or_throw(runtime, stack_pointer, uppercased) }
 }
 
 extern "C" fn lowercase(stack_pointer: usize, frame_pointer: usize, string: usize) -> usize {
@@ -652,10 +668,7 @@ extern "C" fn lowercase(stack_pointer: usize, frame_pointer: usize, string: usiz
     let runtime = get_runtime().get_mut();
     let string_value = runtime.get_string(stack_pointer, string);
     let lowercased = string_value.to_lowercase();
-    runtime
-        .allocate_string(stack_pointer, lowercased)
-        .unwrap()
-        .into()
+    unsafe { allocate_string_or_throw(runtime, stack_pointer, lowercased) }
 }
 
 extern "C" fn split(
@@ -686,10 +699,7 @@ extern "C" fn trim(stack_pointer: usize, frame_pointer: usize, string: usize) ->
     let runtime = get_runtime().get_mut();
     let string_value = runtime.get_string(stack_pointer, string);
     let trimmed = string_value.trim();
-    runtime
-        .allocate_string(stack_pointer, trimmed.to_string())
-        .unwrap()
-        .into()
+    unsafe { allocate_string_or_throw(runtime, stack_pointer, trimmed.to_string()) }
 }
 
 extern "C" fn trim_left(stack_pointer: usize, frame_pointer: usize, string: usize) -> usize {
@@ -698,10 +708,7 @@ extern "C" fn trim_left(stack_pointer: usize, frame_pointer: usize, string: usiz
     let runtime = get_runtime().get_mut();
     let string_value = runtime.get_string(stack_pointer, string);
     let trimmed = string_value.trim_start();
-    runtime
-        .allocate_string(stack_pointer, trimmed.to_string())
-        .unwrap()
-        .into()
+    unsafe { allocate_string_or_throw(runtime, stack_pointer, trimmed.to_string()) }
 }
 
 extern "C" fn trim_right(stack_pointer: usize, frame_pointer: usize, string: usize) -> usize {
@@ -710,10 +717,7 @@ extern "C" fn trim_right(stack_pointer: usize, frame_pointer: usize, string: usi
     let runtime = get_runtime().get_mut();
     let string_value = runtime.get_string(stack_pointer, string);
     let trimmed = string_value.trim_end();
-    runtime
-        .allocate_string(stack_pointer, trimmed.to_string())
-        .unwrap()
-        .into()
+    unsafe { allocate_string_or_throw(runtime, stack_pointer, trimmed.to_string()) }
 }
 
 extern "C" fn starts_with(
@@ -1562,9 +1566,16 @@ pub unsafe extern "C" fn call_variadic_function_value(
 
     // Get function metadata
     let untagged_fn = (function_ptr >> BuiltInTypes::tag_size()) as *const u8;
-    let function = runtime
-        .get_function_by_pointer(untagged_fn)
-        .expect("Invalid function pointer in call_variadic_function_value");
+    let function = match runtime.get_function_by_pointer(untagged_fn) {
+        Some(f) => f,
+        None => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "TypeError",
+                "Invalid function pointer in call_variadic_function_value".to_string(),
+            );
+        },
+    };
     let min_args = function.min_args;
     let is_closure_bool = is_closure == BuiltInTypes::true_value() as usize;
 
@@ -1747,11 +1758,17 @@ pub unsafe extern "C" fn call_variadic_function_value(
                     rest_array,
                 )
             }
-            _ => panic!(
-                "Unsupported min_args value {} for variadic function call (max supported: 7). \
-                Consider reducing the number of required parameters.",
-                min_args
-            ),
+            _ => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "ArgumentError",
+                    format!(
+                        "Unsupported min_args value {} for variadic function call (max supported: 7). \
+                        Consider reducing the number of required parameters.",
+                        min_args
+                    ),
+                );
+            }
         }
     }
 }
@@ -1802,10 +1819,16 @@ pub unsafe extern "C" fn apply_function(
                 (fields.to_vec(), fields.len())
             }
         } else {
-            panic!(
-                "apply: expected array or vector as second argument, got {:?}",
-                BuiltInTypes::get_kind(args_array)
-            );
+            unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "TypeError",
+                    format!(
+                        "apply: expected array or vector as second argument, got {:?}",
+                        BuiltInTypes::get_kind(args_array)
+                    ),
+                );
+            }
         };
 
     unsafe {
@@ -1918,16 +1941,24 @@ pub unsafe extern "C" fn apply_function(
                         call_with_args(fn_ptr, &args, arg_count, false, 0)
                     }
                 } else {
-                    panic!(
-                        "apply: expected function, closure, or multi-arity function, got HeapObject with type_id={}",
-                        type_id
+                    throw_runtime_error(
+                        stack_pointer,
+                        "TypeError",
+                        format!(
+                            "apply: expected function, closure, or multi-arity function, got HeapObject with type_id={}",
+                            type_id
+                        ),
                     );
                 }
             }
             _ => {
-                panic!(
-                    "apply: expected function, closure, or multi-arity function, got {:?}",
-                    tag
+                throw_runtime_error(
+                    stack_pointer,
+                    "TypeError",
+                    format!(
+                        "apply: expected function, closure, or multi-arity function, got {:?}",
+                        tag
+                    ),
                 );
             }
         }
@@ -1938,7 +1969,7 @@ pub unsafe extern "C" fn apply_function(
 /// Uses JIT-compiled trampolines that set X9 (ARM64) or R10 (x86-64) to the arg count.
 #[inline(always)]
 unsafe fn call_variadic_with_args(
-    _stack_pointer: usize,
+    stack_pointer: usize,
     fn_ptr: *const u8,
     args: &[usize],
     arg_count: usize,
@@ -1961,9 +1992,19 @@ unsafe fn call_variadic_with_args(
     // Look up the appropriate trampoline
     let trampoline_name = format!("beagle.builtin/apply_call_{}", effective_arg_count);
     let runtime = get_runtime().get();
-    let trampoline = runtime
-        .get_function_by_name(&trampoline_name)
-        .unwrap_or_else(|| panic!("apply: trampoline {} not found", trampoline_name));
+    let trampoline = match runtime.get_function_by_name(&trampoline_name) {
+        Some(t) => t,
+        None => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "RuntimeError",
+                format!(
+                    "apply: cannot call function with {} arguments (trampoline {} not found)",
+                    effective_arg_count, trampoline_name
+                ),
+            );
+        },
+    };
     let trampoline_ptr = usize::from(trampoline.pointer) as *const u8;
 
     // Build args array: [fn_ptr, arg0, arg1, ...]
@@ -2087,10 +2128,14 @@ unsafe fn call_trampoline(
                     args[9],
                 )
             }
-            _ => panic!(
-                "apply: too many arguments ({}), max supported is 10",
-                arg_count
-            ),
+            _ => {
+                let sp = get_saved_stack_pointer();
+                throw_runtime_error(
+                    sp,
+                    "ArgumentError",
+                    format!("apply: too many arguments ({}), max supported is 10", arg_count),
+                );
+            }
         }
     }
 }
@@ -2209,10 +2254,14 @@ unsafe fn call_trampoline_with_closure(
                     args[8],
                 )
             }
-            _ => panic!(
-                "apply: too many arguments ({}) for closure, max supported is 9",
-                arg_count
-            ),
+            _ => {
+                let sp = get_saved_stack_pointer();
+                throw_runtime_error(
+                    sp,
+                    "ArgumentError",
+                    format!("apply: too many arguments ({}) for closure, max supported is 9", arg_count),
+                );
+            }
         }
     }
 }
@@ -2384,10 +2433,14 @@ unsafe fn call_with_args(
                     args[9],
                 )
             }
-            _ => panic!(
-                "apply: too many arguments ({}), max supported is 10",
-                arg_count
-            ),
+            _ => {
+                let sp = get_saved_stack_pointer();
+                throw_runtime_error(
+                    sp,
+                    "ArgumentError",
+                    format!("apply: too many arguments ({}), max supported is 10", arg_count),
+                );
+            }
         }
     }
 }
@@ -3882,12 +3935,23 @@ pub unsafe fn call_beagle_fn_ptr(runtime: &Runtime, fn_or_closure: usize, arg1: 
     restore_gc_context(saved_ctx);
 }
 
-pub unsafe extern "C" fn load_library(name: usize) -> usize {
+pub unsafe extern "C" fn load_library(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    name: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
-    let string = &runtime.get_string_literal(name);
-    let lib = unsafe {
-        libloading::Library::new(string)
-            .unwrap_or_else(|e| panic!("Failed to load library '{}': {}", string, e))
+    let string = runtime.get_string_literal(name);
+    let lib = match unsafe { libloading::Library::new(&string) } {
+        Ok(lib) => lib,
+        Err(e) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "FFIError",
+                format!("Failed to load library '{}': {}", string, e),
+            );
+        },
     };
     let id = runtime.add_library(lib);
 
@@ -3910,7 +3974,10 @@ pub fn map_beagle_type_to_ffi_type(runtime: &Runtime, value: usize) -> Result<FF
     }
 
     let struct_info = struct_info.unwrap();
-    let name = struct_info.name.as_str().split_once("/").unwrap().1;
+    let name = match struct_info.name.as_str().split_once("/") {
+        Some((_, name)) => name,
+        None => return Err(format!("Invalid struct name format: {}", struct_info.name)),
+    };
     match name {
         "Type.U8" => Ok(FFIType::U8),
         "Type.U16" => Ok(FFIType::U16),
@@ -3969,12 +4036,26 @@ pub extern "C" fn get_function(
     }
 
     // Get the function pointer from the library
-    let func_ptr = unsafe {
-        library
-            .get::<fn()>(function_name.as_bytes())
-            .unwrap_or_else(|e| panic!("Failed to get symbol '{}': {}", function_name, e))
+    let func_ptr = match unsafe { library.get::<fn()>(function_name.as_bytes()) } {
+        Ok(ptr) => ptr,
+        Err(e) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "FFIError",
+                format!("Failed to get symbol '{}': {}", function_name, e),
+            );
+        },
     };
-    let code_ptr = unsafe { func_ptr.try_as_raw_ptr().unwrap() };
+    let code_ptr = match unsafe { func_ptr.try_as_raw_ptr() } {
+        Some(ptr) => ptr,
+        None => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "FFIError",
+                format!("Invalid function pointer for symbol '{}'", function_name),
+            );
+        },
+    };
 
     // Parse argument types
     let types: Vec<usize> = persistent_vector_to_vec(types);
@@ -4017,23 +4098,37 @@ pub extern "C" fn get_function(
 /// Returns a Pointer struct wrapping the raw function address.
 /// Used for variadic FFI calls where arg types are specified per-call.
 pub extern "C" fn get_symbol(
-    _stack_pointer: usize,
+    stack_pointer: usize,
     frame_pointer: usize,
     library_struct: usize,
     function_name: usize,
 ) -> usize {
-    save_gc_context!(_stack_pointer, frame_pointer);
+    save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let library = runtime.get_library(library_struct);
     let function_name = runtime.get_string_literal(function_name);
 
     // Get the function pointer from the library
-    let func_ptr = unsafe {
-        library
-            .get::<fn()>(function_name.as_bytes())
-            .unwrap_or_else(|e| panic!("Failed to get symbol '{}': {}", function_name, e))
+    let func_ptr = match unsafe { library.get::<fn()>(function_name.as_bytes()) } {
+        Ok(ptr) => ptr,
+        Err(e) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "FFIError",
+                format!("Failed to get symbol '{}': {}", function_name, e),
+            );
+        },
     };
-    let code_ptr = unsafe { func_ptr.try_as_raw_ptr().unwrap() };
+    let code_ptr = match unsafe { func_ptr.try_as_raw_ptr() } {
+        Some(ptr) => ptr,
+        None => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "FFIError",
+                format!("Invalid function pointer for symbol '{}'", function_name),
+            );
+        },
+    };
 
     // Return as a Pointer struct (split into lo/hi halves to preserve all 64 bits)
     let raw = code_ptr as u64;
@@ -4255,10 +4350,13 @@ unsafe extern "C" fn invoke_beagle_callback(
                         function_pointer,
                     )
                 }
-                _ => panic!(
-                    "Callback with {} args not supported (max 4 for closures)",
-                    beagle_args.len()
-                ),
+                _ => {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "ArgumentError",
+                        format!("Callback with {} args not supported (max 4 for closures)", beagle_args.len()),
+                    );
+                }
             }
         } else {
             // Regular function pointer
@@ -4309,10 +4407,13 @@ unsafe extern "C" fn invoke_beagle_callback(
                         function_pointer,
                     )
                 }
-                _ => panic!(
-                    "Callback with {} args not supported (max 5 for functions)",
-                    n
-                ),
+                _ => {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "ArgumentError",
+                        format!("Callback with {} args not supported (max 5 for functions)", n),
+                    );
+                }
             }
         };
 
@@ -5623,9 +5724,14 @@ unsafe fn dynamic_c_call(
                         );
                     }
                     _ => {
-                        panic!(
-                            "Unsupported f64 argument pattern on x86-64: {} args, double_mask=0b{:08b}",
-                            num_args, double_mask
+                        let sp = get_saved_stack_pointer();
+                        throw_runtime_error(
+                            sp,
+                            "FFIError",
+                            format!(
+                                "Unsupported f64 argument pattern on x86-64: {} args, double_mask=0b{:08b}",
+                                num_args, double_mask
+                            ),
                         );
                     }
                 }
@@ -5727,9 +5833,14 @@ unsafe fn dynamic_c_call(
                     );
                 }
                 _ => {
-                    panic!(
-                        "Unsupported float argument pattern on x86-64: {} args, float_mask=0b{:06b}",
-                        num_args, float_mask
+                    let sp = get_saved_stack_pointer();
+                    throw_runtime_error(
+                        sp,
+                        "FFIError",
+                        format!(
+                            "Unsupported float argument pattern on x86-64: {} args, float_mask=0b{:06b}",
+                            num_args, float_mask
+                        ),
                     );
                 }
             }
@@ -5769,10 +5880,17 @@ unsafe fn dynamic_c_call(
                     padded[0], padded[1], padded[2], padded[3], padded[4], padded[5],
                 )
             }
-            _ => panic!(
-                "Too many arguments ({}) for FFI call on x86-64. Maximum supported: 6 integer/pointer args.",
-                num_args
-            ),
+            _ => {
+                let sp = get_saved_stack_pointer();
+                throw_runtime_error(
+                    sp,
+                    "FFIError",
+                    format!(
+                        "Too many arguments ({}) for FFI call on x86-64. Maximum supported: 6 integer/pointer args.",
+                        num_args
+                    ),
+                );
+            }
         };
         (result, 0)
     }
@@ -5840,11 +5958,26 @@ unsafe fn unmarshal_ffi_return(
                     return BuiltInTypes::null_value() as usize;
                 }
                 let c_string = CStr::from_ptr(low as *const i8);
-                let string = c_string.to_str().unwrap();
-                runtime
-                    .allocate_string(stack_pointer, string.to_string())
-                    .unwrap()
-                    .into()
+                let string = match c_string.to_str() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        throw_runtime_error(
+                            stack_pointer,
+                            "EncodingError",
+                            format!("FFI returned invalid UTF-8 string: {}", e),
+                        );
+                    }
+                };
+                match runtime.allocate_string(stack_pointer, string.to_string()) {
+                    Ok(s) => s.into(),
+                    Err(_) => {
+                        throw_runtime_error(
+                            stack_pointer,
+                            "AllocationError",
+                            "Failed to allocate string from FFI return".to_string(),
+                        );
+                    }
+                }
             }
             FFIType::Structure(_fields) => {
                 // For a 16-byte struct like Shader {id: u32, locs: *int}:
@@ -5936,7 +6069,17 @@ pub unsafe extern "C" fn copy_object(
         let header = object.get_header();
         let size = header.size as usize;
         let kind = BuiltInTypes::get_kind(object_pointer);
-        runtime.allocate(size, stack_pointer, kind).unwrap()
+        match runtime.allocate(size, stack_pointer, kind) {
+            Ok(ptr) => ptr,
+            Err(_) => unsafe {
+                runtime.unregister_temporary_root(object_pointer_id);
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate object copy - out of memory".to_string(),
+                );
+            },
+        }
     };
     let object_pointer = runtime.unregister_temporary_root(object_pointer_id);
     let mut to_object = HeapObject::from_tagged(to_pointer);
@@ -6111,11 +6254,26 @@ unsafe extern "C" fn ffi_get_string(
         let offset = BuiltInTypes::untag(offset);
         let len = BuiltInTypes::untag(len);
         let slice = std::slice::from_raw_parts(buffer.add(offset), len);
-        let string = std::str::from_utf8(slice).unwrap();
-        (*runtime)
-            .allocate_string(stack_pointer, string.to_string())
-            .unwrap()
-            .into()
+        let string = match std::str::from_utf8(slice) {
+            Ok(s) => s,
+            Err(e) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "EncodingError",
+                    format!("Buffer contains invalid UTF-8: {}", e),
+                );
+            }
+        };
+        match (*runtime).allocate_string(stack_pointer, string.to_string()) {
+            Ok(s) => s.into(),
+            Err(_) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate string from buffer".to_string(),
+                );
+            }
+        }
     }
 }
 
@@ -6140,16 +6298,33 @@ unsafe extern "C" fn ffi_get_string_and_free(
 
         // Copy string bytes into a Rust String (no GC)
         let slice = std::slice::from_raw_parts(raw_ptr.add(offset), len);
-        let string_data = std::str::from_utf8(slice).unwrap().to_string();
+        let string_data = match std::str::from_utf8(slice) {
+            Ok(s) => s.to_string(),
+            Err(e) => {
+                // Free the buffer before throwing error
+                let _ = Vec::from_raw_parts(raw_ptr, buf_size, buf_size);
+                throw_runtime_error(
+                    stack_pointer,
+                    "EncodingError",
+                    format!("Buffer contains invalid UTF-8: {}", e),
+                );
+            }
+        };
 
         // Free the native buffer NOW, before any GC can happen
         let _ = Vec::from_raw_parts(raw_ptr, buf_size, buf_size);
 
         // Allocate the Beagle string (may trigger GC, but Buffer is already freed)
-        (*runtime)
-            .allocate_string(stack_pointer, string_data)
-            .unwrap()
-            .into()
+        match (*runtime).allocate_string(stack_pointer, string_data) {
+            Ok(s) => s.into(),
+            Err(_) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate string from buffer".to_string(),
+                );
+            }
+        }
     }
 }
 
@@ -6450,10 +6625,28 @@ extern "C" fn placeholder() -> usize {
 extern "C" fn wait_for_input(stack_pointer: usize, frame_pointer: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let mut input = String::new();
-    std::io::stdin().read_line(&mut input).unwrap();
-    let runtime = get_runtime().get_mut();
-    let string = runtime.allocate_string(stack_pointer, input);
-    string.unwrap().into()
+    match std::io::stdin().read_line(&mut input) {
+        Ok(_) => {
+            let runtime = get_runtime().get_mut();
+            match runtime.allocate_string(stack_pointer, input) {
+                Ok(s) => s.into(),
+                Err(_) => unsafe {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "AllocationError",
+                        "Failed to allocate string for input".to_string(),
+                    );
+                },
+            }
+        }
+        Err(e) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "IOError",
+                format!("Failed to read input: {}", e),
+            );
+        },
+    }
 }
 
 // Get the ASCII code of the first character of a string
@@ -7635,8 +7828,16 @@ extern "C" fn eval(stack_pointer: usize, frame_pointer: usize, code: usize) -> u
                 }
             }
             let bytes = runtime.get_string_bytes_vec(code);
-            let code_str = std::str::from_utf8(&bytes).unwrap();
-            code_str.to_string()
+            match std::str::from_utf8(&bytes) {
+                Ok(s) => s.to_string(),
+                Err(e) => unsafe {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "EncodingError",
+                        format!("String contains invalid UTF-8: {}", e),
+                    );
+                },
+            }
         }
         _ => unsafe {
             throw_runtime_error(
@@ -9416,6 +9617,29 @@ pub unsafe fn throw_runtime_error(stack_pointer: usize, kind: &str, message: Str
     }
 }
 
+/// Helper to allocate a string with proper error handling.
+/// On allocation failure, throws an AllocationError.
+///
+/// # Safety
+/// Must be called from a context where stack_pointer is valid for error throwing.
+#[inline]
+unsafe fn allocate_string_or_throw(
+    runtime: &mut Runtime,
+    stack_pointer: usize,
+    s: String,
+) -> usize {
+    match runtime.allocate_string(stack_pointer, s) {
+        Ok(ptr) => ptr.into(),
+        Err(_) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                "Failed to allocate string - out of memory".to_string(),
+            );
+        },
+    }
+}
+
 // ============================================================================
 // Delimited Continuation Builtins
 // ============================================================================
@@ -9613,9 +9837,17 @@ pub unsafe extern "C" fn capture_continuation_runtime(
 
     // Allocate an opaque heap buffer for the stack segment
     let segment_words = stack_size.div_ceil(8);
-    let segment_ptr = runtime
-        .allocate(segment_words, stack_pointer, BuiltInTypes::HeapObject)
-        .expect("Failed to allocate continuation segment");
+    let segment_ptr = match runtime.allocate(segment_words, stack_pointer, BuiltInTypes::HeapObject)
+    {
+        Ok(ptr) => ptr,
+        Err(_) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                "Failed to allocate continuation segment - out of memory".to_string(),
+            );
+        },
+    };
 
     let mut segment_obj = HeapObject::from_tagged(segment_ptr);
     let is_large = segment_words > Header::MAX_INLINE_SIZE;
@@ -9653,9 +9885,17 @@ pub unsafe extern "C" fn capture_continuation_runtime(
     let segment_root_id = runtime.register_temporary_root(segment_ptr);
 
     // Allocate the continuation heap object
-    let cont_ptr = runtime
-        .allocate(11, stack_pointer, BuiltInTypes::HeapObject)
-        .expect("Failed to allocate continuation object");
+    let cont_ptr = match runtime.allocate(11, stack_pointer, BuiltInTypes::HeapObject) {
+        Ok(ptr) => ptr,
+        Err(_) => unsafe {
+            runtime.unregister_temporary_root(segment_root_id);
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                "Failed to allocate continuation object - out of memory".to_string(),
+            );
+        },
+    };
     let segment_ptr = runtime.unregister_temporary_root(segment_root_id);
 
     let mut cont_obj = HeapObject::from_tagged(cont_ptr);
@@ -11427,7 +11667,7 @@ impl Runtime {
         self.add_builtin_with_doc(
             "beagle.ffi/load-library",
             load_library as *const u8,
-            false,
+            true,
             &["path"],
             "Load a dynamic library (shared object) from the given path.\n\nReturns a Library struct that can be used with get-function.\n\nExamples:\n  (let lib (ffi/load-library \"libm.dylib\"))",
         )?;
@@ -14401,7 +14641,7 @@ pub unsafe extern "C" fn files_with_diagnostics(
 }
 
 /// Clears all diagnostics
-pub unsafe extern "C" fn clear_diagnostics(_stack_pointer: usize, frame_pointer: usize) -> usize {
+pub unsafe extern "C" fn clear_diagnostics(stack_pointer: usize, frame_pointer: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
 
