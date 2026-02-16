@@ -236,10 +236,7 @@ pub unsafe extern "C" fn to_string(
         unsafe { throw_error(stack_pointer, frame_pointer) };
     }
     let result = result.unwrap();
-    runtime
-        .allocate_string(stack_pointer, result)
-        .unwrap()
-        .into()
+    unsafe { allocate_string_or_throw(runtime, stack_pointer, result) }
 }
 
 pub unsafe extern "C" fn to_number(
@@ -361,9 +358,16 @@ extern "C" fn allocate(stack_pointer: usize, frame_pointer: usize, size: usize) 
     let size = BuiltInTypes::untag(size);
     let runtime = get_runtime().get_mut();
 
-    let result = runtime
-        .allocate(size, stack_pointer, BuiltInTypes::HeapObject)
-        .unwrap();
+    let result = match runtime.allocate(size, stack_pointer, BuiltInTypes::HeapObject) {
+        Ok(ptr) => ptr,
+        Err(_) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                "Failed to allocate heap object - out of memory".to_string(),
+            );
+        },
+    };
 
     debug_assert!(BuiltInTypes::is_heap_pointer(result));
     debug_assert!(BuiltInTypes::untag(result).is_multiple_of(8));
@@ -376,9 +380,16 @@ extern "C" fn allocate_zeroed(stack_pointer: usize, frame_pointer: usize, size: 
     let size = BuiltInTypes::untag(size);
     let runtime = get_runtime().get_mut();
 
-    let result = runtime
-        .allocate_zeroed(size, stack_pointer, BuiltInTypes::HeapObject)
-        .unwrap();
+    let result = match runtime.allocate_zeroed(size, stack_pointer, BuiltInTypes::HeapObject) {
+        Ok(ptr) => ptr,
+        Err(_) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                "Failed to allocate zeroed heap object - out of memory".to_string(),
+            );
+        },
+    };
 
     debug_assert!(BuiltInTypes::is_heap_pointer(result));
     debug_assert!(BuiltInTypes::untag(result).is_multiple_of(8));
@@ -390,9 +401,16 @@ extern "C" fn allocate_float(stack_pointer: usize, frame_pointer: usize, size: u
     let runtime = get_runtime().get_mut();
     let value = BuiltInTypes::untag(size);
 
-    let result = runtime
-        .allocate(value, stack_pointer, BuiltInTypes::Float)
-        .unwrap();
+    let result = match runtime.allocate(value, stack_pointer, BuiltInTypes::Float) {
+        Ok(ptr) => ptr,
+        Err(_) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                "Failed to allocate float - out of memory".to_string(),
+            );
+        },
+    };
 
     debug_assert!(BuiltInTypes::get_kind(result) == BuiltInTypes::Float);
     debug_assert!(BuiltInTypes::untag(result).is_multiple_of(8));
@@ -440,10 +458,7 @@ extern "C" fn get_string_index(
         }
         let ch = s.chars().nth(index).unwrap();
         let result = ch.to_string();
-        runtime
-            .allocate_string(stack_pointer, result)
-            .unwrap()
-            .into()
+        unsafe { allocate_string_or_throw(runtime, stack_pointer, result) }
     } else {
         let heap_obj = HeapObject::from_tagged(string);
         let header = heap_obj.get_header();
@@ -478,10 +493,7 @@ extern "C" fn get_string_index(
             }
             let ch = s.chars().nth(index).unwrap();
             let result = ch.to_string();
-            return runtime
-                .allocate_string(stack_pointer, result)
-                .unwrap()
-                .into();
+            return unsafe { allocate_string_or_throw(runtime, stack_pointer, result) };
         }
 
         let bytes = heap_obj.get_string_bytes();
@@ -520,11 +532,20 @@ extern "C" fn get_string_index(
             }
         }
         let ch = s.chars().nth(index).unwrap();
-        let result = ch.to_string();
-        let result = runtime
-            .allocate_string(stack_pointer, result)
-            .unwrap()
-            .into();
+        let result_str = ch.to_string();
+        let result = match runtime.allocate_string(stack_pointer, result_str) {
+            Ok(ptr) => ptr.into(),
+            Err(_) => {
+                runtime.unregister_temporary_root(object_pointer_id);
+                unsafe {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "AllocationError",
+                        "Failed to allocate character string - out of memory".to_string(),
+                    );
+                }
+            }
+        };
         runtime.unregister_temporary_root(object_pointer_id);
         result
     }
@@ -586,10 +607,7 @@ extern "C" fn string_concat(
         let a_str = runtime.get_string(stack_pointer, a);
         let b_str = runtime.get_string(stack_pointer, b);
         let result = a_str + &b_str;
-        return runtime
-            .allocate_string(stack_pointer, result)
-            .unwrap()
-            .into();
+        return unsafe { allocate_string_or_throw(runtime, stack_pointer, result) };
     }
 
     let a_len = runtime.get_string_byte_length(a);
@@ -612,17 +630,29 @@ extern "C" fn string_concat(
         let mut result = Vec::with_capacity(total_len);
         result.extend_from_slice(&a_bytes);
         result.extend_from_slice(&b_bytes);
-        return runtime
-            .allocate_string_from_bytes(stack_pointer, &result)
-            .unwrap()
-            .into();
+        return match runtime.allocate_string_from_bytes(stack_pointer, &result) {
+            Ok(ptr) => ptr.into(),
+            Err(_) => unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate concatenated string - out of memory".to_string(),
+                );
+            },
+        };
     }
 
     // For larger strings, create a cons string node (O(1))
-    runtime
-        .allocate_cons_string(stack_pointer, a, b)
-        .unwrap()
-        .into()
+    match runtime.allocate_cons_string(stack_pointer, a, b) {
+        Ok(ptr) => ptr.into(),
+        Err(_) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                "Failed to allocate cons string - out of memory".to_string(),
+            );
+        },
+    }
 }
 
 extern "C" fn substring(
@@ -688,7 +718,16 @@ extern "C" fn split(
         .map(|s| s.to_string())
         .collect();
 
-    runtime.create_string_array(stack_pointer, &parts).unwrap()
+    match runtime.create_string_array(stack_pointer, &parts) {
+        Ok(arr) => arr,
+        Err(_) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                "Failed to allocate string array - out of memory".to_string(),
+            );
+        },
+    }
 }
 
 // join() is now implemented in std.bg using Indexed and Length protocols
@@ -817,10 +856,7 @@ extern "C" fn replace_string(
 
     let replaced = string_value.replace(&from_value, &to_value);
 
-    runtime
-        .allocate_string(stack_pointer, replaced)
-        .unwrap()
-        .into()
+    unsafe { allocate_string_or_throw(runtime, stack_pointer, replaced) }
 }
 
 extern "C" fn blank_string(stack_pointer: usize, frame_pointer: usize, string: usize) -> usize {
@@ -851,10 +887,7 @@ extern "C" fn replace_first_string(
 
     let replaced = string_value.replacen(&from_value, &to_value, 1);
 
-    runtime
-        .allocate_string(stack_pointer, replaced)
-        .unwrap()
-        .into()
+    unsafe { allocate_string_or_throw(runtime, stack_pointer, replaced) }
 }
 
 extern "C" fn pad_left_string(
@@ -887,10 +920,7 @@ extern "C" fn pad_left_string(
         string_value
     );
 
-    runtime
-        .allocate_string(stack_pointer, padded)
-        .unwrap()
-        .into()
+    unsafe { allocate_string_or_throw(runtime, stack_pointer, padded) }
 }
 
 extern "C" fn pad_right_string(
@@ -923,10 +953,7 @@ extern "C" fn pad_right_string(
         pad_ch.to_string().repeat(padding_needed)
     );
 
-    runtime
-        .allocate_string(stack_pointer, padded)
-        .unwrap()
-        .into()
+    unsafe { allocate_string_or_throw(runtime, stack_pointer, padded) }
 }
 
 extern "C" fn lines_string(stack_pointer: usize, frame_pointer: usize, string: usize) -> usize {
@@ -937,9 +964,16 @@ extern "C" fn lines_string(stack_pointer: usize, frame_pointer: usize, string: u
 
     let line_vec: Vec<String> = string_value.lines().map(|s| s.to_string()).collect();
 
-    runtime
-        .create_string_array(stack_pointer, &line_vec)
-        .unwrap()
+    match runtime.create_string_array(stack_pointer, &line_vec) {
+        Ok(arr) => arr,
+        Err(_) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                "Failed to allocate string array - out of memory".to_string(),
+            );
+        },
+    }
 }
 
 extern "C" fn words_string(stack_pointer: usize, frame_pointer: usize, string: usize) -> usize {
@@ -953,9 +987,16 @@ extern "C" fn words_string(stack_pointer: usize, frame_pointer: usize, string: u
         .map(|s| s.to_string())
         .collect();
 
-    runtime
-        .create_string_array(stack_pointer, &word_vec)
-        .unwrap()
+    match runtime.create_string_array(stack_pointer, &word_vec) {
+        Ok(arr) => arr,
+        Err(_) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                "Failed to allocate string array - out of memory".to_string(),
+            );
+        },
+    }
 }
 
 extern "C" fn fill_object_fields(object_pointer: usize, value: usize) -> usize {
@@ -998,9 +1039,16 @@ extern "C" fn make_closure(
     let free_variable_pointer = free_variable_pointer as *const usize;
     let start = unsafe { free_variable_pointer.sub(num_free.saturating_sub(1)) };
     let free_variables = unsafe { from_raw_parts(start, num_free) };
-    runtime
-        .make_closure(stack_pointer, function, free_variables)
-        .unwrap()
+    match runtime.make_closure(stack_pointer, function, free_variables) {
+        Ok(closure) => closure,
+        Err(_) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                "Failed to allocate closure - out of memory".to_string(),
+            );
+        },
+    }
 }
 
 /// Create a FunctionObject from a function pointer.
@@ -1027,9 +1075,16 @@ extern "C" fn make_function_object(
         }
     }
 
-    runtime
-        .make_function_object(stack_pointer, function)
-        .unwrap()
+    match runtime.make_function_object(stack_pointer, function) {
+        Ok(obj) => obj,
+        Err(_) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                "Failed to allocate function object - out of memory".to_string(),
+            );
+        },
+    }
 }
 
 pub fn get_current_stack_pointer() -> usize {
@@ -1223,7 +1278,16 @@ extern "C" fn type_of(stack_pointer: usize, frame_pointer: usize, value: usize) 
     save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "type_of");
     let runtime = get_runtime().get_mut();
-    runtime.type_of(stack_pointer, value).unwrap()
+    match runtime.type_of(stack_pointer, value) {
+        Ok(t) => t,
+        Err(_) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                "Failed to allocate type symbol - out of memory".to_string(),
+            );
+        },
+    }
 }
 
 extern "C" fn get_os(stack_pointer: usize, frame_pointer: usize) -> usize {
@@ -1239,10 +1303,7 @@ extern "C" fn get_os(stack_pointer: usize, frame_pointer: usize) -> usize {
     } else {
         "unknown"
     };
-    runtime
-        .allocate_string(stack_pointer, os_name.to_string())
-        .unwrap()
-        .into()
+    unsafe { allocate_string_or_throw(runtime, stack_pointer, os_name.to_string()) }
 }
 
 /// Return the raw usize value of any Beagle value (tagged pointer).
@@ -1437,18 +1498,32 @@ pub unsafe extern "C" fn build_rest_array_from_locals(
 
     if num_extra == 0 {
         // Return empty array
-        let array_ptr = runtime
-            .allocate_zeroed(0, stack_pointer, BuiltInTypes::HeapObject)
-            .unwrap();
+        let array_ptr = match runtime.allocate_zeroed(0, stack_pointer, BuiltInTypes::HeapObject) {
+            Ok(ptr) => ptr,
+            Err(_) => unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate rest array - out of memory".to_string(),
+                );
+            },
+        };
         let mut heap_obj = HeapObject::from_tagged(array_ptr);
         heap_obj.write_type_id(1);
         return array_ptr;
     }
 
     // Allocate array for extra args (zeroed)
-    let array_ptr = runtime
-        .allocate_zeroed(num_extra, stack_pointer, BuiltInTypes::HeapObject)
-        .unwrap();
+    let array_ptr = match runtime.allocate_zeroed(num_extra, stack_pointer, BuiltInTypes::HeapObject) {
+        Ok(ptr) => ptr,
+        Err(_) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                "Failed to allocate rest array - out of memory".to_string(),
+            );
+        },
+    };
 
     // Set type_id to 1 (raw array)
     let mut heap_obj = HeapObject::from_tagged(array_ptr);
@@ -1513,9 +1588,16 @@ pub unsafe extern "C" fn pack_variadic_args_from_stack(
     let num_extra = total.saturating_sub(min);
 
     // Allocate array for extra args (zeroed)
-    let array_ptr = runtime
-        .allocate_zeroed(num_extra, stack_pointer, BuiltInTypes::HeapObject)
-        .unwrap();
+    let array_ptr = match runtime.allocate_zeroed(num_extra, stack_pointer, BuiltInTypes::HeapObject) {
+        Ok(ptr) => ptr,
+        Err(_) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                "Failed to allocate variadic args array - out of memory".to_string(),
+            );
+        },
+    };
 
     // Set type_id to 1 (raw array)
     let mut heap_obj = HeapObject::from_tagged(array_ptr);
@@ -1591,9 +1673,19 @@ pub unsafe extern "C" fn call_variadic_function_value(
     let args_root_id = runtime_mut.register_temporary_root(args_array_ptr);
 
     // Allocate array for extra args (can trigger GC, zeroed)
-    let rest_array = runtime_mut
-        .allocate_zeroed(num_extra, stack_pointer, BuiltInTypes::HeapObject)
-        .unwrap();
+    let rest_array = match runtime_mut.allocate_zeroed(num_extra, stack_pointer, BuiltInTypes::HeapObject) {
+        Ok(ptr) => ptr,
+        Err(_) => {
+            runtime_mut.unregister_temporary_root(args_root_id);
+            unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate rest array - out of memory".to_string(),
+                );
+            }
+        }
+    };
 
     // Get the updated args_array_ptr from the root (GC may have moved it)
     // then unregister the root
@@ -2550,9 +2642,16 @@ pub unsafe extern "C" fn sqrt_builtin(
         let result = float_value.sqrt();
 
         // Allocate a new float object for the result
-        let new_float_ptr = runtime
-            .allocate(1, stack_pointer, BuiltInTypes::Float)
-            .unwrap();
+        let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate float result - out of memory".to_string(),
+                );
+            }
+        };
 
         // Write the result
         let untagged_result = BuiltInTypes::untag(new_float_ptr);
@@ -2579,9 +2678,16 @@ pub unsafe extern "C" fn floor_builtin(
 
         let result = float_value.floor();
 
-        let new_float_ptr = runtime
-            .allocate(1, stack_pointer, BuiltInTypes::Float)
-            .unwrap();
+        let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate float result - out of memory".to_string(),
+                );
+            }
+        };
 
         let untagged_result = BuiltInTypes::untag(new_float_ptr);
         let result_ptr = untagged_result as *mut f64;
@@ -2607,9 +2713,16 @@ pub unsafe extern "C" fn ceil_builtin(
 
         let result = float_value.ceil();
 
-        let new_float_ptr = runtime
-            .allocate(1, stack_pointer, BuiltInTypes::Float)
-            .unwrap();
+        let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate float result - out of memory".to_string(),
+                );
+            }
+        };
 
         let untagged_result = BuiltInTypes::untag(new_float_ptr);
         let result_ptr = untagged_result as *mut f64;
@@ -2646,9 +2759,18 @@ pub unsafe extern "C" fn abs_builtin(
 
                 let result = float_value.abs();
 
-                let new_float_ptr = runtime
-                    .allocate(1, stack_pointer, BuiltInTypes::Float)
-                    .unwrap();
+                let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+                    Ok(ptr) => ptr,
+                    Err(_) => {
+                        unsafe {
+                            throw_runtime_error(
+                                stack_pointer,
+                                "AllocationError",
+                                "Failed to allocate float result - out of memory".to_string(),
+                            );
+                        }
+                    }
+                };
 
                 let untagged_result = BuiltInTypes::untag(new_float_ptr);
                 let result_ptr = untagged_result as *mut f64;
@@ -2658,11 +2780,13 @@ pub unsafe extern "C" fn abs_builtin(
             }
             _ => {
                 // For other types, throw a type error
-                throw_runtime_error(
-                    stack_pointer,
-                    "TypeError",
-                    "abs requires a number (int or float)".to_string(),
-                );
+                unsafe {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "TypeError",
+                        "abs requires a number (int or float)".to_string(),
+                    );
+                }
             }
         }
     }
@@ -2684,9 +2808,18 @@ pub unsafe extern "C" fn round_builtin(
 
         let result = float_value.round();
 
-        let new_float_ptr = runtime
-            .allocate(1, stack_pointer, BuiltInTypes::Float)
-            .unwrap();
+        let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                unsafe {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "AllocationError",
+                        "Failed to allocate float result - out of memory".to_string(),
+                    );
+                }
+            }
+        };
 
         let untagged_result = BuiltInTypes::untag(new_float_ptr);
         let result_ptr = untagged_result as *mut f64;
@@ -2752,9 +2885,16 @@ extern "C" fn max_builtin(stack_pointer: usize, frame_pointer: usize, a: usize, 
         let result = a_float.max(b_float);
 
         let runtime = get_runtime().get_mut();
-        let new_float_ptr = runtime
-            .allocate(1, stack_pointer, BuiltInTypes::Float)
-            .unwrap();
+        let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate float result - out of memory".to_string(),
+                );
+            }
+        };
 
         let untagged_result = BuiltInTypes::untag(new_float_ptr);
         let result_ptr = untagged_result as *mut f64;
@@ -2799,9 +2939,16 @@ extern "C" fn min_builtin(stack_pointer: usize, frame_pointer: usize, a: usize, 
         let result = a_float.min(b_float);
 
         let runtime = get_runtime().get_mut();
-        let new_float_ptr = runtime
-            .allocate(1, stack_pointer, BuiltInTypes::Float)
-            .unwrap();
+        let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate float result - out of memory".to_string(),
+                );
+            }
+        };
 
         let untagged_result = BuiltInTypes::untag(new_float_ptr);
         let result_ptr = untagged_result as *mut f64;
@@ -2867,9 +3014,16 @@ extern "C" fn clamp_builtin(
 
         let result = value_float.max(low_float).min(high_float);
 
-        let new_float_ptr = runtime
-            .allocate(1, stack_pointer, BuiltInTypes::Float)
-            .unwrap();
+        let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate float result - out of memory".to_string(),
+                );
+            }
+        };
 
         let untagged_result = BuiltInTypes::untag(new_float_ptr);
         let result_ptr = untagged_result as *mut f64;
@@ -2920,9 +3074,16 @@ pub unsafe extern "C" fn random_builtin(stack_pointer: usize, frame_pointer: usi
         let mut rng = rand::thread_rng();
         let random_value: f64 = rng.gen_range(0.0..1.0);
 
-        let new_float_ptr = runtime
-            .allocate(1, stack_pointer, BuiltInTypes::Float)
-            .unwrap();
+        let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate float result - out of memory".to_string(),
+                );
+            }
+        };
 
         let untagged_result = BuiltInTypes::untag(new_float_ptr);
         let result_ptr = untagged_result as *mut f64;
@@ -3056,9 +3217,16 @@ pub unsafe extern "C" fn sin_builtin(
 
         let result = float_value.sin();
 
-        let new_float_ptr = runtime
-            .allocate(1, stack_pointer, BuiltInTypes::Float)
-            .unwrap();
+        let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate float result - out of memory".to_string(),
+                );
+            }
+        };
 
         let untagged_result = BuiltInTypes::untag(new_float_ptr);
         let result_ptr = untagged_result as *mut f64;
@@ -3084,9 +3252,16 @@ pub unsafe extern "C" fn cos_builtin(
 
         let result = float_value.cos();
 
-        let new_float_ptr = runtime
-            .allocate(1, stack_pointer, BuiltInTypes::Float)
-            .unwrap();
+        let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate float result - out of memory".to_string(),
+                );
+            }
+        };
 
         let untagged_result = BuiltInTypes::untag(new_float_ptr);
         let result_ptr = untagged_result as *mut f64;
@@ -3112,9 +3287,16 @@ pub unsafe extern "C" fn tan_builtin(
 
         let result = float_value.tan();
 
-        let new_float_ptr = runtime
-            .allocate(1, stack_pointer, BuiltInTypes::Float)
-            .unwrap();
+        let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate float result - out of memory".to_string(),
+                );
+            }
+        };
 
         let untagged_result = BuiltInTypes::untag(new_float_ptr);
         let result_ptr = untagged_result as *mut f64;
@@ -3140,9 +3322,16 @@ pub unsafe extern "C" fn asin_builtin(
 
         let result = float_value.asin();
 
-        let new_float_ptr = runtime
-            .allocate(1, stack_pointer, BuiltInTypes::Float)
-            .unwrap();
+        let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate float result - out of memory".to_string(),
+                );
+            }
+        };
 
         let untagged_result = BuiltInTypes::untag(new_float_ptr);
         let result_ptr = untagged_result as *mut f64;
@@ -3168,9 +3357,16 @@ pub unsafe extern "C" fn acos_builtin(
 
         let result = float_value.acos();
 
-        let new_float_ptr = runtime
-            .allocate(1, stack_pointer, BuiltInTypes::Float)
-            .unwrap();
+        let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate float result - out of memory".to_string(),
+                );
+            }
+        };
 
         let untagged_result = BuiltInTypes::untag(new_float_ptr);
         let result_ptr = untagged_result as *mut f64;
@@ -3196,9 +3392,16 @@ pub unsafe extern "C" fn atan_builtin(
 
         let result = float_value.atan();
 
-        let new_float_ptr = runtime
-            .allocate(1, stack_pointer, BuiltInTypes::Float)
-            .unwrap();
+        let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate float result - out of memory".to_string(),
+                );
+            }
+        };
 
         let untagged_result = BuiltInTypes::untag(new_float_ptr);
         let result_ptr = untagged_result as *mut f64;
@@ -3229,9 +3432,16 @@ pub unsafe extern "C" fn atan2_builtin(
 
         let result = y_value.atan2(x_value);
 
-        let new_float_ptr = runtime
-            .allocate(1, stack_pointer, BuiltInTypes::Float)
-            .unwrap();
+        let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate float result - out of memory".to_string(),
+                );
+            }
+        };
 
         let untagged_result = BuiltInTypes::untag(new_float_ptr);
         let result_ptr = untagged_result as *mut f64;
@@ -3257,9 +3467,16 @@ pub unsafe extern "C" fn exp_builtin(
 
         let result = float_value.exp();
 
-        let new_float_ptr = runtime
-            .allocate(1, stack_pointer, BuiltInTypes::Float)
-            .unwrap();
+        let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate float result - out of memory".to_string(),
+                );
+            }
+        };
 
         let untagged_result = BuiltInTypes::untag(new_float_ptr);
         let result_ptr = untagged_result as *mut f64;
@@ -3285,9 +3502,16 @@ pub unsafe extern "C" fn log_builtin(
 
         let result = float_value.ln();
 
-        let new_float_ptr = runtime
-            .allocate(1, stack_pointer, BuiltInTypes::Float)
-            .unwrap();
+        let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate float result - out of memory".to_string(),
+                );
+            }
+        };
 
         let untagged_result = BuiltInTypes::untag(new_float_ptr);
         let result_ptr = untagged_result as *mut f64;
@@ -3313,9 +3537,16 @@ pub unsafe extern "C" fn log10_builtin(
 
         let result = float_value.log10();
 
-        let new_float_ptr = runtime
-            .allocate(1, stack_pointer, BuiltInTypes::Float)
-            .unwrap();
+        let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate float result - out of memory".to_string(),
+                );
+            }
+        };
 
         let untagged_result = BuiltInTypes::untag(new_float_ptr);
         let result_ptr = untagged_result as *mut f64;
@@ -3341,9 +3572,16 @@ pub unsafe extern "C" fn log2_builtin(
 
         let result = float_value.log2();
 
-        let new_float_ptr = runtime
-            .allocate(1, stack_pointer, BuiltInTypes::Float)
-            .unwrap();
+        let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate float result - out of memory".to_string(),
+                );
+            }
+        };
 
         let untagged_result = BuiltInTypes::untag(new_float_ptr);
         let result_ptr = untagged_result as *mut f64;
@@ -3374,9 +3612,16 @@ pub unsafe extern "C" fn pow_builtin(
 
         let result = base_value.powf(exp_value);
 
-        let new_float_ptr = runtime
-            .allocate(1, stack_pointer, BuiltInTypes::Float)
-            .unwrap();
+        let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate float result - out of memory".to_string(),
+                );
+            }
+        };
 
         let untagged_result = BuiltInTypes::untag(new_float_ptr);
         let result_ptr = untagged_result as *mut f64;
@@ -3404,9 +3649,16 @@ pub unsafe extern "C" fn to_float_builtin(
         let float_value = int_value as f64;
 
         // Allocate a new float object for the result
-        let new_float_ptr = runtime
-            .allocate(1, stack_pointer, BuiltInTypes::Float)
-            .unwrap();
+        let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate float result - out of memory".to_string(),
+                );
+            }
+        };
 
         let untagged_result = BuiltInTypes::untag(new_float_ptr);
         let result_ptr = untagged_result as *mut f64;
@@ -4273,9 +4525,16 @@ unsafe extern "C" fn invoke_beagle_callback(
                 FFIType::F32 => {
                     let f32_val = f32::from_bits(c_val as u32);
                     let f64_val = f32_val as f64;
-                    let new_float_ptr = runtime
-                        .allocate(1, stack_pointer, BuiltInTypes::Float)
-                        .unwrap();
+                    let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+                        Ok(ptr) => ptr,
+                        Err(_) => {
+                            throw_runtime_error(
+                                stack_pointer,
+                                "AllocationError",
+                                "Failed to allocate float for FFI callback - out of memory".to_string(),
+                            );
+                        }
+                    };
                     let untagged_result = BuiltInTypes::untag(new_float_ptr);
                     let result_ptr = untagged_result as *mut f64;
                     *result_ptr.add(1) = f64_val;
@@ -4283,9 +4542,16 @@ unsafe extern "C" fn invoke_beagle_callback(
                 }
                 FFIType::F64 => {
                     let f64_val = f64::from_bits(c_val);
-                    let new_float_ptr = runtime
-                        .allocate(1, stack_pointer, BuiltInTypes::Float)
-                        .unwrap();
+                    let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+                        Ok(ptr) => ptr,
+                        Err(_) => {
+                            throw_runtime_error(
+                                stack_pointer,
+                                "AllocationError",
+                                "Failed to allocate float for FFI callback - out of memory".to_string(),
+                            );
+                        }
+                    };
                     let untagged_result = BuiltInTypes::untag(new_float_ptr);
                     let result_ptr = untagged_result as *mut f64;
                     *result_ptr.add(1) = f64_val;
@@ -4455,10 +4721,15 @@ unsafe extern "C" fn invoke_beagle_callback(
 }
 
 /// Helper to get a save_volatile_registers function pointer.
+/// Panics if the required function is not found - this is an internal runtime invariant.
 unsafe fn get_svr<T>(runtime: &Runtime, n: usize) -> T {
     let name = format!("beagle.builtin/save_volatile_registers{}", n);
-    let func = runtime.get_function_by_name(&name).unwrap();
-    let ptr = runtime.get_pointer(func).unwrap();
+    let func = runtime
+        .get_function_by_name(&name)
+        .unwrap_or_else(|| panic!("Internal error: missing required builtin {}", name));
+    let ptr = runtime
+        .get_pointer(func)
+        .unwrap_or_else(|_| panic!("Internal error: could not get pointer for {}", name));
     unsafe { std::mem::transmute_copy(&ptr) }
 }
 
@@ -5920,9 +6191,16 @@ unsafe fn unmarshal_ffi_return(
                 // Convert f32 return to a heap-allocated Beagle float (f64)
                 let f32_val = f32::from_bits(low as u32);
                 let f64_val = f32_val as f64;
-                let new_float_ptr = runtime
-                    .allocate(1, stack_pointer, BuiltInTypes::Float)
-                    .unwrap();
+                let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+                    Ok(ptr) => ptr,
+                    Err(_) => {
+                        throw_runtime_error(
+                            stack_pointer,
+                            "AllocationError",
+                            "Failed to allocate FFI float result - out of memory".to_string(),
+                        );
+                    }
+                };
                 let untagged_result = BuiltInTypes::untag(new_float_ptr);
                 let result_ptr = untagged_result as *mut f64;
                 *result_ptr.add(1) = f64_val;
@@ -5930,9 +6208,16 @@ unsafe fn unmarshal_ffi_return(
             }
             FFIType::F64 => {
                 let f64_val = f64::from_bits(low);
-                let new_float_ptr = runtime
-                    .allocate(1, stack_pointer, BuiltInTypes::Float)
-                    .unwrap();
+                let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+                    Ok(ptr) => ptr,
+                    Err(_) => {
+                        throw_runtime_error(
+                            stack_pointer,
+                            "AllocationError",
+                            "Failed to allocate FFI float result - out of memory".to_string(),
+                        );
+                    }
+                };
                 let untagged_result = BuiltInTypes::untag(new_float_ptr);
                 let result_ptr = untagged_result as *mut f64;
                 *result_ptr.add(1) = f64_val;
@@ -6084,13 +6369,13 @@ pub unsafe extern "C" fn copy_object(
     let object_pointer = runtime.unregister_temporary_root(object_pointer_id);
     let mut to_object = HeapObject::from_tagged(to_pointer);
     let object = HeapObject::from_tagged(object_pointer);
-    let result = runtime.copy_object(object, &mut to_object);
-    if let Err(error) = result {
-        let stack_pointer = get_current_stack_pointer();
-        println!("Error: {:?}", error);
-        unsafe { throw_error(stack_pointer, frame_pointer) };
-    } else {
-        result.unwrap()
+    match runtime.copy_object(object, &mut to_object) {
+        Ok(ptr) => ptr,
+        Err(error) => {
+            let stack_pointer = get_current_stack_pointer();
+            println!("Error: {:?}", error);
+            unsafe { throw_error(stack_pointer, frame_pointer) };
+        }
     }
 }
 
@@ -6100,9 +6385,20 @@ pub unsafe extern "C" fn copy_from_to_object(from: usize, to: usize) -> usize {
         return to;
     }
     let from = HeapObject::from_tagged(from);
-    let mut to = HeapObject::from_tagged(to);
-    runtime.copy_object_except_header(from, &mut to).unwrap();
-    to.tagged_pointer()
+    let mut to_obj = HeapObject::from_tagged(to);
+    match runtime.copy_object_except_header(from, &mut to_obj) {
+        Ok(_) => to_obj.tagged_pointer(),
+        Err(error) => {
+            let stack_pointer = get_saved_stack_pointer();
+            unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "CopyError",
+                    format!("Failed to copy object: {:?}", error),
+                );
+            }
+        }
+    }
 }
 
 pub unsafe extern "C" fn copy_array_range(
@@ -6668,10 +6964,16 @@ extern "C" fn char_from_code(stack_pointer: usize, frame_pointer: usize, code: u
     let code = BuiltInTypes::untag(code) as u8;
     let ch = code as char;
     let runtime = get_runtime().get_mut();
-    runtime
-        .allocate_string(stack_pointer, ch.to_string())
-        .unwrap()
-        .into()
+    match runtime.allocate_string(stack_pointer, ch.to_string()) {
+        Ok(ptr) => ptr.into(),
+        Err(_) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                "Failed to allocate character string - out of memory".to_string(),
+            );
+        },
+    }
 }
 
 // Read a line from stdin, stripping the trailing newline
@@ -6693,8 +6995,16 @@ extern "C" fn read_line(stack_pointer: usize, frame_pointer: usize) -> usize {
                 }
             }
             let runtime = get_runtime().get_mut();
-            let string = runtime.allocate_string(stack_pointer, input);
-            string.unwrap().into()
+            match runtime.allocate_string(stack_pointer, input) {
+                Ok(ptr) => ptr.into(),
+                Err(_) => unsafe {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "AllocationError",
+                        "Failed to allocate string for read_line - out of memory".to_string(),
+                    );
+                },
+            }
         }
         Err(_) => {
             // Error - return null
@@ -6713,8 +7023,16 @@ extern "C" fn read_full_file(
     let file_name_str = runtime.get_string(stack_pointer, file_name);
     match std::fs::read_to_string(&file_name_str) {
         Ok(content) => {
-            let string = runtime.allocate_string(stack_pointer, content);
-            string.unwrap().into()
+            match runtime.allocate_string(stack_pointer, content) {
+                Ok(ptr) => ptr.into(),
+                Err(_) => unsafe {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "AllocationError",
+                        "Failed to allocate string for file content - out of memory".to_string(),
+                    );
+                },
+            }
         }
         Err(e) => unsafe {
             throw_runtime_error(
@@ -7072,10 +7390,16 @@ extern "C" fn json_encode(stack_pointer: usize, frame_pointer: usize, value: usi
     let runtime = get_runtime().get_mut();
 
     match value_to_json(runtime, value, 0) {
-        Ok(json_string) => runtime
-            .allocate_string(stack_pointer, json_string)
-            .unwrap()
-            .into(),
+        Ok(json_string) => match runtime.allocate_string(stack_pointer, json_string) {
+            Ok(ptr) => ptr.into(),
+            Err(_) => unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate JSON string - out of memory".to_string(),
+                );
+            },
+        },
         Err(e) => unsafe {
             throw_runtime_error(stack_pointer, "JsonError", e.to_string());
         },
@@ -7759,9 +8083,17 @@ extern "C" fn fs_readdir(stack_pointer: usize, frame_pointer: usize, path: usize
                 }
             }
             // Create a Beagle array of strings
-            runtime
-                .create_string_array(stack_pointer, &filenames)
-                .unwrap()
+            match runtime.create_string_array(stack_pointer, &filenames) {
+                Ok(ptr) => ptr,
+                Err(_) => unsafe {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "AllocationError",
+                        "Failed to allocate string array for directory listing - out of memory"
+                            .to_string(),
+                    );
+                },
+            }
         }
         Err(_) => BuiltInTypes::null_value() as usize,
     }
@@ -9306,10 +9638,16 @@ pub extern "C" fn keyword_to_string(
     let bytes = heap_object.get_keyword_bytes();
     let keyword_text = unsafe { std::str::from_utf8_unchecked(bytes) };
 
-    runtime
-        .allocate_string(stack_pointer, keyword_text.to_string())
-        .unwrap()
-        .into()
+    match runtime.allocate_string(stack_pointer, keyword_text.to_string()) {
+        Ok(ptr) => ptr.into(),
+        Err(_) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                "Failed to allocate string for keyword - out of memory".to_string(),
+            );
+        },
+    }
 }
 
 pub extern "C" fn string_to_keyword(
@@ -9322,7 +9660,16 @@ pub extern "C" fn string_to_keyword(
     let keyword_text = runtime.get_string(stack_pointer, string_value);
 
     // Use intern_keyword to ensure same text = same pointer
-    runtime.intern_keyword(stack_pointer, keyword_text).unwrap()
+    match runtime.intern_keyword(stack_pointer, keyword_text) {
+        Ok(ptr) => ptr,
+        Err(_) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                "Failed to intern keyword - out of memory".to_string(),
+            );
+        },
+    }
 }
 
 pub extern "C" fn load_keyword_constant_runtime(
@@ -9346,7 +9693,16 @@ pub extern "C" fn load_keyword_constant_runtime(
 
     // Allocate and register in heap-based map
     let keyword_text = runtime.keyword_constants[index].str.clone();
-    runtime.intern_keyword(stack_pointer, keyword_text).unwrap()
+    match runtime.intern_keyword(stack_pointer, keyword_text) {
+        Ok(ptr) => ptr,
+        Err(_) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                "Failed to intern keyword constant - out of memory".to_string(),
+            );
+        },
+    }
 }
 
 extern "C" fn many_args(
@@ -9440,7 +9796,14 @@ pub unsafe extern "C" fn throw_exception(
     // Create exception object
     let exception = {
         let runtime = get_runtime().get_mut();
-        runtime.create_exception(stack_pointer, value).unwrap()
+        match runtime.create_exception(stack_pointer, value) {
+            Ok(exc) => exc,
+            Err(_) => {
+                // Failed to allocate exception object - use the original value as the exception
+                // This is a last resort to avoid a panic when out of memory
+                value
+            }
+        }
     };
 
     // Pop handlers until we find one
