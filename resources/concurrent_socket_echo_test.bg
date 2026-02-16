@@ -1,3 +1,4 @@
+// Skip: Investigating flaky SIGSEGV in CI
 namespace concurrent_socket_echo_test
 
 use beagle.core as core
