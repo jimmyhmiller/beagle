@@ -66,9 +66,6 @@ fn main() {
     println("Server received: " ++ deref(server_result))
     println("Client received: " ++ deref(client_result))
 
-    // Small delay to ensure server thread fully completes before test ends
-    core/sleep(10)
-
     println("done")
 }
 

@@ -2211,6 +2211,15 @@ impl EventLoopRegistry {
     pub fn remove(&mut self, id: usize) -> Option<EventLoop> {
         self.unregister(id)
     }
+
+    /// Shutdown all event loops and clear the registry.
+    /// This must be called during runtime reset to properly cleanup threads.
+    pub fn shutdown_all(&mut self) {
+        for (_id, el) in self.loops.drain() {
+            el.shutdown_thread();
+        }
+        self.next_id = 1;
+    }
 }
 
 impl Default for EventLoopRegistry {
@@ -3815,6 +3824,9 @@ impl Runtime {
         self.relocation_depth.clear();
         self.variant_to_enum.clear();
         self.compiled_regexes.clear();
+
+        // Shutdown all event loops and their I/O threads to prevent stale references
+        self.event_loops.shutdown_all();
     }
 
     /// Export all documentation as JSON for the documentation generator.
