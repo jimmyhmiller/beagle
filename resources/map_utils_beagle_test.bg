@@ -52,7 +52,7 @@ fn main() {
 // Expect
 // Testing vals with Rust PersistentMap:
 // Created map:
-// {"b": 2, "c": 3, "a": 1}
+// {"b" 2, "c" 3, "a" 1}
 //
 // Testing vals:
 // Values count:
@@ -66,12 +66,12 @@ fn main() {
 //
 // Testing dissoc:
 // After dissoc 'b':
-// {"c": 3, "a": 1}
+// {"c" 3, "a" 1}
 // Count:
 // 2
 //
 // Testing merge:
 // After merge:
-// {"c": 3, "e": 5, "a": 1, "d": 4}
+// {"c" 3, "e" 5, "a" 1, "d" 4}
 // Count:
 // 4

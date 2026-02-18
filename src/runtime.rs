@@ -1,5 +1,6 @@
 use libloading::Library;
 use mmap_rs::{Mmap, MmapMut, MmapOptions, Reserved};
+use nanoserde::SerJson;
 use regex::Regex;
 use std::{
     collections::HashMap,
@@ -458,7 +459,9 @@ pub struct DefaultPrinter;
 
 impl Printer for DefaultPrinter {
     fn print(&mut self, value: String) {
+        use std::io::Write;
         print!("{}", value);
+        let _ = std::io::stdout().flush();
     }
 
     fn println(&mut self, value: String) {
@@ -2137,8 +2140,9 @@ fn event_loop_thread_main(
             s.process_events_and_timers(&events);
             s.events = Some(events);
             // Notify if TCP results, timers, or new file results arrived
-            !s.completed_tcp_results.is_empty() || !s.completed_timers.is_empty() ||
-            s.completed_file_results.len() > initial_file_count
+            !s.completed_tcp_results.is_empty()
+                || !s.completed_timers.is_empty()
+                || s.completed_file_results.len() > initial_file_count
         }; // lock released
 
         if should_notify {
@@ -6179,7 +6183,41 @@ impl Runtime {
         self.namespaces.get_namespace_id(name)
     }
 
+    fn escape_string_for_repr(s: &str) -> String {
+        let mut escaped = String::with_capacity(s.len() + 2);
+        escaped.push('"');
+        for c in s.chars() {
+            match c {
+                '\\' => escaped.push_str("\\\\"),
+                '"' => escaped.push_str("\\\""),
+                '\n' => escaped.push_str("\\n"),
+                '\r' => escaped.push_str("\\r"),
+                '\t' => escaped.push_str("\\t"),
+                '\0' => escaped.push_str("\\0"),
+                c => escaped.push(c),
+            }
+        }
+        escaped.push('"');
+        escaped
+    }
+
+    fn quote_string(s: &str, escape: bool) -> String {
+        if escape {
+            Self::escape_string_for_repr(s)
+        } else {
+            format!("\"{}\"", s)
+        }
+    }
+
     pub fn get_repr(&self, value: usize, depth: usize) -> Option<String> {
+        self.get_repr_inner(value, depth, false)
+    }
+
+    pub fn get_eval_repr(&self, value: usize, depth: usize) -> Option<String> {
+        self.get_repr_inner(value, depth, true)
+    }
+
+    fn get_repr_inner(&self, value: usize, depth: usize, escape: bool) -> Option<String> {
         if depth > 10 {
             return Some("...".to_string());
         }
@@ -6213,7 +6251,7 @@ impl Runtime {
                 let value = BuiltInTypes::untag(value);
                 let string = &self.string_constants[value];
                 if depth > 0 {
-                    return Some(format!("\"{}\"", string.str));
+                    return Some(Self::quote_string(&string.str, escape));
                 }
                 Some(string.str.clone())
             }
@@ -6233,14 +6271,14 @@ impl Runtime {
                 let num_locals = heap_object.get_field(2);
                 let free_variables = heap_object.get_fields()[3..].to_vec();
                 let mut repr = "Closure { ".to_string();
-                repr.push_str(&self.get_repr(function_pointer, depth + 1)?);
+                repr.push_str(&self.get_repr_inner(function_pointer, depth + 1, escape)?);
                 repr.push_str(", ");
                 repr.push_str(&num_free.to_string());
                 repr.push_str(", ");
                 repr.push_str(&num_locals.to_string());
                 repr.push_str(", [");
                 for value in free_variables {
-                    repr.push_str(&self.get_repr(value, depth + 1)?);
+                    repr.push_str(&self.get_repr_inner(value, depth + 1, escape)?);
                     repr.push_str(", ");
                 }
                 repr.push_str("] }");
@@ -6263,13 +6301,18 @@ impl Runtime {
                         }
                         let struct_id = object.get_struct_id();
                         let struct_value = self.get_struct_by_id(struct_id);
-                        Some(self.get_struct_repr(struct_value?, object.get_fields(), depth + 1)?)
+                        Some(self.get_struct_repr_inner(
+                            struct_value?,
+                            object.get_fields(),
+                            depth + 1,
+                            escape,
+                        )?)
                     }
                     1 => {
                         let fields = object.get_fields();
                         let mut repr = "[ ".to_string();
                         for (index, field) in fields.iter().enumerate() {
-                            repr.push_str(&self.get_repr(*field, depth + 1)?);
+                            repr.push_str(&self.get_repr_inner(*field, depth + 1, escape)?);
                             if index != fields.len() - 1 {
                                 repr.push_str(", ");
                             }
@@ -6281,7 +6324,7 @@ impl Runtime {
                         let bytes = self.get_string_bytes_vec(value);
                         let string = unsafe { std::str::from_utf8_unchecked(&bytes) };
                         if depth > 0 {
-                            return Some(format!("\"{}\"", string));
+                            return Some(Self::quote_string(string, escape));
                         }
                         Some(string.to_string())
                     }
@@ -6300,7 +6343,7 @@ impl Runtime {
                                 repr.push_str(", ");
                             }
                             let elem = PersistentVec::get(vec_handle, i);
-                            repr.push_str(&self.get_repr(elem, depth + 1)?);
+                            repr.push_str(&self.get_repr_inner(elem, depth + 1, escape)?);
                         }
                         repr.push(']');
                         Some(repr)
@@ -6319,9 +6362,9 @@ impl Runtime {
                                 if i > 0 {
                                     repr.push_str(", ");
                                 }
-                                repr.push_str(&self.get_repr(*k, depth + 1)?);
-                                repr.push_str(": ");
-                                repr.push_str(&self.get_repr(*v, depth + 1)?);
+                                repr.push_str(&self.get_repr_inner(*k, depth + 1, escape)?);
+                                repr.push(' ');
+                                repr.push_str(&self.get_repr_inner(*v, depth + 1, escape)?);
                             }
                             repr.push('}');
                             Some(repr)
@@ -6461,7 +6504,10 @@ impl Runtime {
                 let forwarded_to = Header::clear_forwarding_bit(raw_header);
                 eprintln!("Object was forwarded to {:#x}", forwarded_to);
             }
-            panic!("Struct not found by ID {} - this is a fatal error", struct_type_id);
+            panic!(
+                "Struct not found by ID {} - this is a fatal error",
+                struct_type_id
+            );
         }
         let struct_value = struct_value.unwrap();
         let field_index = struct_value
@@ -6723,6 +6769,16 @@ impl Runtime {
         fields: &[usize],
         depth: usize,
     ) -> Option<String> {
+        self.get_struct_repr_inner(struct_value, fields, depth, false)
+    }
+
+    fn get_struct_repr_inner(
+        &self,
+        struct_value: &Struct,
+        fields: &[usize],
+        depth: usize,
+        escape: bool,
+    ) -> Option<String> {
         // It should look like this
         // struct_name { field1: value1, field2: value2 }
         let simple_name = struct_value
@@ -6739,7 +6795,7 @@ impl Runtime {
             repr.push_str(field);
             repr.push_str(": ");
             let value = fields[index];
-            repr.push_str(&self.get_repr(value, depth + 1)?);
+            repr.push_str(&self.get_repr_inner(value, depth + 1, escape)?);
             if index != struct_value.fields.len() - 1 {
                 repr.push_str(", ");
             }

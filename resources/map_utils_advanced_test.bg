@@ -81,52 +81,52 @@ fn main() {
 
 // Expect
 // === Testing merge-with ===
-// m1: {"b": 2, "a": 1}
-// m2: {"b": 3, "c": 4}
-// merge-with(+): {"b": 5, "c": 4, "a": 1}
+// m1: {"b" 2, "a" 1}
+// m2: {"b" 3, "c" 4}
+// merge-with(+): {"b" 5, "c" 4, "a" 1}
 //
 // === Testing select-keys ===
-// Original: {"b": 2, "c": 3, "a": 1, "d": 4}
-// select-keys(['a', 'c']): {"c": 3, "a": 1}
+// Original: {"b" 2, "c" 3, "a" 1, "d" 4}
+// select-keys(['a', 'c']): {"c" 3, "a" 1}
 //
 // === Testing update ===
-// Original: {"count": 5}
-// update('count', *2): {"count": 10}
+// Original: {"count" 5}
+// update('count', *2): {"count" 10}
 //
 // === Testing get-in ===
-// Nested map: {"user": {"profile": {"name": "Alice"}}}
+// Nested map: {"user" {"profile" {"name" "Alice"}}}
 // get-in(['user', 'profile', 'name']): Alice
 //
 // === Testing assoc-in ===
 // Empty map assoc-in(['a', 'b', 'c'], 42):
-// {"a": {"b": {"c": 42}}}
+// {"a" {"b" {"c" 42}}}
 // Value at path: 42
 //
 // === Testing update-in ===
-// Before: {"data": {"count": 10}}
-// After update-in(['data', 'count'], +5): {"data": {"count": 15}}
+// Before: {"data" {"count" 10}}
+// After update-in(['data', 'count'], +5): {"data" {"count" 15}}
 //
 // === Testing contains-key? ===
-// Map: {"x": 1, "y": 2}
+// Map: {"x" 1, "y" 2}
 // contains-key?('x'): true
 // contains-key?('z'): false
 //
 // === Testing invert ===
-// Original: {"b": 2, "c": 3, "a": 1}
-// Inverted: {2: "b", 1: "a", 3: "c"}
+// Original: {"b" 2, "c" 3, "a" 1}
+// Inverted: {2 "b", 1 "a", 3 "c"}
 //
 // === Testing map-keys ===
-// Original: {"name": "Alice", "age": 30}
-// map-keys(k => k+'-upper'): {"name-upper": "Alice", "age-upper": 30}
+// Original: {"name" "Alice", "age" 30}
+// map-keys(k => k+'-upper'): {"name-upper" "Alice", "age-upper" 30}
 //
 // === Testing map-vals ===
-// Original: {"b": 2, "c": 3, "a": 1}
-// map-vals(*2): {"b": 4, "c": 6, "a": 2}
+// Original: {"b" 2, "c" 3, "a" 1}
+// map-vals(*2): {"b" 4, "c" 6, "a" 2}
 //
 // === Testing filter-keys ===
-// Original: {"banana": 2, "apple": 1, "apricot": 3}
-// filter-keys(starts-with 'a'): {"apple": 1, "apricot": 3}
+// Original: {"banana" 2, "apple" 1, "apricot" 3}
+// filter-keys(starts-with 'a'): {"apple" 1, "apricot" 3}
 //
 // === Testing filter-vals ===
-// Original: {"b": 5, "c": 2, "a": 1, "d": 8}
-// filter-vals(> 3): {"b": 5, "d": 8}
+// Original: {"b" 5, "c" 2, "a" 1, "d" 8}
+// filter-vals(> 3): {"b" 5, "d" 8}

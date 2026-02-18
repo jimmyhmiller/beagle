@@ -1415,7 +1415,10 @@ impl Parser {
                             parts.push(StringInterpolationPart::Expression(Box::new(ast)));
                         } else {
                             return Err(ParseError::InvalidExpression {
-                                message: format!("Empty or invalid expression in string interpolation: ${{{}}}", expr_source),
+                                message: format!(
+                                    "Empty or invalid expression in string interpolation: ${{{}}}",
+                                    expr_source
+                                ),
                                 location: self.current_source_location(),
                             });
                         }

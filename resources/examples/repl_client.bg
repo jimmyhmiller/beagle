@@ -1,0 +1,368 @@
+namespace repl_client
+
+// ============================================================================
+// Beagle Terminal REPL Client
+// ============================================================================
+// A colorful, interactive terminal REPL that connects to a Beagle socket
+// REPL server (like the one in live_gui.bg).
+//
+// Usage:
+//   cargo run -- resources/examples/repl_client.bg
+//
+// The REPL server should already be running (e.g. via live_gui.bg).
+// Default connection: localhost:7888
+
+use beagle.socket as socket
+use beagle.builtin as builtin
+use beagle.async as async
+
+// ---- ANSI color helpers ----
+
+let ESC = char-from-code(27)
+
+fn color-blue(text)   { ESC ++ "[34m" ++ text ++ ESC ++ "[0m" }
+fn color-green(text)  { ESC ++ "[32m" ++ text ++ ESC ++ "[0m" }
+fn color-red(text)    { ESC ++ "[31m" ++ text ++ ESC ++ "[0m" }
+fn color-cyan(text)   { ESC ++ "[36m" ++ text ++ ESC ++ "[0m" }
+fn color-yellow(text) { ESC ++ "[33m" ++ text ++ ESC ++ "[0m" }
+fn color-bold(text)   { ESC ++ "[1m"  ++ text ++ ESC ++ "[0m" }
+fn color-dim(text)    { ESC ++ "[2m"  ++ text ++ ESC ++ "[0m" }
+
+// ---- JSON parsing ----
+
+fn parse-json(line) {
+    try {
+        json-decode(line)
+    } catch (e) {
+        null
+    }
+}
+
+// ---- Socket I/O ----
+
+// Read one line from the socket (up to \n)
+fn read-socket-line(conn) {
+    let mut line = ""
+    let mut done = false
+
+    while done == false {
+        let data = socket/read(conn, 1)
+        if data == null || data == "" {
+            done = true
+        } else {
+            if data == "\n" {
+                done = true
+            } else {
+                line = line ++ data
+            }
+        }
+    }
+
+    line
+}
+
+// Send a JSON request and collect responses until "done" status
+fn send-and-receive(conn, request) {
+    let json = json-encode(request)
+    socket/write(conn, json ++ "\n")
+
+    let mut responses = []
+    let mut done = false
+
+    while done == false {
+        let line = read-socket-line(conn)
+
+        if length(line) > 0 {
+            let msg = parse-json(line)
+
+            if msg != null {
+                responses = push(responses, msg)
+
+                let status = get(msg, "status")
+                if status != null && any?(status, fn(s) { s == "done" }) {
+                    done = true
+                }
+            }
+        } else {
+            done = true
+        }
+    }
+
+    responses
+}
+
+// ---- Multi-line input support ----
+
+// Count occurrences of a character in a string by splitting on it
+fn count-char(s, ch) {
+    let parts = split(s, ch)
+    length(parts) - 1
+}
+
+// Check if input has balanced brackets/parens
+fn balanced?(text) {
+    let open-parens  = count-char(text, "(")
+    let close-parens = count-char(text, ")")
+    let open-braces  = count-char(text, "{")
+    let close-braces = count-char(text, "}")
+    let open-brackets  = count-char(text, "[")
+    let close-brackets = count-char(text, "]")
+
+    open-parens <= close-parens
+        && open-braces <= close-braces
+        && open-brackets <= close-brackets
+}
+
+// Read multi-line input. If the first line ends with an opening bracket
+// or has unbalanced delimiters, keep reading until balanced.
+fn read-multiline-input(first-line) {
+    if balanced?(first-line) {
+        first-line
+    } else {
+        read-continuation(first-line)
+    }
+}
+
+fn read-continuation(buffer) {
+    print(color-dim("...... "))
+    let line = builtin/read-line()
+    if line == null {
+        // EOF during multi-line input - return what we have
+        buffer
+    } else {
+        let new-buffer = buffer ++ "\n" ++ line
+        if balanced?(new-buffer) {
+            new-buffer
+        } else {
+            read-continuation(new-buffer)
+        }
+    }
+}
+
+// ---- Terminal output helpers ----
+
+// Print colored text by writing ANSI sequences separately
+// This avoids issues with ESC chars in ConsStrings
+fn print-colored(text, code) {
+    print(ESC)
+    print("[" ++ code ++ "m")
+    print(text)
+    print(ESC)
+    println("[0m")
+}
+
+// ---- Display response messages ----
+
+fn display-responses(responses, i) {
+    if i < length(responses) {
+        let resp = nth(responses, i)
+
+        // Print stdout output (default color)
+        let out = get(resp, "out")
+        if out != null {
+            println(out)
+        }
+
+        // Print return value (green)
+        let value = get(resp, "value")
+        if value != null {
+            if value != "null" {
+                print-colored(value, "32")
+            }
+        }
+
+        // Print errors (red)
+        let err = get(resp, "err")
+        if err != null {
+            print-colored("Error: " ++ err, "31")
+        }
+
+        // Print exception info (red)
+        let ex = get(resp, "ex")
+        if ex != null {
+            print-colored("Exception: " ++ ex, "31")
+        }
+
+        display-responses(responses, i + 1)
+    }
+}
+
+// ---- Special commands ----
+
+fn print-help() {
+    println("")
+    println(color-bold("Beagle REPL Client"))
+    println(color-dim("=================="))
+    println("")
+    println(color-cyan(":help")        ++ "         Show this help message")
+    println(color-cyan(":quit")        ++ "         Exit the REPL client")
+    println(color-cyan(":disconnect")  ++ "    Disconnect from the server")
+    println(color-cyan(":connect")     ++ "       Reconnect to the server")
+    println(color-cyan(":sessions")    ++ "      List active REPL sessions")
+    println(color-cyan(":describe")    ++ "      Describe server capabilities")
+    println("")
+    println(color-dim("Multi-line input: lines with unbalanced (), {}, or [] continue"))
+    println(color-dim("on the next line until balanced."))
+    println("")
+}
+
+fn handle-sessions(conn, id, session) {
+    let responses = send-and-receive(conn, {
+        :op "ls-sessions",
+        :id to-string(id)
+    })
+    let msg = first-of(responses)
+    let sessions = get(msg, "sessions")
+    if sessions != null {
+        println(color-cyan("Active sessions: ") ++ to-string(sessions))
+    } else {
+        println(color-dim("No session info returned"))
+    }
+}
+
+fn handle-describe(conn, id) {
+    let responses = send-and-receive(conn, {
+        :op "describe",
+        :id to-string(id)
+    })
+    let msg = first-of(responses)
+    let ops = get(msg, "ops")
+    if ops != null {
+        println(color-cyan("Server operations: ") ++ to-string(ops))
+    } else {
+        println(color-dim("No describe info returned"))
+    }
+}
+
+// ---- Eval and print ----
+
+fn eval-code(conn, id, session, code) {
+    try {
+        let responses = send-and-receive(conn, {
+            :op "eval",
+            :id to-string(id),
+            :session session,
+            :code code
+        })
+        display-responses(responses, 0)
+    } catch (e) {
+        println(color-red("Communication error: " ++ to-string(e)))
+    }
+}
+
+// ---- Connection management ----
+
+fn try-connect(host, port) {
+    try {
+        let conn = socket/connect(host, port)
+        println(color-green("Connected to " ++ host ++ ":" ++ to-string(port)))
+        conn
+    } catch (e) {
+        println(color-red("Failed to connect to " ++ host ++ ":" ++ to-string(port)))
+        println(color-red("  " ++ to-string(e)))
+        println(color-dim("Make sure the REPL server is running."))
+        null
+    }
+}
+
+// ---- Main REPL loop ----
+
+fn repl-loop(conn, session, id, host, port) {
+    print(color-blue("beagle") ++ color-dim("> "))
+    let line = builtin/read-line()
+
+    if line == null {
+        // EOF (Ctrl-D)
+        println("")
+        println(color-dim("Goodbye!"))
+        if conn != null {
+            socket/close(conn)
+        }
+    } else if line == "" {
+        // Empty line - just continue
+        repl-loop(conn, session, id, host, port)
+    } else if line == ":quit" || line == ":exit" || line == ":q" {
+        println(color-dim("Goodbye!"))
+        if conn != null {
+            socket/close(conn)
+        }
+    } else if line == ":help" || line == ":h" || line == ":?" {
+        print-help()
+        repl-loop(conn, session, id, host, port)
+    } else if line == ":disconnect" {
+        if conn != null {
+            socket/close(conn)
+            println(color-yellow("Disconnected"))
+            repl-loop(null, session, id, host, port)
+        } else {
+            println(color-dim("Not connected"))
+            repl-loop(conn, session, id, host, port)
+        }
+    } else if line == ":connect" {
+        if conn != null {
+            println(color-dim("Already connected. Use :disconnect first."))
+            repl-loop(conn, session, id, host, port)
+        } else {
+            let new-conn = try-connect(host, port)
+            repl-loop(new-conn, session, id, host, port)
+        }
+    } else if line == ":sessions" {
+        if conn != null {
+            handle-sessions(conn, id, session)
+            repl-loop(conn, session, id + 1, host, port)
+        } else {
+            println(color-red("Not connected. Use :connect to reconnect."))
+            repl-loop(conn, session, id, host, port)
+        }
+    } else if line == ":describe" {
+        if conn != null {
+            handle-describe(conn, id)
+            repl-loop(conn, session, id + 1, host, port)
+        } else {
+            println(color-red("Not connected. Use :connect to reconnect."))
+            repl-loop(conn, session, id, host, port)
+        }
+    } else if starts-with?(line, ":") {
+        println(color-red("Unknown command: " ++ line))
+        println(color-dim("Type :help for available commands."))
+        repl-loop(conn, session, id, host, port)
+    } else {
+        // Regular code - possibly multi-line
+        if conn == null {
+            println(color-red("Not connected. Use :connect to reconnect."))
+            repl-loop(conn, session, id, host, port)
+        } else {
+            let code = read-multiline-input(line)
+            eval-code(conn, id, session, code)
+            repl-loop(conn, session, id + 1, host, port)
+        }
+    }
+}
+
+// ---- Entry point ----
+
+fn main() {
+    let host = "127.0.0.1"
+    let port = 7888
+    let session = "repl-client"
+
+    println("")
+    println(color-bold("  Beagle REPL Client"))
+    println(color-dim("  =================="))
+    println(color-dim("  Connecting to " ++ host ++ ":" ++ to-string(port) ++ "..."))
+    println("")
+
+    async/with-implicit-async(fn() {
+        let conn = try-connect(host, port)
+
+        if conn != null {
+            println(color-dim("Type :help for commands, :quit to exit."))
+            println("")
+        } else {
+            println(color-dim("Starting in disconnected mode. Use :connect to try again."))
+            println("")
+        }
+
+        repl-loop(conn, session, 1, host, port)
+    })
+}

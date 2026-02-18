@@ -1,0 +1,232 @@
+namespace live_gui
+
+// ============================================================================
+// Live GUI with Socket REPL
+// ============================================================================
+// A Raylib window whose contents are driven by shared atoms.
+// A REPL server runs on a background thread so you can connect
+// with telnet/nc and update the GUI in real time.
+//
+// Run:
+//   cargo run -- resources/examples/7guis/live_gui.bg
+//
+// Then connect:
+//   nc localhost 7888
+//
+// Try sending (each on one line):
+//   {"op":"eval","id":"1","session":"s","code":"live_gui/set-title(\"Hello from REPL!\")"}
+//   {"op":"eval","id":"2","session":"s","code":"live_gui/set-bg(live_gui/SKYBLUE)"}
+//   {"op":"eval","id":"3","session":"s","code":"live_gui/add-circle(200, 200, 40, live_gui/BLUE)"}
+//   {"op":"eval","id":"4","session":"s","code":"live_gui/add-circle(400, 300, 60, live_gui/RED)"}
+//   {"op":"eval","id":"5","session":"s","code":"live_gui/add-rect(50, 300, 120, 80, live_gui/GREEN)"}
+//   {"op":"eval","id":"6","session":"s","code":"live_gui/add-text(\"Hello World!\", 300, 150, 32, live_gui/MAROON)"}
+//   {"op":"eval","id":"7","session":"s","code":"live_gui/clear-all()"}
+
+use raylib_gui as gui
+use beagle.repl as repl
+use beagle.async as async
+
+// ---- Re-export colors for REPL convenience ----
+let RED = gui/RED
+let GREEN = gui/GREEN
+let BLUE = gui/BLUE
+let YELLOW = gui/YELLOW
+let ORANGE = gui/ORANGE
+let PINK = gui/PINK
+let PURPLE = gui/PURPLE
+let BLACK = gui/BLACK
+let WHITE = gui/WHITE
+let GRAY = gui/GRAY
+let DARKGRAY = gui/DARKGRAY
+let LIGHTGRAY = gui/LIGHTGRAY
+let SKYBLUE = gui/SKYBLUE
+let LIME = gui/LIME
+let GOLD = gui/GOLD
+let MAROON = gui/MAROON
+let DARKBLUE = gui/DARKBLUE
+let RAYWHITE = gui/RAYWHITE
+
+// ---- Shared state (atoms) that the REPL can modify ----
+
+let title = atom("Beagle Live GUI")
+let bg_color = atom(gui/RAYWHITE)
+let circles = atom([])
+let shapes = atom([])
+let texts = atom([])
+let title_color = atom(gui/DARKGRAY)
+
+// ---- REPL helper functions ----
+
+fn set-title(t) {
+    reset!(title, t)
+}
+
+fn set-title-color(c) {
+    reset!(title_color, c)
+}
+
+fn set-bg(c) {
+    reset!(bg_color, c)
+}
+
+fn add-circle(x, y, r, color) {
+    swap!(circles, fn(cs) {
+        push(cs, {:x x, :y y, :r r, :color color})
+    })
+}
+
+fn add-rect(x, y, w, h, color) {
+    swap!(shapes, fn(ss) {
+        push(ss, {:kind "rect", :x x, :y y, :w w, :h h, :color color})
+    })
+}
+
+fn add-line(x1, y1, x2, y2, color) {
+    swap!(shapes, fn(ss) {
+        push(ss, {:kind "line", :x1 x1, :y1 y1, :x2 x2, :y2 y2, :color color})
+    })
+}
+
+fn add-text(text, x, y, size, color) {
+    swap!(texts, fn(ts) {
+        push(ts, {:text text, :x x, :y y, :size size, :color color})
+    })
+}
+
+fn clear-circles() {
+    reset!(circles, [])
+}
+
+fn clear-shapes() {
+    reset!(shapes, [])
+}
+
+fn clear-texts() {
+    reset!(texts, [])
+}
+
+fn clear-all() {
+    reset!(circles, [])
+    reset!(shapes, [])
+    reset!(texts, [])
+    reset!(title, "Beagle Live GUI")
+    reset!(bg_color, gui/RAYWHITE)
+    reset!(title_color, gui/DARKGRAY)
+}
+
+// ---- Drawing functions ----
+
+fn draw-circle-item(c) {
+    let x = get(c, :x)
+    let y = get(c, :y)
+    let r = get(c, :r)
+    let color = get(c, :color)
+    gui/draw-circle(x, y, to-float(r), color)
+}
+
+fn draw-circles(items, i) {
+    if i < length(items) {
+        draw-circle-item(nth(items, i))
+        draw-circles(items, i + 1)
+    }
+}
+
+fn draw-shape(s) {
+    let kind = get(s, :kind)
+    let color = get(s, :color)
+    if kind == "rect" {
+        gui/draw-rectangle(get(s, :x), get(s, :y), get(s, :w), get(s, :h), color)
+    } else if kind == "line" {
+        gui/draw-line(get(s, :x1), get(s, :y1), get(s, :x2), get(s, :y2), color)
+    } else if kind == "circle" {
+        gui/draw-circle(get(s, :x), get(s, :y), to-float(get(s, :r)), color)
+    }
+}
+
+fn draw-shapes(items, i) {
+    if i < length(items) {
+        draw-shape(nth(items, i))
+        draw-shapes(items, i + 1)
+    }
+}
+
+fn draw-text-item(t) {
+    let text = get(t, :text)
+    let x = get(t, :x)
+    let y = get(t, :y)
+    let size = get(t, :size)
+    let color = get(t, :color)
+    gui/draw-text(text, x, y, size, color)
+}
+
+fn draw-texts(items, i) {
+    if i < length(items) {
+        draw-text-item(nth(items, i))
+        draw-texts(items, i + 1)
+    }
+}
+
+fn game-loop() {
+    if gui/window-should-close() {
+        null
+    } else {
+        gui/begin-drawing()
+        gui/clear-background(deref(bg_color))
+
+        // Draw title
+        let t = deref(title)
+        let tw = gui/measure-text(t, 28)
+        gui/draw-text(t, (800 - tw) / 2, 20, 28, deref(title_color))
+
+        // Draw instructions
+        gui/draw-text("REPL on port 7888 - connect with: nc localhost 7888", 20, 560, 16, gui/GRAY)
+
+        // Draw all circles from the atom
+        let c = deref(circles)
+        draw-circles(c, 0)
+
+        // Draw all shapes from the atom
+        let s = deref(shapes)
+        draw-shapes(s, 0)
+
+        // Draw all text items from the atom
+        let tx = deref(texts)
+        draw-texts(tx, 0)
+
+        gui/end-drawing()
+
+        game-loop()
+    }
+}
+
+fn main() {
+    println("Starting Beagle Live GUI...")
+    println("REPL server on port 7888")
+    println("Connect with: nc localhost 7888")
+    println("")
+    println("Example REPL commands:")
+    println("  {\"op\":\"eval\",\"id\":\"1\",\"session\":\"s\",\"code\":\"live_gui/set-title(\\\"Hello!\\\")\"}")
+    println("  {\"op\":\"eval\",\"id\":\"2\",\"session\":\"s\",\"code\":\"live_gui/set-bg(live_gui/SKYBLUE)\"}")
+    println("  {\"op\":\"eval\",\"id\":\"3\",\"session\":\"s\",\"code\":\"live_gui/add-circle(200, 200, 40, live_gui/BLUE)\"}")
+    println("  {\"op\":\"eval\",\"id\":\"4\",\"session\":\"s\",\"code\":\"live_gui/add-rect(50, 300, 120, 80, live_gui/GREEN)\"}")
+    println("  {\"op\":\"eval\",\"id\":\"5\",\"session\":\"s\",\"code\":\"live_gui/add-text(\\\"Hi!\\\", 300, 150, 32, live_gui/RED)\"}")
+    println("  {\"op\":\"eval\",\"id\":\"6\",\"session\":\"s\",\"code\":\"live_gui/clear-all()\"}")
+
+    // Start REPL server on background thread
+    thread(fn() {
+        async/with-implicit-async(fn() {
+            repl/start-repl-server("127.0.0.1", 7888)
+        })
+    })
+
+    // Give the server a moment to start
+    sleep(100)
+
+    // Start GUI on main thread
+    gui/init-window(800, 600, "Beagle Live GUI")
+    gui/set-target-fps(60)
+
+    game-loop()
+
+    gui/close-window()
+}

@@ -278,7 +278,7 @@ fn format-rust-map-entries(map, keys-vec, idx, len, acc) {
         let val = rust-coll/map-get(map, key)
         let key-str = format(key, 1)
         let val-str = format(val, 1)
-        let entry = key-str ++ ": " ++ val-str
+        let entry = key-str ++ " " ++ val-str
         let new-acc = if idx == 0 {
             acc ++ entry
         } else {

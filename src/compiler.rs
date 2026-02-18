@@ -738,7 +738,10 @@ impl Compiler {
         }
 
         // Debug: print candidates
-        eprintln!("Looking for namespace '{}', candidates: {:?}", namespace_name, candidates);
+        eprintln!(
+            "Looking for namespace '{}', candidates: {:?}",
+            namespace_name, candidates
+        );
 
         // Try each candidate in each search location
         for candidate in &candidates {
@@ -1300,7 +1303,7 @@ impl CompilerThread {
         Ok(CompilerThread {
             compiler: Compiler {
                 code_allocator: CodeAllocator::new(),
-                property_look_up_cache: MmapOptions::new(MmapOptions::page_size() * 256)  // 1MB cache for property lookups
+                property_look_up_cache: MmapOptions::new(MmapOptions::page_size() * 256) // 1MB cache for property lookups
                     .map_err(|e| {
                         CompileError::MemoryMapping(format!("Failed to create mmap: {}", e))
                     })?

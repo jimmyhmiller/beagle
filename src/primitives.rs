@@ -347,14 +347,17 @@ impl AstCompiler<'_> {
         } = property_access
         else {
             return Err(CompileError::InvalidAssignment {
-                reason: "set! expects a property access (e.g., obj.field) as the first argument".to_string(),
+                reason: "set! expects a property access (e.g., obj.field) as the first argument"
+                    .to_string(),
             });
         };
 
         let object = object.deref();
         if !matches!(object, Ast::Identifier { .. }) {
             return Err(CompileError::InvalidAssignment {
-                reason: "set! expects an identifier as the object (e.g., obj.field, not expr.field)".to_string(),
+                reason:
+                    "set! expects an identifier as the object (e.g., obj.field, not expr.field)"
+                        .to_string(),
             });
         }
 
