@@ -777,6 +777,13 @@ impl Tokenizer {
         self.current_byte(input_bytes) == b'|'
     }
 
+    fn is_operator_char(&self, input_bytes: &[u8]) -> bool {
+        matches!(
+            self.current_byte(input_bytes),
+            b'+' | b'*' | b'%' | b'=' | b'&' | b'^'
+        )
+    }
+
     pub fn parse_identifier(&mut self, input_bytes: &[u8]) -> Token {
         let start = self.position;
         while !self.at_end(input_bytes)
@@ -794,6 +801,7 @@ impl Tokenizer {
             && !self.is_quote(input_bytes)
             && !self.is_dot(input_bytes)
             && !self.is_pipe(input_bytes)
+            && !self.is_operator_char(input_bytes)
         {
             self.consume(input_bytes);
         }
@@ -876,6 +884,7 @@ impl Tokenizer {
             && !self.is_semi_colon(input_bytes)
             && !self.is_comma(input_bytes)
             && !self.is_newline(input_bytes)
+            && !self.is_operator_char(input_bytes)
         {
             self.consume(input_bytes);
         }
