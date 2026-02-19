@@ -251,7 +251,7 @@ impl PersistentMap {
                 return Err(format!("Invalid root node type {} in assoc", root_type).into());
             }
 
-                let root_h = scope.alloc_handle(root);
+            let root_h = scope.alloc_handle(root);
             Self::assoc_node(&mut scope, root_h, 0, hash, key_h, value_h)?
         };
 
@@ -372,8 +372,11 @@ impl PersistentMap {
             }
             _ => Err(format!(
                 "Unknown node type in assoc_node: type_id={}, tagged={:#x}, shift={}",
-                type_id, node.as_tagged(), shift
-            ).into()),
+                type_id,
+                node.as_tagged(),
+                shift
+            )
+            .into()),
         }
     }
 
@@ -499,7 +502,11 @@ impl PersistentMap {
                     if actual_len != old_len {
                         panic!(
                             "assoc_bitmap_node: children field_count changed from {} to {} after allocation! old_tagged={:#x} new_tagged={:#x} type_id={}",
-                            old_len, actual_len, old_tagged, new_tagged, children.get_type_id()
+                            old_len,
+                            actual_len,
+                            old_tagged,
+                            new_tagged,
+                            children.get_type_id()
                         );
                     }
                     children.copy_fields_to(&new_children, old_len);
@@ -1486,12 +1493,8 @@ impl PersistentMap {
                 if value != BuiltInTypes::null_value() as usize {
                     // Leaf entry - add key to vec
                     let current_vec = GcHandle::from_tagged(vec_h.get());
-                    let new_vec = PersistentVec::push(
-                        scope.runtime(),
-                        stack_pointer,
-                        current_vec,
-                        key,
-                    )?;
+                    let new_vec =
+                        PersistentVec::push(scope.runtime(), stack_pointer, current_vec, key)?;
                     // Update both the handle slot and the caller's reference
                     let tg = unsafe { &mut *crate::runtime::cached_thread_global_ptr() };
                     tg.handle_stack[vec_h.slot()] = new_vec.as_tagged();
@@ -1531,12 +1534,8 @@ impl PersistentMap {
                 let kv_array = kv_array_h.to_gc_handle();
                 let key = kv_array.get_field(i * 2);
                 let current_vec = GcHandle::from_tagged(vec_h.get());
-                let new_vec = PersistentVec::push(
-                    scope.runtime(),
-                    stack_pointer,
-                    current_vec,
-                    key,
-                )?;
+                let new_vec =
+                    PersistentVec::push(scope.runtime(), stack_pointer, current_vec, key)?;
                 let tg = unsafe { &mut *crate::runtime::cached_thread_global_ptr() };
                 tg.handle_stack[vec_h.slot()] = new_vec.as_tagged();
             }

@@ -426,7 +426,6 @@ impl GenerationalGC {
             );
         });
     }
-
 }
 
 impl Allocator for GenerationalGC {

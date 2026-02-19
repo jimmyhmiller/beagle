@@ -493,10 +493,7 @@ fn compile_apply_call_trampolines_x86_64(runtime: &mut Runtime) {
             // RSP % 16 == 8 before the call, violating ABI alignment.
             // Add an 8-byte pad so the total pushed bytes are 16-byte aligned.
             if needs_alignment_pad {
-                lang.instructions.push(X86Asm::SubRI {
-                    dest: RSP,
-                    imm: 8,
-                });
+                lang.instructions.push(X86Asm::SubRI { dest: RSP, imm: 8 });
             }
             // Push args in reverse order: argN-1, argN-2, ..., arg6
             for i in (6..num_args).rev() {

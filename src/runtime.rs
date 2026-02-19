@@ -4842,7 +4842,8 @@ impl Runtime {
         }
 
         // Fire USDT probe - all threads are now paused
-        let num_paused = thread_state.paused_threads() + thread_state.c_calling_stack_pointers.len();
+        let num_paused =
+            thread_state.paused_threads() + thread_state.c_calling_stack_pointers.len();
         let total_threads = self
             .registered_thread_count
             .load(std::sync::atomic::Ordering::Acquire)

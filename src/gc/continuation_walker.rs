@@ -74,7 +74,8 @@ impl ContinuationSegmentWalker {
                 break;
             }
             // [fp+8] describes the CALLER frame, will be used as pending_return_addr next iteration
-            let return_addr_for_caller = Self::read_usize_from_segment(segment, return_addr_offset.unwrap());
+            let return_addr_for_caller =
+                Self::read_usize_from_segment(segment, return_addr_offset.unwrap());
 
             #[cfg(feature = "debug-continuation-gc")]
             eprintln!(

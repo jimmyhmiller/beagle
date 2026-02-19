@@ -13807,7 +13807,7 @@ extern "C" fn reflect_args(stack_pointer: usize, frame_pointer: usize, value: us
 
 /// Helper: Build a PersistentVec of strings from a Vec<String>, GC-safe.
 fn build_string_vec(runtime: &mut Runtime, stack_pointer: usize, strings: &[String]) -> usize {
-    use crate::collections::{PersistentVec, HandleScope};
+    use crate::collections::{HandleScope, PersistentVec};
     let mut scope = HandleScope::new(runtime, stack_pointer);
     let vec = match PersistentVec::empty(scope.runtime(), stack_pointer) {
         Ok(v) => v,
@@ -13849,7 +13849,7 @@ extern "C" fn reflect_info(stack_pointer: usize, frame_pointer: usize, value: us
     let runtime = get_runtime().get_mut();
     let (kind, name, doc, _extra, is_variadic) = get_type_info(runtime, stack_pointer, value);
 
-    use crate::collections::{PersistentMap, HandleScope};
+    use crate::collections::{HandleScope, PersistentMap};
 
     let result = (|| -> Result<usize, ()> {
         let mut scope = HandleScope::new(runtime, stack_pointer);
@@ -13876,30 +13876,36 @@ extern "C" fn reflect_info(stack_pointer: usize, frame_pointer: usize, value: us
         }
 
         // Add :name
-        let name_key = scope.runtime()
+        let name_key = scope
+            .runtime()
             .intern_keyword(stack_pointer, "name".to_string())
             .map_err(|_| ())?;
-        let name_str: usize = scope.runtime()
+        let name_str: usize = scope
+            .runtime()
             .allocate_string(stack_pointer, name)
             .map_err(|_| ())?
             .into();
         map_assoc!(name_key, name_str);
 
         // Add :kind
-        let kind_key = scope.runtime()
+        let kind_key = scope
+            .runtime()
             .intern_keyword(stack_pointer, "kind".to_string())
             .map_err(|_| ())?;
-        let kind_kw = scope.runtime()
+        let kind_kw = scope
+            .runtime()
             .intern_keyword(stack_pointer, kind.clone())
             .map_err(|_| ())?;
         map_assoc!(kind_key, kind_kw);
 
         // Add :doc if present
         if let Some(d) = doc {
-            let doc_key = scope.runtime()
+            let doc_key = scope
+                .runtime()
                 .intern_keyword(stack_pointer, "doc".to_string())
                 .map_err(|_| ())?;
-            let doc_str: usize = scope.runtime()
+            let doc_str: usize = scope
+                .runtime()
                 .allocate_string(stack_pointer, d)
                 .map_err(|_| ())?
                 .into();
@@ -13908,7 +13914,8 @@ extern "C" fn reflect_info(stack_pointer: usize, frame_pointer: usize, value: us
 
         // Add kind-specific fields
         if kind == "struct" || kind == "enum" {
-            let fields_key = scope.runtime()
+            let fields_key = scope
+                .runtime()
                 .intern_keyword(stack_pointer, "fields".to_string())
                 .map_err(|_| ())?;
             let fields_val = reflect_fields(stack_pointer, frame_pointer, value);
@@ -13916,7 +13923,8 @@ extern "C" fn reflect_info(stack_pointer: usize, frame_pointer: usize, value: us
         }
 
         if kind == "enum" {
-            let variants_key = scope.runtime()
+            let variants_key = scope
+                .runtime()
                 .intern_keyword(stack_pointer, "variants".to_string())
                 .map_err(|_| ())?;
             let variants_val = reflect_variants(stack_pointer, frame_pointer, value);
@@ -13924,13 +13932,15 @@ extern "C" fn reflect_info(stack_pointer: usize, frame_pointer: usize, value: us
         }
 
         if kind == "function" {
-            let args_key = scope.runtime()
+            let args_key = scope
+                .runtime()
                 .intern_keyword(stack_pointer, "args".to_string())
                 .map_err(|_| ())?;
             let args_val = reflect_args(stack_pointer, frame_pointer, value);
             map_assoc!(args_key, args_val);
 
-            let variadic_key = scope.runtime()
+            let variadic_key = scope
+                .runtime()
                 .intern_keyword(stack_pointer, "variadic?".to_string())
                 .map_err(|_| ())?;
             let variadic_val = BuiltInTypes::construct_boolean(is_variadic) as usize;
@@ -14180,8 +14190,13 @@ extern "C" fn reflect_namespace_info(
                 let key_h = scope.alloc($key);
                 let val_h = scope.alloc($val);
                 let new_map = PersistentMap::assoc(
-                    scope.runtime(), stack_pointer, $map_h.get(), key_h.get(), val_h.get(),
-                ).map_err(|_| ())?;
+                    scope.runtime(),
+                    stack_pointer,
+                    $map_h.get(),
+                    key_h.get(),
+                    val_h.get(),
+                )
+                .map_err(|_| ())?;
                 let tg = unsafe { &mut *tg_ptr };
                 tg.handle_stack[$map_h.slot()] = new_map.as_tagged();
             }};
@@ -14192,9 +14207,9 @@ extern "C" fn reflect_namespace_info(
             ($vec_h:expr, $val:expr) => {{
                 let val_h = scope.alloc($val);
                 let current_vec = crate::collections::GcHandle::from_tagged($vec_h.get());
-                let new_vec = PersistentVec::push(
-                    scope.runtime(), stack_pointer, current_vec, val_h.get(),
-                ).map_err(|_| ())?;
+                let new_vec =
+                    PersistentVec::push(scope.runtime(), stack_pointer, current_vec, val_h.get())
+                        .map_err(|_| ())?;
                 let tg = unsafe { &mut *tg_ptr };
                 tg.handle_stack[$vec_h.slot()] = new_vec.as_tagged();
             }};
@@ -14205,12 +14220,22 @@ extern "C" fn reflect_namespace_info(
         let map_h = scope.alloc(map.as_tagged());
 
         // Add :name
-        let name_key = scope.runtime().intern_keyword(stack_pointer, "name".to_string()).map_err(|_| ())?;
-        let name_val = scope.runtime().allocate_string(stack_pointer, ns_name.to_string()).map(|s| s.into()).map_err(|_| ())?;
+        let name_key = scope
+            .runtime()
+            .intern_keyword(stack_pointer, "name".to_string())
+            .map_err(|_| ())?;
+        let name_val = scope
+            .runtime()
+            .allocate_string(stack_pointer, ns_name.to_string())
+            .map(|s| s.into())
+            .map_err(|_| ())?;
         map_assoc_h!(map_h, name_key, name_val);
 
         // Build :functions vector
-        let funcs_key = scope.runtime().intern_keyword(stack_pointer, "functions".to_string()).map_err(|_| ())?;
+        let funcs_key = scope
+            .runtime()
+            .intern_keyword(stack_pointer, "functions".to_string())
+            .map_err(|_| ())?;
         let funcs_key_h = scope.alloc(funcs_key);
         let funcs_vec = PersistentVec::empty(scope.runtime(), stack_pointer).map_err(|_| ())?;
         let funcs_vec_h = scope.alloc(funcs_vec.as_tagged());
@@ -14219,24 +14244,44 @@ extern "C" fn reflect_namespace_info(
             let func_map = PersistentMap::empty(scope.runtime(), stack_pointer).map_err(|_| ())?;
             let func_map_h = scope.alloc(func_map.as_tagged());
 
-            let k = scope.runtime().intern_keyword(stack_pointer, "name".to_string()).map_err(|_| ())?;
-            let v = scope.runtime().allocate_string(stack_pointer, name).map(|s| s.into()).map_err(|_| ())?;
+            let k = scope
+                .runtime()
+                .intern_keyword(stack_pointer, "name".to_string())
+                .map_err(|_| ())?;
+            let v = scope
+                .runtime()
+                .allocate_string(stack_pointer, name)
+                .map(|s| s.into())
+                .map_err(|_| ())?;
             map_assoc_h!(func_map_h, k, v);
 
-            let k = scope.runtime().intern_keyword(stack_pointer, "doc".to_string()).map_err(|_| ())?;
+            let k = scope
+                .runtime()
+                .intern_keyword(stack_pointer, "doc".to_string())
+                .map_err(|_| ())?;
             let v = match doc {
-                Some(d) => scope.runtime().allocate_string(stack_pointer, d).map(|s| s.into()).map_err(|_| ())?,
+                Some(d) => scope
+                    .runtime()
+                    .allocate_string(stack_pointer, d)
+                    .map(|s| s.into())
+                    .map_err(|_| ())?,
                 None => BuiltInTypes::null_value() as usize,
             };
             map_assoc_h!(func_map_h, k, v);
 
             // Build args vector using build_string_vec
-            let k = scope.runtime().intern_keyword(stack_pointer, "args".to_string()).map_err(|_| ())?;
+            let k = scope
+                .runtime()
+                .intern_keyword(stack_pointer, "args".to_string())
+                .map_err(|_| ())?;
             let k_h = scope.alloc(k);
             let args_val = build_string_vec(scope.runtime(), stack_pointer, &args);
             map_assoc_h!(func_map_h, k_h.get(), args_val);
 
-            let k = scope.runtime().intern_keyword(stack_pointer, "variadic?".to_string()).map_err(|_| ())?;
+            let k = scope
+                .runtime()
+                .intern_keyword(stack_pointer, "variadic?".to_string())
+                .map_err(|_| ())?;
             let v = if variadic {
                 BuiltInTypes::true_value() as usize
             } else {
@@ -14250,28 +14295,49 @@ extern "C" fn reflect_namespace_info(
         map_assoc_h!(map_h, funcs_key_h.get(), funcs_vec_h.get());
 
         // Build :structs vector
-        let structs_key = scope.runtime().intern_keyword(stack_pointer, "structs".to_string()).map_err(|_| ())?;
+        let structs_key = scope
+            .runtime()
+            .intern_keyword(stack_pointer, "structs".to_string())
+            .map_err(|_| ())?;
         let structs_key_h = scope.alloc(structs_key);
         let structs_vec = PersistentVec::empty(scope.runtime(), stack_pointer).map_err(|_| ())?;
         let structs_vec_h = scope.alloc(structs_vec.as_tagged());
 
         for (name, doc, fields) in struct_info {
-            let struct_map = PersistentMap::empty(scope.runtime(), stack_pointer).map_err(|_| ())?;
+            let struct_map =
+                PersistentMap::empty(scope.runtime(), stack_pointer).map_err(|_| ())?;
             let struct_map_h = scope.alloc(struct_map.as_tagged());
 
-            let k = scope.runtime().intern_keyword(stack_pointer, "name".to_string()).map_err(|_| ())?;
-            let v = scope.runtime().allocate_string(stack_pointer, name).map(|s| s.into()).map_err(|_| ())?;
+            let k = scope
+                .runtime()
+                .intern_keyword(stack_pointer, "name".to_string())
+                .map_err(|_| ())?;
+            let v = scope
+                .runtime()
+                .allocate_string(stack_pointer, name)
+                .map(|s| s.into())
+                .map_err(|_| ())?;
             map_assoc_h!(struct_map_h, k, v);
 
-            let k = scope.runtime().intern_keyword(stack_pointer, "doc".to_string()).map_err(|_| ())?;
+            let k = scope
+                .runtime()
+                .intern_keyword(stack_pointer, "doc".to_string())
+                .map_err(|_| ())?;
             let v = match doc {
-                Some(d) => scope.runtime().allocate_string(stack_pointer, d).map(|s| s.into()).map_err(|_| ())?,
+                Some(d) => scope
+                    .runtime()
+                    .allocate_string(stack_pointer, d)
+                    .map(|s| s.into())
+                    .map_err(|_| ())?,
                 None => BuiltInTypes::null_value() as usize,
             };
             map_assoc_h!(struct_map_h, k, v);
 
             // Build fields vector using build_string_vec
-            let k = scope.runtime().intern_keyword(stack_pointer, "fields".to_string()).map_err(|_| ())?;
+            let k = scope
+                .runtime()
+                .intern_keyword(stack_pointer, "fields".to_string())
+                .map_err(|_| ())?;
             let k_h = scope.alloc(k);
             let fields_val = build_string_vec(scope.runtime(), stack_pointer, &fields);
             map_assoc_h!(struct_map_h, k_h.get(), fields_val);
@@ -14282,7 +14348,10 @@ extern "C" fn reflect_namespace_info(
         map_assoc_h!(map_h, structs_key_h.get(), structs_vec_h.get());
 
         // Build :enums vector
-        let enums_key = scope.runtime().intern_keyword(stack_pointer, "enums".to_string()).map_err(|_| ())?;
+        let enums_key = scope
+            .runtime()
+            .intern_keyword(stack_pointer, "enums".to_string())
+            .map_err(|_| ())?;
         let enums_key_h = scope.alloc(enums_key);
         let enums_vec = PersistentVec::empty(scope.runtime(), stack_pointer).map_err(|_| ())?;
         let enums_vec_h = scope.alloc(enums_vec.as_tagged());
@@ -14291,19 +14360,36 @@ extern "C" fn reflect_namespace_info(
             let enum_map = PersistentMap::empty(scope.runtime(), stack_pointer).map_err(|_| ())?;
             let enum_map_h = scope.alloc(enum_map.as_tagged());
 
-            let k = scope.runtime().intern_keyword(stack_pointer, "name".to_string()).map_err(|_| ())?;
-            let v = scope.runtime().allocate_string(stack_pointer, name).map(|s| s.into()).map_err(|_| ())?;
+            let k = scope
+                .runtime()
+                .intern_keyword(stack_pointer, "name".to_string())
+                .map_err(|_| ())?;
+            let v = scope
+                .runtime()
+                .allocate_string(stack_pointer, name)
+                .map(|s| s.into())
+                .map_err(|_| ())?;
             map_assoc_h!(enum_map_h, k, v);
 
-            let k = scope.runtime().intern_keyword(stack_pointer, "doc".to_string()).map_err(|_| ())?;
+            let k = scope
+                .runtime()
+                .intern_keyword(stack_pointer, "doc".to_string())
+                .map_err(|_| ())?;
             let v = match doc {
-                Some(d) => scope.runtime().allocate_string(stack_pointer, d).map(|s| s.into()).map_err(|_| ())?,
+                Some(d) => scope
+                    .runtime()
+                    .allocate_string(stack_pointer, d)
+                    .map(|s| s.into())
+                    .map_err(|_| ())?,
                 None => BuiltInTypes::null_value() as usize,
             };
             map_assoc_h!(enum_map_h, k, v);
 
             // Build variants vector using build_string_vec
-            let k = scope.runtime().intern_keyword(stack_pointer, "variants".to_string()).map_err(|_| ())?;
+            let k = scope
+                .runtime()
+                .intern_keyword(stack_pointer, "variants".to_string())
+                .map_err(|_| ())?;
             let k_h = scope.alloc(k);
             let variants_val = build_string_vec(scope.runtime(), stack_pointer, &variants);
             map_assoc_h!(enum_map_h, k_h.get(), variants_val);

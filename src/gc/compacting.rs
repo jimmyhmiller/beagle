@@ -356,9 +356,7 @@ impl CompactingHeap {
                 // Copy objects and update pointers
                 let new_values: Vec<usize> = roots
                     .iter()
-                    .map(|(_offset, tagged_value)| {
-                        self.copy_using_cheneys_algorithm(*tagged_value)
-                    })
+                    .map(|(_offset, tagged_value)| self.copy_using_cheneys_algorithm(*tagged_value))
                     .collect();
                 for (i, (offset, _)) in roots.iter().enumerate() {
                     unsafe {
@@ -414,9 +412,7 @@ impl CompactingHeap {
         // Copy objects to to_space using Cheney's algorithm
         let new_values: Vec<usize> = roots
             .iter()
-            .map(|(_offset, tagged_value)| {
-                self.copy_using_cheneys_algorithm(*tagged_value)
-            })
+            .map(|(_offset, tagged_value)| self.copy_using_cheneys_algorithm(*tagged_value))
             .collect();
 
         // Update pointers in segment
