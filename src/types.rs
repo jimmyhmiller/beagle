@@ -641,7 +641,7 @@ impl HeapObject {
         fields
             .iter()
             .filter(|_x| !self.is_opaque_object())
-            .filter(|x| BuiltInTypes::is_heap_pointer(**x))
+            .filter(|x| BuiltInTypes::is_heap_pointer(**x) && BuiltInTypes::untag(**x) != 0)
             .map(|&pointer| HeapObject::from_tagged(pointer))
     }
 

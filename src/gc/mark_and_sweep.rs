@@ -375,6 +375,10 @@ impl MarkAndSweep {
             gc_return_addr,
             stack_map,
             |_, pointer| {
+                // Skip heap-tagged null pointers (value 6 = HeapObject tag with address 0)
+                if BuiltInTypes::untag(pointer) == 0 {
+                    return;
+                }
                 to_mark.push(HeapObject::from_tagged(pointer));
             },
         );
@@ -400,9 +404,12 @@ impl MarkAndSweep {
                             cont.original_sp(),
                             cont.original_fp(),
                             cont.prompt_stack_pointer(),
+                            cont.resume_address(),
                             stack_map,
                             |_offset, pointer| {
-                                to_mark.push(HeapObject::from_tagged(pointer));
+                                if BuiltInTypes::untag(pointer) != 0 {
+                                    to_mark.push(HeapObject::from_tagged(pointer));
+                                }
                             },
                         );
                     });
@@ -418,8 +425,13 @@ impl MarkAndSweep {
     /// These are heap pointers stored in Rust-side Vec buffers.
     fn mark_extra_roots(&self, extra_roots: &[(*mut usize, usize)], stack_map: &StackMap) {
         let mut to_mark: Vec<HeapObject> = Vec::new();
-        for &(_slot_addr, value) in extra_roots {
-            if BuiltInTypes::is_heap_pointer(value) {
+        for &(slot_addr, _cached_value) in extra_roots {
+            // IMPORTANT: Read the current value from the slot, not the cached value.
+            // When used as old gen in generational GC, minor_gc updates slot values
+            // in-place (promoting young gen objects to old gen), but the cached value
+            // in the extra_roots tuple is stale and still points to young gen.
+            let value = unsafe { *slot_addr };
+            if BuiltInTypes::is_heap_pointer(value) && BuiltInTypes::untag(value) != 0 {
                 to_mark.push(HeapObject::from_tagged(value));
             }
         }
@@ -441,9 +453,12 @@ impl MarkAndSweep {
                             cont.original_sp(),
                             cont.original_fp(),
                             cont.prompt_stack_pointer(),
+                            cont.resume_address(),
                             stack_map,
                             |_offset, pointer| {
-                                to_mark.push(HeapObject::from_tagged(pointer));
+                                if BuiltInTypes::untag(pointer) != 0 {
+                                    to_mark.push(HeapObject::from_tagged(pointer));
+                                }
                             },
                         );
                     });
@@ -465,14 +480,16 @@ impl MarkAndSweep {
                     continue;
                 }
 
-                ContinuationSegmentWalker::walk_segment_roots(
+                ContinuationSegmentWalker::walk_saved_frame_roots(
                     &rp.saved_stack_frame,
                     rp.stack_pointer,
                     rp.frame_pointer,
-                    rp.frame_pointer, // upper bound is FP
+                    rp.return_address,
                     stack_map,
                     |_offset, pointer| {
-                        to_mark.push(HeapObject::from_tagged(pointer));
+                        if BuiltInTypes::untag(pointer) != 0 {
+                            to_mark.push(HeapObject::from_tagged(pointer));
+                        }
                     },
                 );
             }

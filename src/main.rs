@@ -484,14 +484,25 @@ fn compile_apply_call_trampolines_x86_64(runtime: &mut Runtime) {
         // We need to push them in reverse order so they appear correctly on stack
         // Our arg[i] is at [RBP + 16 + (i-5)*8] for i >= 5
         // arg5 = [RBP+16], arg6 = [RBP+24], arg7 = [RBP+32], etc.
-        if num_args > 6 {
+        let num_stack_args = if num_args > 6 { num_args - 6 } else { 0 };
+        let needs_alignment_pad = num_stack_args % 2 == 1;
+        if num_stack_args > 0 {
+            // Ensure 16-byte stack alignment before call.
+            // After prologue (push RBP), RSP % 16 == 0.
+            // Each pushed stack arg is 8 bytes. If we push an odd number,
+            // RSP % 16 == 8 before the call, violating ABI alignment.
+            // Add an 8-byte pad so the total pushed bytes are 16-byte aligned.
+            if needs_alignment_pad {
+                lang.instructions.push(X86Asm::SubRI {
+                    dest: RSP,
+                    imm: 8,
+                });
+            }
             // Push args in reverse order: argN-1, argN-2, ..., arg6
             for i in (6..num_args).rev() {
                 // Our arg[i] is at [RBP + 16 + (i-5)*8]
                 let offset = 16 + ((i as i32) - 5) * 8;
-                // Load into R11 temporarily (we've saved fn_ptr already)
-                // Actually we need a temp register that won't be clobbered
-                // Use RDI since we'll overwrite it anyway in the shuffle
+                // Use RDI as temp since we'll overwrite it in the shuffle below
                 lang.instructions.push(X86Asm::MovRM {
                     dest: RDI,
                     base: RBP,
@@ -499,9 +510,6 @@ fn compile_apply_call_trampolines_x86_64(runtime: &mut Runtime) {
                 });
                 lang.instructions.push(X86Asm::Push { reg: RDI });
             }
-            // Reload fn_ptr into R11 since we clobbered RDI
-            // Actually wait - we saved fn_ptr first, so R11 still has it
-            // But we used RDI as temp, so we need to restore the shuffle logic
         }
 
         // Shuffle args: RSI->RDI, RDX->RSI, RCX->RDX, R8->RCX, R9->R8
@@ -526,9 +534,10 @@ fn compile_apply_call_trampolines_x86_64(runtime: &mut Runtime) {
         // Call the function via R11
         lang.call(R11);
 
-        // Clean up stack args we pushed (if any)
-        if num_args > 6 {
-            let stack_cleanup = ((num_args - 6) * 8) as i32;
+        // Clean up stack args and alignment padding we pushed (if any)
+        if num_stack_args > 0 {
+            let pad = if needs_alignment_pad { 8 } else { 0 };
+            let stack_cleanup = (num_stack_args * 8 + pad) as i32;
             lang.instructions.push(X86Asm::AddRI {
                 dest: RSP,
                 imm: stack_cleanup,

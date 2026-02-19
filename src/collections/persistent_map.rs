@@ -231,7 +231,9 @@ impl PersistentMap {
         let map = map_h.to_gc_handle();
         let hash = scope.runtime().hash_value(key_h.get());
         let count = Self::count(map);
-        let root_ptr = map.get_field(FIELD_ROOT);
+        // Re-read map from handle to get the latest pointer after any potential GC
+        let map_fresh = map_h.to_gc_handle();
+        let root_ptr = map_fresh.get_field(FIELD_ROOT);
 
         let (new_root, added) = if root_ptr == BuiltInTypes::null_value() as usize {
             // Empty map - create initial leaf node
@@ -249,12 +251,13 @@ impl PersistentMap {
                 return Err(format!("Invalid root node type {} in assoc", root_type).into());
             }
 
-            let root_h = scope.alloc_handle(root);
+                let root_h = scope.alloc_handle(root);
             Self::assoc_node(&mut scope, root_h, 0, hash, key_h, value_h)?
         };
 
         // Allocate new map
         let new_map = scope.allocate_typed_zeroed(2, TYPE_ID_PERSISTENT_MAP)?;
+
         let new_count = if added { count + 1 } else { count };
 
         // No re-reading needed! Handles are stable.
@@ -356,23 +359,21 @@ impl PersistentMap {
     ) -> Result<(Handle, bool), Box<dyn Error>> {
         let node = node_h.to_gc_handle();
         let type_id = node.get_type_id();
-        let field_count = node.field_count();
 
         match type_id {
             TYPE_ID_BITMAP_NODE => {
                 Self::assoc_bitmap_node(scope, node_h, shift, hash, key_h, value_h)
             }
             TYPE_ID_ARRAY_NODE => {
-                // Validate: ArrayNode STRUCT has 2 fields, children ARRAY has 32
-                if field_count == 32 {
-                    return Err("assoc_node: got children array instead of ArrayNode struct".into());
-                }
                 Self::assoc_array_node(scope, node_h, shift, hash, key_h, value_h)
             }
             TYPE_ID_COLLISION_NODE => {
                 Self::assoc_collision_node(scope, node_h, shift, hash, key_h, value_h)
             }
-            _ => Err("Unknown node type in assoc_node".into()),
+            _ => Err(format!(
+                "Unknown node type in assoc_node: type_id={}, tagged={:#x}, shift={}",
+                type_id, node.as_tagged(), shift
+            ).into()),
         }
     }
 
@@ -486,12 +487,21 @@ impl PersistentMap {
                     // Create new children array with updated sub-node
                     let children = children_h.to_gc_handle();
                     let old_len = children.field_count();
+                    let old_tagged = children_h.get();
                     let new_children_h =
                         scope.allocate_typed_zeroed(old_len, TYPE_ID_BITMAP_NODE)?;
 
                     // Bulk copy all fields
                     let children = children_h.to_gc_handle();
                     let new_children = new_children_h.to_gc_handle();
+                    let new_tagged = children_h.get();
+                    let actual_len = children.field_count();
+                    if actual_len != old_len {
+                        panic!(
+                            "assoc_bitmap_node: children field_count changed from {} to {} after allocation! old_tagged={:#x} new_tagged={:#x} type_id={}",
+                            old_len, actual_len, old_tagged, new_tagged, children.get_type_id()
+                        );
+                    }
                     children.copy_fields_to(&new_children, old_len);
 
                     // Call write barriers for all copied heap pointers
@@ -514,8 +524,9 @@ impl PersistentMap {
                     new_children.set_field(index * 2 + 1, BuiltInTypes::null_value() as usize);
 
                     // Create new bitmap node
-                    let node = node_h.to_gc_handle();
                     let new_node_h = scope.allocate_typed_zeroed(2, TYPE_ID_BITMAP_NODE)?;
+                    // Re-read node AFTER allocation (GC may have moved it)
+                    let node = node_h.to_gc_handle();
                     let new_children = new_children_h.to_gc_handle();
                     let new_node = new_node_h.to_gc_handle();
 
@@ -564,8 +575,9 @@ impl PersistentMap {
                 new_children.set_field_with_barrier(scope.runtime(), index * 2 + 1, value);
 
                 // Create new bitmap node
-                let node = node_h.to_gc_handle();
                 let new_node_h = scope.allocate_typed_zeroed(2, TYPE_ID_BITMAP_NODE)?;
+                // Re-read node AFTER allocation (GC may have moved it)
+                let node = node_h.to_gc_handle();
                 let new_children = new_children_h.to_gc_handle();
                 let new_node = new_node_h.to_gc_handle();
 
@@ -623,8 +635,9 @@ impl PersistentMap {
                     );
                     new_children.set_field(index * 2 + 1, BuiltInTypes::null_value() as usize);
 
-                    let node = node_h.to_gc_handle();
                     let new_node_h = scope.allocate_typed_zeroed(2, TYPE_ID_BITMAP_NODE)?;
+                    // Re-read node AFTER allocation (GC may have moved it)
+                    let node = node_h.to_gc_handle();
                     let new_children = new_children_h.to_gc_handle();
                     let new_node = new_node_h.to_gc_handle();
 
@@ -677,8 +690,9 @@ impl PersistentMap {
                     );
                     new_children.set_field(index * 2 + 1, BuiltInTypes::null_value() as usize);
 
-                    let node = node_h.to_gc_handle();
                     let new_node_h = scope.allocate_typed_zeroed(2, TYPE_ID_BITMAP_NODE)?;
+                    // Re-read node AFTER allocation (GC may have moved it)
+                    let node = node_h.to_gc_handle();
                     let new_children = new_children_h.to_gc_handle();
                     let new_node = new_node_h.to_gc_handle();
 
@@ -726,6 +740,7 @@ impl PersistentMap {
         let children_h = scope.alloc_handle(children);
 
         let index = (hash >> shift) & BRANCH_MASK;
+
         let children = children_h.to_gc_handle();
         let child_ptr = children.get_field(index);
 
@@ -758,6 +773,7 @@ impl PersistentMap {
 
             // Create new array node with incremented count
             let new_node_h = scope.allocate_typed_zeroed(2, TYPE_ID_ARRAY_NODE)?;
+
             let new_children = new_children_h.to_gc_handle();
             let new_node = new_node_h.to_gc_handle();
             new_node.set_field(
@@ -774,6 +790,16 @@ impl PersistentMap {
         } else {
             // Non-empty slot - recurse into child node
             let child = GcHandle::from_tagged(child_ptr);
+            let child_type = child.get_type_id();
+            if child_type != TYPE_ID_BITMAP_NODE
+                && child_type != TYPE_ID_ARRAY_NODE
+                && child_type != TYPE_ID_COLLISION_NODE
+            {
+                return Err(format!(
+                    "assoc_array_node: invalid child type_id={} at index={}, shift={}, tagged={:#x}, field_count={}, children_tagged={:#x}",
+                    child_type, index, shift, child_ptr, child.field_count(), children_h.get()
+                ).into());
+            }
             let sub_node_h = scope.alloc_handle(child);
             let (new_sub_h, added) =
                 Self::assoc_node(scope, sub_node_h, shift + 5, hash, key_h, value_h)?;
@@ -801,6 +827,7 @@ impl PersistentMap {
 
             // Create new array node (count unchanged since we're updating existing child)
             let new_node_h = scope.allocate_typed_zeroed(2, TYPE_ID_ARRAY_NODE)?;
+
             let new_children = new_children_h.to_gc_handle();
             let new_node = new_node_h.to_gc_handle();
             new_node.set_field(
@@ -869,6 +896,18 @@ impl PersistentMap {
 
                 if is_subnode {
                     // Sub-node: store directly in array slot
+                    // Validate: key should be a valid node type
+                    let validate_node = GcHandle::from_tagged(key);
+                    let vtype = validate_node.get_type_id();
+                    if vtype != TYPE_ID_BITMAP_NODE
+                        && vtype != TYPE_ID_ARRAY_NODE
+                        && vtype != TYPE_ID_COLLISION_NODE
+                    {
+                        return Err(format!(
+                            "bitmap_to_array_node: storing invalid sub-node! type_id={}, bit_pos={}, key_tagged={:#x}, field_count={}",
+                            vtype, bit_pos, key, validate_node.field_count()
+                        ).into());
+                    }
                     let new_children = new_children_h.to_gc_handle();
                     new_children.set_field_with_barrier(scope.runtime(), bit_pos, key);
                 } else {
@@ -1390,71 +1429,121 @@ impl PersistentMap {
     ) -> Result<GcHandle, Box<dyn Error>> {
         use super::persistent_vec::PersistentVec;
 
-        let mut vec = PersistentVec::empty(runtime, stack_pointer)?;
+        let mut scope = HandleScope::new(runtime, stack_pointer);
+        let map_h = scope.alloc(map.as_tagged());
 
-        let root_ptr = map.get_field(FIELD_ROOT);
+        let vec = PersistentVec::empty(scope.runtime(), stack_pointer)?;
+        // Protect vec on shadow stack — collect_keys will read/write vec_tagged
+        // and we'll keep it synchronized with the handle.
+        let vec_h = scope.alloc(vec.as_tagged());
+
+        // Re-read map from handle after allocation
+        let root_ptr = map_h.to_gc_handle().get_field(FIELD_ROOT);
         if root_ptr == BuiltInTypes::null_value() as usize {
-            return Ok(vec);
+            return Ok(vec_h.to_gc_handle());
         }
 
-        let root = GcHandle::from_tagged(root_ptr);
-        Self::collect_keys(runtime, stack_pointer, root, &mut vec)?;
+        // collect_keys updates vec_tagged in place; we sync it to our handle
+        let mut vec_tagged = vec_h.get();
+        Self::collect_keys(scope.runtime(), stack_pointer, root_ptr, &mut vec_tagged)?;
 
-        Ok(vec)
+        Ok(GcHandle::from_tagged(vec_tagged))
     }
 
     /// Recursively collect keys from a node.
+    /// `node_ptr` is a raw tagged pointer to the node.
+    /// `vec_tagged` is a mutable reference to the current vec tagged pointer,
+    /// updated after each push. Node and vec are protected on the shadow stack
+    /// within this function's HandleScope.
     fn collect_keys(
         runtime: &mut Runtime,
         stack_pointer: usize,
-        node: GcHandle,
-        vec: &mut GcHandle,
+        node_ptr: usize,
+        vec_tagged: &mut usize,
     ) -> Result<(), Box<dyn Error>> {
         use super::persistent_vec::PersistentVec;
 
+        let mut scope = HandleScope::new(runtime, stack_pointer);
+        let node_h = scope.alloc(node_ptr);
+        // Protect vec on the shadow stack so GC updates it
+        let vec_h = scope.alloc(*vec_tagged);
+
+        let node = node_h.to_gc_handle();
         let type_id = node.get_type_id();
 
         if type_id == TYPE_ID_BITMAP_NODE {
             let children_ptr = node.get_field(BN_FIELD_CHILDREN);
-            let children = GcHandle::from_tagged(children_ptr);
+            let children_h = scope.alloc(children_ptr);
             let bitmap = BuiltInTypes::untag(node.get_field(BN_FIELD_BITMAP));
             let count = bitmap.count_ones() as usize;
 
             for i in 0..count {
+                // Re-read children from handle each iteration (GC may have moved it)
+                let children = children_h.to_gc_handle();
                 let key = children.get_field(i * 2);
                 let value = children.get_field(i * 2 + 1);
 
                 if value != BuiltInTypes::null_value() as usize {
-                    // Leaf entry - add key
-                    *vec = PersistentVec::push(runtime, stack_pointer, *vec, key)?;
+                    // Leaf entry - add key to vec
+                    let current_vec = GcHandle::from_tagged(vec_h.get());
+                    let new_vec = PersistentVec::push(
+                        scope.runtime(),
+                        stack_pointer,
+                        current_vec,
+                        key,
+                    )?;
+                    // Update both the handle slot and the caller's reference
+                    let tg = unsafe { &mut *crate::runtime::cached_thread_global_ptr() };
+                    tg.handle_stack[vec_h.slot()] = new_vec.as_tagged();
                 } else if BuiltInTypes::is_heap_pointer(key) {
-                    // Child node - recurse
-                    let child = GcHandle::from_tagged(key);
-                    Self::collect_keys(runtime, stack_pointer, child, vec)?;
+                    // Child node - recurse with current vec from handle
+                    let mut inner_vec = vec_h.get();
+                    Self::collect_keys(scope.runtime(), stack_pointer, key, &mut inner_vec)?;
+                    // Sync back to our handle
+                    let tg = unsafe { &mut *crate::runtime::cached_thread_global_ptr() };
+                    tg.handle_stack[vec_h.slot()] = inner_vec;
                 }
             }
         } else if type_id == TYPE_ID_ARRAY_NODE {
             let children_ptr = node.get_field(AN_FIELD_CHILDREN);
-            let children = GcHandle::from_tagged(children_ptr);
+            let children_h = scope.alloc(children_ptr);
 
             for i in 0..32 {
+                // Re-read children from handle each iteration
+                let children = children_h.to_gc_handle();
                 let child_ptr = children.get_field(i);
-                if child_ptr != BuiltInTypes::null_value() as usize {
-                    let child = GcHandle::from_tagged(child_ptr);
-                    Self::collect_keys(runtime, stack_pointer, child, vec)?;
+                if child_ptr != BuiltInTypes::null_value() as usize
+                    && BuiltInTypes::is_heap_pointer(child_ptr)
+                {
+                    let mut inner_vec = vec_h.get();
+                    Self::collect_keys(scope.runtime(), stack_pointer, child_ptr, &mut inner_vec)?;
+                    let tg = unsafe { &mut *crate::runtime::cached_thread_global_ptr() };
+                    tg.handle_stack[vec_h.slot()] = inner_vec;
                 }
             }
         } else if type_id == TYPE_ID_COLLISION_NODE {
             let count = BuiltInTypes::untag(node.get_field(CN_FIELD_COUNT));
             let kv_array_ptr = node.get_field(CN_FIELD_KV_ARRAY);
-            let kv_array = GcHandle::from_tagged(kv_array_ptr);
+            let kv_array_h = scope.alloc(kv_array_ptr);
 
             for i in 0..count {
+                // Re-read kv_array from handle each iteration
+                let kv_array = kv_array_h.to_gc_handle();
                 let key = kv_array.get_field(i * 2);
-                *vec = PersistentVec::push(runtime, stack_pointer, *vec, key)?;
+                let current_vec = GcHandle::from_tagged(vec_h.get());
+                let new_vec = PersistentVec::push(
+                    scope.runtime(),
+                    stack_pointer,
+                    current_vec,
+                    key,
+                )?;
+                let tg = unsafe { &mut *crate::runtime::cached_thread_global_ptr() };
+                tg.handle_stack[vec_h.slot()] = new_vec.as_tagged();
             }
         }
 
+        // Sync final vec value back to caller
+        *vec_tagged = vec_h.get();
         Ok(())
     }
 }

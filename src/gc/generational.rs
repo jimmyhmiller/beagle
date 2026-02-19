@@ -186,6 +186,14 @@ impl Space {
         pointer >= start && pointer < end
     }
 
+    fn allocation_offset(&self) -> usize {
+        self.allocation_offset
+    }
+
+    fn base_address(&self) -> usize {
+        self.start as usize
+    }
+
     #[allow(unused)]
     fn copy_data_to_offset(&mut self, data: &[u8]) -> isize {
         unsafe {
@@ -340,18 +348,21 @@ impl GenerationalGC {
             return;
         }
 
-        // Process InvocationReturnPoint saved frames
+        // Process InvocationReturnPoint saved frames.
+        // The saved frame captures the handler's locals (from stack_pointer to frame_pointer).
+        // We use the return_address to look up the stack map and find which slots are active.
         for (_thread_id, rps) in runtime.invocation_return_points.iter_mut() {
             for rp in rps.iter_mut() {
                 if rp.saved_stack_frame.is_empty() {
                     continue;
                 }
-                self.update_segment_young_gen_pointers(
+                ContinuationSegmentWalker::update_saved_frame_pointers(
                     &mut rp.saved_stack_frame,
                     rp.stack_pointer,
                     rp.frame_pointer,
-                    rp.frame_pointer,
+                    rp.return_address,
                     stack_map,
+                    |old_value| self.copy(old_value),
                 );
             }
         }
@@ -386,6 +397,7 @@ impl GenerationalGC {
         original_sp: usize,
         original_fp: usize,
         prompt_sp: usize,
+        resume_address: usize,
         stack_map: &StackMap,
     ) {
         ContinuationSegmentWalker::update_segment_pointers(
@@ -393,6 +405,7 @@ impl GenerationalGC {
             original_sp,
             original_fp,
             prompt_sp,
+            resume_address,
             stack_map,
             |old_value| self.copy(old_value),
         );
@@ -408,10 +421,12 @@ impl GenerationalGC {
                 cont.original_sp(),
                 cont.original_fp(),
                 cont.prompt_stack_pointer(),
+                cont.resume_address(),
                 stack_map,
             );
         });
     }
+
 }
 
 impl Allocator for GenerationalGC {
@@ -649,7 +664,8 @@ impl GenerationalGC {
         (slots, old_gen_values)
     }
 
-    /// Inner function to gather roots from a single stack
+    /// Inner function to gather roots from a single stack.
+    /// Uses StackWalker and classifies roots into young gen (to copy) and old gen (to scan fields).
     fn gather_stack_roots_inner(
         &self,
         stack_base: usize,
@@ -667,28 +683,23 @@ impl GenerationalGC {
             stack_map,
             |slot_addr, slot_value| {
                 let untagged = BuiltInTypes::untag(slot_value);
-
-                // Skip values where the untagged pointer is 0 (e.g., value 0b110 = 6)
                 if untagged == 0 {
                     return;
                 }
-
                 if self.young.contains(untagged as *const u8) {
                     assert!(
                         self.young.contains_allocated(untagged as *const u8),
-                        "Young gen pointer {:#x} not in allocated region",
-                        untagged
+                        "Stale young gen pointer {:#x} (offset={}) found on stack at {:#x}, \
+                         young alloc_offset={}, stack_base={:#x}, fp={:#x}",
+                        slot_value,
+                        untagged - self.young.base_address(),
+                        slot_addr,
+                        self.young.allocation_offset(),
+                        stack_base,
+                        frame_pointer,
                     );
                     roots.push((slot_addr, slot_value));
-                } else {
-                    assert!(
-                        self.old.contains(untagged as *const u8),
-                        "Heap pointer {:#x} (tagged {:#x}) neither in young nor old gen. Stack slot @ {:#x}",
-                        untagged,
-                        slot_value,
-                        slot_addr
-                    );
-
+                } else if self.old.contains(untagged as *const u8) {
                     old_gen_objects.push(slot_value);
                 }
             },
@@ -737,8 +748,6 @@ impl GenerationalGC {
     ) {
         let start = std::time::Instant::now();
         usdt_probes::fire_gc_minor_start(self.gc_count);
-
-        self.gc_count += 1;
 
         let (mut stack_roots, mut stack_old_gen) =
             self.gather_stack_root_refs(stack_map, stack_pointers);
@@ -864,8 +873,8 @@ impl GenerationalGC {
             old_object,
             data.len()
         );
+        #[allow(unused_variables)]
         for (i, field) in data.iter_mut().enumerate() {
-            let _ = i; // Suppress unused variable warning when debug-gc is disabled
             if BuiltInTypes::is_heap_pointer(*field) {
                 let field_obj = HeapObject::from_tagged(*field);
                 let field_ptr = field_obj.get_pointer();
@@ -877,13 +886,17 @@ impl GenerationalGC {
                         i, *field
                     );
                     // Young gen reference - copy to old gen and update field
-                    let new_value = self.copy(*field);
-                    *field = new_value;
+                    *field = self.copy(*field);
                     #[cfg(feature = "debug-gc")]
-                    eprintln!("[GC DEBUG]   -> new value: {:#x}", new_value);
+                    eprintln!("[GC DEBUG]   -> new value: {:#x}", *field);
                 }
-                if field_obj.get_type_id() == TYPE_ID_CONTINUATION as usize {
-                    continuation_fields.push(*field);
+                // Check type_id after potential copy
+                let check_field = *field;
+                if BuiltInTypes::is_heap_pointer(check_field) {
+                    let check_obj = HeapObject::from_tagged(check_field);
+                    if check_obj.get_type_id() == TYPE_ID_CONTINUATION as usize {
+                        continuation_fields.push(check_field);
+                    }
                 }
             }
         }
@@ -923,7 +936,11 @@ impl GenerationalGC {
         let header_data = unsafe { *pointer };
         if Header::is_forwarding_bit_set(header_data) {
             // The header contains the forwarding pointer with forwarding bit set
-            return Header::clear_forwarding_bit(header_data);
+            let result = Header::clear_forwarding_bit(header_data);
+            // Preserve the original root's tag - different references to the same
+            // object may use different tags (e.g., Closure vs HeapObject)
+            let result = (result & !7) | (root & 7);
+            return result;
         }
 
         // Copy object data to old generation
@@ -936,7 +953,8 @@ impl GenerationalGC {
 
         // Store forwarding pointer in header for all objects (works even for 0-field objects)
         let tagged_new = tag.tag(new_pointer as isize) as usize;
-        unsafe { *pointer = Header::set_forwarding_bit(tagged_new) };
+        let forwarding = Header::set_forwarding_bit(tagged_new);
+        unsafe { *pointer = forwarding };
 
         tagged_new
     }
@@ -963,8 +981,12 @@ impl GenerationalGC {
                         eprintln!("[GC DEBUG]   copying young-gen field {:#x}", *field);
                         *field = self.copy(*field);
                     }
-                    if heap_obj.get_type_id() == TYPE_ID_CONTINUATION as usize {
-                        continuation_fields.push(*field);
+                    // Note: must check type_id AFTER copy since old heap_obj may have forwarding header
+                    if BuiltInTypes::is_heap_pointer(*field) {
+                        let updated_obj = HeapObject::from_tagged(*field);
+                        if updated_obj.get_type_id() == TYPE_ID_CONTINUATION as usize {
+                            continuation_fields.push(*field);
+                        }
                     }
                 }
             }

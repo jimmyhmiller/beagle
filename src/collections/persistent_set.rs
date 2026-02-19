@@ -93,11 +93,12 @@ impl PersistentSet {
         let true_h = scope.alloc(true_value);
 
         let old_count = Self::count(set_h.to_gc_handle());
-        let root_ptr = set_h.to_gc_handle().get_field(FIELD_ROOT);
 
         // Create a temporary map with the set's root to use PersistentMap::assoc
-        // First, we need to create a map struct pointing to the same root
         let temp_map = scope.allocate_typed_zeroed(2, TYPE_ID_PERSISTENT_MAP)?;
+        // IMPORTANT: Re-read root_ptr AFTER allocation, since GC may have promoted
+        // the root node from young gen to old gen, updating set_h's fields in-place.
+        let root_ptr = set_h.to_gc_handle().get_field(FIELD_ROOT);
         temp_map.to_gc_handle().set_field(
             FIELD_COUNT,
             BuiltInTypes::construct_int(old_count as isize) as usize,
@@ -115,9 +116,16 @@ impl PersistentSet {
             true_h.get(),
         )?;
 
+        // CRITICAL: Protect new_map on the shadow stack before allocating new_set.
+        // PersistentMap::assoc returns a GcHandle (raw pointer snapshot).
+        // If GC runs during new_set allocation, new_map would be stale.
+        let new_map_h = scope.alloc(new_map.as_tagged());
+
         // Create a new set struct with the map's new root
         let new_set = scope.allocate_typed_zeroed(2, TYPE_ID_PERSISTENT_SET)?;
-        let new_count = PersistentMap::count(new_map);
+        // Re-read new_map from handle after allocation (GC may have moved it)
+        let new_map_gc = new_map_h.to_gc_handle();
+        let new_count = PersistentMap::count(new_map_gc);
 
         let new_set_gc = new_set.to_gc_handle();
         new_set_gc.set_field(
@@ -127,7 +135,7 @@ impl PersistentSet {
         new_set_gc.set_field_with_barrier(
             scope.runtime(),
             FIELD_ROOT,
-            new_map.get_field(FIELD_ROOT),
+            new_map_gc.get_field(FIELD_ROOT),
         );
 
         Ok(new_set_gc)

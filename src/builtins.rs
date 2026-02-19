@@ -3745,17 +3745,28 @@ pub unsafe extern "C" fn new_thread(
 // I don't know what the deal is here
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn update_binding(namespace_slot: usize, value: usize) -> usize {
+pub unsafe extern "C" fn update_binding(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    namespace_slot: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "update_binding");
     let runtime = get_runtime().get_mut();
     let namespace_slot = BuiltInTypes::untag(namespace_slot);
     let namespace_id = runtime.current_namespace_id();
 
+    // Root the value so GC can update it if objects move during allocation
+    let value_root_id = runtime.register_temporary_root(value);
+
     // Store binding in heap-based PersistentMap (no namespace_roots tracking needed!)
-    let stack_pointer = get_current_stack_pointer();
     if let Err(e) = runtime.set_heap_binding(stack_pointer, namespace_id, namespace_slot, value) {
         eprintln!("Error in update_binding: {}", e);
     }
+
+    // Re-read value from root in case GC moved it
+    let value = runtime.unregister_temporary_root(value_root_id);
 
     // Also update the Rust-side HashMap for backwards compatibility during migration
     runtime.update_binding(namespace_id, namespace_slot, value);
@@ -3960,20 +3971,54 @@ pub extern "C" fn run_thread(_unused: usize) -> usize {
     let my_thread_id = thread::current().id();
 
     // === STARTUP ===
-    // Acquire gc_lock and register ourselves.
-    // We use blocking lock() here because we are NOT yet counted in registered_thread_count,
-    // so GC won't wait for us - no deadlock possible.
-    {
-        let _guard = runtime.gc_lock.lock().unwrap();
-        // Now register ourselves - GC will count us from this point on
-        let new_count = runtime
-            .registered_thread_count
-            .fetch_add(1, std::sync::atomic::Ordering::Release)
-            + 1;
-        // Fire USDT probes for thread start and registration
-        crate::gc::usdt_probes::fire_thread_register(new_count);
-        crate::gc::usdt_probes::fire_thread_start();
-        // Lock released here - GC can now start, and it will count us
+    // The parent's new_thread already incremented registered_thread_count and
+    // registered us as c_calling with a null stack. We need to transition from
+    // c_calling to active Beagle thread. The tricky part: between unregistering
+    // from c_calling and hitting the first __pause safepoint, GC could run and
+    // not account for us properly.
+    //
+    // Solution: Stay c_calling until the first safepoint (__pause or allocate).
+    // We set a flag that __pause checks to atomically transition from c_calling
+    // to paused (under the thread_state lock, ensuring no gap).
+    //
+    // But we also need to handle the case where is_paused=0 (no GC in progress)
+    // at the first __pause check. In that case, __pause is skipped entirely.
+    // We handle this by checking is_paused ourselves first: if GC is active, we
+    // wait for it. Then we unregister from c_calling while holding gc_lock
+    // (preventing any new GC from starting during the transition).
+    loop {
+        // If GC is in progress, we're c_calling so GC will count us and proceed.
+        // Wait for it to finish.
+        while runtime.is_paused() {
+            thread::yield_now();
+        }
+
+        // Try to get gc_lock. While we hold it, no GC can start.
+        match runtime.gc_lock.try_lock() {
+            Ok(_guard) => {
+                // Unregister from c_calling while holding gc_lock.
+                // No GC can start during this window.
+                {
+                    let (lock, condvar) = &*runtime.thread_state.clone();
+                    let mut state = lock.lock().unwrap();
+                    state.c_calling_stack_pointers.remove(&my_thread_id);
+                    condvar.notify_one();
+                }
+                let current_count = runtime
+                    .registered_thread_count
+                    .load(std::sync::atomic::Ordering::Acquire);
+                // Fire USDT probes for thread start and registration
+                crate::gc::usdt_probes::fire_thread_register(current_count);
+                crate::gc::usdt_probes::fire_thread_start();
+                // gc_lock released here - but we immediately enter Beagle code
+                // where __pause is the first instruction
+                break;
+            }
+            Err(_) => {
+                // gc_lock is held by a GC in progress
+                thread::yield_now();
+            }
+        }
     }
 
     // Enter Beagle code - __run_thread_start calls __pause as first instruction!
@@ -4555,8 +4600,12 @@ unsafe extern "C" fn invoke_beagle_callback(
         #[cfg(target_arch = "x86_64")]
         std::arch::asm!("mov {}, rsp", out(reg) stack_pointer);
 
-        // Unmarshal C args to Beagle values
+        // Unmarshal C args to Beagle values.
+        // Heap-allocated args (Pointer structs, Floats) must be registered as temporary
+        // roots so GC can update them if they move. Without this, a GC triggered by
+        // unmarshalling arg N could move the heap object created for arg N-1.
         let mut beagle_args = Vec::with_capacity(num_args);
+        let mut root_slots = Vec::new();
         for i in 0..num_args {
             let c_val = *c_args_ptr.add(i);
             let beagle_val = match &arg_types[i] {
@@ -4572,12 +4621,15 @@ unsafe extern "C" fn invoke_beagle_callback(
                     let lo_tagged = BuiltInTypes::Int.tag((raw & 0xFFFFFFFF) as isize) as usize;
                     let hi_tagged =
                         BuiltInTypes::Int.tag(((raw >> 32) & 0xFFFFFFFF) as isize) as usize;
-                    call_fn_2(
+                    let val = call_fn_2(
                         runtime,
                         "beagle.ffi/__make_pointer_struct",
                         lo_tagged,
                         hi_tagged,
-                    )
+                    );
+                    let slot = runtime.register_temporary_root(val);
+                    root_slots.push((beagle_args.len(), slot));
+                    val
                 }
                 FFIType::F32 => {
                     let f32_val = f32::from_bits(c_val as u32);
@@ -4597,6 +4649,8 @@ unsafe extern "C" fn invoke_beagle_callback(
                     let untagged_result = BuiltInTypes::untag(new_float_ptr);
                     let result_ptr = untagged_result as *mut f64;
                     *result_ptr.add(1) = f64_val;
+                    let slot = runtime.register_temporary_root(new_float_ptr);
+                    root_slots.push((beagle_args.len(), slot));
                     new_float_ptr
                 }
                 FFIType::F64 => {
@@ -4616,6 +4670,8 @@ unsafe extern "C" fn invoke_beagle_callback(
                     let untagged_result = BuiltInTypes::untag(new_float_ptr);
                     let result_ptr = untagged_result as *mut f64;
                     *result_ptr.add(1) = f64_val;
+                    let slot = runtime.register_temporary_root(new_float_ptr);
+                    root_slots.push((beagle_args.len(), slot));
                     new_float_ptr
                 }
                 _ => {
@@ -4624,6 +4680,12 @@ unsafe extern "C" fn invoke_beagle_callback(
                 }
             };
             beagle_args.push(beagle_val);
+        }
+
+        // Read back possibly-updated values from root slots and unregister them
+        for (arg_index, slot) in root_slots {
+            let updated = runtime.unregister_temporary_root(slot);
+            beagle_args[arg_index] = updated;
         }
 
         // Call the Beagle function using the appropriate save_volatile_registers variant
@@ -12358,8 +12420,8 @@ impl Runtime {
         self.add_builtin_function(
             "beagle.builtin/update-binding",
             update_binding as *const u8,
-            false,
-            2,
+            true,
+            3, // stack_pointer, namespace_slot, value
         )?;
 
         self.add_builtin_function(
@@ -13724,26 +13786,7 @@ extern "C" fn reflect_fields(stack_pointer: usize, frame_pointer: usize, value: 
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let (_, _, _, fields, _) = get_type_info(runtime, stack_pointer, value);
-
-    use crate::collections::PersistentVec;
-    match PersistentVec::empty(runtime, stack_pointer) {
-        Ok(vec_handle) => {
-            let mut current_vec = vec_handle.as_tagged();
-            for field_name in fields.iter() {
-                let field_str = match runtime.allocate_string(stack_pointer, field_name.clone()) {
-                    Ok(s) => s.into(),
-                    Err(_) => return BuiltInTypes::null_value() as usize,
-                };
-                let vec_gc = crate::collections::GcHandle::from_tagged(current_vec);
-                match PersistentVec::push(runtime, stack_pointer, vec_gc, field_str) {
-                    Ok(new_vec) => current_vec = new_vec.as_tagged(),
-                    Err(_) => return BuiltInTypes::null_value() as usize,
-                }
-            }
-            current_vec
-        }
-        Err(_) => BuiltInTypes::null_value() as usize,
-    }
+    build_string_vec(runtime, stack_pointer, &fields)
 }
 
 /// reflect/variants(value) - Get variant names for enum types
@@ -13751,27 +13794,7 @@ extern "C" fn reflect_variants(stack_pointer: usize, frame_pointer: usize, value
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let (_, _, _, variants, _) = get_type_info(runtime, stack_pointer, value);
-
-    use crate::collections::PersistentVec;
-    match PersistentVec::empty(runtime, stack_pointer) {
-        Ok(vec_handle) => {
-            let mut current_vec = vec_handle.as_tagged();
-            for variant_name in variants.iter() {
-                let variant_str = match runtime.allocate_string(stack_pointer, variant_name.clone())
-                {
-                    Ok(s) => s.into(),
-                    Err(_) => return BuiltInTypes::null_value() as usize,
-                };
-                let vec_gc = crate::collections::GcHandle::from_tagged(current_vec);
-                match PersistentVec::push(runtime, stack_pointer, vec_gc, variant_str) {
-                    Ok(new_vec) => current_vec = new_vec.as_tagged(),
-                    Err(_) => return BuiltInTypes::null_value() as usize,
-                }
-            }
-            current_vec
-        }
-        Err(_) => BuiltInTypes::null_value() as usize,
-    }
+    build_string_vec(runtime, stack_pointer, &variants)
 }
 
 /// reflect/args(value) - Get argument names for function types
@@ -13779,26 +13802,37 @@ extern "C" fn reflect_args(stack_pointer: usize, frame_pointer: usize, value: us
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
     let (_, _, _, args, _) = get_type_info(runtime, stack_pointer, value);
+    build_string_vec(runtime, stack_pointer, &args)
+}
 
-    use crate::collections::PersistentVec;
-    match PersistentVec::empty(runtime, stack_pointer) {
-        Ok(vec_handle) => {
-            let mut current_vec = vec_handle.as_tagged();
-            for arg_name in args.iter() {
-                let arg_str = match runtime.allocate_string(stack_pointer, arg_name.clone()) {
-                    Ok(s) => s.into(),
-                    Err(_) => return BuiltInTypes::null_value() as usize,
-                };
-                let vec_gc = crate::collections::GcHandle::from_tagged(current_vec);
-                match PersistentVec::push(runtime, stack_pointer, vec_gc, arg_str) {
-                    Ok(new_vec) => current_vec = new_vec.as_tagged(),
-                    Err(_) => return BuiltInTypes::null_value() as usize,
-                }
+/// Helper: Build a PersistentVec of strings from a Vec<String>, GC-safe.
+fn build_string_vec(runtime: &mut Runtime, stack_pointer: usize, strings: &[String]) -> usize {
+    use crate::collections::{PersistentVec, HandleScope};
+    let mut scope = HandleScope::new(runtime, stack_pointer);
+    let vec = match PersistentVec::empty(scope.runtime(), stack_pointer) {
+        Ok(v) => v,
+        Err(_) => return BuiltInTypes::null_value() as usize,
+    };
+    let vec_h = scope.alloc(vec.as_tagged());
+
+    for s in strings.iter() {
+        let str_val = match scope.runtime().allocate_string(stack_pointer, s.clone()) {
+            Ok(v) => v.into(),
+            Err(_) => return BuiltInTypes::null_value() as usize,
+        };
+        // Protect the string on shadow stack before push (which allocates)
+        let str_h = scope.alloc(str_val);
+        let current_vec = crate::collections::GcHandle::from_tagged(vec_h.get());
+        match PersistentVec::push(scope.runtime(), stack_pointer, current_vec, str_h.get()) {
+            Ok(new_vec) => {
+                // Update vec handle on shadow stack
+                let tg = unsafe { &mut *crate::runtime::cached_thread_global_ptr() };
+                tg.handle_stack[vec_h.slot()] = new_vec.as_tagged();
             }
-            current_vec
+            Err(_) => return BuiltInTypes::null_value() as usize,
         }
-        Err(_) => BuiltInTypes::null_value() as usize,
     }
+    vec_h.get()
 }
 
 /// reflect/variadic?(value) - Check if function is variadic
@@ -13815,110 +13849,95 @@ extern "C" fn reflect_info(stack_pointer: usize, frame_pointer: usize, value: us
     let runtime = get_runtime().get_mut();
     let (kind, name, doc, _extra, is_variadic) = get_type_info(runtime, stack_pointer, value);
 
-    use crate::collections::PersistentMap;
+    use crate::collections::{PersistentMap, HandleScope};
 
     let result = (|| -> Result<usize, ()> {
-        let mut map = PersistentMap::empty(runtime, stack_pointer).map_err(|_| ())?;
+        let mut scope = HandleScope::new(runtime, stack_pointer);
+
+        let map = PersistentMap::empty(scope.runtime(), stack_pointer).map_err(|_| ())?;
+        let map_h = scope.alloc(map.as_tagged());
+
+        // Helper: assoc a key-value pair into the map, keeping map_h updated
+        macro_rules! map_assoc {
+            ($key:expr, $val:expr) => {{
+                let key_h = scope.alloc($key);
+                let val_h = scope.alloc($val);
+                let new_map = PersistentMap::assoc(
+                    scope.runtime(),
+                    stack_pointer,
+                    map_h.get(),
+                    key_h.get(),
+                    val_h.get(),
+                )
+                .map_err(|_| ())?;
+                let tg = unsafe { &mut *crate::runtime::cached_thread_global_ptr() };
+                tg.handle_stack[map_h.slot()] = new_map.as_tagged();
+            }};
+        }
 
         // Add :name
-        let name_key = runtime
+        let name_key = scope.runtime()
             .intern_keyword(stack_pointer, "name".to_string())
             .map_err(|_| ())?;
-        let name_str = runtime
+        let name_str: usize = scope.runtime()
             .allocate_string(stack_pointer, name)
-            .map_err(|_| ())?;
-        map = PersistentMap::assoc(
-            runtime,
-            stack_pointer,
-            map.as_tagged(),
-            name_key,
-            name_str.into(),
-        )
-        .map_err(|_| ())?;
+            .map_err(|_| ())?
+            .into();
+        map_assoc!(name_key, name_str);
 
         // Add :kind
-        let kind_key = runtime
+        let kind_key = scope.runtime()
             .intern_keyword(stack_pointer, "kind".to_string())
             .map_err(|_| ())?;
-        let kind_kw = runtime
+        let kind_kw = scope.runtime()
             .intern_keyword(stack_pointer, kind.clone())
             .map_err(|_| ())?;
-        map = PersistentMap::assoc(runtime, stack_pointer, map.as_tagged(), kind_key, kind_kw)
-            .map_err(|_| ())?;
+        map_assoc!(kind_key, kind_kw);
 
         // Add :doc if present
         if let Some(d) = doc {
-            let doc_key = runtime
+            let doc_key = scope.runtime()
                 .intern_keyword(stack_pointer, "doc".to_string())
                 .map_err(|_| ())?;
-            let doc_str = runtime.allocate_string(stack_pointer, d).map_err(|_| ())?;
-            map = PersistentMap::assoc(
-                runtime,
-                stack_pointer,
-                map.as_tagged(),
-                doc_key,
-                doc_str.into(),
-            )
-            .map_err(|_| ())?;
+            let doc_str: usize = scope.runtime()
+                .allocate_string(stack_pointer, d)
+                .map_err(|_| ())?
+                .into();
+            map_assoc!(doc_key, doc_str);
         }
 
         // Add kind-specific fields
         if kind == "struct" || kind == "enum" {
-            // Add :fields as vector
-            let fields_key = runtime
+            let fields_key = scope.runtime()
                 .intern_keyword(stack_pointer, "fields".to_string())
                 .map_err(|_| ())?;
             let fields_val = reflect_fields(stack_pointer, frame_pointer, value);
-            map = PersistentMap::assoc(
-                runtime,
-                stack_pointer,
-                map.as_tagged(),
-                fields_key,
-                fields_val,
-            )
-            .map_err(|_| ())?;
+            map_assoc!(fields_key, fields_val);
         }
 
         if kind == "enum" {
-            // Add :variants as vector
-            let variants_key = runtime
+            let variants_key = scope.runtime()
                 .intern_keyword(stack_pointer, "variants".to_string())
                 .map_err(|_| ())?;
             let variants_val = reflect_variants(stack_pointer, frame_pointer, value);
-            map = PersistentMap::assoc(
-                runtime,
-                stack_pointer,
-                map.as_tagged(),
-                variants_key,
-                variants_val,
-            )
-            .map_err(|_| ())?;
+            map_assoc!(variants_key, variants_val);
         }
 
         if kind == "function" {
-            // Add :args and :variadic?
-            let args_key = runtime
+            let args_key = scope.runtime()
                 .intern_keyword(stack_pointer, "args".to_string())
                 .map_err(|_| ())?;
             let args_val = reflect_args(stack_pointer, frame_pointer, value);
-            map = PersistentMap::assoc(runtime, stack_pointer, map.as_tagged(), args_key, args_val)
-                .map_err(|_| ())?;
+            map_assoc!(args_key, args_val);
 
-            let variadic_key = runtime
+            let variadic_key = scope.runtime()
                 .intern_keyword(stack_pointer, "variadic?".to_string())
                 .map_err(|_| ())?;
             let variadic_val = BuiltInTypes::construct_boolean(is_variadic) as usize;
-            map = PersistentMap::assoc(
-                runtime,
-                stack_pointer,
-                map.as_tagged(),
-                variadic_key,
-                variadic_val,
-            )
-            .map_err(|_| ())?;
+            map_assoc!(variadic_key, variadic_val);
         }
 
-        Ok(map.as_tagged())
+        Ok(map_h.get())
     })();
 
     result.unwrap_or(BuiltInTypes::null_value() as usize)
@@ -14025,28 +14044,7 @@ extern "C" fn reflect_namespace_members(
         })
         .collect();
 
-    // Now build the result vector
-    use crate::collections::PersistentVec;
-
-    match PersistentVec::empty(runtime, stack_pointer) {
-        Ok(vec_handle) => {
-            let mut current_vec = vec_handle.as_tagged();
-
-            for local_name in local_names {
-                let name_str = match runtime.allocate_string(stack_pointer, local_name) {
-                    Ok(s) => s.into(),
-                    Err(_) => continue,
-                };
-                let vec_gc = crate::collections::GcHandle::from_tagged(current_vec);
-                match PersistentVec::push(runtime, stack_pointer, vec_gc, name_str) {
-                    Ok(new_vec) => current_vec = new_vec.as_tagged(),
-                    Err(_) => continue,
-                }
-            }
-            current_vec
-        }
-        Err(_) => BuiltInTypes::null_value() as usize,
-    }
+    build_string_vec(runtime, stack_pointer, &local_names)
 }
 
 /// reflect/all-namespaces() - List all namespace names
@@ -14068,24 +14066,8 @@ extern "C" fn reflect_all_namespaces(stack_pointer: usize, frame_pointer: usize)
         }
     }
 
-    match PersistentVec::empty(runtime, stack_pointer) {
-        Ok(vec_handle) => {
-            let mut current_vec = vec_handle.as_tagged();
-            for ns in namespaces {
-                let ns_str = match runtime.allocate_string(stack_pointer, ns) {
-                    Ok(s) => s.into(),
-                    Err(_) => continue,
-                };
-                let vec_gc = crate::collections::GcHandle::from_tagged(current_vec);
-                match PersistentVec::push(runtime, stack_pointer, vec_gc, ns_str) {
-                    Ok(new_vec) => current_vec = new_vec.as_tagged(),
-                    Err(_) => continue,
-                }
-            }
-            current_vec
-        }
-        Err(_) => BuiltInTypes::null_value() as usize,
-    }
+    let ns_list: Vec<String> = namespaces.into_iter().collect();
+    build_string_vec(runtime, stack_pointer, &ns_list)
 }
 
 /// reflect/apropos(query) - Search functions by name/doc substring
@@ -14111,28 +14093,7 @@ extern "C" fn reflect_apropos(stack_pointer: usize, frame_pointer: usize, query:
         .map(|func| func.name.clone())
         .collect();
 
-    // Now build the result vector
-    use crate::collections::PersistentVec;
-
-    match PersistentVec::empty(runtime, stack_pointer) {
-        Ok(vec_handle) => {
-            let mut current_vec = vec_handle.as_tagged();
-
-            for name in matching_names {
-                let name_str = match runtime.allocate_string(stack_pointer, name) {
-                    Ok(s) => s.into(),
-                    Err(_) => continue,
-                };
-                let vec_gc = crate::collections::GcHandle::from_tagged(current_vec);
-                match PersistentVec::push(runtime, stack_pointer, vec_gc, name_str) {
-                    Ok(new_vec) => current_vec = new_vec.as_tagged(),
-                    Err(_) => continue,
-                }
-            }
-            current_vec
-        }
-        Err(_) => BuiltInTypes::null_value() as usize,
-    }
+    build_string_vec(runtime, stack_pointer, &matching_names)
 }
 
 /// reflect/namespace-info(ns) - Get detailed info about a namespace
@@ -14149,19 +14110,6 @@ extern "C" fn reflect_namespace_info(
     let prefix = format!("{}/", ns_name);
 
     use crate::collections::{PersistentMap, PersistentVec};
-
-    // Helper to intern a keyword
-    let alloc_keyword = |runtime: &mut Runtime, sp: usize, name: &str| -> Result<usize, ()> {
-        runtime.intern_keyword(sp, name.to_string()).map_err(|_| ())
-    };
-
-    // Helper to allocate a string
-    let alloc_string = |runtime: &mut Runtime, sp: usize, s: String| -> Result<usize, ()> {
-        runtime
-            .allocate_string(sp, s)
-            .map(|s| s.into())
-            .map_err(|_| ())
-    };
 
     // Collect function info
     let function_info: Vec<_> = runtime
@@ -14219,182 +14167,153 @@ extern "C" fn reflect_namespace_info(
         })
         .collect();
 
-    // Build the result map
+    // Build the result map using HandleScope for GC safety
+    use crate::collections::HandleScope;
+
     let result = (|| -> Result<usize, ()> {
+        let mut scope = HandleScope::new(runtime, stack_pointer);
+        let tg_ptr = crate::runtime::cached_thread_global_ptr();
+
+        // Macro to assoc into a map handle, updating it in place
+        macro_rules! map_assoc_h {
+            ($map_h:expr, $key:expr, $val:expr) => {{
+                let key_h = scope.alloc($key);
+                let val_h = scope.alloc($val);
+                let new_map = PersistentMap::assoc(
+                    scope.runtime(), stack_pointer, $map_h.get(), key_h.get(), val_h.get(),
+                ).map_err(|_| ())?;
+                let tg = unsafe { &mut *tg_ptr };
+                tg.handle_stack[$map_h.slot()] = new_map.as_tagged();
+            }};
+        }
+
+        // Macro to push onto a vec handle, updating it in place
+        macro_rules! vec_push_h {
+            ($vec_h:expr, $val:expr) => {{
+                let val_h = scope.alloc($val);
+                let current_vec = crate::collections::GcHandle::from_tagged($vec_h.get());
+                let new_vec = PersistentVec::push(
+                    scope.runtime(), stack_pointer, current_vec, val_h.get(),
+                ).map_err(|_| ())?;
+                let tg = unsafe { &mut *tg_ptr };
+                tg.handle_stack[$vec_h.slot()] = new_vec.as_tagged();
+            }};
+        }
+
         // Create the main map
-        let mut map = PersistentMap::empty(runtime, stack_pointer).map_err(|_| ())?;
+        let map = PersistentMap::empty(scope.runtime(), stack_pointer).map_err(|_| ())?;
+        let map_h = scope.alloc(map.as_tagged());
 
         // Add :name
-        let name_key = alloc_keyword(runtime, stack_pointer, "name")?;
-        let name_val = alloc_string(runtime, stack_pointer, ns_name.to_string())?;
-        map = PersistentMap::assoc(runtime, stack_pointer, map.as_tagged(), name_key, name_val)
-            .map_err(|_| ())?;
+        let name_key = scope.runtime().intern_keyword(stack_pointer, "name".to_string()).map_err(|_| ())?;
+        let name_val = scope.runtime().allocate_string(stack_pointer, ns_name.to_string()).map(|s| s.into()).map_err(|_| ())?;
+        map_assoc_h!(map_h, name_key, name_val);
 
         // Build :functions vector
-        let funcs_key = alloc_keyword(runtime, stack_pointer, "functions")?;
-        let mut funcs_vec = PersistentVec::empty(runtime, stack_pointer).map_err(|_| ())?;
+        let funcs_key = scope.runtime().intern_keyword(stack_pointer, "functions".to_string()).map_err(|_| ())?;
+        let funcs_key_h = scope.alloc(funcs_key);
+        let funcs_vec = PersistentVec::empty(scope.runtime(), stack_pointer).map_err(|_| ())?;
+        let funcs_vec_h = scope.alloc(funcs_vec.as_tagged());
 
         for (name, doc, args, variadic) in function_info {
-            // Create function info map
-            let mut func_map = PersistentMap::empty(runtime, stack_pointer).map_err(|_| ())?;
+            let func_map = PersistentMap::empty(scope.runtime(), stack_pointer).map_err(|_| ())?;
+            let func_map_h = scope.alloc(func_map.as_tagged());
 
-            let k = alloc_keyword(runtime, stack_pointer, "name")?;
-            let v = alloc_string(runtime, stack_pointer, name)?;
-            func_map = PersistentMap::assoc(runtime, stack_pointer, func_map.as_tagged(), k, v)
-                .map_err(|_| ())?;
+            let k = scope.runtime().intern_keyword(stack_pointer, "name".to_string()).map_err(|_| ())?;
+            let v = scope.runtime().allocate_string(stack_pointer, name).map(|s| s.into()).map_err(|_| ())?;
+            map_assoc_h!(func_map_h, k, v);
 
-            let k = alloc_keyword(runtime, stack_pointer, "doc")?;
+            let k = scope.runtime().intern_keyword(stack_pointer, "doc".to_string()).map_err(|_| ())?;
             let v = match doc {
-                Some(d) => alloc_string(runtime, stack_pointer, d)?,
+                Some(d) => scope.runtime().allocate_string(stack_pointer, d).map(|s| s.into()).map_err(|_| ())?,
                 None => BuiltInTypes::null_value() as usize,
             };
-            func_map = PersistentMap::assoc(runtime, stack_pointer, func_map.as_tagged(), k, v)
-                .map_err(|_| ())?;
+            map_assoc_h!(func_map_h, k, v);
 
-            // Build args vector
-            let k = alloc_keyword(runtime, stack_pointer, "args")?;
-            let mut args_vec = PersistentVec::empty(runtime, stack_pointer).map_err(|_| ())?;
-            for arg in args {
-                let arg_str = alloc_string(runtime, stack_pointer, arg)?;
-                args_vec = PersistentVec::push(runtime, stack_pointer, args_vec, arg_str)
-                    .map_err(|_| ())?;
-            }
-            func_map = PersistentMap::assoc(
-                runtime,
-                stack_pointer,
-                func_map.as_tagged(),
-                k,
-                args_vec.as_tagged(),
-            )
-            .map_err(|_| ())?;
+            // Build args vector using build_string_vec
+            let k = scope.runtime().intern_keyword(stack_pointer, "args".to_string()).map_err(|_| ())?;
+            let k_h = scope.alloc(k);
+            let args_val = build_string_vec(scope.runtime(), stack_pointer, &args);
+            map_assoc_h!(func_map_h, k_h.get(), args_val);
 
-            let k = alloc_keyword(runtime, stack_pointer, "variadic?")?;
+            let k = scope.runtime().intern_keyword(stack_pointer, "variadic?".to_string()).map_err(|_| ())?;
             let v = if variadic {
                 BuiltInTypes::true_value() as usize
             } else {
                 BuiltInTypes::false_value() as usize
             };
-            func_map = PersistentMap::assoc(runtime, stack_pointer, func_map.as_tagged(), k, v)
-                .map_err(|_| ())?;
+            map_assoc_h!(func_map_h, k, v);
 
-            funcs_vec =
-                PersistentVec::push(runtime, stack_pointer, funcs_vec, func_map.as_tagged())
-                    .map_err(|_| ())?;
+            vec_push_h!(funcs_vec_h, func_map_h.get());
         }
 
-        map = PersistentMap::assoc(
-            runtime,
-            stack_pointer,
-            map.as_tagged(),
-            funcs_key,
-            funcs_vec.as_tagged(),
-        )
-        .map_err(|_| ())?;
+        map_assoc_h!(map_h, funcs_key_h.get(), funcs_vec_h.get());
 
         // Build :structs vector
-        let structs_key = alloc_keyword(runtime, stack_pointer, "structs")?;
-        let mut structs_vec = PersistentVec::empty(runtime, stack_pointer).map_err(|_| ())?;
+        let structs_key = scope.runtime().intern_keyword(stack_pointer, "structs".to_string()).map_err(|_| ())?;
+        let structs_key_h = scope.alloc(structs_key);
+        let structs_vec = PersistentVec::empty(scope.runtime(), stack_pointer).map_err(|_| ())?;
+        let structs_vec_h = scope.alloc(structs_vec.as_tagged());
 
         for (name, doc, fields) in struct_info {
-            let mut struct_map = PersistentMap::empty(runtime, stack_pointer).map_err(|_| ())?;
+            let struct_map = PersistentMap::empty(scope.runtime(), stack_pointer).map_err(|_| ())?;
+            let struct_map_h = scope.alloc(struct_map.as_tagged());
 
-            let k = alloc_keyword(runtime, stack_pointer, "name")?;
-            let v = alloc_string(runtime, stack_pointer, name)?;
-            struct_map = PersistentMap::assoc(runtime, stack_pointer, struct_map.as_tagged(), k, v)
-                .map_err(|_| ())?;
+            let k = scope.runtime().intern_keyword(stack_pointer, "name".to_string()).map_err(|_| ())?;
+            let v = scope.runtime().allocate_string(stack_pointer, name).map(|s| s.into()).map_err(|_| ())?;
+            map_assoc_h!(struct_map_h, k, v);
 
-            let k = alloc_keyword(runtime, stack_pointer, "doc")?;
+            let k = scope.runtime().intern_keyword(stack_pointer, "doc".to_string()).map_err(|_| ())?;
             let v = match doc {
-                Some(d) => alloc_string(runtime, stack_pointer, d)?,
+                Some(d) => scope.runtime().allocate_string(stack_pointer, d).map(|s| s.into()).map_err(|_| ())?,
                 None => BuiltInTypes::null_value() as usize,
             };
-            struct_map = PersistentMap::assoc(runtime, stack_pointer, struct_map.as_tagged(), k, v)
-                .map_err(|_| ())?;
+            map_assoc_h!(struct_map_h, k, v);
 
-            // Build fields vector
-            let k = alloc_keyword(runtime, stack_pointer, "fields")?;
-            let mut fields_vec = PersistentVec::empty(runtime, stack_pointer).map_err(|_| ())?;
-            for field in fields {
-                let field_str = alloc_string(runtime, stack_pointer, field)?;
-                fields_vec = PersistentVec::push(runtime, stack_pointer, fields_vec, field_str)
-                    .map_err(|_| ())?;
-            }
-            struct_map = PersistentMap::assoc(
-                runtime,
-                stack_pointer,
-                struct_map.as_tagged(),
-                k,
-                fields_vec.as_tagged(),
-            )
-            .map_err(|_| ())?;
+            // Build fields vector using build_string_vec
+            let k = scope.runtime().intern_keyword(stack_pointer, "fields".to_string()).map_err(|_| ())?;
+            let k_h = scope.alloc(k);
+            let fields_val = build_string_vec(scope.runtime(), stack_pointer, &fields);
+            map_assoc_h!(struct_map_h, k_h.get(), fields_val);
 
-            structs_vec =
-                PersistentVec::push(runtime, stack_pointer, structs_vec, struct_map.as_tagged())
-                    .map_err(|_| ())?;
+            vec_push_h!(structs_vec_h, struct_map_h.get());
         }
 
-        map = PersistentMap::assoc(
-            runtime,
-            stack_pointer,
-            map.as_tagged(),
-            structs_key,
-            structs_vec.as_tagged(),
-        )
-        .map_err(|_| ())?;
+        map_assoc_h!(map_h, structs_key_h.get(), structs_vec_h.get());
 
         // Build :enums vector
-        let enums_key = alloc_keyword(runtime, stack_pointer, "enums")?;
-        let mut enums_vec = PersistentVec::empty(runtime, stack_pointer).map_err(|_| ())?;
+        let enums_key = scope.runtime().intern_keyword(stack_pointer, "enums".to_string()).map_err(|_| ())?;
+        let enums_key_h = scope.alloc(enums_key);
+        let enums_vec = PersistentVec::empty(scope.runtime(), stack_pointer).map_err(|_| ())?;
+        let enums_vec_h = scope.alloc(enums_vec.as_tagged());
 
         for (name, doc, variants) in enum_info {
-            let mut enum_map = PersistentMap::empty(runtime, stack_pointer).map_err(|_| ())?;
+            let enum_map = PersistentMap::empty(scope.runtime(), stack_pointer).map_err(|_| ())?;
+            let enum_map_h = scope.alloc(enum_map.as_tagged());
 
-            let k = alloc_keyword(runtime, stack_pointer, "name")?;
-            let v = alloc_string(runtime, stack_pointer, name)?;
-            enum_map = PersistentMap::assoc(runtime, stack_pointer, enum_map.as_tagged(), k, v)
-                .map_err(|_| ())?;
+            let k = scope.runtime().intern_keyword(stack_pointer, "name".to_string()).map_err(|_| ())?;
+            let v = scope.runtime().allocate_string(stack_pointer, name).map(|s| s.into()).map_err(|_| ())?;
+            map_assoc_h!(enum_map_h, k, v);
 
-            let k = alloc_keyword(runtime, stack_pointer, "doc")?;
+            let k = scope.runtime().intern_keyword(stack_pointer, "doc".to_string()).map_err(|_| ())?;
             let v = match doc {
-                Some(d) => alloc_string(runtime, stack_pointer, d)?,
+                Some(d) => scope.runtime().allocate_string(stack_pointer, d).map(|s| s.into()).map_err(|_| ())?,
                 None => BuiltInTypes::null_value() as usize,
             };
-            enum_map = PersistentMap::assoc(runtime, stack_pointer, enum_map.as_tagged(), k, v)
-                .map_err(|_| ())?;
+            map_assoc_h!(enum_map_h, k, v);
 
-            // Build variants vector
-            let k = alloc_keyword(runtime, stack_pointer, "variants")?;
-            let mut variants_vec = PersistentVec::empty(runtime, stack_pointer).map_err(|_| ())?;
-            for variant in variants {
-                let variant_str = alloc_string(runtime, stack_pointer, variant)?;
-                variants_vec =
-                    PersistentVec::push(runtime, stack_pointer, variants_vec, variant_str)
-                        .map_err(|_| ())?;
-            }
-            enum_map = PersistentMap::assoc(
-                runtime,
-                stack_pointer,
-                enum_map.as_tagged(),
-                k,
-                variants_vec.as_tagged(),
-            )
-            .map_err(|_| ())?;
+            // Build variants vector using build_string_vec
+            let k = scope.runtime().intern_keyword(stack_pointer, "variants".to_string()).map_err(|_| ())?;
+            let k_h = scope.alloc(k);
+            let variants_val = build_string_vec(scope.runtime(), stack_pointer, &variants);
+            map_assoc_h!(enum_map_h, k_h.get(), variants_val);
 
-            enums_vec =
-                PersistentVec::push(runtime, stack_pointer, enums_vec, enum_map.as_tagged())
-                    .map_err(|_| ())?;
+            vec_push_h!(enums_vec_h, enum_map_h.get());
         }
 
-        map = PersistentMap::assoc(
-            runtime,
-            stack_pointer,
-            map.as_tagged(),
-            enums_key,
-            enums_vec.as_tagged(),
-        )
-        .map_err(|_| ())?;
+        map_assoc_h!(map_h, enums_key_h.get(), enums_vec_h.get());
 
-        Ok(map.as_tagged())
+        Ok(map_h.get())
     })();
 
     result.unwrap_or(BuiltInTypes::null_value() as usize)

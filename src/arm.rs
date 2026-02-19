@@ -1448,22 +1448,24 @@ impl LowLevelArm {
                 });
             }
 
-            // CRITICAL FIX: Zero out local slots to prevent GC from seeing garbage.
-            // When GC runs during allocation (before a local is assigned), uninitialized
-            // local slots could contain interior pointers or other garbage from previous
-            // stack usage. Initialize all local slots to null (0x7, which is tagged null).
+            // CRITICAL FIX: Zero out local and eval stack slots to prevent GC from
+            // seeing garbage. When GC runs, the stack walker scans all locals and
+            // the full eval stack area (max_stack_size). Uninitialized slots could
+            // contain stale pointers from previous stack usage or previous GC cycles.
+            // Initialize all local AND eval stack slots to null (0x7, tagged null).
             //
             // NOTE: STUR has a 9-bit signed immediate (-256 to 255), so for large stack
             // frames we need a different approach. We use X10 as a pointer that we decrement.
             let null_value = crate::types::BuiltInTypes::null_value() as i32;
+            let slots_to_zero = self.max_locals + self.max_stack_size;
 
             #[cfg(feature = "debug-gc")]
             eprintln!(
-                "[GC DEBUG] patch_prelude: max_locals={}, zeroing {} slots",
-                self.max_locals, self.max_locals
+                "[GC DEBUG] patch_prelude: max_locals={}, max_stack_size={}, zeroing {} slots",
+                self.max_locals, self.max_stack_size, slots_to_zero
             );
 
-            if self.max_locals > 0 {
+            if slots_to_zero > 0 {
                 // Load null value into X11 (NOT X9 - that's reserved for arg count!)
                 alloc_instructions.push(ArmAsm::Movz {
                     rd: X11,
@@ -1481,8 +1483,8 @@ impl LowLevelArm {
                     sh: 0,
                 });
 
-                // Store null to each local slot, decrementing X10 after each store
-                for _ in 0..self.max_locals {
+                // Store null to each local and eval stack slot, decrementing X10 after each store
+                for _ in 0..slots_to_zero {
                     // Store X11 to [X10], then X10 = X10 - 8 (post-decrement)
                     // Use STR with post-index: str x11, [x10], #-8
                     alloc_instructions.push(ArmAsm::StrImmGen {

@@ -222,20 +222,31 @@ pub struct CompactingHeap {
     options: AllocatorOptions,
 }
 impl CompactingHeap {
-    fn copy_using_cheneys_algorithm(&mut self, heap_object: HeapObject) -> usize {
-        let untagged = heap_object.get_pointer() as usize;
+    fn copy_using_cheneys_algorithm(&mut self, tagged_ptr: usize) -> usize {
+        let untagged = BuiltInTypes::untag(tagged_ptr);
 
-        debug_assert!(
-            self.to_space.contains(untagged as *const u8)
-                || self.from_space.contains(untagged as *const u8),
-            "Pointer is not in to space"
-        );
+        // Skip misaligned pointers - these are values (like floats) whose bit
+        // pattern happens to have the heap pointer tag. They aren't real objects.
+        if !untagged.is_multiple_of(8) {
+            return tagged_ptr;
+        }
+
+        // If the pointer is not in either space, it may be an embedded value
+        // (e.g., inline float) or a pointer to runtime-allocated memory outside the GC heap.
+        // Return it unchanged — it doesn't need to be moved.
+        if !self.to_space.contains(untagged as *const u8)
+            && !self.from_space.contains(untagged as *const u8)
+        {
+            return tagged_ptr;
+        }
 
         // If already in to_space, it's been copied
         if self.to_space.contains(untagged as *const u8) {
-            debug_assert!(untagged.is_multiple_of(8), "Pointer is not aligned");
-            return heap_object.tagged_pointer();
+            return tagged_ptr;
         }
+
+        // Now we know it's a valid heap pointer in from_space — safe to construct HeapObject
+        let heap_object = HeapObject::from_tagged(tagged_ptr);
 
         // If forwarded, object has been moved - get forwarding pointer from header
         // We check the forwarding bit (bit 3) which doesn't conflict with type tags
@@ -245,7 +256,10 @@ impl CompactingHeap {
         if Header::is_forwarding_bit_set(header_data) {
             // The header contains the forwarding pointer with forwarding bit set
             // Clear the forwarding bit to get the clean tagged pointer
-            return Header::clear_forwarding_bit(header_data);
+            let result = Header::clear_forwarding_bit(header_data);
+            // Preserve the original root's tag - different references to the same
+            // object may use different tags (e.g., Closure vs HeapObject)
+            return (result & !7) | (tagged_ptr & 7);
         }
 
         // Copy the object to to_space
@@ -270,8 +284,7 @@ impl CompactingHeap {
             // I should think about how to get rid of this allocation at the very least.
             let mut new_roots = vec![];
             for root in roots.iter() {
-                let heap_object = HeapObject::from_tagged(*root);
-                new_roots.push(self.copy_using_cheneys_algorithm(heap_object));
+                new_roots.push(self.copy_using_cheneys_algorithm(*root));
             }
 
             self.copy_remaining(start_offset, stack_map);
@@ -290,8 +303,7 @@ impl CompactingHeap {
             }
             for datum in object.get_fields_mut() {
                 if BuiltInTypes::is_heap_pointer(*datum) {
-                    let heap_object = HeapObject::from_tagged(*datum);
-                    *datum = self.copy_using_cheneys_algorithm(heap_object);
+                    *datum = self.copy_using_cheneys_algorithm(*datum);
                 }
             }
             if object.get_type_id() == TYPE_ID_CONTINUATION as usize
@@ -306,6 +318,7 @@ impl CompactingHeap {
                         cont.original_sp(),
                         cont.original_fp(),
                         cont.prompt_stack_pointer(),
+                        cont.resume_address(),
                         stack_map,
                     );
                 });
@@ -321,19 +334,38 @@ impl CompactingHeap {
             return;
         }
 
-        // Process InvocationReturnPoint saved frames
+        // Process InvocationReturnPoint saved frames.
+        // These are single frames, not frame chains — use the return address for stack map lookup.
         for (_thread_id, rps) in runtime.invocation_return_points.iter_mut() {
             for rp in rps.iter_mut() {
                 if rp.saved_stack_frame.is_empty() {
                     continue;
                 }
-                self.gc_continuation_segment(
-                    &mut rp.saved_stack_frame,
+                // Collect roots from the saved frame
+                let mut roots = Vec::new();
+                ContinuationSegmentWalker::walk_saved_frame_roots(
+                    &rp.saved_stack_frame,
                     rp.stack_pointer,
                     rp.frame_pointer,
-                    rp.frame_pointer,
+                    rp.return_address,
                     stack_map,
+                    |offset, tagged_value| {
+                        roots.push((offset, tagged_value));
+                    },
                 );
+                // Copy objects and update pointers
+                let new_values: Vec<usize> = roots
+                    .iter()
+                    .map(|(_offset, tagged_value)| {
+                        self.copy_using_cheneys_algorithm(*tagged_value)
+                    })
+                    .collect();
+                for (i, (offset, _)) in roots.iter().enumerate() {
+                    unsafe {
+                        let ptr = rp.saved_stack_frame.as_mut_ptr().add(*offset) as *mut usize;
+                        *ptr = new_values[i];
+                    }
+                }
             }
         }
     }
@@ -351,8 +383,7 @@ impl CompactingHeap {
                 continue;
             }
             // Copy the object and update the pointer
-            let heap_object = HeapObject::from_tagged(*cont_ptr);
-            let new_ptr = self.copy_using_cheneys_algorithm(heap_object);
+            let new_ptr = self.copy_using_cheneys_algorithm(*cont_ptr);
             *cont_ptr = new_ptr;
         }
     }
@@ -363,6 +394,7 @@ impl CompactingHeap {
         original_sp: usize,
         original_fp: usize,
         prompt_sp: usize,
+        resume_address: usize,
         stack_map: &StackMap,
     ) {
         // Collect heap pointers and their offsets
@@ -372,6 +404,7 @@ impl CompactingHeap {
             original_sp,
             original_fp,
             prompt_sp,
+            resume_address,
             stack_map,
             |offset, tagged_value| {
                 roots.push((offset, tagged_value));
@@ -382,8 +415,7 @@ impl CompactingHeap {
         let new_values: Vec<usize> = roots
             .iter()
             .map(|(_offset, tagged_value)| {
-                let heap_object = HeapObject::from_tagged(*tagged_value);
-                self.copy_using_cheneys_algorithm(heap_object)
+                self.copy_using_cheneys_algorithm(*tagged_value)
             })
             .collect();
 

@@ -3930,6 +3930,9 @@ impl AstCompiler<'_> {
 
                 // After shift label - this is where we land when continuation (resume) is invoked
                 self.ir.write_label(after_shift);
+                // Record a GC safepoint at the resume point so the continuation segment walker
+                // can find stack map data for the innermost frame when scanning/updating pointers.
+                self.ir.record_gc_safepoint();
                 // The resumed value is in the continuation local
                 let resumed_value = self.ir.load_local(cont_local);
                 self.ir.assign(result_reg, resumed_value);

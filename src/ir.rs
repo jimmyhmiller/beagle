@@ -186,6 +186,7 @@ pub enum Instruction {
     LoadLabelAddress(Value, Label), // dest, label - loads the address of a label into a register
     CaptureContinuation(Value, Label, usize, usize), // dest, resume_label, result_local_index, builtin_fn_ptr
     ReturnFromShift(Value, Value, usize), // value, cont_ptr, builtin_fn_ptr - calls return_from_shift with current SP/FP
+    RecordGcSafepoint, // Record a GC safepoint at the current position (for continuation resume points)
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -428,7 +429,7 @@ impl Instruction {
                     vec![]
                 }
             }
-            Instruction::Breakpoint => {
+            Instruction::Breakpoint | Instruction::RecordGcSafepoint => {
                 vec![]
             }
             Instruction::Jump(_) => {
@@ -665,7 +666,7 @@ impl Instruction {
                 }
             }
 
-            Instruction::Jump(_) | Instruction::Breakpoint => {}
+            Instruction::Jump(_) | Instruction::Breakpoint | Instruction::RecordGcSafepoint => {}
             Instruction::PushExceptionHandler(_, value, _) => {
                 replace_register!(value, old_register, new_register);
             }
@@ -1435,6 +1436,9 @@ impl Ir {
             match instruction {
                 Instruction::Breakpoint => {
                     backend.breakpoint();
+                }
+                Instruction::RecordGcSafepoint => {
+                    backend.record_gc_safepoint();
                 }
                 Instruction::Label(_) => {}
                 Instruction::ExtendLifeTime(_) => {}
@@ -2539,6 +2543,10 @@ impl Ir {
     pub fn return_from_shift(&mut self, value: Value, cont_ptr: Value, builtin_fn: usize) {
         self.instructions
             .push(Instruction::ReturnFromShift(value, cont_ptr, builtin_fn));
+    }
+
+    pub fn record_gc_safepoint(&mut self) {
+        self.instructions.push(Instruction::RecordGcSafepoint);
     }
 
     pub fn load_string_constant(&mut self, string_constant: Value) -> Value {

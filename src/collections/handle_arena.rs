@@ -51,6 +51,13 @@ impl Handle {
     pub fn is_null(self) -> bool {
         self.get() == BuiltInTypes::null_value() as usize
     }
+
+    /// Get the shadow stack slot index for this handle.
+    /// Used internally for updating the handle value directly.
+    #[inline]
+    pub fn slot(self) -> usize {
+        self.slot
+    }
 }
 
 /// RAII scope guard for handle allocation.

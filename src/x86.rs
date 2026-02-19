@@ -1276,11 +1276,13 @@ impl LowLevelX86 {
                 inserted_instructions.push(instr);
             }
 
-            // CRITICAL FIX: Zero out local slots to prevent GC from seeing garbage.
-            // When GC runs during allocation (before a local is assigned), uninitialized
-            // local slots could contain interior pointers or other garbage from previous
-            // stack usage. Initialize all local slots to null (0x7, which is tagged null).
-            if self.max_locals > 0 {
+            // CRITICAL FIX: Zero out local and eval stack slots to prevent GC from
+            // seeing garbage. When GC runs, the stack walker scans all locals and
+            // the full eval stack area (max_stack_size). Uninitialized slots could
+            // contain stale pointers from previous stack usage or previous GC cycles.
+            // Initialize all local AND eval stack slots to null (0x7, tagged null).
+            let slots_to_zero = self.max_locals + self.max_stack_size;
+            if slots_to_zero > 0 {
                 let null_value = BuiltInTypes::null_value() as i32;
 
                 // Load null value into R11 (caller-saved, safe to use)
@@ -1289,8 +1291,8 @@ impl LowLevelX86 {
                     imm: null_value,
                 });
 
-                // Store null to each local slot at [RBP - (i+1)*8]
-                for i in 0..self.max_locals {
+                // Store null to each local and eval stack slot at [RBP - (i+1)*8]
+                for i in 0..slots_to_zero {
                     inserted_instructions.push(X86Asm::MovMR {
                         base: RBP,
                         offset: -((i + 1) * 8),

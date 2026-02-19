@@ -237,6 +237,7 @@ impl StackWalker {
 
         unsafe { std::slice::from_raw_parts_mut(frame_pointer as *mut usize, num_words) }
     }
+
 }
 
 #[cfg(test)]

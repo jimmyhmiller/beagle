@@ -563,23 +563,29 @@ unsafe impl Send for CallbackInfo {}
 unsafe impl Sync for CallbackInfo {}
 
 pub struct ThreadState {
-    pub paused_threads: usize,
-    /// (stack_base, frame_pointer, gc_return_addr) for each paused thread
-    pub stack_pointers: Vec<(usize, usize, usize)>,
+    /// (stack_base, frame_pointer, gc_return_addr) for each paused thread, keyed by ThreadId.
+    /// Using HashMap ensures each thread has exactly one entry and unpause removes the correct one.
+    pub stack_pointers: HashMap<ThreadId, (usize, usize, usize)>,
     // TODO: I probably don't want to do this here. This requires taking a mutex
     // not really ideal for c calls.
     pub c_calling_stack_pointers: HashMap<ThreadId, (usize, usize, usize)>,
 }
 
 impl ThreadState {
+    pub fn paused_threads(&self) -> usize {
+        self.stack_pointers.len()
+    }
+
     pub fn pause(&mut self, stack_pointer: (usize, usize, usize)) {
-        self.paused_threads += 1;
-        self.stack_pointers.push(stack_pointer);
+        let thread_id = thread::current().id();
+        let prev = self.stack_pointers.insert(thread_id, stack_pointer);
+        debug_assert!(prev.is_none(), "Thread {:?} double-paused", thread_id);
     }
 
     pub fn unpause(&mut self) {
-        self.paused_threads -= 1;
-        self.stack_pointers.pop();
+        let thread_id = thread::current().id();
+        let removed = self.stack_pointers.remove(&thread_id);
+        debug_assert!(removed.is_some(), "Thread {:?} not paused", thread_id);
     }
 
     pub fn register_c_call(&mut self, stack_pointer: (usize, usize, usize)) {
@@ -3702,8 +3708,7 @@ impl Runtime {
             gc_lock: Mutex::new(()),
             thread_state: Arc::new((
                 Mutex::new(ThreadState {
-                    paused_threads: 0,
-                    stack_pointers: vec![],
+                    stack_pointers: HashMap::new(),
                     c_calling_stack_pointers: HashMap::new(),
                 }),
                 Condvar::new(),
@@ -4820,7 +4825,7 @@ impl Runtime {
             .load(std::sync::atomic::Ordering::Acquire);
         let mut threads_to_wait_for = registered_count.saturating_sub(1);
 
-        while thread_state.paused_threads + thread_state.c_calling_stack_pointers.len()
+        while thread_state.paused_threads() + thread_state.c_calling_stack_pointers.len()
             < threads_to_wait_for
         {
             // Use wait_timeout to avoid infinite blocking
@@ -4837,7 +4842,7 @@ impl Runtime {
         }
 
         // Fire USDT probe - all threads are now paused
-        let num_paused = thread_state.paused_threads + thread_state.c_calling_stack_pointers.len();
+        let num_paused = thread_state.paused_threads() + thread_state.c_calling_stack_pointers.len();
         let total_threads = self
             .registered_thread_count
             .load(std::sync::atomic::Ordering::Acquire)
@@ -4849,7 +4854,7 @@ impl Runtime {
         // and don't have a valid stack to scan.
         let mut stack_pointers: Vec<(usize, usize, usize)> = thread_state
             .stack_pointers
-            .iter()
+            .values()
             .copied()
             .filter(|(base, _fp, _gc_ret)| *base != 0)
             .collect();
@@ -4930,7 +4935,7 @@ impl Runtime {
         let mut thread_state = lock
             .lock()
             .expect("Failed to lock thread state after GC - this is a fatal error");
-        while thread_state.paused_threads > 0 {
+        while thread_state.paused_threads() > 0 {
             let (state, timeout) = cvar
                 .wait_timeout(thread_state, Duration::from_millis(1))
                 .expect(
@@ -5202,16 +5207,6 @@ impl Runtime {
             return Err("Namespaces atom not initialized".into());
         }
 
-        // Validate pointer is properly aligned
-        let untagged = BuiltInTypes::untag(atom_ptr);
-        if !untagged.is_multiple_of(8) {
-            return Err(format!(
-                "Namespaces atom pointer is corrupted (misaligned): {:#x}",
-                atom_ptr
-            )
-            .into());
-        }
-
         // Deref atom to get the current map
         let atom = HeapObject::from_tagged(atom_ptr);
         let map_ptr = atom.get_field(0);
@@ -5235,6 +5230,7 @@ impl Runtime {
             .unwrap_or(GLOBAL_BLOCK_FREE_SLOT);
         let atom = HeapObject::from_tagged(atom_ptr);
         let new_map_tagged = new_map.as_tagged();
+
         atom.write_field(0, new_map_tagged);
 
         // Write barrier: notify GC that an old gen object (atom) may now point to young gen (new_map)
@@ -5807,6 +5803,21 @@ impl Runtime {
         self.memory.threads.push(thread.thread().clone());
         self.memory.join_handles.push(thread);
 
+        // Register the child thread with GC BEFORE releasing gc_lock.
+        // This prevents a race where threads.len() > 1 but registered_thread_count
+        // hasn't been incremented yet. In that window, GC would use the multi-thread
+        // path but calculate threads_to_wait_for = 0, proceeding without scanning
+        // the child's stack. By incrementing registered_thread_count and registering
+        // the child as c_calling (with null stack), GC will correctly count it.
+        // The child's run_thread will transition from c_calling to active Beagle thread.
+        self.registered_thread_count
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+        {
+            let (lock, condvar) = &*self.thread_state.clone();
+            let mut state = lock.lock().unwrap();
+            state.c_calling_stack_pointers.insert(thread_id, (0, 0, 0));
+            condvar.notify_one();
+        }
         // Release gc_lock before allocating GlobalObject
         drop(gc_lock);
 

@@ -532,6 +532,9 @@ impl PrettyPrint for Instruction {
                     cont_ptr.pretty_print()
                 )
             }
+            Instruction::RecordGcSafepoint => {
+                "record_gc_safepoint".to_string()
+            }
         }
     }
 }
