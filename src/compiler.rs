@@ -110,7 +110,28 @@ impl fmt::Display for CompileError {
             CompileError::MemoryMapping(msg) => write!(f, "Memory mapping error: {}", msg),
             CompileError::ParseError(e) => write!(f, "Parse error: {}", e),
             CompileError::FunctionNotFound { function_name } => {
-                write!(f, "Function not found: {}", function_name)
+                write!(f, "Function not found: {}", function_name)?;
+                // Check if this looks like subtraction written without spaces
+                if let Some(dash_pos) = function_name.find('-') {
+                    let left = &function_name[..dash_pos];
+                    let right = &function_name[dash_pos + 1..];
+                    if !left.is_empty()
+                        && !right.is_empty()
+                        && left.chars().next().map_or(false, |c| c.is_alphanumeric())
+                        && right
+                            .chars()
+                            .next()
+                            .map_or(false, |c| c.is_alphanumeric() || c == '-')
+                    {
+                        write!(
+                            f,
+                            "\n  hint: did you mean `{} - {}`? Subtraction requires spaces around `-`",
+                            left,
+                            &function_name[dash_pos + 1..]
+                        )?;
+                    }
+                }
+                Ok(())
             }
             CompileError::InvalidFunctionPointer { function_name } => {
                 write!(f, "Invalid function pointer for: {}", function_name)
@@ -119,7 +140,28 @@ impl fmt::Display for CompileError {
                 write!(f, "Failed to convert path to string: {}", path)
             }
             CompileError::UndefinedVariable { name } => {
-                write!(f, "Undefined variable: {}", name)
+                write!(f, "Undefined variable: {}", name)?;
+                // Check if this looks like subtraction written without spaces
+                if let Some(dash_pos) = name.find('-') {
+                    let left = &name[..dash_pos];
+                    let right = &name[dash_pos + 1..];
+                    if !left.is_empty()
+                        && !right.is_empty()
+                        && left.chars().next().map_or(false, |c| c.is_alphanumeric())
+                        && right
+                            .chars()
+                            .next()
+                            .map_or(false, |c| c.is_alphanumeric() || c == '-')
+                    {
+                        write!(
+                            f,
+                            "\n  hint: did you mean `{} - {}`? Subtraction requires spaces around `-`",
+                            left,
+                            &name[dash_pos + 1..]
+                        )?;
+                    }
+                }
+                Ok(())
             }
             CompileError::GlobalMutableVariable => {
                 write!(f, "Cannot create mutable variable in global scope")
