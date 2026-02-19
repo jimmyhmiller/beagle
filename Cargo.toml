@@ -1,9 +1,13 @@
 [package]
-name = "main"
+name = "beagle-lang"
 version = "0.1.0"
 edition = "2024"
 build = "build.rs"
-default-run = "main"
+default-run = "beag"
+
+[[bin]]
+name = "beag"
+path = "src/main.rs"
 
 
 [profile.release-with-debug]

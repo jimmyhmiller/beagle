@@ -538,6 +538,58 @@ impl Compiler {
         Ok(top_levels_to_run)
     }
 
+    pub fn compile_source(
+        &mut self,
+        name: &str,
+        source: &str,
+    ) -> Result<Vec<String>, Box<dyn Error>> {
+        if self.compiled_file_cache.contains(name) {
+            if self.command_line_arguments.verbose {
+                println!("Already compiled {:?}", name);
+            }
+            return Ok(vec![]);
+        }
+
+        if self.command_line_arguments.verbose {
+            println!("Compiling {:?} (from embedded source)", name);
+        }
+
+        let parse_time = std::time::Instant::now();
+        let mut parser = Parser::new(name.to_string(), source.to_string())?;
+        let ast = parser.parse()?;
+        let token_line_column_map = parser.get_token_line_column_map();
+
+        if self.command_line_arguments.print_parse {
+            println!("{:#?}", ast);
+        }
+
+        if self.command_line_arguments.print_ast {
+            println!("{:#?}", ast);
+        }
+
+        if self.command_line_arguments.show_times {
+            println!("Parse time: {:?}", parse_time.elapsed());
+        }
+
+        let mut top_levels_to_run = self.compile_dependencies(&ast, name)?;
+
+        let (top_level, diagnostics) = self.compile_ast(ast, None, name, token_line_column_map)?;
+        if let Some(top_level) = top_level {
+            top_levels_to_run.push(top_level);
+        }
+
+        if let Ok(mut store) = self.diagnostic_store.lock() {
+            store.set_file_diagnostics(name.to_string(), diagnostics);
+        }
+
+        if self.command_line_arguments.verbose {
+            println!("Done compiling {:?}", name);
+        }
+        self.code_allocator.make_executable();
+        self.compiled_file_cache.insert(name.to_string());
+        Ok(top_levels_to_run)
+    }
+
     pub fn compile_dependencies(
         &mut self,
         ast: &crate::ast::Ast,
@@ -1316,6 +1368,7 @@ impl fmt::Debug for Compiler {
 pub enum CompilerMessage {
     CompileString(String),
     CompileFile(String),
+    CompileSource(String, String),
     AddFunctionMarkExecutable(String, Vec<u8>, usize, usize),
     CompileProtocolMethod(String, String, Vec<ProtocolMethodInfo>),
     SetPauseAtomPointer(usize),
@@ -1397,6 +1450,17 @@ impl CompilerThread {
                     }
                     CompilerMessage::CompileFile(file_name) => {
                         match self.compiler.compile(&file_name) {
+                            Ok(top_levels) => {
+                                work_done.mark_done(CompilerResponse::FunctionsToRun(top_levels));
+                            }
+                            Err(e) => {
+                                work_done
+                                    .mark_done(CompilerResponse::CompileError(format!("{}", e)));
+                            }
+                        }
+                    }
+                    CompilerMessage::CompileSource(name, source) => {
+                        match self.compiler.compile_source(&name, &source) {
                             Ok(top_levels) => {
                                 work_done.mark_done(CompilerResponse::FunctionsToRun(top_levels));
                             }

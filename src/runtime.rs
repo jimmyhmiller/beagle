@@ -4004,6 +4004,32 @@ impl Runtime {
         }
     }
 
+    pub fn compile_source(
+        &mut self,
+        name: &str,
+        source: &str,
+    ) -> Result<Vec<String>, Box<dyn Error>> {
+        let response = self
+            .compiler_channel
+            .as_ref()
+            .expect("Compiler channel not initialized - this is a fatal error")
+            .send(CompilerMessage::CompileSource(
+                name.to_string(),
+                source.to_string(),
+            ));
+        match response {
+            CompilerResponse::FunctionsToRun(functions) => Ok(functions),
+            CompilerResponse::CompileError(msg) => {
+                eprintln!("Compile error: {}", msg);
+                Err(format!("Error compiling: {}", msg).into())
+            }
+            _ => {
+                eprintln!("Unexpected compiler response");
+                Err("Error compiling".into())
+            }
+        }
+    }
+
     pub fn compile_string(&mut self, _string: &str) -> Result<usize, Box<dyn Error>> {
         let response = self
             .compiler_channel

@@ -29,8 +29,15 @@ fn main() {
 
     copy_recursively(&source_dir, &dest_dir).unwrap();
 
-    // Inform Cargo to rerun the build script if anything in the resources folder changes
-    // println!("cargo:rerun-if-changed=resources");
+    // Also copy standard-library/ next to the binary for development
+    let stdlib_source = PathBuf::from("standard-library");
+    let stdlib_dest = target_dir.join("standard-library");
+    if stdlib_source.exists() {
+        if let Err(e) = fs::create_dir_all(&stdlib_dest) {
+            panic!("Failed to create stdlib destination directory: {}", e);
+        }
+        copy_recursively(&stdlib_source, &stdlib_dest).unwrap();
+    }
 }
 
 // Helper function to recursively copy files

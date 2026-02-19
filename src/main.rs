@@ -27,6 +27,27 @@ use runtime::{DefaultPrinter, Printer, Runtime, TestPrinter};
 
 use std::{cell::UnsafeCell, env, error::Error, sync::OnceLock, time::Instant};
 
+mod embedded_stdlib {
+    pub fn get(name: &str) -> Option<&'static str> {
+        match name {
+            "std.bg" => Some(include_str!("../standard-library/std.bg")),
+            "beagle.ffi.bg" => Some(include_str!("../standard-library/beagle.ffi.bg")),
+            "beagle.io.bg" => Some(include_str!("../standard-library/beagle.io.bg")),
+            "beagle.effect.bg" => Some(include_str!("../standard-library/beagle.effect.bg")),
+            "beagle.async.bg" => Some(include_str!("../standard-library/beagle.async.bg")),
+            "beagle.fs.bg" => Some(include_str!("../standard-library/beagle.fs.bg")),
+            "beagle.timer.bg" => Some(include_str!("../standard-library/beagle.timer.bg")),
+            "beagle.socket.bg" => Some(include_str!("../standard-library/beagle.socket.bg")),
+            "beagle.stream.bg" => Some(include_str!("../standard-library/beagle.stream.bg")),
+            "beagle.repl-session.bg" => {
+                Some(include_str!("../standard-library/beagle.repl-session.bg"))
+            }
+            "beagle.repl.bg" => Some(include_str!("../standard-library/beagle.repl.bg")),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(not(any(
     feature = "backend-x86-64",
     all(target_arch = "x86_64", not(feature = "backend-arm64"))
@@ -1027,9 +1048,18 @@ fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Erro
     }
 
     for file_name in stdlib_files {
-        let file_path = find_stdlib_file(file_name)?;
-        let top_levels = runtime.compile(&file_path)?;
-        all_top_levels.extend(top_levels);
+        match find_stdlib_file(file_name) {
+            Ok(file_path) => {
+                let top_levels = runtime.compile(&file_path)?;
+                all_top_levels.extend(top_levels);
+            }
+            Err(_) => {
+                let source = embedded_stdlib::get(file_name)
+                    .ok_or_else(|| format!("Could not find stdlib file: {}", file_name))?;
+                let top_levels = runtime.compile_source(file_name, source)?;
+                all_top_levels.extend(top_levels);
+            }
+        }
     }
 
     Ok(all_top_levels)
@@ -1085,7 +1115,118 @@ fn find_stdlib_file(file_name: &str) -> Result<String, Box<dyn Error>> {
     Err(format!("Could not find standard library file: {}", file_name).into())
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+// --- New user-facing CLI ---
+
+#[derive(ClapParser, Debug)]
+#[command(
+    name = "beag",
+    version,
+    about = "The Beagle programming language",
+    long_about = "Beagle is a dynamically-typed, functional programming language that compiles directly to native machine code."
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum Commands {
+    /// Run a Beagle program
+    Run(RunArgs),
+    /// Start the interactive REPL
+    Repl,
+    /// Initialize a new Beagle project
+    Init(InitArgs),
+    /// Run tests in the current project
+    Test(TestArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct RunArgs {
+    /// The .bg file to run
+    file: String,
+    /// Arguments to pass to the program's main(args) function
+    #[clap(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct InitArgs {
+    /// Project name (defaults to current directory name)
+    name: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct TestArgs {
+    /// Specific test file to run (runs all tests if omitted)
+    file: Option<String>,
+}
+
+impl CommandLineArguments {
+    fn for_run(file: String, args: Vec<String>) -> Self {
+        Self {
+            program: Some(file),
+            program_args: args,
+            show_times: false,
+            show_gc_times: false,
+            print_ast: false,
+            no_gc: false,
+            gc_always: false,
+            all_tests: false,
+            test: false,
+            debug: false,
+            verbose: false,
+            no_std: false,
+            print_parse: false,
+            print_builtin_calls: false,
+            repl: false,
+            export_docs: false,
+        }
+    }
+
+    fn for_repl() -> Self {
+        Self {
+            program: None,
+            program_args: vec![],
+            show_times: false,
+            show_gc_times: false,
+            print_ast: false,
+            no_gc: false,
+            gc_always: false,
+            all_tests: false,
+            test: false,
+            debug: false,
+            verbose: false,
+            no_std: false,
+            print_parse: false,
+            print_builtin_calls: false,
+            repl: true,
+            export_docs: false,
+        }
+    }
+}
+
+fn is_legacy_flag(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--all-tests"
+            | "--debug"
+            | "--print-ast"
+            | "--show-times"
+            | "--show-gc-times"
+            | "--no-gc"
+            | "--gc-always"
+            | "--test"
+            | "--verbose"
+            | "--no-std"
+            | "--print-parse"
+            | "--print-builtin-calls"
+            | "--export-docs"
+            | "--repl"
+    )
+}
+
+fn legacy_main() -> Result<(), Box<dyn Error>> {
     let args = CommandLineArguments::parse();
     if args.export_docs {
         export_docs(args)
@@ -1095,6 +1236,192 @@ fn main() -> Result<(), Box<dyn Error>> {
         run_repl(args)
     } else {
         main_inner(args)
+    }
+}
+
+fn cmd_init(init_args: InitArgs) -> Result<(), Box<dyn Error>> {
+    let project_name = match init_args.name {
+        Some(name) => {
+            std::fs::create_dir_all(&name)?;
+            std::env::set_current_dir(&name)?;
+            name
+        }
+        None => {
+            let cwd = std::env::current_dir()?;
+            cwd.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("my-project")
+                .to_string()
+        }
+    };
+
+    let toml_content = format!(
+        "[project]\nname = \"{}\"\nversion = \"0.1.0\"\n",
+        project_name
+    );
+    std::fs::write("beagle.toml", toml_content)?;
+
+    std::fs::create_dir_all("src")?;
+    std::fs::write(
+        "src/main.bg",
+        format!(
+            "namespace {}\n\nfn main() {{\n    println(\"Hello from {}!\")\n}}\n",
+            project_name.replace('-', "_"),
+            project_name,
+        ),
+    )?;
+
+    std::fs::create_dir_all("test")?;
+    std::fs::write(
+        "test/main_test.bg",
+        format!(
+            "namespace {}_test\n\nfn main() {{\n    println(\"ok\")\n}}\n\n// Expect\n// ok\n",
+            project_name.replace('-', "_"),
+        ),
+    )?;
+
+    println!("Created new Beagle project: {}", project_name);
+    println!();
+    println!("  beagle.toml");
+    println!("  src/main.bg");
+    println!("  test/main_test.bg");
+    println!();
+    println!("Run your project:");
+    println!("  beag run src/main.bg");
+    Ok(())
+}
+
+fn cmd_test(test_args: TestArgs) -> Result<(), Box<dyn Error>> {
+    // Find test files
+    let test_dir = if std::path::Path::new("test").is_dir() {
+        "test"
+    } else if std::path::Path::new("tests").is_dir() {
+        "tests"
+    } else {
+        return Err("No test/ or tests/ directory found. Create one with .bg test files.".into());
+    };
+
+    let mut test_files: Vec<std::path::PathBuf> = vec![];
+
+    if let Some(file) = test_args.file {
+        let path = std::path::PathBuf::from(&file);
+        if !path.exists() {
+            return Err(format!("Test file not found: {}", file).into());
+        }
+        test_files.push(path);
+    } else {
+        // Discover all .bg files with // Expect in the test directory
+        for entry in std::fs::read_dir(test_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("bg") {
+                let content = std::fs::read_to_string(&path)?;
+                if content.contains("// Expect") {
+                    test_files.push(path);
+                }
+            }
+        }
+        test_files.sort();
+    }
+
+    if test_files.is_empty() {
+        println!("No test files found in {}/", test_dir);
+        return Ok(());
+    }
+
+    // Run each test file using the existing test infrastructure
+    let mut passed = 0;
+    let mut failed = 0;
+    let mut skipped = 0;
+
+    for test_file in &test_files {
+        let file_str = test_file.to_str().unwrap();
+        let source = std::fs::read_to_string(test_file)?;
+
+        if source.contains("// Skip") {
+            let skip_reason = source
+                .lines()
+                .find(|l| l.contains("// Skip"))
+                .and_then(|l| l.split("// Skip:").nth(1))
+                .map(|r| r.trim().to_string());
+            println!(
+                "  skip  {}{}",
+                file_str,
+                skip_reason.map_or(String::new(), |r| format!(" ({})", r))
+            );
+            skipped += 1;
+            continue;
+        }
+
+        // Run the test in a subprocess to isolate runtime state
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args(["--test", file_str])
+            .output()?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        if output.status.success() {
+            println!("  pass  {}", file_str);
+            passed += 1;
+        } else {
+            println!("  FAIL  {}", file_str);
+            if !stderr.is_empty() {
+                for line in stderr.lines() {
+                    println!("        {}", line);
+                }
+            }
+            if !stdout.is_empty() {
+                for line in stdout.lines() {
+                    println!("        {}", line);
+                }
+            }
+            failed += 1;
+        }
+    }
+
+    println!();
+    println!(
+        "{} passed, {} failed, {} skipped ({} total)",
+        passed,
+        failed,
+        skipped,
+        test_files.len()
+    );
+
+    if failed > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let raw_args: Vec<String> = std::env::args().collect();
+
+    // Legacy dev mode: --flag as first real argument
+    if raw_args.len() > 1 && raw_args[1].starts_with("--") && is_legacy_flag(&raw_args[1]) {
+        return legacy_main();
+    }
+
+    // Bare file: beag file.bg [args...]
+    if raw_args.len() > 1 && raw_args[1].ends_with(".bg") {
+        let args = CommandLineArguments::for_run(raw_args[1].clone(), raw_args[2..].to_vec());
+        return main_inner(args);
+    }
+
+    // Subcommand mode
+    let cli = Cli::parse();
+    match cli.command {
+        Commands::Run(run_args) => {
+            let args = CommandLineArguments::for_run(run_args.file, run_args.args);
+            main_inner(args)
+        }
+        Commands::Repl => {
+            let args = CommandLineArguments::for_repl();
+            run_repl(args)
+        }
+        Commands::Init(init_args) => cmd_init(init_args),
+        Commands::Test(test_args) => cmd_test(test_args),
     }
 }
 
