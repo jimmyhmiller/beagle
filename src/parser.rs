@@ -377,6 +377,9 @@ pub struct Tokenizer {
     pub position: usize,
     pub line: usize,
     pub column: usize,
+    /// Tracks the last non-whitespace token for context-aware tokenization
+    /// (e.g., distinguishing binary minus from negative number literals)
+    last_significant_token: Option<Token>,
 }
 
 impl Default for Tokenizer {
@@ -422,6 +425,33 @@ impl Tokenizer {
             position: 0,
             line: 1,
             column: 1,
+            last_significant_token: None,
+        }
+    }
+
+    /// Returns true if the last significant (non-whitespace) token is one that
+    /// produces a value. Used to disambiguate binary minus from negative number
+    /// literals: after a value, `-` is binary minus; otherwise it starts a
+    /// negative number or is unary minus.
+    fn last_token_is_value_producing(&self) -> bool {
+        match &self.last_significant_token {
+            Some(token) => matches!(
+                token,
+                Token::Integer(_)
+                    | Token::Float(_)
+                    | Token::Atom(_)
+                    | Token::String(_)
+                    | Token::InterpolatedString(_)
+                    | Token::CloseParen
+                    | Token::CloseBracket
+                    | Token::CloseCurly
+                    | Token::True
+                    | Token::False
+                    | Token::Null
+                    | Token::Infinity
+                    | Token::NegativeInfinity
+            ),
+            None => false,
         }
     }
 
@@ -642,9 +672,6 @@ impl Tokenizer {
             || (self.current_byte(input_bytes) == PERIOD
                 && self.peek(input_bytes).unwrap_or(0) >= ZERO
                 && self.peek(input_bytes).unwrap_or(0) <= NINE)
-            || (self.current_byte(input_bytes) == NEGATIVE
-                && self.peek(input_bytes).unwrap_or(0) >= ZERO
-                && self.peek(input_bytes).unwrap_or(0) <= NINE)
     }
 
     /// Check if a byte is a valid hex digit
@@ -664,6 +691,11 @@ impl Tokenizer {
 
     pub fn parse_number(&mut self, input_bytes: &[u8]) -> Result<Token, ParseError> {
         let start = self.position;
+
+        // Consume leading minus sign for negative numbers
+        if self.current_byte(input_bytes) == NEGATIVE {
+            self.consume(input_bytes);
+        }
 
         // Check for radix prefixes: 0x (hex), 0o (octal), 0b (binary)
         if self.current_byte(input_bytes) == ZERO {
@@ -867,6 +899,31 @@ impl Tokenizer {
         } else if self.is_close_paren(input_bytes) {
             self.consume(input_bytes);
             Token::CloseParen
+        } else if self.current_byte(input_bytes) == b'-' {
+            // Context-aware: after a value, `-` is binary minus;
+            // otherwise it starts a negative number or is unary minus.
+            if self.last_token_is_value_producing() {
+                self.consume(input_bytes);
+                Token::Minus
+            } else if self.position + 9 <= input_bytes.len()
+                && &input_bytes[self.position..self.position + 9] == b"-infinity"
+                && (self.position + 9 >= input_bytes.len()
+                    || !(input_bytes[self.position + 9].is_ascii_alphanumeric()
+                        || input_bytes[self.position + 9] == b'_'))
+            {
+                for _ in 0..9 {
+                    self.consume(input_bytes);
+                }
+                Token::NegativeInfinity
+            } else if self
+                .peek(input_bytes)
+                .is_some_and(|b| b >= ZERO && b <= NINE)
+            {
+                self.parse_number(input_bytes)?
+            } else {
+                self.consume(input_bytes);
+                Token::Minus
+            }
         } else if self.is_valid_number_char(input_bytes) {
             self.parse_number(input_bytes)?
         } else if self.is_quote(input_bytes) {
@@ -951,10 +1008,82 @@ impl Tokenizer {
             } else {
                 Token::Not
             }
+        } else if self.current_byte(input_bytes) == b'+' {
+            self.consume(input_bytes);
+            if !self.at_end(input_bytes) && self.current_byte(input_bytes) == b'+' {
+                self.consume(input_bytes);
+                Token::Concat // ++
+            } else {
+                Token::Plus // +
+            }
+        } else if self.current_byte(input_bytes) == b'*' {
+            self.consume(input_bytes);
+            Token::Mul
+        } else if self.current_byte(input_bytes) == b'/' {
+            self.consume(input_bytes);
+            Token::Div
+        } else if self.current_byte(input_bytes) == b'%' {
+            self.consume(input_bytes);
+            Token::Modulo
+        } else if self.current_byte(input_bytes) == b'<' {
+            self.consume(input_bytes);
+            if !self.at_end(input_bytes) && self.current_byte(input_bytes) == b'=' {
+                self.consume(input_bytes);
+                Token::LessThanOrEqual // <=
+            } else if !self.at_end(input_bytes) && self.current_byte(input_bytes) == b'<' {
+                self.consume(input_bytes);
+                Token::ShiftLeft // <<
+            } else {
+                Token::LessThan // <
+            }
+        } else if self.current_byte(input_bytes) == b'>' {
+            self.consume(input_bytes);
+            if !self.at_end(input_bytes) && self.current_byte(input_bytes) == b'=' {
+                self.consume(input_bytes);
+                Token::GreaterThanOrEqual // >=
+            } else if !self.at_end(input_bytes) && self.current_byte(input_bytes) == b'>' {
+                self.consume(input_bytes);
+                if !self.at_end(input_bytes) && self.current_byte(input_bytes) == b'>' {
+                    self.consume(input_bytes);
+                    Token::ShiftRightZero // >>>
+                } else {
+                    Token::ShiftRight // >>
+                }
+            } else {
+                Token::GreaterThan // >
+            }
+        } else if self.current_byte(input_bytes) == b'=' {
+            self.consume(input_bytes);
+            if !self.at_end(input_bytes) && self.current_byte(input_bytes) == b'=' {
+                self.consume(input_bytes);
+                Token::EqualEqual // ==
+            } else if !self.at_end(input_bytes) && self.current_byte(input_bytes) == b'>' {
+                self.consume(input_bytes);
+                Token::Arrow // =>
+            } else {
+                Token::Equal // =
+            }
+        } else if self.current_byte(input_bytes) == b'&' {
+            self.consume(input_bytes);
+            if !self.at_end(input_bytes) && self.current_byte(input_bytes) == b'&' {
+                self.consume(input_bytes);
+                Token::And // &&
+            } else {
+                Token::BitWiseAnd // &
+            }
+        } else if self.current_byte(input_bytes) == b'^' {
+            self.consume(input_bytes);
+            Token::BitWiseXor
         } else {
-            // println!("identifier");
             self.parse_identifier(input_bytes)
         };
+        // Track last significant token for context-aware tokenization
+        match &result {
+            Token::Spaces(_) | Token::NewLine | Token::Comment(_) => {}
+            _ => {
+                self.last_significant_token = Some(result.clone());
+            }
+        }
         Ok(Some(result))
     }
 
@@ -1292,6 +1421,25 @@ impl Parser {
                 };
                 Ok(Some(Ast::Not {
                     expr: Box::new(expr),
+                    token_range,
+                }))
+            }
+            Token::Minus => {
+                // Unary minus: -expr is compiled as (0 - expr)
+                let start = self.position;
+                self.consume(); // consume the '-'
+                let expr = self.parse_expression(99, true, false)?.ok_or_else(|| {
+                    ParseError::UnexpectedEof {
+                        expected: "expression after '-'".to_string(),
+                    }
+                })?;
+                let token_range = TokenRange {
+                    start,
+                    end: self.position,
+                };
+                Ok(Some(Ast::Sub {
+                    left: Box::new(Ast::IntegerLiteral(0, start)),
+                    right: Box::new(expr),
                     token_range,
                 }))
             }
