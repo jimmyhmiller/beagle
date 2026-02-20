@@ -86,7 +86,7 @@ fn main() {
     ""
 }
 
-// Expect
+// @beagle.core.snapshot
 // lines tests:
 // lines('hello\nworld\ntest'):
 // [ "hello", "world", "test" ]

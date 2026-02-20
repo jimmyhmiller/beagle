@@ -62,7 +62,7 @@ fn main() {
     ""
 }
 
-// Expect
+// @beagle.core.snapshot
 // tan tests:
 // tan(0.0): pass
 // tan(PI/4): pass

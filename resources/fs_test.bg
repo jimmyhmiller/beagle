@@ -87,7 +87,7 @@ fn main() {
     println("Done!")
 }
 
-// Expect
+// @beagle.core.snapshot
 // Testing fs/write-file...
 // Write OK, bytes: 21
 // Testing fs/read-file...

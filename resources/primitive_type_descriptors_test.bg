@@ -36,7 +36,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Int
 // String
 // Float

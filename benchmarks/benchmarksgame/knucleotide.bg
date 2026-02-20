@@ -9,7 +9,7 @@ use beagle.ffi as ffi
 use beagle.io as io
 use beagle.builtin as builtin
 use beagle.collections as c
-use raw-mutable-array as arr
+use beagle.mutable-array as arr
 
 let READ_CHUNK = 65536
 

@@ -69,7 +69,7 @@ fn main() {
     println("Final result:", result)
 }
 
-// Expect
+// @beagle.core.snapshot
 // === Async Future Basic Test ===
 // Test 1: Basic async/await
 // Result: 42

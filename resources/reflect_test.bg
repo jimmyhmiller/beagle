@@ -83,7 +83,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Int
 // Float
 // Bool

@@ -61,7 +61,7 @@ fn main() {
     result
 }
 
-// Expect
+// @beagle.core.snapshot
 // Starting GC stress test with vec operations...
 // Total sum: 5050000
 // Success!

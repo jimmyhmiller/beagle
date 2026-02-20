@@ -1,7 +1,7 @@
 namespace bounds_checking_test
 
 
-use raw-mutable-array as raw
+use beagle.mutable-array as raw
 struct Point {
     x
     y
@@ -183,7 +183,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // === Testing valid array access ===
 // 1
 // 2

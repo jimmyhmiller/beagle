@@ -9,5 +9,5 @@ fn main() {
     println(x())
 }
 
-// Expect
+// @beagle.core.snapshot
 // 2

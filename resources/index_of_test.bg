@@ -71,7 +71,7 @@ fn main() {
     ""
 }
 
-// Expect
+// @beagle.core.snapshot
 // index-of tests:
 // index-of 'hello world' for 'world':
 // 6

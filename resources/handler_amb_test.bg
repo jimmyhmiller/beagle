@@ -42,7 +42,7 @@ fn main() {
     println("=== Test Complete ===")
 }
 
-// Expect
+// @beagle.core.snapshot
 // === Amb Effect Test ===
 // Flipped: true
 // Flipped: false

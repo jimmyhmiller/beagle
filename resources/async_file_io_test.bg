@@ -61,7 +61,7 @@ fn main() {
     println("Done!")
 }
 
-// Expect
+// @beagle.core.snapshot
 // Writing file...
 // Write OK, bytes:  26
 // Reading file...

@@ -27,7 +27,7 @@ use runtime::{DefaultPrinter, Printer, Runtime, TestPrinter};
 
 use std::{cell::UnsafeCell, env, error::Error, sync::OnceLock, time::Instant};
 
-mod embedded_stdlib {
+pub mod embedded_stdlib {
     pub fn get(name: &str) -> Option<&'static str> {
         match name {
             "std.bg" => Some(include_str!("../standard-library/std.bg")),
@@ -43,6 +43,10 @@ mod embedded_stdlib {
                 Some(include_str!("../standard-library/beagle.repl-session.bg"))
             }
             "beagle.repl.bg" => Some(include_str!("../standard-library/beagle.repl.bg")),
+            "beagle.spawn.bg" => Some(include_str!("../standard-library/beagle.spawn.bg")),
+            "beagle.mutable-array.bg" => {
+                Some(include_str!("../standard-library/beagle.mutable-array.bg"))
+            }
             _ => None,
         }
     }
@@ -984,44 +988,22 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
     }
 }
 
-#[derive(ClapParser, Debug, Clone)]
-#[command(version, about, long_about = None)]
-#[command(name = "beag")]
-#[command(bin_name = "beag")]
+#[derive(Debug, Clone)]
 pub struct CommandLineArguments {
     program: Option<String>,
-    /// Arguments to pass to the Beagle program's main(args) function
-    #[clap(trailing_var_arg = true, allow_hyphen_values = true)]
     program_args: Vec<String>,
-    #[clap(long, default_value = "false")]
     show_times: bool,
-    #[clap(long, default_value = "false")]
     show_gc_times: bool,
-    #[clap(long, default_value = "false")]
     print_ast: bool,
-    #[clap(long, default_value = "false")]
     no_gc: bool,
-    #[clap(long, default_value = "false")]
     gc_always: bool,
-    #[clap(long, default_value = "false")]
-    all_tests: bool,
-    #[clap(long, default_value = "false")]
     test: bool,
-    #[clap(long, default_value = "false")]
     debug: bool,
-    #[clap(long, default_value = "false")]
     verbose: bool,
-    #[clap(long, default_value = "false")]
     no_std: bool,
-    #[clap(long, default_value = "false")]
     print_parse: bool,
-    #[clap(long, default_value = "false")]
     print_builtin_calls: bool,
-    #[clap(long, default_value = "false")]
-    repl: bool,
-    /// Export all documentation to JSON and exit
-    #[clap(long, default_value = "false")]
-    export_docs: bool,
+    update_snapshots: bool,
 }
 
 fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Error>> {
@@ -1139,6 +1121,8 @@ enum Commands {
     Init(InitArgs),
     /// Run tests in the current project
     Test(TestArgs),
+    /// Export all documentation to JSON
+    ExportDocs,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1148,6 +1132,32 @@ struct RunArgs {
     /// Arguments to pass to the program's main(args) function
     #[clap(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
+    #[clap(long)]
+    show_times: bool,
+    #[clap(long)]
+    show_gc_times: bool,
+    #[clap(long)]
+    print_ast: bool,
+    #[clap(long)]
+    no_gc: bool,
+    #[clap(long)]
+    gc_always: bool,
+    #[clap(long)]
+    debug: bool,
+    #[clap(long)]
+    verbose: bool,
+    #[clap(long)]
+    no_std: bool,
+    #[clap(long)]
+    print_parse: bool,
+    #[clap(long)]
+    print_builtin_calls: bool,
+    /// Internal: run in test mode (used by `beag test` subprocesses)
+    #[clap(long, hide = true)]
+    test: bool,
+    /// Update snapshot expectations to match actual output
+    #[clap(long)]
+    update_snapshots: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1158,8 +1168,11 @@ struct InitArgs {
 
 #[derive(clap::Args, Debug)]
 struct TestArgs {
-    /// Specific test file to run (runs all tests if omitted)
-    file: Option<String>,
+    /// File or directory to test (defaults to test/ or tests/)
+    path: Option<String>,
+    /// Update snapshot expectations to match actual output
+    #[clap(long)]
+    update_snapshots: bool,
 }
 
 impl CommandLineArguments {
@@ -1172,19 +1185,17 @@ impl CommandLineArguments {
             print_ast: false,
             no_gc: false,
             gc_always: false,
-            all_tests: false,
             test: false,
             debug: false,
             verbose: false,
             no_std: false,
             print_parse: false,
             print_builtin_calls: false,
-            repl: false,
-            export_docs: false,
+            update_snapshots: false,
         }
     }
 
-    fn for_repl() -> Self {
+    fn default() -> Self {
         Self {
             program: None,
             program_args: vec![],
@@ -1193,49 +1204,33 @@ impl CommandLineArguments {
             print_ast: false,
             no_gc: false,
             gc_always: false,
-            all_tests: false,
             test: false,
             debug: false,
             verbose: false,
             no_std: false,
             print_parse: false,
             print_builtin_calls: false,
-            repl: true,
-            export_docs: false,
+            update_snapshots: false,
         }
     }
-}
 
-fn is_legacy_flag(arg: &str) -> bool {
-    matches!(
-        arg,
-        "--all-tests"
-            | "--debug"
-            | "--print-ast"
-            | "--show-times"
-            | "--show-gc-times"
-            | "--no-gc"
-            | "--gc-always"
-            | "--test"
-            | "--verbose"
-            | "--no-std"
-            | "--print-parse"
-            | "--print-builtin-calls"
-            | "--export-docs"
-            | "--repl"
-    )
-}
-
-fn legacy_main() -> Result<(), Box<dyn Error>> {
-    let args = CommandLineArguments::parse();
-    if args.export_docs {
-        export_docs(args)
-    } else if args.all_tests {
-        run_all_tests(args)
-    } else if args.repl {
-        run_repl(args)
-    } else {
-        main_inner(args)
+    fn from_run_args(run_args: RunArgs) -> Self {
+        Self {
+            program: Some(run_args.file),
+            program_args: run_args.args,
+            show_times: run_args.show_times,
+            show_gc_times: run_args.show_gc_times,
+            print_ast: run_args.print_ast,
+            no_gc: run_args.no_gc,
+            gc_always: run_args.gc_always,
+            test: run_args.test,
+            debug: run_args.debug,
+            verbose: run_args.verbose,
+            no_std: run_args.no_std,
+            print_parse: run_args.print_parse,
+            print_builtin_calls: run_args.print_builtin_calls,
+            update_snapshots: run_args.update_snapshots,
+        }
     }
 }
 
@@ -1275,7 +1270,7 @@ fn cmd_init(init_args: InitArgs) -> Result<(), Box<dyn Error>> {
     std::fs::write(
         "test/main_test.bg",
         format!(
-            "namespace {}_test\n\nfn main() {{\n    println(\"ok\")\n}}\n\n// Expect\n// ok\n",
+            "namespace {}_test\n\nfn main() {{\n    println(\"ok\")\n}}\n\n// @beagle.core.snapshot\n// ok\n",
             project_name.replace('-', "_"),
         ),
     )?;
@@ -1291,45 +1286,67 @@ fn cmd_init(init_args: InitArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn cmd_test(test_args: TestArgs) -> Result<(), Box<dyn Error>> {
-    // Find test files
-    let test_dir = if std::path::Path::new("test").is_dir() {
-        "test"
-    } else if std::path::Path::new("tests").is_dir() {
-        "tests"
-    } else {
-        return Err("No test/ or tests/ directory found. Create one with .bg test files.".into());
-    };
+fn discover_test_files(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>, Box<dyn Error>> {
+    let mut test_files = vec![];
+    discover_test_files_recursive(dir, &mut test_files)?;
+    test_files.sort();
+    Ok(test_files)
+}
 
-    let mut test_files: Vec<std::path::PathBuf> = vec![];
-
-    if let Some(file) = test_args.file {
-        let path = std::path::PathBuf::from(&file);
-        if !path.exists() {
-            return Err(format!("Test file not found: {}", file).into());
-        }
-        test_files.push(path);
-    } else {
-        // Discover all .bg files with // Expect in the test directory
-        for entry in std::fs::read_dir(test_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("bg") {
-                let content = std::fs::read_to_string(&path)?;
-                if content.contains("// Expect") {
-                    test_files.push(path);
-                }
+fn discover_test_files_recursive(
+    dir: &std::path::Path,
+    test_files: &mut Vec<std::path::PathBuf>,
+) -> Result<(), Box<dyn Error>> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            discover_test_files_recursive(&path, test_files)?;
+        } else if path.extension().and_then(|e| e.to_str()) == Some("bg") {
+            let content = std::fs::read_to_string(&path)?;
+            if content.contains("// @beagle.core.snapshot") || content.contains("test \"") {
+                test_files.push(path);
             }
         }
-        test_files.sort();
+    }
+    Ok(())
+}
+
+fn cmd_test(test_args: TestArgs) -> Result<(), Box<dyn Error>> {
+    let mut test_files: Vec<std::path::PathBuf> = vec![];
+
+    if let Some(ref path_str) = test_args.path {
+        let path = std::path::PathBuf::from(path_str);
+        if !path.exists() {
+            return Err(format!("Path not found: {}", path_str).into());
+        }
+        if path.is_dir() {
+            test_files = discover_test_files(&path)?;
+            if test_files.is_empty() {
+                println!("No test files found in {}", path_str);
+                return Ok(());
+            }
+        } else {
+            test_files.push(path);
+        }
+    } else {
+        // Default: look for test/ or tests/ directory
+        let test_dir = if std::path::Path::new("test").is_dir() {
+            "test"
+        } else if std::path::Path::new("tests").is_dir() {
+            "tests"
+        } else {
+            return Err(
+                "No test/ or tests/ directory found. Create one with .bg test files.".into(),
+            );
+        };
+        test_files = discover_test_files(std::path::Path::new(test_dir))?;
+        if test_files.is_empty() {
+            println!("No test files found in {}/", test_dir);
+            return Ok(());
+        }
     }
 
-    if test_files.is_empty() {
-        println!("No test files found in {}/", test_dir);
-        return Ok(());
-    }
-
-    // Run each test file using the existing test infrastructure
     let mut passed = 0;
     let mut failed = 0;
     let mut skipped = 0;
@@ -1353,31 +1370,39 @@ fn cmd_test(test_args: TestArgs) -> Result<(), Box<dyn Error>> {
             continue;
         }
 
-        // Run the test in a subprocess to isolate runtime state
-        let output = std::process::Command::new(std::env::current_exe()?)
-            .args(["--test", file_str])
-            .output()?;
+        let gc_always = source.contains("// gc-always");
+        let no_std = source.contains("// no-std");
+        let args = CommandLineArguments {
+            program: Some(file_str.to_string()),
+            program_args: vec![],
+            show_times: false,
+            show_gc_times: false,
+            print_ast: false,
+            no_gc: false,
+            gc_always,
+            test: true,
+            debug: false,
+            verbose: false,
+            no_std,
+            print_parse: false,
+            print_builtin_calls: false,
+            update_snapshots: test_args.update_snapshots,
+        };
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        if output.status.success() {
-            println!("  pass  {}", file_str);
-            passed += 1;
-        } else {
-            println!("  FAIL  {}", file_str);
-            if !stderr.is_empty() {
-                for line in stderr.lines() {
+        match main_inner(args) {
+            Ok(_) => {
+                println!("  pass  {}", file_str);
+                passed += 1;
+            }
+            Err(e) => {
+                println!("  FAIL  {}", file_str);
+                for line in e.to_string().lines() {
                     println!("        {}", line);
                 }
+                failed += 1;
             }
-            if !stdout.is_empty() {
-                for line in stdout.lines() {
-                    println!("        {}", line);
-                }
-            }
-            failed += 1;
         }
+        RUNTIME.get().unwrap().get_mut().reset();
     }
 
     println!();
@@ -1398,11 +1423,6 @@ fn cmd_test(test_args: TestArgs) -> Result<(), Box<dyn Error>> {
 fn main() -> Result<(), Box<dyn Error>> {
     let raw_args: Vec<String> = std::env::args().collect();
 
-    // Legacy dev mode: --flag as first real argument
-    if raw_args.len() > 1 && raw_args[1].starts_with("--") && is_legacy_flag(&raw_args[1]) {
-        return legacy_main();
-    }
-
     // Bare file: beag file.bg [args...]
     if raw_args.len() > 1 && raw_args[1].ends_with(".bg") {
         let args = CommandLineArguments::for_run(raw_args[1].clone(), raw_args[2..].to_vec());
@@ -1413,18 +1433,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Run(run_args) => {
-            let args = CommandLineArguments::for_run(run_args.file, run_args.args);
+            let args = CommandLineArguments::from_run_args(run_args);
             main_inner(args)
         }
         Commands::Repl => {
-            let args = CommandLineArguments::for_repl();
+            let args = CommandLineArguments::default();
             run_repl(args)
         }
         Commands::Init(init_args) => cmd_init(init_args),
         Commands::Test(test_args) => cmd_test(test_args),
+        Commands::ExportDocs => export_docs(CommandLineArguments::default()),
     }
 }
 
+#[cfg(test)]
 fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     for entry in std::fs::read_dir("resources")? {
         let entry = entry?;
@@ -1449,7 +1471,7 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
         let source: String = std::fs::read_to_string(path)?;
 
-        if !source.contains("// Expect") {
+        if !source.contains("// @beagle.core.snapshot") && !source.contains("test \"") {
             continue;
         }
 
@@ -1473,21 +1495,19 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         let gc_always = args.gc_always || source.contains("// gc-always");
         let args = CommandLineArguments {
             program: Some(path.to_string()),
-            program_args: vec![], // Tests don't receive extra args
+            program_args: vec![],
             show_times: args.show_times,
             show_gc_times: args.show_gc_times,
             print_ast: args.print_ast,
             no_gc: args.no_gc,
             gc_always,
-            all_tests: false,
             test: true,
             debug: args.debug,
             verbose: args.verbose,
             no_std: args.no_std,
             print_parse: args.print_parse,
             print_builtin_calls: args.print_builtin_calls,
-            repl: false,
-            export_docs: false,
+            update_snapshots: false,
         };
         main_inner(args)?;
         RUNTIME.get().unwrap().get_mut().reset();
@@ -1592,8 +1612,7 @@ fn run_repl(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
                         if function_pointer == 0 {
                             continue;
                         }
-                        let f: fn() -> usize = unsafe { std::mem::transmute(function_pointer) };
-                        let result = f();
+                        let result = runtime.call_via_trampoline(function_pointer);
                         runtime.println(result).unwrap();
                     }
                     Err(e) => {
@@ -1668,7 +1687,7 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     // TODO: This is very ad-hoc
     // I should make it real functionality later
     // but right now I just want something working
-    let has_expect = args.test && source.contains("// Expect");
+    let has_expect = args.test && source.contains("// @beagle.core.snapshot");
 
     let args_clone = args.clone();
 
@@ -1885,21 +1904,83 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     }
 
     if has_expect {
-        let source = std::fs::read_to_string(program)?;
-        let expected = get_expect(&source);
+        let source = std::fs::read_to_string(program.clone())?;
+        let expected = match get_expect(&source) {
+            Some(e) => e,
+            None => {
+                return Err(format!(
+                    "File '{}' was expected to have a // @beagle.core.snapshot marker but none was found",
+                    program
+                ).into());
+            }
+        };
         let expected = expected.trim();
         let printed = runtime.printer.get_output().join("").trim().to_string();
         if printed != expected {
-            println!("Expected: \n{}\n", expected);
-            println!("Got: \n{}\n", printed);
-            panic!("Test failed");
+            if args.update_snapshots {
+                update_snapshot(&program, &printed)?;
+            } else {
+                return Err(format!(
+                    "Snapshot mismatch:\nExpected:\n{}\nGot:\n{}",
+                    expected, printed
+                )
+                .into());
+            }
         }
-        println!("Test passed");
+    }
+
+    // Run test blocks if in test mode
+    if args.test {
+        let test_names = runtime.get_test_function_names();
+        if !test_names.is_empty() {
+            let mut test_passed = 0;
+            let mut test_failed = 0;
+            for test_name in &test_names {
+                // Extract the human-readable test name from __test_name__
+                let short = test_name.rsplit('/').next().unwrap_or(test_name);
+                let display_name = short
+                    .strip_prefix("__test_")
+                    .and_then(|s| s.strip_suffix("__"))
+                    .unwrap_or(short)
+                    .replace('_', " ");
+
+                // Compile a wrapper that calls the test function with try/catch
+                // Use the short function name since compile_string runs in the test's namespace
+                let short_fn_name = test_name.rsplit('/').next().unwrap_or(test_name);
+                let wrapper = format!(
+                    "try {{ {}(); \"__PASS__\" }} catch (e) {{ to-string(e) }}",
+                    short_fn_name
+                );
+                match runtime.compile_string(&wrapper) {
+                    Ok(fn_ptr) => {
+                        let result = runtime.call_via_trampoline(fn_ptr);
+                        let result_str = runtime.get_string(0, result);
+                        if result_str == "__PASS__" {
+                            println!("  test pass: {}", display_name);
+                            test_passed += 1;
+                        } else {
+                            println!("  test FAIL: {}", display_name);
+                            println!("        {}", result_str);
+                            test_failed += 1;
+                        }
+                    }
+                    Err(e) => {
+                        println!("  test FAIL: {} (compile error: {})", display_name, e);
+                        test_failed += 1;
+                    }
+                }
+            }
+            if test_failed > 0 {
+                return Err(format!(
+                    "Test blocks: {} passed, {} failed",
+                    test_passed, test_failed
+                )
+                .into());
+            }
+        }
     }
 
     loop {
-        // take the list of threads so we are not holding a borrow on the compiler
-        // use mem::replace to swap out the threads with an empty vec
         let threads = std::mem::take(&mut runtime.memory.join_handles);
         if threads.is_empty() {
             break;
@@ -1912,39 +1993,51 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn get_expect(source: &str) -> String {
-    let start = source.find("// Expect").unwrap();
-    // get each line as long as they start with //
+fn get_expect(source: &str) -> Option<String> {
+    let start = source.find("// @beagle.core.snapshot")?;
 
-    source[start..]
-        .lines()
-        .skip(1)
-        .take_while(|line| line.starts_with("//"))
-        .map(|line| line.trim_start_matches("//").trim())
-        .collect::<Vec<_>>()
-        .join("\n")
+    Some(
+        source[start..]
+            .lines()
+            .skip(1)
+            .take_while(|line| line.starts_with("//"))
+            .map(|line| line.trim_start_matches("//").trim())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+fn update_snapshot(file_path: &str, actual_output: &str) -> Result<(), Box<dyn Error>> {
+    let source = std::fs::read_to_string(file_path)?;
+    let marker = "// @beagle.core.snapshot";
+
+    let marker_pos = source.find(marker).unwrap();
+    // Find the start of the marker line
+    let line_start = source[..marker_pos].rfind('\n').map_or(0, |p| p + 1);
+
+    // Build new snapshot section
+    let mut new_snapshot = String::new();
+    new_snapshot.push_str(marker);
+    new_snapshot.push('\n');
+    for line in actual_output.lines() {
+        if line.is_empty() {
+            new_snapshot.push_str("//\n");
+        } else {
+            new_snapshot.push_str(&format!("// {}\n", line));
+        }
+    }
+
+    // Replace everything from the marker line to end of file
+    let mut new_source = source[..line_start].to_string();
+    new_source.push_str(&new_snapshot);
+
+    std::fs::write(file_path, new_source)?;
+    Ok(())
 }
 
 #[test]
 fn try_all_examples() -> Result<(), Box<dyn Error>> {
-    let args = CommandLineArguments {
-        program: None,
-        program_args: vec![],
-        show_times: false,
-        show_gc_times: false,
-        print_ast: false,
-        no_gc: false,
-        gc_always: false,
-        all_tests: true,
-        test: false,
-        debug: false,
-        verbose: false,
-        no_std: false,
-        print_parse: false,
-        print_builtin_calls: false,
-        repl: false,
-        export_docs: false,
-    };
+    let args = CommandLineArguments::default();
     run_all_tests(args)?;
     Ok(())
 }

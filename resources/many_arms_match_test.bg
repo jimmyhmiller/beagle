@@ -55,7 +55,7 @@ fn main() {
     println("done")
 }
 
-// Expect
+// @beagle.core.snapshot
 // A: 1
 // J: 10
 // T: 20

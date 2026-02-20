@@ -13,7 +13,7 @@ fn main() {
     count_down(10)
 }
 
-// Expect
+// @beagle.core.snapshot
 // 10
 // 9
 // 8

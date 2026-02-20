@@ -1,6 +1,6 @@
 namespace array_size_test
 
-use raw-mutable-array as arr
+use beagle.mutable-array as arr
 use beagle.primitive as primitive
 
 fn main() {

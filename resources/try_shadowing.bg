@@ -17,7 +17,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // caught in catch
 // inner value
 // outer e after try:

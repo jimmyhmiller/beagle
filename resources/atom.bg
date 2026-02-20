@@ -45,7 +45,7 @@ fn main() {
 }
 
 
-// Expect
+// @beagle.core.snapshot
 // Atom { value: 42 }
 // Atom { value: 1 }
 // true

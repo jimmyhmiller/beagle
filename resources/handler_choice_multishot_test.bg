@@ -48,7 +48,7 @@ fn main() {
     println("=== Test Complete ===")
 }
 
-// Expect
+// @beagle.core.snapshot
 // === Choice Multishot Test ===
 // Exploring choice a: 1
 // Picked: 1

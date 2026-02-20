@@ -30,7 +30,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Large value:
 // 1152921504606846975
 // Large + 1:

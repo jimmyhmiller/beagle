@@ -19,5 +19,5 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // RED

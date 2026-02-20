@@ -46,7 +46,7 @@ fn main() {
     println("=== Test Complete ===")
 }
 
-// Expect
+// @beagle.core.snapshot
 // === Writer Effect Test ===
 // [Writer] Hello
 // [Writer] World

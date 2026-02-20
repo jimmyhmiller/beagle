@@ -1,6 +1,6 @@
 namespace array_boundary_test
 
-use raw-mutable-array as arr
+use beagle.mutable-array as arr
 fn main() {
     let a = arr/new-array(125000)
 

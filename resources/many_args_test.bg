@@ -23,7 +23,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // 66
 // 55
 // Thing { x: 9, y: 10 }

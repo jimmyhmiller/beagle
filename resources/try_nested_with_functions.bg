@@ -35,7 +35,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // In main try
 // In middle_function
 // In inner_function

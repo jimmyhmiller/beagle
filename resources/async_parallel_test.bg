@@ -58,7 +58,7 @@ fn main() {
     println("Final result: done")
 }
 
-// Expect
+// @beagle.core.snapshot
 // === Async Parallel Execution Test ===
 // Futures ran on different threads than main: OK
 // Thread IDs collected: OK

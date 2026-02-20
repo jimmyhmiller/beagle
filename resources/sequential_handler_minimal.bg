@@ -46,6 +46,6 @@ fn main() {
     println("B:", result_b)
 }
 
-// Expect
+// @beagle.core.snapshot
 // A: 1
 // B: 2

@@ -76,7 +76,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // 6
 // 15
 // 4

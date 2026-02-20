@@ -9,7 +9,7 @@ use raylib_gui as gui
 // Simple date validation: DD.MM.YYYY format
 // Returns the date as an integer YYYYMMDD for comparison, or -1 if invalid
 fn parse-date(s) {
-    // Expect format: DD.MM.YYYY (10 chars)
+    // @beagle.core.snapshot format: DD.MM.YYYY (10 chars)
     if length(s) != 10 {
         -1
     } else {

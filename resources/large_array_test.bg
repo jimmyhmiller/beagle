@@ -1,6 +1,6 @@
 namespace large_array_test
 
-use raw-mutable-array as arr
+use beagle.mutable-array as arr
 fn main() {
     let capacity = 125000
     let a = arr/new-array(capacity)
@@ -36,7 +36,7 @@ fn main() {
     ""
 }
 
-// Expect
+// @beagle.core.snapshot
 // Slot 32005:
 // A
 // Slot 50000:

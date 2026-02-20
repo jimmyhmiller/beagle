@@ -50,7 +50,7 @@ fn main() {
     println("=== Test Complete ===")
 }
 
-// Expect
+// @beagle.core.snapshot
 // === Reader Effect Test ===
 // Asking for environment...
 // Got environment: production

@@ -58,7 +58,7 @@ fn main() {
     ""
 }
 
-// Expect
+// @beagle.core.snapshot
 // round tests (positive):
 // round(1.4):
 // 1.0

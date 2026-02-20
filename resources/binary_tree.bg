@@ -97,7 +97,7 @@ fn bottomUpTree(depth) {
     }
 }
 
-// Expect
+// @beagle.core.snapshot
 // stretch tree of depth 19 check: 1048575
 // 262144 trees of depth 4 check: 8126464
 // 65536 trees of depth 6 check: 8323072

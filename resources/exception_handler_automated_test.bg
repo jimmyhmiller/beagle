@@ -30,7 +30,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Handlers set successfully
 // Caught in try-catch:
 // caught error

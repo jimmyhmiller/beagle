@@ -15,5 +15,5 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // created closure

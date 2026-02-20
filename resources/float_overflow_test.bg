@@ -40,7 +40,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Infinity constant:
 // infinity
 // Negative infinity constant:

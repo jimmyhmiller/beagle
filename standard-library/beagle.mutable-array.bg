@@ -1,4 +1,4 @@
-namespace raw-mutable-array
+namespace beagle.mutable-array
 use beagle.builtin as builtin
 use beagle.primitive as primitive
 
@@ -181,7 +181,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // true
 // 10
 // 0

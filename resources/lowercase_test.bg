@@ -38,7 +38,7 @@ fn main() {
     ""
 }
 
-// Expect
+// @beagle.core.snapshot
 // Lowercase result:
 // hello
 // Equals hello?

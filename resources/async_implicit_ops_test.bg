@@ -144,7 +144,7 @@ fn main() {
     println("Done")
 }
 
-// Expect
+// @beagle.core.snapshot
 // create-dir-all...
 // OK
 // is-directory?...

@@ -65,7 +65,7 @@ fn main() {
     println("=== Test Complete ===")
 }
 
-// Expect
+// @beagle.core.snapshot
 // === Deep Call Stack Test ===
 // [Trace depth 0 ] Starting
 // [Trace depth 1 ] In level1

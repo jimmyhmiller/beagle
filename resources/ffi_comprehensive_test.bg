@@ -350,7 +350,7 @@ fn main() {
     println("\n=== All FFI Tests Completed ===")
 }
 
-// Expect
+// @beagle.core.snapshot
 // === FFI Comprehensive Test Suite ===
 //
 // --- Zero Arguments Tests ---

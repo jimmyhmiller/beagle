@@ -9,6 +9,6 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Testing simple async
 // Result: Result.Ok { value: 42 }

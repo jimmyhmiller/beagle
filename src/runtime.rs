@@ -6178,6 +6178,18 @@ impl Runtime {
         self.keyword_namespace
     }
 
+    /// Returns the names of all test functions (matching `__test_*__` pattern)
+    pub fn get_test_function_names(&self) -> Vec<String> {
+        self.functions
+            .iter()
+            .filter(|f| {
+                let short_name = f.name.rsplit('/').next().unwrap_or(&f.name);
+                short_name.starts_with("__test_") && short_name.ends_with("__")
+            })
+            .map(|f| f.name.clone())
+            .collect()
+    }
+
     pub fn current_namespace_name(&self) -> String {
         self.namespaces
             .namespaces
@@ -7776,6 +7788,19 @@ impl Runtime {
             .expect("Trampoline function not found - this is a fatal error");
 
         unsafe { std::mem::transmute(trampoline.pointer) }
+    }
+
+    /// Call a JIT-compiled function via the trampoline.
+    /// This switches to the Beagle stack and saves/restores callee-saved registers,
+    /// which is required for correctness when calling JIT code from Rust.
+    pub fn call_via_trampoline(&self, fn_ptr: usize) -> usize {
+        let trampoline = self.get_trampoline();
+        let stack_pointer = self.get_stack_base();
+        let global_block_ptr = self.get_global_block_ptr();
+        unsafe {
+            *((stack_pointer - 8) as *mut usize) = global_block_ptr;
+        }
+        trampoline(stack_pointer as u64, fn_ptr as u64) as usize
     }
 
     /// Return a tagged string literal for a single ASCII byte.

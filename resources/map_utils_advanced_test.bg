@@ -79,7 +79,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // === Testing merge-with ===
 // m1: {"b" 2, "a" 1}
 // m2: {"b" 3, "c" 4}

@@ -46,6 +46,6 @@ fn main() {
     println("Done!")
 }
 
-// Expect
+// @beagle.core.snapshot
 // Testing minimal crash case...
 // Done!

@@ -10,4 +10,4 @@ fn main() {
     result
 }
 
-// Expect
+// @beagle.core.snapshot

@@ -56,7 +56,7 @@ fn main() {
     println("=== Test Complete ===")
 }
 
-// Expect
+// @beagle.core.snapshot
 // === Exception Effect Test ===
 // Trying safe division...
 // 10 / 2 = 5

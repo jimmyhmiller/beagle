@@ -36,7 +36,7 @@ fn main() {
     ""
 }
 
-// Expect
+// @beagle.core.snapshot
 // Substring result:
 // H
 // Literal:

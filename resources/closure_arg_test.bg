@@ -13,7 +13,7 @@ fn main() {
     println(result)
 }
 
-// Expect:
+// @beagle.core.snapshot
 // before callback
 // after callback
 // 43

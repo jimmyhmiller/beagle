@@ -10,7 +10,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // 2
 // Hello, world!
 // 2

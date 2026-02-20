@@ -61,7 +61,7 @@ fn main() {
     println("=== Test Complete ===")
 }
 
-// Expect
+// @beagle.core.snapshot
 // === Sequential Handler Blocks Test ===
 // HandlerA handling DoA
 // Got from A: 1

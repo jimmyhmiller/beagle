@@ -31,7 +31,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // 3
 // 3.14159
 // 4

@@ -12,5 +12,5 @@ fn main() {
     println(fib(30));
 }
 
-// Expect
+// @beagle.core.snapshot
 // 832040

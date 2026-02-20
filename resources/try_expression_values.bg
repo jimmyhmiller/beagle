@@ -24,7 +24,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // caught in expression
 // fail
 // 12

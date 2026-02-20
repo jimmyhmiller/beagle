@@ -53,7 +53,7 @@ fn main() {
     println("Success!")
 }
 
-// Expect
+// @beagle.core.snapshot
 // Test: Pointer update in continuation segments
 // Final value: 12345
 // Result: 12345

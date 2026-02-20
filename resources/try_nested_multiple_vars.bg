@@ -28,7 +28,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // outer value
 // Outer catch:
 // outer error

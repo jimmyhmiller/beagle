@@ -761,6 +761,7 @@ enum SystemError {
     IndexError { message, location }
     MutabilityError { message, location }
     JsonError { message, location }
+    AssertError { message, location }
 }
 
 // Diagnostic severity levels
@@ -2710,6 +2711,24 @@ fn doc(value) {
 ///   apropos("reduce")  ; => ["beagle.core/reduce", "beagle.core/reduce-right"]
 fn apropos(query) {
     reflect/apropos(query)
+}
+
+/// Assert that calling the given function throws an exception.
+/// Throws AssertionError if no exception is thrown.
+///
+/// Examples:
+///   assert-throws!(fn() { throw "boom" })   ; passes
+///   assert-throws!(fn() { 42 })              ; fails - no exception thrown
+fn assert-throws!(thunk) {
+    let threw = try {
+        thunk()
+        false
+    } catch (_e) {
+        true
+    }
+    if !threw {
+        throw("assert-throws! failed: expected function to throw, but it returned normally")
+    }
 }
 
 // Writer protocol definitions moved to beginning of file

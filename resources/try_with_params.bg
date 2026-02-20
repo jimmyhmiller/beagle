@@ -20,7 +20,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Param before try:
 // 42
 // In catch, param:

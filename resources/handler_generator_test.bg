@@ -53,7 +53,7 @@ fn main() {
     println("=== Test Complete ===")
 }
 
-// Expect
+// @beagle.core.snapshot
 // === Generator Effect Test ===
 // Yielded: 1
 // Yielded: 2

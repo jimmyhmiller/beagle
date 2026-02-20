@@ -29,7 +29,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Matched Red from imported namespace
 // Matched Blue with value:
 // 128

@@ -23,7 +23,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Inside match, value is:
 // inner
 // Outside match, value is:

@@ -11,7 +11,7 @@ fn main() {
     println(x[0])
 }
 
-// Expect
+// @beagle.core.snapshot
 // test
 // t
 

@@ -16,7 +16,7 @@ fn main() {
     x
 }
 
-// Expect
+// @beagle.core.snapshot
 // Before try
 // In try block
 // In catch block

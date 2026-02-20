@@ -49,7 +49,7 @@ fn main() {
     ""
 }
 
-// Expect
+// @beagle.core.snapshot
 // Testing vals with Rust PersistentMap:
 // Created map:
 // {"b" 2, "c" 3, "a" 1}

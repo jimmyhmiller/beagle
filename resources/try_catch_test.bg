@@ -33,7 +33,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Test 1: Basic try-catch
 // In try block
 // Caught exception:

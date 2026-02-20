@@ -22,7 +22,7 @@ fn main() {
     println("done")
 }
 
-// Expect
+// @beagle.core.snapshot
 // Event loop created: true
 // Listener created: true
 // Listener closed: true

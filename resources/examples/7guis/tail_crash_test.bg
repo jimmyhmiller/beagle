@@ -22,7 +22,7 @@ fn main() {
     println(!(1 == 2))
 }
 
-// Expect
+// @beagle.core.snapshot
 // 2
 // false
 // true

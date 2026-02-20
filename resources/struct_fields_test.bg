@@ -28,7 +28,7 @@ fn main() {
     println(length(empty_fields))
 }
 
-// Expect
+// @beagle.core.snapshot
 // ["x", "y"]
 // ["name", "age", "email"]
 // []

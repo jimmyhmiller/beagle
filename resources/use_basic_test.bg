@@ -6,5 +6,5 @@ fn main() {
     println(f/fib(10))
 }
 
-// Expect
+// @beagle.core.snapshot
 // 55

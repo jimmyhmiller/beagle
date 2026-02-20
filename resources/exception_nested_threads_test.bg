@@ -27,5 +27,5 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // outer: inner error

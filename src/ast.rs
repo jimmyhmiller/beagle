@@ -388,6 +388,12 @@ pub enum Ast {
         body: Box<Ast>,
         token_range: TokenRange,
     },
+    /// Test block: `test "name" { body }` - only runs in test mode
+    Test {
+        name: String,
+        body: Vec<Ast>,
+        token_range: TokenRange,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -588,7 +594,8 @@ impl Ast {
             | Ast::Shift { token_range, .. }
             | Ast::Perform { token_range, .. }
             | Ast::Handle { token_range, .. }
-            | Ast::Future { token_range, .. } => *token_range,
+            | Ast::Future { token_range, .. }
+            | Ast::Test { token_range, .. } => *token_range,
             Ast::IntegerLiteral(_, position)
             | Ast::FloatLiteral(_, position)
             | Ast::Identifier(_, position)
@@ -605,6 +612,7 @@ impl Ast {
         file_name: &str,
         token_line_column_map: Vec<(usize, usize)>,
     ) -> CompileResult {
+        let test_mode = compiler.command_line_arguments.test;
         let allocate_fn_pointer = compiler.allocate_fn_pointer()?;
         let mut ast_compiler = AstCompiler {
             ast: self.clone(),
@@ -633,6 +641,7 @@ impl Ast {
             current_function_min_args: 0,
             token_line_column_map,
             diagnostics: Vec::new(),
+            test_mode,
         };
 
         let ir = ast_compiler.compile()?;
@@ -652,6 +661,7 @@ impl Ast {
                         | Ast::Struct { .. }
                         // | Ast::Enum { .. }
                         | Ast::Namespace { .. }
+                        | Ast::Test { .. }
                 )
         })
     }
@@ -791,6 +801,8 @@ pub struct AstCompiler<'a> {
     pub token_line_column_map: Vec<(usize, usize)>,
     /// Diagnostics collected during compilation of this file
     pub diagnostics: Vec<crate::compiler::Diagnostic>,
+    /// Whether we are compiling in test mode (test blocks are compiled as functions)
+    pub test_mode: bool,
 }
 
 impl AstCompiler<'_> {
@@ -4059,6 +4071,31 @@ impl AstCompiler<'_> {
                 self.ir.write_label(after_handle);
                 Ok(result_reg.into())
             }
+            Ast::Test {
+                name,
+                body,
+                token_range,
+            } => {
+                if self.test_mode {
+                    // In test mode, compile as a named function: __test_<name>__()
+                    let sanitized_name = name.replace(' ', "_");
+                    let fn_name = format!("__test_{}__", sanitized_name);
+
+                    // Compile as a function definition
+                    let test_fn = Ast::Function {
+                        name: Some(fn_name),
+                        args: vec![],
+                        rest_param: None,
+                        body,
+                        token_range,
+                        docstring: None,
+                    };
+                    self.call_compile(&test_fn)
+                } else {
+                    // In normal mode, test blocks are no-ops
+                    Ok(Value::TaggedConstant(0))
+                }
+            }
             Ast::Future { body, token_range } => {
                 // future(expr) is a special form that captures expr as a thunk
                 // and calls __make_future(thunk)
@@ -5147,6 +5184,17 @@ impl AstCompiler<'_> {
                         .unwrap();
                 }
             }
+            Ast::Test { name, .. } => {
+                if self.test_mode {
+                    let sanitized_name = name.replace(' ', "_");
+                    let fn_name = format!("__test_{}__", sanitized_name);
+                    let full_function_name =
+                        self.compiler.current_namespace_name() + "/" + &fn_name;
+                    self.compiler
+                        .reserve_function(&full_function_name, 0, false, 0)
+                        .unwrap();
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -5723,6 +5771,11 @@ impl AstCompiler<'_> {
             }
             Ast::Future { body, .. } => {
                 self.find_mutable_vars_that_need_boxing(body);
+            }
+            Ast::Test { body, .. } => {
+                for expression in body.iter() {
+                    self.find_mutable_vars_that_need_boxing(expression);
+                }
             }
         }
     }

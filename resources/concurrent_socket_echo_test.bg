@@ -69,7 +69,7 @@ fn main() {
     println("done")
 }
 
-// Expect
+// @beagle.core.snapshot
 // Server received: Hello World
 // Client received: Hello World
 // done

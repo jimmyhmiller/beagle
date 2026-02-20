@@ -1,7 +1,7 @@
 namespace large_concat_test
 
 use beagle.builtin as builtin
-use raw-mutable-array as arr
+use beagle.mutable-array as arr
 fn build_string(n, acc) {
     if n <= 0 {
         acc
@@ -95,7 +95,7 @@ fn main() {
     ""
 }
 
-// Expect
+// @beagle.core.snapshot
 // Length:
 // 4000
 // First 20 chars:

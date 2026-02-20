@@ -227,6 +227,7 @@ pub enum Token {
     Handle,
     Use,
     Future,
+    Test,
     Not,
 }
 impl Token {
@@ -335,6 +336,7 @@ impl Token {
             Token::Handle => Ok("handle".to_string()),
             Token::Use => Ok("use".to_string()),
             Token::Future => Ok("future".to_string()),
+            Token::Test => Ok("test".to_string()),
             Token::Not => Ok("!".to_string()),
             Token::Comment((start, end))
             | Token::DocComment((start, end))
@@ -841,6 +843,7 @@ impl Tokenizer {
             b"handle" => Token::Handle,
             b"use" => Token::Use,
             b"future" => Token::Future,
+            b"test" => Token::Test,
             _ => Token::Atom((start, self.position)),
         }
     }
@@ -1214,6 +1217,7 @@ impl Parser {
                     }
                 })
             }
+            Token::Test => Ok("test".to_string()),
             _ => Err(ParseError::UnexpectedToken {
                 expected: "identifier".to_string(),
                 found: self.get_token_repr(),
@@ -1426,6 +1430,7 @@ impl Parser {
                     token_range,
                 }))
             }
+            Token::Test => Ok(Some(self.parse_test()?)),
             Token::Try => Ok(Some(self.parse_try()?)),
             Token::Throw => Ok(Some(self.parse_throw()?)),
             Token::Reset => Ok(Some(self.parse_reset()?)),
@@ -1915,6 +1920,10 @@ impl Parser {
                 self.move_to_next_non_whitespace();
                 Some("future".to_string())
             }
+            Token::Test => {
+                self.move_to_next_non_whitespace();
+                Some("test".to_string())
+            }
             _ => None,
         };
 
@@ -1935,6 +1944,42 @@ impl Parser {
             body,
             token_range: TokenRange::new(start_position, end_position),
             docstring,
+        })
+    }
+
+    fn parse_test(&mut self) -> ParseResult<Ast> {
+        let start_position = self.position;
+        self.move_to_next_non_whitespace(); // consume 'test' keyword
+
+        // Expect a string literal for the test name
+        let name = match self.current_token() {
+            Token::String((start, end)) => {
+                // String token range includes quotes, so strip them (start+1..end-1)
+                let inner_start = start + 1;
+                let inner_end = end - 1;
+                let s = String::from_utf8(self.source.as_bytes()[inner_start..inner_end].to_vec())
+                    .map_err(|_| ParseError::InvalidUtf8 {
+                        location: self.current_source_location(),
+                    })?;
+                self.move_to_next_non_whitespace();
+                s
+            }
+            _ => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "string literal for test name".to_string(),
+                    found: format!("{:?}", self.current_token()),
+                    location: self.current_source_location(),
+                });
+            }
+        };
+
+        let body = self.parse_block()?;
+        let end_position = self.position;
+
+        Ok(Ast::Test {
+            name,
+            body,
+            token_range: TokenRange::new(start_position, end_position),
         })
     }
 
@@ -3352,6 +3397,21 @@ impl Parser {
         }
     }
 
+    /// Check if the current token is a contextual keyword that can also be used
+    /// as an identifier (e.g., in namespace names, function names, dotted paths).
+    /// These keywords only have special meaning in specific syntactic positions.
+    fn is_contextual_keyword(&self) -> bool {
+        matches!(self.current_token(), Token::Test)
+    }
+
+    /// Get the string representation of a contextual keyword token.
+    fn contextual_keyword_str(&self) -> Option<&'static str> {
+        match self.current_token() {
+            Token::Test => Some("test"),
+            _ => None,
+        }
+    }
+
     fn is_as(&self) -> bool {
         match self.current_token() {
             Token::As => true,
@@ -3378,7 +3438,12 @@ impl Parser {
     fn parse_dotted_identifier(&mut self) -> ParseResult<String> {
         self.move_to_next_non_whitespace();
         let mut name = String::new();
-        while !self.at_end() && (self.is_atom() || self.is_dot()) {
+        while !self.at_end() && (self.is_atom() || self.is_dot() || self.is_contextual_keyword()) {
+            if let Some(kw) = self.contextual_keyword_str() {
+                name.push_str(kw);
+                self.consume();
+                continue;
+            }
             match self.current_token() {
                 Token::Dot => {
                     name.push('.');

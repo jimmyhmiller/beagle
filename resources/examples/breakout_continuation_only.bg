@@ -4,7 +4,7 @@ namespace breakout_copy
 // Classic arcade game: destroy all bricks with the bouncing ball!
 
 use beagle.ffi as ffi
-use raw-mutable-array as arr
+use beagle.mutable-array as arr
 // ============================================================
 // Raylib Library Setup
 // ============================================================

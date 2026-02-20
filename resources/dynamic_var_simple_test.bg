@@ -6,5 +6,5 @@ fn main() {
     println(dyn_x)
 }
 
-// Expect
+// @beagle.core.snapshot
 // 42

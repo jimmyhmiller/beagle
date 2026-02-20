@@ -33,7 +33,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Map has entries:
 // 3
 // Name:

@@ -68,7 +68,7 @@ fn main() {
     println("done")
 }
 
-// Expect
+// @beagle.core.snapshot
 // Handler created
 // Handler called, data: 100
 // Op1: 5

@@ -26,5 +26,5 @@ fn main() {
     println(sum)
 }
 
-// Expect
+// @beagle.core.snapshot
 // 210

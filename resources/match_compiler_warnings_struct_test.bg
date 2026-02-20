@@ -14,7 +14,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Got diagnostics
 // Diagnostic count:
 // 0

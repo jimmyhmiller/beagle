@@ -25,7 +25,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Level 1 try
 // Level 2 try
 // Level 3 try

@@ -76,7 +76,7 @@ fn main() {
     println("=== All tests completed successfully ===")
 }
 
-// Expect
+// @beagle.core.snapshot
 // === Async Blocking Functions Test ===
 // Testing blocking-sleep...
 // Sleep result: Result.Ok { value: null }

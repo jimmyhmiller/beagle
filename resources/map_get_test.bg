@@ -19,7 +19,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Manual map count:
 // 1
 // Manual map get:

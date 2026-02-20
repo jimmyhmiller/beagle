@@ -127,7 +127,7 @@ fn main() {
     println("\n=== All Callback Tests Completed ===")
 }
 
-// Expect
+// @beagle.core.snapshot
 // === FFI Callback Tests ===
 //
 // --- qsort ascending test ---

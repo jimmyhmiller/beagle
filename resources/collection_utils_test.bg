@@ -40,7 +40,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Testing min-of and max-of:
 // Numbers: [3, 1, 4, 1, 5, 9, 2, 6]
 // min-of: 1

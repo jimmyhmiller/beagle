@@ -37,7 +37,7 @@ fn main() {
     println(get(obj, "age"))
 }
 
-// Expect
+// @beagle.core.snapshot
 // 42
 // 3.14
 // "hello"

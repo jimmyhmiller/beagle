@@ -52,7 +52,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // This is a test function that adds two numbers.
 // It demonstrates multi-line docstrings.
 // true

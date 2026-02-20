@@ -80,7 +80,7 @@ fn main() {
     }
 }
 
-// Expect
+// @beagle.core.snapshot
 // Starting GC stress test with continuations...
 // Total result: 210000
 // Success!

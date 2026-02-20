@@ -12,6 +12,6 @@ fn main() {
     println("done")
 }
 
-// Expect
+// @beagle.core.snapshot
 // Caught error: SystemError.TypeError { message: "Cannot access property 'foo' on null", location: null }
 // done

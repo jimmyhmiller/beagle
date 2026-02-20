@@ -62,7 +62,7 @@ fn main() {
     println("done")
 }
 
-// Expect
+// @beagle.core.snapshot
 // 25
 // all keys verified
 // 10

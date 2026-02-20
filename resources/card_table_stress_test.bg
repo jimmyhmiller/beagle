@@ -310,7 +310,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // === Test 1: Basic old-to-young writes ===
 // Created 20 old gen atoms
 // Wrote young objects into old atoms

@@ -6,5 +6,5 @@ fn main() {
     println(u/helper())
 }
 
-// Expect
+// @beagle.core.snapshot
 // helped

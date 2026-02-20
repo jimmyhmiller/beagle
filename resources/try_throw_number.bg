@@ -13,7 +13,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // caught int
 // 5
 // 15

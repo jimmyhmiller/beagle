@@ -27,7 +27,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Entering with depth:
 // 3
 // Entering with depth:

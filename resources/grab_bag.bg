@@ -208,7 +208,7 @@ fn main() {
 }
 
 
-// Expect
+// @beagle.core.snapshot
 // 5
 // TreeNode { left: null, right: null }
 // TreeNode { left: TreeNode { left: null, right: null }, right: TreeNode { left: null, right: null } }

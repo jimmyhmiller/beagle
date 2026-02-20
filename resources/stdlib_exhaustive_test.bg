@@ -359,7 +359,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // === EXHAUSTIVE STDLIB TESTS ===
 //
 // --- reduce ---

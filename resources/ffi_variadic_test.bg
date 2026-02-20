@@ -92,7 +92,7 @@ fn main() {
     println("\n=== All Variadic FFI Tests Completed ===")
 }
 
-// Expect
+// @beagle.core.snapshot
 // === FFI Variadic Call Tests ===
 //
 // --- strlen via call-variadic ---

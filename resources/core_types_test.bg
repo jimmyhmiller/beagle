@@ -8,5 +8,5 @@ fn main() {
     }
 }
 
-// Expect
+// @beagle.core.snapshot
 // Got: 42

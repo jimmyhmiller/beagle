@@ -29,7 +29,7 @@ fn main() {
     "closure assignment test passed"
 }
 
-// Expect
+// @beagle.core.snapshot
 // 0
 // 42
 // 200

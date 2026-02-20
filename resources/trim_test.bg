@@ -70,7 +70,7 @@ fn main() {
     ""
 }
 
-// Expect
+// @beagle.core.snapshot
 // Basic trim:
 // 'hello world'
 // Equals 'hello world'?

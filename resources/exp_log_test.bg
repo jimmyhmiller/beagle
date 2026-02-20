@@ -64,7 +64,7 @@ fn main() {
     ""
 }
 
-// Expect
+// @beagle.core.snapshot
 // exp tests:
 // exp(0.0): pass
 // exp(1.0): pass

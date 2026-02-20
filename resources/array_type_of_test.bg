@@ -1,5 +1,5 @@
 namespace test
-use raw-mutable-array as array
+use beagle.mutable-array as array
 // Test that type-of correctly identifies arrays
 // Arrays have type_id == 1 and should return the Array type descriptor
 
@@ -28,7 +28,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Array
 // true
 // false

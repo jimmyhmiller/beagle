@@ -79,7 +79,7 @@ fn main() {
     println("=== Test Complete ===")
 }
 
-// Expect
+// @beagle.core.snapshot
 // === Multi Effect Type Test ===
 // --- Testing Log effect ---
 // [INFO] Starting up

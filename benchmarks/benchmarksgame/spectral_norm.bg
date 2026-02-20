@@ -5,7 +5,7 @@ namespace spectral_norm
 //
 // Beagle implementation
 
-use raw-mutable-array as arr
+use beagle.mutable-array as arr
 
 fn A(i, j) {
     let ij = i + j
@@ -123,6 +123,6 @@ fn main(args) {
     run(n)
 }
 
-// Expect
+// @beagle.core.snapshot
 // 1.274219991
 // 1.274219991

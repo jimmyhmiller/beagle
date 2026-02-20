@@ -3,7 +3,7 @@ namespace crash_ffi_alloc_dealloc
 use beagle.ffi as ffi
 use beagle.io as io
 use beagle.builtin as builtin
-use raw-mutable-array as arr
+use beagle.mutable-array as arr
 
 let READ_CHUNK = 65536
 

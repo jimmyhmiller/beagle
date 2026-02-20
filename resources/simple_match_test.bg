@@ -30,7 +30,7 @@ fn main() {
     println("done")
 }
 
-// Expect
+// @beagle.core.snapshot
 // Testing Ok variant:
 // Got Ok: 42
 // Testing Err variant:

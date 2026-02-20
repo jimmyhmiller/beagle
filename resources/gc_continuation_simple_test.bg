@@ -67,7 +67,7 @@ fn main() {
     }
 }
 
-// Expect
+// @beagle.core.snapshot
 // Starting simple continuation test...
 // Result: 11000
 // Success!

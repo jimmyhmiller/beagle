@@ -1,6 +1,6 @@
 namespace array_size_overflow_bug
 
-use raw-mutable-array as arr
+use beagle.mutable-array as arr
 use beagle.primitive as primitive
 
 fn main() {
@@ -19,6 +19,6 @@ fn main() {
     ""
 }
 
-// Expect
+// @beagle.core.snapshot
 // Requested size: 125000
 // Actual size: 125000

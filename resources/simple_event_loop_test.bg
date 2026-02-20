@@ -13,7 +13,7 @@ fn main() {
     println("done")
 }
 
-// Expect
+// @beagle.core.snapshot
 // Before sleep
 // After sleep
 // done

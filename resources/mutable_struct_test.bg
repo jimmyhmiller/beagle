@@ -70,7 +70,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // === Mutable Struct Tests ===
 //
 // --- Test 1: Mutable field ---

@@ -8,7 +8,7 @@ namespace revcomp
 
 use beagle.ffi as ffi
 use beagle.io as io
-use raw-mutable-array as arr
+use beagle.mutable-array as arr
 
 let LINE_WIDTH = 60
 let READ_CHUNK = 65536

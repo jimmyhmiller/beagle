@@ -10107,6 +10107,82 @@ pub unsafe fn throw_runtime_error(stack_pointer: usize, kind: &str, message: Str
     }
 }
 
+// ============================================================================
+// Assertion builtins for test blocks
+// ============================================================================
+
+pub unsafe extern "C" fn assert_truthy(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    // Falsy values: false, null
+    let is_falsy = value == BuiltInTypes::false_value() as usize
+        || value == BuiltInTypes::null_value() as usize;
+
+    if is_falsy {
+        let runtime = get_runtime().get_mut();
+        let repr = runtime
+            .get_repr(value, 0)
+            .unwrap_or_else(|| "???".to_string());
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AssertError",
+                format!("assert! failed: expected truthy value, got {}", repr),
+            );
+        }
+    }
+    BuiltInTypes::null_value() as usize
+}
+
+pub unsafe extern "C" fn assert_eq(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    a: usize,
+    b: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    if !runtime.equal(a, b) {
+        let repr_a = runtime.get_repr(a, 0).unwrap_or_else(|| "???".to_string());
+        let repr_b = runtime.get_repr(b, 0).unwrap_or_else(|| "???".to_string());
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AssertError",
+                format!(
+                    "assert-eq! failed\n  expected: {}\n       got: {}",
+                    repr_b, repr_a
+                ),
+            );
+        }
+    }
+    BuiltInTypes::null_value() as usize
+}
+
+pub unsafe extern "C" fn assert_ne(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    a: usize,
+    b: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    if runtime.equal(a, b) {
+        let repr_a = runtime.get_repr(a, 0).unwrap_or_else(|| "???".to_string());
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AssertError",
+                format!("assert-ne! failed: both values are {}", repr_a),
+            );
+        }
+    }
+    BuiltInTypes::null_value() as usize
+}
+
 /// Helper to allocate a string with proper error handling.
 /// On allocation failure, throws an AllocationError.
 ///
@@ -11875,8 +11951,28 @@ impl Runtime {
             4, // stack_pointer, kind_str, message_str, location_str
         )?;
 
-        self.add_builtin_function("beagle.builtin/assert!", placeholder as *const u8, false, 0)?;
-
+        // Assertion builtins for test blocks
+        self.add_builtin_with_doc(
+            "beagle.core/assert!",
+            assert_truthy as *const u8,
+            true,
+            &["value"],
+            "Assert that a value is truthy. Throws AssertError if the value is false, null, or 0.",
+        )?;
+        self.add_builtin_with_doc(
+            "beagle.core/assert-eq!",
+            assert_eq as *const u8,
+            true,
+            &["actual", "expected"],
+            "Assert that two values are equal. Throws AssertError showing both values on failure.",
+        )?;
+        self.add_builtin_with_doc(
+            "beagle.core/assert-ne!",
+            assert_ne as *const u8,
+            true,
+            &["a", "b"],
+            "Assert that two values are not equal. Throws AssertError on failure.",
+        )?;
         // Garbage collection
         self.add_builtin_with_doc(
             "beagle.core/gc",

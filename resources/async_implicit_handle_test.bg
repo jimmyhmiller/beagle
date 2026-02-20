@@ -147,7 +147,7 @@ fn main() {
     println("Done")
 }
 
-// Expect
+// @beagle.core.snapshot
 // open for write...
 // OK
 // write...

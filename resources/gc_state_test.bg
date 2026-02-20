@@ -1,6 +1,6 @@
 namespace gc_state_test
 
-use raw-mutable-array as arr
+use beagle.mutable-array as arr
 
 // Simulate knucleotide's pattern: pass a mutable state array
 // through nested function calls, with allocations at each level
@@ -50,5 +50,5 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // 1600

@@ -118,7 +118,7 @@ fn main() {
     println("done")
 }
 
-// Expect
+// @beagle.core.snapshot
 // All events captured: true
 // Event count: 8
 // sleep: true

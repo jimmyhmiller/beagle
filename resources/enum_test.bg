@@ -22,7 +22,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Fast
 // Action.run { speed: 5 }
 // 5

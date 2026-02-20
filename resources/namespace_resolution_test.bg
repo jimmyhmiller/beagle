@@ -7,7 +7,7 @@ fn main() {
     println(enum_test/Action.run { speed: 2 })
 }
 
-// Expect
+// @beagle.core.snapshot
 // 2
 // 2
 // Action.run { speed: 2 }

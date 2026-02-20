@@ -1,6 +1,6 @@
 namespace crash_big_array
 
-use raw-mutable-array as arr
+use beagle.mutable-array as arr
 
 fn try_alloc(size) {
     print("arr/new-array(")

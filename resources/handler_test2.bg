@@ -36,7 +36,7 @@ fn main() {
     println("main done")
 }
 
-// Expect
+// @beagle.core.snapshot
 // main started
 // before perform
 // in handler

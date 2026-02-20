@@ -56,7 +56,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Test 1 - Same order:
 // data
 // ok

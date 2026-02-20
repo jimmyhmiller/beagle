@@ -23,7 +23,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // first run
 // second run
 // expected catch

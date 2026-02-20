@@ -16,7 +16,7 @@ fn main() {
     println(find([10, 20, 30], 30))
 }
 
-// Expect
+// @beagle.core.snapshot
 // 1
 // 0
 // 2

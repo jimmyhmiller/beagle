@@ -22,7 +22,7 @@ fn main() {
     println(0B1010)   // 10
 }
 
-// Expect
+// @beagle.core.snapshot
 // 31
 // 255
 // 43981

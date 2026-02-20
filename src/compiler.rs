@@ -599,12 +599,33 @@ impl Compiler {
 
         for use_stmt in ast.uses() {
             let (namespace_name, _alias) = self.extract_use(&use_stmt)?;
-            if namespace_name.starts_with("beagle.") {
+            // Skip namespaces already registered in the runtime (e.g. beagle.primitive,
+            // beagle.builtin, beagle.core, etc.) that were loaded by runtime init or
+            // load_default_files before we get here. This also catches namespaces compiled
+            // via compile_source (which caches under "name.bg" rather than canonical path),
+            // since any compiled source registers its namespace in the runtime.
+            if self.namespace_exists(&namespace_name) {
                 continue;
             }
-            let file_name = self.resolve_namespace_to_file(&namespace_name, source_file)?;
-            let top_level = self.compile(&file_name)?;
-            top_levels_to_run.extend(top_level);
+            match self.resolve_namespace_to_file(&namespace_name, source_file) {
+                Ok(file_name) => {
+                    let top_level = self.compile(&file_name)?;
+                    top_levels_to_run.extend(top_level);
+                }
+                Err(_) => {
+                    // File not found on disk - try embedded stdlib
+                    let embedded_name = format!("{}.bg", namespace_name);
+                    if let Some(source) = crate::embedded_stdlib::get(&embedded_name) {
+                        let top_level = self.compile_source(&embedded_name, source)?;
+                        top_levels_to_run.extend(top_level);
+                    } else {
+                        return Err(format!(
+                            "Cannot resolve namespace '{}': not found as a file, in embedded stdlib, or as a runtime namespace",
+                            namespace_name
+                        ).into());
+                    }
+                }
+            }
         }
 
         Ok(top_levels_to_run)
@@ -831,12 +852,6 @@ impl Compiler {
             candidates.push(format!("{}.bg", last));
         }
 
-        // Debug: print candidates
-        eprintln!(
-            "Looking for namespace '{}', candidates: {:?}",
-            namespace_name, candidates
-        );
-
         // Try each candidate in each search location
         for candidate in &candidates {
             // Try relative to source file
@@ -956,6 +971,12 @@ impl Compiler {
     pub fn add_alias(&mut self, library_name: String, alias: String) {
         let runtime = get_runtime().get_mut();
         runtime.add_alias(library_name, alias);
+    }
+
+    /// Check if a namespace is already registered in the runtime
+    pub fn namespace_exists(&self, name: &str) -> bool {
+        let runtime = get_runtime().get();
+        runtime.get_namespace_id(name).is_some()
     }
 
     pub fn current_namespace_id(&self) -> usize {

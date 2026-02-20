@@ -8,7 +8,7 @@ fn main() {
     println(ends-with?("hello world", "hello"))
 }
 
-// Expect
+// @beagle.core.snapshot
 // hello
 // true
 // false

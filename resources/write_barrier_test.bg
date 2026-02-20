@@ -105,7 +105,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // === Two-level indirection test ===
 // Created old wrapper -> old holder
 // Stored young data via set!

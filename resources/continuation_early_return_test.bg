@@ -23,6 +23,6 @@ fn main() {
     println(result2)  // Should be -1
 }
 
-// Expect
+// @beagle.core.snapshot
 // 4
 // -1

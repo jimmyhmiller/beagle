@@ -25,7 +25,7 @@ fn main() {
     ""
 }
 
-// Expect
+// @beagle.core.snapshot
 // Testing Rust PersistentMap with protocols:
 // Map created:
 // {"b" 2, "c" 3, "a" 1}

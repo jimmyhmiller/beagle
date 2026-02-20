@@ -33,7 +33,7 @@ fn main() {
     println("done")
 }
 
-// Expect
+// @beagle.core.snapshot
 // enumerate: [[0, "a"], [1, "b"], [2, "c"]]
 // remove-at: [1, 2, 4, 5]
 // remove-at first: [2, 3]

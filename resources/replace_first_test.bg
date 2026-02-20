@@ -61,7 +61,7 @@ fn main() {
     ""
 }
 
-// Expect
+// @beagle.core.snapshot
 // replace-first tests:
 // replace-first('hello world', 'world', 'there'):
 // hello there

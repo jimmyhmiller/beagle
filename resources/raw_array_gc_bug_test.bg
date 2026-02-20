@@ -1,6 +1,6 @@
 namespace raw_array_gc_bug_test
 
-use raw-mutable-array as arr
+use beagle.mutable-array as arr
 fn main() {
     let a = arr/new-array(125000)
 
@@ -32,7 +32,7 @@ fn main() {
     ""
 }
 
-// Expect
+// @beagle.core.snapshot
 // After 1 write, 60000:
 // test1
 // After 2 writes, 60000:

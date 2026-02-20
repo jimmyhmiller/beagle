@@ -176,11 +176,11 @@ fn test_init_with_name() {
         "main.bg should have main function"
     );
 
-    // Check test file has Expect annotation
+    // Check test file has snapshot annotation
     let test = std::fs::read_to_string(tmp.join("my-project/test/main_test.bg")).unwrap();
     assert!(
-        test.contains("// Expect"),
-        "test file should have // Expect"
+        test.contains("// @beagle.core.snapshot"),
+        "test file should have // @beagle.core.snapshot"
     );
 }
 
@@ -327,21 +327,137 @@ fn test_nonexistent_test_file() {
     );
 }
 
-// --- Legacy mode ---
+// --- Update snapshots ---
 
 #[test]
-fn test_legacy_all_tests() {
+fn test_snapshot_mismatch_fails() {
+    let tmp = tempdir();
+
+    // Create a test file with a wrong snapshot
+    std::fs::create_dir_all(tmp.join("test")).unwrap();
+    std::fs::write(
+        tmp.join("test/snap_test.bg"),
+        "namespace snap_test\n\nfn main() {\n    println(\"actual\")\n}\n\n// @beagle.core.snapshot\n// wrong\n",
+    )
+    .unwrap();
+
     let output = beag()
-        .arg("--all-tests")
+        .arg("test")
+        .current_dir(&tmp)
         .output()
-        .expect("failed to run beag --all-tests");
+        .expect("failed to run beag test");
+    assert!(
+        !output.status.success(),
+        "Mismatched snapshot should fail"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("FAIL"), "Output should show FAIL");
+}
+
+#[test]
+fn test_update_snapshots_rewrites_file() {
+    let tmp = tempdir();
+
+    // Create a test file with a wrong snapshot
+    std::fs::create_dir_all(tmp.join("test")).unwrap();
+    let test_file = tmp.join("test/snap_test.bg");
+    std::fs::write(
+        &test_file,
+        "namespace snap_test\n\nfn main() {\n    println(\"actual output\")\n}\n\n// @beagle.core.snapshot\n// wrong\n",
+    )
+    .unwrap();
+
+    // Run with --update-snapshots
+    let output = beag()
+        .args(["test", "--update-snapshots"])
+        .current_dir(&tmp)
+        .output()
+        .expect("failed to run beag test");
     assert!(
         output.status.success(),
-        "Legacy --all-tests failed: {}",
+        "beag test --update-snapshots should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Read the file back and verify the snapshot was updated
+    let content = std::fs::read_to_string(&test_file).unwrap();
+    assert!(
+        content.contains("// actual output"),
+        "Snapshot should contain actual output, got:\n{}",
+        content
+    );
+    assert!(
+        !content.contains("// wrong"),
+        "Old snapshot should be gone"
+    );
+}
+
+#[test]
+fn test_update_snapshots_then_passes() {
+    let tmp = tempdir();
+
+    // Create a test file with a wrong snapshot
+    std::fs::create_dir_all(tmp.join("test")).unwrap();
+    let test_file = tmp.join("test/snap_test.bg");
+    std::fs::write(
+        &test_file,
+        "namespace snap_test\n\nfn main() {\n    println(\"hello\")\n    println(42)\n}\n\n// @beagle.core.snapshot\n// stale\n",
+    )
+    .unwrap();
+
+    // Update snapshots
+    let output = beag()
+        .args(["test", "--update-snapshots"])
+        .current_dir(&tmp)
+        .output()
+        .expect("failed to run beag test");
+    assert!(output.status.success());
+
+    // Now run without --update-snapshots, should pass
+    let output = beag()
+        .arg("test")
+        .current_dir(&tmp)
+        .output()
+        .expect("failed to run beag test");
+    assert!(
+        output.status.success(),
+        "After update, test should pass: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Test passed"), "Should have passing tests");
+    assert!(stdout.contains("1 passed"), "Should have 1 passing test");
+    assert!(stdout.contains("0 failed"), "Should have 0 failures");
+}
+
+#[test]
+fn test_recursive_test_discovery() {
+    let tmp = tempdir();
+
+    // Create nested test directories
+    std::fs::create_dir_all(tmp.join("test/unit")).unwrap();
+    std::fs::write(
+        tmp.join("test/top_test.bg"),
+        "namespace top_test\n\nfn main() {\n    println(\"top\")\n}\n\n// @beagle.core.snapshot\n// top\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.join("test/unit/nested_test.bg"),
+        "namespace nested_test\n\nfn main() {\n    println(\"nested\")\n}\n\n// @beagle.core.snapshot\n// nested\n",
+    )
+    .unwrap();
+
+    let output = beag()
+        .arg("test")
+        .current_dir(&tmp)
+        .output()
+        .expect("failed to run beag test");
+    assert!(
+        output.status.success(),
+        "Recursive tests should pass: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("2 passed"), "Should find 2 tests");
 }
 
 // --- No arguments ---

@@ -26,7 +26,7 @@ fn main() {
     println("hello\tworld")
 }
 
-// Expect
+// @beagle.core.snapshot
 // tab: [	]
 // newline in string length: 1
 // null char length: 1

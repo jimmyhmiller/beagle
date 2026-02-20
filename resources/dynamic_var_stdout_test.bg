@@ -17,7 +17,7 @@ fn main() {
     print(buffer.content)
 }
 
-// Expect
+// @beagle.core.snapshot
 // to stdout
 // back to stdout
 // captured line 1

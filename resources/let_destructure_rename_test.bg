@@ -16,6 +16,6 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Alice
 // 30

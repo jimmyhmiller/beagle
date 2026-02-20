@@ -20,7 +20,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Outer try
 // Inner try
 // Inner catch:

@@ -93,7 +93,7 @@ fn main() {
     println(get(decoded_arr, 2))
 }
 
-// Expect
+// @beagle.core.snapshot
 // 0
 // -42
 // 9007199254740991

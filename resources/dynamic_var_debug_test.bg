@@ -13,7 +13,7 @@ fn main() {
     println(dyn_x)
 }
 
-// Expect
+// @beagle.core.snapshot
 // before
 // 42
 // inside binding

@@ -67,7 +67,7 @@ fn main() {
     ""
 }
 
-// Expect
+// @beagle.core.snapshot
 // starts-with? tests:
 // 'hello world' starts with 'hello'?
 // true

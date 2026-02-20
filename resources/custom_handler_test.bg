@@ -121,7 +121,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Testing custom mock handler...
 // Read hello.txt: Hello, World!
 // Read data.json: {"key": "value"}

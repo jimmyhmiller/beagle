@@ -6,7 +6,7 @@ namespace nbody
 // Beagle implementation of the N-body simulation
 // Uses mutable structs and arrays to avoid allocation in the hot loop
 
-use raw-mutable-array as arr
+use beagle.mutable-array as arr
 
 let PI = 3.141592653589793
 let SOLAR_MASS = 39.47841760435743

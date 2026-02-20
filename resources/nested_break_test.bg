@@ -32,7 +32,7 @@ fn main() {
     println(outer2)
 }
 
-// Expect
+// @beagle.core.snapshot
 // 2
 // 2
 // 2

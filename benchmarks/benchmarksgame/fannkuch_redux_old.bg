@@ -5,7 +5,7 @@ namespace fannkuch_redux
 //
 // Beagle implementation, based on Dart version by Jos Hirth
 
-use raw-mutable-array as arr
+use beagle.mutable-array as arr
 
 struct Result {
     sum
@@ -159,7 +159,7 @@ fn main(args) {
     run(n)
 }
 
-// Expect
+// @beagle.core.snapshot
 // 228
 // Pfannkuchen(7) = 16
 // 16

@@ -16,5 +16,5 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // handlers set successfully

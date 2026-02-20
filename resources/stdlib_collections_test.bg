@@ -166,7 +166,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // map: [2, 4, 6]
 // filter: [2, 4]
 // reduce: 10

@@ -1,6 +1,6 @@
 namespace test.gc.in.namespaces
 
-use raw-mutable-array as array
+use beagle.mutable-array as array
 struct HeapThing {
     x
     y
@@ -37,7 +37,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // PersistentVector { count: 0, shift: 5, root: [  ], tail: [  ] }
 // HeapThing { x: 1, y: 2, z: 3 }
 // HeapThing { x: HeapThing { x: 1, y: 2, z: 3 }, y: HeapThing { x: 1, y: 2, z: 3 }, z: HeapThing { x: 1, y: 2, z: 3 } }

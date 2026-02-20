@@ -78,7 +78,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // === Testing new stdlib functions ===
 // --- not-every? ---
 // some fail: true

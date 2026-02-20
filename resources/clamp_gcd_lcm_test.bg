@@ -93,7 +93,7 @@ fn main() {
     ""
 }
 
-// Expect
+// @beagle.core.snapshot
 // clamp tests (integers):
 // clamp(5, 0, 10) - should be 5:
 // 5

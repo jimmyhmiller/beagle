@@ -59,7 +59,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Result 1:
 // 5
 // Caught e1:

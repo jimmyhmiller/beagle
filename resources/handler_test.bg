@@ -32,7 +32,7 @@ fn main() {
     println("Done")
 }
 
-// Expect
+// @beagle.core.snapshot
 // in handler
 // After perform
 // 42

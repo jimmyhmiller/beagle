@@ -11,7 +11,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Before try
 // In try - no exception
 // After try-catch

@@ -51,7 +51,7 @@ fn main() {
     println("done")
 }
 
-// Expect
+// @beagle.core.snapshot
 // Token created: true
 // Initially cancelled: false
 // After cancel: true

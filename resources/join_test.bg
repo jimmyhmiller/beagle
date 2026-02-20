@@ -57,7 +57,7 @@ fn main() {
     ""
 }
 
-// Expect
+// @beagle.core.snapshot
 // Join with comma:
 // hello, world, test
 // Equals 'hello, world, test'?

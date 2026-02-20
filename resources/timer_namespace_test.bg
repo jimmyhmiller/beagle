@@ -40,7 +40,7 @@ fn main() {
     println("Done!")
 }
 
-// Expect
+// @beagle.core.snapshot
 // Testing timer/sleep...
 // Sleep OK
 // Elapsed OK

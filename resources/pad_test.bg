@@ -73,7 +73,7 @@ fn main() {
     ""
 }
 
-// Expect
+// @beagle.core.snapshot
 // pad-left tests:
 // pad-left('hello', 10, ' ') length:
 // true

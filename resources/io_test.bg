@@ -73,7 +73,7 @@ fn main() {
     println("=== Tests Complete ===")
 }
 
-// Expect
+// @beagle.core.snapshot
 // === Beagle IO Tests ===
 // Testing Result helpers...
 // ok?(good) =  true

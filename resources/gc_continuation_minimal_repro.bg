@@ -73,7 +73,7 @@ fn main() {
 }
 
 // Behavior note: Should compute 500 * 420 = 210000
-// Expect
+// @beagle.core.snapshot
 // Running minimal GC corruption test...
 // This should fail with 'Handler: ErrorOpaque' after several GC cycles
 // Result: 210000

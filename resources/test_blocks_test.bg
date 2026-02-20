@@ -1,0 +1,40 @@
+namespace test_blocks_test
+
+fn add(a, b) { a + b }
+fn divide(a, b) {
+    if b == 0 {
+        throw("division by zero")
+    }
+    a / b
+}
+
+test "addition" {
+    assert-eq!(add(1, 2), 3)
+    assert-eq!(add(0, 0), 0)
+    assert-eq!(add(-1, 1), 0)
+}
+
+test "assert truthy" {
+    assert!(true)
+    assert!(1)
+    assert!("hello")
+    assert!([1, 2, 3])
+}
+
+test "assert not equal" {
+    assert-ne!(1, 2)
+    assert-ne!("hello", "world")
+    assert-ne!(true, false)
+}
+
+test "assert throws" {
+    assert-throws!(fn() { throw("boom") })
+    assert-throws!(fn() { divide(1, 0) })
+}
+
+fn main() {
+    println(add(2, 3))
+}
+
+// @beagle.core.snapshot
+// 5

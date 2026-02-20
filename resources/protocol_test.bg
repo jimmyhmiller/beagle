@@ -86,7 +86,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // PersistentVector
 // Protocol { name: "beagle.core/Indexed" }
 // 2

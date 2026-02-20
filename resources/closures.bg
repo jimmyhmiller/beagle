@@ -47,6 +47,6 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // Closure { function, 8, 8, [32, ] }
 // 32

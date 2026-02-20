@@ -18,7 +18,7 @@ fn main() {
     "done"
 }
 
-// Expect
+// @beagle.core.snapshot
 // caught arg
 // arg error
 // arg error

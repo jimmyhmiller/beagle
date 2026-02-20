@@ -27,7 +27,7 @@ fn main() {
     println(char-from-code(66))
 }
 
-// Expect
+// @beagle.core.snapshot
 // 10
 // 20
 // 5

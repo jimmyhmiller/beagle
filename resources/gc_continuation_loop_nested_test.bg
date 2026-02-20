@@ -63,7 +63,7 @@ fn main() {
     }
 }
 
-// Expect
+// @beagle.core.snapshot
 // Testing loop + nested performs...
 // Result: 1050
 // Success!
