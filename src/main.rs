@@ -1860,6 +1860,18 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             }
         };
         let expected = expected.trim();
+        if expected.is_empty() {
+            return Err(format!(
+                "File '{}' has a // @beagle.core.snapshot marker but no expected output.\n\
+                 Add expected output lines after the marker, prefixed with //:\n\n\
+                 // @beagle.core.snapshot\n\
+                 // expected output here\n\n\
+                 If the marker appears in a comment unrelated to testing, \
+                 reword it to avoid the exact string '// @beagle.core.snapshot'.",
+                program
+            )
+            .into());
+        }
         let printed = runtime.printer.get_output().join("").trim().to_string();
         if printed != expected {
             if args.update_snapshots {

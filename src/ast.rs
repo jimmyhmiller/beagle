@@ -4813,24 +4813,9 @@ impl AstCompiler<'_> {
         } else if let Some(free_var) = self.create_free_if_closable(&name.to_string()) {
             Ok(free_var)
         } else {
-            let current_env = self.environment_stack.last_mut().unwrap();
-            current_env.free_variables.push(FreeVariable {
+            Err(CompileError::UndefinedVariable {
                 name: name.to_string(),
-            });
-            let index = current_env.free_variables.len() - 1;
-
-            let free = match existing_location {
-                Some(VariableLocation::BoxedMutableLocal(_)) => {
-                    VariableLocation::BoxedFreeVariable(index)
-                }
-                Some(VariableLocation::MutableLocal(_)) => {
-                    VariableLocation::MutableFreeVariable(index)
-                }
-                _ => VariableLocation::FreeVariable(index),
-            };
-            current_env.variables.insert(name.to_string(), free);
-            let current_env = self.environment_stack.last().unwrap();
-            Ok(current_env.variables.get(name).unwrap().clone())
+            })
         }
     }
 

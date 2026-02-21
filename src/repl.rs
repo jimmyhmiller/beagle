@@ -1115,7 +1115,10 @@ mod tests {
     #[test]
     fn highlight_syntax_keyword_colored() {
         let result = highlight_syntax("fn");
-        assert!(result.contains(BOLD_BLUE), "keyword 'fn' should be bold blue");
+        assert!(
+            result.contains(BOLD_BLUE),
+            "keyword 'fn' should be bold blue"
+        );
         assert!(result.contains("fn"), "should contain the keyword text");
         assert!(result.contains(RESET), "should reset after keyword");
     }
@@ -1154,7 +1157,10 @@ mod tests {
         let h = make_helper(6);
         let result = h.highlight("fn foo() {", 0);
         // Should just be syntax-highlighted, no continuation processing
-        assert!(!result.contains("..."), "single line should not get continuation prefix");
+        assert!(
+            !result.contains("..."),
+            "single line should not get continuation prefix"
+        );
     }
 
     #[test]
@@ -1164,7 +1170,10 @@ mod tests {
         let input = "if true {\n      4";
         let result = h.highlight(input, 0);
         // The continuation line should have "..." prefix (dimmed)
-        assert!(result.contains("..."), "continuation line should show dots prefix");
+        assert!(
+            result.contains("..."),
+            "continuation line should show dots prefix"
+        );
     }
 
     #[test]
@@ -1188,7 +1197,10 @@ mod tests {
         // Strip ANSI codes to check structure
         let stripped = strip_ansi(second);
         // After visual prefix ("..." + pad), should be "}" followed by spaces
-        assert!(stripped.contains("}"), "should still contain the closing brace");
+        assert!(
+            stripped.contains("}"),
+            "should still contain the closing brace"
+        );
         // The "}" should appear earlier (less leading space) than in raw input
         let brace_pos_raw = "          }".find('}').unwrap(); // position 10
         let brace_pos_display = stripped.find('}').unwrap();
@@ -1361,5 +1373,4 @@ mod tests {
         }
         result
     }
-
 }

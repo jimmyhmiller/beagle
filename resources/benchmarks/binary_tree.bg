@@ -108,4 +108,3 @@ fn bottomUpTree(depth) {
 // 64 trees of depth 16 check: 8388544
 // 16 trees of depth 18 check: 8388592
 // long lived tree of depth 18 check: 524287
-// 524287

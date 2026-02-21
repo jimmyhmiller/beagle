@@ -442,12 +442,32 @@ impl Compiler {
         let mut parser = Parser::new("".to_string(), string.to_string())?;
         let ast = parser.parse()?;
         let token_line_column_map = parser.get_token_line_column_map();
-        let (top_level, diagnostics) = self.compile_ast(
+
+        // Track function count before compilation so we can clean up on failure.
+        // The first pass reserves functions (with null pointers) before compiling
+        // bodies. If body compilation fails, those reserved functions would remain
+        // with null code pointers, causing segfaults if called later.
+        let functions_before = {
+            let runtime = get_runtime().get_mut();
+            runtime.functions.len()
+        };
+
+        let compile_result = self.compile_ast(
             ast,
             Some("REPL_FUNCTION".to_string()),
             "repl",
             token_line_column_map,
-        )?;
+        );
+
+        let (top_level, diagnostics) = match compile_result {
+            Ok(result) => result,
+            Err(e) => {
+                // Remove functions that were reserved during this failed compilation
+                let runtime = get_runtime().get_mut();
+                runtime.functions.truncate(functions_before);
+                return Err(e);
+            }
+        };
 
         // Store diagnostics for "repl" (replaces previous REPL diagnostics)
         if let Ok(mut store) = self.diagnostic_store.lock() {
