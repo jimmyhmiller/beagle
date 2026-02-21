@@ -1117,6 +1117,29 @@ impl Tokenizer {
         self.position = 0;
         Ok((result, token_line_column_map))
     }
+
+    /// Tokenize input and return (token, start_byte, end_byte) triples.
+    /// Used by the REPL for syntax highlighting. Recovers from errors
+    /// by returning tokens up to the point of failure.
+    pub fn tokenize_with_spans(&mut self, input_bytes: &[u8]) -> Vec<(Token, usize, usize)> {
+        let mut result = Vec::new();
+        self.position = 0;
+        self.line = 1;
+        self.column = 1;
+        self.last_significant_token = None;
+        while !self.at_end(input_bytes) {
+            let start = self.position;
+            match self.parse_single(input_bytes) {
+                Ok(Some(token)) => {
+                    let end = self.position;
+                    result.push((token, start, end));
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+        result
+    }
 }
 
 #[test]

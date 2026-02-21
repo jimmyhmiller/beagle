@@ -6233,6 +6233,76 @@ impl Runtime {
         self.namespaces.get_namespace_id(name)
     }
 
+    /// Return all namespace names (for REPL completion).
+    pub fn all_namespace_names(&self) -> Vec<String> {
+        self.namespaces.namespace_names.keys().cloned().collect()
+    }
+
+    /// Return all function names visible from the current namespace (for REPL completion).
+    /// Includes: current namespace bindings + imported aliases.
+    pub fn visible_function_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        let current_ns = self.current_namespace_name();
+
+        for f in &self.functions {
+            if !f.is_defined {
+                continue;
+            }
+            if let Some(short) = f
+                .name
+                .strip_prefix(&current_ns)
+                .and_then(|s| s.strip_prefix('/'))
+            {
+                names.push(short.to_string());
+            }
+        }
+
+        // Also add names from aliased namespaces
+        let current_ns_id = self.namespaces.current_namespace;
+        if let Some(ns_mutex) = self.namespaces.namespaces.get(current_ns_id) {
+            if let Ok(ns) = ns_mutex.lock() {
+                for (alias, &ns_id) in &ns.aliases {
+                    if let Some(aliased_name) = self.namespaces.id_to_name.get(&ns_id) {
+                        let prefix = format!("{}/", aliased_name);
+                        for f in &self.functions {
+                            if !f.is_defined {
+                                continue;
+                            }
+                            if let Some(short) = f.name.strip_prefix(&prefix) {
+                                names.push(format!("{}/{}", alias, short));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        names
+    }
+
+    /// Return all struct names (for REPL completion).
+    pub fn all_struct_names(&self) -> Vec<String> {
+        self.structs.iter().map(|s| s.name.clone()).collect()
+    }
+
+    /// Return all enum names and their variants (for REPL completion).
+    pub fn all_enum_names_and_variants(&self) -> Vec<(String, Vec<String>)> {
+        self.enums
+            .iter()
+            .map(|e| {
+                let variants = e
+                    .variants
+                    .iter()
+                    .map(|v| match v {
+                        EnumVariant::StructVariant { name, .. } => name.clone(),
+                        EnumVariant::StaticVariant { name } => name.clone(),
+                    })
+                    .collect();
+                (e.name.clone(), variants)
+            })
+            .collect()
+    }
+
     fn escape_string_for_repr(s: &str) -> String {
         let mut escaped = String::with_capacity(s.len() + 2);
         escaped.push('"');

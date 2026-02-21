@@ -346,10 +346,7 @@ fn test_snapshot_mismatch_fails() {
         .current_dir(&tmp)
         .output()
         .expect("failed to run beag test");
-    assert!(
-        !output.status.success(),
-        "Mismatched snapshot should fail"
-    );
+    assert!(!output.status.success(), "Mismatched snapshot should fail");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("FAIL"), "Output should show FAIL");
 }
@@ -386,10 +383,7 @@ fn test_update_snapshots_rewrites_file() {
         "Snapshot should contain actual output, got:\n{}",
         content
     );
-    assert!(
-        !content.contains("// wrong"),
-        "Old snapshot should be gone"
-    );
+    assert!(!content.contains("// wrong"), "Old snapshot should be gone");
 }
 
 #[test]

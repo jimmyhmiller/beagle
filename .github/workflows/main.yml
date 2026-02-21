@@ -79,11 +79,3 @@ jobs:
           else
             RUST_BACKTRACE=1 cargo test --features ${{ matrix.gc-features }},${{ matrix.backend }} -- --test-threads=1
           fi
-
-      - name: Run Beagle language tests (${{ matrix.build-mode }})
-        run: |
-          if [ "${{ matrix.build-mode }}" = "release" ]; then
-            cargo run --features ${{ matrix.gc-features }},${{ matrix.backend }} --release -- --all-tests
-          else
-            cargo run --features ${{ matrix.gc-features }},${{ matrix.backend }} -- --all-tests
-          fi

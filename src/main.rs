@@ -81,6 +81,7 @@ mod types;
 mod x86;
 
 pub mod collections;
+mod repl;
 
 #[derive(Debug, Encode, Decode, Clone, SerJson)]
 pub struct Message {
@@ -1516,8 +1517,6 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 }
 
 fn run_repl(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
-    use std::io::{self, Write};
-
     let args_clone = args.clone();
 
     RUNTIME.get_or_init(|| {
@@ -1533,13 +1532,11 @@ fn run_repl(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     compile_trampoline(runtime);
     compile_apply_call_trampolines(runtime);
-    // x86-64 has 6 arg registers (0-5), ARM64 has 8 (0-7)
-    // The wrapper uses the last arg register for the function pointer
     cfg_if::cfg_if! {
         if #[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))] {
-            let max_wrapper_args = 5; // Uses arg0-4 for data, arg5 for fn ptr
+            let max_wrapper_args = 5;
         } else {
-            let max_wrapper_args = 6; // Uses arg0-5 for data, arg6 for fn ptr (ARM supports 8 args)
+            let max_wrapper_args = 6;
         }
     }
     for i in 0..=max_wrapper_args {
@@ -1549,16 +1546,10 @@ fn run_repl(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     let pause_atom_ptr = runtime.pause_atom_ptr();
     runtime.set_pause_atom_ptr(pause_atom_ptr);
 
-    // Initialize GlobalObject for main thread before any heap allocations that use roots
     runtime.initialize_thread_global()?;
-
-    // Initialize the namespaces atom in GlobalObject slot 0
     runtime.initialize_namespaces()?;
-
     runtime.install_builtins()?;
 
-    // Generate continuation trampolines using the code generator (x86-64 only)
-    // This replaces the Rust inline assembly version which gets broken by LLVM optimizer
     #[cfg(any(
         feature = "backend-x86-64",
         all(target_arch = "x86_64", not(feature = "backend-arm64"))
@@ -1582,53 +1573,7 @@ fn run_repl(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         .unwrap_or_else(|| runtime.reserve_namespace("user".to_string()));
     runtime.set_current_namespace(user_namespace_id);
 
-    println!("Beagle REPL - Enter expressions to evaluate (Ctrl+C to exit)");
-
-    loop {
-        print!("beagle> ");
-        io::stdout().flush()?;
-
-        let mut input = String::new();
-        match io::stdin().read_line(&mut input) {
-            Ok(0) => break, // EOF
-            Ok(_) => {
-                let input = input.trim();
-                if input.is_empty() {
-                    continue;
-                }
-
-                // Escape the input string for eval()
-                let escaped_input = input.replace("\\", "\\\\").replace("\"", "\\\"");
-
-                // Wrap user input in eval() with try/catch to handle all exceptions consistently
-                // This ensures parse/compile errors throw SystemError.CompileError like explicit eval() calls
-                let wrapped_input = format!(
-                    "try {{ eval(\"{}\") }} catch (__repl_error__) {{ println(\"Uncaught exception:\"); println(__repl_error__); null }}",
-                    escaped_input
-                );
-
-                match runtime.compile_string(&wrapped_input) {
-                    Ok(function_pointer) => {
-                        if function_pointer == 0 {
-                            continue;
-                        }
-                        let result = runtime.call_via_trampoline(function_pointer);
-                        runtime.println(result).unwrap();
-                    }
-                    Err(e) => {
-                        // This should only happen if the wrapper code itself has syntax errors
-                        eprintln!("Internal REPL error: {}", e);
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("Error reading input: {}", e);
-                break;
-            }
-        }
-    }
-
-    Ok(())
+    repl::run_interactive_loop(runtime)
 }
 
 cfg_if::cfg_if! {

@@ -1189,15 +1189,30 @@ extern "C" fn property_access(
     let runtime = get_runtime().get_mut();
     let (result, index) = runtime
         .property_access(struct_pointer, str_constant_ptr)
-        .unwrap_or_else(|error| {
+        .unwrap_or_else(|_error| {
             let stack_pointer = get_current_stack_pointer();
-            let frame_pointer = get_saved_frame_pointer();
             let heap_object = HeapObject::from_tagged(struct_pointer);
-            println!("Heap object: {:?}", heap_object.get_header());
-            println!("Error: {:?}", error);
+            let struct_type_id = heap_object.get_struct_id();
+            let struct_name = runtime
+                .get_struct_by_id(struct_type_id)
+                .map(|s| s.name.rsplit('/').next().unwrap_or(&s.name).to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let fields = runtime
+                .get_struct_by_id(struct_type_id)
+                .map(|s| s.fields.join(", "))
+                .unwrap_or_default();
+            let str_constant_idx: usize = BuiltInTypes::untag(str_constant_ptr);
+            let property_name = runtime.string_constants[str_constant_idx].str.clone();
             unsafe {
-                throw_error(stack_pointer, frame_pointer);
-            };
+                throw_runtime_error(
+                    stack_pointer,
+                    "FieldError",
+                    format!(
+                        "Struct '{}' has no field '{}'. Available fields: {}",
+                        struct_name, property_name, fields
+                    ),
+                );
+            }
         });
     let type_id = HeapObject::from_tagged(struct_pointer).get_struct_id();
     let buffer = unsafe { from_raw_parts_mut(property_cache_location as *mut usize, 2) };
