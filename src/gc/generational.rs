@@ -942,9 +942,22 @@ impl GenerationalGC {
             return result;
         }
 
-        // Copy object data to old generation
-        let data = heap_object.get_full_object_data();
-        let new_pointer = self.old.copy_data_to_offset(data);
+        // Check if this user struct needs migration to a new shape
+        let new_pointer = if heap_object.get_type_id() == 0 {
+            let shape_id = heap_object.get_struct_id();
+            let runtime = crate::get_runtime().get_mut();
+            if let Some(plan) = runtime.structs.migration_plan_for(shape_id) {
+                self.copy_with_migration(&heap_object, &plan)
+            } else {
+                // Normal copy
+                let data = heap_object.get_full_object_data();
+                self.old.copy_data_to_offset(data)
+            }
+        } else {
+            // Normal copy
+            let data = heap_object.get_full_object_data();
+            self.old.copy_data_to_offset(data)
+        };
 
         // Get the new object and add to processing queue
         let new_object = HeapObject::from_untagged(new_pointer);
@@ -956,6 +969,43 @@ impl GenerationalGC {
         unsafe { *pointer = forwarding };
 
         tagged_new
+    }
+
+    fn copy_with_migration(
+        &mut self,
+        old_object: &HeapObject,
+        plan: &crate::runtime::MigrationPlan,
+    ) -> *const u8 {
+        // Build the new object data as a byte buffer and use copy_data_to_offset
+        let old_header = old_object.get_header();
+        let new_header = Header {
+            type_id: old_header.type_id,
+            type_data: plan.new_shape_id as u32,
+            size: plan.new_field_count as u16,
+            opaque: old_header.opaque,
+            marked: false,
+            large: false,
+            type_flags: old_header.type_flags,
+        };
+
+        let total_words = 1 + plan.new_field_count; // header + fields
+        let mut data = vec![0u8; total_words * 8];
+
+        // Write header
+        data[0..8].copy_from_slice(&new_header.to_usize().to_ne_bytes());
+
+        // Write fields
+        let null_val = BuiltInTypes::null_value() as usize;
+        for (new_idx, mapping) in plan.field_map.iter().enumerate() {
+            let value = match mapping {
+                Some(old_idx) => old_object.get_field(*old_idx),
+                None => null_val,
+            };
+            let offset = (1 + new_idx) * 8;
+            data[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
+        }
+
+        self.old.copy_data_to_offset(&data)
     }
 
     fn copy_remaining(&mut self, stack_map: &StackMap) {

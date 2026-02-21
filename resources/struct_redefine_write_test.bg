@@ -1,0 +1,43 @@
+namespace struct_redefine_write_test
+
+struct Point { x, y, z }
+
+fn main() {
+    // Create old object with 3 fields
+    let p = Point { x: 10, y: 20, z: 30 }
+
+    // Redefine to remove z, add w
+    eval("struct Point { x, y, w }")
+
+    // Existing fields work
+    println(p.x)
+    println(p.y)
+
+    // Removed field z errors
+    try {
+        println(p.z)
+        println("ERROR: should not reach here")
+    } catch (e) {
+        println("Caught z access error")
+    }
+
+    // New field w returns null on old object
+    println(p.w)
+
+    // New object with the new layout
+    eval("
+        let p2 = Point { x: 100, y: 200, w: 300 }
+        println(p2.x)
+        println(p2.y)
+        println(p2.w)
+    ")
+}
+
+// @beagle.core.snapshot
+// 10
+// 20
+// Caught z access error
+// null
+// 100
+// 200
+// 300

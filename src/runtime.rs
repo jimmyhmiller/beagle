@@ -3,7 +3,7 @@ use mmap_rs::{Mmap, MmapMut, MmapOptions, Reserved};
 use nanoserde::SerJson;
 use regex::Regex;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     error::Error,
     ffi::{CString, c_void},
     io::Write,
@@ -407,9 +407,21 @@ impl Struct {
     }
 }
 
+/// Computed by StructManager, consumed by any GC for migrating objects to new layouts.
+pub struct MigrationPlan {
+    pub new_field_count: usize,
+    pub new_shape_id: usize,
+    /// For each field in the new layout: Some(old_index) or None (fill with null)
+    pub field_map: Vec<Option<usize>>,
+}
+
 pub struct StructManager {
     name_to_id: HashMap<String, usize>,
     structs: Vec<Struct>,
+    name_to_family_id: HashMap<String, usize>,
+    shape_id_to_family_id: Vec<usize>,
+    family_id_to_latest_shape: Vec<usize>,
+    family_id_counter: usize,
 }
 
 impl Default for StructManager {
@@ -423,12 +435,36 @@ impl StructManager {
         Self {
             name_to_id: HashMap::new(),
             structs: Vec::new(),
+            name_to_family_id: HashMap::new(),
+            shape_id_to_family_id: Vec::new(),
+            family_id_to_latest_shape: Vec::new(),
+            family_id_counter: 0,
         }
     }
 
-    pub fn insert(&mut self, name: String, s: Struct) {
-        self.name_to_id.insert(name.clone(), self.structs.len());
+    /// Insert a struct definition. Returns (shape_id, is_redefinition).
+    pub fn insert(&mut self, name: String, s: Struct) -> (usize, bool) {
+        let new_shape_id = self.structs.len();
+        let is_redefinition = self.name_to_id.contains_key(&name);
+
+        let family_id = if let Some(&existing_family) = self.name_to_family_id.get(&name) {
+            // Redefinition: reuse family_id, update latest shape
+            self.family_id_to_latest_shape[existing_family] = new_shape_id;
+            existing_family
+        } else {
+            // New struct: allocate family_id
+            let fid = self.family_id_counter;
+            self.family_id_counter += 1;
+            self.name_to_family_id.insert(name.clone(), fid);
+            self.family_id_to_latest_shape.push(new_shape_id);
+            fid
+        };
+
+        self.name_to_id.insert(name, new_shape_id);
         self.structs.push(s);
+        self.shape_id_to_family_id.push(family_id);
+
+        (new_shape_id, is_redefinition)
     }
 
     pub fn get(&self, name: &str) -> Option<(usize, &Struct)> {
@@ -438,6 +474,61 @@ impl StructManager {
 
     pub fn get_by_id(&self, type_id: usize) -> Option<&Struct> {
         self.structs.get(type_id)
+    }
+
+    /// Check if a shape_id is the latest version for its family
+    pub fn is_latest_shape(&self, shape_id: usize) -> bool {
+        if let Some(&family_id) = self.shape_id_to_family_id.get(shape_id) {
+            self.family_id_to_latest_shape[family_id] == shape_id
+        } else {
+            true
+        }
+    }
+
+    /// Get the latest shape_id for the same family as the given shape_id
+    pub fn get_latest_shape_for(&self, shape_id: usize) -> usize {
+        if let Some(&family_id) = self.shape_id_to_family_id.get(shape_id) {
+            self.family_id_to_latest_shape[family_id]
+        } else {
+            shape_id
+        }
+    }
+
+    /// Get the family_id for a given shape_id
+    pub fn get_family_id(&self, shape_id: usize) -> Option<usize> {
+        self.shape_id_to_family_id.get(shape_id).copied()
+    }
+
+    /// Check if two shape_ids belong to the same family
+    pub fn same_family(&self, a: usize, b: usize) -> bool {
+        match (self.get_family_id(a), self.get_family_id(b)) {
+            (Some(fa), Some(fb)) => fa == fb,
+            _ => false,
+        }
+    }
+
+    /// Build a migration map: for each field in new_shape, the index in old_shape (or None)
+    fn build_migration_map(&self, old_shape: usize, new_shape: usize) -> Vec<Option<usize>> {
+        let old_def = &self.structs[old_shape];
+        let new_def = &self.structs[new_shape];
+        new_def
+            .fields
+            .iter()
+            .map(|new_field| old_def.fields.iter().position(|f| f == new_field))
+            .collect()
+    }
+
+    /// Returns None if object doesn't need migration (already latest shape)
+    pub fn migration_plan_for(&self, shape_id: usize) -> Option<MigrationPlan> {
+        if self.is_latest_shape(shape_id) {
+            return None;
+        }
+        let latest = self.get_latest_shape_for(shape_id);
+        Some(MigrationPlan {
+            new_field_count: self.structs[latest].fields.len(),
+            new_shape_id: latest,
+            field_map: self.build_migration_map(shape_id, latest),
+        })
     }
 
     /// Iterate over all structs
@@ -6630,12 +6721,30 @@ impl Runtime {
             );
         }
         let struct_value = struct_value.unwrap();
-        let field_index = struct_value
-            .fields
-            .iter()
-            .position(|f| f == string)
-            .ok_or_else(|| format!("Field not found {} for struct {:?}", string, struct_value))?;
-        Ok((heap_object.get_field(field_index), field_index))
+
+        // Check the latest definition for field validity (removed fields error immediately)
+        let latest_shape_id = self.structs.get_latest_shape_for(struct_type_id);
+        if latest_shape_id != struct_type_id {
+            let latest_def = self
+                .get_struct_by_id(latest_shape_id)
+                .expect("Latest shape must exist");
+            if !latest_def.fields.iter().any(|f| f == string) {
+                let simple_name = latest_def
+                    .name
+                    .split_once("/")
+                    .map(|(_, n)| n)
+                    .unwrap_or(&latest_def.name);
+                return Err(format!("Field '{}' does not exist on {}", string, simple_name).into());
+            }
+        }
+
+        // Find field in object's actual layout
+        if let Some(field_index) = struct_value.fields.iter().position(|f| f == string) {
+            Ok((heap_object.get_field(field_index), field_index))
+        } else {
+            // Field was added after this object was created — return null
+            Ok((BuiltInTypes::null_value() as usize, usize::MAX))
+        }
     }
 
     pub fn type_of(
@@ -6753,6 +6862,20 @@ impl Runtime {
             let a_string = unsafe { std::str::from_utf8_unchecked(&a_bytes) };
             return a_string == b_string;
         }
+        // Handle int/float mixed comparison: convert int to float and compare values
+        if (a_tag == BuiltInTypes::Int && b_tag == BuiltInTypes::Float)
+            || (a_tag == BuiltInTypes::Float && b_tag == BuiltInTypes::Int)
+        {
+            let (int_val, float_tagged) = if a_tag == BuiltInTypes::Int {
+                (a, b)
+            } else {
+                (b, a)
+            };
+            let int_as_f64 = BuiltInTypes::untag(int_val) as i64 as f64;
+            let float_ptr = BuiltInTypes::untag(float_tagged) as *const f64;
+            let float_val = unsafe { *float_ptr.add(1) };
+            return int_as_f64 == float_val;
+        }
         if a_tag != b_tag {
             return false;
         }
@@ -6855,27 +6978,68 @@ impl Runtime {
         let struct_value = self
             .get_struct_by_id(struct_type_id)
             .expect("Struct not found by ID - this is a fatal error");
+
+        // Check the latest definition for field validity (removed fields error immediately)
+        let latest_shape_id = self.structs.get_latest_shape_for(struct_type_id);
+        if latest_shape_id != struct_type_id {
+            let latest_def = self
+                .get_struct_by_id(latest_shape_id)
+                .expect("Latest shape must exist");
+            if !latest_def.fields.iter().any(|f| f == string) {
+                let simple_name = latest_def
+                    .name
+                    .split_once("/")
+                    .map(|(_, n)| n)
+                    .unwrap_or(&latest_def.name);
+                unsafe {
+                    crate::builtins::throw_runtime_error(
+                        stack_pointer,
+                        "FieldError",
+                        format!("Field '{}' does not exist on {}", string, simple_name),
+                    );
+                }
+            }
+        }
+
+        // Find field in object's actual layout
         let field_index = struct_value.fields.iter().position(|f| f == string);
 
-        let field_index = field_index.unwrap_or_else(|| unsafe {
-            crate::builtins::throw_runtime_error(
-                stack_pointer,
-                "FieldError",
-                format!("Field '{}' not found in struct", string),
-            );
-        });
+        let field_index = match field_index {
+            Some(idx) => idx,
+            None => {
+                // Field was added after this object was created — can't write to it
+                unsafe {
+                    crate::builtins::throw_runtime_error(
+                        stack_pointer,
+                        "FieldError",
+                        format!(
+                            "Cannot write field '{}' on old-layout object (field was added in a later redefinition)",
+                            string
+                        ),
+                    );
+                }
+            }
+        };
 
-        // Check if field is mutable
-        if !struct_value.is_field_mutable(field_index) {
-            unsafe {
-                crate::builtins::throw_runtime_error(
-                    stack_pointer,
-                    "MutabilityError",
-                    format!(
-                        "Cannot mutate immutable field '{}' in struct '{}'",
-                        string, struct_value.name
-                    ),
-                );
+        // Check if field is mutable (use latest definition for mutability)
+        let mutable_check_def = if latest_shape_id != struct_type_id {
+            self.get_struct_by_id(latest_shape_id).unwrap()
+        } else {
+            struct_value
+        };
+        let latest_field_index = mutable_check_def.fields.iter().position(|f| f == string);
+        if let Some(li) = latest_field_index {
+            if !mutable_check_def.is_field_mutable(li) {
+                unsafe {
+                    crate::builtins::throw_runtime_error(
+                        stack_pointer,
+                        "MutabilityError",
+                        format!(
+                            "Cannot mutate immutable field '{}' in struct '{}'",
+                            string, mutable_check_def.name
+                        ),
+                    );
+                }
             }
         }
 
@@ -7917,21 +8081,32 @@ impl Runtime {
         self.keyword_constants.len() - 1
     }
 
-    pub fn add_struct(&mut self, s: Struct) {
+    pub fn add_struct(&mut self, s: Struct) -> bool {
         let name = s.name.clone();
-        // TODO: Namespace these
-        self.structs.insert(name.clone(), s);
-        // TODO: I need a "Struct" object that I can add here
-        // What I mean by this is a kind of meta object
-        // if you define a struct like this:
-        // struct Point { x y }
-        // and then you say let x = Point
-        // x is a struct object that describes the struct Point
+        // Grab the old shape_id before insert (if this is a redefinition)
+        let old_shape_id = self.structs.get(&name).map(|(id, _)| id);
+
+        let (new_shape_id, is_redefinition) = self.structs.insert(name.clone(), s);
+
+        if is_redefinition {
+            if let Some(old_id) = old_shape_id {
+                // Copy protocol dispatch entries from old shape to new shape
+                for table in self.dispatch_tables.values_mut() {
+                    if old_id < table.struct_dispatch.len() && table.struct_dispatch[old_id] != 0 {
+                        let fn_ptr = table.struct_dispatch[old_id];
+                        table.register(new_shape_id as isize, fn_ptr);
+                    }
+                }
+            }
+        }
+
         // grab the simple name for the binding
         let (_, simple_name) = name
             .split_once("/")
             .expect("Struct name must contain / separator - this is a fatal error");
         self.add_binding(simple_name, 0);
+
+        is_redefinition
     }
 
     pub fn add_enum(&mut self, e: Enum) {

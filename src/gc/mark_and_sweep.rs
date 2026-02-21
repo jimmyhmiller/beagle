@@ -606,6 +606,133 @@ impl MarkAndSweep {
             offset = (offset + 7) & !7;
         }
     }
+
+    /// Post-sweep migration: migrate live objects with outdated struct shapes to the latest layout.
+    fn migrate_outdated_structs(&mut self) {
+        let runtime = crate::get_runtime().get_mut();
+
+        // Phase 1: Find all objects that need migration, allocate new copies
+        let mut forwarding_map: Vec<(usize, usize, usize)> = Vec::new();
+
+        let mut offset = 0;
+        loop {
+            if offset > self.space.highmark {
+                break;
+            }
+            if let Some(entry) = self.free_list.find_entry_contains(offset) {
+                offset = entry.end();
+                continue;
+            }
+            let ptr = unsafe { self.space.start.add(offset) };
+            let heap_object = HeapObject::from_untagged(ptr);
+            let full_size = heap_object.full_size();
+
+            if heap_object.get_type_id() == 0 {
+                let shape_id = heap_object.get_struct_id();
+                if let Some(plan) = runtime.structs.migration_plan_for(shape_id) {
+                    let old_header = heap_object.get_header();
+                    let new_header = Header {
+                        type_id: old_header.type_id,
+                        type_data: plan.new_shape_id as u32,
+                        size: plan.new_field_count as u16,
+                        opaque: old_header.opaque,
+                        marked: false,
+                        large: false,
+                        type_flags: old_header.type_flags,
+                    };
+
+                    let total_bytes = 8 + plan.new_field_count * 8;
+                    let mut data = vec![0u8; total_bytes];
+                    data[0..8].copy_from_slice(&new_header.to_usize().to_ne_bytes());
+
+                    let null_val = BuiltInTypes::null_value() as usize;
+                    for (new_idx, mapping) in plan.field_map.iter().enumerate() {
+                        let value = match mapping {
+                            Some(old_idx) => heap_object.get_field(*old_idx),
+                            None => null_val,
+                        };
+                        let field_offset = (1 + new_idx) * 8;
+                        data[field_offset..field_offset + 8].copy_from_slice(&value.to_ne_bytes());
+                    }
+
+                    let new_ptr = self.copy_data_to_offset(&data);
+                    forwarding_map.push((ptr as usize, full_size, new_ptr as usize));
+
+                    // Set forwarding pointer in old object's header
+                    let tagged_new = BuiltInTypes::HeapObject.tag(new_ptr as isize) as usize;
+                    unsafe {
+                        *(ptr as *mut usize) = Header::set_forwarding_bit(tagged_new);
+                    }
+                }
+            }
+
+            offset += full_size;
+            offset = (offset + 7) & !7;
+        }
+
+        if forwarding_map.is_empty() {
+            return;
+        }
+
+        // Phase 2: Walk all live objects and update references to forwarded objects
+        let mut offset = 0;
+        loop {
+            if offset > self.space.highmark {
+                break;
+            }
+            if let Some(entry) = self.free_list.find_entry_contains(offset) {
+                offset = entry.end();
+                continue;
+            }
+            let ptr = unsafe { self.space.start.add(offset) };
+            let raw_header = unsafe { *(ptr as *const usize) };
+
+            // Skip forwarded objects (old copies waiting to be freed)
+            if Header::is_forwarding_bit_set(raw_header) {
+                if let Some((_, old_size, _)) = forwarding_map
+                    .iter()
+                    .find(|(old_ptr, _, _)| *old_ptr == ptr as usize)
+                {
+                    offset += old_size;
+                    offset = (offset + 7) & !7;
+                    continue;
+                }
+                offset += 8;
+                continue;
+            }
+
+            let mut heap_object = HeapObject::from_untagged(ptr);
+            let full_size = heap_object.full_size();
+
+            if !heap_object.is_opaque_object() {
+                for field in heap_object.get_fields_mut().iter_mut() {
+                    if BuiltInTypes::is_heap_pointer(*field) {
+                        let field_untagged = BuiltInTypes::untag(*field);
+                        let field_tag = *field & 7;
+                        if self.space.contains(field_untagged as *const u8) {
+                            let field_header = unsafe { *(field_untagged as *const usize) };
+                            if Header::is_forwarding_bit_set(field_header) {
+                                let new_tagged = Header::clear_forwarding_bit(field_header);
+                                *field = (new_tagged & !7) | field_tag;
+                            }
+                        }
+                    }
+                }
+            }
+
+            offset += full_size;
+            offset = (offset + 7) & !7;
+        }
+
+        // Phase 3: Free old objects
+        for (old_ptr, old_size, _) in forwarding_map {
+            let heap_offset = old_ptr - self.space.start as usize;
+            self.free_list.insert(FreeListEntry {
+                offset: heap_offset,
+                size: old_size,
+            });
+        }
+    }
 }
 
 impl Allocator for MarkAndSweep {
@@ -664,6 +791,7 @@ impl Allocator for MarkAndSweep {
         self.mark_extra_roots(extra_roots, stack_map);
 
         self.sweep();
+        self.migrate_outdated_structs();
         if self.options.print_stats {
             println!("Mark and sweep took {:?}", start.elapsed());
         }

@@ -780,7 +780,26 @@ impl Compiler {
     // TODO: All of this seems bad
     pub fn add_struct(&mut self, s: Struct) {
         let runtime = get_runtime().get_mut();
-        runtime.add_struct(s);
+        let is_redefinition = runtime.add_struct(s);
+        if is_redefinition {
+            self.invalidate_all_property_caches();
+        }
+    }
+
+    /// Invalidate all property access inline caches by writing usize::MAX to the
+    /// struct_id slot of every entry. This forces all accesses through the slow path.
+    fn invalidate_all_property_caches(&mut self) {
+        // Each cache entry is 24 bytes (3 words): [struct_id, field_offset, is_mutable]
+        // Write usize::MAX to the struct_id slot (word 0) of each entry.
+        let entry_size = 3 * 8; // 24 bytes per entry
+        let mut offset = 0;
+        while offset + entry_size <= self.property_look_up_cache_offset {
+            unsafe {
+                let cache_ptr = self.property_look_up_cache.as_mut_ptr().add(offset) as *mut usize;
+                *cache_ptr = usize::MAX;
+            }
+            offset += entry_size;
+        }
     }
 
     pub fn add_enum(&mut self, e: Enum) {
@@ -796,6 +815,12 @@ impl Compiler {
     pub fn get_struct(&self, name: &str) -> Option<(usize, &Struct)> {
         let runtime = get_runtime().get_mut();
         runtime.get_struct(name)
+    }
+
+    pub fn get_struct_family_id(&self, name: &str) -> Option<usize> {
+        let runtime = get_runtime().get_mut();
+        let (shape_id, _) = runtime.get_struct(name)?;
+        runtime.structs.get_family_id(shape_id)
     }
 
     /// Register a mapping from enum variant struct_id to enum name

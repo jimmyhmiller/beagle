@@ -1,0 +1,39 @@
+namespace struct_redefine_add_field_test
+
+struct Point { x, y }
+
+fn main() {
+    // Create object with original definition
+    let p = Point { x: 10, y: 20 }
+    println(p.x)
+    println(p.y)
+
+    // Redefine Point with an additional field
+    eval("struct Point { x, y, z }")
+
+    // Old object: existing fields still work
+    println(p.x)
+    println(p.y)
+
+    // Old object: new field returns null
+    println(p.z)
+
+    // New object creation must go through eval since compiler
+    // only knows the original definition at compile time
+    eval("
+        let p2 = Point { x: 1, y: 2, z: 3 }
+        println(p2.x)
+        println(p2.y)
+        println(p2.z)
+    ")
+}
+
+// @beagle.core.snapshot
+// 10
+// 20
+// 10
+// 20
+// null
+// 1
+// 2
+// 3

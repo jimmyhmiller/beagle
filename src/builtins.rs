@@ -1166,6 +1166,20 @@ pub fn get_current_frame_pointer() -> usize {
     fp
 }
 
+/// Check if a struct's shape_id belongs to the expected family.
+/// Takes tagged shape_id and tagged expected_family_id, returns tagged bool.
+extern "C" fn check_struct_family(tagged_shape_id: usize, tagged_family_id: usize) -> usize {
+    let shape_id = BuiltInTypes::untag(tagged_shape_id);
+    let expected_family = BuiltInTypes::untag(tagged_family_id);
+    let runtime = get_runtime().get_mut();
+    let actual_family = runtime.structs.get_family_id(shape_id);
+    if actual_family == Some(expected_family) {
+        BuiltInTypes::true_value() as usize
+    } else {
+        BuiltInTypes::false_value() as usize
+    }
+}
+
 extern "C" fn property_access(
     struct_pointer: usize,
     str_constant_ptr: usize,
@@ -1189,35 +1203,19 @@ extern "C" fn property_access(
     let runtime = get_runtime().get_mut();
     let (result, index) = runtime
         .property_access(struct_pointer, str_constant_ptr)
-        .unwrap_or_else(|_error| {
+        .unwrap_or_else(|error| {
             let stack_pointer = get_current_stack_pointer();
-            let heap_object = HeapObject::from_tagged(struct_pointer);
-            let struct_type_id = heap_object.get_struct_id();
-            let struct_name = runtime
-                .get_struct_by_id(struct_type_id)
-                .map(|s| s.name.rsplit('/').next().unwrap_or(&s.name).to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            let fields = runtime
-                .get_struct_by_id(struct_type_id)
-                .map(|s| s.fields.join(", "))
-                .unwrap_or_default();
-            let str_constant_idx: usize = BuiltInTypes::untag(str_constant_ptr);
-            let property_name = runtime.string_constants[str_constant_idx].str.clone();
             unsafe {
-                throw_runtime_error(
-                    stack_pointer,
-                    "FieldError",
-                    format!(
-                        "Struct '{}' has no field '{}'. Available fields: {}",
-                        struct_name, property_name, fields
-                    ),
-                );
+                throw_runtime_error(stack_pointer, "FieldError", error.to_string());
             }
         });
-    let type_id = HeapObject::from_tagged(struct_pointer).get_struct_id();
-    let buffer = unsafe { from_raw_parts_mut(property_cache_location as *mut usize, 2) };
-    buffer[0] = type_id;
-    buffer[1] = index * 8;
+    // Don't cache if field_index is usize::MAX (field was added after object creation, returned null)
+    if index != usize::MAX {
+        let type_id = HeapObject::from_tagged(struct_pointer).get_struct_id();
+        let buffer = unsafe { from_raw_parts_mut(property_cache_location as *mut usize, 2) };
+        buffer[0] = type_id;
+        buffer[1] = index * 8;
+    }
     result
 }
 
@@ -1993,6 +1991,16 @@ pub unsafe extern "C" fn apply_function(
                             0,
                         )
                     } else {
+                        if arg_count != func_info.number_of_args {
+                            throw_runtime_error(
+                                stack_pointer,
+                                "ArityError",
+                                format!(
+                                    "apply: function '{}' expects {} arguments, but got {}",
+                                    func_info.name, func_info.number_of_args, arg_count
+                                ),
+                            );
+                        }
                         call_with_args(fn_ptr, &args, arg_count, false, 0)
                     }
                 } else {
@@ -2019,6 +2027,16 @@ pub unsafe extern "C" fn apply_function(
                             function,
                         )
                     } else {
+                        if arg_count != func_info.number_of_args {
+                            throw_runtime_error(
+                                stack_pointer,
+                                "ArityError",
+                                format!(
+                                    "apply: closure '{}' expects {} arguments, but got {}",
+                                    func_info.name, func_info.number_of_args, arg_count
+                                ),
+                            );
+                        }
                         call_with_args(fn_ptr, &args, arg_count, true, function)
                     }
                 } else {
@@ -10639,6 +10657,22 @@ pub unsafe extern "C" fn return_from_shift_runtime(
                     unsafe { std::mem::transmute(ptr) };
                 return_jump_ptr(new_sp, new_fp, value, return_address, callee_saved.as_ptr(), frame_src, frame_size);
             } else {
+                // CRITICAL for multi-shot continuations: Restore the shift body's stack frame.
+                // The continuation body may have written to stack locations that overlap with
+                // the shift body's frame (e.g., the result_local slot where k is stored).
+                // We must restore the original frame contents so that the shift body can
+                // continue to access its local variables (including k for subsequent calls).
+                let saved_frame = &return_point.saved_stack_frame;
+                if !saved_frame.is_empty() {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            saved_frame.as_ptr(),
+                            new_sp as *mut u8,
+                            saved_frame.len(),
+                        );
+                    }
+                }
+
                 // ARM64 callee-saved: x19-x28
                 // Use explicit register constraints to avoid conflicts.
                 // We put inputs in specific registers that won't be clobbered
@@ -11725,6 +11759,13 @@ impl Runtime {
             property_access as *const u8,
             false,
             3,
+        )?;
+
+        self.add_builtin_function(
+            "beagle.builtin/check-struct-family",
+            check_struct_family as *const u8,
+            false,
+            2,
         )?;
 
         self.add_builtin_function_with_fp(
@@ -15253,6 +15294,10 @@ mod rust_collections {
     /// Signature: (vec_ptr, index) -> tagged_value
     pub unsafe extern "C" fn rust_vec_get(vec_ptr: usize, index: usize) -> usize {
         if !BuiltInTypes::is_heap_pointer(vec_ptr) {
+            return BuiltInTypes::null_value() as usize;
+        }
+        // Validate that the index is an integer
+        if BuiltInTypes::get_kind(index) != BuiltInTypes::Int {
             return BuiltInTypes::null_value() as usize;
         }
         let vec = GcHandle::from_tagged(vec_ptr);

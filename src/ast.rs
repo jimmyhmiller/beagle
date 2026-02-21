@@ -5879,14 +5879,14 @@ impl AstCompiler<'_> {
                 self.ir
                     .jump_if(no_match_label, Condition::Equal, value_reg, Value::Null);
 
-                // Get the struct ID for this enum variant
+                // Get the family_id for this enum variant
                 let full_enum_name = self.get_full_enum_name(enum_name);
                 let full_name = format!("{}.{}", full_enum_name, variant_name);
-                let (expected_struct_id, _) =
-                    self.compiler.get_struct(&full_name).ok_or_else(|| {
-                        CompileError::EnumVariantNotFound {
-                            name: full_name.clone(),
-                        }
+                let expected_family_id = self
+                    .compiler
+                    .get_struct_family_id(&full_name)
+                    .ok_or_else(|| CompileError::EnumVariantNotFound {
+                        name: full_name.clone(),
                     })?;
 
                 // Untag the value before reading struct ID
@@ -5898,17 +5898,20 @@ impl AstCompiler<'_> {
                 // Tag the struct ID before comparison (as Int)
                 let tagged_struct_id = self.ir.tag(struct_id_reg, BuiltInTypes::Int.get_tag());
 
-                // Create expected value - will be tagged by codegen via TaggedConstant
-                // (don't pre-tag, TaggedConstant already applies construct_int which tags)
-                let expected_reg = self.ir.assign_new(expected_struct_id);
+                // Create expected family_id
+                let expected_family_reg = self
+                    .ir
+                    .assign_new(Value::TaggedConstant(expected_family_id as isize));
 
-                // Compare and jump if not equal (both values are tagged ints)
-                self.ir.jump_if(
-                    no_match_label,
-                    Condition::NotEqual,
-                    tagged_struct_id,
-                    expected_reg,
-                );
+                // Call builtin to check family membership
+                let result = self.call_builtin(
+                    "beagle.builtin/check-struct-family",
+                    vec![tagged_struct_id, expected_family_reg.into()],
+                )?;
+
+                // Jump if family doesn't match
+                self.ir
+                    .jump_if(no_match_label, Condition::NotEqual, result, Value::True);
                 Ok(())
             }
             Pattern::Struct { name, .. } => {
@@ -5916,11 +5919,11 @@ impl AstCompiler<'_> {
                 self.ir
                     .jump_if(no_match_label, Condition::Equal, value_reg, Value::Null);
 
-                // Check if the value is a struct with the expected struct ID
+                // Check if the value belongs to the expected struct family
                 let full_struct_name = self.get_full_struct_name(name);
-                let (expected_struct_id, _) = self
+                let expected_family_id = self
                     .compiler
-                    .get_struct(&full_struct_name)
+                    .get_struct_family_id(&full_struct_name)
                     .ok_or_else(|| CompileError::StructResolution {
                         struct_name: full_struct_name.clone(),
                     })?;
@@ -5934,17 +5937,20 @@ impl AstCompiler<'_> {
                 // Tag the struct ID before comparison (as Int)
                 let tagged_struct_id = self.ir.tag(struct_id_reg, BuiltInTypes::Int.get_tag());
 
-                // Create expected value - will be tagged by codegen via TaggedConstant
-                // (don't pre-tag, TaggedConstant already applies construct_int which tags)
-                let expected_reg = self.ir.assign_new(expected_struct_id);
+                // Create expected family_id
+                let expected_family_reg = self
+                    .ir
+                    .assign_new(Value::TaggedConstant(expected_family_id as isize));
 
-                // Compare and jump if not equal
-                self.ir.jump_if(
-                    no_match_label,
-                    Condition::NotEqual,
-                    tagged_struct_id,
-                    expected_reg,
-                );
+                // Call builtin to check family membership
+                let result = self.call_builtin(
+                    "beagle.builtin/check-struct-family",
+                    vec![tagged_struct_id, expected_family_reg.into()],
+                )?;
+
+                // Jump if family doesn't match
+                self.ir
+                    .jump_if(no_match_label, Condition::NotEqual, result, Value::True);
                 Ok(())
             }
             Pattern::Array {
@@ -6088,38 +6094,27 @@ impl AstCompiler<'_> {
                 fields,
                 ..
             } => {
-                // Get the variant's struct definition to look up field indices by name
+                // Use property_access builtin for each field to correctly handle
+                // objects with old shape versions
                 let full_enum_name = self.get_full_enum_name(enum_name);
                 let full_name = format!("{}.{}", full_enum_name, variant_name);
-                let (_, variant_struct) =
-                    self.compiler.get_struct(&full_name).ok_or_else(|| {
-                        CompileError::EnumVariantNotFound {
-                            name: full_name.clone(),
-                        }
-                    })?;
+                // Verify variant exists
+                let _ = self.compiler.get_struct(&full_name).ok_or_else(|| {
+                    CompileError::EnumVariantNotFound {
+                        name: full_name.clone(),
+                    }
+                })?;
 
-                // Clone the field names to avoid borrow checker issues
-                let variant_field_names = variant_struct.fields.clone();
-
-                // Untag the value once before reading fields
-                let untagged_value = self.ir.untag(value_reg);
-
-                // Bind each field to a local variable
                 for field_pattern in fields.iter() {
-                    // Look up the actual field index in the variant definition
-                    let actual_field_idx = variant_field_names
-                        .iter()
-                        .position(|f| f == &field_pattern.field_name)
-                        .ok_or_else(|| CompileError::StructFieldNotDefined {
-                            struct_name: full_name.clone(),
-                            field: field_pattern.field_name.clone(),
-                        })?;
+                    let property_location = Value::RawValue(self.compiler.add_property_lookup()?);
+                    let property_location = self.ir.assign_new(property_location);
+                    let constant_ptr = self.string_constant(field_pattern.field_name.clone());
+                    let constant_ptr = self.ir.assign_new(constant_ptr);
 
-                    // Read the field from the value using the ACTUAL index, not iteration order
-                    let field_value = self.ir.read_field(
-                        untagged_value,
-                        Value::TaggedConstant(actual_field_idx as isize),
-                    );
+                    let field_value = self.call_builtin(
+                        "beagle.builtin/property-access",
+                        vec![value_reg, constant_ptr.into(), property_location.into()],
+                    )?;
 
                     // Determine the variable name to bind to
                     let binding_name = field_pattern
@@ -6131,7 +6126,6 @@ impl AstCompiler<'_> {
                     let location = match field_value {
                         Value::Register(reg) => VariableLocation::Register(reg),
                         _ => {
-                            // Assign to a register if not already
                             let reg = self.ir.assign_new(field_value);
                             VariableLocation::Register(reg)
                         }
@@ -6142,37 +6136,26 @@ impl AstCompiler<'_> {
                 }
             }
             Pattern::Struct { name, fields, .. } => {
-                // Get the struct definition to look up field indices by name
+                // Use property_access builtin for each field to correctly handle
+                // objects with old shape versions (field reordering, etc.)
                 let full_struct_name = self.get_full_struct_name(name);
-                let (_, struct_def) =
-                    self.compiler.get_struct(&full_struct_name).ok_or_else(|| {
-                        CompileError::StructResolution {
-                            struct_name: full_struct_name.clone(),
-                        }
-                    })?;
+                // Verify struct exists
+                let _ = self.compiler.get_struct(&full_struct_name).ok_or_else(|| {
+                    CompileError::StructResolution {
+                        struct_name: full_struct_name.clone(),
+                    }
+                })?;
 
-                // Clone the field names to avoid borrow checker issues
-                let struct_field_names = struct_def.fields.clone();
-
-                // Untag the value once before reading fields
-                let untagged_value = self.ir.untag(value_reg);
-
-                // Bind each field to a local variable
                 for field_pattern in fields.iter() {
-                    // Look up the actual field index in the struct definition
-                    let actual_field_idx = struct_field_names
-                        .iter()
-                        .position(|f| f == &field_pattern.field_name)
-                        .ok_or_else(|| CompileError::StructFieldNotDefined {
-                            struct_name: full_struct_name.clone(),
-                            field: field_pattern.field_name.clone(),
-                        })?;
+                    let property_location = Value::RawValue(self.compiler.add_property_lookup()?);
+                    let property_location = self.ir.assign_new(property_location);
+                    let constant_ptr = self.string_constant(field_pattern.field_name.clone());
+                    let constant_ptr = self.ir.assign_new(constant_ptr);
 
-                    // Read the field from the value using the ACTUAL index
-                    let field_value = self.ir.read_field(
-                        untagged_value,
-                        Value::TaggedConstant(actual_field_idx as isize),
-                    );
+                    let field_value = self.call_builtin(
+                        "beagle.builtin/property-access",
+                        vec![value_reg, constant_ptr.into(), property_location.into()],
+                    )?;
 
                     // Determine the variable name to bind to
                     let binding_name = field_pattern

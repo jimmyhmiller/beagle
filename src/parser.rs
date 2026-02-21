@@ -408,6 +408,31 @@ fn stripslashes(s: &str) -> String {
                         '\\' => '\\',
                         '"' => '"',
                         '\'' => '\'',
+                        'u' => {
+                            // Unicode escape: \u{XXXX}
+                            if chars.next() == Some('{') {
+                                let mut hex = String::new();
+                                for ch in chars.by_ref() {
+                                    if ch == '}' {
+                                        break;
+                                    }
+                                    hex.push(ch);
+                                }
+                                if let Ok(code_point) = u32::from_str_radix(&hex, 16) {
+                                    if let Some(ch) = char::from_u32(code_point) {
+                                        ch
+                                    } else {
+                                        // Invalid code point, output replacement char
+                                        '\u{FFFD}'
+                                    }
+                                } else {
+                                    // Invalid hex, output replacement char
+                                    '\u{FFFD}'
+                                }
+                            } else {
+                                'u'
+                            }
+                        }
                         _ => c,
                     }
                 } else {

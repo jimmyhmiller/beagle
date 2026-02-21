@@ -1,0 +1,43 @@
+namespace struct_shape_family_test
+
+struct Point { x, y }
+struct Color { r, g, b }
+
+fn describe(thing) {
+    match thing {
+        Point { x, y } => "Point(" ++ to-string(x) ++ ", " ++ to-string(y) ++ ")",
+        Color { r, g, b } => "Color(" ++ to-string(r) ++ ", " ++ to-string(g) ++ ", " ++ to-string(b) ++ ")",
+    }
+}
+
+fn main() {
+    let p = Point { x: 10, y: 20 }
+    let c = Color { r: 255, g: 128, b: 0 }
+
+    // Basic property access
+    println(p.x)
+    println(p.y)
+    println(c.r)
+    println(c.g)
+    println(c.b)
+
+    // Pattern matching with field extraction
+    println(describe(p))
+    println(describe(c))
+
+    // Pattern match with binding names
+    let result = match p {
+        Point { x: px, y: py } => px * py,
+    }
+    println(result)
+}
+
+// @beagle.core.snapshot
+// 10
+// 20
+// 255
+// 128
+// 0
+// Point(10, 20)
+// Color(255, 128, 0)
+// 200

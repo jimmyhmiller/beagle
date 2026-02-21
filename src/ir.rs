@@ -1119,8 +1119,22 @@ impl Ir {
         self.assign(result_register, dest2);
         self.jump(after_compare);
 
-        // Default path - use regular comparison (works for ints, bools, null, pointers, etc.)
+        // Default path - for ordered comparisons (<, >, <=, >=), require both operands
+        // to have the same type tag. Cross-type ordered comparisons throw a type error.
         self.write_label(default_compare_label);
+        match condition {
+            Condition::LessThan
+            | Condition::LessThanOrEqual
+            | Condition::GreaterThan
+            | Condition::GreaterThanOrEqual => {
+                let tag_a = self.get_tag(a.into());
+                let tag_b = self.get_tag(b.into());
+                self.jump_if(self.after_return, Condition::NotEqual, tag_a, tag_b);
+            }
+            Condition::Equal | Condition::NotEqual => {
+                // Equality/inequality can compare any types - no guard needed
+            }
+        }
         let tag = self.assign_new(Value::RawValue(BuiltInTypes::Bool.get_tag() as usize));
         let dest = self.volatile_register();
         self.instructions.push(Instruction::Compare(
@@ -1388,6 +1402,36 @@ impl Ir {
                 backend.mov_64(temp_reg, *val as isize);
                 temp_reg
             }
+            Value::TaggedConstant(val) => {
+                let temp_reg = backend.temporary_register();
+                backend.mov_64(temp_reg, *val);
+                temp_reg
+            }
+            Value::True => {
+                let temp_reg = backend.temporary_register();
+                backend.mov_64(temp_reg, BuiltInTypes::true_value());
+                temp_reg
+            }
+            Value::False => {
+                let temp_reg = backend.temporary_register();
+                backend.mov_64(temp_reg, BuiltInTypes::false_value());
+                temp_reg
+            }
+            Value::Null => {
+                let temp_reg = backend.temporary_register();
+                backend.mov_64(temp_reg, BuiltInTypes::null_value());
+                temp_reg
+            }
+            Value::StringConstantPtr(val) | Value::KeywordConstantPtr(val) => {
+                let temp_reg = backend.temporary_register();
+                backend.mov_64(temp_reg, *val as isize);
+                temp_reg
+            }
+            Value::Function(val) | Value::Pointer(val) => {
+                let temp_reg = backend.temporary_register();
+                backend.mov_64(temp_reg, *val as isize);
+                temp_reg
+            }
             _ => panic!("Expected register got {:?}", value),
         }
     }
@@ -1451,8 +1495,16 @@ impl Ir {
                     // Use a temporary register for guard checks to avoid clobbering operands
                     // if dest happens to be the same register as a or b
                     let guard_temp = backend.temporary_register();
-                    backend.guard_integer(guard_temp, a, self.after_return);
-                    backend.guard_integer(guard_temp, b, self.after_return);
+                    backend.guard_integer(
+                        guard_temp,
+                        a,
+                        ir_label_to_lang_label[&self.after_return],
+                    );
+                    backend.guard_integer(
+                        guard_temp,
+                        b,
+                        ir_label_to_lang_label[&self.after_return],
+                    );
                     backend.free_temporary_register(guard_temp);
 
                     backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
@@ -1486,8 +1538,16 @@ impl Ir {
                     // Use a temporary register for guard checks to avoid clobbering operands
                     // if dest happens to be the same register as a or b
                     let guard_temp = backend.temporary_register();
-                    backend.guard_integer(guard_temp, a, self.after_return);
-                    backend.guard_integer(guard_temp, b, self.after_return);
+                    backend.guard_integer(
+                        guard_temp,
+                        a,
+                        ir_label_to_lang_label[&self.after_return],
+                    );
+                    backend.guard_integer(
+                        guard_temp,
+                        b,
+                        ir_label_to_lang_label[&self.after_return],
+                    );
                     backend.free_temporary_register(guard_temp);
 
                     backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
@@ -1509,16 +1569,23 @@ impl Ir {
                     let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, backend);
+                    let error_label = ir_label_to_lang_label[&self.after_return];
 
                     // Use a temporary register for guard checks to avoid clobbering operands
                     // if dest happens to be the same register as a or b
                     let guard_temp = backend.temporary_register();
-                    backend.guard_integer(guard_temp, a, self.after_return);
-                    backend.guard_integer(guard_temp, b, self.after_return);
+                    backend.guard_integer(guard_temp, a, error_label);
+                    backend.guard_integer(guard_temp, b, error_label);
                     backend.free_temporary_register(guard_temp);
 
                     backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
                     backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    // Check for division by zero
+                    let zero_reg = backend.temporary_register();
+                    backend.mov_64(zero_reg, 0);
+                    backend.compare(b, zero_reg);
+                    backend.free_temporary_register(zero_reg);
+                    backend.jump_equal(error_label);
                     backend.div(dest, a, b);
                     backend.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
                     // Only re-tag operands if they're different from dest
@@ -1535,15 +1602,22 @@ impl Ir {
                     let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, backend);
+                    let error_label = ir_label_to_lang_label[&self.after_return];
 
                     // Use a temporary register for guard checks
                     let guard_temp = backend.temporary_register();
-                    backend.guard_integer(guard_temp, a, self.after_return);
-                    backend.guard_integer(guard_temp, b, self.after_return);
+                    backend.guard_integer(guard_temp, a, error_label);
+                    backend.guard_integer(guard_temp, b, error_label);
                     backend.free_temporary_register(guard_temp);
 
                     backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
                     backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    // Check for division by zero
+                    let zero_reg = backend.temporary_register();
+                    backend.mov_64(zero_reg, 0);
+                    backend.compare(b, zero_reg);
+                    backend.free_temporary_register(zero_reg);
+                    backend.jump_equal(error_label);
                     // True modulo: result is always non-negative when divisor is positive
                     backend.modulo(dest, a, b);
                     backend.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
@@ -1561,7 +1635,7 @@ impl Ir {
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, backend);
 
-                    backend.guard_integer(dest, value, self.after_return);
+                    backend.guard_integer(dest, value, ir_label_to_lang_label[&self.after_return]);
 
                     backend.shift_right_imm(dest, value, *shift);
                     self.store_spill(dest, dest_spill, backend);
@@ -1586,8 +1660,8 @@ impl Ir {
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, backend);
 
-                    backend.guard_integer(dest, a, self.after_return);
-                    backend.guard_integer(dest, b, self.after_return);
+                    backend.guard_integer(dest, a, ir_label_to_lang_label[&self.after_return]);
+                    backend.guard_integer(dest, b, ir_label_to_lang_label[&self.after_return]);
 
                     backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
                     backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
@@ -1603,8 +1677,8 @@ impl Ir {
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, backend);
 
-                    backend.guard_integer(dest, a, self.after_return);
-                    backend.guard_integer(dest, b, self.after_return);
+                    backend.guard_integer(dest, a, ir_label_to_lang_label[&self.after_return]);
+                    backend.guard_integer(dest, b, ir_label_to_lang_label[&self.after_return]);
 
                     backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
                     backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
@@ -1620,8 +1694,8 @@ impl Ir {
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, backend);
 
-                    backend.guard_integer(dest, a, self.after_return);
-                    backend.guard_integer(dest, b, self.after_return);
+                    backend.guard_integer(dest, a, ir_label_to_lang_label[&self.after_return]);
+                    backend.guard_integer(dest, b, ir_label_to_lang_label[&self.after_return]);
 
                     backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
                     backend.shift_right_imm(b, b, BuiltInTypes::tag_size());

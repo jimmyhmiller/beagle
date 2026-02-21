@@ -1,0 +1,36 @@
+namespace struct_redefine_protocol_test
+
+struct Point { x, y }
+
+protocol Describe {
+    fn describe(self)
+}
+
+extend Point with Describe {
+    fn describe(self) {
+        "Point(" ++ to-string(self.x) ++ ", " ++ to-string(self.y) ++ ")"
+    }
+}
+
+fn main() {
+    let p1 = Point { x: 10, y: 20 }
+    println(describe(p1))
+
+    // Redefine Point with additional field
+    eval("struct Point { x, y, z }")
+
+    // Protocol dispatch on old object should still work
+    // (dispatch entries copied from old shape to new shape)
+    println(describe(p1))
+
+    // Protocol dispatch on new object should also work
+    eval("
+        let p2 = Point { x: 1, y: 2, z: 3 }
+        println(describe(p2))
+    ")
+}
+
+// @beagle.core.snapshot
+// Point(10, 20)
+// Point(10, 20)
+// Point(1, 2)

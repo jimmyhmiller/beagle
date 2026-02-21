@@ -1,0 +1,47 @@
+namespace struct_redefine_pattern_test
+
+struct Point { x, y }
+
+fn describe(thing) {
+    match thing {
+        Point { x, y } => "Point(" ++ to-string(x) ++ ", " ++ to-string(y) ++ ")",
+    }
+}
+
+fn main() {
+    // Create old object
+    let p1 = Point { x: 10, y: 20 }
+
+    // Pattern match on old shape works
+    println(describe(p1))
+
+    // Redefine Point with additional field
+    eval("struct Point { x, y, z }")
+
+    // Pattern match on old object still works (family id match)
+    // The compiled describe() function uses family_id, not shape_id
+    println(describe(p1))
+
+    // Pattern match using eval to define new function that knows about z
+    eval("
+        fn describe3(thing) {
+            match thing {
+                Point { x, y, z } => \"Point3(\" ++ to-string(x) ++ \", \" ++ to-string(y) ++ \", \" ++ to-string(z) ++ \")\",
+            }
+        }
+        let p2 = Point { x: 1, y: 2, z: 3 }
+        println(describe3(p2))
+    ")
+
+    // Create a new Point through eval and pass it to old describe function
+    eval("
+        let p3 = Point { x: 100, y: 200, z: 300 }
+        println(describe(p3))
+    ")
+}
+
+// Expect
+// Point(10, 20)
+// Point(10, 20)
+// Point3(1, 2, 3)
+// Point(100, 200)

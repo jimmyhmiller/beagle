@@ -262,6 +262,19 @@ impl CompactingHeap {
             return (result & !7) | (tagged_ptr & 7);
         }
 
+        // Check if this user struct needs migration to a new shape
+        if heap_object.get_type_id() == 0 {
+            let shape_id = heap_object.get_struct_id();
+            let runtime = crate::get_runtime().get_mut();
+            if let Some(plan) = runtime.structs.migration_plan_for(shape_id) {
+                let new_pointer = self.copy_with_migration(&heap_object, &plan);
+                debug_assert!(new_pointer % 8 == 0, "Pointer is not aligned");
+                let tagged_new = heap_object.get_object_type().unwrap().tag(new_pointer) as usize;
+                unsafe { *pointer = Header::set_forwarding_bit(tagged_new) };
+                return tagged_new;
+            }
+        }
+
         // Copy the object to to_space
         let data = heap_object.get_full_object_data();
         let new_pointer = self.to_space.copy_data_to_offset(data);
@@ -273,6 +286,56 @@ impl CompactingHeap {
         unsafe { *pointer = Header::set_forwarding_bit(tagged_new) };
 
         tagged_new
+    }
+
+    fn copy_with_migration(
+        &mut self,
+        old_object: &HeapObject,
+        plan: &crate::runtime::MigrationPlan,
+    ) -> isize {
+        // Build new header with updated shape_id and field count
+        let old_header = old_object.get_header();
+        let new_header = Header {
+            type_id: old_header.type_id,
+            type_data: plan.new_shape_id as u32,
+            size: plan.new_field_count as u16,
+            opaque: old_header.opaque,
+            marked: false,
+            large: false,
+            type_flags: old_header.type_flags,
+        };
+
+        // Allocate space: header (8 bytes) + fields
+        let total_bytes = 8 + plan.new_field_count * 8;
+        self.to_space.ensure_capacity(total_bytes);
+        let new_pointer =
+            unsafe { self.to_space.start.add(self.to_space.allocation_offset) } as isize;
+
+        // Write header
+        unsafe {
+            let header_ptr = new_pointer as *mut usize;
+            *header_ptr = new_header.to_usize();
+        }
+
+        // Write fields: map old fields to new layout, null for missing fields
+        let null_val = BuiltInTypes::null_value() as usize;
+        for (new_idx, mapping) in plan.field_map.iter().enumerate() {
+            let value = match mapping {
+                Some(old_idx) => old_object.get_field(*old_idx),
+                None => null_val,
+            };
+            unsafe {
+                let field_ptr = (new_pointer as *mut usize).add(1 + new_idx);
+                *field_ptr = value;
+            }
+        }
+
+        self.to_space.allocation_offset += total_bytes;
+        debug_assert!(
+            self.to_space.allocation_offset.is_multiple_of(8),
+            "Heap offset is not aligned"
+        );
+        new_pointer
     }
 
     unsafe fn copy_all(&mut self, roots: Vec<usize>, stack_map: &StackMap) -> Vec<usize> {

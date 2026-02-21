@@ -1,0 +1,75 @@
+namespace struct_redefine_multi_test
+
+struct Point { x, y }
+
+fn main() {
+    // Create object with v1
+    let p1 = Point { x: 1, y: 2 }
+    println(p1.x)
+
+    // Redefine v2: add z
+    eval("struct Point { x, y, z }")
+    eval("
+        let p2 = Point { x: 10, y: 20, z: 30 }
+        println(p2.z)
+    ")
+    // p1 still works for x,y; z is null
+    println(p1.x)
+    println(p1.z)
+
+    // Redefine v3: remove y, add w
+    eval("struct Point { x, z, w }")
+    eval("
+        let p3 = Point { x: 100, z: 300, w: 400 }
+        println(p3.x)
+        println(p3.z)
+        println(p3.w)
+    ")
+
+    // p1 (v1): x works, y is removed (error), z is null (added in v2), w is null (added in v3)
+    println(p1.x)
+    try {
+        println(p1.y)
+        println("ERROR")
+    } catch (e) {
+        println("y removed correctly")
+    }
+    println(p1.z)
+    println(p1.w)
+
+    // Redefine v4: completely different fields
+    eval("struct Point { a, b }")
+    eval("
+        let p4 = Point { a: 1000, b: 2000 }
+        println(p4.a)
+        println(p4.b)
+    ")
+
+    // p1 (v1): all original fields removed
+    try {
+        println(p1.x)
+        println("ERROR")
+    } catch (e) {
+        println("x removed correctly")
+    }
+    println(p1.a)
+    println(p1.b)
+}
+
+// @beagle.core.snapshot
+// 1
+// 30
+// 1
+// null
+// 100
+// 300
+// 400
+// 1
+// y removed correctly
+// null
+// null
+// 1000
+// 2000
+// x removed correctly
+// null
+// null

@@ -1,0 +1,43 @@
+namespace struct_redefine_cache_test
+
+struct Point { x, y }
+
+fn get-x(p) {
+    p.x
+}
+
+fn main() {
+    let p = Point { x: 42, y: 99 }
+
+    // Call get-x multiple times to warm up inline cache
+    println(get-x(p))
+    println(get-x(p))
+    println(get-x(p))
+
+    // Redefine Point with x at a different offset
+    eval("struct Point { y, x }")
+
+    // Old object: cache was invalidated, slow path re-resolves
+    // x should still be 42 even though x is now at offset 1 in new layout
+    println(get-x(p))
+
+    // New object with reordered layout
+    eval("
+        let p2 = Point { y: 200, x: 100 }
+        println(get-x(p2))
+    ")
+
+    // Call again to verify cache works with new layout
+    eval("
+        let p3 = Point { y: 500, x: 600 }
+        println(get-x(p3))
+    ")
+}
+
+// @beagle.core.snapshot
+// 42
+// 42
+// 42
+// 42
+// 100
+// 600

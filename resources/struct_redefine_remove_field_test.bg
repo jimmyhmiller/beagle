@@ -1,0 +1,43 @@
+namespace struct_redefine_remove_field_test
+
+struct Point { x, y, z }
+
+fn main() {
+    // Create object with original definition (3 fields)
+    let p = Point { x: 10, y: 20, z: 30 }
+    println(p.x)
+    println(p.y)
+    println(p.z)
+
+    // Redefine Point with z removed
+    eval("struct Point { x, y }")
+
+    // Old object: existing fields still work
+    println(p.x)
+    println(p.y)
+
+    // Old object: accessing removed field should error immediately
+    try {
+        println(p.z)
+        println("ERROR: should not reach here")
+    } catch (e) {
+        println("Caught removed field error")
+    }
+
+    // New object only has x and y
+    eval("
+        let p2 = Point { x: 100, y: 200 }
+        println(p2.x)
+        println(p2.y)
+    ")
+}
+
+// @beagle.core.snapshot
+// 10
+// 20
+// 30
+// 10
+// 20
+// Caught removed field error
+// 100
+// 200
