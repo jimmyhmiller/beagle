@@ -203,11 +203,10 @@ pub fn debugger(_message: Message) {
         }
         let ptr = serialized_message.as_ptr();
         let length = serialized_message.len();
-        mem::forget(serialized_message);
         unsafe {
             debugger_info(ptr, length);
         }
-        // TODO: Should clean up this memory
+        drop(serialized_message);
     }
 }
 
