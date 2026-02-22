@@ -24,7 +24,9 @@ Beagle is a dynamically-typed, functional programming language that compiles dir
 cargo run -- resources/example.bg
 
 # Run tests
-cargo run -- --all-tests
+cargo run -- test resources/
+# Run a single test file
+cargo run -- test resources/some_test.bg
 
 # Run with debugging
 cargo run -- --debug resources/example.bg
@@ -54,9 +56,9 @@ cargo clippy --fix --allow-dirty --allow-staged
 # Testing after changes
 # ALWAYS run cargo fmt and tests after making code changes
 cargo fmt
-cargo run -- --all-tests
+cargo run -- test resources/
 # For specific GC implementations, use the appropriate feature flag:
-cargo run --features generation-v2 -- --all-tests
+cargo run --features generation-v2 -- test resources/
 
 # Trailing whitespace cleanup
 # For non-Rust files (*.bg, *.md, *.toml, etc.), remove trailing whitespace:
@@ -111,8 +113,8 @@ Beagle uses a simple but effective testing system:
 
 **Test Requirements:**
 - Tests must be `.bg` files in the `resources/` directory
-- **Must contain the exact string `"// Expect"`** to be included in `--all-tests`
-- Expected output follows immediately after `// Expect` on lines starting with `//`
+- **Must contain the exact string `"// @beagle.core.snapshot"`** to be discovered by `cargo run -- test`
+- Expected output follows immediately after `// @beagle.core.snapshot` on lines starting with `//`
 
 **Test Format:**
 ```beagle
@@ -124,7 +126,7 @@ fn main() {
     "done"  // Return value also appears in output
 }
 
-// Expect
+// @beagle.core.snapshot
 // Hello
 // 42
 // done
@@ -136,7 +138,9 @@ fn main() {
 - `// gc-always` - Run GC on every allocation (for GC stress testing)
 
 **Test Execution:**
-- `cargo run -- --all-tests` runs all tests with `// Expect`
+- `cargo run -- test resources/` runs all tests with `// @beagle.core.snapshot`
+- `cargo run -- test resources/some_test.bg` runs a single test file
+- `cargo run -- test --update-snapshots resources/some_test.bg` updates snapshot to match actual output
 - Output comparison is exact - whitespace and formatting must match
 - Tests use `TestPrinter` to capture all `println()` and `print()` calls
 - Each test runs in a fresh runtime environment

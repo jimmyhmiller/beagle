@@ -870,7 +870,14 @@ extern "C" fn index_of(
     let substr_value = runtime.get_string(stack_pointer, substr);
 
     match string_value.find(&substr_value) {
-        Some(index) => BuiltInTypes::construct_int(index as isize) as usize,
+        Some(byte_index) => {
+            if string_value.is_ascii() {
+                BuiltInTypes::construct_int(byte_index as isize) as usize
+            } else {
+                let char_index = string_value[..byte_index].chars().count();
+                BuiltInTypes::construct_int(char_index as isize) as usize
+            }
+        }
         None => BuiltInTypes::construct_int(-1) as usize,
     }
 }
@@ -888,7 +895,14 @@ extern "C" fn last_index_of(
     let substr_value = runtime.get_string(stack_pointer, substr);
 
     match string_value.rfind(&substr_value) {
-        Some(index) => BuiltInTypes::construct_int(index as isize) as usize,
+        Some(byte_index) => {
+            if string_value.is_ascii() {
+                BuiltInTypes::construct_int(byte_index as isize) as usize
+            } else {
+                let char_index = string_value[..byte_index].chars().count();
+                BuiltInTypes::construct_int(char_index as isize) as usize
+            }
+        }
         None => BuiltInTypes::construct_int(-1) as usize,
     }
 }
@@ -7227,11 +7241,20 @@ extern "C" fn char_code(stack_pointer: usize, frame_pointer: usize, string: usiz
     }
 }
 
-// Create a single-character string from an ASCII code
+// Create a single-character string from a Unicode code point
 extern "C" fn char_from_code(stack_pointer: usize, frame_pointer: usize, code: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
-    let code = BuiltInTypes::untag(code) as u8;
-    let ch = code as char;
+    let code = BuiltInTypes::untag(code) as u32;
+    let ch = match char::from_u32(code) {
+        Some(c) => c,
+        None => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "InvalidArgument",
+                format!("Invalid Unicode code point: {}", code),
+            );
+        },
+    };
     let runtime = get_runtime().get_mut();
     match runtime.allocate_string(stack_pointer, ch.to_string()) {
         Ok(ptr) => ptr.into(),

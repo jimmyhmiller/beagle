@@ -1,0 +1,133 @@
+namespace unicode_string_test
+
+fn main() {
+    // === index-of: multi-byte chars BEFORE match target ===
+    // This is the critical test: byte offset != char offset
+    // "héllo" = h(1) é(2) l(1) l(1) o(1) = 6 bytes, 5 chars
+    // Finding "l": byte offset = 3, char offset = 2
+    let s1 = "héllo"
+    println("index-of 'héllo' 'l':")
+    println(index-of(s1, "l"))
+
+    // Multiple multi-byte chars before target
+    // "ééé_x" = é(2) é(2) é(2) _(1) x(1) = 8 bytes, 5 chars
+    // Finding "x": byte offset = 7, char offset = 4
+    println("index-of 'ééé_x' 'x':")
+    println(index-of("ééé_x", "x"))
+
+    // 4-byte emoji before target
+    // "😊hello" = 😊(4) h(1) e(1) l(1) l(1) o(1) = 9 bytes, 6 chars
+    // Finding "hello": byte offset = 4, char offset = 1
+    println("index-of '😊hello' 'hello':")
+    println(index-of("😊hello", "hello"))
+
+    // Mixed multi-byte: search target is also multi-byte
+    // "aébéc" = a(1) é(2) b(1) é(2) c(1) = 7 bytes, 5 chars
+    // Finding second "é": index-of finds first at char 1
+    println("index-of 'aébéc' 'é':")
+    println(index-of("aébéc", "é"))
+
+    // Not found in unicode string
+    println("index-of 'héllo' 'z':")
+    println(index-of("héllo", "z"))
+
+    // === last-index-of: byte offset != char offset ===
+    // "héllo héllo" = h é l l o ' ' h é l l o
+    // chars:          0 1 2 3 4 5  6 7 8 9 10
+    // Last "h" at char 6 (byte 7)
+    println("last-index-of 'héllo héllo' 'h':")
+    println(last-index-of("héllo héllo", "h"))
+
+    // Last "é" at char 7 (byte 8)
+    println("last-index-of 'héllo héllo' 'é':")
+    println(last-index-of("héllo héllo", "é"))
+
+    // Multiple emoji then search
+    // "😊😊_a" = 😊(4) 😊(4) _(1) a(1) = 10 bytes, 4 chars
+    // Last "a" at char 3 (byte 9)
+    println("last-index-of '😊😊_a' 'a':")
+    println(last-index-of("😊😊_a", "a"))
+
+    // Not found in unicode string
+    println("last-index-of 'héllo' 'z':")
+    println(last-index-of("héllo", "z"))
+
+    // === char-from-code: values > 255 (the actual bug) ===
+    // 233 fits in u8 so wouldn't have caught the old bug
+    // 8364 = € (3 bytes in UTF-8, doesn't fit in u8)
+    let euro = char-from-code(8364)
+    println("char-from-code(8364):")
+    println(euro)
+
+    // 128522 = 😊 (4 bytes in UTF-8, doesn't fit in u8)
+    let smiley = char-from-code(128522)
+    println("char-from-code(128522):")
+    println(smiley)
+
+    // 12354 = あ (hiragana, 3 bytes, doesn't fit in u8)
+    let hiragana = char-from-code(12354)
+    println("char-from-code(12354):")
+    println(hiragana)
+
+    // Verify char-code gives back the same code point
+    println("char-code round-trip 8364:")
+    println(char-code(euro))
+    println("char-code round-trip 128522:")
+    println(char-code(smiley))
+    println("char-code round-trip 12354:")
+    println(char-code(hiragana))
+
+    // === Integration: index-of result works with substring ===
+    // This is the key end-to-end test: find something in a unicode
+    // string, then extract it with substring using the returned index
+    let s5 = "say héllo world"
+    let idx = index-of(s5, "héllo")
+    println("index-of + substring round-trip:")
+    println(substring(s5, idx, 5))
+
+    // Same with emoji
+    let s6 = "hi 😊 there"
+    let idx2 = index-of(s6, "there")
+    println("index-of 'hi 😊 there' 'there':")
+    println(idx2)
+    println(substring(s6, idx2, 5))
+
+    ""
+}
+
+// @beagle.core.snapshot
+// index-of 'héllo' 'l':
+// 2
+// index-of 'ééé_x' 'x':
+// 4
+// index-of '😊hello' 'hello':
+// 1
+// index-of 'aébéc' 'é':
+// 1
+// index-of 'héllo' 'z':
+// -1
+// last-index-of 'héllo héllo' 'h':
+// 6
+// last-index-of 'héllo héllo' 'é':
+// 7
+// last-index-of '😊😊_a' 'a':
+// 3
+// last-index-of 'héllo' 'z':
+// -1
+// char-from-code(8364):
+// €
+// char-from-code(128522):
+// 😊
+// char-from-code(12354):
+// あ
+// char-code round-trip 8364:
+// 8364
+// char-code round-trip 128522:
+// 128522
+// char-code round-trip 12354:
+// 12354
+// index-of + substring round-trip:
+// héllo
+// index-of 'hi 😊 there' 'there':
+// 5
+// there
