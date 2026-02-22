@@ -5880,7 +5880,10 @@ fn build_ffi_trampoline() -> *const u8 {
     // === Call the function ===
     code.push(ArmAsm::Blr { rn: X19 }.encode());
 
-    // === Save float return value (d0) to int_args[0] via x20 ===
+    // === Save float return values (d0, d1) to int_args[0..1] via x20 ===
+    // This captures both float registers for HFA struct returns (e.g., NSPoint)
+    // as well as single float returns.
+
     // fmov x9, d0  (move 64-bit float return bits to x9)
     code.push(
         ArmAsm::FmovFloatGen {
@@ -5910,6 +5913,40 @@ fn build_ffi_trampoline() -> *const u8 {
                 size: Size::S64,
             },
             imm12: 0,
+            class_selector: StrImmGenSelector::UnsignedOffset,
+        }
+        .encode(),
+    );
+
+    // fmov x9, d1  (move 64-bit float return bits from d1 to x9)
+    code.push(
+        ArmAsm::FmovFloatGen {
+            sf: 1,
+            ftype: 0b01,
+            rmode: 0b00,
+            opcode: 0b110, // float-to-general
+            rn: Register {
+                index: 1,
+                size: Size::S64,
+            }, // d1
+            rd: Register {
+                index: 9,
+                size: Size::S64,
+            }, // x9
+        }
+        .encode(),
+    );
+    // str x9, [x20, #8]  (store 64-bit float bits to int_args[1])
+    code.push(
+        ArmAsm::StrImmGen {
+            size: 3, // 64-bit store
+            imm9: 0,
+            rn: X20,
+            rt: Register {
+                index: 9,
+                size: Size::S64,
+            },
+            imm12: 1, // offset = 1 * 8 = 8 bytes
             class_selector: StrImmGenSelector::UnsignedOffset,
         }
         .encode(),
@@ -6097,7 +6134,19 @@ unsafe fn dynamic_c_call(
     let low = result as u64;
     let high = (result >> 64) as u64;
 
-    // For float returns, the trampoline saved d0 bits into int_args[0]
+    // Structs where all fields are floats (e.g., NSPoint, CGSize) are returned
+    // in float registers d0/d1, not integer registers x0/x1.
+    // The trampoline saved d0→int_args[0] and d1→int_args[1].
+    if let FFIType::Structure(fields) = return_type {
+        if fields
+            .iter()
+            .all(|f| matches!(f, FFIType::F32 | FFIType::F64))
+        {
+            return (int_args[0], if fields.len() > 1 { int_args[1] } else { 0 });
+        }
+    }
+
+    // For single float returns, the trampoline saved d0 bits into int_args[0]
     if matches!(return_type, FFIType::F32 | FFIType::F64) {
         return (int_args[0], 0);
     }
@@ -6446,16 +6495,54 @@ unsafe fn unmarshal_ffi_return(
                     }
                 }
             }
-            FFIType::Structure(_fields) => {
-                // For a 16-byte struct like Shader {id: u32, locs: *int}:
-                // - low contains the first 8 bytes (id in lower 4 bytes)
-                // - high contains the next 8 bytes (locs pointer)
-                call_fn_2(
-                    runtime,
-                    "beagle.ffi/__make_struct_return",
-                    BuiltInTypes::Int.tag(low as isize) as usize,
-                    BuiltInTypes::Int.tag(high as isize) as usize,
-                )
+            FFIType::Structure(fields) => {
+                let all_float_fields = fields
+                    .iter()
+                    .all(|f| matches!(f, FFIType::F32 | FFIType::F64));
+                if all_float_fields {
+                    // All-float struct (e.g., NSPoint): low/high contain f64 bit
+                    // patterns from float registers d0/d1. Convert each field to
+                    // a proper heap-allocated Beagle float.
+                    let values: [u64; 2] = [low, high];
+                    let mut tagged_fields = [BuiltInTypes::null_value() as usize; 2];
+                    for (i, field_type) in fields.iter().enumerate().take(2) {
+                        let f_val = match field_type {
+                            FFIType::F32 => f32::from_bits(values[i] as u32) as f64,
+                            FFIType::F64 => f64::from_bits(values[i]),
+                            _ => unreachable!(),
+                        };
+                        let new_float_ptr =
+                            match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+                                Ok(ptr) => ptr,
+                                Err(_) => {
+                                    throw_runtime_error(
+                                        stack_pointer,
+                                        "AllocationError",
+                                        "Failed to allocate FFI float struct field - out of memory"
+                                            .to_string(),
+                                    );
+                                }
+                            };
+                        let untagged = BuiltInTypes::untag(new_float_ptr);
+                        let float_ptr = untagged as *mut f64;
+                        *float_ptr.add(1) = f_val;
+                        tagged_fields[i] = new_float_ptr;
+                    }
+                    call_fn_2(
+                        runtime,
+                        "beagle.ffi/__make_struct_return",
+                        tagged_fields[0],
+                        tagged_fields[1],
+                    )
+                } else {
+                    // Non-HFA struct: low/high contain raw bytes from x0/x1.
+                    call_fn_2(
+                        runtime,
+                        "beagle.ffi/__make_struct_return",
+                        BuiltInTypes::Int.tag(low as isize) as usize,
+                        BuiltInTypes::Int.tag(high as isize) as usize,
+                    )
+                }
             }
         }
     }
