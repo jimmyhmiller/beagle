@@ -1,0 +1,35 @@
+namespace map_closure_capture_test
+
+fn identity(x, f) { f(x) }
+
+fn main() {
+    let counter = atom(0)
+
+    // Map with closure values that capture outer variables
+    let m = {
+        :increment fn(x) { identity(counter, fn(n) { n }) },
+        :decrement fn(x) { println("dec") }
+    }
+    println(keys(m))
+
+    // Single-pair map with capture
+    let val = 42
+    let m2 = {:a fn(x) { identity(val, x) }}
+    println(keys(m2))
+
+    // Capture without nested fn
+    let m3 = {:a fn(x) { identity(val, x) }, :b 2}
+    println(keys(m3))
+
+    // Multiple captures
+    let x = 1
+    let y = 2
+    let m4 = {:k fn(z) { x + y + z }}
+    println(keys(m4))
+}
+
+// Expect
+// [:increment, :decrement]
+// [:a]
+// [:b, :a]
+// [:k]

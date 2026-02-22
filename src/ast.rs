@@ -4637,9 +4637,9 @@ impl AstCompiler<'_> {
             }
         }
         // load count of free variables
-        let num_free = self.get_current_env().free_variables.len();
+        let num_free_count = self.get_current_env().free_variables.len();
 
-        let num_free = Value::TaggedConstant(num_free as isize);
+        let num_free = Value::TaggedConstant(num_free_count as isize);
         let num_free_reg = self.ir.volatile_register();
         self.ir.assign(num_free_reg, num_free);
         // Call make_closure
@@ -4657,7 +4657,7 @@ impl AstCompiler<'_> {
         let stack_pointer = self.ir.get_stack_pointer_imm(0);
         let frame_pointer = self.ir.get_frame_pointer();
 
-        Ok(self.ir.call(
+        let result = self.ir.call(
             make_closure_reg.into(),
             vec![
                 stack_pointer,
@@ -4666,7 +4666,17 @@ impl AstCompiler<'_> {
                 num_free_reg.into(),
                 free_variable_pointer,
             ],
-        ))
+        );
+
+        // Clean up: pop free variables from the stack. make_closure has already
+        // copied them into the heap-allocated closure object, so they're no longer
+        // needed. Without this, the leftover stack entries corrupt offset-based
+        // reads in map/set literals and other stack-sensitive contexts.
+        for _ in 0..num_free_count {
+            self.ir.pop_from_stack();
+        }
+
+        Ok(result)
     }
 
     fn find_or_insert_local(&mut self, name: &str) -> usize {
