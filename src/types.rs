@@ -112,11 +112,6 @@ impl BuiltInTypes {
         if value { bool.tag(1) } else { bool.tag(0) }
     }
 
-    pub fn construct_float(x: f64) -> isize {
-        let value = x.to_bits() as isize;
-        BuiltInTypes::Float.tag(value)
-    }
-
     pub fn tag_size() -> i32 {
         3
     }

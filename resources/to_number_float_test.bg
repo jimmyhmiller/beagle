@@ -1,0 +1,33 @@
+namespace to_number_float_test
+
+// Test parsing float strings into proper heap-allocated floats
+// (to-number must allocate on the heap, not create inline tagged floats
+// that the GC would mistake for heap pointers)
+
+fn main() {
+    let x = to-number("3.14")
+    println(x)
+    let y = to-number("2.71")
+    println(y)
+    let z = x + y
+    println(z)
+    // Test that the float survives GC pressure
+    let mut results = []
+    let mut i = 0
+    while i < 100 {
+        let val = to-number("1.5")
+        results = push(results, val)
+        i = i + 1
+    }
+    println(count(results))
+    println(nth(results, 0))
+    println(nth(results, 99))
+}
+
+// @beagle.core.snapshot
+// 3.14
+// 2.71
+// 5.85
+// 100
+// 1.5
+// 1.5

@@ -721,21 +721,12 @@ impl GenerationalGC {
         for root_ref in roots {
             let old_value = root_ref.value();
 
-            if !BuiltInTypes::is_heap_pointer(old_value) {
-                continue;
-            }
-
-            let heap_object = HeapObject::from_tagged(old_value);
-
-            // Skip if not in young gen
-            if !self.young.contains(heap_object.get_pointer()) {
-                continue;
-            }
-
-            // Copy to old gen
+            // copy() handles non-heap, misaligned, and non-young-gen checks
             let new_value = self.copy(old_value);
 
-            self.update_root(&root_ref, new_value);
+            if new_value != old_value {
+                self.update_root(&root_ref, new_value);
+            }
         }
     }
 
@@ -884,7 +875,6 @@ impl GenerationalGC {
                         "[GC DEBUG]   field[{}] = {:#x} is in young gen, copying",
                         i, *field
                     );
-                    // Young gen reference - copy to old gen and update field
                     *field = self.copy(*field);
                     #[cfg(feature = "debug-gc")]
                     eprintln!("[GC DEBUG]   -> new value: {:#x}", *field);
@@ -915,7 +905,7 @@ impl GenerationalGC {
 
     // ==================== COPY LOGIC ====================
 
-    /// Scan all objects in young gen for corrupted float headers.
+    /// Copy a young gen object to old gen, returning the new tagged pointer.
     fn copy(&mut self, root: usize) -> usize {
         if !BuiltInTypes::is_heap_pointer(root) {
             return root;

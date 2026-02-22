@@ -261,7 +261,27 @@ pub unsafe extern "C" fn to_number(
     let string = runtime.get_string(stack_pointer, value);
     if string.contains(".") {
         match string.parse::<f64>() {
-            Ok(result) => BuiltInTypes::construct_float(result) as usize,
+            Ok(result) => {
+                // Must heap-allocate the float, not use construct_float which creates
+                // an inline tagged value that looks like a heap pointer to the GC but
+                // contains raw f64 bits instead of a real address.
+                let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+                    Ok(ptr) => ptr,
+                    Err(_) => unsafe {
+                        throw_runtime_error(
+                            stack_pointer,
+                            "AllocationError",
+                            "Failed to allocate float - out of memory".to_string(),
+                        );
+                    },
+                };
+                let untagged = BuiltInTypes::untag(new_float_ptr);
+                unsafe {
+                    let float_ptr = untagged as *mut f64;
+                    *float_ptr.add(1) = result;
+                }
+                new_float_ptr
+            }
             Err(e) => unsafe {
                 throw_runtime_error(
                     stack_pointer,

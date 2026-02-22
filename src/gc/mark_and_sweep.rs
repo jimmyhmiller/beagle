@@ -375,8 +375,9 @@ impl MarkAndSweep {
             gc_return_addr,
             stack_map,
             |_, pointer| {
-                // Skip heap-tagged null pointers (value 6 = HeapObject tag with address 0)
-                if BuiltInTypes::untag(pointer) == 0 {
+                let untagged = BuiltInTypes::untag(pointer);
+                // Skip null and misaligned pointers
+                if untagged == 0 || !untagged.is_multiple_of(8) {
                     return;
                 }
                 to_mark.push(HeapObject::from_tagged(pointer));
@@ -407,7 +408,8 @@ impl MarkAndSweep {
                             cont.resume_address(),
                             stack_map,
                             |_offset, pointer| {
-                                if BuiltInTypes::untag(pointer) != 0 {
+                                let untagged = BuiltInTypes::untag(pointer);
+                                if untagged != 0 && untagged.is_multiple_of(8) {
                                     to_mark.push(HeapObject::from_tagged(pointer));
                                 }
                             },
@@ -456,7 +458,8 @@ impl MarkAndSweep {
                             cont.resume_address(),
                             stack_map,
                             |_offset, pointer| {
-                                if BuiltInTypes::untag(pointer) != 0 {
+                                let untagged = BuiltInTypes::untag(pointer);
+                                if untagged != 0 && untagged.is_multiple_of(8) {
                                     to_mark.push(HeapObject::from_tagged(pointer));
                                 }
                             },
@@ -487,7 +490,8 @@ impl MarkAndSweep {
                     rp.return_address,
                     stack_map,
                     |_offset, pointer| {
-                        if BuiltInTypes::untag(pointer) != 0 {
+                        let untagged = BuiltInTypes::untag(pointer);
+                        if untagged != 0 && untagged.is_multiple_of(8) {
                             to_mark.push(HeapObject::from_tagged(pointer));
                         }
                     },
