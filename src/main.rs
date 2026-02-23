@@ -1548,6 +1548,7 @@ fn run_repl(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     runtime.initialize_thread_global()?;
     runtime.initialize_namespaces()?;
+    runtime.register_function_struct();
     runtime.install_builtins()?;
 
     #[cfg(any(
@@ -1605,6 +1606,7 @@ fn export_docs(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     compile_trampoline(runtime);
     compile_apply_call_trampolines(runtime);
+    runtime.register_function_struct();
     runtime.install_builtins()?;
     if !args.no_std {
         load_default_files(runtime)?;
@@ -1687,6 +1689,7 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     // Initialize the namespaces atom in GlobalObject slot 0
     runtime.initialize_namespaces()?;
 
+    runtime.register_function_struct();
     runtime.install_builtins()?;
 
     // Generate continuation trampolines using the code generator (x86-64 only)
@@ -1731,6 +1734,7 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         }
     }
     runtime.set_current_namespace(current_namespace);
+
     let fully_qualified_main = runtime.current_namespace_name() + "/main";
 
     // Check if main exists and how many arguments it takes

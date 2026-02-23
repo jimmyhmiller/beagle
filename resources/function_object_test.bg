@@ -1,0 +1,24 @@
+namespace function_object_test
+
+fn double(x) { x * 2 }
+fn add(x, y) { x + y }
+
+fn main() {
+    let f = double
+    println(f.name)
+    println(f.arity)
+    println(f(5))
+
+    let g = add
+    println(g.name)
+    println(g.arity)
+    println(g(3, 4))
+}
+
+// @beagle.core.snapshot
+// function_object_test/double
+// 1
+// 10
+// function_object_test/add
+// 2
+// 7

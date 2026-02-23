@@ -651,17 +651,16 @@ impl Ast {
     }
 
     pub fn has_top_level(&self) -> bool {
-        // Multi-arity functions need runtime initialization (heap allocation for dispatch object)
-        // so they count as top-level code
+        // Functions need runtime initialization (heap allocation for function objects)
+        // Multi-arity functions also need runtime initialization (dispatch object)
         self.nodes().iter().any(|node| {
-            matches!(node, Ast::MultiArityFunction { .. })
+            matches!(node, Ast::Function { .. } | Ast::MultiArityFunction { .. })
                 || !matches!(
                     node,
-                    Ast::Function { .. }
-                        | Ast::Struct { .. }
-                        // | Ast::Enum { .. }
-                        | Ast::Namespace { .. }
-                        | Ast::Test { .. }
+                    Ast::Struct { .. }
+                    // | Ast::Enum { .. }
+                    | Ast::Namespace { .. }
+                    | Ast::Test { .. }
                 )
         })
     }
@@ -1231,7 +1230,7 @@ impl AstCompiler<'_> {
                     let namespace_id = self.current_namespace_id();
                     // Use the full qualified name for namespace slot reservation
                     let reserved_namespace_slot = self.compiler.reserve_namespace_slot(full_name);
-                    self.store_namespaced_variable(
+                    self.store_function_binding(
                         Value::TaggedConstant(reserved_namespace_slot as isize),
                         function_reg,
                     );
@@ -5193,6 +5192,14 @@ impl AstCompiler<'_> {
             _ => {}
         }
         Ok(())
+    }
+
+    fn store_function_binding(&mut self, slot: Value, fn_reg: VirtualRegister) {
+        let slot: VirtualRegister = self.ir.assign_new(slot);
+        let _ = self.call_builtin(
+            "beagle.builtin/store-function-binding",
+            vec![slot.into(), fn_reg.into()],
+        );
     }
 
     fn store_namespaced_variable(&mut self, slot: Value, reg: VirtualRegister) {

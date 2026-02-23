@@ -3732,6 +3732,9 @@ pub struct Runtime {
     /// Each entry's `beagle_fn` is kept alive via GC root.
     /// The trampoline code references callbacks by index.
     pub callbacks: Vec<CallbackInfo>,
+    /// Struct ID for the built-in Function struct (beagle.core/Function).
+    /// Function objects are regular HeapObject structs with this struct_id.
+    pub function_struct_id: usize,
 }
 
 pub fn create_stack_with_protected_page_after(stack_size: usize) -> MmapMut {
@@ -3862,7 +3865,28 @@ impl Runtime {
             future_wait_set: FutureWaitSet::new(),
             event_loops: EventLoopRegistry::new(),
             callbacks: Vec::new(),
+            function_struct_id: 0, // Will be set by register_function_struct()
         }
+    }
+
+    /// Register the built-in Function struct (beagle.core/Function).
+    /// Must be called after Runtime::new() and before any functions are registered.
+    pub fn register_function_struct(&mut self) {
+        let fn_struct = Struct {
+            name: "beagle.core/Function".to_string(),
+            fields: vec![
+                "pointer".to_string(),
+                "name".to_string(),
+                "arity".to_string(),
+            ],
+            mutable_fields: vec![false, false, false],
+            docstring: Some("A first-class function object.".to_string()),
+            field_docstrings: vec![None, None, None],
+        };
+        self.structs
+            .insert("beagle.core/Function".to_string(), fn_struct);
+        let (id, _) = self.structs.get("beagle.core/Function").unwrap();
+        self.function_struct_id = id;
     }
 
     pub fn reset(&mut self) {
@@ -3876,6 +3900,8 @@ impl Runtime {
         self.namespaces = NamespaceManager::new();
         self.structs = StructManager::new();
         self.enums = EnumManager::new();
+        // Re-register the built-in Function struct after clearing
+        self.register_function_struct();
         self.string_constants.clear();
         self.ascii_char_cache = [0; 128];
         self.keyword_constants.clear();
@@ -5586,6 +5612,33 @@ impl Runtime {
         Ok(heap_pointer)
     }
 
+    /// Create a proper function object (HeapObject struct) from a raw function pointer.
+    /// The function object is a regular struct with struct_id = function_struct_id.
+    /// Fields: [pointer (Int-tagged fn_ptr), name (String-tagged), arity (Int-tagged)]
+    pub fn create_function_value(
+        &mut self,
+        stack_pointer: usize,
+        fn_ptr: *const u8,
+        name: &str,
+        arity: usize,
+    ) -> Result<usize, Box<dyn Error>> {
+        let name_idx = self.add_string(StringValue {
+            str: name.to_string(),
+        });
+        let name_tagged = BuiltInTypes::String.tag(name_idx as isize) as usize;
+        let fn_ptr_tagged = BuiltInTypes::Int.tag(fn_ptr as isize) as usize;
+        let arity_tagged = BuiltInTypes::Int.tag(arity as isize) as usize;
+
+        let obj = self.allocate(3, stack_pointer, BuiltInTypes::HeapObject)?;
+        let mut heap_obj = HeapObject::from_tagged(obj);
+        heap_obj.write_struct_id(self.function_struct_id);
+        heap_obj.write_field(0, fn_ptr_tagged);
+        heap_obj.write_field(1, name_tagged);
+        heap_obj.write_field(2, arity_tagged);
+
+        Ok(obj)
+    }
+
     #[allow(clippy::type_complexity)]
     pub fn get_function_base(&self, name: &str) -> Option<(u64, u64, fn(u64, u64) -> u64)> {
         let function = self.functions.iter().find(|f| f.name == name)?;
@@ -6176,6 +6229,8 @@ impl Runtime {
         self.get_binding(namespace, slot)
     }
 
+    /// Upgrade all Function-tagged bindings to proper function objects (HeapObject structs).
+    /// Called on the main thread after compilation, where heap allocation is possible.
     /// Push a new dynamic binding (temporarily rebind a namespace variable)
     /// Saves the current value on a per-thread stack and sets the new value
     pub fn push_dynamic_binding(&mut self, namespace: usize, slot: usize, new_value: usize) {
@@ -6511,6 +6566,13 @@ impl Runtime {
                             return Some("ErrorOpaque".to_string());
                         }
                         let struct_id = object.get_struct_id();
+                        // Function struct objects get a clean repr
+                        if struct_id == self.function_struct_id {
+                            let name_tagged = object.get_field(1);
+                            let name_idx = BuiltInTypes::untag(name_tagged);
+                            let name = &self.string_constants[name_idx].str;
+                            return Some(format!("fn({})", name));
+                        }
                         let struct_value = self.get_struct_by_id(struct_id);
                         Some(self.get_struct_repr_inner(
                             struct_value?,
@@ -6697,6 +6759,17 @@ impl Runtime {
         let str_constant_ptr: usize = BuiltInTypes::untag(str_constant_ptr);
         let string_value = &self.string_constants[str_constant_ptr];
         let string = &string_value.str;
+
+        // For typed internal objects (type_id > 0), use type_id-based field lookup.
+        // These objects (PersistentVec, PersistentMap, etc.) don't have user-defined
+        // struct definitions but do have known field layouts.
+        let type_id = heap_object.get_type_id();
+        if type_id > 0 {
+            if let Some(field_index) = Self::typed_object_field_index(type_id as u8, string) {
+                return Ok((heap_object.get_field(field_index), field_index));
+            }
+        }
+
         let struct_type_id = heap_object.get_struct_id();
         let struct_value = self.get_struct_by_id(struct_type_id);
         if struct_value.is_none() {
@@ -6744,6 +6817,34 @@ impl Runtime {
         } else {
             // Field was added after this object was created — return null
             Ok((BuiltInTypes::null_value() as usize, usize::MAX))
+        }
+    }
+
+    /// Look up field index for typed internal objects by type_id.
+    /// Returns None if the type_id is unknown or the field name doesn't exist.
+    fn typed_object_field_index(type_id: u8, field_name: &str) -> Option<usize> {
+        use crate::collections::{
+            TYPE_ID_PERSISTENT_MAP, TYPE_ID_PERSISTENT_SET, TYPE_ID_PERSISTENT_VEC,
+        };
+        match type_id {
+            TYPE_ID_PERSISTENT_VEC => match field_name {
+                "count" => Some(0),
+                "shift" => Some(1),
+                "root" => Some(2),
+                "tail" => Some(3),
+                _ => None,
+            },
+            TYPE_ID_PERSISTENT_MAP => match field_name {
+                "count" => Some(0),
+                "root" => Some(1),
+                _ => None,
+            },
+            TYPE_ID_PERSISTENT_SET => match field_name {
+                "count" => Some(0),
+                "root" => Some(1),
+                _ => None,
+            },
+            _ => None,
         }
     }
 
@@ -7639,9 +7740,23 @@ impl Runtime {
                     if source_line.is_some() {
                         self.functions[index].source_line = source_line;
                     }
-                    // Tag and add the binding for reserved functions that are now being defined
-                    let tagged_fn = BuiltInTypes::Function.tag(function_pointer as isize) as usize;
-                    self.add_binding(n, tagged_fn);
+                    // Create a function object if we have a stack (main thread).
+                    // On the compiler thread, fall back to Function-tagged pointer.
+                    if let Some(stack_pointer) = self.try_get_stack_base() {
+                        let fn_obj = self
+                            .create_function_value(
+                                stack_pointer,
+                                function_pointer as *const u8,
+                                n,
+                                number_of_args,
+                            )
+                            .expect("Failed to create function value");
+                        self.add_binding(n, fn_obj);
+                    } else {
+                        let tagged_fn =
+                            BuiltInTypes::Function.tag(function_pointer as isize) as usize;
+                        self.add_binding(n, tagged_fn);
+                    }
                     already_defined = true;
                     break;
                 }
@@ -7767,7 +7882,6 @@ impl Runtime {
 
         self.functions[index].jump_table_offset = jump_table_offset;
         if let Some(name) = name {
-            // Tag the function pointer so dynamic calls can identify it as a Function
             let tagged_fn = BuiltInTypes::Function.tag(function_pointer as isize) as usize;
             self.add_binding(name, tagged_fn);
         }

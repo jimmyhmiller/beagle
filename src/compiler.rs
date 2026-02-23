@@ -751,6 +751,13 @@ impl Compiler {
                 .add(self.property_look_up_cache_offset) as usize
         };
         // Cache layout: [struct_id (8 bytes), field_offset (8 bytes), is_mutable (8 bytes)]
+        // Initialize struct_id with sentinel value that will never match a real struct_id.
+        // This ensures the first access always goes to the slow path.
+        // (mmap is zero-initialized, so struct_id=0 would falsely match the first registered struct.)
+        unsafe {
+            let cache_ptr = location as *mut usize;
+            *cache_ptr = usize::MAX;
+        }
         self.property_look_up_cache_offset += 3 * 8;
         Ok(location)
     }

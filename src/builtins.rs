@@ -1083,8 +1083,32 @@ extern "C" fn make_closure(
     save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "make_closure");
     let runtime = get_runtime().get_mut();
-    if BuiltInTypes::get_kind(function) != BuiltInTypes::Function {
-        unsafe {
+
+    // Extract the raw function pointer for closure creation.
+    // Accept both Function-tagged raw pointers and HeapObject function struct objects.
+    let function = match BuiltInTypes::get_kind(function) {
+        BuiltInTypes::Function => function,
+        BuiltInTypes::HeapObject => {
+            let obj = HeapObject::from_tagged(function);
+            if obj.get_type_id() == 0 && obj.get_struct_id() == runtime.function_struct_id {
+                // Extract Int-tagged fn_ptr from field 0, re-tag as Function
+                let int_tagged = obj.get_field(0);
+                let raw = BuiltInTypes::untag(int_tagged);
+                BuiltInTypes::Function.tag(raw as isize) as usize
+            } else {
+                unsafe {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "TypeError",
+                        format!(
+                            "Expected function, got HeapObject with type_id={}",
+                            obj.get_type_id()
+                        ),
+                    );
+                }
+            }
+        }
+        _ => unsafe {
             throw_runtime_error(
                 stack_pointer,
                 "TypeError",
@@ -1093,13 +1117,8 @@ extern "C" fn make_closure(
                     BuiltInTypes::get_kind(function)
                 ),
             );
-        }
-    }
-
-    assert!(matches!(
-        BuiltInTypes::get_kind(function),
-        BuiltInTypes::Function
-    ));
+        },
+    };
 
     let num_free = BuiltInTypes::untag(num_free);
     let free_variable_pointer = free_variable_pointer as *const usize;
@@ -1128,8 +1147,29 @@ extern "C" fn make_function_object(
     print_call_builtin(get_runtime().get(), "make_function_object");
     let runtime = get_runtime().get_mut();
 
-    if BuiltInTypes::get_kind(function) != BuiltInTypes::Function {
-        unsafe {
+    // Accept both Function-tagged raw pointers and HeapObject function struct objects
+    let function = match BuiltInTypes::get_kind(function) {
+        BuiltInTypes::Function => function,
+        BuiltInTypes::HeapObject => {
+            let obj = HeapObject::from_tagged(function);
+            if obj.get_type_id() == 0 && obj.get_struct_id() == runtime.function_struct_id {
+                let int_tagged = obj.get_field(0);
+                let raw = BuiltInTypes::untag(int_tagged);
+                BuiltInTypes::Function.tag(raw as isize) as usize
+            } else {
+                unsafe {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "TypeError",
+                        format!(
+                            "make-function-object: Expected function, got HeapObject with type_id={}",
+                            obj.get_type_id()
+                        ),
+                    );
+                }
+            }
+        }
+        _ => unsafe {
             throw_runtime_error(
                 stack_pointer,
                 "TypeError",
@@ -1138,8 +1178,8 @@ extern "C" fn make_function_object(
                     BuiltInTypes::get_kind(function)
                 ),
             );
-        }
-    }
+        },
+    };
 
     match runtime.make_function_object(stack_pointer, function) {
         Ok(obj) => obj,
@@ -2133,6 +2173,40 @@ pub unsafe extern "C" fn apply_function(
                         }
                     } else {
                         call_with_args(fn_ptr, &args, arg_count, false, 0)
+                    }
+                } else if type_id == 0 {
+                    // Could be a Function struct object
+                    let struct_id = heap_obj.get_struct_id();
+                    if struct_id == runtime.function_struct_id {
+                        let fn_ptr_tagged = heap_obj.get_field(0);
+                        let fn_ptr = BuiltInTypes::untag(fn_ptr_tagged) as *const u8;
+
+                        if let Some(func_info) = runtime.get_function_by_pointer(fn_ptr) {
+                            if func_info.is_variadic {
+                                call_variadic_with_args(
+                                    stack_pointer,
+                                    fn_ptr,
+                                    &args,
+                                    arg_count,
+                                    func_info.min_args,
+                                    false,
+                                    0,
+                                )
+                            } else {
+                                call_with_args(fn_ptr, &args, arg_count, false, 0)
+                            }
+                        } else {
+                            call_with_args(fn_ptr, &args, arg_count, false, 0)
+                        }
+                    } else {
+                        throw_runtime_error(
+                            stack_pointer,
+                            "TypeError",
+                            format!(
+                                "apply: expected function, closure, or multi-arity function, got HeapObject with type_id={}",
+                                type_id
+                            ),
+                        );
                     }
                 } else {
                     throw_runtime_error(
@@ -3840,6 +3914,52 @@ pub unsafe extern "C" fn update_binding(
     BuiltInTypes::null_value() as usize
 }
 
+/// Store a function object in a namespace binding.
+/// Takes a namespace slot and a Function-tagged pointer.
+/// Creates a proper function object (with name, arity) and stores it.
+pub unsafe extern "C" fn store_function_binding(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    namespace_slot: usize,
+    function: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let namespace_slot = BuiltInTypes::untag(namespace_slot);
+    let namespace_id = runtime.current_namespace_id();
+
+    // Extract the raw function pointer
+    let fn_ptr = BuiltInTypes::untag(function) as *const u8;
+
+    // Look up function metadata for name and arity
+    let (name, arity) = if let Some(func) = runtime.get_function_by_pointer(fn_ptr) {
+        (func.name.clone(), func.number_of_args)
+    } else {
+        ("<unknown>".to_string(), 0)
+    };
+
+    // Create a function object
+    let fn_obj = runtime
+        .create_function_value(stack_pointer, fn_ptr, &name, arity)
+        .expect("Failed to create function value");
+
+    // Root the value so GC can update it if objects move during allocation
+    let value_root_id = runtime.register_temporary_root(fn_obj);
+
+    // Store binding in heap-based PersistentMap
+    if let Err(e) = runtime.set_heap_binding(stack_pointer, namespace_id, namespace_slot, fn_obj) {
+        eprintln!("Error in store_function_binding: {}", e);
+    }
+
+    // Re-read value from root in case GC moved it
+    let fn_obj = runtime.unregister_temporary_root(value_root_id);
+
+    // Also update the Rust-side HashMap
+    runtime.update_binding(namespace_id, namespace_slot, fn_obj);
+
+    BuiltInTypes::null_value() as usize
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn get_binding(namespace: usize, slot: usize) -> usize {
     let runtime = get_runtime().get_mut();
@@ -4757,7 +4877,30 @@ unsafe extern "C" fn invoke_beagle_callback(
         // Call the Beagle function using the appropriate save_volatile_registers variant
         let saved_ctx = save_current_gc_context();
 
-        let kind = BuiltInTypes::get_kind(beagle_fn);
+        // If beagle_fn is a function object (HeapObject with Function struct_id),
+        // extract the raw function pointer from field 0 and treat as regular function.
+        let (kind, resolved_fn) = {
+            let k = BuiltInTypes::get_kind(beagle_fn);
+            if matches!(k, BuiltInTypes::HeapObject) {
+                let heap_obj = HeapObject::from_tagged(beagle_fn);
+                if heap_obj.get_type_id() == 0 {
+                    let rt = get_runtime().get();
+                    if heap_obj.get_struct_id() == rt.function_struct_id {
+                        // Extract Int-tagged fn_ptr, re-tag as Function
+                        let int_tagged_fn_ptr = heap_obj.get_field(0);
+                        let raw_fn_ptr = BuiltInTypes::untag(int_tagged_fn_ptr);
+                        let fn_tagged = BuiltInTypes::Function.tag(raw_fn_ptr as isize) as usize;
+                        (BuiltInTypes::Function, fn_tagged)
+                    } else {
+                        (k, beagle_fn)
+                    }
+                } else {
+                    (k, beagle_fn)
+                }
+            } else {
+                (k, beagle_fn)
+            }
+        };
         let result = if matches!(kind, BuiltInTypes::Closure) {
             // Closure: extract function pointer, pass closure as first implicit arg
             let untagged = BuiltInTypes::untag(beagle_fn);
@@ -4817,8 +4960,8 @@ unsafe extern "C" fn invoke_beagle_callback(
                 }
             }
         } else {
-            // Regular function pointer
-            let function_pointer = BuiltInTypes::untag(beagle_fn);
+            // Regular function pointer (or resolved from function object)
+            let function_pointer = BuiltInTypes::untag(resolved_fn);
             let n = beagle_args.len();
             match n {
                 0 => {
@@ -5893,11 +6036,39 @@ fn build_ffi_trampoline() -> *const u8 {
     // === Call the function ===
     code.push(ArmAsm::Blr { rn: X19 }.encode());
 
-    // === Save float return values (d0, d1) to int_args[0..1] via x20 ===
-    // This captures both float registers for HFA struct returns (e.g., NSPoint)
-    // as well as single float returns.
+    // === Capture both integer and float return values ===
+    // Save x0/x1 (integer/pointer return) to int_args buffer via x20,
+    // then overwrite x0/x1 with d0/d1 bits (float return).
+    // This way the trampoline's register return (x0:x1) carries d0:d1 for
+    // float/struct returns, while int_args carries the original x0:x1 for
+    // integer/pointer returns. The Rust caller picks the right one based
+    // on return_type — no inline asm or compiler workarounds needed.
 
-    // fmov x9, d0  (move 64-bit float return bits to x9)
+    // str x0, [x20]  (save integer return low to int_args[0])
+    code.push(
+        ArmAsm::StrImmGen {
+            size: 3,
+            imm9: 0,
+            rn: X20,
+            rt: X0,
+            imm12: 0,
+            class_selector: StrImmGenSelector::UnsignedOffset,
+        }
+        .encode(),
+    );
+    // str x1, [x20, #8]  (save integer return high to int_args[1])
+    code.push(
+        ArmAsm::StrImmGen {
+            size: 3,
+            imm9: 0,
+            rn: X20,
+            rt: X1,
+            imm12: 1, // offset = 1 * 8 = 8 bytes
+            class_selector: StrImmGenSelector::UnsignedOffset,
+        }
+        .encode(),
+    );
+    // fmov x0, d0  (float return bits → x0)
     code.push(
         ArmAsm::FmovFloatGen {
             sf: 1,
@@ -5908,30 +6079,11 @@ fn build_ffi_trampoline() -> *const u8 {
                 index: 0,
                 size: Size::S64,
             }, // d0
-            rd: Register {
-                index: 9,
-                size: Size::S64,
-            }, // x9
+            rd: X0,
         }
         .encode(),
     );
-    // str x9, [x20]  (store 64-bit float bits to int_args[0])
-    code.push(
-        ArmAsm::StrImmGen {
-            size: 3, // 64-bit store
-            imm9: 0,
-            rn: X20,
-            rt: Register {
-                index: 9,
-                size: Size::S64,
-            },
-            imm12: 0,
-            class_selector: StrImmGenSelector::UnsignedOffset,
-        }
-        .encode(),
-    );
-
-    // fmov x9, d1  (move 64-bit float return bits from d1 to x9)
+    // fmov x1, d1  (float return bits → x1)
     code.push(
         ArmAsm::FmovFloatGen {
             sf: 1,
@@ -5942,25 +6094,7 @@ fn build_ffi_trampoline() -> *const u8 {
                 index: 1,
                 size: Size::S64,
             }, // d1
-            rd: Register {
-                index: 9,
-                size: Size::S64,
-            }, // x9
-        }
-        .encode(),
-    );
-    // str x9, [x20, #8]  (store 64-bit float bits to int_args[1])
-    code.push(
-        ArmAsm::StrImmGen {
-            size: 3, // 64-bit store
-            imm9: 0,
-            rn: X20,
-            rt: Register {
-                index: 9,
-                size: Size::S64,
-            },
-            imm12: 1, // offset = 1 * 8 = 8 bytes
-            class_selector: StrImmGenSelector::UnsignedOffset,
+            rd: X1,
         }
         .encode(),
     );
@@ -6127,44 +6261,47 @@ unsafe fn dynamic_c_call(
     let num_overflow = overflow_args.len();
     let stack_alloc_size = (num_overflow * 8 + 15) & !15; // 16-byte aligned
 
-    let trampoline: extern "C" fn(
-        *const u8,
+    // Call the trampoline. It returns d0:d1 bits in x0:x1 (the u128 return),
+    // and saves the original x0:x1 (integer return) to int_args[0..1].
+    // We pick the right pair based on return_type.
+    let tramp_fn: unsafe extern "C" fn(
+        u64,
         *mut u64,
         *const u64,
         *const u64,
         usize,
         usize,
     ) -> u128 = unsafe { std::mem::transmute(get_ffi_trampoline()) };
-
-    let result = trampoline(
-        func_ptr,
-        int_args.as_mut_ptr(),
-        float_args.as_ptr(),
-        overflow_args.as_ptr(),
-        num_overflow,
-        stack_alloc_size,
-    );
+    let result = unsafe {
+        tramp_fn(
+            func_ptr as u64,
+            int_args.as_mut_ptr(),
+            float_args.as_ptr(),
+            overflow_args.as_ptr(),
+            num_overflow,
+            stack_alloc_size,
+        )
+    };
     let low = result as u64;
     let high = (result >> 64) as u64;
 
-    // Structs where all fields are floats (e.g., NSPoint, CGSize) are returned
-    // in float registers d0/d1, not integer registers x0/x1.
-    // The trampoline saved d0→int_args[0] and d1→int_args[1].
+    // For float/struct returns, the trampoline put d0:d1 bits into x0:x1,
+    // which we get directly from (low, high).
     if let FFIType::Structure(fields) = return_type {
         if fields
             .iter()
             .all(|f| matches!(f, FFIType::F32 | FFIType::F64))
         {
-            return (int_args[0], if fields.len() > 1 { int_args[1] } else { 0 });
+            return (low, if fields.len() > 1 { high } else { 0 });
         }
     }
-
-    // For single float returns, the trampoline saved d0 bits into int_args[0]
     if matches!(return_type, FFIType::F32 | FFIType::F64) {
-        return (int_args[0], 0);
+        return (low, 0);
     }
 
-    (low, high)
+    // For integer/pointer returns, the trampoline saved original x0:x1
+    // into int_args[0..1].
+    (int_args[0], int_args[1])
 }
 
 /// x86-64 fallback: use transmute-based dispatch (same as before but cleaned up).
@@ -11651,6 +11788,20 @@ pub extern "C" fn dispatch_multi_arity(
 ) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
 
+    // Check if this is a Function struct object - if so, extract fn_ptr directly
+    let heap_obj = HeapObject::from_tagged(multi_arity_obj);
+    if heap_obj.get_type_id() == 0 {
+        let struct_id = heap_obj.get_struct_id();
+        let runtime = get_runtime().get();
+        if struct_id == runtime.function_struct_id {
+            // Return the Int-tagged fn_ptr from field 0
+            // Callers expect a Function-tagged result, so re-tag it
+            let int_tagged_fn_ptr = heap_obj.get_field(0);
+            let raw_fn_ptr = BuiltInTypes::untag(int_tagged_fn_ptr);
+            return BuiltInTypes::Function.tag(raw_fn_ptr as isize) as usize;
+        }
+    }
+
     // Untag the heap object
     let ptr = BuiltInTypes::untag(multi_arity_obj);
 
@@ -12703,6 +12854,14 @@ impl Runtime {
             update_binding as *const u8,
             true,
             3, // stack_pointer, namespace_slot, value
+        )?;
+
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/store-function-binding",
+            store_function_binding as *const u8,
+            true,
+            true,
+            4, // stack_pointer, frame_pointer, namespace_slot, function
         )?;
 
         self.add_builtin_function(
@@ -13927,12 +14086,34 @@ fn get_type_info(
                     false,
                 ),
                 _ => {
+                    // Check for Function struct objects
+                    if type_id == 0 && struct_id == runtime.function_struct_id {
+                        let fn_ptr_tagged = heap_obj.get_field(0);
+                        let fn_ptr = BuiltInTypes::untag(fn_ptr_tagged) as *const u8;
+                        if let Some(func) = runtime.get_function_by_pointer(fn_ptr) {
+                            return (
+                                "function".to_string(),
+                                func.name.clone(),
+                                func.docstring.clone(),
+                                func.arg_names.clone(),
+                                func.is_variadic,
+                            );
+                        } else {
+                            let name_tagged = heap_obj.get_field(1);
+                            let name_idx = BuiltInTypes::untag(name_tagged);
+                            let name = runtime.string_constants[name_idx].str.clone();
+                            return ("function".to_string(), name, None, vec![], false);
+                        }
+                    }
+
                     // Check if this is a type descriptor (Struct instance with id field at index 1)
-                    // Type descriptors have struct_id=1 (base Struct type) and field 1 contains the type id:
+                    // Type descriptors are instances of beagle.core/Struct and field 1 contains the type id:
                     // - Negative id_field: primitive type (e.g., Int=-3, Float=-4)
                     // - Positive id_field: user-defined struct (e.g., Point=50)
                     let fields_size = heap_obj.fields_size() / 8; // number of fields
-                    if struct_id == 1 && fields_size >= 2 {
+                    let struct_struct_id =
+                        runtime.get_struct("beagle.core/Struct").map(|(id, _)| id);
+                    if struct_struct_id == Some(struct_id) && fields_size >= 2 {
                         let id_field = heap_obj.get_field(1);
                         if BuiltInTypes::get_kind(id_field) == BuiltInTypes::Int {
                             // This is a type descriptor - extract name from field 0
@@ -14248,8 +14429,10 @@ extern "C" fn reflect_is_struct(
     let type_id = heap_obj.get_type_id();
     let struct_id = heap_obj.get_struct_id();
     let runtime = get_runtime().get();
-    // Custom struct (type_id == 0) that is NOT an enum variant
-    let is_struct = type_id == 0 && runtime.get_enum_name_for_variant(struct_id).is_none();
+    // Custom struct (type_id == 0) that is NOT an enum variant and NOT a Function struct
+    let is_struct = type_id == 0
+        && runtime.get_enum_name_for_variant(struct_id).is_none()
+        && struct_id != runtime.function_struct_id;
     BuiltInTypes::construct_boolean(is_struct) as usize
 }
 
@@ -14278,11 +14461,19 @@ extern "C" fn reflect_is_function(
     let is_fn = matches!(kind, BuiltInTypes::Function | BuiltInTypes::Closure);
     if !is_fn && matches!(kind, BuiltInTypes::HeapObject) {
         let heap_obj = HeapObject::from_tagged(value);
-        let type_id = heap_obj.get_struct_id() as u8;
+        let type_id = heap_obj.get_type_id() as u8;
         if type_id == crate::collections::TYPE_ID_FUNCTION_OBJECT
             || type_id == TYPE_ID_MULTI_ARITY_FUNCTION
         {
             return BuiltInTypes::true_value() as usize;
+        }
+        // Check for Function struct objects (type_id=0, struct_id=function_struct_id)
+        if type_id == 0 {
+            let struct_id = heap_obj.get_struct_id();
+            let runtime = get_runtime().get();
+            if struct_id == runtime.function_struct_id {
+                return BuiltInTypes::true_value() as usize;
+            }
         }
     }
     BuiltInTypes::construct_boolean(is_fn) as usize
@@ -14343,7 +14534,6 @@ extern "C" fn reflect_all_namespaces(stack_pointer: usize, frame_pointer: usize)
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
 
-    use crate::collections::PersistentVec;
     use std::collections::HashSet;
 
     // Collect unique namespace names from functions

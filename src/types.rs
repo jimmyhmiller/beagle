@@ -780,6 +780,18 @@ impl HeapObject {
         unsafe { *pointer = new_header.to_usize() };
     }
 
+    pub fn write_struct_id(&mut self, struct_id: usize) {
+        let untagged = self.untagged();
+        let pointer = untagged as *mut usize;
+        let header = unsafe { *pointer };
+        let header = Header::from_usize(header);
+        let new_header = Header {
+            type_data: struct_id as u32,
+            ..header
+        };
+        unsafe { *pointer = new_header.to_usize() };
+    }
+
     pub fn get_struct_id(&self) -> usize {
         self.get_type_data()
     }
