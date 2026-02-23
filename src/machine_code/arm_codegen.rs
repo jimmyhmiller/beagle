@@ -717,6 +717,14 @@ pub enum ArmAsm {
         rn: Register,
         rd: Register,
     },
+    /// FRINTZ -- A64
+    /// Floating-point Round to Integral, toward Zero (scalar)
+    /// FRINTZ <Dd>, <Dn>
+    FrintzFloat {
+        ftype: i32,
+        rn: Register,
+        rd: Register,
+    },
     /// FCMP -- A64
     /// Floating-point Compare (scalar)
     /// FCMP  <Dn>, <Dm>
@@ -1303,6 +1311,14 @@ impl ArmAsm {
                 0b0_0_0_11110_00_1_00000_0001_10_00000_00000
                     | ((*ftype as u32) << 22)
                     | (rm << 16)
+                    | (rn << 5)
+                    | (rd << 0)
+            }
+            ArmAsm::FrintzFloat { ftype, rn, rd } => {
+                // FRINTZ <Dd>, <Dn>: round toward zero
+                // Encoding: 0 0 0 11110 ftype 1 001011 10000 Rn Rd
+                0b0_0_0_11110_00_1_001011_10000_00000_00000
+                    | ((*ftype as u32) << 22)
                     | (rn << 5)
                     | (rd << 0)
             }

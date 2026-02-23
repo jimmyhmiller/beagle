@@ -178,6 +178,10 @@ impl CodegenBackend for X86_64Backend {
         self.inner.fdiv(dest, a, b);
     }
 
+    fn frintz(&mut self, dest: Self::Register, src: Self::Register) {
+        self.inner.frintz(dest, src);
+    }
+
     fn fmov_to_float(&mut self, dest: Self::Register, src: Self::Register) {
         self.inner.fmov_to_float(dest, src);
     }

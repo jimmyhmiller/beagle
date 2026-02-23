@@ -1,0 +1,35 @@
+namespace float_modulo_test
+
+fn main() {
+    // float % float
+    println(10.5 % 3.0)
+    println(7.0 % 2.0)
+    println(1740000000.0 % 86400.0)
+
+    // int % float
+    println(10 % 3.0)
+    println(7 % 2.5)
+
+    // float % int
+    println(10.5 % 3)
+    println(7.5 % 2)
+
+    // int % int (still works)
+    println(10 % 3)
+    println(7 % 2)
+
+    // negative float modulo
+    println(0.0 - (10.5 % 3.0))
+}
+
+// @beagle.core.snapshot
+// 1.5
+// 1.0
+// 76800.0
+// 1.0
+// 2.0
+// 1.5
+// 1.5
+// 1
+// 1
+// -1.5

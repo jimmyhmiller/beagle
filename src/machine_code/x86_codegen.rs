@@ -463,6 +463,12 @@ pub enum X86Asm {
         dest: X86Register,
         src: X86Register,
     },
+    /// ROUNDSD xmm, xmm, imm8
+    Roundsd {
+        dest: X86Register,
+        src: X86Register,
+        mode: u8,
+    },
     /// MOVSD xmm, xmm
     MovsdRR {
         dest: X86Register,
@@ -942,6 +948,18 @@ impl X86Asm {
                 }
                 bytes.extend_from_slice(&[0x0F, 0x5E]);
                 bytes.push(modrm(0b11, dest.index, src.index));
+                bytes
+            }
+
+            X86Asm::Roundsd { dest, src, mode } => {
+                // ROUNDSD xmm, xmm, imm8: 66 0F 3A 0B /r ib
+                let mut bytes = vec![0x66];
+                if dest.needs_rex_ext() || src.needs_rex_ext() {
+                    bytes.push(rex(false, dest.index >= 8, false, src.index >= 8));
+                }
+                bytes.extend_from_slice(&[0x0F, 0x3A, 0x0B]);
+                bytes.push(modrm(0b11, dest.index, src.index));
+                bytes.push(*mode);
                 bytes
             }
 

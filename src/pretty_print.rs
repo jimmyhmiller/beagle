@@ -382,6 +382,9 @@ impl PrettyPrint for Instruction {
                     value1.pretty_print()
                 )
             }
+            Instruction::FRoundToZero(value, value1) => {
+                format!("frintz {}, {}", value.pretty_print(), value1.pretty_print())
+            }
             Instruction::AddFloat(value, value1, value2) => {
                 format!(
                     "add_float {}, {}, {}",
@@ -1270,6 +1273,12 @@ impl PrettyPrint for ArmAsm {
                     rn.pretty_print(),
                     rm.pretty_print()
                 )
+            }
+            ArmAsm::FrintzFloat { ftype, rn, rd } => {
+                if *ftype != 0b01 {
+                    panic!("Need to deal with ftype since I'm using it now");
+                }
+                format!("frintz {}, {}", rd.pretty_print(), rn.pretty_print())
             }
             ArmAsm::FcmpFloat { ftype, rm, rn } => {
                 if *ftype != 0b01 {

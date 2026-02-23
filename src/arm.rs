@@ -1783,6 +1783,14 @@ impl LowLevelArm {
         });
     }
 
+    pub fn frintz(&mut self, dest: Register, src: Register) {
+        self.instructions.push(ArmAsm::FrintzFloat {
+            ftype: 0b01,
+            rn: src,
+            rd: dest,
+        });
+    }
+
     pub fn get_label_by_name(&self, arg: &str) -> Label {
         self.labels
             .iter()

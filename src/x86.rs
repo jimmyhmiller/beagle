@@ -939,6 +939,18 @@ impl LowLevelX86 {
         self.instructions.push(X86Asm::Divsd { dest, src: b });
     }
 
+    pub fn frintz(&mut self, dest: X86Register, src: X86Register) {
+        // ROUNDSD xmm1, xmm2, 3  (3 = round toward zero / truncate)
+        if dest != src {
+            self.instructions.push(X86Asm::MovsdRR { dest, src });
+        }
+        self.instructions.push(X86Asm::Roundsd {
+            dest,
+            src: dest,
+            mode: 3,
+        });
+    }
+
     pub fn fmov_to_float(&mut self, dest: X86Register, src: X86Register) {
         self.instructions.push(X86Asm::MovqXR { dest, src });
     }

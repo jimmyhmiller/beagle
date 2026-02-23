@@ -125,6 +125,9 @@ pub trait CodegenBackend: Sized {
     fn fmul(&mut self, dest: Self::Register, a: Self::Register, b: Self::Register);
     fn fdiv(&mut self, dest: Self::Register, a: Self::Register, b: Self::Register);
 
+    /// Floating-point round to integral, toward zero (FRINTZ on ARM64).
+    fn frintz(&mut self, dest: Self::Register, src: Self::Register);
+
     /// Move value from general-purpose register to floating-point register.
     fn fmov_to_float(&mut self, dest: Self::Register, src: Self::Register);
 

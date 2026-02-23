@@ -161,6 +161,7 @@ pub enum Instruction {
     FmovGeneralToFloat(Value, Value),
     FmovFloatToGeneral(Value, Value),
     IntToFloat(Value, Value), // Convert tagged int to float register (SCVTF/CVTSI2SD)
+    FRoundToZero(Value, Value), // Float round toward zero (FRINTZ/ROUNDSD)
     AddFloat(Value, Value, Value),
     SubFloat(Value, Value, Value),
     MulFloat(Value, Value, Value),
@@ -337,6 +338,9 @@ impl Instruction {
                 get_registers!(a, b)
             }
             Instruction::IntToFloat(a, b) => {
+                get_registers!(a, b)
+            }
+            Instruction::FRoundToZero(a, b) => {
                 get_registers!(a, b)
             }
             Instruction::AddFloat(a, b, c) => {
@@ -600,6 +604,7 @@ impl Instruction {
             | Instruction::FmovGeneralToFloat(value, value1)
             | Instruction::FmovFloatToGeneral(value, value1)
             | Instruction::IntToFloat(value, value1)
+            | Instruction::FRoundToZero(value, value1)
             | Instruction::ShiftRightImm(value, value1, _)
             | Instruction::ShiftRightImmRaw(value, value1, _)
             | Instruction::AndImm(value, value1, _)
@@ -1061,9 +1066,7 @@ impl Ir {
         A: Into<Value>,
         B: Into<Value>,
     {
-        // For now, only integer modulo is supported
-        // True modulo: ((a % b) + b) % b to handle negative numbers correctly
-        self.modulo(a, b)
+        self.math_any(a, b, Self::modulo, Self::modulo_float)
     }
 
     pub fn compare(&mut self, a: Value, b: Value, condition: Condition) -> Value {
@@ -1089,38 +1092,117 @@ impl Ir {
         let result_register = self.assign_new(Value::TaggedConstant(0));
         let a: VirtualRegister = self.assign_new(a);
         let b: VirtualRegister = self.assign_new(b);
-        let compare_float_label: Label = self.label("compare_float");
         let default_compare_label: Label = self.label("default_compare");
         let after_compare = self.label("after_compare");
 
-        // Check if BOTH values are floats - only then use float comparison
-        self.guard_float(a.into(), default_compare_label);
+        // Fast path: check if both are ints
+        let not_both_ints: Label = self.label("not_both_ints");
+        self.guard_int(a.into(), not_both_ints);
+        self.guard_int(b.into(), not_both_ints);
+
+        // Both ints - integer comparison (fast path)
+        {
+            let tag = self.assign_new(Value::RawValue(BuiltInTypes::Bool.get_tag() as usize));
+            let dest = self.volatile_register();
+            self.instructions.push(Instruction::Compare(
+                dest.into(),
+                a.into(),
+                b.into(),
+                condition,
+            ));
+            self.instructions
+                .push(Instruction::Tag(dest.into(), dest.into(), tag.into()));
+            self.assign(result_register, dest);
+            self.jump(after_compare);
+        }
+
+        // Slow path: handle floats and mixed int/float types
+        self.write_label(not_both_ints);
+
+        let a_is_float: Label = self.label("cmp_a_is_float");
+        let both_floats: Label = self.label("cmp_both_floats");
+
+        // Check if a is int (we know at least one is not int from fast path)
+        self.guard_int(a.into(), a_is_float);
+
+        // a is int, so b must be float (since fast path failed)
         self.guard_float(b.into(), default_compare_label);
 
-        // Float path - both are floats
-        self.write_label(compare_float_label);
-        let a_untagged = self.untag(a.into());
-        let b_untagged = self.untag(b.into());
-        let a_raw = self.load_from_heap(a_untagged, 1);
-        let b_raw = self.load_from_heap(b_untagged, 1);
-        let a_float = self.fmov_general_to_float(a_raw);
-        let b_float = self.fmov_general_to_float(b_raw);
+        // Case: a is int, b is float - convert a to float and compare
+        {
+            let a_untagged = self.shift_right_imm_raw(a.into(), 3);
+            let a_float = self.int_to_float(a_untagged);
+            let b_untagged = self.untag(b.into());
+            let b_val = self.load_from_heap(b_untagged, 1);
+            let b_float = self.fmov_general_to_float(b_val);
+            let tag = self.assign_new(Value::RawValue(BuiltInTypes::Bool.get_tag() as usize));
+            let dest = self.volatile_register();
+            self.instructions.push(Instruction::CompareFloat(
+                dest.into(),
+                a_float,
+                b_float,
+                condition,
+            ));
+            self.instructions
+                .push(Instruction::Tag(dest.into(), dest.into(), tag.into()));
+            self.assign(result_register, dest);
+            self.jump(after_compare);
+        }
 
-        let tag2 = self.assign_new(Value::RawValue(BuiltInTypes::Bool.get_tag() as usize));
-        let dest2 = self.volatile_register();
-        self.instructions.push(Instruction::CompareFloat(
-            dest2.into(),
-            a_float,
-            b_float,
-            condition,
-        ));
-        self.instructions
-            .push(Instruction::Tag(dest2.into(), dest2.into(), tag2.into()));
-        self.assign(result_register, dest2);
-        self.jump(after_compare);
+        // a is not int - check if a is float
+        self.write_label(a_is_float);
+        self.guard_float(a.into(), default_compare_label);
 
-        // Default path - for ordered comparisons (<, >, <=, >=), require both operands
-        // to have the same type tag. Cross-type ordered comparisons throw a type error.
+        // a is float - check if b is int or float
+        self.guard_int(b.into(), both_floats);
+
+        // Case: a is float, b is int - convert b to float and compare
+        {
+            let a_untagged = self.untag(a.into());
+            let a_val = self.load_from_heap(a_untagged, 1);
+            let a_float = self.fmov_general_to_float(a_val);
+            let b_untagged = self.shift_right_imm_raw(b.into(), 3);
+            let b_float = self.int_to_float(b_untagged);
+            let tag = self.assign_new(Value::RawValue(BuiltInTypes::Bool.get_tag() as usize));
+            let dest = self.volatile_register();
+            self.instructions.push(Instruction::CompareFloat(
+                dest.into(),
+                a_float,
+                b_float,
+                condition,
+            ));
+            self.instructions
+                .push(Instruction::Tag(dest.into(), dest.into(), tag.into()));
+            self.assign(result_register, dest);
+            self.jump(after_compare);
+        }
+
+        // Case: both are floats
+        self.write_label(both_floats);
+        self.guard_float(b.into(), default_compare_label);
+
+        {
+            let a_untagged = self.untag(a.into());
+            let b_untagged = self.untag(b.into());
+            let a_raw = self.load_from_heap(a_untagged, 1);
+            let b_raw = self.load_from_heap(b_untagged, 1);
+            let a_float = self.fmov_general_to_float(a_raw);
+            let b_float = self.fmov_general_to_float(b_raw);
+            let tag = self.assign_new(Value::RawValue(BuiltInTypes::Bool.get_tag() as usize));
+            let dest = self.volatile_register();
+            self.instructions.push(Instruction::CompareFloat(
+                dest.into(),
+                a_float,
+                b_float,
+                condition,
+            ));
+            self.instructions
+                .push(Instruction::Tag(dest.into(), dest.into(), tag.into()));
+            self.assign(result_register, dest);
+            self.jump(after_compare);
+        }
+
+        // Default path - neither operand is a number, or non-numeric types
         self.write_label(default_compare_label);
         match condition {
             Condition::LessThan
@@ -1763,6 +1845,13 @@ impl Ir {
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, backend);
                     backend.int_to_float(dest, src);
+                    self.store_spill(dest, dest_spill, backend);
+                }
+                Instruction::FRoundToZero(dest, src) => {
+                    let src = self.value_to_register(src, backend);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.frintz(dest, src);
                     self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::AddFloat(dest, a, b) => {
@@ -2927,6 +3016,20 @@ impl Ir {
         let dest = self.volatile_register().into();
         self.instructions.push(Instruction::DivFloat(dest, a, b));
         dest
+    }
+
+    fn fround_to_zero(&mut self, a: Value) -> Value {
+        let dest = self.volatile_register().into();
+        self.instructions.push(Instruction::FRoundToZero(dest, a));
+        dest
+    }
+
+    /// Float modulo: a % b = a - trunc(a/b) * b
+    fn modulo_float(&mut self, a: Value, b: Value) -> Value {
+        let q = self.div_float(a, b);
+        let q_trunc = self.fround_to_zero(q);
+        let q_times_b = self.mul_float(q_trunc, b);
+        self.sub_float(a, q_times_b)
     }
 
     fn allocate(&mut self, size: Value) -> Value {
