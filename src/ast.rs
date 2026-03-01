@@ -3165,11 +3165,12 @@ impl AstCompiler<'_> {
                     }
                     VariableLocation::BoxedMutableLocal(local_index) => {
                         let local = self.ir.load_local(local_index);
-                        // I thought I needed a write barrier, but I believe that isn't the case
-                        // because these are only heap allocated if captured.
-                        // self.call_builtin("beagle.builtin/gc-add-root", vec![local]);
                         let local = self.ir.untag(local);
                         self.ir.write_field(local, 0, value.into());
+                        // Write barrier: the box may be in old gen, value may be in young gen
+                        let mark_card_fn =
+                            Value::RawValue((mark_card as usize) << BuiltInTypes::tag_size());
+                        self.ir.call_builtin(mark_card_fn, vec![local]);
                     }
                     VariableLocation::FreeVariable(_free_variable) => {
                         return Err(CompileError::InvalidAssignment {
@@ -3193,11 +3194,12 @@ impl AstCompiler<'_> {
                             .ir
                             .assign_new(Value::TaggedConstant((index + 3) as isize));
                         let slot = self.ir.read_field(arg0, index.into());
-                        // I thought I needed a write barrier, but I believe that isn't the case
-                        // because these are only heap allocated if captured.
-                        // self.call_builtin("beagle.builtin/gc-add-root", vec![slot]);
                         let slot = self.ir.untag(slot);
                         self.ir.write_field(slot, 0, value.into());
+                        // Write barrier: the box may be in old gen, value may be in young gen
+                        let mark_card_fn =
+                            Value::RawValue((mark_card as usize) << BuiltInTypes::tag_size());
+                        self.ir.call_builtin(mark_card_fn, vec![slot]);
                     }
                     VariableLocation::MutableFreeVariable(index) => {
                         let arg0_location = self
@@ -3211,11 +3213,12 @@ impl AstCompiler<'_> {
                             }
                         })?;
                         let arg0: VirtualRegister = self.ir.assign_new(arg0);
-                        // I thought I needed a write barrier, but I believe that isn't the case
-                        // because these are only heap allocated if captured.
-                        // self.call_builtin("beagle.builtin/gc-add-root", vec![arg0.into()]);
                         let arg0 = self.ir.untag(arg0.into());
                         self.ir.write_field(arg0, index + 3, value.into());
+                        // Write barrier: closure may be in old gen, value may be in young gen
+                        let mark_card_fn =
+                            Value::RawValue((mark_card as usize) << BuiltInTypes::tag_size());
+                        self.ir.call_builtin(mark_card_fn, vec![arg0]);
                     }
                     VariableLocation::Register(_virtual_register) => {
                         return Err(CompileError::InvalidAssignment {
