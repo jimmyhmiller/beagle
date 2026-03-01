@@ -400,11 +400,12 @@ impl MarkAndSweep {
                         if segment.is_empty() {
                             return;
                         }
+                        let segment_end = cont.original_sp() + segment.len();
                         ContinuationSegmentWalker::walk_segment_roots(
                             segment,
                             cont.original_sp(),
                             cont.original_fp(),
-                            cont.prompt_stack_pointer(),
+                            segment_end,
                             cont.resume_address(),
                             stack_map,
                             |_offset, pointer| {
@@ -450,11 +451,12 @@ impl MarkAndSweep {
                         if segment.is_empty() {
                             return;
                         }
+                        let segment_end = cont.original_sp() + segment.len();
                         ContinuationSegmentWalker::walk_segment_roots(
                             segment,
                             cont.original_sp(),
                             cont.original_fp(),
-                            cont.prompt_stack_pointer(),
+                            segment_end,
                             cont.resume_address(),
                             stack_map,
                             |_offset, pointer| {
