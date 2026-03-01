@@ -633,7 +633,7 @@ impl MarkAndSweep {
             let heap_object = HeapObject::from_untagged(ptr);
             let full_size = heap_object.full_size();
 
-            if heap_object.get_type_id() == 0 {
+            if heap_object.get_type_id() == 0 && !heap_object.is_opaque_object() {
                 let shape_id = heap_object.get_struct_id();
                 if let Some(plan) = runtime.structs.migration_plan_for(shape_id) {
                     let old_header = heap_object.get_header();

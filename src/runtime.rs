@@ -3,7 +3,7 @@ use mmap_rs::{Mmap, MmapMut, MmapOptions, Reserved};
 use nanoserde::SerJson;
 use regex::Regex;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     error::Error,
     ffi::{CString, c_void},
     io::Write,
@@ -3090,7 +3090,6 @@ impl Memory {
             }
             roots
         };
-
         // Store namespace roots in a Vec to provide stable pointers during GC
         // This is required for copying collectors (like generational GC) that need to
         // update pointers when objects move.

@@ -2946,13 +2946,13 @@ pub unsafe extern "C" fn abs_builtin(
 
                 let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
                     Ok(ptr) => ptr,
-                    Err(_) => unsafe {
+                    Err(_) => {
                         throw_runtime_error(
                             stack_pointer,
                             "AllocationError",
                             "Failed to allocate float result - out of memory".to_string(),
                         );
-                    },
+                    }
                 };
 
                 let untagged_result = BuiltInTypes::untag(new_float_ptr);
@@ -2963,13 +2963,11 @@ pub unsafe extern "C" fn abs_builtin(
             }
             _ => {
                 // For other types, throw a type error
-                unsafe {
-                    throw_runtime_error(
-                        stack_pointer,
-                        "TypeError",
-                        "abs requires a number (int or float)".to_string(),
-                    );
-                }
+                throw_runtime_error(
+                    stack_pointer,
+                    "TypeError",
+                    "abs requires a number (int or float)".to_string(),
+                );
             }
         }
     }
@@ -2993,13 +2991,13 @@ pub unsafe extern "C" fn round_builtin(
 
         let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
             Ok(ptr) => ptr,
-            Err(_) => unsafe {
+            Err(_) => {
                 throw_runtime_error(
                     stack_pointer,
                     "AllocationError",
                     "Failed to allocate float result - out of memory".to_string(),
                 );
-            },
+            }
         };
 
         let untagged_result = BuiltInTypes::untag(new_float_ptr);
@@ -7415,10 +7413,6 @@ unsafe extern "C" fn ffi_copy_bytes_filter(
 
         BuiltInTypes::Int.tag(written as isize) as usize
     }
-}
-
-extern "C" fn placeholder() -> usize {
-    BuiltInTypes::null_value() as usize
 }
 
 extern "C" fn wait_for_input(stack_pointer: usize, frame_pointer: usize) -> usize {

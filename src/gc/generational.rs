@@ -934,7 +934,7 @@ impl GenerationalGC {
         }
 
         // Check if this user struct needs migration to a new shape
-        let new_pointer = if heap_object.get_type_id() == 0 {
+        let new_pointer = if heap_object.get_type_id() == 0 && !heap_object.is_opaque_object() {
             let shape_id = heap_object.get_struct_id();
             let runtime = crate::get_runtime().get_mut();
             if let Some(plan) = runtime.structs.migration_plan_for(shape_id) {
