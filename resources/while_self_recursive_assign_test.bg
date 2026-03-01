@@ -1,0 +1,31 @@
+namespace while_self_recursive_assign_test
+
+// Regression test for a bug where `result = self_call(result)` inside a
+// while loop was compiled as a tail call, causing the loop to exit early.
+// The fix ensures while loop bodies and assignment RHS are never in tail position.
+
+fn process(items, acc) {
+    let mut result = acc
+    let len = length(items)
+    let mut i = 0
+    while i < len {
+        if get(items, i) == 99 {
+            result = process([100, 101], result)
+        }
+        result = push(result, get(items, i))
+        i = i + 1
+    }
+    result
+}
+
+fn main() {
+    let items = [0, 1, 99, 3, 4]
+    let result = process(items, [])
+    // Should be: [0, 1, 100, 101, 99, 3, 4] = 7 items
+    println(length(result))
+    println(result)
+}
+
+// @beagle.core.snapshot
+// 7
+// [0, 1, 100, 101, 99, 3, 4]

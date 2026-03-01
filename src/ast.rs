@@ -1293,6 +1293,9 @@ impl AstCompiler<'_> {
                     .jump_if(loop_exit, Condition::NotEqual, cond_value, Value::True);
 
                 // Execute body and track last expression value
+                // Nothing inside a while body is in tail position because
+                // the loop jumps back to the condition check after each iteration.
+                self.not_tail_position();
                 let mut last_value = Value::Null;
                 for ast in body.iter() {
                     last_value = self.call_compile(ast)?;
@@ -3134,6 +3137,9 @@ impl AstCompiler<'_> {
                         got: format!("{:?}", name),
                     });
                 };
+                // The RHS of an assignment is never in tail position because
+                // the result must be stored into the variable, not returned.
+                self.not_tail_position();
                 let value = self.call_compile(&value)?;
                 let value = self.ir.assign_new(value);
                 let variable = self.get_variable_alloc_free_variable(name)?;
