@@ -1,0 +1,40 @@
+namespace struct_spread_test
+
+struct Point {
+    x
+    y
+}
+
+struct Color {
+    r
+    g
+    b
+}
+
+fn main() {
+    let p = Point { x: 10, y: 20 }
+    let p2 = Point { ...p, x: 15 }
+    println(p2.x)
+    println(p2.y)
+    println(p.x)
+
+    let c = Color { r: 255, g: 0, b: 0 }
+    let c2 = Color { ...c, g: 128, b: 64 }
+    println(c2.r)
+    println(c2.g)
+    println(c2.b)
+
+    let p3 = Point { ...p }
+    println(p3.x)
+    println(p3.y)
+}
+
+// @beagle.core.snapshot
+// 15
+// 20
+// 10
+// 255
+// 128
+// 64
+// 10
+// 20

@@ -6798,6 +6798,90 @@ pub unsafe extern "C" fn copy_object(
     }
 }
 
+/// Like copy_object but checks the source struct_id matches expected_struct_id first.
+/// Throws a StructError with a descriptive message on mismatch or non-struct input.
+pub unsafe extern "C" fn copy_object_spread(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    object_pointer: usize,
+    expected_struct_id: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+
+    // Check that the value is actually a heap object (not an int, float, etc.)
+    if !BuiltInTypes::is_heap_pointer(object_pointer) {
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "StructError",
+                "Spread source must be a struct".to_string(),
+            );
+        }
+    }
+
+    let actual_struct_id = HeapObject::from_tagged(object_pointer).get_struct_id();
+    if actual_struct_id != expected_struct_id {
+        let runtime = get_runtime().get_mut();
+        let expected_name = runtime
+            .get_struct_by_id(expected_struct_id)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| format!("<struct#{}>", expected_struct_id));
+        let actual_name = runtime
+            .get_struct_by_id(actual_struct_id)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| format!("<struct#{}>", actual_struct_id));
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "StructError",
+                format!(
+                    "Spread type mismatch: expected {}, got {}",
+                    expected_name, actual_name
+                ),
+            );
+        }
+    }
+
+    // Type-checked — delegate to the actual copy
+    let object_pointer_id = {
+        let runtime = get_runtime().get_mut();
+        runtime.register_temporary_root(object_pointer)
+    };
+    let to_pointer = {
+        let runtime = get_runtime().get_mut();
+        let object = HeapObject::from_tagged(object_pointer);
+        let header = object.get_header();
+        let size = header.size as usize;
+        let kind = BuiltInTypes::get_kind(object_pointer);
+        match runtime.allocate(size, stack_pointer, kind) {
+            Ok(ptr) => ptr,
+            Err(_) => unsafe {
+                runtime.unregister_temporary_root(object_pointer_id);
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate object copy - out of memory".to_string(),
+                );
+            },
+        }
+    };
+    let object_pointer = {
+        let runtime = get_runtime().get_mut();
+        runtime.unregister_temporary_root(object_pointer_id)
+    };
+    let mut to_object = HeapObject::from_tagged(to_pointer);
+    let object = HeapObject::from_tagged(object_pointer);
+    let runtime = get_runtime().get_mut();
+    match runtime.copy_object(object, &mut to_object) {
+        Ok(ptr) => ptr,
+        Err(error) => {
+            let stack_pointer = get_current_stack_pointer();
+            println!("Error: {:?}", error);
+            unsafe { throw_error(stack_pointer, frame_pointer) };
+        }
+    }
+}
+
 pub unsafe extern "C" fn copy_from_to_object(from: usize, to: usize) -> usize {
     let runtime = get_runtime().get_mut();
     if from == BuiltInTypes::null_value() as usize {
@@ -12000,6 +12084,15 @@ impl Runtime {
             true,
             true,
             3,
+        )?;
+
+        // copy_object_spread takes (stack_pointer, frame_pointer, object_pointer, expected_struct_id)
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/copy-object-spread",
+            copy_object_spread as *const u8,
+            true,
+            true,
+            4,
         )?;
 
         self.add_builtin_function(

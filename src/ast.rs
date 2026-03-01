@@ -200,6 +200,7 @@ pub enum Ast {
     StructCreation {
         name: String,
         fields: Vec<(String, Ast)>,
+        spread: Option<Box<Ast>>,
         token_range: TokenRange,
     },
     PropertyAccess {
@@ -1686,6 +1687,7 @@ impl AstCompiler<'_> {
                         ("name".to_string(), Ast::String(fully_qualified_name, 0)),
                         ("id".to_string(), Ast::IntegerLiteral(struct_id as i64, 0)),
                     ],
+                    spread: None,
                     token_range: ast.token_range(),
                 })?;
                 let namespace_id = self
@@ -1727,6 +1729,7 @@ impl AstCompiler<'_> {
                                 Ast::StructCreation {
                                     name: format!("{}.{}", name, variant_name),
                                     fields: vec![],
+                                    spread: None,
                                     token_range: *token_range,
                                 },
                             ));
@@ -1741,6 +1744,7 @@ impl AstCompiler<'_> {
                 let value = self.call_compile(&Ast::StructCreation {
                     name: name.clone(),
                     fields: struct_fields,
+                    spread: None,
                     token_range,
                 })?;
                 let namespace_id = self
@@ -1869,6 +1873,7 @@ impl AstCompiler<'_> {
                 let value = self.call_compile(&Ast::StructCreation {
                     name: "beagle.core/Protocol".to_string(),
                     fields: vec![("name".to_string(), Ast::String(fully_qualified_name, 0))],
+                    spread: None,
                     token_range: ast.token_range(),
                 })?;
                 let reserved_namespace_slot = self.compiler.reserve_namespace_slot(&name);
@@ -2136,96 +2141,138 @@ impl AstCompiler<'_> {
                     .ir
                     .tag(struct_pointer, BuiltInTypes::HeapObject.get_tag()))
             }
-            Ast::StructCreation { name, fields, .. } => {
+            Ast::StructCreation {
+                name,
+                fields,
+                spread,
+                ..
+            } => {
                 let (namespace, name) = self.get_namespace_name_and_name(&name)?;
-                for field in fields.iter() {
-                    self.not_tail_position();
-                    let value = self.call_compile(&field.1)?;
-                    let reg = self.ir.assign_new(value);
-                    self.ir.push_to_stack(reg.into());
-                }
 
-                let (struct_id, struct_type) = match self
-                    .compiler
-                    .get_struct(&format!("{}/{}", namespace, name))
-                    .or_else(|| self.compiler.get_struct(&format!("beagle.core/{}", name)))
-                {
-                    Some(s) => s,
-                    None => {
-                        // Generate code to throw a runtime error that can be caught with try/catch
+                // Collect struct metadata into owned values so we don't hold a borrow on
+                // self.compiler while calling call_compile (which needs &mut self).
+                let (struct_id, field_order, struct_size) = {
+                    let (struct_id, struct_type) = match self
+                        .compiler
+                        .get_struct(&format!("{}/{}", namespace, name))
+                        .or_else(|| self.compiler.get_struct(&format!("beagle.core/{}", name)))
+                    {
+                        Some(s) => s,
+                        None => {
+                            // Generate code to throw a runtime error that can be caught with try/catch
 
-                        // Create error kind string
-                        let kind_constant = self.string_constant("StructError".to_string());
-                        let kind_str = self.ir.load_string_constant(kind_constant);
+                            // Create error kind string
+                            let kind_constant = self.string_constant("StructError".to_string());
+                            let kind_str = self.ir.load_string_constant(kind_constant);
 
-                        // Create error message string
-                        let message =
-                            format!("Struct '{}' not found in namespace '{}'", name, namespace);
-                        let message_constant = self.string_constant(message);
-                        let message_str = self.ir.load_string_constant(message_constant);
+                            // Create error message string
+                            let message = format!(
+                                "Struct '{}' not found in namespace '{}'",
+                                name, namespace
+                            );
+                            let message_constant = self.string_constant(message);
+                            let message_str = self.ir.load_string_constant(message_constant);
 
-                        // Create null for location and assign to register
-                        let null_reg = self.ir.assign_new(Value::Null);
+                            // Create null for location and assign to register
+                            let null_reg = self.ir.assign_new(Value::Null);
 
-                        // Call create_error builtin (stack_pointer is added automatically by call_builtin)
-                        let error = self.call_builtin(
-                            "beagle.builtin/create-error",
-                            vec![kind_str, message_str, null_reg.into()],
-                        )?;
+                            // Call create_error builtin (stack_pointer is added automatically by call_builtin)
+                            let error = self.call_builtin(
+                                "beagle.builtin/create-error",
+                                vec![kind_str, message_str, null_reg.into()],
+                            )?;
 
-                        // Throw the exception (this doesn't return)
-                        self.call_builtin("beagle.builtin/throw-exception", vec![error])?;
+                            // Throw the exception (this doesn't return)
+                            self.call_builtin("beagle.builtin/throw-exception", vec![error])?;
 
-                        // Return null (unreachable but needed for type checking)
-                        return Ok(Value::Null);
-                    }
-                };
+                            // Return null (unreachable but needed for type checking)
+                            return Ok(Value::Null);
+                        }
+                    };
 
-                let mut field_order: Vec<usize> = vec![];
-                for field in fields.iter() {
-                    let mut found = false;
-                    for (i, defined_field) in struct_type.fields.iter().enumerate() {
-                        if &field.0 == defined_field {
-                            field_order.push(i);
-                            found = true;
-                            break;
+                    let mut field_order: Vec<usize> = vec![];
+                    for field in fields.iter() {
+                        let mut found = false;
+                        for (i, defined_field) in struct_type.fields.iter().enumerate() {
+                            if &field.0 == defined_field {
+                                field_order.push(i);
+                                found = true;
+                                break;
+                            }
+                        }
+                        if !found {
+                            return Err(CompileError::StructFieldNotDefined {
+                                struct_name: name.clone(),
+                                field: field.0.clone(),
+                            });
                         }
                     }
-                    if !found {
-                        return Err(CompileError::StructFieldNotDefined {
-                            struct_name: name.clone(),
-                            field: field.0.clone(),
-                        });
+
+                    (struct_id, field_order, struct_type.size())
+                    // struct_type borrow ends here
+                };
+
+                if let Some(spread_expr) = spread {
+                    // Spread path: type-checked copy of source object, then patch explicit fields
+                    self.not_tail_position();
+                    let spread_val = self.call_compile(&spread_expr)?;
+                    let spread_reg = self.ir.assign_new(spread_val);
+                    let struct_id_val = self.ir.assign_new(Value::RawValue(struct_id));
+                    let copy_ptr = self.call_builtin(
+                        "beagle.builtin/copy-object-spread",
+                        vec![spread_reg.into(), struct_id_val.into()],
+                    )?;
+                    let copy_ptr_reg = self.ir.assign_new(copy_ptr);
+                    let copy_ptr_raw = self.ir.untag(copy_ptr_reg.into());
+
+                    for (i, (_field_name, field_expr)) in fields.iter().enumerate() {
+                        let field_index = field_order[i];
+                        self.not_tail_position();
+                        let val = self.call_compile(field_expr)?;
+                        let val_reg = self.ir.assign_new(val);
+                        self.ir.write_field(copy_ptr_raw, field_index, val_reg.into());
                     }
+
+                    Ok(self
+                        .ir
+                        .tag(copy_ptr_raw, BuiltInTypes::HeapObject.get_tag()))
+                } else {
+                    // Normal path: push field values on stack, allocate, write fields
+                    for field in fields.iter() {
+                        self.not_tail_position();
+                        let value = self.call_compile(&field.1)?;
+                        let reg = self.ir.assign_new(value);
+                        self.ir.push_to_stack(reg.into());
+                    }
+
+                    let allocate = self
+                        .compiler
+                        .find_function("beagle.builtin/allocate")
+                        .unwrap();
+                    let allocate = self.compiler.get_function_pointer(allocate).unwrap();
+                    let allocate = self.ir.assign_new(allocate);
+
+                    let size_reg = self.ir.assign_new(struct_size);
+                    let stack_pointer = self.ir.get_stack_pointer_imm(0);
+                    let frame_pointer = self.ir.get_frame_pointer();
+
+                    let struct_ptr = self.ir.call_builtin(
+                        allocate.into(),
+                        vec![stack_pointer, frame_pointer, size_reg.into()],
+                    );
+
+                    let struct_pointer = self.ir.untag(struct_ptr);
+                    self.ir.write_struct_id(struct_pointer, struct_id);
+
+                    for field in field_order.iter().rev() {
+                        let reg = self.ir.pop_from_stack();
+                        self.ir.write_field(struct_pointer, *field, reg);
+                    }
+
+                    Ok(self
+                        .ir
+                        .tag(struct_pointer, BuiltInTypes::HeapObject.get_tag()))
                 }
-
-                let allocate = self
-                    .compiler
-                    .find_function("beagle.builtin/allocate")
-                    .unwrap();
-                let allocate = self.compiler.get_function_pointer(allocate).unwrap();
-                let allocate = self.ir.assign_new(allocate);
-
-                let size_reg = self.ir.assign_new(struct_type.size());
-                let stack_pointer = self.ir.get_stack_pointer_imm(0);
-                let frame_pointer = self.ir.get_frame_pointer();
-
-                let struct_ptr = self.ir.call_builtin(
-                    allocate.into(),
-                    vec![stack_pointer, frame_pointer, size_reg.into()],
-                );
-
-                let struct_pointer = self.ir.untag(struct_ptr);
-                self.ir.write_struct_id(struct_pointer, struct_id);
-
-                for field in field_order.iter().rev() {
-                    let reg = self.ir.pop_from_stack();
-                    self.ir.write_field(struct_pointer, *field, reg);
-                }
-
-                Ok(self
-                    .ir
-                    .tag(struct_pointer, BuiltInTypes::HeapObject.get_tag()))
             }
             Ast::Array {
                 array: elements, ..
@@ -2862,6 +2909,7 @@ impl AstCompiler<'_> {
                             let boxed = self.call_compile(&Ast::StructCreation {
                                 name: "beagle.core/__Box__".to_string(),
                                 fields: vec![("value".to_string(), (*value).clone())],
+                                spread: None,
                                 token_range: ast.token_range(),
                             })?;
                             self.ir.assign(reg, boxed);
@@ -5576,8 +5624,12 @@ impl AstCompiler<'_> {
             Ast::StructCreation {
                 name: _,
                 fields,
+                spread,
                 token_range: _,
             } => {
+                if let Some(spread_expr) = spread {
+                    self.find_mutable_vars_that_need_boxing(spread_expr);
+                }
                 for (_, field) in fields.iter() {
                     self.find_mutable_vars_that_need_boxing(field);
                 }

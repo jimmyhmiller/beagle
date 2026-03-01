@@ -3572,27 +3572,42 @@ impl Parser {
 
     fn parse_struct_creation(&mut self, name: String, start_position: usize) -> ParseResult<Ast> {
         self.expect_open_curly()?;
-        let fields = self.parse_struct_fields_creations()?;
+        let (spread, fields) = self.parse_struct_fields_creations()?;
 
         self.expect_close_curly()?;
         let end_position = self.position;
         Ok(Ast::StructCreation {
             name,
             fields,
+            spread: spread.map(Box::new),
             token_range: TokenRange::new(start_position, end_position),
         })
     }
 
-    fn parse_struct_fields_creations(&mut self) -> ParseResult<Vec<(String, Ast)>> {
+    fn parse_struct_fields_creations(&mut self) -> ParseResult<(Option<Ast>, Vec<(String, Ast)>)> {
         let mut fields = Vec::new();
+        let mut spread = None;
         while !self.at_end() && !self.is_close_curly() {
-            if let Some(field) = self.parse_struct_field_creation()? {
+            self.skip_whitespace();
+            if matches!(self.current_token(), Token::DotDotDot) {
+                self.consume(); // consume `...`
+                let expr = self.parse_expression(0, false, true)?.ok_or_else(|| {
+                    ParseError::InvalidExpression {
+                        message: "Expected expression after `...` in struct literal".to_string(),
+                        location: self.current_source_location(),
+                    }
+                })?;
+                spread = Some(expr);
+                if !self.is_close_curly() {
+                    self.data_delimiter()?;
+                }
+            } else if let Some(field) = self.parse_struct_field_creation()? {
                 fields.push(field);
             } else {
                 break;
             }
         }
-        Ok(fields)
+        Ok((spread, fields))
     }
 
     fn parse_struct_field_creation(&mut self) -> ParseResult<Option<(String, Ast)>> {
@@ -4172,6 +4187,7 @@ impl Parser {
                     Ast::Identifier(name, pos) => Box::new(Ast::StructCreation {
                         name,
                         fields: vec![],
+                        spread: None,
                         token_range: TokenRange::new(pos, self.position),
                     }),
                     _ => {
@@ -5233,7 +5249,7 @@ impl Parser {
                 // Check if this is enum creation syntax: Enum.Variant { ... }
                 if self.is_open_curly() && struct_creation_allowed {
                     let _fields_start = self.consume();
-                    let fields = self.parse_struct_fields_creations()?;
+                    let (_, fields) = self.parse_struct_fields_creations()?;
                     self.expect_close_curly()?;
                     let token_range = TokenRange::new(start_position, self.position);
                     match lhs {
@@ -5350,12 +5366,13 @@ impl Parser {
             }
             Token::OpenCurly => {
                 let position = self.consume();
-                let fields = self.parse_struct_fields_creations()?;
+                let (spread, fields) = self.parse_struct_fields_creations()?;
                 self.expect_close_curly()?;
                 match lhs {
                     Ast::Identifier(name, _) => Ok(Some(Ast::StructCreation {
                         name,
                         fields,
+                        spread: spread.map(Box::new),
                         token_range: TokenRange::new(position, self.position),
                     })),
                     Ast::PropertyAccess {
