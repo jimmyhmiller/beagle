@@ -1178,6 +1178,12 @@ impl EventLoop {
         self.state.lock().unwrap().pop_completed_timer()
     }
 
+    /// Remove one completed timer entry matching `future_atom`.
+    /// Returns true if an entry was removed.
+    pub fn take_completed_timer(&self, future_atom: usize) -> bool {
+        self.state.lock().unwrap().take_completed_timer(future_atom)
+    }
+
     /// Get the number of completed file results waiting
     pub fn file_results_count(&self) -> usize {
         self.state.lock().unwrap().file_results_count()
@@ -1981,6 +1987,21 @@ impl EventLoopState {
             None
         } else {
             Some(self.completed_timers.remove(0))
+        }
+    }
+
+    /// Remove one completed timer entry matching `future_atom`.
+    /// Returns true if an entry was removed.
+    pub fn take_completed_timer(&mut self, future_atom: usize) -> bool {
+        if let Some(index) = self
+            .completed_timers
+            .iter()
+            .position(|value| *value == future_atom)
+        {
+            self.completed_timers.remove(index);
+            true
+        } else {
+            false
         }
     }
 

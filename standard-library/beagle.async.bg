@@ -1076,14 +1076,13 @@ fn handle-sleep-event-loop(loop_id, ms) {
         // Process events with timeout slightly less than remaining time
         core/event-loop-run-once(loop_id, 10)
 
-        // Check for completed timers
-        let completed_marker = core/timer-pop-completed(loop_id)
-        if completed_marker == marker {
+        // Consume only our completion marker so concurrent sleepers
+        // cannot steal each other's timer completions.
+        let completed = core/timer-take-completed(loop_id, marker)
+        if completed == 1 {
             // Our timer completed - return Result like other handlers
             break(async-ok(null))
         }
-
-        // If we got a different marker, it's for another timer - ignore
     }
 }
 
@@ -2147,4 +2146,3 @@ fn __main__(main_fn, args) {
         }
     }
 }
-

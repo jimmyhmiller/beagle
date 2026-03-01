@@ -9329,6 +9329,22 @@ extern "C" fn timer_pop_completed(loop_id: usize) -> usize {
     }
 }
 
+/// Remove a completed timer entry matching `future_atom`.
+/// Returns 1 if found and removed, 0 otherwise.
+extern "C" fn timer_take_completed(loop_id: usize, future_atom: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let future_atom = BuiltInTypes::untag(future_atom);
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(0) as usize,
+    };
+
+    let removed = event_loop.take_completed_timer(future_atom);
+    BuiltInTypes::Int.tag(if removed { 1 } else { 0 }) as usize
+}
+
 // ============================================================================
 // Async File I/O Builtins
 // ============================================================================
@@ -13212,6 +13228,12 @@ impl Runtime {
             timer_pop_completed as *const u8,
             false,
             1, // loop_id
+        )?;
+        self.add_builtin_function(
+            "beagle.core/timer-take-completed",
+            timer_take_completed as *const u8,
+            false,
+            2, // loop_id, future_atom
         )?;
 
         // Handle-based async file I/O builtins (new API)
