@@ -2002,6 +2002,7 @@ fn try_all_examples() -> Result<(), Box<dyn Error>> {
     run_all_tests(args)?;
     Ok(())
 }
+
 #[repr(transparent)]
 pub struct SyncUnsafeCell<T: ?Sized> {
     value: UnsafeCell<T>,

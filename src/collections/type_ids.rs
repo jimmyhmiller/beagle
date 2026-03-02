@@ -76,3 +76,7 @@ pub const TYPE_ID_STRING_SLICE: u8 = 34;
 /// A lazy concatenation node. Total byte length is in header.type_data.
 /// Non-opaque so GC traces left and right child pointers.
 pub const TYPE_ID_CONS_STRING: u8 = 35;
+
+/// Type ID for GlobalObjectBlock (runtime infrastructure, not a user struct).
+/// This prevents the block from being considered for struct migration.
+pub const TYPE_ID_GLOBAL_OBJECT_BLOCK: u8 = 36;

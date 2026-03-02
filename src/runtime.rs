@@ -5171,9 +5171,11 @@ impl Runtime {
             .heap
             .allocate_for_runtime(GLOBAL_BLOCK_TOTAL_FIELDS)?;
 
-        // Initialize the block
+        // Initialize the block and set its type_id to prevent struct migration
         let block = GlobalObjectBlock::from_tagged(head_block);
         block.initialize();
+        HeapObject::from_tagged(head_block)
+            .write_type_id(crate::collections::TYPE_ID_GLOBAL_OBJECT_BLOCK as usize);
 
         // Create the ThreadGlobal (boxed for stable address)
         let thread_global = Box::new(ThreadGlobal::new(head_block, thread_id, stack_base));
@@ -5481,9 +5483,11 @@ impl Runtime {
             .allocate_for_runtime(GLOBAL_BLOCK_TOTAL_FIELDS)
             .ok()?;
 
-        // Initialize the new block
+        // Initialize the new block and set its type_id to prevent struct migration
         let block = GlobalObjectBlock::from_tagged(new_block);
         block.initialize();
+        HeapObject::from_tagged(new_block)
+            .write_type_id(crate::collections::TYPE_ID_GLOBAL_OBJECT_BLOCK as usize);
 
         // Link it and add the root (no mutex needed — only this thread touches its own ThreadGlobal)
         let tg = unsafe { &mut *tg_ptr };

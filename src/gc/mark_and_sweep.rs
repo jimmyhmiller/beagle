@@ -360,21 +360,13 @@ impl MarkAndSweep {
     ) {
         let mut to_mark: Vec<HeapObject> = Vec::with_capacity(128);
 
-        // Note: namespace_roots removed - bindings now stored in heap-based PersistentMap
-        // which is traced automatically via GlobalObject roots
-
-        // Temporary roots (including Thread objects) are now in GlobalObjectBlocks
-        // which are traced via the stack walker.
-        // GlobalObject blocks are found via stack walking - no special handling needed.
-        // The block pointer is stored on the stack at a known location.
-
         // Use the stack walker with explicit return address
         StackWalker::walk_stack_roots_with_return_addr(
             stack_base,
             frame_pointer,
             gc_return_addr,
             stack_map,
-            |_, pointer| {
+            |_slot_addr, pointer| {
                 let untagged = BuiltInTypes::untag(pointer);
                 // Skip null and misaligned pointers
                 if untagged == 0 || !untagged.is_multiple_of(8) {
@@ -429,13 +421,10 @@ impl MarkAndSweep {
     fn mark_extra_roots(&self, extra_roots: &[(*mut usize, usize)], stack_map: &StackMap) {
         let mut to_mark: Vec<HeapObject> = Vec::new();
         for &(slot_addr, _cached_value) in extra_roots {
-            // IMPORTANT: Read the current value from the slot, not the cached value.
-            // When used as old gen in generational GC, minor_gc updates slot values
-            // in-place (promoting young gen objects to old gen), but the cached value
-            // in the extra_roots tuple is stale and still points to young gen.
             let value = unsafe { *slot_addr };
             if BuiltInTypes::is_heap_pointer(value) && BuiltInTypes::untag(value) != 0 {
-                to_mark.push(HeapObject::from_tagged(value));
+                let obj = HeapObject::from_tagged(value);
+                to_mark.push(obj);
             }
         }
         // Same marking loop as in `mark` — transitively mark all reachable objects
@@ -443,6 +432,7 @@ impl MarkAndSweep {
             if object.marked() {
                 continue;
             }
+
             object.mark();
             if object.get_type_id() == TYPE_ID_CONTINUATION as usize {
                 let tagged = object.tagged_pointer();
@@ -614,7 +604,8 @@ impl MarkAndSweep {
     }
 
     /// Post-sweep migration: migrate live objects with outdated struct shapes to the latest layout.
-    fn migrate_outdated_structs(&mut self) {
+    /// Also updates extra_roots (namespace bindings, handle stack) to point to new locations.
+    fn migrate_outdated_structs(&mut self, extra_roots: &[(*mut usize, usize)]) {
         let runtime = crate::get_runtime().get_mut();
 
         // Phase 1: Find all objects that need migration, allocate new copies
@@ -730,6 +721,25 @@ impl MarkAndSweep {
             offset = (offset + 7) & !7;
         }
 
+        // Phase 2b: Update extra roots (namespace bindings, handle stack entries)
+        // These are stored in Rust-side Vecs, not on the heap, so Phase 2's heap walk misses them.
+        for &(slot_addr, _) in extra_roots {
+            let value = unsafe { *slot_addr };
+            if BuiltInTypes::is_heap_pointer(value) {
+                let untagged = BuiltInTypes::untag(value);
+                let tag = value & 7;
+                if self.space.contains(untagged as *const u8) {
+                    let header_at_old = unsafe { *(untagged as *const usize) };
+                    if Header::is_forwarding_bit_set(header_at_old) {
+                        let new_tagged = Header::clear_forwarding_bit(header_at_old);
+                        unsafe {
+                            *slot_addr = (new_tagged & !7) | tag;
+                        }
+                    }
+                }
+            }
+        }
+
         // Phase 3: Free old objects
         for (old_ptr, old_size, _) in forwarding_map {
             let heap_offset = old_ptr - self.space.start as usize;
@@ -797,7 +807,8 @@ impl Allocator for MarkAndSweep {
         self.mark_extra_roots(extra_roots, stack_map);
 
         self.sweep();
-        self.migrate_outdated_structs();
+
+        self.migrate_outdated_structs(extra_roots);
         if self.options.print_stats {
             println!("Mark and sweep took {:?}", start.elapsed());
         }
