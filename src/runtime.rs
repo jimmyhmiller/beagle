@@ -6350,11 +6350,15 @@ impl Runtime {
 
     /// Returns the names of all test functions (matching `__test_*__` pattern)
     pub fn get_test_function_names(&self) -> Vec<String> {
+        let current_ns = self.current_namespace_name();
+        let prefix = format!("{}/", current_ns);
         self.functions
             .iter()
             .filter(|f| {
                 let short_name = f.name.rsplit('/').next().unwrap_or(&f.name);
-                short_name.starts_with("__test_") && short_name.ends_with("__")
+                short_name.starts_with("__test_")
+                    && short_name.ends_with("__")
+                    && f.name.starts_with(&prefix)
             })
             .map(|f| f.name.clone())
             .collect()
