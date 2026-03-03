@@ -1294,6 +1294,110 @@ fn discover_test_files(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>,
     Ok(test_files)
 }
 
+/// Sort test files so that dependencies come before dependents.
+/// Parses `namespace` declarations and `use` statements from each file to build
+/// a dependency graph, then topological-sorts it. Files without dependencies
+/// (or with only stdlib deps) retain their original alphabetical order.
+fn sort_tests_by_deps(files: &mut Vec<std::path::PathBuf>) {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    // Build namespace→index map from each file's `namespace` declaration
+    let mut ns_to_idx: HashMap<String, usize> = HashMap::new();
+    let mut file_sources: Vec<String> = Vec::with_capacity(files.len());
+
+    for (i, file) in files.iter().enumerate() {
+        let source = std::fs::read_to_string(file).unwrap_or_default();
+        // Extract namespace name from first `namespace` line
+        if let Some(ns) = source.lines().find_map(|line| {
+            let trimmed = line.trim();
+            trimmed
+                .strip_prefix("namespace ")
+                .map(|rest| rest.trim().to_string())
+        }) {
+            ns_to_idx.insert(ns, i);
+        }
+        file_sources.push(source);
+    }
+
+    // Build adjacency list: edges[i] = set of indices that file i depends on
+    let n = files.len();
+    let mut deps: Vec<Vec<usize>> = vec![vec![]; n];
+    let mut in_degree: Vec<usize> = vec![0; n];
+
+    for (i, source) in file_sources.iter().enumerate() {
+        for line in source.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("use ") {
+                // Parse `use <namespace> as <alias>` or `use <namespace>`
+                let ns_name = rest.split_whitespace().next().unwrap_or("");
+                if let Some(&dep_idx) = ns_to_idx.get(ns_name) {
+                    if dep_idx != i {
+                        deps[i].push(dep_idx);
+                        in_degree[dep_idx] += 0; // ensure entry exists
+                    }
+                }
+            }
+        }
+    }
+
+    // Kahn's algorithm for topological sort (stable: ties broken by original order)
+    // We want dependencies first, so edges go from dependent → dependency.
+    // Reverse: in_degree counts how many files depend on this file.
+    // Actually, we want: if A depends on B, B should come first.
+    // So edges: A → B means "A depends on B". We want B before A.
+    // in_degree[i] = number of unsatisfied dependencies of i.
+    let mut in_deg: Vec<usize> = vec![0; n];
+    for (i, dep_list) in deps.iter().enumerate() {
+        in_deg[i] = dep_list.len();
+    }
+
+    let mut queue: VecDeque<usize> = VecDeque::new();
+    // Start with files that have no dependencies (in_deg == 0), in original order
+    for i in 0..n {
+        if in_deg[i] == 0 {
+            queue.push_back(i);
+        }
+    }
+
+    // Build reverse adjacency: who depends on me?
+    let mut dependents: Vec<Vec<usize>> = vec![vec![]; n];
+    for (i, dep_list) in deps.iter().enumerate() {
+        for &dep in dep_list {
+            dependents[dep].push(i);
+        }
+    }
+
+    let mut order: Vec<usize> = Vec::with_capacity(n);
+    while let Some(idx) = queue.pop_front() {
+        order.push(idx);
+        // Sort dependents to maintain stable order for ties
+        let mut next: Vec<usize> = dependents[idx].clone();
+        next.sort();
+        for dep_idx in next {
+            in_deg[dep_idx] -= 1;
+            if in_deg[dep_idx] == 0 {
+                queue.push_back(dep_idx);
+            }
+        }
+    }
+
+    // If there are cycles, just append remaining files in original order
+    if order.len() < n {
+        let in_order: HashSet<usize> = order.iter().copied().collect();
+        for i in 0..n {
+            if !in_order.contains(&i) {
+                order.push(i);
+            }
+        }
+    }
+
+    // Reorder files according to topological order
+    let original: Vec<std::path::PathBuf> = files.clone();
+    for (i, &orig_idx) in order.iter().enumerate() {
+        files[i] = original[orig_idx].clone();
+    }
+}
+
 fn discover_test_files_recursive(
     dir: &std::path::Path,
     test_files: &mut Vec<std::path::PathBuf>,
@@ -1347,6 +1451,8 @@ fn cmd_test(test_args: TestArgs) -> Result<(), Box<dyn Error>> {
             return Ok(());
         }
     }
+
+    sort_tests_by_deps(&mut test_files);
 
     let mut passed = 0;
     let mut failed = 0;
@@ -1449,32 +1555,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 #[cfg(test)]
 fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
-    for entry in std::fs::read_dir("resources")? {
-        let entry = entry?;
-        let mut path = entry.path();
+    let mut test_files = discover_test_files(std::path::Path::new("resources"))?;
+    sort_tests_by_deps(&mut test_files);
 
-        // Skip directories
-        if path.is_dir() {
-            continue;
-        }
-
-        if !path.exists() {
-            path = path
-                .parent()
-                .unwrap()
-                .join("resources")
-                .join(path.file_name().unwrap());
-        }
-        let path = path.to_str().unwrap();
-        if !path.ends_with(".bg") {
-            continue;
-        }
-
+    for test_file in &test_files {
+        let path = test_file.to_str().unwrap();
         let source: String = std::fs::read_to_string(path)?;
-
-        if !source.contains("// @beagle.core.snapshot") && !source.contains("test \"") {
-            continue;
-        }
 
         // Check for // Skip annotation (supports "// Skip" or "// Skip: reason")
         if let Some(skip_line) = source.lines().find(|line| line.starts_with("// Skip")) {
@@ -1492,7 +1578,6 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         }
 
         println!("Running test: {}", path);
-        // Check for gc-always annotation - test requests gc on every allocation
         let gc_always = args.gc_always || source.contains("// gc-always");
         let args = CommandLineArguments {
             program: Some(path.to_string()),
