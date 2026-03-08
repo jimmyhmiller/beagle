@@ -226,19 +226,10 @@ fn start-repl-server(host, port) {
     let server = socket/listen(host, port)
     println("REPL server listening...")
 
-    let mut running = true
-    while running {
-        try {
-            let client = socket/accept(server)
-            println("Client connected")
-
-            thread(fn() {
-                async/with-implicit-async(fn() {
-                    handle-client(client)
-                })
-            })
-        } catch (e) {
-            println("Error accepting connection:", e)
-        }
-    }
+    // Use cooperative connection handling instead of OS threads.
+    // The runtime is shared globally; this keeps all REPL execution on one thread.
+    socket/on-connection(server, fn(client) {
+        println("Client connected")
+        handle-client(client)
+    })
 }

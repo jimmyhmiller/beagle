@@ -11072,7 +11072,9 @@ pub unsafe extern "C" fn return_from_shift_runtime(
         .unwrap_or(false);
 
     // Check if there's an invocation return point (multi-shot continuation case).
-    if let Some(return_points) = runtime.invocation_return_points.get_mut(&thread_id)
+    // Handler returns (after call-handler in perform) must NOT consume return points.
+    if !is_handler_return
+        && let Some(return_points) = runtime.invocation_return_points.get_mut(&thread_id)
         && let Some(return_point) = return_points.pop()
     {
         let remaining = return_points.len();
@@ -11200,7 +11202,14 @@ pub unsafe extern "C" fn return_from_shift_runtime(
         .copied()
         .unwrap_or(0);
 
-    let cont_ptr = if saved != 0 && BuiltInTypes::is_heap_pointer(saved) {
+    let passed_is_valid = cont_ptr != 0
+        && cont_ptr != BuiltInTypes::null_value() as usize
+        && BuiltInTypes::is_heap_pointer(cont_ptr)
+        && BuiltInTypes::untag(cont_ptr).is_multiple_of(8);
+
+    let cont_ptr = if passed_is_valid {
+        cont_ptr
+    } else if saved != 0 && BuiltInTypes::is_heap_pointer(saved) {
         if debug_prompts {
             if let Some(saved_cont) = ContinuationObject::from_tagged(saved) {
                 eprintln!(
@@ -11221,18 +11230,10 @@ pub unsafe extern "C" fn return_from_shift_runtime(
         runtime.saved_continuation_ptr.remove(&thread_id);
         saved
     } else {
-        let is_valid_cont_ptr = cont_ptr != 0
-            && cont_ptr != BuiltInTypes::null_value() as usize
-            && BuiltInTypes::is_heap_pointer(cont_ptr)
-            && BuiltInTypes::untag(cont_ptr).is_multiple_of(8);
-
-        if !is_valid_cont_ptr {
-            panic!(
-                "return_from_shift called without captured continuation or return point: cont_ptr={:#x}",
-                cont_ptr
-            );
-        }
-        cont_ptr
+        panic!(
+            "return_from_shift called without captured continuation or return point: cont_ptr={:#x}",
+            cont_ptr
+        );
     };
 
     let continuation = ContinuationObject::from_tagged(cont_ptr).unwrap_or_else(|| {
