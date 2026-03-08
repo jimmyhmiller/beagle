@@ -1,6 +1,6 @@
 use crate::collections::{
-    TYPE_ID_CONTINUATION, TYPE_ID_FRAME, TYPE_ID_FUNCTION_OBJECT, TYPE_ID_KEYWORD, TYPE_ID_REGEX,
-    TYPE_ID_STRING,
+    TYPE_ID_CAPTURED_FRAME, TYPE_ID_CONTINUATION, TYPE_ID_FRAME, TYPE_ID_FUNCTION_OBJECT,
+    TYPE_ID_KEYWORD, TYPE_ID_REGEX, TYPE_ID_STRING,
 };
 use crate::ir::{Ir, Value};
 
@@ -834,8 +834,16 @@ impl HeapObject {
             x if x == TYPE_ID_STRING || x == TYPE_ID_KEYWORD => 0,
             // Frame objects: num_slots encoded in upper 16 bits of type_data
             x if x == TYPE_ID_FRAME => (header.type_data >> 16) as usize,
-            // Continuation: only field 0 (segment pointer) is a heap ptr
-            x if x == TYPE_ID_CONTINUATION => 1,
+            // Continuation: all 11 fields are traced (field 0 is CapturedFrame ptr,
+            // others are tagged ints which GC ignores)
+            x if x == TYPE_ID_CONTINUATION => 11,
+            // CapturedFrame: parent + 3 metadata + num_locals (upper 16 bits of type_data)
+            // Callee-saved registers at the end are NOT traced — they are copies of
+            // values already in locals, so GC traces the canonical copy in locals.
+            x if x == TYPE_ID_CAPTURED_FRAME => {
+                let num_locals = (header.type_data >> 16) as usize;
+                4 + num_locals
+            }
             // FunctionObject: field 0 is a tagged function pointer, not a heap object
             x if x == TYPE_ID_FUNCTION_OBJECT => 0,
             // Regex: opaque index, not a heap pointer

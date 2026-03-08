@@ -32,10 +32,11 @@ use crate::{
 };
 
 use crate::collections::{
-    GcHandle, HandleScope, PersistentMap, PersistentVec, TYPE_ID_ATOM, TYPE_ID_CONS_STRING,
-    TYPE_ID_CONTINUATION, TYPE_ID_CONTINUATION_SEGMENT, TYPE_ID_FUNCTION_OBJECT, TYPE_ID_KEYWORD,
-    TYPE_ID_MULTI_ARITY_FUNCTION, TYPE_ID_PERSISTENT_MAP, TYPE_ID_PERSISTENT_SET,
-    TYPE_ID_PERSISTENT_VEC, TYPE_ID_RAW_ARRAY, TYPE_ID_STRING, TYPE_ID_STRING_SLICE,
+    GcHandle, HandleScope, PersistentMap, PersistentVec, TYPE_ID_ATOM, TYPE_ID_CAPTURED_FRAME,
+    TYPE_ID_CONS_STRING, TYPE_ID_CONTINUATION,
+    TYPE_ID_FUNCTION_OBJECT, TYPE_ID_KEYWORD, TYPE_ID_MULTI_ARITY_FUNCTION,
+    TYPE_ID_PERSISTENT_MAP, TYPE_ID_PERSISTENT_SET, TYPE_ID_PERSISTENT_VEC, TYPE_ID_RAW_ARRAY,
+    TYPE_ID_STRING, TYPE_ID_STRING_SLICE,
 };
 
 use std::cell::{Cell, RefCell};
@@ -654,12 +655,12 @@ unsafe impl Send for CallbackInfo {}
 unsafe impl Sync for CallbackInfo {}
 
 pub struct ThreadState {
-    /// frame_pointer for each paused thread, keyed by ThreadId.
+    /// (frame_pointer, gc_frame_top) for each paused thread, keyed by ThreadId.
     /// Using HashMap ensures each thread has exactly one entry and unpause removes the correct one.
-    pub stack_pointers: HashMap<ThreadId, usize>,
+    pub stack_pointers: HashMap<ThreadId, (usize, usize)>,
     // TODO: I probably don't want to do this here. This requires taking a mutex
     // not really ideal for c calls.
-    pub c_calling_stack_pointers: HashMap<ThreadId, usize>,
+    pub c_calling_stack_pointers: HashMap<ThreadId, (usize, usize)>,
 }
 
 impl ThreadState {
@@ -669,7 +670,8 @@ impl ThreadState {
 
     pub fn pause(&mut self, frame_pointer: usize) {
         let thread_id = thread::current().id();
-        let prev = self.stack_pointers.insert(thread_id, frame_pointer);
+        let gc_frame_top = crate::builtins::get_gc_frame_top();
+        let prev = self.stack_pointers.insert(thread_id, (frame_pointer, gc_frame_top));
         debug_assert!(prev.is_none(), "Thread {:?} double-paused", thread_id);
     }
 
@@ -681,8 +683,9 @@ impl ThreadState {
 
     pub fn register_c_call(&mut self, frame_pointer: usize) {
         let thread_id = thread::current().id();
+        let gc_frame_top = crate::builtins::get_gc_frame_top();
         self.c_calling_stack_pointers
-            .insert(thread_id, frame_pointer);
+            .insert(thread_id, (frame_pointer, gc_frame_top));
     }
 
     pub fn unregister_c_call(&mut self) {
@@ -3071,7 +3074,7 @@ impl Memory {
     /// Returns updated namespace root values after GC (for copying collectors)
     pub fn run_gc(
         &mut self,
-        stack_pointers: &[(usize, usize)],
+        gc_frame_tops: &[usize],
         namespace_roots: &[usize],
     ) -> Vec<usize> {
         // Collect shadow stack entries and head_block roots from all threads as extra GC roots.
@@ -3114,7 +3117,7 @@ impl Memory {
             }
         }
 
-        self.heap.gc(stack_pointers, &extra_roots);
+        self.heap.gc(gc_frame_tops, &extra_roots);
 
         // Sync stack slots from updated head_block (GC may have moved the block)
         // Direction: head_block → stack_base - 8
@@ -3146,10 +3149,10 @@ impl Allocator for Memory {
 
     fn gc(
         &mut self,
-        stack_pointers: &[(usize, usize)],
+        gc_frame_tops: &[usize],
         extra_roots: &[(*mut usize, usize)],
     ) {
-        self.heap.gc(stack_pointers, extra_roots);
+        self.heap.gc(gc_frame_tops, extra_roots);
     }
 
     fn grow(&mut self) {
@@ -3453,12 +3456,12 @@ pub struct InvocationReturnPoint {
     /// Callee-saved registers (x19-x28 on ARM64) that must be preserved
     /// These are saved when k() is called and restored when returning
     pub callee_saved_regs: [usize; 10],
-    /// Saved stack frame contents from the shift body.
+    /// Saved stack frame as a heap CapturedFrame pointer (tagged), or 0.
     /// For multi-shot continuations, we need to preserve the shift body's locals
     /// (including the continuation k) when the continuation body runs, because
     /// the continuation body may write to stack locations that overlap with
-    /// the shift body's frame. We save the frame from FP to SP.
-    pub saved_stack_frame: Vec<u8>,
+    /// the shift body's frame.
+    pub saved_frame: usize,
     /// Unique ID of the prompt handler that this return point belongs to.
     /// Used to match return points with their corresponding handle blocks.
     /// This distinguishes sequential handlers at the same stack depth.
@@ -3516,29 +3519,6 @@ impl ContinuationObject {
 
     pub fn segment_ptr(&self) -> usize {
         self.heap_obj.get_field(Self::FIELD_SEGMENT)
-    }
-
-    pub fn segment_len(&self) -> usize {
-        let segment_obj = HeapObject::from_tagged(self.segment_ptr());
-        segment_obj.get_opaque_bytes_len()
-    }
-
-    pub fn with_segment_bytes<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&[u8]) -> R,
-    {
-        let segment_obj = HeapObject::from_tagged(self.segment_ptr());
-        let bytes = segment_obj.get_opaque_bytes();
-        f(bytes)
-    }
-
-    pub fn with_segment_bytes_mut<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&mut [u8]) -> R,
-    {
-        let mut segment_obj = HeapObject::from_tagged(self.segment_ptr());
-        let bytes = segment_obj.get_opaque_bytes_mut();
-        f(bytes)
     }
 
     pub fn original_sp(&self) -> usize {
@@ -3646,6 +3626,315 @@ impl ContinuationObject {
     }
 }
 
+/// A captured stack frame promoted to the heap during continuation capture.
+/// Each CapturedFrame represents one native Beagle stack frame and links to
+/// its caller via the parent pointer. The GC traces these like normal heap objects.
+///
+/// Layout (as heap object fields):
+///   [0] parent          — tagged ptr to parent CapturedFrame (or null)
+///   [1] return_address  — tagged int: saved LR / return address
+///   [2] saved_caller_fp — tagged int: the saved caller FP from [FP+0] at capture time
+///   [3] frame_info      — tagged int: packs (num_locals << 32 | num_callee_saved << 16 | original_frame_size)
+///   [4..4+num_locals-1] — local/eval-stack slots (GC traced)
+///   [4+num_locals..]    — callee-saved register values (NOT GC traced)
+pub struct CapturedFrame {
+    heap_obj: HeapObject,
+}
+
+impl CapturedFrame {
+    const FIELD_PARENT: usize = 0;
+    const FIELD_RETURN_ADDRESS: usize = 1;
+    const FIELD_SAVED_FP_OFFSET: usize = 2;
+    const FIELD_FRAME_INFO: usize = 3;
+    const LOCALS_START: usize = 4;
+
+    pub fn from_tagged(tagged: usize) -> Option<Self> {
+        if tagged == 0 || tagged == BuiltInTypes::null_value() as usize {
+            return None;
+        }
+        let heap_obj = HeapObject::try_from_tagged(tagged)?;
+        if heap_obj.get_type_id() == TYPE_ID_CAPTURED_FRAME as usize {
+            Some(Self { heap_obj })
+        } else {
+            None
+        }
+    }
+
+    pub fn tagged_ptr(&self) -> usize {
+        self.heap_obj.tagged_pointer()
+    }
+
+    pub fn parent_tagged(&self) -> usize {
+        self.heap_obj.get_field(Self::FIELD_PARENT)
+    }
+
+    pub fn parent(&self) -> Option<CapturedFrame> {
+        CapturedFrame::from_tagged(self.parent_tagged())
+    }
+
+    pub fn return_address(&self) -> usize {
+        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_RETURN_ADDRESS))
+    }
+
+    /// Returns the saved caller FP that was at [FP+0] when this frame was captured.
+    /// Used to link the outermost frame back to its caller during stack reconstruction.
+    pub fn saved_caller_fp(&self) -> usize {
+        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_SAVED_FP_OFFSET))
+    }
+
+    /// Decode frame_info: (num_locals, num_callee_saved, original_frame_size)
+    fn decode_frame_info(&self) -> (usize, usize, usize) {
+        let info = BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_FRAME_INFO));
+        let num_locals = (info >> 32) & 0xFFFF;
+        let num_callee_saved = (info >> 16) & 0xFFFF;
+        let original_frame_size = info & 0xFFFF;
+        (num_locals, num_callee_saved, original_frame_size)
+    }
+
+    pub fn num_locals(&self) -> usize {
+        self.decode_frame_info().0
+    }
+
+    pub fn num_callee_saved(&self) -> usize {
+        self.decode_frame_info().1
+    }
+
+    /// Total size of this frame on the native stack (in bytes).
+    /// This is the distance from frame's SP to the FP of the frame above it
+    /// (i.e., FP + 16 of this frame — the saved FP and LR/return address).
+    pub fn original_frame_size(&self) -> usize {
+        self.decode_frame_info().2
+    }
+
+    /// Total native stack bytes this frame needs when restored:
+    /// saved_fp(8) + saved_lr(8) + header(8) + prev(8) + num_locals*8 + callee_saved*8
+    /// = original_frame_size
+    pub fn total_stack_size(&self) -> usize {
+        self.original_frame_size()
+    }
+
+    /// Capture one native stack frame into a heap CapturedFrame object.
+    ///
+    /// # Arguments
+    /// * `fp` - Frame pointer of the frame to capture
+    /// * `num_slots` - Number of local/eval-stack slots (from TYPE_ID_FRAME header.size)
+    /// * `frame_bottom` - Bottom of this frame on the stack (next frame's SP, or the segment SP for innermost)
+    /// * `parent_tagged` - Tagged pointer to parent CapturedFrame (or null_value)
+    /// * `runtime` - Runtime for allocation
+    /// * `stack_pointer` - Current SP for GC context
+    ///
+    /// Returns the tagged pointer to the new CapturedFrame.
+    pub fn from_stack_frame(
+        fp: usize,
+        num_slots: usize,
+        frame_bottom: usize,
+        parent_tagged: usize,
+        runtime: &mut crate::Runtime,
+        stack_pointer: usize,
+    ) -> usize {
+        // The frame on the native stack looks like:
+        //   [FP+8]: saved LR / return address
+        //   [FP+0]: saved FP (caller's FP)
+        //   [FP-8]: frame header (TYPE_ID_FRAME)
+        //   [FP-16]: GC prev pointer
+        //   [FP-24]: local[0]
+        //   [FP-32]: local[1]
+        //   ...
+        //   [FP-24-i*8]: local[i]
+        //   Below locals: callee-saved registers
+        //   frame_bottom: bottom of this frame
+
+        let return_address = unsafe { *((fp + 8) as *const usize) };
+
+        // Calculate callee-saved count from frame geometry
+        // Frame layout: [saved_fp(8) + saved_lr(8)] + [header(8) + prev(8)] + [locals * 8] + [callee_saved * 8]
+        // frame_size = fp + 16 - frame_bottom  (the +16 is for saved FP and LR at the top)
+        let frame_size = (fp + 16).saturating_sub(frame_bottom);
+        let header_and_locals_bytes = 16 + num_slots * 8; // header(8) + prev(8) + locals
+        let callee_saved_bytes = frame_size.saturating_sub(16 + header_and_locals_bytes);
+        let num_callee_saved = callee_saved_bytes / 8;
+
+        // Total fields: 4 metadata + num_slots locals + num_callee_saved
+        let total_fields = 4 + num_slots + num_callee_saved;
+
+        // Allocate the heap object
+        let obj_ptr = match runtime.allocate(total_fields, stack_pointer, BuiltInTypes::HeapObject)
+        {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                panic!("Failed to allocate CapturedFrame - out of memory");
+            }
+        };
+
+        let mut obj = HeapObject::from_tagged(obj_ptr);
+
+        // Write header
+        let is_large = total_fields > Header::MAX_INLINE_SIZE;
+        obj.writer_header_direct(Header {
+            type_id: TYPE_ID_CAPTURED_FRAME,
+            type_data: (num_slots as u32) << 16, // num_locals in upper 16 bits
+            size: if is_large {
+                0xFFFF
+            } else {
+                total_fields as u16
+            },
+            opaque: false,
+            marked: false,
+            large: is_large,
+            type_flags: 0,
+        });
+        if is_large {
+            let size_ptr = (obj.untagged() + 8) as *mut usize;
+            unsafe { *size_ptr = total_fields };
+        }
+
+        // Encode frame_info: pack (num_locals, num_callee_saved, original_frame_size)
+        let frame_info = ((num_slots & 0xFFFF) << 32)
+            | ((num_callee_saved & 0xFFFF) << 16)
+            | (frame_size & 0xFFFF);
+
+        // Write metadata fields
+        obj.write_field(Self::FIELD_PARENT as i32, parent_tagged);
+        obj.write_field(
+            Self::FIELD_RETURN_ADDRESS as i32,
+            BuiltInTypes::Int.tag(return_address as isize) as usize,
+        );
+        // Store the saved caller FP: the value at [FP+0] on the native stack.
+        // This is needed to correctly link the outermost frame back to its caller
+        // when reconstructing the stack during continuation invocation.
+        let saved_caller_fp = unsafe { *(fp as *const usize) };
+        obj.write_field(
+            Self::FIELD_SAVED_FP_OFFSET as i32,
+            BuiltInTypes::Int.tag(saved_caller_fp as isize) as usize,
+        );
+        obj.write_field(
+            Self::FIELD_FRAME_INFO as i32,
+            BuiltInTypes::Int.tag(frame_info as isize) as usize,
+        );
+
+        // Copy locals from stack: [FP-24], [FP-32], ...
+        for i in 0..num_slots {
+            let slot_addr = fp.wrapping_sub(24).wrapping_sub(i * 8);
+            let slot_value = unsafe { *(slot_addr as *const usize) };
+            obj.write_field((Self::LOCALS_START + i) as i32, slot_value);
+        }
+
+        // Copy callee-saved registers from stack (below locals, above frame_bottom)
+        // They are at [FP - 24 - num_slots*8 - 8], [FP - 24 - num_slots*8 - 16], ...
+        for i in 0..num_callee_saved {
+            let reg_addr = fp
+                .wrapping_sub(24)
+                .wrapping_sub(num_slots * 8)
+                .wrapping_sub(i * 8);
+            let reg_value = unsafe { *(reg_addr as *const usize) };
+            obj.write_field((Self::LOCALS_START + num_slots + i) as i32, reg_value);
+        }
+
+        obj_ptr
+    }
+
+    /// Restore this captured frame to the native stack at the given target FP.
+    ///
+    /// Writes: [target_fp+8] = return_address
+    ///         [target_fp+0] = caller_fp
+    ///         [target_fp-8] = frame header
+    ///         [target_fp-16] = GC prev pointer (0 placeholder, caller links into chain)
+    ///         [target_fp-24..] = locals
+    ///         below locals = callee-saved registers
+    ///
+    /// NOTE: This does NOT link the frame into the GC chain. The caller must
+    /// call link_restored_frames_into_gc_chain() after restoring all frames.
+    pub fn restore_to_stack(&self, target_fp: usize, caller_fp: usize) {
+        let (num_locals, num_callee_saved, _) = self.decode_frame_info();
+
+        // Write saved FP (will be set by caller to point to next frame's FP)
+        unsafe { *(target_fp as *mut usize) = caller_fp };
+
+        // Write return address at [FP+8]
+        unsafe { *((target_fp + 8) as *mut usize) = self.return_address() };
+
+        // Write frame header at [FP-8]
+        let frame_header = Header {
+            type_id: crate::collections::TYPE_ID_FRAME,
+            type_data: (num_locals as u32) << 16,
+            size: num_locals as u16,
+            opaque: false,
+            marked: false,
+            large: false,
+            type_flags: 0,
+        };
+        unsafe { *((target_fp - 8) as *mut usize) = frame_header.to_usize() };
+
+        // Write placeholder prev pointer at [FP-16] (will be set by gc chain linking)
+        unsafe { *((target_fp - 16) as *mut usize) = 0 };
+
+        // Restore locals at [FP-24], [FP-32], ...
+        for i in 0..num_locals {
+            let slot_value = self.heap_obj.get_field(Self::LOCALS_START + i);
+            let slot_addr = target_fp.wrapping_sub(24).wrapping_sub(i * 8);
+            unsafe { *(slot_addr as *mut usize) = slot_value };
+        }
+
+        // Restore callee-saved registers
+        for i in 0..num_callee_saved {
+            let reg_value = self
+                .heap_obj
+                .get_field(Self::LOCALS_START + num_locals + i);
+            let reg_addr = target_fp
+                .wrapping_sub(24)
+                .wrapping_sub(num_locals * 8)
+                .wrapping_sub(i * 8);
+            unsafe { *(reg_addr as *mut usize) = reg_value };
+        }
+    }
+
+    /// Link a chain of restored frames into the GC frame linked list.
+    /// `fps` is a list of frame pointers (outermost first, innermost last).
+    /// Each frame's header is at [FP-8] and prev pointer at [FP-16].
+    /// After linking, the innermost frame becomes the new GC_FRAME_TOP.
+    pub fn link_restored_frames_into_gc_chain(fps: &[usize]) {
+        if fps.is_empty() {
+            return;
+        }
+        // Save the current gc_frame_top — the outermost restored frame's prev
+        // should point to whatever was on the chain before.
+        let current_top = crate::builtins::get_gc_frame_top();
+
+        // Link outermost frame to the existing chain
+        let outermost_fp = fps[0];
+        let outermost_header_addr = outermost_fp - 8;
+        unsafe { *((outermost_fp - 16) as *mut usize) = current_top };
+
+        // Link each subsequent frame to the previous one
+        for i in 1..fps.len() {
+            let prev_header_addr = fps[i - 1] - 8;
+            unsafe { *((fps[i] - 16) as *mut usize) = prev_header_addr };
+        }
+
+        // The innermost frame is the new top
+        let innermost_fp = fps[fps.len() - 1];
+        let innermost_header_addr = innermost_fp - 8;
+        crate::builtins::set_gc_frame_top(innermost_header_addr);
+        let _ = outermost_header_addr; // suppress warning
+    }
+
+    /// Collect all frames in the chain into a Vec (outermost first).
+    /// The chain starts from the outermost frame (stored as the continuation's segment_ptr)
+    /// and follows parent pointers toward the innermost frame.
+    pub fn collect_chain(outermost_tagged: usize) -> Vec<CapturedFrame> {
+        let mut frames = Vec::new();
+        let mut current = CapturedFrame::from_tagged(outermost_tagged);
+        while let Some(frame) = current {
+            frames.push(CapturedFrame {
+                heap_obj: HeapObject::from_tagged(frame.tagged_ptr()),
+            });
+            current = frame.parent();
+        }
+        // No reverse needed: the chain already goes outermost → innermost via parent pointers
+        frames
+    }
+}
+
 pub struct Runtime {
     pub memory: Memory,
     pub libraries: Vec<Library>,
@@ -3714,11 +4003,10 @@ pub struct Runtime {
     // (after `call-handler` in perform). When set, return_from_shift should skip
     // popping InvocationReturnPoints and use the passed continuation pointer instead.
     pub is_handler_return: HashMap<ThreadId, bool>,
-    // Per-thread saved continuation pointer from when via_return_point was used.
-    // When a continuation is invoked and returns via via_return_point, we save
-    // the continuation pointer here. Then when return_from_shift_handler is called
-    // with a null cont_ptr (because the stack local was overwritten), we use this
-    // saved pointer instead.
+    /// Saved continuation pointer per thread for return_from_shift_handler.
+    /// After invoke_continuation_runtime copies modifications back, the cont_ptr
+    /// local on the stack may be null (it was captured before being assigned).
+    /// This saves the root continuation pointer so return_from_shift can use it.
     pub saved_continuation_ptr: HashMap<ThreadId, usize>,
     /// Depth of relocated stacks for each thread. When > 0, we're running on a
     /// relocated stack and should not copy modifications back to "original_sp"
@@ -3965,10 +4253,10 @@ impl Runtime {
         self.skip_return_from_shift.clear();
         self.return_from_shift_via_pop_prompt.clear();
         self.is_handler_return.clear();
+        self.saved_continuation_ptr.clear();
         self.thread_exception_handler_fns.clear();
         self.default_exception_handler_fn = None;
         self.stacks_for_continuation_swapping.clear();
-        self.saved_continuation_ptr.clear();
         self.relocation_depth.clear();
         self.variant_to_enum.clear();
         self.compiled_regexes.clear();
@@ -4879,8 +5167,8 @@ impl Runtime {
             // If there is only one thread, that is us
             // that means nothing else could spin up a thread in the mean time
             // so there is no need to lock anything
-            let stack_base = self.get_stack_base();
-            let stack_pointers = vec![(stack_base, frame_pointer)];
+            let gc_frame_top = crate::builtins::get_gc_frame_top();
+            let gc_frame_tops = vec![gc_frame_top];
 
             // Collect namespace bindings as GC roots
             // IMPORTANT: Namespace bindings are NOT in a heap-based PersistentMap despite
@@ -4896,7 +5184,7 @@ impl Runtime {
                 namespace_roots.extend(values);
             }
 
-            let updated_roots = self.memory.run_gc(&stack_pointers, &namespace_roots);
+            let updated_roots = self.memory.run_gc(&gc_frame_tops, &namespace_roots);
 
             // Write updated namespace roots back to namespaces (for copying GC)
             let mut root_index = 0;
@@ -4991,28 +5279,25 @@ impl Runtime {
             + thread_state.c_calling_stack_pointers.len();
         usdt_probes::fire_stw_all_paused(num_paused, total_threads);
 
-        // Collect (stack_base, frame_pointer) pairs from paused threads.
-        // Look up stack_base from thread_globals for each thread.
-        let thread_globals = self.memory.thread_globals.lock().unwrap();
-        let mut stack_pointers: Vec<(usize, usize)> = Vec::new();
+        // Collect gc_frame_top values from all paused threads.
+        let mut gc_frame_tops: Vec<usize> = Vec::new();
 
-        for (tid, &fp) in thread_state.stack_pointers.iter() {
-            if fp == 0 { continue; }
-            let stack_base = thread_globals.get(tid).map(|tg| tg.stack_base).unwrap_or(0);
-            stack_pointers.push((stack_base, fp));
+        for (_tid, &(_fp, gc_frame_top)) in thread_state.stack_pointers.iter() {
+            if gc_frame_top != 0 {
+                gc_frame_tops.push(gc_frame_top);
+            }
         }
         // Also include threads in C calls (FFI)
-        for (tid, &fp) in thread_state.c_calling_stack_pointers.iter() {
-            if fp == 0 { continue; }
-            let stack_base = thread_globals.get(tid).map(|tg| tg.stack_base).unwrap_or(0);
-            stack_pointers.push((stack_base, fp));
+        for (_tid, &(_fp, gc_frame_top)) in thread_state.c_calling_stack_pointers.iter() {
+            if gc_frame_top != 0 {
+                gc_frame_tops.push(gc_frame_top);
+            }
         }
 
-        // Main thread
-        let main_stack_base = self.get_stack_base();
-        stack_pointers.push((main_stack_base, frame_pointer));
+        // Main thread (us — the GC-initiating thread)
+        let main_gc_frame_top = crate::builtins::get_gc_frame_top();
+        gc_frame_tops.push(main_gc_frame_top);
 
-        drop(thread_globals);
         drop(thread_state);
 
         // Collect namespace bindings as GC roots
@@ -5029,7 +5314,7 @@ impl Runtime {
             namespace_roots.extend(values);
         }
 
-        let updated_roots = self.memory.run_gc(&stack_pointers, &namespace_roots);
+        let updated_roots = self.memory.run_gc(&gc_frame_tops, &namespace_roots);
 
         // Write updated namespace roots back to namespaces (for copying GC)
         let mut root_index = 0;
@@ -5971,7 +6256,7 @@ impl Runtime {
         {
             let (lock, condvar) = &*self.thread_state.clone();
             let mut state = lock.lock().unwrap();
-            state.c_calling_stack_pointers.insert(thread_id, 0);
+            state.c_calling_stack_pointers.insert(thread_id, (0, 0));
             condvar.notify_one();
         }
         // Release gc_lock before allocating GlobalObject
@@ -6889,7 +7174,6 @@ impl Runtime {
                     val if val == TYPE_ID_PERSISTENT_SET as usize => "PersistentSet",
                     val if val == TYPE_ID_MULTI_ARITY_FUNCTION as usize => "MultiArityFunction",
                     val if val == TYPE_ID_CONTINUATION as usize => "Continuation",
-                    val if val == TYPE_ID_CONTINUATION_SEGMENT as usize => "ContinuationSegment",
                     _ => {
                         // Custom struct (type_id == 0 or other) - use struct_id
                         let struct_type_id = heap_object.get_struct_id();

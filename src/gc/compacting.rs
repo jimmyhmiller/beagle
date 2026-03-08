@@ -4,16 +4,9 @@ use libc::mprotect;
 
 use super::get_page_size;
 
-use crate::{
-    collections::TYPE_ID_CONTINUATION,
-    runtime::ContinuationObject,
-    types::{BuiltInTypes, Header, HeapObject, Word},
-};
+use crate::types::{BuiltInTypes, Header, HeapObject, Word};
 
-use super::{
-    AllocateAction, Allocator, AllocatorOptions,
-    continuation_walker::ContinuationSegmentWalker, stack_walker::StackWalker,
-};
+use super::{AllocateAction, Allocator, AllocatorOptions, stack_walker::StackWalker};
 
 const DEFAULT_PAGE_COUNT: usize = 1024;
 // Aribtary number that should be changed when I have
@@ -43,6 +36,16 @@ impl Space {
     fn contains(&self, pointer: *const u8) -> bool {
         let start = self.start as usize;
         let end = start + self.byte_count();
+        let pointer = pointer as usize;
+        pointer >= start && pointer < end
+    }
+
+    /// Check if a pointer falls within the currently allocated (used) portion of this space.
+    /// Unlike `contains()` which checks the entire reserved virtual memory region,
+    /// this only checks up to `allocation_offset` — the portion that actually holds objects.
+    fn contains_allocated(&self, pointer: *const u8) -> bool {
+        let start = self.start as usize;
+        let end = start + self.allocation_offset;
         let pointer = pointer as usize;
         pointer >= start && pointer < end
     }
@@ -231,11 +234,14 @@ impl CompactingHeap {
             return tagged_ptr;
         }
 
-        // If the pointer is not in either space, it may be an embedded value
-        // (e.g., inline float) or a pointer to runtime-allocated memory outside the GC heap.
-        // Return it unchanged — it doesn't need to be moved.
+        // If the pointer is not in either space's allocated region, it may be an
+        // embedded value (e.g., inline float) or a pointer to runtime-allocated memory
+        // outside the GC heap. Return it unchanged — it doesn't need to be moved.
+        // We use contains_allocated() for from_space to avoid false positives: values
+        // (like callee-saved register spills) whose bit pattern happens to fall within
+        // the reserved-but-unallocated portion of from_space's virtual memory.
         if !self.to_space.contains(untagged as *const u8)
-            && !self.from_space.contains(untagged as *const u8)
+            && !self.from_space.contains_allocated(untagged as *const u8)
         {
             return tagged_ptr;
         }
@@ -251,8 +257,13 @@ impl CompactingHeap {
         // If forwarded, object has been moved - get forwarding pointer from header
         // We check the forwarding bit (bit 3) which doesn't conflict with type tags
         let untagged = heap_object.untagged();
+        if untagged == 0 {
+            // Null heap pointer (tagged 6 with address 0) — skip
+            return tagged_ptr;
+        }
         let pointer = untagged as *mut usize;
         let header_data = unsafe { *pointer };
+
         if Header::is_forwarding_bit_set(header_data) {
             // The header contains the forwarding pointer with forwarding bit set
             // Clear the forwarding bit to get the clean tagged pointer
@@ -366,26 +377,10 @@ impl CompactingHeap {
             if object.is_zero_size() {
                 continue;
             }
-            for datum in object.get_fields_mut() {
+            for datum in object.get_fields_mut().iter_mut() {
                 if BuiltInTypes::is_heap_pointer(*datum) {
                     *datum = self.copy_using_cheneys_algorithm(*datum);
                 }
-            }
-            if object.get_type_id() == TYPE_ID_CONTINUATION as usize
-                && let Some(cont) = ContinuationObject::from_heap_object(object)
-            {
-                cont.with_segment_bytes_mut(|segment| {
-                    if segment.is_empty() {
-                        return;
-                    }
-                    let segment_end = cont.original_sp() + segment.len();
-                    self.gc_continuation_segment(
-                        segment,
-                        cont.original_sp(),
-                        cont.original_fp(),
-                        segment_end,
-                    );
-                });
             }
         }
     }
@@ -393,90 +388,19 @@ impl CompactingHeap {
     fn gc_continuations(&mut self) {
         let runtime = crate::get_runtime().get_mut();
 
-        // Fast path: skip if no invocation return points
-        if runtime.invocation_return_points.is_empty() {
-            return;
-        }
-
-        // Process InvocationReturnPoint saved frames.
+        // Process InvocationReturnPoint saved frames (CapturedFrame heap pointers).
         for (_thread_id, rps) in runtime.invocation_return_points.iter_mut() {
             for rp in rps.iter_mut() {
-                if rp.saved_stack_frame.is_empty() {
-                    continue;
-                }
-                // Collect roots from the saved frame
-                let mut roots = Vec::new();
-                ContinuationSegmentWalker::walk_saved_frame_roots(
-                    &rp.saved_stack_frame,
-                    rp.stack_pointer,
-                    rp.frame_pointer,
-                    |offset, tagged_value| {
-                        roots.push((offset, tagged_value));
-                    },
-                );
-                // Copy objects and update pointers
-                let new_values: Vec<usize> = roots
-                    .iter()
-                    .map(|(_offset, tagged_value)| self.copy_using_cheneys_algorithm(*tagged_value))
-                    .collect();
-                for (i, (offset, _)) in roots.iter().enumerate() {
-                    unsafe {
-                        let ptr = rp.saved_stack_frame.as_mut_ptr().add(*offset) as *mut usize;
-                        *ptr = new_values[i];
-                    }
+                if rp.saved_frame != 0 && BuiltInTypes::is_heap_pointer(rp.saved_frame) {
+                    rp.saved_frame = self.copy_using_cheneys_algorithm(rp.saved_frame);
                 }
             }
         }
-    }
 
-    /// Update saved_continuation_ptr values after copying.
-    /// These are continuation objects saved during invoke_continuation_runtime.
-    fn gc_saved_continuation_ptrs(&mut self) {
-        let runtime = crate::get_runtime().get_mut();
-
-        for (_thread_id, cont_ptr) in runtime.saved_continuation_ptr.iter_mut() {
-            if *cont_ptr == 0 {
-                continue;
-            }
-            if !BuiltInTypes::is_heap_pointer(*cont_ptr) {
-                continue;
-            }
-            // Copy the object and update the pointer
-            let new_ptr = self.copy_using_cheneys_algorithm(*cont_ptr);
-            *cont_ptr = new_ptr;
-        }
-    }
-
-    fn gc_continuation_segment(
-        &mut self,
-        segment: &mut [u8],
-        original_sp: usize,
-        original_fp: usize,
-        prompt_sp: usize,
-    ) {
-        // Collect heap pointers and their offsets
-        let mut roots = Vec::new();
-        ContinuationSegmentWalker::walk_segment_roots(
-            segment,
-            original_sp,
-            original_fp,
-            prompt_sp,
-            |offset, tagged_value| {
-                roots.push((offset, tagged_value));
-            },
-        );
-
-        // Copy objects to to_space using Cheney's algorithm
-        let new_values: Vec<usize> = roots
-            .iter()
-            .map(|(_offset, tagged_value)| self.copy_using_cheneys_algorithm(*tagged_value))
-            .collect();
-
-        // Update pointers in segment
-        for (i, (offset, _)) in roots.iter().enumerate() {
-            unsafe {
-                let ptr = segment.as_mut_ptr().add(*offset) as *mut usize;
-                *ptr = new_values[i];
+        // Process saved_continuation_ptr (tagged ContinuationObject pointers)
+        for (_thread_id, ptr) in runtime.saved_continuation_ptr.iter_mut() {
+            if *ptr != 0 && BuiltInTypes::is_heap_pointer(*ptr) {
+                *ptr = self.copy_using_cheneys_algorithm(*ptr);
             }
         }
     }
@@ -524,18 +448,15 @@ impl Allocator for CompactingHeap {
 
     fn gc(
         &mut self,
-        stack_pointers: &[(usize, usize)],
+        gc_frame_tops: &[usize],
         extra_roots: &[(*mut usize, usize)],
     ) {
         if !self.options.gc {
             return;
         }
 
-        for (stack_base, frame_pointer) in stack_pointers.iter() {
-            let roots = StackWalker::collect_stack_roots(
-                *stack_base,
-                *frame_pointer,
-            );
+        for &gc_frame_top in gc_frame_tops.iter() {
+            let roots = StackWalker::collect_stack_roots(gc_frame_top);
             let new_roots =
                 unsafe { self.copy_all(roots.iter().map(|x| x.1).collect()) };
 
@@ -562,16 +483,11 @@ impl Allocator for CompactingHeap {
         }
 
         // Capture offset BEFORE continuation processing so that copy_remaining
-        // will transitively process any objects newly copied by gc_continuations
-        // and gc_saved_continuation_ptrs (objects only reachable from continuation
-        // segments that weren't already discovered through stack/extra roots).
+        // will transitively process any objects newly copied by gc_continuations.
         let start_offset = self.to_space.allocation_offset;
 
-        // Process continuation segments
+        // Process InvocationReturnPoint saved_frame pointers
         self.gc_continuations();
-
-        // Process saved_continuation_ptr values (continuation objects saved in Rust runtime)
-        self.gc_saved_continuation_ptrs();
 
         unsafe { self.copy_remaining(start_offset) };
 

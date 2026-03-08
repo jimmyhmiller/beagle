@@ -5,15 +5,10 @@ use libc::mprotect;
 use super::get_page_size;
 use super::usdt_probes;
 
-use crate::{
-    collections::TYPE_ID_CONTINUATION,
-    runtime::ContinuationObject,
-    types::{BuiltInTypes, Header, HeapObject, Word},
-};
+use crate::types::{BuiltInTypes, Header, HeapObject, Word};
 
 use super::{
-    AllocateAction, Allocator, AllocatorOptions,
-    continuation_walker::ContinuationSegmentWalker, mark_and_sweep::MarkAndSweep,
+    AllocateAction, Allocator, AllocatorOptions, mark_and_sweep::MarkAndSweep,
     stack_walker::StackWalker,
 };
 
@@ -343,80 +338,27 @@ impl GenerationalGC {
     fn update_continuation_segments(&mut self) {
         let runtime = crate::get_runtime().get_mut();
 
-        // Fast path: skip if no invocation return points
-        if runtime.invocation_return_points.is_empty() {
-            return;
-        }
-
-        // Process InvocationReturnPoint saved frames.
-        // The saved frame captures the handler's locals (from stack_pointer to frame_pointer).
+        // Process InvocationReturnPoint saved_frame pointers (CapturedFrame heap objects).
         for (_thread_id, rps) in runtime.invocation_return_points.iter_mut() {
             for rp in rps.iter_mut() {
-                if rp.saved_stack_frame.is_empty() {
-                    continue;
+                if rp.saved_frame != 0 && BuiltInTypes::is_heap_pointer(rp.saved_frame) {
+                    let untagged = BuiltInTypes::untag(rp.saved_frame);
+                    if self.young.contains(untagged as *const u8) {
+                        rp.saved_frame = self.copy(rp.saved_frame);
+                    }
                 }
-                ContinuationSegmentWalker::update_saved_frame_pointers(
-                    &mut rp.saved_stack_frame,
-                    rp.stack_pointer,
-                    rp.frame_pointer,
-                    |old_value| self.copy(old_value),
-                );
             }
         }
-    }
 
-    /// Update saved_continuation_ptr values that point to young gen objects.
-    /// These are continuation objects saved during invoke_continuation_runtime
-    /// that may be collected or moved during GC.
-    fn update_saved_continuation_ptrs(&mut self) {
-        let runtime = crate::get_runtime().get_mut();
-
-        for (_thread_id, cont_ptr) in runtime.saved_continuation_ptr.iter_mut() {
-            if *cont_ptr == 0 {
-                continue;
-            }
-            if !BuiltInTypes::is_heap_pointer(*cont_ptr) {
-                continue;
-            }
-            let untagged = BuiltInTypes::untag(*cont_ptr);
-            // Only process if in young gen
-            if self.young.contains(untagged as *const u8) {
-                // Copy to old gen and update the pointer
-                let new_ptr = self.copy(*cont_ptr);
-                *cont_ptr = new_ptr;
+        // Process saved_continuation_ptr (tagged ContinuationObject pointers)
+        for (_thread_id, ptr) in runtime.saved_continuation_ptr.iter_mut() {
+            if *ptr != 0 && BuiltInTypes::is_heap_pointer(*ptr) {
+                let untagged = BuiltInTypes::untag(*ptr);
+                if self.young.contains(untagged as *const u8) {
+                    *ptr = self.copy(*ptr);
+                }
             }
         }
-    }
-
-    fn update_segment_young_gen_pointers(
-        &mut self,
-        segment: &mut [u8],
-        original_sp: usize,
-        original_fp: usize,
-        prompt_sp: usize,
-    ) {
-        ContinuationSegmentWalker::update_segment_pointers(
-            segment,
-            original_sp,
-            original_fp,
-            prompt_sp,
-            |old_value| self.copy(old_value),
-        );
-    }
-
-    fn update_continuation_segment(&mut self, cont: &ContinuationObject) {
-        cont.with_segment_bytes_mut(|segment| {
-            if segment.is_empty() {
-                return;
-            }
-            let segment_end = cont.original_sp() + segment.len();
-            self.update_segment_young_gen_pointers(
-                segment,
-                cont.original_sp(),
-                cont.original_fp(),
-                segment_end,
-            );
-        });
     }
 }
 
@@ -459,7 +401,7 @@ impl Allocator for GenerationalGC {
 
     fn gc(
         &mut self,
-        stack_pointers: &[(usize, usize)],
+        gc_frame_tops: &[usize],
         extra_roots: &[(*mut usize, usize)],
     ) {
         if !self.options.gc {
@@ -467,9 +409,9 @@ impl Allocator for GenerationalGC {
         }
         if self.gc_count != 0 && self.gc_count.is_multiple_of(self.full_gc_frequency) {
             self.gc_count = 0;
-            self.full_gc(stack_pointers, extra_roots);
+            self.full_gc(gc_frame_tops, extra_roots);
         } else {
-            self.minor_gc(stack_pointers, extra_roots);
+            self.minor_gc(gc_frame_tops, extra_roots);
         }
         self.gc_count += 1;
     }
@@ -630,16 +572,13 @@ impl GenerationalGC {
     /// Returns (slot_refs, old_gen_values) - old gen values need field updates.
     fn gather_stack_root_refs(
         &self,
-        stack_pointers: &[(usize, usize)],
+        gc_frame_tops: &[usize],
     ) -> (Vec<RootRef>, Vec<usize>) {
         let mut slots = Vec::new();
         let mut old_gen_values = Vec::new();
 
-        for (stack_base, frame_pointer) in stack_pointers {
-            let (young_roots, old_roots) = self.gather_stack_roots_inner(
-                *stack_base,
-                *frame_pointer,
-            );
+        for &gc_frame_top in gc_frame_tops {
+            let (young_roots, old_roots) = self.gather_stack_roots_inner(gc_frame_top);
 
             for (slot_addr, _value) in young_roots {
                 slots.push(RootRef(slot_addr as *mut usize));
@@ -651,19 +590,17 @@ impl GenerationalGC {
         (slots, old_gen_values)
     }
 
-    /// Inner function to gather roots from a single stack.
+    /// Inner function to gather roots from a single thread's GC frame chain.
     /// Uses StackWalker and classifies roots into young gen (to copy) and old gen (to scan fields).
     fn gather_stack_roots_inner(
         &self,
-        stack_base: usize,
-        frame_pointer: usize,
+        gc_frame_top: usize,
     ) -> (Vec<(usize, usize)>, Vec<usize>) {
         let mut roots: Vec<(usize, usize)> = Vec::with_capacity(36);
         let mut old_gen_objects: Vec<usize> = Vec::with_capacity(16);
 
         StackWalker::walk_stack_roots(
-            stack_base,
-            frame_pointer,
+            gc_frame_top,
             |slot_addr, slot_value| {
                 let untagged = BuiltInTypes::untag(slot_value);
                 if untagged == 0 {
@@ -673,12 +610,11 @@ impl GenerationalGC {
                     assert!(
                         self.young.contains_allocated(untagged as *const u8),
                         "Stale young gen pointer {:#x} (offset={}) found on stack at {:#x}, \
-                         young alloc_offset={}, fp={:#x}",
+                         young alloc_offset={}",
                         slot_value,
                         untagged - self.young.base_address(),
                         slot_addr,
                         self.young.allocation_offset(),
-                        frame_pointer,
                     );
                     roots.push((slot_addr, slot_value));
                 } else if self.old.contains(untagged as *const u8) {
@@ -715,14 +651,14 @@ impl GenerationalGC {
 
     fn minor_gc(
         &mut self,
-        stack_pointers: &[(usize, usize)],
+        gc_frame_tops: &[usize],
         extra_roots: &[(*mut usize, usize)],
     ) {
         let start = std::time::Instant::now();
         usdt_probes::fire_gc_minor_start(self.gc_count);
 
         let (mut stack_roots, mut stack_old_gen) =
-            self.gather_stack_root_refs(stack_pointers);
+            self.gather_stack_root_refs(gc_frame_tops);
 
         // Classify extra_roots (shadow stack handles) into young/old gen
         for &(slot_addr, value) in extra_roots {
@@ -739,11 +675,8 @@ impl GenerationalGC {
 
         self.process_all_roots(stack_roots);
 
-        // Update continuation segments
+        // Update InvocationReturnPoint saved_frame pointers
         self.update_continuation_segments();
-
-        // Update saved_continuation_ptr values (continuation objects saved in Rust runtime)
-        self.update_saved_continuation_ptrs();
 
         // Process old gen objects found on stack - update their young gen references.
         // This scans one level deep for old gen objects directly referenced from stack.
@@ -838,7 +771,6 @@ impl GenerationalGC {
 
         // Process this old gen object's fields
         let data = heap_obj.get_fields_mut();
-        let mut continuation_fields = Vec::new();
         #[cfg(feature = "debug-gc")]
         eprintln!(
             "[GC DEBUG] process_old_gen_object {:#x}: {} fields",
@@ -861,26 +793,6 @@ impl GenerationalGC {
                     #[cfg(feature = "debug-gc")]
                     eprintln!("[GC DEBUG]   -> new value: {:#x}", *field);
                 }
-                // Check type_id after potential copy
-                let check_field = *field;
-                if BuiltInTypes::is_heap_pointer(check_field) {
-                    let check_obj = HeapObject::from_tagged(check_field);
-                    if check_obj.get_type_id() == TYPE_ID_CONTINUATION as usize {
-                        continuation_fields.push(check_field);
-                    }
-                }
-            }
-        }
-
-        if heap_obj.get_type_id() == TYPE_ID_CONTINUATION as usize
-            && let Some(cont) = ContinuationObject::from_heap_object(heap_obj)
-        {
-            self.update_continuation_segment(&cont);
-        }
-
-        for cont_ptr in continuation_fields {
-            if let Some(cont) = ContinuationObject::from_tagged(cont_ptr) {
-                self.update_continuation_segment(&cont);
             }
         }
     }
@@ -1001,7 +913,6 @@ impl GenerationalGC {
                     object.untagged()
                 );
             }
-            let mut continuation_fields = Vec::new();
             for field in object.get_fields_mut().iter_mut() {
                 if BuiltInTypes::is_heap_pointer(*field) {
                     let heap_obj = HeapObject::from_tagged(*field);
@@ -1010,25 +921,6 @@ impl GenerationalGC {
                         eprintln!("[GC DEBUG]   copying young-gen field {:#x}", *field);
                         *field = self.copy(*field);
                     }
-                    // Note: must check type_id AFTER copy since old heap_obj may have forwarding header
-                    if BuiltInTypes::is_heap_pointer(*field) {
-                        let updated_obj = HeapObject::from_tagged(*field);
-                        if updated_obj.get_type_id() == TYPE_ID_CONTINUATION as usize {
-                            continuation_fields.push(*field);
-                        }
-                    }
-                }
-            }
-
-            if object.get_type_id() == TYPE_ID_CONTINUATION as usize
-                && let Some(cont) = ContinuationObject::from_heap_object(object)
-            {
-                self.update_continuation_segment(&cont);
-            }
-
-            for cont_ptr in continuation_fields {
-                if let Some(cont) = ContinuationObject::from_tagged(cont_ptr) {
-                    self.update_continuation_segment(&cont);
                 }
             }
         }
@@ -1041,12 +933,12 @@ impl GenerationalGC {
 
     fn full_gc(
         &mut self,
-        stack_pointers: &[(usize, usize)],
+        gc_frame_tops: &[usize],
         extra_roots: &[(*mut usize, usize)],
     ) {
         usdt_probes::fire_gc_full_start(self.gc_count);
-        self.minor_gc(stack_pointers, extra_roots);
-        self.old.gc(stack_pointers, extra_roots);
+        self.minor_gc(gc_frame_tops, extra_roots);
+        self.old.gc(gc_frame_tops, extra_roots);
         usdt_probes::fire_gc_full_end(self.gc_count);
     }
 }

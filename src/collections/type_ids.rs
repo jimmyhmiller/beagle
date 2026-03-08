@@ -61,9 +61,6 @@ pub const TYPE_ID_REGEX: u8 = 30;
 /// Type ID for captured continuations (stack segment + prompt metadata)
 pub const TYPE_ID_CONTINUATION: u8 = 31;
 
-/// Type ID for continuation stack segment byte buffers (opaque)
-pub const TYPE_ID_CONTINUATION_SEGMENT: u8 = 32;
-
 /// Type ID for MutableMap (3 fields: keys_array, values_array, size)
 pub const TYPE_ID_MUTABLE_MAP: u8 = 33;
 
@@ -85,3 +82,10 @@ pub const TYPE_ID_GLOBAL_OBJECT_BLOCK: u8 = 36;
 /// These are NOT heap-allocated — they live on the stack but use heap object layout
 /// so the GC can trace locals uniformly. The upper 16 bits of type_data encode num_slots.
 pub const TYPE_ID_FRAME: u8 = 37;
+
+/// Type ID for captured stack frames (promoted to heap during continuation capture).
+/// Layout: [parent, return_address, saved_caller_fp, frame_info, locals..., callee_saved...]
+/// The upper 16 bits of type_data encode num_locals (GC-traced slot count).
+/// header.size = num_locals + num_callee_saved + 4 (metadata fields).
+/// GC traces only the first (4 + num_locals) fields; callee-saved values are not traced.
+pub const TYPE_ID_CAPTURED_FRAME: u8 = 38;

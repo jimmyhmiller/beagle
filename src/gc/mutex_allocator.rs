@@ -68,14 +68,14 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
 
     fn gc(
         &mut self,
-        stack_pointers: &[(usize, usize)],
+        gc_frame_tops: &[usize],
         extra_roots: &[(*mut usize, usize)],
     ) {
         if self.registered_threads.load(Ordering::Acquire) == 0 {
-            return self.alloc.gc(stack_pointers, extra_roots);
+            return self.alloc.gc(gc_frame_tops, extra_roots);
         }
         let lock = self.mutex.lock().unwrap();
-        self.alloc.gc(stack_pointers, extra_roots);
+        self.alloc.gc(gc_frame_tops, extra_roots);
         drop(lock)
     }
 

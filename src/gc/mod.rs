@@ -9,7 +9,6 @@ use crate::{CommandLineArguments, types::BuiltInTypes};
 pub use crate::mmap_utils::get_page_size;
 
 pub mod compacting;
-pub mod continuation_walker;
 pub mod generational;
 #[cfg(feature = "heap-dump")]
 pub mod heap_dump;
@@ -133,10 +132,8 @@ pub trait Allocator {
 
     /// Run garbage collection.
     ///
-    /// `stack_pointers` contains `(stack_base, frame_pointer)` for each thread.
-    /// `stack_base` bounds the FP chain walk (prevents walking into Rust frames).
-    /// GlobalObjectBlock roots are NOT scanned from `stack_base - 8` — they are
-    /// passed via `extra_roots` (from ThreadGlobal.head_block).
+    /// `gc_frame_tops` contains the GC frame chain top for each thread.
+    /// GC walks each chain using the prev-pointer linked list in frame headers.
     ///
     /// `extra_roots` contains `(slot_address, value)` pairs from shadow stacks,
     /// head_block pointers, and namespace roots.
@@ -144,7 +141,7 @@ pub trait Allocator {
     /// allowing moving GCs to update pointers in-place.
     fn gc(
         &mut self,
-        stack_pointers: &[(usize, usize)],
+        gc_frame_tops: &[usize],
         extra_roots: &[(*mut usize, usize)],
     );
 

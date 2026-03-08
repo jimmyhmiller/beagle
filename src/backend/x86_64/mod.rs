@@ -497,8 +497,8 @@ impl CodegenBackend for X86_64Backend {
     }
 
     fn get_local_byte_offset(&self, local_index: usize) -> isize {
-        // Locals start at [FP-16] (FP-8 is the frame header)
-        -(((local_index + 2) * 8) as isize)
+        // Locals start at [FP-24] (FP-8 is the frame header, FP-16 is the prev pointer)
+        -(((local_index + 3) * 8) as isize)
     }
 
     fn zero_register(&self) -> Self::Register {

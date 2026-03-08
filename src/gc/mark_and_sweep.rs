@@ -4,16 +4,9 @@ use libc::mprotect;
 
 use super::get_page_size;
 
-use crate::{
-    collections::TYPE_ID_CONTINUATION,
-    runtime::ContinuationObject,
-    types::{BuiltInTypes, Header, HeapObject, Word},
-};
+use crate::types::{BuiltInTypes, Header, HeapObject, Word};
 
-use super::{
-    AllocateAction, Allocator, AllocatorOptions,
-    continuation_walker::ContinuationSegmentWalker, stack_walker::StackWalker,
-};
+use super::{AllocateAction, Allocator, AllocatorOptions, stack_walker::StackWalker};
 
 const DEFAULT_PAGE_COUNT: usize = 1024;
 // Aribtary number that should be changed when I have
@@ -351,16 +344,14 @@ impl MarkAndSweep {
         }
     }
 
-    fn mark(
+    fn mark_from_chain(
         &self,
-        stack_base: usize,
-        frame_pointer: usize,
+        gc_frame_top: usize,
     ) {
         let mut to_mark: Vec<HeapObject> = Vec::with_capacity(128);
 
         StackWalker::walk_stack_roots(
-            stack_base,
-            frame_pointer,
+            gc_frame_top,
             |_slot_addr, pointer| {
                 let untagged = BuiltInTypes::untag(pointer);
                 // Skip null and misaligned pointers
@@ -371,8 +362,24 @@ impl MarkAndSweep {
             },
         );
 
-        // Scan continuation segments for heap pointers
-        self.mark_continuation_roots(&mut to_mark);
+        // Mark InvocationReturnPoint saved_frame pointers as roots.
+        // CapturedFrame objects are normal heap objects, so we just add them as roots.
+        {
+            let runtime = crate::get_runtime().get();
+            for (_thread_id, rps) in runtime.invocation_return_points.iter() {
+                for rp in rps {
+                    if rp.saved_frame != 0 && BuiltInTypes::is_heap_pointer(rp.saved_frame) {
+                        to_mark.push(HeapObject::from_tagged(rp.saved_frame));
+                    }
+                }
+            }
+            // Mark saved_continuation_ptr (tagged ContinuationObject pointers)
+            for (_thread_id, ptr) in runtime.saved_continuation_ptr.iter() {
+                if *ptr != 0 && BuiltInTypes::is_heap_pointer(*ptr) {
+                    to_mark.push(HeapObject::from_tagged(*ptr));
+                }
+            }
+        }
 
         while let Some(object) = to_mark.pop() {
             if object.marked() {
@@ -380,29 +387,6 @@ impl MarkAndSweep {
             }
 
             object.mark();
-            if object.get_type_id() == TYPE_ID_CONTINUATION as usize {
-                let tagged = object.tagged_pointer();
-                if let Some(cont) = ContinuationObject::from_tagged(tagged) {
-                    cont.with_segment_bytes(|segment| {
-                        if segment.is_empty() {
-                            return;
-                        }
-                        let segment_end = cont.original_sp() + segment.len();
-                        ContinuationSegmentWalker::walk_segment_roots(
-                            segment,
-                            cont.original_sp(),
-                            cont.original_fp(),
-                            segment_end,
-                            |_offset, pointer| {
-                                let untagged = BuiltInTypes::untag(pointer);
-                                if untagged != 0 && untagged.is_multiple_of(8) {
-                                    to_mark.push(HeapObject::from_tagged(pointer));
-                                }
-                            },
-                        );
-                    });
-                }
-            }
             for child in object.get_heap_references() {
                 to_mark.push(child);
             }
@@ -420,74 +404,14 @@ impl MarkAndSweep {
                 to_mark.push(obj);
             }
         }
-        // Same marking loop as in `mark` — transitively mark all reachable objects
         while let Some(object) = to_mark.pop() {
             if object.marked() {
                 continue;
             }
 
             object.mark();
-            if object.get_type_id() == TYPE_ID_CONTINUATION as usize {
-                let tagged = object.tagged_pointer();
-                if let Some(cont) = ContinuationObject::from_tagged(tagged) {
-                    cont.with_segment_bytes(|segment| {
-                        if segment.is_empty() {
-                            return;
-                        }
-                        let segment_end = cont.original_sp() + segment.len();
-                        ContinuationSegmentWalker::walk_segment_roots(
-                            segment,
-                            cont.original_sp(),
-                            cont.original_fp(),
-                            segment_end,
-                            |_offset, pointer| {
-                                let untagged = BuiltInTypes::untag(pointer);
-                                if untagged != 0 && untagged.is_multiple_of(8) {
-                                    to_mark.push(HeapObject::from_tagged(pointer));
-                                }
-                            },
-                        );
-                    });
-                }
-            }
             for child in object.get_heap_references() {
                 to_mark.push(child);
-            }
-        }
-    }
-
-    fn mark_continuation_roots(&self, to_mark: &mut Vec<HeapObject>) {
-        let runtime = crate::get_runtime().get();
-
-        // Scan InvocationReturnPoint saved frames (for multi-shot continuations)
-        for (_thread_id, rps) in runtime.invocation_return_points.iter() {
-            for rp in rps {
-                if rp.saved_stack_frame.is_empty() {
-                    continue;
-                }
-
-                ContinuationSegmentWalker::walk_saved_frame_roots(
-                    &rp.saved_stack_frame,
-                    rp.stack_pointer,
-                    rp.frame_pointer,
-                    |_offset, pointer| {
-                        let untagged = BuiltInTypes::untag(pointer);
-                        if untagged != 0 && untagged.is_multiple_of(8) {
-                            to_mark.push(HeapObject::from_tagged(pointer));
-                        }
-                    },
-                );
-            }
-        }
-
-        // Mark saved_continuation_ptr values as roots.
-        // These are continuation objects saved during invoke_continuation_runtime.
-        for (_thread_id, cont_ptr) in runtime.saved_continuation_ptr.iter() {
-            if *cont_ptr == 0 {
-                continue;
-            }
-            if BuiltInTypes::is_heap_pointer(*cont_ptr) {
-                to_mark.push(HeapObject::from_tagged(*cont_ptr));
             }
         }
     }
@@ -784,15 +708,15 @@ impl Allocator for MarkAndSweep {
 
     fn gc(
         &mut self,
-        stack_pointers: &[(usize, usize)],
+        gc_frame_tops: &[usize],
         extra_roots: &[(*mut usize, usize)],
     ) {
         if !self.options.gc {
             return;
         }
         let start = std::time::Instant::now();
-        for (stack_base, frame_pointer) in stack_pointers {
-            self.mark(*stack_base, *frame_pointer);
+        for &gc_frame_top in gc_frame_tops {
+            self.mark_from_chain(gc_frame_top);
         }
 
         // Mark extra roots from shadow stacks

@@ -2,7 +2,7 @@ use crate::{
     builtins::debugger,
     machine_code::arm_codegen::{
         ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, SP, Size, StpGenSelector,
-        StrImmGenSelector, X0, X10, X11, X12, X16, X19, X20, X21, X22, X23, X24, X25, X26, X27,
+        StrImmGenSelector, X0, X10, X11, X12, X16, X17, X19, X20, X21, X22, X23, X24, X25, X26, X27,
         X28, X29, X30, ZERO_REGISTER,
     },
     types::BuiltInTypes,
@@ -788,8 +788,9 @@ impl LowLevelArm {
         self.increment_stack_size(1);
         self.store_on_stack(reg, -(self.max_locals + self.stack_size + Self::FRAME_HEADER_WORDS))
     }
-    /// Frame header occupies [FP-8], so locals start at [FP-16].
-    const FRAME_HEADER_WORDS: i32 = 1;
+    /// Frame header occupies [FP-8] and GC prev pointer at [FP-16],
+    /// so locals start at [FP-24].
+    const FRAME_HEADER_WORDS: i32 = 2;
 
     pub fn store_local(&mut self, value: Register, offset: i32) {
         self.store_on_stack(value, -(offset + 1 + Self::FRAME_HEADER_WORDS));
@@ -1407,8 +1408,8 @@ impl LowLevelArm {
         let num_callee_saved = used_callee_saved.len() as u64;
         self.num_callee_saved = num_callee_saved as usize;
 
-        // Calculate total stack size: 1 for frame header + locals + eval stack + callee-saved
-        let mut max = 1 + self.max_stack_size as u64 + self.max_locals as u64 + num_callee_saved;
+        // Calculate total stack size: 2 for frame header (header + prev pointer) + locals + eval stack + callee-saved
+        let mut max = 2 + self.max_stack_size as u64 + self.max_locals as u64 + num_callee_saved;
         let remainder = max % 2;
         if remainder != 0 {
             max += 1;
@@ -1498,6 +1499,122 @@ impl LowLevelArm {
                 });
             }
 
+            // Link this frame into the GC frame chain by calling gc_frame_link.
+            // Save/restore argument registers (X0-X7, X9) around the call.
+            // Use STP/LDP pairs to save to stack below SP.
+            {
+                // Save argument registers: STP pairs push below SP
+                // X0-X1 pair
+                alloc_instructions.push(ArmAsm::StpGen {
+                    opc: 0b10, // 64-bit
+                    imm7: -2,  // pre-index offset -16
+                    rt2: X1,
+                    rn: Register::SP,
+                    rt: X0,
+                    class_selector: StpGenSelector::PreIndex,
+                });
+                // X2-X3 pair
+                alloc_instructions.push(ArmAsm::StpGen {
+                    opc: 0b10,
+                    imm7: -2,
+                    rt2: X3,
+                    rn: Register::SP,
+                    rt: X2,
+                    class_selector: StpGenSelector::PreIndex,
+                });
+                // X4-X5 pair
+                alloc_instructions.push(ArmAsm::StpGen {
+                    opc: 0b10,
+                    imm7: -2,
+                    rt2: X5,
+                    rn: Register::SP,
+                    rt: X4,
+                    class_selector: StpGenSelector::PreIndex,
+                });
+                // X6-X7 pair
+                alloc_instructions.push(ArmAsm::StpGen {
+                    opc: 0b10,
+                    imm7: -2,
+                    rt2: X7,
+                    rn: Register::SP,
+                    rt: X6,
+                    class_selector: StpGenSelector::PreIndex,
+                });
+                // X9 (arg count) - save as X9-XZR pair
+                alloc_instructions.push(ArmAsm::StpGen {
+                    opc: 0b10,
+                    imm7: -2,
+                    rt2: Register::XZR,
+                    rn: Register::SP,
+                    rt: X9,
+                    class_selector: StpGenSelector::PreIndex,
+                });
+
+                // Set up X0 = frame_header_addr = X29 - 8
+                alloc_instructions.push(ArmAsm::SubAddsubImm {
+                    sf: 1, rn: X29, rd: X0, imm12: 8, sh: 0,
+                });
+
+                // Load gc_frame_link address into X16 and call via BLR
+                let gc_frame_link_ptr = crate::builtins::gc_frame_link as usize;
+                for instr in Self::mov_64_bit_num(X16, gc_frame_link_ptr as isize) {
+                    alloc_instructions.push(instr);
+                }
+                alloc_instructions.push(ArmAsm::Blr { rn: X16 });
+
+                // Store returned prev pointer (X0) at [X29-16]
+                alloc_instructions.push(ArmAsm::SturGen {
+                    size: 0b11, imm9: -16, rn: X29, rt: X0,
+                });
+
+                // Restore argument registers in reverse order
+                // X9
+                alloc_instructions.push(ArmAsm::LdpGen {
+                    opc: 0b10,
+                    imm7: 2,
+                    rt2: Register::XZR,
+                    rn: Register::SP,
+                    rt: X9,
+                    class_selector: LdpGenSelector::PostIndex,
+                });
+                // X6-X7
+                alloc_instructions.push(ArmAsm::LdpGen {
+                    opc: 0b10,
+                    imm7: 2,
+                    rt2: X7,
+                    rn: Register::SP,
+                    rt: X6,
+                    class_selector: LdpGenSelector::PostIndex,
+                });
+                // X4-X5
+                alloc_instructions.push(ArmAsm::LdpGen {
+                    opc: 0b10,
+                    imm7: 2,
+                    rt2: X5,
+                    rn: Register::SP,
+                    rt: X4,
+                    class_selector: LdpGenSelector::PostIndex,
+                });
+                // X2-X3
+                alloc_instructions.push(ArmAsm::LdpGen {
+                    opc: 0b10,
+                    imm7: 2,
+                    rt2: X3,
+                    rn: Register::SP,
+                    rt: X2,
+                    class_selector: LdpGenSelector::PostIndex,
+                });
+                // X0-X1
+                alloc_instructions.push(ArmAsm::LdpGen {
+                    opc: 0b10,
+                    imm7: 2,
+                    rt2: X1,
+                    rn: Register::SP,
+                    rt: X0,
+                    class_selector: LdpGenSelector::PostIndex,
+                });
+            }
+
             if slots_to_zero > 0 {
                 // Load null value into X11 (NOT X9 - that's reserved for arg count!)
                 alloc_instructions.push(ArmAsm::Movz {
@@ -1507,12 +1624,12 @@ impl LowLevelArm {
                     sf: 1,
                 });
 
-                // X10 = X29 - 16 (point to first local slot, after frame header at [X29-8])
+                // X10 = X29 - 24 (point to first local slot, after header at [X29-8] and prev at [X29-16])
                 alloc_instructions.push(ArmAsm::SubAddsubImm {
                     sf: 1,
                     rn: X29,
                     rd: X10,
-                    imm12: 16,
+                    imm12: 24,
                     sh: 0,
                 });
 
@@ -1569,9 +1686,48 @@ impl LowLevelArm {
         });
 
         if let Some(index) = add_index {
-            // First restore callee-saved registers from the bottom of the stack,
+            // Unlink this frame from the GC chain, then restore callee-saved registers,
             // then deallocate the stack space.
             let mut dealloc_instructions = Vec::new();
+
+            // Unlink this frame from the GC chain by calling gc_frame_unlink(prev).
+            // Save X0 (return value) around the call.
+            {
+                // Save X0 (return value) and X30 (LR) to stack
+                dealloc_instructions.push(ArmAsm::StpGen {
+                    opc: 0b10,
+                    imm7: -2,  // pre-index, SP -= 16
+                    rt2: X30,
+                    rn: Register::SP,
+                    rt: X0,
+                    class_selector: StpGenSelector::PreIndex,
+                });
+
+                // Load prev pointer from [X29-16] into X0 (first argument)
+                dealloc_instructions.push(ArmAsm::LdurGen {
+                    size: 0b11,
+                    imm9: -16,
+                    rn: X29,
+                    rt: X0,
+                });
+
+                // Load gc_frame_unlink address into X16 and call it
+                let gc_frame_unlink_ptr = crate::builtins::gc_frame_unlink as usize;
+                for instr in Self::mov_64_bit_num(X16, gc_frame_unlink_ptr as isize) {
+                    dealloc_instructions.push(instr);
+                }
+                dealloc_instructions.push(ArmAsm::Blr { rn: X16 });
+
+                // Restore X0 (return value) and X30 (LR) from stack
+                dealloc_instructions.push(ArmAsm::LdpGen {
+                    opc: 0b10,
+                    imm7: 2,  // post-index, SP += 16
+                    rt2: X30,
+                    rn: Register::SP,
+                    rt: X0,
+                    class_selector: LdpGenSelector::PostIndex,
+                });
+            }
 
             // Restore callee-saved registers from [SP + i*8]
             for (i, reg) in used_callee_saved.iter().enumerate() {

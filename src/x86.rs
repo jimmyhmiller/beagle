@@ -606,8 +606,9 @@ impl LowLevelX86 {
     // === Stack operations ===
 
     /// Offset in bytes from FP to the first local slot.
-    /// The frame header word lives at [FP-8], so locals start at [FP-16].
-    const FRAME_HEADER_SIZE: i32 = 8;
+    /// The frame header word lives at [FP-8] and the GC prev pointer at [FP-16],
+    /// so locals start at [FP-24].
+    const FRAME_HEADER_SIZE: i32 = 16;
 
     pub fn push_to_stack(&mut self, reg: X86Register) {
         self.increment_stack_size(1);
@@ -1254,8 +1255,8 @@ impl LowLevelX86 {
         let num_callee_saved = used_callee_saved.len();
         self.num_callee_saved = num_callee_saved;
 
-        // Calculate stack size: 1 for frame header + locals + eval stack + callee-saved
-        let mut slots = 1 + self.max_locals + self.max_stack_size + num_callee_saved as i32;
+        // Calculate stack size: 2 for frame header (header + prev pointer) + locals + eval stack + callee-saved
+        let mut slots = 2 + self.max_locals + self.max_stack_size + num_callee_saved as i32;
         if slots % 2 != 0 {
             slots += 1;
         }
@@ -1314,8 +1315,33 @@ impl LowLevelX86 {
                 src: R11,
             });
 
+            // Link this frame into the GC frame chain by calling gc_frame_link.
+            // We must save/restore argument registers around the call since they
+            // haven't been saved to locals yet by the compiler.
+            // Save all 6 argument registers (RDI, RSI, RDX, RCX, R8, R9)
+            inserted_instructions.push(X86Asm::Push { reg: RDI });
+            inserted_instructions.push(X86Asm::Push { reg: RSI });
+            inserted_instructions.push(X86Asm::Push { reg: RDX });
+            inserted_instructions.push(X86Asm::Push { reg: RCX });
+            inserted_instructions.push(X86Asm::Push { reg: R8 });
+            inserted_instructions.push(X86Asm::Push { reg: R9 });
+            // Call gc_frame_link(frame_header_addr=RBP-8)
+            inserted_instructions.push(X86Asm::Lea { dest: RDI, base: RBP, offset: -8 });
+            let gc_frame_link_ptr = crate::builtins::gc_frame_link as usize;
+            inserted_instructions.push(X86Asm::MovRI { dest: RAX, imm: gc_frame_link_ptr as i64 });
+            inserted_instructions.push(X86Asm::CallR { target: RAX });
+            // Store returned prev pointer at [RBP-16]
+            inserted_instructions.push(X86Asm::MovMR { base: RBP, offset: -16, src: RAX });
+            // Restore argument registers
+            inserted_instructions.push(X86Asm::Pop { reg: R9 });
+            inserted_instructions.push(X86Asm::Pop { reg: R8 });
+            inserted_instructions.push(X86Asm::Pop { reg: RCX });
+            inserted_instructions.push(X86Asm::Pop { reg: RDX });
+            inserted_instructions.push(X86Asm::Pop { reg: RSI });
+            inserted_instructions.push(X86Asm::Pop { reg: RDI });
+
             // Zero out local and eval stack slots to prevent GC from seeing garbage.
-            // Locals start at [RBP-16] (after the frame header at [RBP-8]).
+            // Locals start at [RBP-24] (after frame header at [RBP-8] and prev ptr at [RBP-16]).
             let slots_to_zero = self.max_locals + self.max_stack_size;
             if slots_to_zero > 0 {
                 let null_value = BuiltInTypes::null_value() as i32;
@@ -1326,12 +1352,12 @@ impl LowLevelX86 {
                     imm: null_value,
                 });
 
-                // Store null to each local and eval stack slot at [RBP - (i+2)*8]
-                // (skipping [RBP-8] which is the frame header)
+                // Store null to each local and eval stack slot at [RBP - (i+3)*8]
+                // (skipping [RBP-8] header and [RBP-16] prev pointer)
                 for i in 0..slots_to_zero {
                     inserted_instructions.push(X86Asm::MovMR {
                         base: RBP,
-                        offset: -((i + 2) * 8),
+                        offset: -((i + 3) * 8),
                         src: R11,
                     });
                 }
@@ -1380,8 +1406,21 @@ impl LowLevelX86 {
             let byte_offset_at_insert: usize =
                 self.instructions[..index].iter().map(|i| i.size()).sum();
 
-            // Create load instructions to restore callee-saved registers
+            // Unlink this frame from the GC chain by calling gc_frame_unlink.
+            // Save/restore RAX (return value) around the call.
             let mut inserted_instructions = Vec::new();
+            // Save return value
+            inserted_instructions.push(X86Asm::Push { reg: RAX });
+            // Load prev pointer from [RBP-16] into RDI (first argument)
+            inserted_instructions.push(X86Asm::MovRM { dest: RDI, base: RBP, offset: -16 });
+            // Call gc_frame_unlink
+            let gc_frame_unlink_ptr = crate::builtins::gc_frame_unlink as usize;
+            inserted_instructions.push(X86Asm::MovRI { dest: R11, imm: gc_frame_unlink_ptr as i64 });
+            inserted_instructions.push(X86Asm::CallR { target: R11 });
+            // Restore return value
+            inserted_instructions.push(X86Asm::Pop { reg: RAX });
+
+            // Restore callee-saved registers
             for (i, reg) in used_callee_saved.iter().enumerate() {
                 // Load from [RSP + i*8]
                 let instr = X86Asm::MovRM {
@@ -1393,6 +1432,7 @@ impl LowLevelX86 {
             }
 
             // Calculate total byte size of inserted instructions
+            let num_epilogue_inserted = inserted_instructions.len();
             let byte_delta: usize = inserted_instructions.iter().map(|i| i.size()).sum();
 
             // Insert the instructions
@@ -1400,18 +1440,18 @@ impl LowLevelX86 {
                 self.instructions.insert(index + i, instr);
             }
 
-            // Update the ADD instruction (now at index + num_callee_saved)
-            let new_add_index = index + num_callee_saved;
+            // Update the ADD instruction (now shifted by all inserted instructions)
+            let new_add_index = index + num_epilogue_inserted;
             self.instructions[new_add_index] = X86Asm::AddRI {
                 dest: RSP,
                 imm: aligned_size,
             };
 
             // Shift label locations that come after the insertion point
-            if num_callee_saved > 0 {
+            if num_epilogue_inserted > 0 {
                 for location in self.label_locations.values_mut() {
                     if *location > index {
-                        *location += num_callee_saved;
+                        *location += num_epilogue_inserted;
                     }
                 }
 

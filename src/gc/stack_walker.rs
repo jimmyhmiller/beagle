@@ -1,20 +1,35 @@
 use crate::collections::TYPE_ID_FRAME;
 use crate::types::{BuiltInTypes, Header};
 
-/// A simple abstraction for walking the stack and finding heap pointers
-/// Uses frame pointer chain traversal for accurate stack walking.
+/// Stack walker that traverses the GC frame linked list (Henderson/Pizderson frames).
+///
+/// Each compiled Beagle function links its frame into a per-thread linked list via
+/// `gc_frame_link` in the prologue and `gc_frame_unlink` in the epilogue.
+///
+/// Frame layout:
+///   [FP+8]  : saved return address
+///   [FP+0]  : saved caller FP
+///   [FP-8]  : frame header (TYPE_ID_FRAME, size=num_slots)  ← header_addr
+///   [FP-16] : prev pointer (raw address of previous frame's header, or 0)
+///   [FP-24] : local[0]
+///   [FP-32] : local[1]
+///   ...
+///
+/// GC walks the prev chain starting from GC_FRAME_TOP, independent of the FP chain.
+/// This means captured continuation frames are naturally excluded from scanning
+/// (they were unlinked when captured), and restored frames are included (they were
+/// re-linked during restoration).
 pub struct StackWalker;
 
 impl StackWalker {
-    /// Collect all heap pointers from the stack.
+    /// Collect all heap pointers from the GC frame chain for a single thread.
+    /// `gc_frame_top` is the address of the topmost frame's header (or 0 for empty).
     pub fn collect_stack_roots(
-        stack_base: usize,
-        frame_pointer: usize,
+        gc_frame_top: usize,
     ) -> Vec<(usize, usize)> {
         let mut roots = Vec::with_capacity(32);
         Self::walk_stack_roots(
-            stack_base,
-            frame_pointer,
+            gc_frame_top,
             |addr, pointer| {
                 roots.push((addr, pointer));
             },
@@ -22,43 +37,34 @@ impl StackWalker {
         roots
     }
 
-    /// Walk the stack using the frame pointer chain, reading frame headers at [FP-8]
-    /// to determine how many slots each frame has.
+    /// Walk the GC frame linked list, scanning each frame's local slots for heap pointers.
     ///
-    /// `stack_base` is used as an upper bound to prevent walking beyond the Beagle
-    /// stack into Rust frames. It is NOT used to scan GlobalObjectBlock slots —
-    /// those are handled via extra_roots (ThreadGlobal.head_block).
-    ///
-    /// Each compiled Beagle function writes a heap-object-style header at [FP-8] with
-    /// type_id == TYPE_ID_FRAME. The header's `size` field gives the number of
-    /// traced slots (locals + eval stack) starting at [FP-16].
-    /// Frames without a frame header (trampolines, Rust frames) are skipped.
+    /// `gc_frame_top` is the address of the topmost frame's header word.
+    /// The prev pointer is at `header_addr - 8` (i.e., [FP-16]).
+    /// Locals start at `header_addr - 16` (i.e., [FP-24]).
     pub fn walk_stack_roots<F>(
-        stack_base: usize,
-        frame_pointer: usize,
+        gc_frame_top: usize,
         mut callback: F,
     ) where
         F: FnMut(usize, usize),
     {
-        let mut fp = frame_pointer;
+        let mut header_addr = gc_frame_top;
 
         #[cfg(feature = "debug-gc")]
         eprintln!(
-            "[GC DEBUG] walk_stack_roots: stack_base={:#x}, frame_pointer={:#x}",
-            stack_base, frame_pointer
+            "[GC DEBUG] walk_stack_roots: gc_frame_top={:#x}",
+            gc_frame_top
         );
 
-        while fp != 0 && fp < stack_base {
-            let caller_fp = unsafe { *(fp as *const usize) };
-
-            // Read frame header at [FP-8]
-            let header_value = unsafe { *((fp - 8) as *const usize) };
+        while header_addr != 0 {
+            // Read frame header
+            let header_value = unsafe { *(header_addr as *const usize) };
             let header = Header::from_usize(header_value);
 
             #[cfg(feature = "debug-gc")]
             eprintln!(
-                "[GC DEBUG] Frame at FP={:#x}, caller_fp={:#x}, header type_id={}, size={}",
-                fp, caller_fp, header.type_id, header.size
+                "[GC DEBUG] Frame header at {:#x}, type_id={}, size={}",
+                header_addr, header.type_id, header.size
             );
 
             // Only scan frames with a valid frame header
@@ -67,13 +73,14 @@ impl StackWalker {
 
                 #[cfg(feature = "debug-gc")]
                 eprintln!(
-                    "[GC DEBUG] Scanning frame at FP={:#x}: num_slots={}",
-                    fp, num_slots
+                    "[GC DEBUG] Scanning frame at header={:#x}: num_slots={}",
+                    header_addr, num_slots
                 );
 
                 for i in 0..num_slots {
-                    // Locals are at [fp-16], [fp-24], etc. ([fp-8] is the frame header)
-                    let slot_addr = fp - 16 - (i * 8);
+                    // Locals are at [header_addr - 16], [header_addr - 24], etc.
+                    // (header_addr - 8 is the prev pointer)
+                    let slot_addr = header_addr - 16 - (i * 8);
                     let slot_value = unsafe { *(slot_addr as *const usize) };
 
                     #[cfg(feature = "debug-gc")]
@@ -112,20 +119,15 @@ impl StackWalker {
                 }
             }
 
+            // Follow prev pointer at [header_addr - 8]
+            let prev_value = unsafe { *((header_addr - 8) as *const usize) };
+
             #[cfg(feature = "debug-gc")]
-            eprintln!("[GC DEBUG] Next FP: {:#x}", caller_fp);
+            eprintln!("[GC DEBUG] Next prev: {:#x}", prev_value);
 
-            if caller_fp != 0 && caller_fp <= fp {
-                #[cfg(feature = "debug-gc")]
-                eprintln!(
-                    "[GC DEBUG] FP chain invalid: caller_fp={:#x} <= fp={:#x}, stopping",
-                    caller_fp, fp
-                );
-                break;
-            }
-
-            // Move to caller frame
-            fp = caller_fp;
+            // prev_value is a raw address (not tagged), pointing to previous frame's header
+            // A value of 0 means end of chain
+            header_addr = prev_value;
         }
 
         #[cfg(feature = "debug-gc")]
