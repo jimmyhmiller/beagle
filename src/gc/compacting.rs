@@ -11,7 +11,7 @@ use crate::{
 };
 
 use super::{
-    AllocateAction, Allocator, AllocatorOptions, StackMap,
+    AllocateAction, Allocator, AllocatorOptions,
     continuation_walker::ContinuationSegmentWalker, stack_walker::StackWalker,
 };
 
@@ -263,15 +263,21 @@ impl CompactingHeap {
         }
 
         // Check if this user struct needs migration to a new shape
+        // IMPORTANT: Skip closures — they have type_id=0 but are NOT user structs.
+        // Closures are tagged as Closure (tag 5), while user structs are HeapObject (tag 6).
         if heap_object.get_type_id() == 0 && !heap_object.is_opaque_object() {
-            let shape_id = heap_object.get_struct_id();
-            let runtime = crate::get_runtime().get_mut();
-            if let Some(plan) = runtime.structs.migration_plan_for(shape_id) {
-                let new_pointer = self.copy_with_migration(&heap_object, &plan);
-                debug_assert!(new_pointer % 8 == 0, "Pointer is not aligned");
-                let tagged_new = heap_object.get_object_type().unwrap().tag(new_pointer) as usize;
-                unsafe { *pointer = Header::set_forwarding_bit(tagged_new) };
-                return tagged_new;
+            let object_type = heap_object.get_object_type();
+            let is_closure = object_type == Some(BuiltInTypes::Closure);
+            if !is_closure {
+                let shape_id = heap_object.get_struct_id();
+                let runtime = crate::get_runtime().get_mut();
+                if let Some(plan) = runtime.structs.migration_plan_for(shape_id) {
+                    let new_pointer = self.copy_with_migration(&heap_object, &plan);
+                    debug_assert!(new_pointer % 8 == 0, "Pointer is not aligned");
+                    let tagged_new = object_type.unwrap().tag(new_pointer) as usize;
+                    unsafe { *pointer = Header::set_forwarding_bit(tagged_new) };
+                    return tagged_new;
+                }
             }
         }
 
@@ -338,25 +344,21 @@ impl CompactingHeap {
         new_pointer
     }
 
-    unsafe fn copy_all(&mut self, roots: Vec<usize>, stack_map: &StackMap) -> Vec<usize> {
+    unsafe fn copy_all(&mut self, roots: Vec<usize>) -> Vec<usize> {
         unsafe {
             let start_offset = self.to_space.allocation_offset;
-            // TODO: Is this vec the best way? Probably not
-            // I could hand this the pointers to the stack location
-            // then resolve what they point to and update them?
-            // I should think about how to get rid of this allocation at the very least.
             let mut new_roots = vec![];
             for root in roots.iter() {
                 new_roots.push(self.copy_using_cheneys_algorithm(*root));
             }
 
-            self.copy_remaining(start_offset, stack_map);
+            self.copy_remaining(start_offset);
 
             new_roots
         }
     }
 
-    unsafe fn copy_remaining(&mut self, start_offset: usize, stack_map: &StackMap) {
+    unsafe fn copy_remaining(&mut self, start_offset: usize) {
         for mut object in self.to_space.object_iter_from_position(start_offset) {
             if object.marked() {
                 panic!("We are copying to this space, nothing should be marked");
@@ -382,15 +384,13 @@ impl CompactingHeap {
                         cont.original_sp(),
                         cont.original_fp(),
                         segment_end,
-                        cont.resume_address(),
-                        stack_map,
                     );
                 });
             }
         }
     }
 
-    fn gc_continuations(&mut self, stack_map: &StackMap) {
+    fn gc_continuations(&mut self) {
         let runtime = crate::get_runtime().get_mut();
 
         // Fast path: skip if no invocation return points
@@ -399,7 +399,6 @@ impl CompactingHeap {
         }
 
         // Process InvocationReturnPoint saved frames.
-        // These are single frames, not frame chains — use the return address for stack map lookup.
         for (_thread_id, rps) in runtime.invocation_return_points.iter_mut() {
             for rp in rps.iter_mut() {
                 if rp.saved_stack_frame.is_empty() {
@@ -411,8 +410,6 @@ impl CompactingHeap {
                     &rp.saved_stack_frame,
                     rp.stack_pointer,
                     rp.frame_pointer,
-                    rp.return_address,
-                    stack_map,
                     |offset, tagged_value| {
                         roots.push((offset, tagged_value));
                     },
@@ -456,8 +453,6 @@ impl CompactingHeap {
         original_sp: usize,
         original_fp: usize,
         prompt_sp: usize,
-        resume_address: usize,
-        stack_map: &StackMap,
     ) {
         // Collect heap pointers and their offsets
         let mut roots = Vec::new();
@@ -466,8 +461,6 @@ impl CompactingHeap {
             original_sp,
             original_fp,
             prompt_sp,
-            resume_address,
-            stack_map,
             |offset, tagged_value| {
                 roots.push((offset, tagged_value));
             },
@@ -531,23 +524,20 @@ impl Allocator for CompactingHeap {
 
     fn gc(
         &mut self,
-        stack_map: &StackMap,
-        stack_pointers: &[(usize, usize, usize)],
+        stack_pointers: &[(usize, usize)],
         extra_roots: &[(*mut usize, usize)],
     ) {
         if !self.options.gc {
             return;
         }
 
-        for (stack_base, frame_pointer, gc_return_addr) in stack_pointers.iter() {
-            let roots = StackWalker::collect_stack_roots_with_return_addr(
+        for (stack_base, frame_pointer) in stack_pointers.iter() {
+            let roots = StackWalker::collect_stack_roots(
                 *stack_base,
                 *frame_pointer,
-                *gc_return_addr,
-                stack_map,
             );
             let new_roots =
-                unsafe { self.copy_all(roots.iter().map(|x| x.1).collect(), stack_map) };
+                unsafe { self.copy_all(roots.iter().map(|x| x.1).collect()) };
 
             for (i, (slot_addr, _)) in roots.iter().enumerate() {
                 debug_assert!(
@@ -563,7 +553,7 @@ impl Allocator for CompactingHeap {
         // Process extra roots from shadow stacks
         if !extra_roots.is_empty() {
             let values: Vec<usize> = extra_roots.iter().map(|&(_, v)| v).collect();
-            let new_values = unsafe { self.copy_all(values, stack_map) };
+            let new_values = unsafe { self.copy_all(values) };
             for (i, &(slot_addr, _)) in extra_roots.iter().enumerate() {
                 unsafe {
                     *slot_addr = new_values[i];
@@ -571,15 +561,19 @@ impl Allocator for CompactingHeap {
             }
         }
 
+        // Capture offset BEFORE continuation processing so that copy_remaining
+        // will transitively process any objects newly copied by gc_continuations
+        // and gc_saved_continuation_ptrs (objects only reachable from continuation
+        // segments that weren't already discovered through stack/extra roots).
+        let start_offset = self.to_space.allocation_offset;
+
         // Process continuation segments
-        self.gc_continuations(stack_map);
+        self.gc_continuations();
 
         // Process saved_continuation_ptr values (continuation objects saved in Rust runtime)
         self.gc_saved_continuation_ptrs();
 
-        let start_offset = self.to_space.allocation_offset;
-
-        unsafe { self.copy_remaining(start_offset, stack_map) };
+        unsafe { self.copy_remaining(start_offset) };
 
         mem::swap(&mut self.from_space, &mut self.to_space);
 

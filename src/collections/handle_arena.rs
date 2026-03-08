@@ -130,9 +130,7 @@ impl<'a> HandleScope<'a> {
         // Check if GC is in progress before allocating
         if self.runtime.is_paused() {
             let frame_pointer = crate::builtins::get_saved_frame_pointer();
-            let gc_return_addr = crate::builtins::get_saved_gc_return_addr();
-            self.runtime
-                .gc_impl(self.stack_pointer, frame_pointer, gc_return_addr);
+            self.runtime.gc_impl(frame_pointer);
         }
 
         let ptr =
@@ -160,9 +158,7 @@ impl<'a> HandleScope<'a> {
         // Check if GC is in progress before allocating
         if self.runtime.is_paused() {
             let frame_pointer = crate::builtins::get_saved_frame_pointer();
-            let gc_return_addr = crate::builtins::get_saved_gc_return_addr();
-            self.runtime
-                .gc_impl(self.stack_pointer, frame_pointer, gc_return_addr);
+            self.runtime.gc_impl(frame_pointer);
         }
 
         let ptr = self.runtime.allocate_zeroed(

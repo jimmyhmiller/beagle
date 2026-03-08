@@ -131,19 +131,20 @@ pub trait Allocator {
         }
     }
 
-    /// GC with explicit return address for the first frame.
-    /// The tuple is (stack_base, frame_pointer, gc_return_addr).
-    /// gc_return_addr is the return address of the gc() call, which is the
-    /// safepoint in the stack map describing the caller's frame.
-    /// If gc_return_addr is 0, the stack walker falls back to [FP+8] lookup.
+    /// Run garbage collection.
     ///
-    /// `extra_roots` contains `(slot_address, value)` pairs from shadow stacks.
-    /// The slot address points into the Rust-side handle_stack Vec buffer,
+    /// `stack_pointers` contains `(stack_base, frame_pointer)` for each thread.
+    /// `stack_base` bounds the FP chain walk (prevents walking into Rust frames).
+    /// GlobalObjectBlock roots are NOT scanned from `stack_base - 8` — they are
+    /// passed via `extra_roots` (from ThreadGlobal.head_block).
+    ///
+    /// `extra_roots` contains `(slot_address, value)` pairs from shadow stacks,
+    /// head_block pointers, and namespace roots.
+    /// The slot address points into the Rust-side Vec/AtomicUsize buffer,
     /// allowing moving GCs to update pointers in-place.
     fn gc(
         &mut self,
-        stack_map: &StackMap,
-        stack_pointers: &[(usize, usize, usize)],
+        stack_pointers: &[(usize, usize)],
         extra_roots: &[(*mut usize, usize)],
     );
 

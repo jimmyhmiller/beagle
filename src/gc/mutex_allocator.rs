@@ -8,7 +8,7 @@ use std::{
 
 use crate::types::BuiltInTypes;
 
-use super::{AllocateAction, Allocator, AllocatorOptions, StackMap};
+use super::{AllocateAction, Allocator, AllocatorOptions};
 
 pub struct MutexAllocator<Alloc: Allocator> {
     alloc: Alloc,
@@ -68,15 +68,14 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
 
     fn gc(
         &mut self,
-        stack_map: &StackMap,
-        stack_pointers: &[(usize, usize, usize)],
+        stack_pointers: &[(usize, usize)],
         extra_roots: &[(*mut usize, usize)],
     ) {
         if self.registered_threads.load(Ordering::Acquire) == 0 {
-            return self.alloc.gc(stack_map, stack_pointers, extra_roots);
+            return self.alloc.gc(stack_pointers, extra_roots);
         }
         let lock = self.mutex.lock().unwrap();
-        self.alloc.gc(stack_map, stack_pointers, extra_roots);
+        self.alloc.gc(stack_pointers, extra_roots);
         drop(lock)
     }
 

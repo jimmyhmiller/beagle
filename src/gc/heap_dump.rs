@@ -13,9 +13,8 @@ use std::io::Write;
 
 use serde::{Deserialize, Serialize};
 
+use crate::collections::TYPE_ID_FRAME;
 use crate::types::{BuiltInTypes, Header, HeapObject};
-
-use super::StackMap;
 
 /// A snapshot of a single heap object
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,30 +250,25 @@ pub fn snapshot_stack(
     thread_index: usize,
     stack_base: usize,
     frame_pointer: usize,
-    gc_return_addr: usize,
-    stack_map: &StackMap,
     classifier: &PointerClassifier,
 ) -> ThreadStackSnapshot {
     let mut frames = Vec::new();
     let mut fp = frame_pointer;
-    let mut pending_return_addr = gc_return_addr;
 
     while fp != 0 && fp < stack_base {
         let caller_fp = unsafe { *(fp as *const usize) };
-        let return_addr_for_caller = unsafe { *((fp + 8) as *const usize) };
 
-        let stack_map_result = if pending_return_addr != 0 {
-            stack_map.find_stack_data_no_debug(pending_return_addr)
-        } else {
-            None
-        };
+        // Read frame header at [FP-8]
+        let header_value = unsafe { *((fp - 8) as *const usize) };
+        let header = Header::from_usize(header_value);
+        let has_frame_header = header.type_id == TYPE_ID_FRAME;
 
         let mut slots = Vec::new();
 
-        if let Some(details) = &stack_map_result {
-            let active_slots = details.number_of_locals + details.current_stack_size;
-            for i in 0..active_slots {
-                let slot_addr = fp - 8 - (i * 8);
+        if has_frame_header {
+            let num_slots = header.size as usize;
+            for i in 0..num_slots {
+                let slot_addr = fp - 16 - (i * 8);
                 let slot_value = unsafe { *(slot_addr as *const usize) };
 
                 slots.push(StackSlotSnapshot {
@@ -290,23 +284,12 @@ pub fn snapshot_stack(
 
         frames.push(FrameSnapshot {
             frame_pointer: format!("{:#x}", fp),
-            return_address: format!("{:#x}", pending_return_addr),
-            stack_map_found: stack_map_result.is_some(),
-            function_name: stack_map_result
-                .as_ref()
-                .and_then(|d| d.function_name.clone()),
-            number_of_locals: stack_map_result
-                .as_ref()
-                .map(|d| d.number_of_locals)
-                .unwrap_or(0),
-            current_stack_size: stack_map_result
-                .as_ref()
-                .map(|d| d.current_stack_size)
-                .unwrap_or(0),
-            max_stack_size: stack_map_result
-                .as_ref()
-                .map(|d| d.max_stack_size)
-                .unwrap_or(0),
+            return_address: format!("{:#x}", 0),
+            stack_map_found: has_frame_header,
+            function_name: None,
+            number_of_locals: if has_frame_header { header.size as usize } else { 0 },
+            current_stack_size: 0,
+            max_stack_size: if has_frame_header { header.size as usize } else { 0 },
             slots,
         });
 
@@ -315,14 +298,13 @@ pub fn snapshot_stack(
         }
 
         fp = caller_fp;
-        pending_return_addr = return_addr_for_caller;
     }
 
     ThreadStackSnapshot {
         thread_index,
         stack_base: format!("{:#x}", stack_base),
         frame_pointer: format!("{:#x}", frame_pointer),
-        gc_return_addr: format!("{:#x}", gc_return_addr),
+        gc_return_addr: format!("{:#x}", 0),
         frames,
     }
 }

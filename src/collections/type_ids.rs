@@ -80,3 +80,8 @@ pub const TYPE_ID_CONS_STRING: u8 = 35;
 /// Type ID for GlobalObjectBlock (runtime infrastructure, not a user struct).
 /// This prevents the block from being considered for struct migration.
 pub const TYPE_ID_GLOBAL_OBJECT_BLOCK: u8 = 36;
+
+/// Type ID for stack frame objects (heap-object-style headers on the native stack).
+/// These are NOT heap-allocated — they live on the stack but use heap object layout
+/// so the GC can trace locals uniformly. The upper 16 bits of type_data encode num_slots.
+pub const TYPE_ID_FRAME: u8 = 37;

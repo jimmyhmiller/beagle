@@ -1,3 +1,7 @@
+use crate::collections::{
+    TYPE_ID_CONTINUATION, TYPE_ID_FRAME, TYPE_ID_FUNCTION_OBJECT, TYPE_ID_KEYWORD, TYPE_ID_REGEX,
+    TYPE_ID_STRING,
+};
 use crate::ir::{Ir, Value};
 
 // I don't know if this is actually the setup I want
@@ -488,14 +492,14 @@ impl HeapObject {
     }
 
     pub fn get_fields(&self) -> &[usize] {
-        if self.is_opaque_object() {
+        let num_slots = self.num_traced_slots();
+        if num_slots == 0 {
             return &[];
         }
-        let size = self.fields_size();
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
         let pointer = unsafe { pointer.add(self.header_size() / 8) };
-        unsafe { std::slice::from_raw_parts(pointer, size / 8) }
+        unsafe { std::slice::from_raw_parts(pointer, num_slots) }
     }
 
     /// String slice type ID (must match TYPE_ID_STRING_SLICE in type_ids.rs)
@@ -635,20 +639,19 @@ impl HeapObject {
         let fields = self.get_fields();
         fields
             .iter()
-            .filter(|_x| !self.is_opaque_object())
             .filter(|x| BuiltInTypes::is_heap_pointer(**x) && BuiltInTypes::untag(**x) != 0)
             .map(|&pointer| HeapObject::from_tagged(pointer))
     }
 
     pub fn get_fields_mut(&mut self) -> &mut [usize] {
-        if self.is_opaque_object() {
+        let num_slots = self.num_traced_slots();
+        if num_slots == 0 {
             return &mut [];
         }
-        let size = self.fields_size();
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
         let pointer = unsafe { pointer.add(self.header_size() / 8) };
-        unsafe { std::slice::from_raw_parts_mut(pointer, size / 8) }
+        unsafe { std::slice::from_raw_parts_mut(pointer, num_slots) }
     }
 
     pub fn unmark(&self) {
@@ -810,6 +813,37 @@ impl HeapObject {
         let data: usize = unsafe { *pointer.cast::<usize>() };
         let header = Header::from_usize(data);
         header.opaque
+    }
+
+    /// Returns the number of GC-traced pointer slots for this object.
+    /// The GC will scan only these first N words; remaining bytes are opaque.
+    pub fn num_traced_slots(&self) -> usize {
+        if self.is_opaque_object() {
+            return 0;
+        }
+        let header = self.get_header();
+        let size_words = if header.large {
+            let untagged = self.untagged();
+            let pointer = untagged as *const usize;
+            unsafe { *pointer.add(1) }
+        } else {
+            header.size as usize
+        };
+        match header.type_id {
+            // Strings and keywords: opaque bytes (already handled by opaque flag, but be safe)
+            x if x == TYPE_ID_STRING || x == TYPE_ID_KEYWORD => 0,
+            // Frame objects: num_slots encoded in upper 16 bits of type_data
+            x if x == TYPE_ID_FRAME => (header.type_data >> 16) as usize,
+            // Continuation: only field 0 (segment pointer) is a heap ptr
+            x if x == TYPE_ID_CONTINUATION => 1,
+            // FunctionObject: field 0 is a tagged function pointer, not a heap object
+            x if x == TYPE_ID_FUNCTION_OBJECT => 0,
+            // Regex: opaque index, not a heap pointer
+            x if x == TYPE_ID_REGEX => 0,
+            // Everything else (user structs, collections, MultiArityFunction, etc.):
+            // all fields are traced slots
+            _ => size_words,
+        }
     }
 
     pub fn get_header(&self) -> Header {

@@ -1895,7 +1895,7 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         {
             let (lock, condvar) = &*runtime.thread_state.clone();
             let mut state = lock.lock().unwrap();
-            state.register_c_call((0, 0, 0)); // No stack to scan
+            state.register_c_call(0); // No stack to scan
             condvar.notify_one();
         }
 

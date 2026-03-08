@@ -1668,7 +1668,7 @@ pub unsafe extern "C" fn build_rest_array_from_locals(
         let arg = if actual_register < NUM_ARG_REGISTERS {
             // Register arg: read from saved local
             let local_index = first_local_index + user_arg_idx;
-            let local_addr = frame_pointer.wrapping_sub((local_index + 1) * 8);
+            let local_addr = frame_pointer.wrapping_sub((local_index + 2) * 8);
             unsafe { *(local_addr as *const usize) }
         } else {
             // Stack arg: read from caller's stack frame
@@ -2794,16 +2794,15 @@ fn print_stack(_stack_pointer: usize) {
 pub unsafe extern "C" fn gc(stack_pointer: usize, frame_pointer: usize) -> usize {
     // Save the GC context including the return address
     save_gc_context!(stack_pointer, frame_pointer);
-    let gc_return_addr = get_saved_gc_return_addr();
     #[cfg(feature = "debug-gc")]
     {
         eprintln!(
-            "DEBUG gc: stack_pointer={:#x}, frame_pointer={:#x}, gc_return_addr={:#x}",
-            stack_pointer, frame_pointer, gc_return_addr
+            "DEBUG gc: stack_pointer={:#x}, frame_pointer={:#x}",
+            stack_pointer, frame_pointer
         );
     }
     let runtime = get_runtime().get_mut();
-    runtime.gc_impl(stack_pointer, frame_pointer, gc_return_addr);
+    runtime.gc_impl(frame_pointer);
     BuiltInTypes::null_value() as usize
 }
 
@@ -4004,38 +4003,6 @@ extern "C" fn get_current_namespace(stack_pointer: usize, frame_pointer: usize) 
 pub unsafe extern "C" fn __pause(_stack_pointer: usize, frame_pointer: usize) -> usize {
     use crate::gc::usdt_probes::{self, ThreadStateCode};
 
-    // Get the gc_return_addr. When called from Rust code (get_my_thread_obj, gc_impl),
-    // save_gc_context! was already called with the correct Beagle return address.
-    // When called directly from Beagle (via primitive/__pause), we capture it ourselves.
-    //
-    // To distinguish these cases, we compare the Beagle frame_pointer we received
-    // with the saved frame_pointer from save_gc_context!. If they match, we're in
-    // the same Beagle call chain and the saved gc_return_addr is valid.
-    let saved_beagle_fp = get_saved_frame_pointer();
-    let my_rust_fp = get_current_rust_frame_pointer();
-    let captured_addr = unsafe { *((my_rust_fp + 8) as *const usize) };
-    let saved_addr = get_saved_gc_return_addr();
-
-    let gc_return_addr = if saved_beagle_fp != 0 && saved_beagle_fp == frame_pointer {
-        // Same Beagle frame as when save_gc_context! was called - use saved addr
-        if std::env::var("BEAGLE_PAUSE_DEBUG").is_ok() {
-            eprintln!(
-                "[PAUSE_DEBUG] Using saved gc_return_addr={:#x} (saved_fp={:#x} == frame_pointer={:#x})",
-                saved_addr, saved_beagle_fp, frame_pointer
-            );
-        }
-        saved_addr
-    } else {
-        // Called directly from Beagle with a different/no saved frame - capture our own
-        if std::env::var("BEAGLE_PAUSE_DEBUG").is_ok() {
-            eprintln!(
-                "[PAUSE_DEBUG] Using captured gc_return_addr={:#x} (saved_fp={:#x} != frame_pointer={:#x})",
-                captured_addr, saved_beagle_fp, frame_pointer
-            );
-        }
-        captured_addr
-    };
-
     let runtime = get_runtime().get_mut();
 
     // Fire USDT probe for thread state change
@@ -4045,7 +4012,7 @@ pub unsafe extern "C" fn __pause(_stack_pointer: usize, frame_pointer: usize) ->
     let pause_start = std::time::Instant::now();
 
     // Use frame_pointer passed from Beagle code for FP-chain stack walking
-    pause_current_thread(frame_pointer, gc_return_addr, runtime);
+    pause_current_thread(frame_pointer, runtime);
 
     // Memory barrier to ensure all writes are visible before parking
     std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
@@ -4071,13 +4038,11 @@ pub unsafe extern "C" fn __pause(_stack_pointer: usize, frame_pointer: usize) ->
     BuiltInTypes::null_value() as usize
 }
 
-fn pause_current_thread(frame_pointer: usize, gc_return_addr: usize, runtime: &mut Runtime) {
+fn pause_current_thread(frame_pointer: usize, runtime: &mut Runtime) {
     let thread_state = runtime.thread_state.clone();
     let (lock, condvar) = &*thread_state;
     let mut state = lock.lock().unwrap();
-    let stack_base = runtime.get_stack_base();
-    // Store (stack_base, frame_pointer, gc_return_addr) for stack walking
-    state.pause((stack_base, frame_pointer, gc_return_addr));
+    state.pause(frame_pointer);
     condvar.notify_one();
     drop(state);
 }
@@ -4091,17 +4056,12 @@ fn unpause_current_thread(runtime: &mut Runtime) {
 }
 
 pub extern "C" fn register_c_call(_stack_pointer: usize, frame_pointer: usize) -> usize {
-    // Capture our return address - this is the safepoint in Beagle code
-    let gc_return_addr = get_current_rust_frame_pointer();
-    let gc_return_addr = unsafe { *((gc_return_addr + 8) as *const usize) };
-
     // Use frame_pointer passed from Beagle code for FP-chain stack walking
     let runtime = get_runtime().get_mut();
     let thread_state = runtime.thread_state.clone();
     let (lock, condvar) = &*thread_state;
     let mut state = lock.lock().unwrap();
-    let stack_base = runtime.get_stack_base();
-    state.register_c_call((stack_base, frame_pointer, gc_return_addr));
+    state.register_c_call(frame_pointer);
     condvar.notify_one();
     BuiltInTypes::null_value() as usize
 }
@@ -4216,7 +4176,7 @@ pub extern "C" fn run_thread(_unused: usize) -> usize {
     {
         let (lock, condvar) = &*runtime.thread_state.clone();
         let mut state = lock.lock().unwrap();
-        state.register_c_call((0, 0, 0)); // No stack to scan
+        state.register_c_call(0); // No stack to scan
         condvar.notify_one();
     }
 

@@ -12,7 +12,7 @@ use crate::{
 };
 
 use super::{
-    AllocateAction, Allocator, AllocatorOptions, StackMap,
+    AllocateAction, Allocator, AllocatorOptions,
     continuation_walker::ContinuationSegmentWalker, mark_and_sweep::MarkAndSweep,
     stack_walker::StackWalker,
 };
@@ -340,7 +340,7 @@ pub struct GenerationalGC {
 }
 
 impl GenerationalGC {
-    fn update_continuation_segments(&mut self, stack_map: &StackMap) {
+    fn update_continuation_segments(&mut self) {
         let runtime = crate::get_runtime().get_mut();
 
         // Fast path: skip if no invocation return points
@@ -350,7 +350,6 @@ impl GenerationalGC {
 
         // Process InvocationReturnPoint saved frames.
         // The saved frame captures the handler's locals (from stack_pointer to frame_pointer).
-        // We use the return_address to look up the stack map and find which slots are active.
         for (_thread_id, rps) in runtime.invocation_return_points.iter_mut() {
             for rp in rps.iter_mut() {
                 if rp.saved_stack_frame.is_empty() {
@@ -360,8 +359,6 @@ impl GenerationalGC {
                     &mut rp.saved_stack_frame,
                     rp.stack_pointer,
                     rp.frame_pointer,
-                    rp.return_address,
-                    stack_map,
                     |old_value| self.copy(old_value),
                 );
             }
@@ -397,21 +394,17 @@ impl GenerationalGC {
         original_sp: usize,
         original_fp: usize,
         prompt_sp: usize,
-        resume_address: usize,
-        stack_map: &StackMap,
     ) {
         ContinuationSegmentWalker::update_segment_pointers(
             segment,
             original_sp,
             original_fp,
             prompt_sp,
-            resume_address,
-            stack_map,
             |old_value| self.copy(old_value),
         );
     }
 
-    fn update_continuation_segment(&mut self, cont: &ContinuationObject, stack_map: &StackMap) {
+    fn update_continuation_segment(&mut self, cont: &ContinuationObject) {
         cont.with_segment_bytes_mut(|segment| {
             if segment.is_empty() {
                 return;
@@ -422,8 +415,6 @@ impl GenerationalGC {
                 cont.original_sp(),
                 cont.original_fp(),
                 segment_end,
-                cont.resume_address(),
-                stack_map,
             );
         });
     }
@@ -468,8 +459,7 @@ impl Allocator for GenerationalGC {
 
     fn gc(
         &mut self,
-        stack_map: &super::StackMap,
-        stack_pointers: &[(usize, usize, usize)],
+        stack_pointers: &[(usize, usize)],
         extra_roots: &[(*mut usize, usize)],
     ) {
         if !self.options.gc {
@@ -477,9 +467,9 @@ impl Allocator for GenerationalGC {
         }
         if self.gc_count != 0 && self.gc_count.is_multiple_of(self.full_gc_frequency) {
             self.gc_count = 0;
-            self.full_gc(stack_map, stack_pointers, extra_roots);
+            self.full_gc(stack_pointers, extra_roots);
         } else {
-            self.minor_gc(stack_map, stack_pointers, extra_roots);
+            self.minor_gc(stack_pointers, extra_roots);
         }
         self.gc_count += 1;
     }
@@ -640,18 +630,15 @@ impl GenerationalGC {
     /// Returns (slot_refs, old_gen_values) - old gen values need field updates.
     fn gather_stack_root_refs(
         &self,
-        stack_map: &StackMap,
-        stack_pointers: &[(usize, usize, usize)],
+        stack_pointers: &[(usize, usize)],
     ) -> (Vec<RootRef>, Vec<usize>) {
         let mut slots = Vec::new();
         let mut old_gen_values = Vec::new();
 
-        for (stack_base, frame_pointer, gc_return_addr) in stack_pointers {
+        for (stack_base, frame_pointer) in stack_pointers {
             let (young_roots, old_roots) = self.gather_stack_roots_inner(
                 *stack_base,
-                stack_map,
                 *frame_pointer,
-                *gc_return_addr,
             );
 
             for (slot_addr, _value) in young_roots {
@@ -669,18 +656,14 @@ impl GenerationalGC {
     fn gather_stack_roots_inner(
         &self,
         stack_base: usize,
-        stack_map: &StackMap,
         frame_pointer: usize,
-        gc_return_addr: usize,
     ) -> (Vec<(usize, usize)>, Vec<usize>) {
         let mut roots: Vec<(usize, usize)> = Vec::with_capacity(36);
         let mut old_gen_objects: Vec<usize> = Vec::with_capacity(16);
 
-        StackWalker::walk_stack_roots_with_return_addr(
+        StackWalker::walk_stack_roots(
             stack_base,
             frame_pointer,
-            gc_return_addr,
-            stack_map,
             |slot_addr, slot_value| {
                 let untagged = BuiltInTypes::untag(slot_value);
                 if untagged == 0 {
@@ -690,12 +673,11 @@ impl GenerationalGC {
                     assert!(
                         self.young.contains_allocated(untagged as *const u8),
                         "Stale young gen pointer {:#x} (offset={}) found on stack at {:#x}, \
-                         young alloc_offset={}, stack_base={:#x}, fp={:#x}",
+                         young alloc_offset={}, fp={:#x}",
                         slot_value,
                         untagged - self.young.base_address(),
                         slot_addr,
                         self.young.allocation_offset(),
-                        stack_base,
                         frame_pointer,
                     );
                     roots.push((slot_addr, slot_value));
@@ -733,15 +715,14 @@ impl GenerationalGC {
 
     fn minor_gc(
         &mut self,
-        stack_map: &StackMap,
-        stack_pointers: &[(usize, usize, usize)],
+        stack_pointers: &[(usize, usize)],
         extra_roots: &[(*mut usize, usize)],
     ) {
         let start = std::time::Instant::now();
         usdt_probes::fire_gc_minor_start(self.gc_count);
 
         let (mut stack_roots, mut stack_old_gen) =
-            self.gather_stack_root_refs(stack_map, stack_pointers);
+            self.gather_stack_root_refs(stack_pointers);
 
         // Classify extra_roots (shadow stack handles) into young/old gen
         for &(slot_addr, value) in extra_roots {
@@ -759,7 +740,7 @@ impl GenerationalGC {
         self.process_all_roots(stack_roots);
 
         // Update continuation segments
-        self.update_continuation_segments(stack_map);
+        self.update_continuation_segments();
 
         // Update saved_continuation_ptr values (continuation objects saved in Rust runtime)
         self.update_saved_continuation_ptrs();
@@ -767,7 +748,7 @@ impl GenerationalGC {
         // Process old gen objects found on stack - update their young gen references.
         // This scans one level deep for old gen objects directly referenced from stack.
         for old_root in stack_old_gen {
-            self.process_old_gen_object(old_root, stack_map);
+            self.process_old_gen_object(old_root);
         }
 
         // Process remembered set - old gen objects that were mutated to point to young gen.
@@ -784,14 +765,14 @@ impl GenerationalGC {
         for old_object in remembered {
             #[cfg(feature = "debug-gc")]
             eprintln!("[GC DEBUG] Processing remembered object {:#x}", old_object);
-            self.process_old_gen_object(old_object, stack_map);
+            self.process_old_gen_object(old_object);
         }
 
         // Process dirty cards - cards marked by generated code write barriers.
         // We need to scan all objects in dirty cards for young gen references.
-        self.process_dirty_cards(stack_map);
+        self.process_dirty_cards();
 
-        self.copy_remaining(stack_map);
+        self.copy_remaining();
 
         self.young.clear();
 
@@ -806,7 +787,7 @@ impl GenerationalGC {
 
     /// Process dirty cards from the card table.
     /// Scans all objects in old gen that are in dirty cards for young gen references.
-    fn process_dirty_cards(&mut self, stack_map: &StackMap) {
+    fn process_dirty_cards(&mut self) {
         // Use the tracked dirty card indices (O(1) to get, no scanning)
         if !self.card_table.has_dirty_cards() {
             return;
@@ -847,12 +828,12 @@ impl GenerationalGC {
 
         // Now process each object
         for old_object in objects_to_process {
-            self.process_old_gen_object(old_object, stack_map);
+            self.process_old_gen_object(old_object);
         }
     }
 
     /// Process an old gen object's fields, copying any young gen references to old gen.
-    fn process_old_gen_object(&mut self, old_object: usize, stack_map: &StackMap) {
+    fn process_old_gen_object(&mut self, old_object: usize) {
         let mut heap_obj = HeapObject::from_tagged(old_object);
 
         // Process this old gen object's fields
@@ -894,12 +875,12 @@ impl GenerationalGC {
         if heap_obj.get_type_id() == TYPE_ID_CONTINUATION as usize
             && let Some(cont) = ContinuationObject::from_heap_object(heap_obj)
         {
-            self.update_continuation_segment(&cont, stack_map);
+            self.update_continuation_segment(&cont);
         }
 
         for cont_ptr in continuation_fields {
             if let Some(cont) = ContinuationObject::from_tagged(cont_ptr) {
-                self.update_continuation_segment(&cont, stack_map);
+                self.update_continuation_segment(&cont);
             }
         }
     }
@@ -934,13 +915,21 @@ impl GenerationalGC {
         }
 
         // Check if this user struct needs migration to a new shape
+        // Closures also have type_id=0 but must NOT be migrated as structs
         let new_pointer = if heap_object.get_type_id() == 0 && !heap_object.is_opaque_object() {
-            let shape_id = heap_object.get_struct_id();
-            let runtime = crate::get_runtime().get_mut();
-            if let Some(plan) = runtime.structs.migration_plan_for(shape_id) {
-                self.copy_with_migration(&heap_object, &plan)
+            let is_closure = heap_object.get_object_type() == Some(BuiltInTypes::Closure);
+            if !is_closure {
+                let shape_id = heap_object.get_struct_id();
+                let runtime = crate::get_runtime().get_mut();
+                if let Some(plan) = runtime.structs.migration_plan_for(shape_id) {
+                    self.copy_with_migration(&heap_object, &plan)
+                } else {
+                    // Normal copy
+                    let data = heap_object.get_full_object_data();
+                    self.old.copy_data_to_offset(data)
+                }
             } else {
-                // Normal copy
+                // Normal copy for closures
                 let data = heap_object.get_full_object_data();
                 self.old.copy_data_to_offset(data)
             }
@@ -999,7 +988,7 @@ impl GenerationalGC {
         self.old.copy_data_to_offset(&data)
     }
 
-    fn copy_remaining(&mut self, stack_map: &StackMap) {
+    fn copy_remaining(&mut self) {
         #[cfg(feature = "debug-gc")]
         let mut iterations = 0;
         while let Some(mut object) = self.copied.pop() {
@@ -1034,12 +1023,12 @@ impl GenerationalGC {
             if object.get_type_id() == TYPE_ID_CONTINUATION as usize
                 && let Some(cont) = ContinuationObject::from_heap_object(object)
             {
-                self.update_continuation_segment(&cont, stack_map);
+                self.update_continuation_segment(&cont);
             }
 
             for cont_ptr in continuation_fields {
                 if let Some(cont) = ContinuationObject::from_tagged(cont_ptr) {
-                    self.update_continuation_segment(&cont, stack_map);
+                    self.update_continuation_segment(&cont);
                 }
             }
         }
@@ -1052,13 +1041,12 @@ impl GenerationalGC {
 
     fn full_gc(
         &mut self,
-        stack_map: &StackMap,
-        stack_pointers: &[(usize, usize, usize)],
+        stack_pointers: &[(usize, usize)],
         extra_roots: &[(*mut usize, usize)],
     ) {
         usdt_probes::fire_gc_full_start(self.gc_count);
-        self.minor_gc(stack_map, stack_pointers, extra_roots);
-        self.old.gc(stack_map, stack_pointers, extra_roots);
+        self.minor_gc(stack_pointers, extra_roots);
+        self.old.gc(stack_pointers, extra_roots);
         usdt_probes::fire_gc_full_end(self.gc_count);
     }
 }

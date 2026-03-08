@@ -786,10 +786,13 @@ impl LowLevelArm {
 
     pub fn push_to_stack(&mut self, reg: Register) {
         self.increment_stack_size(1);
-        self.store_on_stack(reg, -(self.max_locals + self.stack_size))
+        self.store_on_stack(reg, -(self.max_locals + self.stack_size + Self::FRAME_HEADER_WORDS))
     }
+    /// Frame header occupies [FP-8], so locals start at [FP-16].
+    const FRAME_HEADER_WORDS: i32 = 1;
+
     pub fn store_local(&mut self, value: Register, offset: i32) {
-        self.store_on_stack(value, -(offset + 1));
+        self.store_on_stack(value, -(offset + 1 + Self::FRAME_HEADER_WORDS));
     }
 
     pub fn load_from_stack(&mut self, destination: Register, offset: i32) {
@@ -924,11 +927,11 @@ impl LowLevelArm {
 
     pub fn pop_from_stack(&mut self, reg: Register) {
         self.increment_stack_size(-1);
-        self.load_from_stack(reg, -(self.max_locals + self.stack_size + 1))
+        self.load_from_stack(reg, -(self.max_locals + self.stack_size + 1 + Self::FRAME_HEADER_WORDS))
     }
 
     pub fn load_local(&mut self, destination: Register, offset: i32) {
-        self.load_from_stack(destination, -(offset + 1));
+        self.load_from_stack(destination, -(offset + 1 + Self::FRAME_HEADER_WORDS));
     }
 
     pub fn load_from_heap(&mut self, destination: Register, source: Register, offset: i32) {
@@ -1404,8 +1407,8 @@ impl LowLevelArm {
         let num_callee_saved = used_callee_saved.len() as u64;
         self.num_callee_saved = num_callee_saved as usize;
 
-        // Calculate total stack size including callee-saved area
-        let mut max = self.max_stack_size as u64 + self.max_locals as u64 + num_callee_saved;
+        // Calculate total stack size: 1 for frame header + locals + eval stack + callee-saved
+        let mut max = 1 + self.max_stack_size as u64 + self.max_locals as u64 + num_callee_saved;
         let remainder = max % 2;
         if remainder != 0 {
             max += 1;
@@ -1427,7 +1430,8 @@ impl LowLevelArm {
             // Stack layout:
             //   [FP + 8]  -> Saved LR (X30)
             //   [FP + 0]  -> Saved FP (X29)
-            //   [FP - 8]  -> Local 0
+            //   [FP - 8]  -> Frame header (heap-object-style, type_id=37)
+            //   [FP - 16] -> Local 0
             //   ...
             //   [FP - N]  -> Stack slots
             //   [SP + (num_callee_saved-1)*8] -> First saved callee-saved reg
@@ -1465,6 +1469,35 @@ impl LowLevelArm {
                 self.max_locals, self.max_stack_size, slots_to_zero
             );
 
+            // Write frame header at [X29-8]. This is a heap-object-style header
+            // that lets GC know how many traced slots this frame has.
+            {
+                let num_slots = (self.max_locals + self.max_stack_size) as usize;
+                let frame_header = crate::types::Header {
+                    type_id: crate::collections::TYPE_ID_FRAME,
+                    type_data: (num_slots as u32) << 16,
+                    size: num_slots as u16,
+                    opaque: false,
+                    marked: false,
+                    large: false,
+                    type_flags: 0,
+                };
+                let header_value = frame_header.to_usize();
+
+                // Load the 64-bit header value into X11
+                for instr in Self::mov_64_bit_num(X11, header_value as isize) {
+                    alloc_instructions.push(instr);
+                }
+
+                // Store X11 to [X29 - 8]
+                alloc_instructions.push(ArmAsm::SturGen {
+                    size: 0b11,
+                    imm9: -8,
+                    rn: X29,
+                    rt: X11,
+                });
+            }
+
             if slots_to_zero > 0 {
                 // Load null value into X11 (NOT X9 - that's reserved for arg count!)
                 alloc_instructions.push(ArmAsm::Movz {
@@ -1474,12 +1507,12 @@ impl LowLevelArm {
                     sf: 1,
                 });
 
-                // X10 = X29 - 8 (point to first local slot)
+                // X10 = X29 - 16 (point to first local slot, after frame header at [X29-8])
                 alloc_instructions.push(ArmAsm::SubAddsubImm {
                     sf: 1,
                     rn: X29,
                     rd: X10,
-                    imm12: 8,
+                    imm12: 16,
                     sh: 0,
                 });
 
@@ -1705,10 +1738,9 @@ impl LowLevelArm {
             sf: dest.sf(),
             rn: X29,
             rd: dest,
-            imm12: (self.max_locals + self.stack_size + 1) * 8,
+            imm12: (self.max_locals + self.stack_size + 1 + Self::FRAME_HEADER_WORDS) * 8,
             sh: 0,
         });
-        // TODO: This seems
     }
 
     pub fn set_all_locals_to_null(&mut self, null_register: Register) {

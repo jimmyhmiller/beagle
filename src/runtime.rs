@@ -654,12 +654,12 @@ unsafe impl Send for CallbackInfo {}
 unsafe impl Sync for CallbackInfo {}
 
 pub struct ThreadState {
-    /// (stack_base, frame_pointer, gc_return_addr) for each paused thread, keyed by ThreadId.
+    /// frame_pointer for each paused thread, keyed by ThreadId.
     /// Using HashMap ensures each thread has exactly one entry and unpause removes the correct one.
-    pub stack_pointers: HashMap<ThreadId, (usize, usize, usize)>,
+    pub stack_pointers: HashMap<ThreadId, usize>,
     // TODO: I probably don't want to do this here. This requires taking a mutex
     // not really ideal for c calls.
-    pub c_calling_stack_pointers: HashMap<ThreadId, (usize, usize, usize)>,
+    pub c_calling_stack_pointers: HashMap<ThreadId, usize>,
 }
 
 impl ThreadState {
@@ -667,9 +667,9 @@ impl ThreadState {
         self.stack_pointers.len()
     }
 
-    pub fn pause(&mut self, stack_pointer: (usize, usize, usize)) {
+    pub fn pause(&mut self, frame_pointer: usize) {
         let thread_id = thread::current().id();
-        let prev = self.stack_pointers.insert(thread_id, stack_pointer);
+        let prev = self.stack_pointers.insert(thread_id, frame_pointer);
         debug_assert!(prev.is_none(), "Thread {:?} double-paused", thread_id);
     }
 
@@ -679,10 +679,10 @@ impl ThreadState {
         debug_assert!(removed.is_some(), "Thread {:?} not paused", thread_id);
     }
 
-    pub fn register_c_call(&mut self, stack_pointer: (usize, usize, usize)) {
+    pub fn register_c_call(&mut self, frame_pointer: usize) {
         let thread_id = thread::current().id();
         self.c_calling_stack_pointers
-            .insert(thread_id, stack_pointer);
+            .insert(thread_id, frame_pointer);
     }
 
     pub fn unregister_c_call(&mut self) {
@@ -3066,20 +3066,28 @@ impl Memory {
     }
 
     /// Convenience method for Runtime to trigger GC using Memory's own stack_map and thread_globals.
-    /// Collects shadow stack roots from all threads and passes them to the GC.
+    /// Collects shadow stack roots and head_block roots from all threads and passes them to the GC.
     /// namespace_roots: Additional GC roots from namespace bindings (passed from Runtime)
     /// Returns updated namespace root values after GC (for copying collectors)
     pub fn run_gc(
         &mut self,
-        stack_pointers: &[(usize, usize, usize)],
+        stack_pointers: &[(usize, usize)],
         namespace_roots: &[usize],
     ) -> Vec<usize> {
-        // Collect shadow stack entries from all threads as extra GC roots.
+        // Collect shadow stack entries and head_block roots from all threads as extra GC roots.
         // Safety: world is stopped during GC, so no thread modifies handle_stack.
         let mut extra_roots: Vec<(*mut usize, usize)> = {
             let thread_globals = self.thread_globals.lock().unwrap();
             let mut roots = Vec::new();
             for tg in thread_globals.values() {
+                // Add head_block as a GC root (so GlobalObjectBlock chain is traced)
+                let head_block_value = tg.head_block.load(Ordering::SeqCst);
+                if BuiltInTypes::is_heap_pointer(head_block_value) {
+                    // Get a *mut usize to the AtomicUsize's inner value
+                    let slot_addr = tg.head_block.as_ptr();
+                    roots.push((slot_addr, head_block_value));
+                }
+
                 for i in 0..tg.handle_stack_top {
                     let value = tg.handle_stack[i];
                     if BuiltInTypes::is_heap_pointer(value) {
@@ -3106,20 +3114,15 @@ impl Memory {
             }
         }
 
-        self.heap.gc(&self.stack_map, stack_pointers, &extra_roots);
+        self.heap.gc(stack_pointers, &extra_roots);
 
-        // Sync ThreadGlobal.head_block from stack slots (updated by GC)
-        // Hold lock for entire operation to prevent concurrent modifications
-        let mut thread_globals = self.thread_globals.lock().unwrap();
-        for (stack_base, _, _) in stack_pointers.iter() {
-            let global_block_slot = (stack_base - 8) as *const usize;
-            let new_head_block = unsafe { *global_block_slot };
-
-            for tg in thread_globals.values_mut() {
-                if tg.stack_base == *stack_base {
-                    tg.head_block.store(new_head_block, Ordering::SeqCst);
-                    break;
-                }
+        // Sync stack slots from updated head_block (GC may have moved the block)
+        // Direction: head_block → stack_base - 8
+        let thread_globals = self.thread_globals.lock().unwrap();
+        for tg in thread_globals.values() {
+            if tg.stack_base != 0 {
+                let new_head = tg.head_block.load(Ordering::SeqCst);
+                unsafe { *((tg.stack_base - 8) as *mut usize) = new_head; }
             }
         }
 
@@ -3143,11 +3146,10 @@ impl Allocator for Memory {
 
     fn gc(
         &mut self,
-        stack_map: &StackMap,
-        stack_pointers: &[(usize, usize, usize)],
+        stack_pointers: &[(usize, usize)],
         extra_roots: &[(*mut usize, usize)],
     ) {
-        self.heap.gc(stack_map, stack_pointers, extra_roots);
+        self.heap.gc(stack_pointers, extra_roots);
     }
 
     fn grow(&mut self) {
@@ -4865,44 +4867,20 @@ impl Runtime {
 
     /// GC entry point called when allocation fails or gc_always is set.
     /// With frame pointers enabled, we just read the current FP and walk from there.
-    fn run_gc(&mut self, stack_pointer: usize, frame_pointer: usize) {
-        let gc_return_addr = crate::builtins::get_saved_gc_return_addr();
-        self.gc_impl(stack_pointer, frame_pointer, gc_return_addr);
+    fn run_gc(&mut self, _stack_pointer: usize, frame_pointer: usize) {
+        self.gc_impl(frame_pointer);
     }
 
-    pub fn gc_impl(&mut self, stack_pointer: usize, frame_pointer: usize, gc_return_addr: usize) {
-        // Save the gc context so that any nested __pause calls use the correct address.
-        // This is critical: if we call __pause from within gc_impl, __pause must use
-        // the gc_return_addr we received (which points to Beagle code), not its own
-        // return address (which would point to gc_impl, Rust code).
-        crate::builtins::save_gc_return_addr(gc_return_addr);
+    pub fn gc_impl(&mut self, frame_pointer: usize) {
+        // Save the frame pointer so that any nested __pause calls use the correct address.
         crate::builtins::save_frame_pointer(frame_pointer);
-        // With frame pointers enabled everywhere (via -C force-frame-pointers=yes),
-        // we just start walking from the current Rust function's FP.
-        // The stack walker checks each [FP+8] against the stack map:
-        // - If in stack map, it's a Beagle frame → scan it
-        // - If not in stack map, it's a Rust frame → skip it
-        // This naturally handles the mixed Rust/Beagle call stack.
 
         if self.memory.threads.len() == 1 {
             // If there is only one thread, that is us
             // that means nothing else could spin up a thread in the mean time
             // so there is no need to lock anything
-            // The tuple is (stack_base, frame_pointer, gc_return_addr)
-            // We pass the saved gc_return_addr to ensure the first Beagle frame is scanned
-            let mut all_stack_pointers =
-                vec![(self.get_stack_base(), frame_pointer, gc_return_addr)];
-
-            // Also include all ThreadGlobal stack bases explicitly. This ensures the
-            // GlobalObjectBlock head pointers are always traced even if a thread's
-            // pause bookkeeping misses adding its stack entry (e.g., platform quirks).
-            let thread_globals = self.memory.thread_globals.lock().unwrap();
-            for tg in thread_globals.values() {
-                if tg.stack_base != 0 {
-                    all_stack_pointers.push((tg.stack_base, 0, 0));
-                }
-            }
-            drop(thread_globals);
+            let stack_base = self.get_stack_base();
+            let stack_pointers = vec![(stack_base, frame_pointer)];
 
             // Collect namespace bindings as GC roots
             // IMPORTANT: Namespace bindings are NOT in a heap-based PersistentMap despite
@@ -4918,7 +4896,7 @@ impl Runtime {
                 namespace_roots.extend(values);
             }
 
-            let updated_roots = self.memory.run_gc(&all_stack_pointers, &namespace_roots);
+            let updated_roots = self.memory.run_gc(&stack_pointers, &namespace_roots);
 
             // Write updated namespace roots back to namespaces (for copying GC)
             let mut root_index = 0;
@@ -4941,14 +4919,14 @@ impl Runtime {
             match e {
                 TryLockError::WouldBlock => {
                     drop(locked);
-                    unsafe { __pause(stack_pointer, frame_pointer) };
+                    unsafe { __pause(0, frame_pointer) };
                 }
                 TryLockError::Poisoned(e) => {
                     eprintln!("Warning: Poisoned lock in GC: {:?}", e);
                     // Try to recover by using the poisoned data anyway
                     // The lock is poisoned but the data might still be usable
                     drop(locked);
-                    unsafe { __pause(stack_pointer, frame_pointer) };
+                    unsafe { __pause(0, frame_pointer) };
                 }
             }
 
@@ -4965,7 +4943,7 @@ impl Runtime {
         );
         if result != Ok(0) {
             drop(locked);
-            unsafe { __pause(stack_pointer, frame_pointer) };
+            unsafe { __pause(0, frame_pointer) };
             return;
         }
 
@@ -5013,45 +4991,28 @@ impl Runtime {
             + thread_state.c_calling_stack_pointers.len();
         usdt_probes::fire_stw_all_paused(num_paused, total_threads);
 
-        // Paused threads already have (base, fp, gc_return_addr) triples
-        // Filter out null stacks - threads that pause with (0, 0, 0) are exiting
-        // and don't have a valid stack to scan.
-        let mut stack_pointers: Vec<(usize, usize, usize)> = thread_state
-            .stack_pointers
-            .values()
-            .copied()
-            .filter(|(base, _fp, _gc_ret)| *base != 0)
-            .collect();
-        // Also include threads that are in C calls (FFI) - their stacks must be scanned too!
-        // Filter out null stacks - threads that are exiting may register with (0, 0, 0)
-        // to maintain thread count, but we can't scan a null stack.
-        let c_calling_stacks: Vec<_> = thread_state
-            .c_calling_stack_pointers
-            .iter()
-            .map(|(tid, s)| (*tid, *s))
-            .collect();
-
-        stack_pointers.extend(
-            c_calling_stacks
-                .iter()
-                .map(|(_, s)| *s)
-                .filter(|(base, _fp, _gc_ret)| *base != 0),
-        );
-
-        // Add an explicit entry for each ThreadGlobal's stack base. This keeps the
-        // GlobalObjectBlock chain rooted even if a thread fails to register a pause
-        // record (observed on arm64 where handler roots went missing).
+        // Collect (stack_base, frame_pointer) pairs from paused threads.
+        // Look up stack_base from thread_globals for each thread.
         let thread_globals = self.memory.thread_globals.lock().unwrap();
-        for tg in thread_globals.values() {
-            if tg.stack_base != 0 {
-                stack_pointers.push((tg.stack_base, 0, 0));
-            }
+        let mut stack_pointers: Vec<(usize, usize)> = Vec::new();
+
+        for (tid, &fp) in thread_state.stack_pointers.iter() {
+            if fp == 0 { continue; }
+            let stack_base = thread_globals.get(tid).map(|tg| tg.stack_base).unwrap_or(0);
+            stack_pointers.push((stack_base, fp));
         }
+        // Also include threads in C calls (FFI)
+        for (tid, &fp) in thread_state.c_calling_stack_pointers.iter() {
+            if fp == 0 { continue; }
+            let stack_base = thread_globals.get(tid).map(|tg| tg.stack_base).unwrap_or(0);
+            stack_pointers.push((stack_base, fp));
+        }
+
+        // Main thread
+        let main_stack_base = self.get_stack_base();
+        stack_pointers.push((main_stack_base, frame_pointer));
+
         drop(thread_globals);
-
-        // Main thread uses the saved frame_pointer and gc_return_addr
-        stack_pointers.push((self.get_stack_base(), frame_pointer, gc_return_addr));
-
         drop(thread_state);
 
         // Collect namespace bindings as GC roots
@@ -5944,7 +5905,7 @@ impl Runtime {
         let gc_lock = loop {
             // Check if GC needs us to pause
             if self.is_paused() {
-                unsafe { __pause(stack_pointer, frame_pointer) };
+                unsafe { __pause(0, frame_pointer) };
             }
 
             match self.gc_lock.try_lock() {
@@ -5952,7 +5913,7 @@ impl Runtime {
                 Err(_) => {
                     // Couldn't get lock - GC might be starting
                     if self.is_paused() {
-                        unsafe { __pause(stack_pointer, frame_pointer) };
+                        unsafe { __pause(0, frame_pointer) };
                     }
                     std::thread::yield_now();
                 }
@@ -6010,7 +5971,7 @@ impl Runtime {
         {
             let (lock, condvar) = &*self.thread_state.clone();
             let mut state = lock.lock().unwrap();
-            state.c_calling_stack_pointers.insert(thread_id, (0, 0, 0));
+            state.c_calling_stack_pointers.insert(thread_id, 0);
             condvar.notify_one();
         }
         // Release gc_lock before allocating GlobalObject

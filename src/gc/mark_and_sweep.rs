@@ -11,7 +11,7 @@ use crate::{
 };
 
 use super::{
-    AllocateAction, Allocator, AllocatorOptions, StackMap,
+    AllocateAction, Allocator, AllocatorOptions,
     continuation_walker::ContinuationSegmentWalker, stack_walker::StackWalker,
 };
 
@@ -354,18 +354,13 @@ impl MarkAndSweep {
     fn mark(
         &self,
         stack_base: usize,
-        stack_map: &super::StackMap,
         frame_pointer: usize,
-        gc_return_addr: usize,
     ) {
         let mut to_mark: Vec<HeapObject> = Vec::with_capacity(128);
 
-        // Use the stack walker with explicit return address
-        StackWalker::walk_stack_roots_with_return_addr(
+        StackWalker::walk_stack_roots(
             stack_base,
             frame_pointer,
-            gc_return_addr,
-            stack_map,
             |_slot_addr, pointer| {
                 let untagged = BuiltInTypes::untag(pointer);
                 // Skip null and misaligned pointers
@@ -377,7 +372,7 @@ impl MarkAndSweep {
         );
 
         // Scan continuation segments for heap pointers
-        self.mark_continuation_roots(stack_map, &mut to_mark);
+        self.mark_continuation_roots(&mut to_mark);
 
         while let Some(object) = to_mark.pop() {
             if object.marked() {
@@ -398,8 +393,6 @@ impl MarkAndSweep {
                             cont.original_sp(),
                             cont.original_fp(),
                             segment_end,
-                            cont.resume_address(),
-                            stack_map,
                             |_offset, pointer| {
                                 let untagged = BuiltInTypes::untag(pointer);
                                 if untagged != 0 && untagged.is_multiple_of(8) {
@@ -418,7 +411,7 @@ impl MarkAndSweep {
 
     /// Mark extra roots from shadow stacks (HandleScope handles).
     /// These are heap pointers stored in Rust-side Vec buffers.
-    fn mark_extra_roots(&self, extra_roots: &[(*mut usize, usize)], stack_map: &StackMap) {
+    fn mark_extra_roots(&self, extra_roots: &[(*mut usize, usize)]) {
         let mut to_mark: Vec<HeapObject> = Vec::new();
         for &(slot_addr, _cached_value) in extra_roots {
             let value = unsafe { *slot_addr };
@@ -447,8 +440,6 @@ impl MarkAndSweep {
                             cont.original_sp(),
                             cont.original_fp(),
                             segment_end,
-                            cont.resume_address(),
-                            stack_map,
                             |_offset, pointer| {
                                 let untagged = BuiltInTypes::untag(pointer);
                                 if untagged != 0 && untagged.is_multiple_of(8) {
@@ -465,7 +456,7 @@ impl MarkAndSweep {
         }
     }
 
-    fn mark_continuation_roots(&self, stack_map: &StackMap, to_mark: &mut Vec<HeapObject>) {
+    fn mark_continuation_roots(&self, to_mark: &mut Vec<HeapObject>) {
         let runtime = crate::get_runtime().get();
 
         // Scan InvocationReturnPoint saved frames (for multi-shot continuations)
@@ -479,8 +470,6 @@ impl MarkAndSweep {
                     &rp.saved_stack_frame,
                     rp.stack_pointer,
                     rp.frame_pointer,
-                    rp.return_address,
-                    stack_map,
                     |_offset, pointer| {
                         let untagged = BuiltInTypes::untag(pointer);
                         if untagged != 0 && untagged.is_multiple_of(8) {
@@ -625,40 +614,44 @@ impl MarkAndSweep {
             let full_size = heap_object.full_size();
 
             if heap_object.get_type_id() == 0 && !heap_object.is_opaque_object() {
-                let shape_id = heap_object.get_struct_id();
-                if let Some(plan) = runtime.structs.migration_plan_for(shape_id) {
-                    let old_header = heap_object.get_header();
-                    let new_header = Header {
-                        type_id: old_header.type_id,
-                        type_data: plan.new_shape_id as u32,
-                        size: plan.new_field_count as u16,
-                        opaque: old_header.opaque,
-                        marked: false,
-                        large: false,
-                        type_flags: old_header.type_flags,
-                    };
-
-                    let total_bytes = 8 + plan.new_field_count * 8;
-                    let mut data = vec![0u8; total_bytes];
-                    data[0..8].copy_from_slice(&new_header.to_usize().to_ne_bytes());
-
-                    let null_val = BuiltInTypes::null_value() as usize;
-                    for (new_idx, mapping) in plan.field_map.iter().enumerate() {
-                        let value = match mapping {
-                            Some(old_idx) => heap_object.get_field(*old_idx),
-                            None => null_val,
+                // Closures also have type_id=0 but must NOT be migrated as structs
+                let is_closure = heap_object.get_object_type() == Some(BuiltInTypes::Closure);
+                if !is_closure {
+                    let shape_id = heap_object.get_struct_id();
+                    if let Some(plan) = runtime.structs.migration_plan_for(shape_id) {
+                        let old_header = heap_object.get_header();
+                        let new_header = Header {
+                            type_id: old_header.type_id,
+                            type_data: plan.new_shape_id as u32,
+                            size: plan.new_field_count as u16,
+                            opaque: old_header.opaque,
+                            marked: false,
+                            large: false,
+                            type_flags: old_header.type_flags,
                         };
-                        let field_offset = (1 + new_idx) * 8;
-                        data[field_offset..field_offset + 8].copy_from_slice(&value.to_ne_bytes());
-                    }
 
-                    let new_ptr = self.copy_data_to_offset(&data);
-                    forwarding_map.push((ptr as usize, full_size, new_ptr as usize));
+                        let total_bytes = 8 + plan.new_field_count * 8;
+                        let mut data = vec![0u8; total_bytes];
+                        data[0..8].copy_from_slice(&new_header.to_usize().to_ne_bytes());
 
-                    // Set forwarding pointer in old object's header
-                    let tagged_new = BuiltInTypes::HeapObject.tag(new_ptr as isize) as usize;
-                    unsafe {
-                        *(ptr as *mut usize) = Header::set_forwarding_bit(tagged_new);
+                        let null_val = BuiltInTypes::null_value() as usize;
+                        for (new_idx, mapping) in plan.field_map.iter().enumerate() {
+                            let value = match mapping {
+                                Some(old_idx) => heap_object.get_field(*old_idx),
+                                None => null_val,
+                            };
+                            let field_offset = (1 + new_idx) * 8;
+                            data[field_offset..field_offset + 8].copy_from_slice(&value.to_ne_bytes());
+                        }
+
+                        let new_ptr = self.copy_data_to_offset(&data);
+                        forwarding_map.push((ptr as usize, full_size, new_ptr as usize));
+
+                        // Set forwarding pointer in old object's header
+                        let tagged_new = BuiltInTypes::HeapObject.tag(new_ptr as isize) as usize;
+                        unsafe {
+                            *(ptr as *mut usize) = Header::set_forwarding_bit(tagged_new);
+                        }
                     }
                 }
             }
@@ -791,20 +784,19 @@ impl Allocator for MarkAndSweep {
 
     fn gc(
         &mut self,
-        stack_map: &StackMap,
-        stack_pointers: &[(usize, usize, usize)],
+        stack_pointers: &[(usize, usize)],
         extra_roots: &[(*mut usize, usize)],
     ) {
         if !self.options.gc {
             return;
         }
         let start = std::time::Instant::now();
-        for (stack_base, frame_pointer, gc_return_addr) in stack_pointers {
-            self.mark(*stack_base, stack_map, *frame_pointer, *gc_return_addr);
+        for (stack_base, frame_pointer) in stack_pointers {
+            self.mark(*stack_base, *frame_pointer);
         }
 
         // Mark extra roots from shadow stacks
-        self.mark_extra_roots(extra_roots, stack_map);
+        self.mark_extra_roots(extra_roots);
 
         self.sweep();
 

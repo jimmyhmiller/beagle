@@ -491,8 +491,8 @@ impl CodegenBackend for Arm64Backend {
     }
 
     fn get_local_byte_offset(&self, local_index: usize) -> isize {
-        // On ARM64, locals are at [FP - (local_index + 1) * 8]
-        -(((local_index + 1) * 8) as isize)
+        // Locals start at [FP-16] (FP-8 is the frame header)
+        -(((local_index + 2) * 8) as isize)
     }
 
     fn zero_register(&self) -> Self::Register {

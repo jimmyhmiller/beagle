@@ -11,7 +11,7 @@ use crate::{
         Condition as X86Cond, R8, R9, R10, R11, R12, R13, R14, R15, RAX, RBP, RBX, RCX, RDI, RDX,
         RSI, RSP, X86Asm, X86Register,
     },
-    types::BuiltInTypes,
+    types::{BuiltInTypes, Header},
 };
 
 use std::collections::HashMap;
@@ -605,11 +605,13 @@ impl LowLevelX86 {
 
     // === Stack operations ===
 
-    const CALLEE_SAVED_SIZE: i32 = 0;
+    /// Offset in bytes from FP to the first local slot.
+    /// The frame header word lives at [FP-8], so locals start at [FP-16].
+    const FRAME_HEADER_SIZE: i32 = 8;
 
     pub fn push_to_stack(&mut self, reg: X86Register) {
         self.increment_stack_size(1);
-        let offset = Self::CALLEE_SAVED_SIZE + (self.max_locals + self.stack_size) * 8;
+        let offset = Self::FRAME_HEADER_SIZE + (self.max_locals + self.stack_size) * 8;
         self.instructions.push(X86Asm::MovMR {
             base: RBP,
             offset: -offset,
@@ -618,7 +620,7 @@ impl LowLevelX86 {
     }
 
     pub fn pop_from_stack(&mut self, reg: X86Register) {
-        let offset = Self::CALLEE_SAVED_SIZE + (self.max_locals + self.stack_size) * 8;
+        let offset = Self::FRAME_HEADER_SIZE + (self.max_locals + self.stack_size) * 8;
         self.instructions.push(X86Asm::MovRM {
             dest: reg,
             base: RBP,
@@ -640,7 +642,7 @@ impl LowLevelX86 {
         self.instructions.push(X86Asm::MovRM {
             dest,
             base: RBP,
-            offset: -Self::CALLEE_SAVED_SIZE - (offset + 1) * 8,
+            offset: -Self::FRAME_HEADER_SIZE - (offset + 1) * 8,
         });
     }
 
@@ -656,7 +658,7 @@ impl LowLevelX86 {
         }
         self.instructions.push(X86Asm::MovMR {
             base: RBP,
-            offset: -Self::CALLEE_SAVED_SIZE - (offset + 1) * 8,
+            offset: -Self::FRAME_HEADER_SIZE - (offset + 1) * 8,
             src,
         });
     }
@@ -741,7 +743,7 @@ impl LowLevelX86 {
     }
 
     pub fn get_current_stack_position(&mut self, dest: X86Register) {
-        let offset = Self::CALLEE_SAVED_SIZE + (self.max_locals + self.stack_size + 1) * 8;
+        let offset = Self::FRAME_HEADER_SIZE + (self.max_locals + self.stack_size + 1) * 8;
         self.instructions.push(X86Asm::Lea {
             dest,
             base: RBP,
@@ -1252,8 +1254,8 @@ impl LowLevelX86 {
         let num_callee_saved = used_callee_saved.len();
         self.num_callee_saved = num_callee_saved;
 
-        // Calculate stack size including space for callee-saved registers
-        let mut slots = self.max_locals + self.max_stack_size + num_callee_saved as i32;
+        // Calculate stack size: 1 for frame header + locals + eval stack + callee-saved
+        let mut slots = 1 + self.max_locals + self.max_stack_size + num_callee_saved as i32;
         if slots % 2 != 0 {
             slots += 1;
         }
@@ -1288,11 +1290,32 @@ impl LowLevelX86 {
                 inserted_instructions.push(instr);
             }
 
-            // CRITICAL FIX: Zero out local and eval stack slots to prevent GC from
-            // seeing garbage. When GC runs, the stack walker scans all locals and
-            // the full eval stack area (max_stack_size). Uninitialized slots could
-            // contain stale pointers from previous stack usage or previous GC cycles.
-            // Initialize all local AND eval stack slots to null (0x7, tagged null).
+            // Write frame header at [RBP-8]. This is a heap-object-style header
+            // that lets GC know how many traced slots this frame has.
+            let num_slots = (self.max_locals + self.max_stack_size) as usize;
+            let frame_header = Header {
+                type_id: crate::collections::TYPE_ID_FRAME,
+                type_data: (num_slots as u32) << 16,
+                size: num_slots as u16,
+                opaque: false,
+                marked: false,
+                large: false,
+                type_flags: 0,
+            };
+            let header_value = frame_header.to_usize();
+            // Use MovRI to load the 64-bit header value, then store to [RBP-8]
+            inserted_instructions.push(X86Asm::MovRI {
+                dest: R11,
+                imm: header_value as i64,
+            });
+            inserted_instructions.push(X86Asm::MovMR {
+                base: RBP,
+                offset: -8,
+                src: R11,
+            });
+
+            // Zero out local and eval stack slots to prevent GC from seeing garbage.
+            // Locals start at [RBP-16] (after the frame header at [RBP-8]).
             let slots_to_zero = self.max_locals + self.max_stack_size;
             if slots_to_zero > 0 {
                 let null_value = BuiltInTypes::null_value() as i32;
@@ -1303,11 +1326,12 @@ impl LowLevelX86 {
                     imm: null_value,
                 });
 
-                // Store null to each local and eval stack slot at [RBP - (i+1)*8]
+                // Store null to each local and eval stack slot at [RBP - (i+2)*8]
+                // (skipping [RBP-8] which is the frame header)
                 for i in 0..slots_to_zero {
                     inserted_instructions.push(X86Asm::MovMR {
                         base: RBP,
-                        offset: -((i + 1) * 8),
+                        offset: -((i + 2) * 8),
                         src: R11,
                     });
                 }
