@@ -1,0 +1,28 @@
+namespace gc_handler_minimal_test
+// gc-always
+
+use beagle.effect as effect
+
+enum Log {
+    Info { message }
+}
+
+struct ConsoleLogger {}
+
+extend ConsoleLogger with effect/Handler(Log) {
+    fn handle(self, op, resume) {
+        resume(null)
+    }
+}
+
+fn main() {
+    let logger = ConsoleLogger {}
+    let result = handle effect/Handler(Log) with logger {
+        perform Log.Info { message: "test" }
+        42
+    }
+    println(result)
+}
+
+// @beagle.core.snapshot
+// 42

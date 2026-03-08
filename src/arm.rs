@@ -922,7 +922,10 @@ impl LowLevelArm {
 
     pub fn pop_from_stack_indexed(&mut self, reg: Register, offset: i32) {
         self.increment_stack_size(-1);
-        self.load_from_stack(reg, -(offset + self.max_locals + 1))
+        self.load_from_stack(
+            reg,
+            -(offset + self.max_locals + 1 + Self::FRAME_HEADER_WORDS),
+        )
     }
 
     pub fn pop_from_stack_indexed_raw(&mut self, reg: Register, offset: i32) {
