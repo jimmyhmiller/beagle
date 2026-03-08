@@ -11101,23 +11101,28 @@ pub unsafe extern "C" fn return_from_shift_runtime(
                 .insert(thread_id, current_depth - 1);
         }
 
-        // Copy modifications from the relocated stack segment back to the original
-        // location. This propagates changes made inside the handle body (e.g., mutations
-        // to outer variables like `sum = sum + v`) back to the original frame.
-        // Only root invocations copy back (nested invocations point to relocated stacks).
-        if return_point.is_root_invocation && return_point.segment_len > 0 {
+        // Copy only mutable local/eval-slot ranges from the relocated segment back to
+        // the original location. Do not copy frame metadata (saved FP/LR, frame header,
+        // GC links, callee-saved registers), which would corrupt control flow.
+        if return_point.is_root_invocation && !return_point.mutable_ranges.is_empty() {
+            let total_copy_bytes: usize = return_point.mutable_ranges.iter().map(|r| r.len).sum();
             if debug_prompts {
                 eprintln!(
-                    "[return_from_shift] Copying modifications: {} bytes from relocated_sp={:#x} to original_sp={:#x}",
-                    return_point.segment_len, return_point.relocated_sp, return_point.original_sp
+                    "[return_from_shift] Copying mutable slots: {} ranges, {} bytes from relocated_sp={:#x} to original_sp={:#x}",
+                    return_point.mutable_ranges.len(),
+                    total_copy_bytes,
+                    return_point.relocated_sp,
+                    return_point.original_sp
                 );
             }
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    return_point.relocated_sp as *const u8,
-                    return_point.original_sp as *mut u8,
-                    return_point.segment_len,
-                );
+            for range in &return_point.mutable_ranges {
+                unsafe {
+                    std::ptr::copy(
+                        (return_point.relocated_sp + range.offset) as *const u8,
+                        (return_point.original_sp + range.offset) as *mut u8,
+                        range.len,
+                    );
+                }
             }
         }
 
@@ -11570,8 +11575,10 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
         actual_rsp = stack_pointer;
     }
 
-    // Place the reconstructed stack below actual RSP with safety margin
-    let safety_margin = stack_segment_size.max(4096) + 4096;
+    // Place the reconstructed stack well below the active Rust stack.
+    // We still do runtime bookkeeping (HashMap/prompt stack updates) before the final
+    // jump, and that transient Rust stack usage must not overlap the reconstructed segment.
+    let safety_margin = stack_segment_size.max(4096) + 1024 * 1024;
     let new_sp = actual_rsp - stack_segment_size - safety_margin;
     let new_sp = new_sp & !0xF;
 
@@ -11629,11 +11636,13 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
     }
 
     let mut restored_fps: Vec<usize> = Vec::with_capacity(frames.len());
+    let mut mutable_ranges: Vec<crate::runtime::StackCopyRange> = Vec::with_capacity(frames.len());
     for (idx, frame) in frames.iter().enumerate() {
         let frame_size = frame.total_stack_size();
         let frame_bottom = current_top - frame_size;
         let target_fp = current_top - 16; // FP is 16 bytes below the top of the frame
         // (saved_fp at [fp+0], saved_lr at [fp+8])
+        let num_locals = frame.num_locals();
 
         // Determine the caller FP for this frame
         let caller_fp = if idx == 0 {
@@ -11652,6 +11661,38 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
 
         frame.restore_to_stack(target_fp, caller_fp);
         restored_fps.push(target_fp);
+
+        if num_locals > 0 {
+            let range_len = num_locals * 8;
+            let range_start = target_fp.checked_sub(16 + range_len).unwrap_or_else(|| {
+                panic!(
+                    "[invoke_cont] Mutable range underflow: target_fp={:#x} num_locals={}",
+                    target_fp, num_locals
+                )
+            });
+            let range_offset = range_start.checked_sub(new_sp).unwrap_or_else(|| {
+                panic!(
+                    "[invoke_cont] Mutable range below segment: start={:#x} new_sp={:#x}",
+                    range_start, new_sp
+                )
+            });
+            let range_end = range_offset.checked_add(range_len).unwrap_or_else(|| {
+                panic!(
+                    "[invoke_cont] Mutable range overflow: offset={} len={}",
+                    range_offset, range_len
+                )
+            });
+            if range_end > stack_segment_size {
+                panic!(
+                    "[invoke_cont] Mutable range out of bounds: offset={} len={} segment_len={}",
+                    range_offset, range_len, stack_segment_size
+                );
+            }
+            mutable_ranges.push(crate::runtime::StackCopyRange {
+                offset: range_offset,
+                len: range_len,
+            });
+        }
 
         prev_fp = target_fp;
         current_top = frame_bottom;
@@ -11690,7 +11731,6 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
     }
 
     let result_ptr = (new_fp as isize).wrapping_add(continuation.result_local()) as *mut usize;
-
     // Create InvocationReturnPoint for multi-shot support
     let current_depth = runtime
         .relocation_depth
@@ -11716,6 +11756,7 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
             relocated_sp: new_sp,
             original_sp,
             segment_len: stack_segment_size,
+            mutable_ranges,
             is_root_invocation,
         });
 

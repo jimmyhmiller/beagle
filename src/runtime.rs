@@ -3440,6 +3440,15 @@ pub struct PromptHandler {
 /// When a continuation k is invoked via k(value), we save where to return after the
 /// continuation body completes. This enables multiple invocations like [k(1), k(2), k(3)].
 #[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct StackCopyRange {
+    /// Byte offset from segment base (relocated_sp/original_sp).
+    pub offset: usize,
+    /// Number of bytes to copy at this offset.
+    pub len: usize,
+}
+
+#[repr(C)]
 #[derive(Debug, Clone)]
 pub struct InvocationReturnPoint {
     /// Stack pointer at the point where k(value) was called
@@ -3469,6 +3478,9 @@ pub struct InvocationReturnPoint {
     pub original_sp: usize,
     /// Length of the stack segment in bytes.
     pub segment_len: usize,
+    /// Byte ranges within the segment that are mutable frame slots (locals/eval stack).
+    /// These are copied back to original_sp on root return; frame metadata is excluded.
+    pub mutable_ranges: Vec<StackCopyRange>,
     /// Whether this is a "root" invocation from original code (true) or a nested
     /// invocation from within a continuation body (false).
     /// Only root invocations should copy modifications back, because nested invocations
@@ -3629,9 +3641,9 @@ impl ContinuationObject {
 ///   [0] parent          — tagged ptr to parent CapturedFrame (or null)
 ///   [1] return_address  — tagged int: saved LR / return address
 ///   [2] saved_caller_fp — tagged int: the saved caller FP from [FP+0] at capture time
-///   [3] frame_info      — tagged int: packs (num_locals << 32 | num_callee_saved << 16 | original_frame_size)
+///   [3] frame_info      — tagged int: packs (num_locals << 32 | num_trailing_words << 16 | original_frame_size)
 ///   [4..4+num_locals-1] — local/eval-stack slots (GC traced)
-///   [4+num_locals..]    — callee-saved register values (NOT GC traced)
+///   [4+num_locals..]    — trailing frame words below locals (callee-saved + alignment padding)
 pub struct CapturedFrame {
     heap_obj: HeapObject,
 }
@@ -3677,21 +3689,26 @@ impl CapturedFrame {
         BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_SAVED_FP_OFFSET))
     }
 
-    /// Decode frame_info: (num_locals, num_callee_saved, original_frame_size)
+    /// Decode frame_info: (num_locals, num_trailing_words, original_frame_size)
     fn decode_frame_info(&self) -> (usize, usize, usize) {
         let info = BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_FRAME_INFO));
         let num_locals = (info >> 32) & 0xFFFF;
-        let num_callee_saved = (info >> 16) & 0xFFFF;
+        let num_trailing_words = (info >> 16) & 0xFFFF;
         let original_frame_size = info & 0xFFFF;
-        (num_locals, num_callee_saved, original_frame_size)
+        (num_locals, num_trailing_words, original_frame_size)
     }
 
     pub fn num_locals(&self) -> usize {
         self.decode_frame_info().0
     }
 
-    pub fn num_callee_saved(&self) -> usize {
+    pub fn num_trailing_words(&self) -> usize {
         self.decode_frame_info().1
+    }
+
+    /// Backward-compatible alias used in debug logging.
+    pub fn num_callee_saved(&self) -> usize {
+        self.num_trailing_words()
     }
 
     /// Total size of this frame on the native stack (in bytes).
@@ -3702,7 +3719,7 @@ impl CapturedFrame {
     }
 
     /// Total native stack bytes this frame needs when restored:
-    /// saved_fp(8) + saved_lr(8) + header(8) + prev(8) + num_locals*8 + callee_saved*8
+    /// saved_fp(8) + saved_lr(8) + header(8) + prev(8) + num_locals*8 + trailing_words*8
     /// = original_frame_size
     pub fn total_stack_size(&self) -> usize {
         self.original_frame_size()
@@ -3741,16 +3758,17 @@ impl CapturedFrame {
 
         let return_address = unsafe { *((fp + 8) as *const usize) };
 
-        // Calculate callee-saved count from frame geometry
+        // Calculate trailing-word count from frame geometry.
+        // This includes callee-saved register spill slots and any alignment padding.
         // Frame layout: [saved_fp(8) + saved_lr(8)] + [header(8) + prev(8)] + [locals * 8] + [callee_saved * 8]
         // frame_size = fp + 16 - frame_bottom  (the +16 is for saved FP and LR at the top)
         let frame_size = (fp + 16).saturating_sub(frame_bottom);
         let header_and_locals_bytes = 16 + num_slots * 8; // header(8) + prev(8) + locals
-        let callee_saved_bytes = frame_size.saturating_sub(16 + header_and_locals_bytes);
-        let num_callee_saved = callee_saved_bytes / 8;
+        let trailing_bytes = frame_size.saturating_sub(16 + header_and_locals_bytes);
+        let num_trailing_words = trailing_bytes / 8;
 
-        // Total fields: 4 metadata + num_slots locals + num_callee_saved
-        let total_fields = 4 + num_slots + num_callee_saved;
+        // Total fields: 4 metadata + num_slots locals + trailing words
+        let total_fields = 4 + num_slots + num_trailing_words;
 
         // Allocate the heap object
         let obj_ptr = match runtime.allocate(total_fields, stack_pointer, BuiltInTypes::HeapObject)
@@ -3783,9 +3801,9 @@ impl CapturedFrame {
             unsafe { *size_ptr = total_fields };
         }
 
-        // Encode frame_info: pack (num_locals, num_callee_saved, original_frame_size)
+        // Encode frame_info: pack (num_locals, num_trailing_words, original_frame_size)
         let frame_info = ((num_slots & 0xFFFF) << 32)
-            | ((num_callee_saved & 0xFFFF) << 16)
+            | ((num_trailing_words & 0xFFFF) << 16)
             | (frame_size & 0xFFFF);
 
         // Write metadata fields
@@ -3814,15 +3832,13 @@ impl CapturedFrame {
             obj.write_field((Self::LOCALS_START + i) as i32, slot_value);
         }
 
-        // Copy callee-saved registers from stack (below locals, above frame_bottom)
-        // They are at [FP - 24 - num_slots*8 - 8], [FP - 24 - num_slots*8 - 16], ...
-        for i in 0..num_callee_saved {
-            let reg_addr = fp
-                .wrapping_sub(24)
-                .wrapping_sub(num_slots * 8)
-                .wrapping_sub(i * 8);
-            let reg_value = unsafe { *(reg_addr as *const usize) };
-            obj.write_field((Self::LOCALS_START + num_slots + i) as i32, reg_value);
+        // Copy the trailing frame words from bottom to top.
+        // This preserves the exact frame tail (callee-saved slots + alignment padding)
+        // without guessing how many words are true register spills.
+        for i in 0..num_trailing_words {
+            let word_addr = frame_bottom.wrapping_add(i * 8);
+            let word_value = unsafe { *(word_addr as *const usize) };
+            obj.write_field((Self::LOCALS_START + num_slots + i) as i32, word_value);
         }
 
         obj_ptr
@@ -3840,7 +3856,7 @@ impl CapturedFrame {
     /// NOTE: This does NOT link the frame into the GC chain. The caller must
     /// call link_restored_frames_into_gc_chain() after restoring all frames.
     pub fn restore_to_stack(&self, target_fp: usize, caller_fp: usize) {
-        let (num_locals, num_callee_saved, _) = self.decode_frame_info();
+        let (num_locals, num_trailing_words, frame_size) = self.decode_frame_info();
 
         // Write saved FP (will be set by caller to point to next frame's FP)
         unsafe { *(target_fp as *mut usize) = caller_fp };
@@ -3870,14 +3886,15 @@ impl CapturedFrame {
             unsafe { *(slot_addr as *mut usize) = slot_value };
         }
 
-        // Restore callee-saved registers
-        for i in 0..num_callee_saved {
-            let reg_value = self.heap_obj.get_field(Self::LOCALS_START + num_locals + i);
-            let reg_addr = target_fp
-                .wrapping_sub(24)
-                .wrapping_sub(num_locals * 8)
-                .wrapping_sub(i * 8);
-            unsafe { *(reg_addr as *mut usize) = reg_value };
+        // Restore trailing frame words at the frame bottom.
+        let frame_bottom = target_fp
+            .checked_add(16)
+            .and_then(|v| v.checked_sub(frame_size))
+            .expect("CapturedFrame restore underflow computing frame_bottom");
+        for i in 0..num_trailing_words {
+            let word_value = self.heap_obj.get_field(Self::LOCALS_START + num_locals + i);
+            let word_addr = frame_bottom.wrapping_add(i * 8);
+            unsafe { *(word_addr as *mut usize) = word_value };
         }
     }
 
