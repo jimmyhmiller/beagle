@@ -66,11 +66,7 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         result
     }
 
-    fn gc(
-        &mut self,
-        gc_frame_tops: &[usize],
-        extra_roots: &[(*mut usize, usize)],
-    ) {
+    fn gc(&mut self, gc_frame_tops: &[usize], extra_roots: &[(*mut usize, usize)]) {
         if self.registered_threads.load(Ordering::Acquire) == 0 {
             return self.alloc.gc(gc_frame_tops, extra_roots);
         }

@@ -446,19 +446,14 @@ impl Allocator for CompactingHeap {
         Ok(AllocateAction::Allocated(pointer))
     }
 
-    fn gc(
-        &mut self,
-        gc_frame_tops: &[usize],
-        extra_roots: &[(*mut usize, usize)],
-    ) {
+    fn gc(&mut self, gc_frame_tops: &[usize], extra_roots: &[(*mut usize, usize)]) {
         if !self.options.gc {
             return;
         }
 
         for &gc_frame_top in gc_frame_tops.iter() {
             let roots = StackWalker::collect_stack_roots(gc_frame_top);
-            let new_roots =
-                unsafe { self.copy_all(roots.iter().map(|x| x.1).collect()) };
+            let new_roots = unsafe { self.copy_all(roots.iter().map(|x| x.1).collect()) };
 
             for (i, (slot_addr, _)) in roots.iter().enumerate() {
                 debug_assert!(

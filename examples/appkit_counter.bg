@@ -1,0 +1,181 @@
+namespace appkit_counter
+
+// A native macOS counter app using AppKit via Objective-C FFI.
+// No frameworks, no bindings generator — just raw objc_msgSend calls
+// from a dynamic language that compiles to machine code.
+//
+// Run: cargo run -- examples/appkit_counter.bg
+
+use beagle.ffi as ffi
+
+// ─── ObjC Runtime ──────────────────────────────────────────────────
+
+let objc = ffi/load-library("libobjc.dylib")
+let _appkit = ffi/load-library("/System/Library/Frameworks/AppKit.framework/AppKit")
+
+let objc_getClass = ffi/get-function(objc, "objc_getClass", [ffi/Type.String], ffi/Type.Pointer)
+let sel_registerName = ffi/get-function(objc, "sel_registerName", [ffi/Type.String], ffi/Type.Pointer)
+let objc_allocateClassPair = ffi/get-function(objc, "objc_allocateClassPair",
+    [ffi/Type.Pointer, ffi/Type.String, ffi/Type.U64], ffi/Type.Pointer)
+let class_addMethod = ffi/get-function(objc, "class_addMethod",
+    [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.String], ffi/Type.U8)
+let objc_registerClassPair = ffi/get-function(objc, "objc_registerClassPair",
+    [ffi/Type.Pointer], ffi/Type.Void)
+
+let msgSend = ffi/get-symbol(objc, "objc_msgSend")
+
+// ─── Message helpers ───────────────────────────────────────────────
+
+fn msg0(obj, sel_name, ret_type) {
+    let sel = sel_registerName(sel_name)
+    ffi/call-variadic(msgSend, [obj, sel], [ffi/Type.Pointer, ffi/Type.Pointer], ret_type)
+}
+
+fn msg1(obj, sel_name, a1, t1, ret_type) {
+    let sel = sel_registerName(sel_name)
+    ffi/call-variadic(msgSend, [obj, sel, a1], [ffi/Type.Pointer, ffi/Type.Pointer, t1], ret_type)
+}
+
+fn msg3(obj, sel_name, a1, t1, a2, t2, a3, t3, ret_type) {
+    let sel = sel_registerName(sel_name)
+    ffi/call-variadic(msgSend, [obj, sel, a1, a2, a3],
+        [ffi/Type.Pointer, ffi/Type.Pointer, t1, t2, t3], ret_type)
+}
+
+fn msg-frame(obj, sel_name, x, y, w, h) {
+    let sel = sel_registerName(sel_name)
+    ffi/call-variadic(msgSend, [obj, sel, x, y, w, h],
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64],
+        ffi/Type.Pointer)
+}
+
+fn msg-rgba(obj, sel_name, r, g, b, a) {
+    let sel = sel_registerName(sel_name)
+    ffi/call-variadic(msgSend, [obj, sel, r, g, b, a],
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64],
+        ffi/Type.Pointer)
+}
+
+fn nsstring(str) {
+    let NSString = objc_getClass("NSString")
+    msg1(NSString, "stringWithUTF8String:", str, ffi/Type.String, ffi/Type.Pointer)
+}
+
+fn alloc-init(cls) {
+    msg0(msg0(cls, "alloc", ffi/Type.Pointer), "init", ffi/Type.Pointer)
+}
+
+// ─── App delegate (quit on window close) ───────────────────────────
+
+fn should-terminate(self_, sel, sender) { 1 }
+
+// ─── Build the UI ──────────────────────────────────────────────────
+
+fn main() {
+    // Initialize the application
+    let NSApplication = objc_getClass("NSApplication")
+    let app = msg0(NSApplication, "sharedApplication", ffi/Type.Pointer)
+    msg1(app, "setActivationPolicy:", 0, ffi/Type.U64, ffi/Type.U8)
+
+    // Set up delegate so Cmd+Q and window close work
+    let NSObject = objc_getClass("NSObject")
+    let delegateCls = objc_allocateClassPair(NSObject, "AppDelegate", 0)
+    let cb = ffi/create-callback(should-terminate,
+        [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer], ffi/Type.U8)
+    class_addMethod(delegateCls,
+        sel_registerName("applicationShouldTerminateAfterLastWindowClosed:"), cb, "B@:@")
+    objc_registerClassPair(delegateCls)
+    msg1(app, "setDelegate:", alloc-init(delegateCls), ffi/Type.Pointer, ffi/Type.Void)
+
+    // Create window
+    let NSWindow = objc_getClass("NSWindow")
+    let win_sel = sel_registerName("initWithContentRect:styleMask:backing:defer:")
+    let window = ffi/call-variadic(msgSend,
+        [msg0(NSWindow, "alloc", ffi/Type.Pointer), win_sel,
+         0.0, 0.0, 400.0, 300.0, 15, 2, 0],
+        [ffi/Type.Pointer, ffi/Type.Pointer,
+         ffi/Type.F64, ffi/Type.F64, ffi/Type.F64, ffi/Type.F64,
+         ffi/Type.U64, ffi/Type.U64, ffi/Type.U64],
+        ffi/Type.Pointer)
+    msg0(window, "center", ffi/Type.Void)
+    msg1(window, "setTitle:", nsstring("Beagle Counter"), ffi/Type.Pointer, ffi/Type.Void)
+
+    // Dark background
+    let contentView = msg0(window, "contentView", ffi/Type.Pointer)
+    msg1(contentView, "setWantsLayer:", 1, ffi/Type.U8, ffi/Type.Void)
+    let NSColor = objc_getClass("NSColor")
+    let bg = msg-rgba(NSColor, "colorWithRed:green:blue:alpha:", 0.12, 0.12, 0.15, 1.0)
+    let layer = msg0(contentView, "layer", ffi/Type.Pointer)
+    msg1(layer, "setBackgroundColor:", msg0(bg, "CGColor", ffi/Type.Pointer),
+        ffi/Type.Pointer, ffi/Type.Void)
+
+    // Counter display
+    let NSTextField = objc_getClass("NSTextField")
+    let NSFont = objc_getClass("NSFont")
+    let white = msg0(NSColor, "whiteColor", ffi/Type.Pointer)
+
+    let countLabel = msg-frame(msg0(NSTextField, "alloc", ffi/Type.Pointer),
+        "initWithFrame:", 0.0, 140.0, 400.0, 80.0)
+    msg1(countLabel, "setStringValue:", nsstring("0"), ffi/Type.Pointer, ffi/Type.Void)
+    msg1(countLabel, "setBezeled:", 0, ffi/Type.U8, ffi/Type.Void)
+    msg1(countLabel, "setDrawsBackground:", 0, ffi/Type.U8, ffi/Type.Void)
+    msg1(countLabel, "setEditable:", 0, ffi/Type.U8, ffi/Type.Void)
+    msg1(countLabel, "setAlignment:", 1, ffi/Type.U64, ffi/Type.Void)
+    msg1(countLabel, "setFont:",
+        msg1(NSFont, "monospacedDigitSystemFontOfSize:weight:", 64.0, ffi/Type.F64, ffi/Type.Pointer),
+        ffi/Type.Pointer, ffi/Type.Void)
+    msg1(countLabel, "setTextColor:", white, ffi/Type.Pointer, ffi/Type.Void)
+    msg1(contentView, "addSubview:", countLabel, ffi/Type.Pointer, ffi/Type.Void)
+
+    // Shared counter state
+    let counter = atom(0)
+
+    // Button handler class
+    let handlerCls = objc_allocateClassPair(NSObject, "Handler", 0)
+
+    let inc_cb = ffi/create-callback(fn(self_, sel, sender) {
+        swap!(counter, fn(n) { n + 1 })
+        msg1(countLabel, "setStringValue:", nsstring(to-string(deref(counter))),
+            ffi/Type.Pointer, ffi/Type.Void)
+    }, [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer], ffi/Type.Void)
+    class_addMethod(handlerCls, sel_registerName("increment:"), inc_cb, "v@:@")
+
+    let dec_cb = ffi/create-callback(fn(self_, sel, sender) {
+        swap!(counter, fn(n) { n - 1 })
+        msg1(countLabel, "setStringValue:", nsstring(to-string(deref(counter))),
+            ffi/Type.Pointer, ffi/Type.Void)
+    }, [ffi/Type.Pointer, ffi/Type.Pointer, ffi/Type.Pointer], ffi/Type.Void)
+    class_addMethod(handlerCls, sel_registerName("decrement:"), dec_cb, "v@:@")
+
+    objc_registerClassPair(handlerCls)
+    let handler = alloc-init(handlerCls)
+
+    // Create buttons
+    let NSButton = objc_getClass("NSButton")
+
+    let minus = msg-frame(msg0(NSButton, "alloc", ffi/Type.Pointer),
+        "initWithFrame:", 80.0, 60.0, 100.0, 44.0)
+    msg1(minus, "setTitle:", nsstring("  -  "), ffi/Type.Pointer, ffi/Type.Void)
+    msg1(minus, "setBezelStyle:", 1, ffi/Type.U64, ffi/Type.Void)
+    msg1(minus, "setFont:", msg1(NSFont, "boldSystemFontOfSize:", 24.0, ffi/Type.F64, ffi/Type.Pointer),
+        ffi/Type.Pointer, ffi/Type.Void)
+    msg1(minus, "setTarget:", handler, ffi/Type.Pointer, ffi/Type.Void)
+    msg1(minus, "setAction:", sel_registerName("decrement:"), ffi/Type.Pointer, ffi/Type.Void)
+    msg1(contentView, "addSubview:", minus, ffi/Type.Pointer, ffi/Type.Void)
+
+    let plus = msg-frame(msg0(NSButton, "alloc", ffi/Type.Pointer),
+        "initWithFrame:", 220.0, 60.0, 100.0, 44.0)
+    msg1(plus, "setTitle:", nsstring("  +  "), ffi/Type.Pointer, ffi/Type.Void)
+    msg1(plus, "setBezelStyle:", 1, ffi/Type.U64, ffi/Type.Void)
+    msg1(plus, "setFont:", msg1(NSFont, "boldSystemFontOfSize:", 24.0, ffi/Type.F64, ffi/Type.Pointer),
+        ffi/Type.Pointer, ffi/Type.Void)
+    msg1(plus, "setTarget:", handler, ffi/Type.Pointer, ffi/Type.Void)
+    msg1(plus, "setAction:", sel_registerName("increment:"), ffi/Type.Pointer, ffi/Type.Void)
+    msg1(contentView, "addSubview:", plus, ffi/Type.Pointer, ffi/Type.Void)
+
+    // Show window and run
+    msg1(window, "makeKeyAndOrderFront:", 0, ffi/Type.Pointer, ffi/Type.Void)
+    msg1(app, "activateIgnoringOtherApps:", 1, ffi/Type.U8, ffi/Type.Void)
+    println("Counter app running — click + and - or press Cmd+Q to quit")
+    msg0(app, "run", ffi/Type.Void)
+}

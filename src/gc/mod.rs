@@ -139,11 +139,7 @@ pub trait Allocator {
     /// head_block pointers, and namespace roots.
     /// The slot address points into the Rust-side Vec/AtomicUsize buffer,
     /// allowing moving GCs to update pointers in-place.
-    fn gc(
-        &mut self,
-        gc_frame_tops: &[usize],
-        extra_roots: &[(*mut usize, usize)],
-    );
+    fn gc(&mut self, gc_frame_tops: &[usize], extra_roots: &[(*mut usize, usize)]);
 
     fn grow(&mut self);
 

@@ -12,12 +12,14 @@ use std::{
 use crate::{
     Message,
     collections::{
-        GcHandle, PersistentVec, TYPE_ID_CONS_STRING, TYPE_ID_FRAME,
-        TYPE_ID_KEYWORD, TYPE_ID_MULTI_ARITY_FUNCTION, TYPE_ID_STRING, TYPE_ID_STRING_SLICE,
+        GcHandle, PersistentVec, TYPE_ID_CONS_STRING, TYPE_ID_FRAME, TYPE_ID_KEYWORD,
+        TYPE_ID_MULTI_ARITY_FUNCTION, TYPE_ID_STRING, TYPE_ID_STRING_SLICE,
     },
     gc::STACK_SIZE,
     get_runtime,
-    runtime::{CapturedFrame, ContinuationObject, DispatchTable, FFIInfo, FFIType, RawPtr, Runtime},
+    runtime::{
+        CapturedFrame, ContinuationObject, DispatchTable, FFIInfo, FFIType, RawPtr, Runtime,
+    },
     types::{BuiltInTypes, Header, HeapObject},
 };
 
@@ -11029,7 +11031,13 @@ pub unsafe extern "C" fn capture_continuation_runtime(
     if debug_prompts {
         eprintln!(
             "[capture_cont] prompt_id={} stack_size={} prompt_sp={:#x} prompt_fp={:#x} resume={:#x} cont_ptr={:#x} num_frames={}",
-            prompt.prompt_id, stack_size, prompt_sp, prompt_fp, resume_address, cont_ptr, fps.len()
+            prompt.prompt_id,
+            stack_size,
+            prompt_sp,
+            prompt_fp,
+            resume_address,
+            cont_ptr,
+            fps.len()
         );
     }
 
@@ -11071,8 +11079,12 @@ pub unsafe extern "C" fn return_from_shift_runtime(
         if debug_prompts {
             eprintln!(
                 "[return_from_shift] via_return_point from_pop_prompt={} remaining_after_pop={} rp_sp={:#x} rp_fp={:#x} ret_addr={:#x} prompt_id={}",
-                from_pop_prompt, remaining, return_point.stack_pointer, return_point.frame_pointer,
-                return_point.return_address, return_point.prompt_id
+                from_pop_prompt,
+                remaining,
+                return_point.stack_pointer,
+                return_point.frame_pointer,
+                return_point.return_address,
+                return_point.prompt_id
             );
         }
 
@@ -11188,7 +11200,11 @@ pub unsafe extern "C" fn return_from_shift_runtime(
             if let Some(saved_cont) = ContinuationObject::from_tagged(saved) {
                 eprintln!(
                     "[return_from_shift] using saved cont_ptr={:#x} (passed={:#x}) saved_prompt_sp={:#x} saved_prompt_fp={:#x} saved_original_sp={:#x}",
-                    saved, cont_ptr, saved_cont.prompt_stack_pointer(), saved_cont.prompt_frame_pointer(), saved_cont.original_sp()
+                    saved,
+                    cont_ptr,
+                    saved_cont.prompt_stack_pointer(),
+                    saved_cont.prompt_frame_pointer(),
+                    saved_cont.original_sp()
                 );
             } else {
                 eprintln!(
@@ -11224,8 +11240,11 @@ pub unsafe extern "C" fn return_from_shift_runtime(
     if debug_prompts {
         eprintln!(
             "[return_from_shift] via_prompt from_pop_prompt={} prompt_sp={:#x} prompt_fp={:#x} handler={:#x} prompt_id={}",
-            from_pop_prompt, prompt.stack_pointer, prompt.frame_pointer,
-            prompt.handler_address, prompt.prompt_id
+            from_pop_prompt,
+            prompt.stack_pointer,
+            prompt.frame_pointer,
+            prompt.handler_address,
+            prompt.prompt_id
         );
     }
 
@@ -11246,7 +11265,8 @@ pub unsafe extern "C" fn return_from_shift_runtime(
             if debug_prompts {
                 eprintln!(
                     "[return_from_shift] Restoring {} frames to original_sp={:#x}",
-                    frames.len(), original_sp
+                    frames.len(),
+                    original_sp
                 );
             }
 
@@ -11274,9 +11294,7 @@ pub unsafe extern "C" fn return_from_shift_runtime(
             CapturedFrame::link_restored_frames_into_gc_chain(&restored_fps);
         }
     } else if debug_prompts {
-        eprintln!(
-            "[return_from_shift] Skipping stack segment restore (is_handler_return=true)"
-        );
+        eprintln!("[return_from_shift] Skipping stack segment restore (is_handler_return=true)");
     }
 
     // Store the value in the result local
@@ -11374,7 +11392,11 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
         let cont_obj = ContinuationObject::from_tagged(cont_ptr).unwrap();
         eprintln!(
             "[invoke_cont] saved_cont_ptr: already_had={} saved={:#x} cont_ptr={:#x} cont_prompt_fp={:#x} cont_original_sp={:#x}",
-            already_had, saved, cont_ptr, cont_obj.prompt_frame_pointer(), cont_obj.original_sp()
+            already_had,
+            saved,
+            cont_ptr,
+            cont_obj.prompt_frame_pointer(),
+            cont_obj.original_sp()
         );
     }
 
@@ -11421,7 +11443,11 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
                 None
             };
             // Also protect saved_continuation_ptr (the root continuation) during allocation
-            let saved_cont = runtime.saved_continuation_ptr.get(&thread_id).copied().unwrap_or(0);
+            let saved_cont = runtime
+                .saved_continuation_ptr
+                .get(&thread_id)
+                .copied()
+                .unwrap_or(0);
             let saved_cont_root_id = if saved_cont != 0 && saved_cont != cont_ptr {
                 Some(runtime.register_temporary_root(saved_cont))
             } else {
@@ -11460,7 +11486,10 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
     };
 
     let continuation = ContinuationObject::from_tagged(cont_ptr).unwrap_or_else(|| {
-        panic!("Continuation pointer became invalid after allocation: {:#x}", cont_ptr);
+        panic!(
+            "Continuation pointer became invalid after allocation: {:#x}",
+            cont_ptr
+        );
     });
 
     let resume_address = continuation.resume_address();
@@ -11481,7 +11510,10 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
         if debug_prompts {
             eprintln!(
                 "[invoke_cont] empty_segment prompt_id={} value={:#x} orig_sp={:#x} orig_fp={:#x}",
-                prompt_id, value, continuation.original_sp(), continuation.original_fp()
+                prompt_id,
+                value,
+                continuation.original_sp(),
+                continuation.original_fp()
             );
         }
 
@@ -11549,13 +11581,18 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
 
     // Validate frames before reconstruction
     if frames.is_empty() && has_frames {
-        panic!("[invoke_cont] collect_chain returned empty but segment_ptr was non-null! segment_ptr={:#x}", segment_ptr);
+        panic!(
+            "[invoke_cont] collect_chain returned empty but segment_ptr was non-null! segment_ptr={:#x}",
+            segment_ptr
+        );
     }
     let computed_size: usize = frames.iter().map(|f| f.total_stack_size()).sum();
     if computed_size != stack_segment_size {
         panic!(
             "[invoke_cont] Stack size mismatch: computed={} expected={}. frames.len()={}",
-            computed_size, stack_segment_size, frames.len()
+            computed_size,
+            stack_segment_size,
+            frames.len()
         );
     }
     for (idx, frame) in frames.iter().enumerate() {
@@ -11564,7 +11601,9 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
             let frame_size = frame.total_stack_size();
             panic!(
                 "[invoke_cont] Frame {} has zero return address! tagged_ptr={:#x} frame_size={}",
-                idx, frame.tagged_ptr(), frame_size
+                idx,
+                frame.tagged_ptr(),
+                frame_size
             );
         }
     }
@@ -11594,15 +11633,14 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
         let frame_size = frame.total_stack_size();
         let frame_bottom = current_top - frame_size;
         let target_fp = current_top - 16; // FP is 16 bytes below the top of the frame
-                                          // (saved_fp at [fp+0], saved_lr at [fp+8])
+        // (saved_fp at [fp+0], saved_lr at [fp+8])
 
         // Determine the caller FP for this frame
         let caller_fp = if idx == 0 {
             // Outermost frame: its saved caller FP was captured from [FP+0].
             // If it falls within the original segment, relocate it.
             let saved_caller_fp = frame.saved_caller_fp();
-            if saved_caller_fp >= original_sp
-                && saved_caller_fp < original_sp + stack_segment_size
+            if saved_caller_fp >= original_sp && saved_caller_fp < original_sp + stack_segment_size
             {
                 (saved_caller_fp as isize + relocation_offset) as usize
             } else {
@@ -11689,7 +11727,15 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
             .unwrap_or(0);
         eprintln!(
             "[invoke_cont] push_return_point prompt_id={} stack_seg={} is_root={} depth={} rp_len={} new_sp={:#x} new_fp={:#x} original_sp={:#x} relocated_sp={:#x}",
-            prompt_id, stack_segment_size, is_root_invocation, current_depth + 1, rp_len, new_sp, new_fp, original_sp, new_sp
+            prompt_id,
+            stack_segment_size,
+            is_root_invocation,
+            current_depth + 1,
+            rp_len,
+            new_sp,
+            new_fp,
+            original_sp,
+            new_sp
         );
     }
 

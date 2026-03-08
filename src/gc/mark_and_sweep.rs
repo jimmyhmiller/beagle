@@ -344,23 +344,17 @@ impl MarkAndSweep {
         }
     }
 
-    fn mark_from_chain(
-        &self,
-        gc_frame_top: usize,
-    ) {
+    fn mark_from_chain(&self, gc_frame_top: usize) {
         let mut to_mark: Vec<HeapObject> = Vec::with_capacity(128);
 
-        StackWalker::walk_stack_roots(
-            gc_frame_top,
-            |_slot_addr, pointer| {
-                let untagged = BuiltInTypes::untag(pointer);
-                // Skip null and misaligned pointers
-                if untagged == 0 || !untagged.is_multiple_of(8) {
-                    return;
-                }
-                to_mark.push(HeapObject::from_tagged(pointer));
-            },
-        );
+        StackWalker::walk_stack_roots(gc_frame_top, |_slot_addr, pointer| {
+            let untagged = BuiltInTypes::untag(pointer);
+            // Skip null and misaligned pointers
+            if untagged == 0 || !untagged.is_multiple_of(8) {
+                return;
+            }
+            to_mark.push(HeapObject::from_tagged(pointer));
+        });
 
         // Mark InvocationReturnPoint saved_frame pointers as roots.
         // CapturedFrame objects are normal heap objects, so we just add them as roots.
@@ -565,7 +559,8 @@ impl MarkAndSweep {
                                 None => null_val,
                             };
                             let field_offset = (1 + new_idx) * 8;
-                            data[field_offset..field_offset + 8].copy_from_slice(&value.to_ne_bytes());
+                            data[field_offset..field_offset + 8]
+                                .copy_from_slice(&value.to_ne_bytes());
                         }
 
                         let new_ptr = self.copy_data_to_offset(&data);
@@ -706,11 +701,7 @@ impl Allocator for MarkAndSweep {
         }
     }
 
-    fn gc(
-        &mut self,
-        gc_frame_tops: &[usize],
-        extra_roots: &[(*mut usize, usize)],
-    ) {
+    fn gc(&mut self, gc_frame_tops: &[usize], extra_roots: &[(*mut usize, usize)]) {
         if !self.options.gc {
             return;
         }

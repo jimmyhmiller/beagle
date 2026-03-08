@@ -24,16 +24,11 @@ pub struct StackWalker;
 impl StackWalker {
     /// Collect all heap pointers from the GC frame chain for a single thread.
     /// `gc_frame_top` is the address of the topmost frame's header (or 0 for empty).
-    pub fn collect_stack_roots(
-        gc_frame_top: usize,
-    ) -> Vec<(usize, usize)> {
+    pub fn collect_stack_roots(gc_frame_top: usize) -> Vec<(usize, usize)> {
         let mut roots = Vec::with_capacity(32);
-        Self::walk_stack_roots(
-            gc_frame_top,
-            |addr, pointer| {
-                roots.push((addr, pointer));
-            },
-        );
+        Self::walk_stack_roots(gc_frame_top, |addr, pointer| {
+            roots.push((addr, pointer));
+        });
         roots
     }
 
@@ -42,10 +37,8 @@ impl StackWalker {
     /// `gc_frame_top` is the address of the topmost frame's header word.
     /// The prev pointer is at `header_addr - 8` (i.e., [FP-16]).
     /// Locals start at `header_addr - 16` (i.e., [FP-24]).
-    pub fn walk_stack_roots<F>(
-        gc_frame_top: usize,
-        mut callback: F,
-    ) where
+    pub fn walk_stack_roots<F>(gc_frame_top: usize, mut callback: F)
+    where
         F: FnMut(usize, usize),
     {
         let mut header_addr = gc_frame_top;
@@ -99,7 +92,11 @@ impl StackWalker {
                         };
                         eprintln!(
                             "[GC DEBUG]   slot[{}] @ {:#x} = {:#x} (tag={} [{}]), is_heap_ptr={}",
-                            i, slot_addr, slot_value, tag, tag_name,
+                            i,
+                            slot_addr,
+                            slot_value,
+                            tag,
+                            tag_name,
                             BuiltInTypes::is_heap_pointer(slot_value)
                         );
                     }

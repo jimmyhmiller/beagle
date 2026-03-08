@@ -1,0 +1,176 @@
+namespace raylib_game
+
+// A simple game using raylib via FFI.
+// Move with arrow keys. Catch falling squares. Avoid missing them.
+//
+// Requires: raylib installed (brew install raylib)
+// Run: cargo run -- examples/raylib_game.bg
+
+use beagle.ffi as ffi
+
+// ─── Raylib bindings ───────────────────────────────────────────────
+
+let raylib = ffi/load-library("/opt/homebrew/lib/libraylib.dylib")
+
+let InitWindow = ffi/get-function(raylib, "InitWindow",
+    [ffi/Type.I32, ffi/Type.I32, ffi/Type.String], ffi/Type.Void)
+let CloseWindow = ffi/get-function(raylib, "CloseWindow", [], ffi/Type.Void)
+let WindowShouldClose = ffi/get-function(raylib, "WindowShouldClose", [], ffi/Type.I32)
+let SetTargetFPS = ffi/get-function(raylib, "SetTargetFPS", [ffi/Type.I32], ffi/Type.Void)
+let BeginDrawing = ffi/get-function(raylib, "BeginDrawing", [], ffi/Type.Void)
+let EndDrawing = ffi/get-function(raylib, "EndDrawing", [], ffi/Type.Void)
+let ClearBackground = ffi/get-function(raylib, "ClearBackground", [ffi/Type.U32], ffi/Type.Void)
+let DrawRectangle = ffi/get-function(raylib, "DrawRectangle",
+    [ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.U32], ffi/Type.Void)
+let DrawText = ffi/get-function(raylib, "DrawText",
+    [ffi/Type.String, ffi/Type.I32, ffi/Type.I32, ffi/Type.I32, ffi/Type.U32], ffi/Type.Void)
+let IsKeyDown = ffi/get-function(raylib, "IsKeyDown", [ffi/Type.I32], ffi/Type.I32)
+let GetRandomValue = ffi/get-function(raylib, "GetRandomValue",
+    [ffi/Type.I32, ffi/Type.I32], ffi/Type.I32)
+
+// ─── Colors (RGBA packed little-endian) ────────────────────────────
+
+fn rgb(r, g, b) { r + (g * 256) + (b * 65536) + (255 * 16777216) }
+
+let BG      = rgb(30, 30, 40)
+let WHITE   = rgb(255, 255, 255)
+let GREEN   = rgb(0, 228, 48)
+let GOLD    = rgb(255, 203, 0)
+let SKYBLUE = rgb(102, 191, 255)
+let GRAY    = rgb(130, 130, 130)
+let RED     = rgb(230, 41, 55)
+
+// ─── Key codes ─────────────────────────────────────────────────────
+
+let KEY_LEFT  = 263
+let KEY_RIGHT = 262
+
+// ─── Game structs ──────────────────────────────────────────────────
+
+struct Ball { x, y, dy, size }
+
+struct Game {
+    player_x
+    balls
+    score
+    missed
+    frame
+}
+
+// ─── Game logic ────────────────────────────────────────────────────
+
+let WIDTH = 800
+let HEIGHT = 600
+let PLAYER_Y = HEIGHT - 60
+let PLAYER_W = 100
+let PLAYER_H = 20
+let SPEED = 8
+
+fn spawn-ball() {
+    let size = GetRandomValue(12, 30)
+    Ball {
+        x: GetRandomValue(0, WIDTH - size),
+        y: 0 - size,
+        dy: GetRandomValue(3, 6),
+        size: size
+    }
+}
+
+fn update-balls(game) {
+    let mut new_balls = []
+    let mut new_score = game.score
+    let mut new_missed = game.missed
+
+    for ball in game.balls {
+        let moved = Ball { ...ball, y: ball.y + ball.dy }
+
+        let hit_player = moved.x + moved.size > game.player_x
+            && moved.x < game.player_x + PLAYER_W
+            && moved.y + moved.size > PLAYER_Y
+            && moved.y < PLAYER_Y + PLAYER_H
+
+        if hit_player {
+            new_score = new_score + moved.size
+        } else if moved.y > HEIGHT {
+            new_missed = new_missed + 1
+        } else {
+            new_balls = push(new_balls, moved)
+        }
+    }
+
+    // Spawn new ball every 20 frames
+    let final_balls = if game.frame % 20 == 0 {
+        push(new_balls, spawn-ball())
+    } else {
+        new_balls
+    }
+
+    Game {
+        ...game,
+        balls: final_balls,
+        score: new_score,
+        missed: new_missed
+    }
+}
+
+fn update-player(game) {
+    let dx = if IsKeyDown(KEY_LEFT) != 0 { 0 - SPEED } else { 0 }
+    let dx = if IsKeyDown(KEY_RIGHT) != 0 { dx + SPEED } else { dx }
+    let new_x = game.player_x + dx
+
+    let clamped = if new_x < 0 { 0 }
+        else if new_x + PLAYER_W > WIDTH { WIDTH - PLAYER_W }
+        else { new_x }
+
+    Game { ...game, player_x: clamped }
+}
+
+fn render(game) {
+    BeginDrawing()
+    ClearBackground(BG)
+
+    // Player
+    DrawRectangle(game.player_x, PLAYER_Y, PLAYER_W, PLAYER_H, SKYBLUE)
+
+    // Balls
+    for ball in game.balls {
+        let c = if ball.size > 22 { GOLD } else { GREEN }
+        DrawRectangle(ball.x, ball.y, ball.size, ball.size, c)
+    }
+
+    // HUD
+    DrawText("Arrow keys to move, ESC to quit", 10, 10, 16, GRAY)
+    DrawText("Score: " ++ to-string(game.score), WIDTH - 160, 10, 20, GREEN)
+    DrawText("Missed: " ++ to-string(game.missed), WIDTH - 160, 36, 20, RED)
+
+    EndDrawing()
+}
+
+// ─── Main loop ─────────────────────────────────────────────────────
+
+fn game-loop(game) {
+    if WindowShouldClose() != 0 {
+        game
+    } else {
+        let game = update-player(game)
+        let game = update-balls(game)
+        render(game)
+        game-loop(Game { ...game, frame: game.frame + 1 })
+    }
+}
+
+fn main() {
+    InitWindow(WIDTH, HEIGHT, "Beagle + Raylib")
+    SetTargetFPS(60)
+
+    let result = game-loop(Game {
+        player_x: WIDTH / 2 - PLAYER_W / 2,
+        balls: [],
+        score: 0,
+        missed: 0,
+        frame: 0
+    })
+
+    println("Final score: " ++ to-string(result.score))
+    CloseWindow()
+}

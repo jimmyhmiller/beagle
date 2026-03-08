@@ -287,9 +287,17 @@ pub fn snapshot_stack(
             return_address: format!("{:#x}", 0),
             stack_map_found: has_frame_header,
             function_name: None,
-            number_of_locals: if has_frame_header { header.size as usize } else { 0 },
+            number_of_locals: if has_frame_header {
+                header.size as usize
+            } else {
+                0
+            },
             current_stack_size: 0,
-            max_stack_size: if has_frame_header { header.size as usize } else { 0 },
+            max_stack_size: if has_frame_header {
+                header.size as usize
+            } else {
+                0
+            },
             slots,
         });
 

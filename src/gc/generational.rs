@@ -399,11 +399,7 @@ impl Allocator for GenerationalGC {
         Ok(pointer)
     }
 
-    fn gc(
-        &mut self,
-        gc_frame_tops: &[usize],
-        extra_roots: &[(*mut usize, usize)],
-    ) {
+    fn gc(&mut self, gc_frame_tops: &[usize], extra_roots: &[(*mut usize, usize)]) {
         if !self.options.gc {
             return;
         }
@@ -570,10 +566,7 @@ impl GenerationalGC {
 
     /// Gather stack roots as RootRefs.
     /// Returns (slot_refs, old_gen_values) - old gen values need field updates.
-    fn gather_stack_root_refs(
-        &self,
-        gc_frame_tops: &[usize],
-    ) -> (Vec<RootRef>, Vec<usize>) {
+    fn gather_stack_root_refs(&self, gc_frame_tops: &[usize]) -> (Vec<RootRef>, Vec<usize>) {
         let mut slots = Vec::new();
         let mut old_gen_values = Vec::new();
 
@@ -592,36 +585,30 @@ impl GenerationalGC {
 
     /// Inner function to gather roots from a single thread's GC frame chain.
     /// Uses StackWalker and classifies roots into young gen (to copy) and old gen (to scan fields).
-    fn gather_stack_roots_inner(
-        &self,
-        gc_frame_top: usize,
-    ) -> (Vec<(usize, usize)>, Vec<usize>) {
+    fn gather_stack_roots_inner(&self, gc_frame_top: usize) -> (Vec<(usize, usize)>, Vec<usize>) {
         let mut roots: Vec<(usize, usize)> = Vec::with_capacity(36);
         let mut old_gen_objects: Vec<usize> = Vec::with_capacity(16);
 
-        StackWalker::walk_stack_roots(
-            gc_frame_top,
-            |slot_addr, slot_value| {
-                let untagged = BuiltInTypes::untag(slot_value);
-                if untagged == 0 {
-                    return;
-                }
-                if self.young.contains(untagged as *const u8) {
-                    assert!(
-                        self.young.contains_allocated(untagged as *const u8),
-                        "Stale young gen pointer {:#x} (offset={}) found on stack at {:#x}, \
+        StackWalker::walk_stack_roots(gc_frame_top, |slot_addr, slot_value| {
+            let untagged = BuiltInTypes::untag(slot_value);
+            if untagged == 0 {
+                return;
+            }
+            if self.young.contains(untagged as *const u8) {
+                assert!(
+                    self.young.contains_allocated(untagged as *const u8),
+                    "Stale young gen pointer {:#x} (offset={}) found on stack at {:#x}, \
                          young alloc_offset={}",
-                        slot_value,
-                        untagged - self.young.base_address(),
-                        slot_addr,
-                        self.young.allocation_offset(),
-                    );
-                    roots.push((slot_addr, slot_value));
-                } else if self.old.contains(untagged as *const u8) {
-                    old_gen_objects.push(slot_value);
-                }
-            },
-        );
+                    slot_value,
+                    untagged - self.young.base_address(),
+                    slot_addr,
+                    self.young.allocation_offset(),
+                );
+                roots.push((slot_addr, slot_value));
+            } else if self.old.contains(untagged as *const u8) {
+                old_gen_objects.push(slot_value);
+            }
+        });
 
         (roots, old_gen_objects)
     }
@@ -649,16 +636,11 @@ impl GenerationalGC {
         }
     }
 
-    fn minor_gc(
-        &mut self,
-        gc_frame_tops: &[usize],
-        extra_roots: &[(*mut usize, usize)],
-    ) {
+    fn minor_gc(&mut self, gc_frame_tops: &[usize], extra_roots: &[(*mut usize, usize)]) {
         let start = std::time::Instant::now();
         usdt_probes::fire_gc_minor_start(self.gc_count);
 
-        let (mut stack_roots, mut stack_old_gen) =
-            self.gather_stack_root_refs(gc_frame_tops);
+        let (mut stack_roots, mut stack_old_gen) = self.gather_stack_root_refs(gc_frame_tops);
 
         // Classify extra_roots (shadow stack handles) into young/old gen
         for &(slot_addr, value) in extra_roots {
@@ -931,11 +913,7 @@ impl GenerationalGC {
         );
     }
 
-    fn full_gc(
-        &mut self,
-        gc_frame_tops: &[usize],
-        extra_roots: &[(*mut usize, usize)],
-    ) {
+    fn full_gc(&mut self, gc_frame_tops: &[usize], extra_roots: &[(*mut usize, usize)]) {
         usdt_probes::fire_gc_full_start(self.gc_count);
         self.minor_gc(gc_frame_tops, extra_roots);
         self.old.gc(gc_frame_tops, extra_roots);

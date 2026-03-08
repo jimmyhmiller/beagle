@@ -1326,12 +1326,23 @@ impl LowLevelX86 {
             inserted_instructions.push(X86Asm::Push { reg: R8 });
             inserted_instructions.push(X86Asm::Push { reg: R9 });
             // Call gc_frame_link(frame_header_addr=RBP-8)
-            inserted_instructions.push(X86Asm::Lea { dest: RDI, base: RBP, offset: -8 });
+            inserted_instructions.push(X86Asm::Lea {
+                dest: RDI,
+                base: RBP,
+                offset: -8,
+            });
             let gc_frame_link_ptr = crate::builtins::gc_frame_link as usize;
-            inserted_instructions.push(X86Asm::MovRI { dest: RAX, imm: gc_frame_link_ptr as i64 });
+            inserted_instructions.push(X86Asm::MovRI {
+                dest: RAX,
+                imm: gc_frame_link_ptr as i64,
+            });
             inserted_instructions.push(X86Asm::CallR { target: RAX });
             // Store returned prev pointer at [RBP-16]
-            inserted_instructions.push(X86Asm::MovMR { base: RBP, offset: -16, src: RAX });
+            inserted_instructions.push(X86Asm::MovMR {
+                base: RBP,
+                offset: -16,
+                src: RAX,
+            });
             // Restore argument registers
             inserted_instructions.push(X86Asm::Pop { reg: R9 });
             inserted_instructions.push(X86Asm::Pop { reg: R8 });
@@ -1412,10 +1423,17 @@ impl LowLevelX86 {
             // Save return value
             inserted_instructions.push(X86Asm::Push { reg: RAX });
             // Load prev pointer from [RBP-16] into RDI (first argument)
-            inserted_instructions.push(X86Asm::MovRM { dest: RDI, base: RBP, offset: -16 });
+            inserted_instructions.push(X86Asm::MovRM {
+                dest: RDI,
+                base: RBP,
+                offset: -16,
+            });
             // Call gc_frame_unlink
             let gc_frame_unlink_ptr = crate::builtins::gc_frame_unlink as usize;
-            inserted_instructions.push(X86Asm::MovRI { dest: R11, imm: gc_frame_unlink_ptr as i64 });
+            inserted_instructions.push(X86Asm::MovRI {
+                dest: R11,
+                imm: gc_frame_unlink_ptr as i64,
+            });
             inserted_instructions.push(X86Asm::CallR { target: R11 });
             // Restore return value
             inserted_instructions.push(X86Asm::Pop { reg: RAX });

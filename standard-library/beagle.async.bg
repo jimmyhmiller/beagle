@@ -256,6 +256,22 @@ enum IOAction {
 }
 
 // ============================================================================
+// Cooperative Scheduler Data Types
+// ============================================================================
+
+enum PendingOp {
+    TcpIO { result_atom, loop_id },
+    FileIO { handle, loop_id },
+    Timer { marker, loop_id },
+    SpawnedTask { future },
+    NewTask { thunk }
+}
+
+struct ReadyTask { resume, result }
+struct SchedulerTask { op, resume }
+struct CooperativeHandler { tasks, loop_id }
+
+// ============================================================================
 // Async Effect Enum
 // ============================================================================
 // The Async effect handles all async operations including legacy file I/O.
@@ -304,7 +320,10 @@ enum Async {
 
     // Spawning
     Spawn { thunk },
-    SpawnWithToken { thunk, token }
+    SpawnWithToken { thunk, token },
+
+    // Cooperative scheduling
+    CoopSpawn { thunk }
 }
 
 // ============================================================================
@@ -724,6 +743,13 @@ extend BlockingAsyncHandler with effect/Handler(Async) {
             },
             Async.SpawnWithToken { thunk, token } => {
                 handle-spawn-with-token-blocking(thunk, token)
+            },
+            Async.CoopSpawn { thunk } => {
+                // No cooperative scheduler — just run synchronously under a handler
+                handle effect/Handler(Async) with self {
+                    thunk()
+                }
+                null
             }
         }
         resume(result)
@@ -1631,6 +1657,13 @@ fn spawn(thunk) {
     perform Async.Spawn { thunk: thunk }
 }
 
+/// Spawn a cooperative task. The thunk runs until its first IO operation,
+/// then the continuation is stashed for the scheduler to resume later.
+/// Only works under CooperativeHandler (i.e., in __main__).
+fn cooperative-spawn(thunk) {
+    perform Async.CoopSpawn { thunk: thunk }
+}
+
 // ============================================================================
 // Convenience Functions
 // ============================================================================
@@ -1846,6 +1879,28 @@ let TCP_READ_ERR = 6
 let TCP_WRITE_OK = 7
 let TCP_WRITE_ERR = 8
 
+// Decode a completed TCP result into a Beagle value
+fn decode-tcp-result(result_type, loop_id) {
+    if result_type == TCP_CONNECT_OK || result_type == TCP_ACCEPT_OK {
+        let socket_id = core/tcp-result-value(loop_id)
+        TcpSocket { loop_id: loop_id, socket_id: socket_id }
+    } else if result_type == TCP_READ_OK {
+        core/tcp-result-data(loop_id)
+    } else if result_type == TCP_WRITE_OK {
+        core/tcp-result-value(loop_id)
+    } else if result_type == TCP_CONNECT_ERR {
+        throw("Connect failed: " ++ core/tcp-result-data(loop_id))
+    } else if result_type == TCP_ACCEPT_ERR {
+        throw("Accept failed: " ++ core/tcp-result-data(loop_id))
+    } else if result_type == TCP_READ_ERR {
+        throw("Read failed: " ++ core/tcp-result-data(loop_id))
+    } else if result_type == TCP_WRITE_ERR {
+        throw("Write failed: " ++ core/tcp-result-data(loop_id))
+    } else {
+        throw("Unknown TCP result type: " ++ to-string(result_type))
+    }
+}
+
 fn get-io-loop() {
     let loop_id = deref(__io_loop_atom)
     if loop_id == null {
@@ -1890,6 +1945,224 @@ fn get-io-loop-threaded() {
         }
     } else {
         loop_id
+    }
+}
+
+// ============================================================================
+// CooperativeHandler - single-threaded cooperative scheduler
+// ============================================================================
+// This handler suspends continuations on async IO and stashes them.
+// The scheduler loop polls for completions and resumes ready tasks.
+// Sync ops (listen, close) are handled immediately.
+
+fn stash-task(tasks_atom, op, resume) {
+    swap!(tasks_atom, fn(t) {
+        push(t, SchedulerTask { op: op, resume: resume })
+    })
+    null
+}
+
+extend CooperativeHandler with effect/Handler(Async) {
+    fn handle(self, op, resume) {
+        let loop_id = self.loop_id
+        match op {
+            Async.IO { action } => {
+                match action {
+                    // Synchronous — handle immediately
+                    IOAction.TcpListen { host, port } => {
+                        let listener_id = core/tcp-listen(loop_id, host, port, 128)
+                        if listener_id < 0 {
+                            throw("Failed to create TCP listener on " ++ host ++ ":" ++ to-string(port))
+                        }
+                        resume(TcpListener { loop_id: loop_id, listener_id: listener_id })
+                    },
+                    IOAction.TcpClose { socket } => {
+                        core/tcp-close(socket.loop_id, socket.socket_id)
+                        resume(null)
+                    },
+                    IOAction.TcpCloseListener { listener } => {
+                        core/tcp-close-listener(listener.loop_id, listener.listener_id)
+                        resume(null)
+                    },
+
+                    // Asynchronous — submit and stash, do NOT resume
+                    IOAction.TcpAccept { listener } => {
+                        let result_atom = atom(null)
+                        core/tcp-accept-async(loop_id, listener.listener_id, result_atom)
+                        stash-task(self.tasks, PendingOp.TcpIO { result_atom: result_atom, loop_id: loop_id }, resume)
+                    },
+                    IOAction.TcpRead { socket, n } => {
+                        let result_atom = atom(null)
+                        core/tcp-read-async(loop_id, socket.socket_id, n, result_atom)
+                        stash-task(self.tasks, PendingOp.TcpIO { result_atom: result_atom, loop_id: loop_id }, resume)
+                    },
+                    IOAction.TcpWrite { socket, data } => {
+                        let result_atom = atom(null)
+                        core/tcp-write-async(loop_id, socket.socket_id, data, result_atom)
+                        stash-task(self.tasks, PendingOp.TcpIO { result_atom: result_atom, loop_id: loop_id }, resume)
+                    },
+                    IOAction.TcpConnect { host, port } => {
+                        let result_atom = atom(null)
+                        core/tcp-connect-async(loop_id, host, port, result_atom)
+                        stash-task(self.tasks, PendingOp.TcpIO { result_atom: result_atom, loop_id: loop_id }, resume)
+                    }
+                }
+            },
+
+            Async.Sleep { ms } => {
+                let marker = core/time-now()
+                let timer_id = core/timer-set(loop_id, ms, marker)
+                if timer_id < 0 {
+                    throw("Failed to set timer")
+                }
+                stash-task(self.tasks, PendingOp.Timer { marker: marker, loop_id: loop_id }, resume)
+            },
+
+            // File operations — submit and stash
+            Async.ReadFile { path } => {
+                let handle = core/file-read-submit(loop_id, path)
+                if handle < 0 { throw("Failed to submit read operation") }
+                stash-task(self.tasks, PendingOp.FileIO { handle: handle, loop_id: loop_id }, resume)
+            },
+            Async.WriteFile { path, content } => {
+                let handle = core/file-write-submit(loop_id, path, content)
+                if handle < 0 { throw("Failed to submit write operation") }
+                stash-task(self.tasks, PendingOp.FileIO { handle: handle, loop_id: loop_id }, resume)
+            },
+            Async.AppendFile { path, content } => {
+                let handle = core/file-append-submit(loop_id, path, content)
+                if handle < 0 { throw("Failed to submit append operation") }
+                stash-task(self.tasks, PendingOp.FileIO { handle: handle, loop_id: loop_id }, resume)
+            },
+            Async.DeleteFile { path } => {
+                let handle = core/file-delete-submit(loop_id, path)
+                if handle < 0 { throw("Failed to submit delete operation") }
+                stash-task(self.tasks, PendingOp.FileIO { handle: handle, loop_id: loop_id }, resume)
+            },
+            Async.FileExists { path } => {
+                let handle = core/file-exists-submit(loop_id, path)
+                if handle < 0 { throw("Failed to submit exists operation") }
+                stash-task(self.tasks, PendingOp.FileIO { handle: handle, loop_id: loop_id }, resume)
+            },
+            Async.RenameFile { old_path, new_path } => {
+                let handle = core/file-rename-submit(loop_id, old_path, new_path)
+                if handle < 0 { throw("Failed to submit rename operation") }
+                stash-task(self.tasks, PendingOp.FileIO { handle: handle, loop_id: loop_id }, resume)
+            },
+            Async.CopyFile { src_path, dest_path } => {
+                let handle = core/file-copy-submit(loop_id, src_path, dest_path)
+                if handle < 0 { throw("Failed to submit copy operation") }
+                stash-task(self.tasks, PendingOp.FileIO { handle: handle, loop_id: loop_id }, resume)
+            },
+            Async.ReadDir { path } => {
+                let handle = core/file-readdir-submit(loop_id, path)
+                if handle < 0 { throw("Failed to submit readdir operation") }
+                stash-task(self.tasks, PendingOp.FileIO { handle: handle, loop_id: loop_id }, resume)
+            },
+            Async.CreateDir { path } => {
+                let handle = core/file-mkdir-submit(loop_id, path)
+                if handle < 0 { throw("Failed to submit mkdir operation") }
+                stash-task(self.tasks, PendingOp.FileIO { handle: handle, loop_id: loop_id }, resume)
+            },
+            Async.CreateDirAll { path } => {
+                let handle = core/file-mkdir-all-submit(loop_id, path)
+                if handle < 0 { throw("Failed to submit mkdir-all operation") }
+                stash-task(self.tasks, PendingOp.FileIO { handle: handle, loop_id: loop_id }, resume)
+            },
+            Async.RemoveDir { path } => {
+                let handle = core/file-rmdir-submit(loop_id, path)
+                if handle < 0 { throw("Failed to submit rmdir operation") }
+                stash-task(self.tasks, PendingOp.FileIO { handle: handle, loop_id: loop_id }, resume)
+            },
+            Async.RemoveDirAll { path } => {
+                let handle = core/file-rmdir-all-submit(loop_id, path)
+                if handle < 0 { throw("Failed to submit rmdir-all operation") }
+                stash-task(self.tasks, PendingOp.FileIO { handle: handle, loop_id: loop_id }, resume)
+            },
+            Async.FileSize { path } => {
+                let handle = core/file-stat-submit(loop_id, path)
+                if handle < 0 { throw("Failed to submit stat operation") }
+                stash-task(self.tasks, PendingOp.FileIO { handle: handle, loop_id: loop_id }, resume)
+            },
+            Async.IsDirectory { path } => {
+                let handle = core/file-is-dir-submit(loop_id, path)
+                if handle < 0 { throw("Failed to submit is-directory operation") }
+                stash-task(self.tasks, PendingOp.FileIO { handle: handle, loop_id: loop_id }, resume)
+            },
+            Async.IsFile { path } => {
+                let handle = core/file-is-file-submit(loop_id, path)
+                if handle < 0 { throw("Failed to submit is-file operation") }
+                stash-task(self.tasks, PendingOp.FileIO { handle: handle, loop_id: loop_id }, resume)
+            },
+            Async.Open { path, mode } => {
+                let handle = core/file-open-submit(loop_id, path, mode)
+                if handle < 0 { throw("Failed to submit open operation") }
+                stash-task(self.tasks, PendingOp.FileIO { handle: handle, loop_id: loop_id }, resume)
+            },
+            Async.Close { file } => {
+                let handle = core/file-close-submit(loop_id, file)
+                if handle < 0 { throw("Failed to submit close operation") }
+                stash-task(self.tasks, PendingOp.FileIO { handle: handle, loop_id: loop_id }, resume)
+            },
+            Async.Read { file, n } => {
+                let handle = core/file-handle-read-submit(loop_id, file, n)
+                if handle < 0 { throw("Failed to submit handle-read operation") }
+                stash-task(self.tasks, PendingOp.FileIO { handle: handle, loop_id: loop_id }, resume)
+            },
+            Async.Write { file, content } => {
+                let handle = core/file-handle-write-submit(loop_id, file, content)
+                if handle < 0 { throw("Failed to submit handle-write operation") }
+                stash-task(self.tasks, PendingOp.FileIO { handle: handle, loop_id: loop_id }, resume)
+            },
+            Async.ReadLine { file } => {
+                let handle = core/file-handle-readline-submit(loop_id, file)
+                if handle < 0 { throw("Failed to submit handle-readline operation") }
+                stash-task(self.tasks, PendingOp.FileIO { handle: handle, loop_id: loop_id }, resume)
+            },
+            Async.Flush { file } => {
+                let handle = core/file-handle-flush-submit(loop_id, file)
+                if handle < 0 { throw("Failed to submit handle-flush operation") }
+                stash-task(self.tasks, PendingOp.FileIO { handle: handle, loop_id: loop_id }, resume)
+            },
+
+            // Threaded spawn — spawn thread immediately, resume with future
+            Async.Spawn { thunk } => {
+                let future = handle-spawn-threaded(thunk)
+                resume(future)
+            },
+            Async.SpawnWithToken { thunk, token } => {
+                let future = handle-spawn-with-token-threaded(thunk, token)
+                resume(future)
+            },
+
+            // Await — stash the future for cooperative polling
+            Async.Await { future } => {
+                if future == null {
+                    resume(null)
+                } else {
+                    stash-task(self.tasks, PendingOp.SpawnedTask { future: future }, resume)
+                }
+            },
+
+            // Synchronous operations — handle immediately
+            Async.AwaitAll { futures } => {
+                resume(handle-await-all-threaded(futures))
+            },
+            Async.AwaitFirst { futures } => {
+                resume(handle-await-first-threaded(futures))
+            },
+            Async.Cancel { future } => {
+                resume(handle-cancel(future))
+            },
+
+            // Cooperative spawn — stash thunk for deferred execution, resume caller immediately
+            Async.CoopSpawn { thunk } => {
+                swap!(self.tasks, fn(t) {
+                    push(t, SchedulerTask { op: PendingOp.NewTask { thunk: thunk }, resume: null })
+                })
+                resume(null)
+            }
+        }
     }
 }
 
@@ -2108,6 +2381,13 @@ extend ImplicitAsyncHandler with effect/Handler(Async) {
             },
             Async.SpawnWithToken { thunk, token } => {
                 handle-spawn-with-token-threaded(thunk, token)
+            },
+            Async.CoopSpawn { thunk } => {
+                // No cooperative scheduler — just run synchronously under a handler
+                handle effect/Handler(Async) with self {
+                    thunk()
+                }
+                null
             }
         }
         resume(result)
@@ -2128,6 +2408,95 @@ fn with-implicit-async(thunk) {
 }
 
 // ============================================================================
+// Cooperative Scheduler Loop
+// ============================================================================
+
+// Poll all pending tasks, returning [ready_list, remaining_list]
+fn poll-tasks(tasks, loop_id) {
+    let mut ready = []
+    let mut remaining = []
+    for task in tasks {
+        match task.op {
+            PendingOp.TcpIO { result_atom, loop_id: op_loop_id } => {
+                let result_type = core/tcp-result-pop-for-atom(op_loop_id, result_atom)
+                if result_type != 0 {
+                    let result = decode-tcp-result(result_type, op_loop_id)
+                    ready = push(ready, ReadyTask { resume: task.resume, result: result })
+                } else {
+                    remaining = push(remaining, task)
+                }
+            },
+            PendingOp.FileIO { handle, loop_id: op_loop_id } => {
+                let result = poll-file-result(op_loop_id, handle)
+                if result != null {
+                    ready = push(ready, ReadyTask { resume: task.resume, result: result })
+                } else {
+                    remaining = push(remaining, task)
+                }
+            },
+            PendingOp.Timer { marker, loop_id: op_loop_id } => {
+                let completed = core/timer-take-completed(op_loop_id, marker)
+                if completed == 1 {
+                    ready = push(ready, ReadyTask { resume: task.resume, result: async-ok(null) })
+                } else {
+                    remaining = push(remaining, task)
+                }
+            },
+            PendingOp.SpawnedTask { future } => {
+                let state = deref(future.state_atom)
+                match state {
+                    FutureState.Resolved { value } => {
+                        ready = push(ready, ReadyTask { resume: task.resume, result: value })
+                    },
+                    FutureState.Rejected { error } => {
+                        ready = push(ready, ReadyTask { resume: task.resume, result: error })
+                    },
+                    _ => {
+                        remaining = push(remaining, task)
+                    }
+                }
+            },
+            PendingOp.NewTask { thunk } => {
+                // New tasks are always immediately ready to start
+                ready = push(ready, ReadyTask { resume: null, result: thunk })
+            }
+        }
+    }
+    [ready, remaining]
+}
+
+// Run the scheduler loop — polls for IO completions, resumes ready tasks
+fn scheduler-loop(handler) {
+    loop {
+        let tasks = deref(handler.tasks)
+        if length(tasks) == 0 {
+            break(null)
+        }
+
+        // Poll the event loop with a short timeout (1ms)
+        core/event-loop-run-once(handler.loop_id, 1)
+
+        let result = poll-tasks(deref(handler.tasks), handler.loop_id)
+        let ready = result[0]
+        let remaining = result[1]
+        reset!(handler.tasks, remaining)
+
+        for item in ready {
+            if item.resume == null {
+                // New task — run the thunk (result is the thunk)
+                handle effect/Handler(Async) with handler {
+                    item.result()
+                }
+            } else {
+                handle effect/Handler(Async) with handler {
+                    item.resume(item.result)
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
 // Main Function Wrapper
 // ============================================================================
 // This function is called by the runtime to wrap main() with the implicit
@@ -2135,14 +2504,15 @@ fn with-implicit-async(thunk) {
 // The runtime checks for beagle.async/__main__ and calls it if present.
 
 fn __main__(main_fn, args) {
-    let handler = create-implicit-handler()
+    let loop_id = get-io-loop()
+    let tasks = atom([])
+    let handler = CooperativeHandler { tasks: tasks, loop_id: loop_id }
     handle effect/Handler(Async) with handler {
-        reset {
-            if args == null {
-                main_fn()
-            } else {
-                main_fn(args)
-            }
+        if args == null {
+            main_fn()
+        } else {
+            main_fn(args)
         }
     }
+    scheduler-loop(handler)
 }

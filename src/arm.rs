@@ -2,8 +2,8 @@ use crate::{
     builtins::debugger,
     machine_code::arm_codegen::{
         ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, SP, Size, StpGenSelector,
-        StrImmGenSelector, X0, X10, X11, X12, X16, X17, X19, X20, X21, X22, X23, X24, X25, X26, X27,
-        X28, X29, X30, ZERO_REGISTER,
+        StrImmGenSelector, X0, X1, X2, X3, X4, X5, X6, X7, X9, X10, X11, X12, X16, X19, X20, X21,
+        X22, X23, X24, X25, X26, X27, X28, X29, X30, ZERO_REGISTER,
     },
     types::BuiltInTypes,
 };
@@ -786,7 +786,10 @@ impl LowLevelArm {
 
     pub fn push_to_stack(&mut self, reg: Register) {
         self.increment_stack_size(1);
-        self.store_on_stack(reg, -(self.max_locals + self.stack_size + Self::FRAME_HEADER_WORDS))
+        self.store_on_stack(
+            reg,
+            -(self.max_locals + self.stack_size + Self::FRAME_HEADER_WORDS),
+        )
     }
     /// Frame header occupies [FP-8] and GC prev pointer at [FP-16],
     /// so locals start at [FP-24].
@@ -928,7 +931,10 @@ impl LowLevelArm {
 
     pub fn pop_from_stack(&mut self, reg: Register) {
         self.increment_stack_size(-1);
-        self.load_from_stack(reg, -(self.max_locals + self.stack_size + 1 + Self::FRAME_HEADER_WORDS))
+        self.load_from_stack(
+            reg,
+            -(self.max_locals + self.stack_size + 1 + Self::FRAME_HEADER_WORDS),
+        )
     }
 
     pub fn load_local(&mut self, destination: Register, offset: i32) {
@@ -1509,7 +1515,7 @@ impl LowLevelArm {
                     opc: 0b10, // 64-bit
                     imm7: -2,  // pre-index offset -16
                     rt2: X1,
-                    rn: Register::SP,
+                    rn: SP,
                     rt: X0,
                     class_selector: StpGenSelector::PreIndex,
                 });
@@ -1518,7 +1524,7 @@ impl LowLevelArm {
                     opc: 0b10,
                     imm7: -2,
                     rt2: X3,
-                    rn: Register::SP,
+                    rn: SP,
                     rt: X2,
                     class_selector: StpGenSelector::PreIndex,
                 });
@@ -1527,7 +1533,7 @@ impl LowLevelArm {
                     opc: 0b10,
                     imm7: -2,
                     rt2: X5,
-                    rn: Register::SP,
+                    rn: SP,
                     rt: X4,
                     class_selector: StpGenSelector::PreIndex,
                 });
@@ -1536,7 +1542,7 @@ impl LowLevelArm {
                     opc: 0b10,
                     imm7: -2,
                     rt2: X7,
-                    rn: Register::SP,
+                    rn: SP,
                     rt: X6,
                     class_selector: StpGenSelector::PreIndex,
                 });
@@ -1544,15 +1550,19 @@ impl LowLevelArm {
                 alloc_instructions.push(ArmAsm::StpGen {
                     opc: 0b10,
                     imm7: -2,
-                    rt2: Register::XZR,
-                    rn: Register::SP,
+                    rt2: ZERO_REGISTER,
+                    rn: SP,
                     rt: X9,
                     class_selector: StpGenSelector::PreIndex,
                 });
 
                 // Set up X0 = frame_header_addr = X29 - 8
                 alloc_instructions.push(ArmAsm::SubAddsubImm {
-                    sf: 1, rn: X29, rd: X0, imm12: 8, sh: 0,
+                    sf: 1,
+                    rn: X29,
+                    rd: X0,
+                    imm12: 8,
+                    sh: 0,
                 });
 
                 // Load gc_frame_link address into X16 and call via BLR
@@ -1564,7 +1574,10 @@ impl LowLevelArm {
 
                 // Store returned prev pointer (X0) at [X29-16]
                 alloc_instructions.push(ArmAsm::SturGen {
-                    size: 0b11, imm9: -16, rn: X29, rt: X0,
+                    size: 0b11,
+                    imm9: -16,
+                    rn: X29,
+                    rt: X0,
                 });
 
                 // Restore argument registers in reverse order
@@ -1572,8 +1585,8 @@ impl LowLevelArm {
                 alloc_instructions.push(ArmAsm::LdpGen {
                     opc: 0b10,
                     imm7: 2,
-                    rt2: Register::XZR,
-                    rn: Register::SP,
+                    rt2: ZERO_REGISTER,
+                    rn: SP,
                     rt: X9,
                     class_selector: LdpGenSelector::PostIndex,
                 });
@@ -1582,7 +1595,7 @@ impl LowLevelArm {
                     opc: 0b10,
                     imm7: 2,
                     rt2: X7,
-                    rn: Register::SP,
+                    rn: SP,
                     rt: X6,
                     class_selector: LdpGenSelector::PostIndex,
                 });
@@ -1591,7 +1604,7 @@ impl LowLevelArm {
                     opc: 0b10,
                     imm7: 2,
                     rt2: X5,
-                    rn: Register::SP,
+                    rn: SP,
                     rt: X4,
                     class_selector: LdpGenSelector::PostIndex,
                 });
@@ -1600,7 +1613,7 @@ impl LowLevelArm {
                     opc: 0b10,
                     imm7: 2,
                     rt2: X3,
-                    rn: Register::SP,
+                    rn: SP,
                     rt: X2,
                     class_selector: LdpGenSelector::PostIndex,
                 });
@@ -1609,7 +1622,7 @@ impl LowLevelArm {
                     opc: 0b10,
                     imm7: 2,
                     rt2: X1,
-                    rn: Register::SP,
+                    rn: SP,
                     rt: X0,
                     class_selector: LdpGenSelector::PostIndex,
                 });
@@ -1696,9 +1709,9 @@ impl LowLevelArm {
                 // Save X0 (return value) and X30 (LR) to stack
                 dealloc_instructions.push(ArmAsm::StpGen {
                     opc: 0b10,
-                    imm7: -2,  // pre-index, SP -= 16
+                    imm7: -2, // pre-index, SP -= 16
                     rt2: X30,
-                    rn: Register::SP,
+                    rn: SP,
                     rt: X0,
                     class_selector: StpGenSelector::PreIndex,
                 });
@@ -1721,9 +1734,9 @@ impl LowLevelArm {
                 // Restore X0 (return value) and X30 (LR) from stack
                 dealloc_instructions.push(ArmAsm::LdpGen {
                     opc: 0b10,
-                    imm7: 2,  // post-index, SP += 16
+                    imm7: 2, // post-index, SP += 16
                     rt2: X30,
-                    rn: Register::SP,
+                    rn: SP,
                     rt: X0,
                     class_selector: LdpGenSelector::PostIndex,
                 });

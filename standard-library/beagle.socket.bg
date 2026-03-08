@@ -7,6 +7,8 @@ namespace beagle.socket
 // loop management.
 
 use beagle.async as async
+use beagle.effect as effect
+use beagle.core as core
 
 // Create a TCP listener on the given host and port
 fn listen(host, port) {
@@ -54,5 +56,23 @@ fn close(socket) {
 fn close-listener(listener) {
     perform async/Async.IO {
         action: async/IOAction.TcpCloseListener { listener: listener }
+    }
+}
+
+// ============================================================================
+// Cooperative Single-Threaded Server
+// ============================================================================
+// on-connection uses the CooperativeHandler in beagle.async to multiplex
+// many connections on a single thread. When a callback does socket/read or
+// socket/write, the continuation is suspended and other connections run.
+
+// Accept connections and handle each one cooperatively on a single thread.
+// The callback receives a connection and can use socket/read, socket/write, etc.
+// Multiple clients are multiplexed via the event loop and continuations —
+// no threads are spawned.
+fn on-connection(listener, callback) {
+    loop {
+        let conn = accept(listener)
+        async/cooperative-spawn(fn() { callback(conn) })
     }
 }

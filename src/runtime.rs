@@ -33,10 +33,9 @@ use crate::{
 
 use crate::collections::{
     GcHandle, HandleScope, PersistentMap, PersistentVec, TYPE_ID_ATOM, TYPE_ID_CAPTURED_FRAME,
-    TYPE_ID_CONS_STRING, TYPE_ID_CONTINUATION,
-    TYPE_ID_FUNCTION_OBJECT, TYPE_ID_KEYWORD, TYPE_ID_MULTI_ARITY_FUNCTION,
-    TYPE_ID_PERSISTENT_MAP, TYPE_ID_PERSISTENT_SET, TYPE_ID_PERSISTENT_VEC, TYPE_ID_RAW_ARRAY,
-    TYPE_ID_STRING, TYPE_ID_STRING_SLICE,
+    TYPE_ID_CONS_STRING, TYPE_ID_CONTINUATION, TYPE_ID_FUNCTION_OBJECT, TYPE_ID_KEYWORD,
+    TYPE_ID_MULTI_ARITY_FUNCTION, TYPE_ID_PERSISTENT_MAP, TYPE_ID_PERSISTENT_SET,
+    TYPE_ID_PERSISTENT_VEC, TYPE_ID_RAW_ARRAY, TYPE_ID_STRING, TYPE_ID_STRING_SLICE,
 };
 
 use std::cell::{Cell, RefCell};
@@ -671,7 +670,9 @@ impl ThreadState {
     pub fn pause(&mut self, frame_pointer: usize) {
         let thread_id = thread::current().id();
         let gc_frame_top = crate::builtins::get_gc_frame_top();
-        let prev = self.stack_pointers.insert(thread_id, (frame_pointer, gc_frame_top));
+        let prev = self
+            .stack_pointers
+            .insert(thread_id, (frame_pointer, gc_frame_top));
         debug_assert!(prev.is_none(), "Thread {:?} double-paused", thread_id);
     }
 
@@ -3072,11 +3073,7 @@ impl Memory {
     /// Collects shadow stack roots and head_block roots from all threads and passes them to the GC.
     /// namespace_roots: Additional GC roots from namespace bindings (passed from Runtime)
     /// Returns updated namespace root values after GC (for copying collectors)
-    pub fn run_gc(
-        &mut self,
-        gc_frame_tops: &[usize],
-        namespace_roots: &[usize],
-    ) -> Vec<usize> {
+    pub fn run_gc(&mut self, gc_frame_tops: &[usize], namespace_roots: &[usize]) -> Vec<usize> {
         // Collect shadow stack entries and head_block roots from all threads as extra GC roots.
         // Safety: world is stopped during GC, so no thread modifies handle_stack.
         let mut extra_roots: Vec<(*mut usize, usize)> = {
@@ -3125,7 +3122,9 @@ impl Memory {
         for tg in thread_globals.values() {
             if tg.stack_base != 0 {
                 let new_head = tg.head_block.load(Ordering::SeqCst);
-                unsafe { *((tg.stack_base - 8) as *mut usize) = new_head; }
+                unsafe {
+                    *((tg.stack_base - 8) as *mut usize) = new_head;
+                }
             }
         }
 
@@ -3147,11 +3146,7 @@ impl Allocator for Memory {
         self.heap.try_allocate(words, kind)
     }
 
-    fn gc(
-        &mut self,
-        gc_frame_tops: &[usize],
-        extra_roots: &[(*mut usize, usize)],
-    ) {
+    fn gc(&mut self, gc_frame_tops: &[usize], extra_roots: &[(*mut usize, usize)]) {
         self.heap.gc(gc_frame_tops, extra_roots);
     }
 
@@ -3877,9 +3872,7 @@ impl CapturedFrame {
 
         // Restore callee-saved registers
         for i in 0..num_callee_saved {
-            let reg_value = self
-                .heap_obj
-                .get_field(Self::LOCALS_START + num_locals + i);
+            let reg_value = self.heap_obj.get_field(Self::LOCALS_START + num_locals + i);
             let reg_addr = target_fp
                 .wrapping_sub(24)
                 .wrapping_sub(num_locals * 8)

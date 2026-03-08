@@ -1,0 +1,33 @@
+namespace echo_server
+
+// A multi-client echo server on a single thread.
+// Each connection is multiplexed via the event loop and continuations —
+// no threads are spawned.
+//
+// Run:   cargo run -- examples/echo_server.bg
+// Test:  nc localhost 8080
+//        (open multiple nc sessions — they all work concurrently)
+
+use beagle.socket as socket
+
+let PORT = 8080
+
+fn main() {
+    let listener = socket/listen("0.0.0.0", PORT)
+    println("Echo server listening on port ${PORT}")
+    println("Connect with: nc localhost ${PORT}")
+
+    socket/on-connection(listener, fn(conn) {
+        println("Client connected")
+        loop {
+            let data = socket/read(conn, 4096)
+            if data == "" || data == null {
+                println("Client disconnected")
+                socket/close(conn)
+                break(null)
+            } else {
+                socket/write(conn, data)
+            }
+        }
+    })
+}
