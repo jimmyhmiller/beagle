@@ -215,6 +215,10 @@ impl FreeList {
     fn find_entry_contains(&self, offset: usize) -> Option<&FreeListEntry> {
         self.ranges.iter().find(|&entry| entry.contains(offset))
     }
+
+    fn trailing_free_entry(&self) -> Option<&FreeListEntry> {
+        self.ranges.last()
+    }
 }
 
 pub struct MarkAndSweep {
@@ -255,6 +259,21 @@ impl MarkAndSweep {
             .enumerate()
             .find(|(_, x)| x.size >= size);
         spot.is_some()
+    }
+
+    fn shrink_highmark_if_tail_is_free(&mut self) {
+        let Some(trailing_free) = self.free_list.trailing_free_entry() else {
+            return;
+        };
+
+        if trailing_free.end() != self.space.byte_count() {
+            return;
+        }
+
+        // `highmark` only needs to be somewhere after the start of the highest live object
+        // and before the start of the trailing free range. Using `offset - 8` keeps all
+        // existing `offset > highmark` scans correct while dropping dead tail space.
+        self.space.highmark = trailing_free.offset.saturating_sub(8);
     }
 
     fn allocate_inner(
@@ -451,6 +470,8 @@ impl MarkAndSweep {
                 );
             }
         }
+
+        self.shrink_highmark_if_tail_is_free();
     }
 
     #[allow(unused)]
@@ -514,6 +535,9 @@ impl MarkAndSweep {
     /// Also updates extra_roots (namespace bindings, handle stack) to point to new locations.
     fn migrate_outdated_structs(&mut self, extra_roots: &[(*mut usize, usize)]) {
         let runtime = crate::get_runtime().get_mut();
+        if !runtime.structs.has_pending_migrations() {
+            return;
+        }
 
         // Phase 1: Find all objects that need migration, allocate new copies
         let mut forwarding_map: Vec<(usize, usize, usize)> = Vec::new();
@@ -580,6 +604,7 @@ impl MarkAndSweep {
         }
 
         if forwarding_map.is_empty() {
+            runtime.structs.complete_pending_migrations();
             return;
         }
 
@@ -660,6 +685,9 @@ impl MarkAndSweep {
                 size: old_size,
             });
         }
+
+        self.shrink_highmark_if_tail_is_free();
+        runtime.structs.complete_pending_migrations();
     }
 }
 

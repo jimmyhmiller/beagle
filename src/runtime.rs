@@ -3,7 +3,7 @@ use mmap_rs::{Mmap, MmapMut, MmapOptions, Reserved};
 use nanoserde::SerJson;
 use regex::Regex;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     error::Error,
     ffi::{CString, c_void},
     io::Write,
@@ -408,6 +408,7 @@ impl Struct {
 }
 
 /// Computed by StructManager, consumed by any GC for migrating objects to new layouts.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MigrationPlan {
     pub new_field_count: usize,
     pub new_shape_id: usize,
@@ -421,6 +422,9 @@ pub struct StructManager {
     name_to_family_id: HashMap<String, usize>,
     shape_id_to_family_id: Vec<usize>,
     family_id_to_latest_shape: Vec<usize>,
+    family_id_to_shape_ids: Vec<Vec<usize>>,
+    migration_plans_by_shape: Vec<Option<MigrationPlan>>,
+    pending_migration_families: HashSet<usize>,
     family_id_counter: usize,
 }
 
@@ -438,6 +442,9 @@ impl StructManager {
             name_to_family_id: HashMap::new(),
             shape_id_to_family_id: Vec::new(),
             family_id_to_latest_shape: Vec::new(),
+            family_id_to_shape_ids: Vec::new(),
+            migration_plans_by_shape: Vec::new(),
+            pending_migration_families: HashSet::new(),
             family_id_counter: 0,
         }
     }
@@ -457,12 +464,20 @@ impl StructManager {
             self.family_id_counter += 1;
             self.name_to_family_id.insert(name.clone(), fid);
             self.family_id_to_latest_shape.push(new_shape_id);
+            self.family_id_to_shape_ids.push(Vec::new());
             fid
         };
 
         self.name_to_id.insert(name, new_shape_id);
         self.structs.push(s);
         self.shape_id_to_family_id.push(family_id);
+        self.family_id_to_shape_ids[family_id].push(new_shape_id);
+        self.migration_plans_by_shape.push(None);
+
+        if is_redefinition {
+            self.pending_migration_families.insert(family_id);
+            self.refresh_family_migration_state(family_id);
+        }
 
         (new_shape_id, is_redefinition)
     }
@@ -518,22 +533,123 @@ impl StructManager {
             .collect()
     }
 
-    /// Returns None if object doesn't need migration (already latest shape)
-    pub fn migration_plan_for(&self, shape_id: usize) -> Option<MigrationPlan> {
-        if self.is_latest_shape(shape_id) {
-            return None;
+    fn refresh_family_migration_state(&mut self, family_id: usize) {
+        let latest_shape = self.family_id_to_latest_shape[family_id];
+        for &shape_id in &self.family_id_to_shape_ids[family_id] {
+            if shape_id == latest_shape {
+                self.migration_plans_by_shape[shape_id] = None;
+            } else {
+                self.migration_plans_by_shape[shape_id] = Some(MigrationPlan {
+                    new_field_count: self.structs[latest_shape].fields.len(),
+                    new_shape_id: latest_shape,
+                    field_map: self.build_migration_map(shape_id, latest_shape),
+                });
+            }
         }
-        let latest = self.get_latest_shape_for(shape_id);
-        Some(MigrationPlan {
-            new_field_count: self.structs[latest].fields.len(),
-            new_shape_id: latest,
-            field_map: self.build_migration_map(shape_id, latest),
-        })
+    }
+
+    pub fn has_pending_migrations(&self) -> bool {
+        !self.pending_migration_families.is_empty()
+    }
+
+    /// Called after a full-heap/full-live-set migration pass has rewritten all reachable
+    /// outdated objects to their latest shapes.
+    pub fn complete_pending_migrations(&mut self) {
+        if self.pending_migration_families.is_empty() {
+            return;
+        }
+
+        let pending_families: Vec<usize> = self.pending_migration_families.drain().collect();
+        for family_id in pending_families {
+            for &shape_id in &self.family_id_to_shape_ids[family_id] {
+                self.migration_plans_by_shape[shape_id] = None;
+            }
+        }
+    }
+
+    /// Returns None if object doesn't need migration (already latest shape or
+    /// all pending migrations have already been completed).
+    pub fn migration_plan_for(&self, shape_id: usize) -> Option<&MigrationPlan> {
+        self.migration_plans_by_shape
+            .get(shape_id)
+            .and_then(|plan| plan.as_ref())
     }
 
     /// Iterate over all structs
     pub fn iter(&self) -> impl Iterator<Item = &Struct> {
         self.structs.iter()
+    }
+}
+
+#[cfg(test)]
+mod struct_manager_tests {
+    use super::{Struct, StructManager};
+
+    fn make_struct(name: &str, fields: &[&str]) -> Struct {
+        Struct {
+            name: name.to_string(),
+            fields: fields.iter().map(|field| field.to_string()).collect(),
+            mutable_fields: vec![false; fields.len()],
+            docstring: None,
+            field_docstrings: vec![None; fields.len()],
+        }
+    }
+
+    #[test]
+    fn tracks_pending_migrations_per_family() {
+        let mut structs = StructManager::new();
+
+        let (shape0, is_redefinition) = structs.insert(
+            "user/Foo".to_string(),
+            make_struct("user/Foo", &["a"]),
+        );
+        assert!(!is_redefinition);
+        assert!(!structs.has_pending_migrations());
+        assert!(structs.migration_plan_for(shape0).is_none());
+
+        let (shape1, is_redefinition) = structs.insert(
+            "user/Foo".to_string(),
+            make_struct("user/Foo", &["a", "b"]),
+        );
+        assert!(is_redefinition);
+        assert!(structs.has_pending_migrations());
+        let plan0 = structs.migration_plan_for(shape0).unwrap();
+        assert_eq!(plan0.new_shape_id, shape1);
+        assert_eq!(plan0.field_map, vec![Some(0), None]);
+        assert!(structs.migration_plan_for(shape1).is_none());
+
+        let (shape2, is_redefinition) = structs.insert(
+            "user/Foo".to_string(),
+            make_struct("user/Foo", &["b", "a", "c"]),
+        );
+        assert!(is_redefinition);
+        let plan0 = structs.migration_plan_for(shape0).unwrap();
+        assert_eq!(plan0.new_shape_id, shape2);
+        assert_eq!(plan0.field_map, vec![None, Some(0), None]);
+        let plan1 = structs.migration_plan_for(shape1).unwrap();
+        assert_eq!(plan1.new_shape_id, shape2);
+        assert_eq!(plan1.field_map, vec![Some(1), Some(0), None]);
+
+        structs.complete_pending_migrations();
+        assert!(!structs.has_pending_migrations());
+        assert!(structs.migration_plan_for(shape0).is_none());
+        assert!(structs.migration_plan_for(shape1).is_none());
+        assert!(structs.migration_plan_for(shape2).is_none());
+    }
+
+    #[test]
+    fn redefinition_only_marks_affected_family_pending() {
+        let mut structs = StructManager::new();
+
+        let (foo0, _) = structs.insert("user/Foo".to_string(), make_struct("user/Foo", &["a"]));
+        let (bar0, _) = structs.insert("user/Bar".to_string(), make_struct("user/Bar", &["x"]));
+        let (foo1, _) =
+            structs.insert("user/Foo".to_string(), make_struct("user/Foo", &["a", "b"]));
+
+        assert!(structs.has_pending_migrations());
+        assert!(structs.migration_plan_for(foo0).is_some());
+        assert!(structs.migration_plan_for(foo1).is_none());
+        assert!(structs.migration_plan_for(bar0).is_none());
     }
 }
 

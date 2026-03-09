@@ -282,12 +282,14 @@ impl CompactingHeap {
             if !is_closure {
                 let shape_id = heap_object.get_struct_id();
                 let runtime = crate::get_runtime().get_mut();
-                if let Some(plan) = runtime.structs.migration_plan_for(shape_id) {
-                    let new_pointer = self.copy_with_migration(&heap_object, &plan);
-                    debug_assert!(new_pointer % 8 == 0, "Pointer is not aligned");
-                    let tagged_new = object_type.unwrap().tag(new_pointer) as usize;
-                    unsafe { *pointer = Header::set_forwarding_bit(tagged_new) };
-                    return tagged_new;
+                if runtime.structs.has_pending_migrations() {
+                    if let Some(plan) = runtime.structs.migration_plan_for(shape_id) {
+                        let new_pointer = self.copy_with_migration(&heap_object, plan);
+                        debug_assert!(new_pointer % 8 == 0, "Pointer is not aligned");
+                        let tagged_new = object_type.unwrap().tag(new_pointer) as usize;
+                        unsafe { *pointer = Header::set_forwarding_bit(tagged_new) };
+                        return tagged_new;
+                    }
                 }
             }
         }
@@ -450,6 +452,7 @@ impl Allocator for CompactingHeap {
         if !self.options.gc {
             return;
         }
+        let had_pending_migrations = crate::get_runtime().get().structs.has_pending_migrations();
 
         for &gc_frame_top in gc_frame_tops.iter() {
             let roots = StackWalker::collect_stack_roots(gc_frame_top);
@@ -485,6 +488,13 @@ impl Allocator for CompactingHeap {
         self.gc_continuations();
 
         unsafe { self.copy_remaining(start_offset) };
+
+        if had_pending_migrations {
+            crate::get_runtime()
+                .get_mut()
+                .structs
+                .complete_pending_migrations();
+        }
 
         mem::swap(&mut self.from_space, &mut self.to_space);
 

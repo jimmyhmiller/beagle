@@ -815,8 +815,14 @@ impl GenerationalGC {
             if !is_closure {
                 let shape_id = heap_object.get_struct_id();
                 let runtime = crate::get_runtime().get_mut();
-                if let Some(plan) = runtime.structs.migration_plan_for(shape_id) {
-                    self.copy_with_migration(&heap_object, &plan)
+                if runtime.structs.has_pending_migrations() {
+                    if let Some(plan) = runtime.structs.migration_plan_for(shape_id) {
+                        self.copy_with_migration(&heap_object, plan)
+                    } else {
+                        // Normal copy
+                        let data = heap_object.get_full_object_data();
+                        self.old.copy_data_to_offset(data)
+                    }
                 } else {
                     // Normal copy
                     let data = heap_object.get_full_object_data();
