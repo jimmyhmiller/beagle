@@ -226,10 +226,16 @@ fn start-repl-server(host, port) {
     let server = socket/listen(host, port)
     println("REPL server listening...")
 
-    // Use cooperative connection handling instead of OS threads.
-    // The runtime is shared globally; this keeps all REPL execution on one thread.
-    socket/on-connection(server, fn(client) {
-        println("Client connected")
-        handle-client(client)
-    })
+    // Keep server handling single-threaded to avoid runtime races while still
+    // supporting multiple sequential client sessions.
+    let mut running = true
+    while running {
+        try {
+            let client = socket/accept(server)
+            println("Client connected")
+            handle-client(client)
+        } catch (e) {
+            println("Error accepting connection:", e)
+        }
+    }
 }
