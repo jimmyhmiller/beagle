@@ -1,0 +1,40 @@
+namespace beagle.repl-interactive
+
+use beagle.builtin as builtin
+
+fn main() {
+    // Switch to "user" namespace so eval'd code lives there
+    eval("namespace user")
+    println("Beagle REPL v0.1.0")
+    println("Type :quit to exit.")
+    repl-loop()
+}
+
+fn repl-loop() {
+    print("user> ")
+    let input = builtin/read-line()
+    if input == null {
+        // EOF (Ctrl-D)
+        println("")
+        null
+    } else if input == ":quit" {
+        null
+    } else if input == "" {
+        repl-loop()
+    } else {
+        let had-error = atom(false)
+        let result = try {
+            eval(input)
+        } catch (e) {
+            swap!(had-error, fn(_) { true })
+            println("Error:", to-string(e))
+            null
+        }
+        if !deref(had-error) {
+            if result != null {
+                println("=>", repr(result))
+            }
+        }
+        repl-loop()
+    }
+}

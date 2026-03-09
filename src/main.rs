@@ -43,6 +43,9 @@ pub mod embedded_stdlib {
                 Some(include_str!("../standard-library/beagle.repl-session.bg"))
             }
             "beagle.repl.bg" => Some(include_str!("../standard-library/beagle.repl.bg")),
+            "beagle.repl-interactive.bg" => Some(include_str!(
+                "../standard-library/beagle.repl-interactive.bg"
+            )),
             "beagle.spawn.bg" => Some(include_str!("../standard-library/beagle.spawn.bg")),
             "beagle.mutable-array.bg" => {
                 Some(include_str!("../standard-library/beagle.mutable-array.bg"))
@@ -1021,6 +1024,7 @@ fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Erro
         "beagle.stream.bg",
         "beagle.repl-session.bg",
         "beagle.repl.bg",
+        "beagle.repl-interactive.bg",
     ];
     let mut all_top_levels = vec![];
 
@@ -1653,13 +1657,39 @@ fn run_repl(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // Set REPL to use "user" namespace for user code
-    let user_namespace_id = runtime
-        .get_namespace_id("user")
-        .unwrap_or_else(|| runtime.reserve_namespace("user".to_string()));
-    runtime.set_current_namespace(user_namespace_id);
+    // Run the Beagle REPL program through __main__ so it gets the async handler
+    let repl_main = "beagle.repl-interactive/main";
 
-    repl::run_interactive_loop(runtime)
+    // Register main thread so child-triggered GC waits for us.
+    {
+        let _guard = runtime.gc_lock.lock().unwrap();
+        let new_count = runtime
+            .registered_thread_count
+            .fetch_add(1, std::sync::atomic::Ordering::Release)
+            + 1;
+        gc::usdt_probes::fire_thread_register(new_count);
+    }
+
+    let async_main_wrapper = "beagle.async/__main__";
+    let has_async_wrapper = runtime.get_function_arity(async_main_wrapper).is_some();
+
+    if has_async_wrapper {
+        let _stack_pointer = runtime.get_stack_base();
+        let main_fn = runtime.find_function(repl_main).unwrap();
+        let main_fn_ptr = runtime.get_function_pointer(main_fn).unwrap();
+        let tagged_main_fn = ((main_fn_ptr as u64) << 3) | 0b100;
+        let args_or_null = 0b111u64; // null for 0-arity main
+
+        let wrapper = runtime.get_function2(async_main_wrapper).unwrap();
+        wrapper(tagged_main_fn, args_or_null);
+    } else {
+        let f = runtime
+            .get_function0(repl_main)
+            .expect("beagle.repl-interactive/main not found");
+        f();
+    }
+
+    Ok(())
 }
 
 cfg_if::cfg_if! {

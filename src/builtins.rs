@@ -4212,7 +4212,17 @@ pub extern "C" fn run_thread(_unused: usize) -> usize {
 
     // Enter Beagle code - __run_thread_start calls __pause as first instruction!
     // If GC started right after we released gc_lock, __pause will handle it.
-    let result = unsafe { call_fn_0(runtime, "beagle.core/__run_thread_start") };
+    // Check if beagle.async/__run_thread_start exists — if so, use it to wrap
+    // the thread function with the same async handler that __main__ provides.
+    let thread_start_fn = if runtime
+        .get_function_arity("beagle.async/__run_thread_start")
+        .is_some()
+    {
+        "beagle.async/__run_thread_start"
+    } else {
+        "beagle.core/__run_thread_start"
+    };
+    let result = unsafe { call_fn_0(runtime, thread_start_fn) };
 
     // === CLEANUP ===
     // We're still registered but we're in C code now, not Beagle code.

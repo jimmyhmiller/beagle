@@ -469,6 +469,317 @@ fn test_no_args() {
     );
 }
 
+// --- REPL ---
+
+/// Helper to run the REPL with piped input and return stdout
+fn run_repl(input: &str) -> String {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = beag()
+        .arg("repl")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn beag repl");
+
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .expect("failed to write to stdin");
+    drop(child.stdin.take());
+
+    let output = child
+        .wait_with_output()
+        .expect("failed to wait for beag repl");
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+#[test]
+fn test_repl_banner() {
+    let stdout = run_repl(":quit\n");
+    assert!(
+        stdout.contains("Beagle REPL"),
+        "Should show banner, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_repl_simple_expression() {
+    let stdout = run_repl("1 + 2\n:quit\n");
+    assert!(
+        stdout.contains("=> 3"),
+        "Should evaluate 1 + 2 to 3, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_repl_string_expression() {
+    let stdout = run_repl("\"hello\"\n:quit\n");
+    assert!(
+        stdout.contains("=> \"hello\""),
+        "Should show string repr, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_repl_variable_binding() {
+    let stdout = run_repl("let x = 42\nx * 2\n:quit\n");
+    assert!(
+        stdout.contains("=> 42"),
+        "Should show let binding result, got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("=> 84"),
+        "Should evaluate x * 2, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_repl_error_handling() {
+    let stdout = run_repl("undefined_var\n1 + 2\n:quit\n");
+    assert!(
+        stdout.contains("Error:"),
+        "Should show error for undefined var, got: {}",
+        stdout
+    );
+    // Should recover and continue
+    assert!(
+        stdout.contains("=> 3"),
+        "Should continue after error, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_repl_eof_exits() {
+    // Send no :quit, just EOF
+    let stdout = run_repl("1 + 2\n");
+    assert!(
+        stdout.contains("=> 3"),
+        "Should evaluate before EOF, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_repl_empty_lines_skipped() {
+    let stdout = run_repl("\n\n1 + 2\n:quit\n");
+    assert!(
+        stdout.contains("=> 3"),
+        "Should skip empty lines, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_repl_function_definition() {
+    let stdout = run_repl("fn double(x) { x * 2 }\ndouble(21)\n:quit\n");
+    assert!(
+        stdout.contains("=> 42"),
+        "Should define and call function, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_repl_multiple_expressions() {
+    let stdout = run_repl("10 + 20\n30 + 40\n50 + 60\n:quit\n");
+    assert!(stdout.contains("=> 30"), "First expr, got: {}", stdout);
+    assert!(stdout.contains("=> 70"), "Second expr, got: {}", stdout);
+    assert!(stdout.contains("=> 110"), "Third expr, got: {}", stdout);
+}
+
+#[test]
+fn test_repl_prompt_shows_user() {
+    let stdout = run_repl(":quit\n");
+    assert!(
+        stdout.contains("user>"),
+        "Should show user> prompt, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_repl_null_not_printed() {
+    // println returns its last arg, but null results should not be printed
+    let stdout = run_repl("null\n:quit\n");
+    // null should not produce "=> null" output
+    assert!(
+        !stdout.contains("=> null"),
+        "Should not print null result, got: {}",
+        stdout
+    );
+}
+
+// --- REPL + Socket REPL ---
+
+#[test]
+fn test_repl_starts_socket_server() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpStream;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    /// Read response lines from the socket REPL until we see a "done" status
+    /// or the read times out. Returns all lines concatenated.
+    fn read_until_done(reader: &mut BufReader<TcpStream>) -> String {
+        let mut all = String::new();
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    all.push_str(&line);
+                    if line.contains("done") {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        all
+    }
+
+    // Pick a port unlikely to collide
+    let port = 17856 + (std::process::id() % 1000) as u16;
+
+    let mut child = beag()
+        .arg("repl")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn beag repl");
+
+    let mut stdin = child.stdin.take().unwrap();
+
+    // Start the socket REPL server in a thread from the interactive REPL
+    let cmds = format!(
+        "use beagle.repl as repl\nthread(fn() {{ repl/start-repl-server(\"127.0.0.1\", {}) }})\n",
+        port
+    );
+    stdin
+        .write_all(cmds.as_bytes())
+        .expect("failed to write to repl stdin");
+    stdin.flush().unwrap();
+
+    // Poll until the server is accepting connections (max 10s)
+    let start = Instant::now();
+    let mut stream = None;
+    while start.elapsed() < Duration::from_secs(10) {
+        match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => {
+                stream = Some(s);
+                break;
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+    let stream = stream.unwrap_or_else(|| {
+        let _ = child.kill();
+        panic!(
+            "Socket REPL server did not start within 10s on port {}",
+            port
+        );
+    });
+
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+
+    // Split into separate read/write handles to avoid borrow conflicts
+    let mut writer = stream.try_clone().expect("failed to clone TcpStream");
+    let mut reader = BufReader::new(stream);
+
+    // Helper: send a JSON command
+    let mut send = |cmd: &str| {
+        writer.write_all(cmd.as_bytes()).unwrap();
+        writer.flush().unwrap();
+    };
+
+    // 1) describe — returns a single line with ops and versions
+    send("{\"op\":\"describe\",\"id\":\"d1\"}\n");
+
+    let describe_resp = read_until_done(&mut reader);
+    assert!(
+        describe_resp.contains("d1"),
+        "describe response should contain request id, got: {}",
+        describe_resp
+    );
+    assert!(
+        describe_resp.contains("eval"),
+        "describe should list eval op, got: {}",
+        describe_resp
+    );
+
+    // 2) eval "1 + 2" — returns value line then done line
+    send("{\"op\":\"eval\",\"id\":\"e1\",\"session\":\"test-sess\",\"code\":\"1 + 2\"}\n");
+
+    let eval_resp = read_until_done(&mut reader);
+    assert!(
+        eval_resp.contains("e1"),
+        "eval response should contain request id, got: {}",
+        eval_resp
+    );
+    assert!(
+        eval_resp.contains("3"),
+        "eval of '1 + 2' should return 3, got: {}",
+        eval_resp
+    );
+    assert!(
+        eval_resp.contains("done"),
+        "eval should end with done status, got: {}",
+        eval_resp
+    );
+
+    // 3) eval with println — returns out line, value line, then done line
+    send("{\"op\":\"eval\",\"id\":\"e2\",\"session\":\"test-sess\",\"code\":\"println(\\\"socket-hello\\\")\"}\n");
+
+    let println_resp = read_until_done(&mut reader);
+    assert!(
+        println_resp.contains("e2"),
+        "println eval response should contain request id, got: {}",
+        println_resp
+    );
+    assert!(
+        println_resp.contains("socket-hello"),
+        "should capture println output, got: {}",
+        println_resp
+    );
+    assert!(
+        println_resp.contains("done"),
+        "println eval should end with done, got: {}",
+        println_resp
+    );
+
+    // 4) close session
+    send("{\"op\":\"close\",\"id\":\"c1\",\"session\":\"test-sess\"}\n");
+
+    let close_resp = read_until_done(&mut reader);
+    assert!(
+        close_resp.contains("c1") && close_resp.contains("done"),
+        "close response should have id and done status, got: {}",
+        close_resp
+    );
+
+    // Clean up
+    drop(reader);
+    drop(writer);
+    let _ = stdin.write_all(b":quit\n");
+    drop(stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 // --- Helpers ---
 
 fn tempdir() -> PathBuf {

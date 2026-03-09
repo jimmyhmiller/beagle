@@ -3,6 +3,7 @@ namespace beagle.async
 use beagle.io as io
 use beagle.ffi as ffi
 use beagle.builtin as builtin
+use beagle.primitive as primitive
 use beagle.effect as effect
 use beagle.core as core
 
@@ -2513,6 +2514,20 @@ fn __main__(main_fn, args) {
         } else {
             main_fn(args)
         }
+    }
+    scheduler-loop(handler)
+}
+
+// Thread wrapper — gives each thread the same async handler setup as main.
+// Called by the runtime instead of beagle.core/__run_thread_start when present.
+fn __run_thread_start() {
+    let thread-obj = primitive/__get-my-thread-obj();
+    let f = thread-obj.closure;
+    let loop_id = get-io-loop()
+    let tasks = atom([])
+    let handler = CooperativeHandler { tasks: tasks, loop_id: loop_id }
+    handle effect/Handler(Async) with handler {
+        f()
     }
     scheduler-loop(handler)
 }

@@ -22,7 +22,7 @@ fn main() {
     println("")
     println("Try these commands:")
     println("  {\"op\":\"describe\",\"id\":\"1\"}")
-    println("  {\"op\":\"eval\",\"id\":\"2\",\"session\":\"test\",\"code\":\"(+ 1 2)\"}")
+    println("  {\"op\":\"eval\",\"id\":\"2\",\"session\":\"test\",\"code\":\"1 + 2\"}")
     println("  {\"op\":\"eval\",\"id\":\"3\",\"session\":\"test\",\"code\":\"println(\\\"hello\\\")\"}")
     println("  {\"op\":\"ls-sessions\",\"id\":\"4\"}")
     println("  {\"op\":\"interrupt\",\"id\":\"5\",\"session\":\"test\"}")
