@@ -245,6 +245,28 @@ impl LinearScan {
                     }
                 }
                 *instruction = Instruction::CallWithSaves(*dest, *f, args.clone(), *builtin, saves);
+            } else if let Instruction::CaptureContinuation(dest, label, local_index, builtin) =
+                &instruction.clone()
+            {
+                let mut saves = Vec::new();
+                for (original_register, (start, end)) in self.lifetimes.iter() {
+                    if *start < i && *end > i && !self.location.contains_key(original_register) {
+                        let register = self.allocated_registers.get(original_register).unwrap();
+                        if let Value::Register(dest) = dest
+                            && dest == register
+                        {
+                            continue;
+                        }
+                        saves.push(Value::Register(*register));
+                    }
+                }
+                *instruction = Instruction::CaptureContinuationWithSaves(
+                    *dest,
+                    *label,
+                    *local_index,
+                    *builtin,
+                    saves,
+                );
             } else if let Instruction::Recurse(dest, args) = instruction {
                 let mut saves = Vec::new();
                 for (original_register, (start, end)) in self.lifetimes.iter() {

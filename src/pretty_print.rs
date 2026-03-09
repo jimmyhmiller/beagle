@@ -528,6 +528,15 @@ impl PrettyPrint for Instruction {
                     local_index
                 )
             }
+            Instruction::CaptureContinuationWithSaves(dest, label, local_index, _, saves) => {
+                format!(
+                    "capture_continuation_with_saves {}, label_{}, local_{}, {}",
+                    dest.pretty_print(),
+                    label.index,
+                    local_index,
+                    saves.pretty_print()
+                )
+            }
             Instruction::ReturnFromShift(value, cont_ptr, _) => {
                 format!(
                     "return_from_shift {}, {}",

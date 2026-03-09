@@ -10937,25 +10937,10 @@ pub unsafe extern "C" fn capture_continuation_runtime(
         }
     }
 
-    // Unlink captured frames from the GC chain.
-    // The captured frames span from current FP to prompt FP. After capture,
-    // their compiled epilogues won't run (we jump away via continuation mechanics),
-    // so they'd remain in the GC chain with stale pointers. We unlink them by
-    // finding the outermost captured frame's prev pointer (which points to the
-    // frame above the prompt — the first frame NOT captured) and setting
-    // GC_FRAME_TOP to that.
-    //
-    // In the GC chain: current_top → innermost_captured → ... → outermost_captured → frames_above
-    // We want:         current_top = outermost_captured.prev = frames_above
-    //
-    // The outermost captured frame is the prompt frame (or the last frame added to fps[]).
-    // Its prev pointer at [FP-16] points to whatever was above it in the chain.
-    if !fps.is_empty() {
-        let outermost_fp = fps[fps.len() - 1];
-        // The prev pointer at [outermost_FP - 16] points to the frame above the prompt
-        let above_captured = unsafe { *((outermost_fp - 16) as *const usize) };
-        set_gc_frame_top(above_captured);
-    }
+    // Keep the original frames in the GC chain after capture.
+    // Execution continues in these same frames to build the resume closure and
+    // call the handler, so their locals/spills must remain visible to GC until
+    // a later non-local control transfer actually abandons them.
 
     // Now parent_frame points to the outermost CapturedFrame.
     // But we want the ContinuationObject's segment field to point to the innermost frame

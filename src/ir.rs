@@ -186,6 +186,7 @@ pub enum Instruction {
     PopPromptHandler(Value, usize),         // result_value, builtin_fn_ptr
     LoadLabelAddress(Value, Label), // dest, label - loads the address of a label into a register
     CaptureContinuation(Value, Label, usize, usize), // dest, resume_label, result_local_index, builtin_fn_ptr
+    CaptureContinuationWithSaves(Value, Label, usize, usize, Vec<Value>), // dest, resume_label, result_local_index, builtin_fn_ptr, saved live roots
     ReturnFromShift(Value, Value, usize), // value, cont_ptr, builtin_fn_ptr - calls return_from_shift with current SP/FP
     RecordGcSafepoint, // Record a GC safepoint at the current position (for continuation resume points)
 }
@@ -544,6 +545,15 @@ impl Instruction {
             Instruction::CaptureContinuation(dest, _, _, _) => {
                 get_register!(dest)
             }
+            Instruction::CaptureContinuationWithSaves(dest, _, _, _, saves) => {
+                let mut result: Vec<VirtualRegister> = get_register!(dest);
+                for save in saves {
+                    if let Ok(register) = save.try_into() {
+                        result.push(register);
+                    }
+                }
+                result
+            }
             Instruction::ReturnFromShift(value, cont_ptr, _) => {
                 get_registers!(value, cont_ptr)
             }
@@ -690,6 +700,12 @@ impl Instruction {
             }
             Instruction::CaptureContinuation(dest, _, _, _) => {
                 replace_register!(dest, old_register, new_register);
+            }
+            Instruction::CaptureContinuationWithSaves(dest, _, _, _, saves) => {
+                replace_register!(dest, old_register, new_register);
+                for save in saves {
+                    replace_register!(save, old_register, new_register);
+                }
             }
             Instruction::ReturnFromShift(value, cont_ptr, _) => {
                 replace_register!(value, old_register, new_register);
@@ -2572,7 +2588,54 @@ impl Ir {
                     result_local_index,
                     builtin_fn,
                 ) => {
-                    // Call capture_continuation builtin
+                    // Get current stack pointer into arg 0
+                    backend.get_stack_pointer_imm(backend.arg(0), 0);
+
+                    // Get current frame pointer into arg 1
+                    backend.mov_reg(backend.arg(1), backend.frame_pointer());
+
+                    // Load address of resume label into arg 2
+                    let resume_backend_label = ir_label_to_lang_label.get(resume_label).unwrap();
+                    backend.load_label_address(backend.arg(2), *resume_backend_label);
+
+                    // Load result_local byte offset into arg 3 (as signed value)
+                    let local_offset = backend.get_local_byte_offset(*result_local_index);
+                    backend.mov_64(backend.arg(3), local_offset);
+
+                    // Call the builtin
+                    let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
+                    backend.call_builtin(fn_ptr);
+
+                    // Store result in dest
+                    let dest_spill = self.dest_spill(dest);
+                    let dest_reg = match dest {
+                        Value::Register(register) => backend.register_from_index(register.index),
+                        Value::Spill(_, _) => backend.temporary_register(),
+                        _ => panic!(
+                            "Unexpected dest type for CaptureContinuationWithSaves: {:?}",
+                            dest
+                        ),
+                    };
+                    backend.mov_reg(dest_reg, backend.ret_reg());
+                    self.store_spill(dest_reg, dest_spill, backend);
+                    if matches!(dest, Value::Spill(_, _)) {
+                        backend.free_temporary_register(dest_reg);
+                    }
+                }
+                Instruction::CaptureContinuationWithSaves(
+                    dest,
+                    resume_label,
+                    result_local_index,
+                    builtin_fn,
+                    saves,
+                ) => {
+                    // Call capture_continuation builtin. Any live heap roots that must
+                    // survive this GC point are first materialized into frame slots.
+                    for save in saves.iter() {
+                        let save_reg = self.value_to_register(save, backend);
+                        backend.push_to_stack(save_reg);
+                    }
+
                     // Arguments: (stack_pointer, frame_pointer, resume_address, result_local_offset)
 
                     // Get current stack pointer into arg 0
@@ -2604,6 +2667,12 @@ impl Ir {
                     self.store_spill(dest_reg, dest_spill, backend);
                     if matches!(dest, Value::Spill(_, _)) {
                         backend.free_temporary_register(dest_reg);
+                    }
+
+                    // Reload saved live roots from the frame after the GC point.
+                    for save in saves.iter().rev() {
+                        let save_reg = self.value_to_register(save, backend);
+                        backend.pop_from_stack(save_reg);
                     }
                 }
                 Instruction::ReturnFromShift(value, cont_ptr, builtin_fn) => {
