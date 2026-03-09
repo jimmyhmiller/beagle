@@ -7534,6 +7534,101 @@ extern "C" fn read_line(stack_pointer: usize, frame_pointer: usize) -> usize {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Rich REPL readline with editing, history, completion, highlighting, multi-line
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    static REPL_EDITOR: std::cell::RefCell<Option<(crate::repl::ReplEditor, std::sync::Arc<std::sync::atomic::AtomicUsize>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn with_repl_editor<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut crate::repl::ReplEditor, &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> R,
+{
+    REPL_EDITOR.with(|cell| {
+        let mut editor_opt = cell.borrow_mut();
+
+        // Initialize on first call
+        if editor_opt.is_none() {
+            match crate::repl::create_editor() {
+                Ok(editor_and_pw) => {
+                    *editor_opt = Some(editor_and_pw);
+                }
+                Err(e) => {
+                    panic!("Failed to create REPL editor: {}", e);
+                }
+            }
+        }
+
+        let (rl, prompt_width) = editor_opt.as_mut().unwrap();
+        f(rl, prompt_width)
+    })
+}
+
+extern "C" fn repl_read_line(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    prompt_value: usize,
+) -> usize {
+    use std::sync::atomic::Ordering;
+
+    save_gc_context!(stack_pointer, frame_pointer);
+
+    // Get prompt string from Beagle value
+    let runtime = get_runtime().get_mut();
+    let prompt = runtime.get_string(stack_pointer, prompt_value);
+
+    with_repl_editor(|rl, prompt_width| {
+        // Refresh completions from runtime
+        let runtime = get_runtime().get_mut();
+        rl.helper_mut().unwrap().refresh(runtime);
+
+        // Update prompt width for auto-indent
+        prompt_width.store(prompt.len(), Ordering::Relaxed);
+        rl.helper_mut().unwrap().prompt_width = prompt.len();
+
+        match rl.readline(&prompt) {
+            Ok(line) => {
+                let runtime = get_runtime().get_mut();
+                match runtime.allocate_string(stack_pointer, line) {
+                    Ok(ptr) => ptr.into(),
+                    Err(_) => unsafe {
+                        throw_runtime_error(
+                            stack_pointer,
+                            "AllocationError",
+                            "Failed to allocate string for repl_read_line".to_string(),
+                        );
+                    },
+                }
+            }
+            Err(rustyline::error::ReadlineError::Eof) => {
+                // EOF (Ctrl-D)
+                BuiltInTypes::null_value() as usize
+            }
+            Err(rustyline::error::ReadlineError::Interrupted) => {
+                // Ctrl-C — return special marker string so Beagle can handle it
+                let runtime = get_runtime().get_mut();
+                match runtime.allocate_string(stack_pointer, ":interrupted".to_string()) {
+                    Ok(ptr) => ptr.into(),
+                    Err(_) => BuiltInTypes::null_value() as usize,
+                }
+            }
+            Err(_) => BuiltInTypes::null_value() as usize,
+        }
+    })
+}
+
+// Save REPL history to disk
+extern "C" fn repl_save_history() -> usize {
+    with_repl_editor(|rl, _| {
+        let hist = crate::repl::history_path();
+        let _ = rl.save_history(&hist);
+    });
+    BuiltInTypes::null_value() as usize
+}
+
 extern "C" fn read_full_file(
     stack_pointer: usize,
     frame_pointer: usize,
@@ -13100,6 +13195,24 @@ impl Runtime {
             true,
             true,
             2,
+        )?;
+
+        // Rich REPL readline: editing, history, completion, highlighting, multi-line
+        // Takes (stack_pointer, frame_pointer, prompt_string) — 1 Beagle arg
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/repl-read-line",
+            repl_read_line as *const u8,
+            true,
+            true,
+            3,
+        )?;
+
+        // Save REPL history to disk
+        self.add_builtin_function(
+            "beagle.builtin/repl-save-history",
+            repl_save_history as *const u8,
+            false,
+            0,
         )?;
 
         self.add_builtin_function(

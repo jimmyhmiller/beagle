@@ -15,6 +15,9 @@ use rustyline::{
 use crate::parser::{Token, Tokenizer};
 use crate::runtime::Runtime;
 
+// Re-export types needed by the builtin
+pub type ReplEditor = Editor<BeagleHelper, rustyline::history::DefaultHistory>;
+
 // ---------------------------------------------------------------------------
 // ANSI helpers
 // ---------------------------------------------------------------------------
@@ -46,7 +49,7 @@ const BOLD_MAGENTA: &str = "\x1b[1;35m";
 // BeagleHelper — holds a snapshot of completions + implements all four traits
 // ---------------------------------------------------------------------------
 
-struct BeagleHelper {
+pub struct BeagleHelper {
     /// Snapshot of completable names, refreshed each eval cycle.
     completions: Vec<String>,
     /// Struct names for completion
@@ -56,11 +59,11 @@ struct BeagleHelper {
     /// All namespace names
     namespace_names: Vec<String>,
     /// Current prompt width (for continuation line display)
-    prompt_width: usize,
+    pub prompt_width: usize,
 }
 
 impl BeagleHelper {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             completions: Vec::new(),
             struct_names: Vec::new(),
@@ -71,7 +74,7 @@ impl BeagleHelper {
     }
 
     /// Refresh completion data from the runtime.
-    fn refresh(&mut self, runtime: &Runtime) {
+    pub fn refresh(&mut self, runtime: &Runtime) {
         // Visible function names (short names from current namespace + aliased namespaces)
         self.completions = runtime.visible_function_names();
 
@@ -834,7 +837,7 @@ fn resolve_name(runtime: &Runtime, name: &str) -> String {
 // History file path
 // ---------------------------------------------------------------------------
 
-fn history_path() -> std::path::PathBuf {
+pub fn history_path() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let dir = std::path::PathBuf::from(home).join(".beagle");
     let _ = std::fs::create_dir_all(&dir);
@@ -877,7 +880,7 @@ fn print_banner() {
 // ---------------------------------------------------------------------------
 
 /// Compute brace/paren/bracket depth, respecting strings and comments.
-fn brace_depth(input: &str) -> i32 {
+pub fn brace_depth(input: &str) -> i32 {
     let mut depth = 0i32;
     let mut in_string = false;
     let mut in_comment = false;
@@ -910,8 +913,8 @@ fn brace_depth(input: &str) -> i32 {
     depth
 }
 
-struct AutoIndentHandler {
-    prompt_width: Arc<AtomicUsize>,
+pub struct AutoIndentHandler {
+    pub prompt_width: Arc<AtomicUsize>,
 }
 
 impl ConditionalEventHandler for AutoIndentHandler {
@@ -940,9 +943,42 @@ impl ConditionalEventHandler for AutoIndentHandler {
 }
 
 // ---------------------------------------------------------------------------
-// Main interactive loop
+// Editor factory — creates a configured rustyline Editor for use by builtins
 // ---------------------------------------------------------------------------
 
+pub fn create_editor() -> Result<(ReplEditor, Arc<AtomicUsize>), Box<dyn Error>> {
+    let config = Config::builder()
+        .auto_add_history(true)
+        .max_history_size(10_000)
+        .expect("valid history size")
+        .build();
+
+    let prompt_width = Arc::new(AtomicUsize::new(6));
+
+    let helper = BeagleHelper::new();
+    let mut rl: ReplEditor = Editor::with_config(config)?;
+    rl.set_helper(Some(helper));
+
+    // Bind Enter to auto-indent handler
+    rl.bind_sequence(
+        KeyEvent(KeyCode::Enter, Modifiers::NONE),
+        EventHandler::Conditional(Box::new(AutoIndentHandler {
+            prompt_width: prompt_width.clone(),
+        })),
+    );
+
+    // Load history
+    let hist = history_path();
+    let _ = rl.load_history(&hist);
+
+    Ok((rl, prompt_width))
+}
+
+// ---------------------------------------------------------------------------
+// Main interactive loop (legacy, no longer used — kept for reference/tests)
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
 pub fn run_interactive_loop(runtime: &mut Runtime) -> Result<(), Box<dyn Error>> {
     print_banner();
 

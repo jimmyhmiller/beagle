@@ -599,11 +599,26 @@ fn test_repl_multiple_expressions() {
 }
 
 #[test]
-fn test_repl_prompt_shows_user() {
-    let stdout = run_repl(":quit\n");
+fn test_repl_help_command() {
+    let stdout = run_repl(":help\n:quit\n");
     assert!(
-        stdout.contains("user>"),
-        "Should show user> prompt, got: {}",
+        stdout.contains("Available commands"),
+        "Should show help text, got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains(":quit"),
+        "Help should list :quit, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_repl_ns_command() {
+    let stdout = run_repl(":ns\n:quit\n");
+    assert!(
+        stdout.contains("user"),
+        "Should show current namespace, got: {}",
         stdout
     );
 }
@@ -616,6 +631,134 @@ fn test_repl_null_not_printed() {
     assert!(
         !stdout.contains("=> null"),
         "Should not print null result, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_repl_quit_command() {
+    // :quit should exit cleanly — the process should terminate
+    let stdout = run_repl("1 + 1\n:quit\n");
+    assert!(
+        stdout.contains("=> 2"),
+        "Should eval before quit, got: {}",
+        stdout
+    );
+    // No crash, no error output — just clean exit
+}
+
+#[test]
+fn test_repl_quit_aliases() {
+    // :q and :exit should also work
+    let stdout = run_repl("1 + 1\n:q\n");
+    assert!(
+        stdout.contains("=> 2"),
+        ":q should work as quit alias, got: {}",
+        stdout
+    );
+
+    let stdout = run_repl("1 + 1\n:exit\n");
+    assert!(
+        stdout.contains("=> 2"),
+        ":exit should work as quit alias, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_repl_ns_switch() {
+    // Switch namespace and verify eval happens in new namespace
+    let stdout = run_repl(":ns mylib\nfn greet() { \"hello from mylib\" }\ngreet()\n:quit\n");
+    assert!(
+        stdout.contains("Switched to namespace: mylib"),
+        "Should confirm switch, got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("hello from mylib"),
+        "Should eval in new namespace, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_repl_unknown_command() {
+    let stdout = run_repl(":bogus\n:quit\n");
+    assert!(
+        stdout.contains("Unknown command"),
+        "Should report unknown command, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_repl_struct_definition() {
+    let stdout = run_repl("struct Point { x, y }\nlet p = Point { x: 10, y: 20 }\np.x + p.y\n:quit\n");
+    assert!(
+        stdout.contains("=> 30"),
+        "Should define struct and access fields, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_repl_multiple_errors_recover() {
+    // Multiple errors in a row should all recover
+    let stdout = run_repl("bad1\nbad2\n1 + 1\n:quit\n");
+    let error_count = stdout.matches("Error:").count();
+    assert!(
+        error_count >= 2,
+        "Should show at least 2 errors, got {} in: {}",
+        error_count,
+        stdout
+    );
+    assert!(
+        stdout.contains("=> 2"),
+        "Should still work after multiple errors, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_repl_use_import() {
+    // use statement should work in the REPL
+    let stdout = run_repl("use beagle.core as core\ncore/length([1,2,3])\n:quit\n");
+    assert!(
+        stdout.contains("=> 3"),
+        "Should be able to use namespace alias, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_repl_clear_command() {
+    // :clear shouldn't crash — just verify the REPL continues working after it
+    let stdout = run_repl(":clear\n1 + 1\n:quit\n");
+    assert!(
+        stdout.contains("=> 2"),
+        ":clear should not break the REPL, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_repl_println_output() {
+    // println should print to stdout, not show as => result
+    let stdout = run_repl("println(\"visible output\")\n:quit\n");
+    assert!(
+        stdout.contains("visible output"),
+        "println should appear in output, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_repl_state_persists_across_evals() {
+    // Variables defined in one eval should be accessible in subsequent evals
+    let stdout = run_repl("let a = 10\nlet b = 20\nlet c = a + b\nc * 2\n:quit\n");
+    assert!(
+        stdout.contains("=> 60"),
+        "State should persist across eval calls, got: {}",
         stdout
     );
 }
@@ -742,7 +885,9 @@ fn test_repl_starts_socket_server() {
     );
 
     // 3) eval with println — returns out line, value line, then done line
-    send("{\"op\":\"eval\",\"id\":\"e2\",\"session\":\"test-sess\",\"code\":\"println(\\\"socket-hello\\\")\"}\n");
+    send(
+        "{\"op\":\"eval\",\"id\":\"e2\",\"session\":\"test-sess\",\"code\":\"println(\\\"socket-hello\\\")\"}\n",
+    );
 
     let println_resp = read_until_done(&mut reader);
     assert!(

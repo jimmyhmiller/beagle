@@ -6,20 +6,35 @@ fn main() {
     // Switch to "user" namespace so eval'd code lives there
     eval("namespace user")
     println("Beagle REPL v0.1.0")
-    println("Type :quit to exit.")
-    repl-loop()
+    println("Type :help for commands, Ctrl-D to exit.")
+    try {
+        repl-loop()
+    } catch (e) {
+        if e == :repl-exit {
+            null
+        } else {
+            throw(e)
+        }
+    }
+    builtin/repl-save-history()
 }
 
 fn repl-loop() {
-    print("user> ")
-    let input = builtin/read-line()
+    let ns = current-namespace()
+    let prompt = ns ++ "> "
+    let input = builtin/repl-read-line(prompt)
     if input == null {
         // EOF (Ctrl-D)
         println("")
         null
-    } else if input == ":quit" {
-        null
+    } else if input == ":interrupted" {
+        // Ctrl-C
+        println("^C")
+        repl-loop()
     } else if input == "" {
+        repl-loop()
+    } else if starts-with?(input, ":") {
+        handle-command(input)
         repl-loop()
     } else {
         let had-error = atom(false)
@@ -36,5 +51,44 @@ fn repl-loop() {
             }
         }
         repl-loop()
+    }
+}
+
+fn handle-command(input) {
+    let space-idx = index-of(input, " ")
+    let cmd = if space-idx == -1 {
+        input
+    } else {
+        substring(input, 0, space-idx)
+    }
+    let arg = if space-idx == -1 {
+        ""
+    } else {
+        trim(substring(input, space-idx + 1, length(input) - space-idx - 1))
+    }
+
+    if cmd == ":quit" || cmd == ":q" || cmd == ":exit" {
+        throw(:repl-exit)
+    } else if cmd == ":help" {
+        println("Available commands:")
+        println("  :help             List available commands")
+        println("  :ns               Show current namespace")
+        println("  :ns <name>        Switch to namespace")
+        println("  :clear            Clear screen")
+        println("  :quit             Exit the REPL")
+        println("")
+        println("  Evaluate any Beagle expression by typing it directly.")
+    } else if cmd == ":clear" {
+        let esc = builtin/char-from-code(27)
+        print(esc ++ "[2J" ++ esc ++ "[H")
+    } else if cmd == ":ns" {
+        if arg == "" {
+            println(current-namespace())
+        } else {
+            eval("namespace " ++ arg)
+            println("Switched to namespace:", arg)
+        }
+    } else {
+        println("Unknown command:", cmd ++ ". Type :help for available commands.")
     }
 }

@@ -599,18 +599,14 @@ mod struct_manager_tests {
     fn tracks_pending_migrations_per_family() {
         let mut structs = StructManager::new();
 
-        let (shape0, is_redefinition) = structs.insert(
-            "user/Foo".to_string(),
-            make_struct("user/Foo", &["a"]),
-        );
+        let (shape0, is_redefinition) =
+            structs.insert("user/Foo".to_string(), make_struct("user/Foo", &["a"]));
         assert!(!is_redefinition);
         assert!(!structs.has_pending_migrations());
         assert!(structs.migration_plan_for(shape0).is_none());
 
-        let (shape1, is_redefinition) = structs.insert(
-            "user/Foo".to_string(),
-            make_struct("user/Foo", &["a", "b"]),
-        );
+        let (shape1, is_redefinition) =
+            structs.insert("user/Foo".to_string(), make_struct("user/Foo", &["a", "b"]));
         assert!(is_redefinition);
         assert!(structs.has_pending_migrations());
         let plan0 = structs.migration_plan_for(shape0).unwrap();
