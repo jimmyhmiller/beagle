@@ -4322,6 +4322,10 @@ impl Runtime {
     }
 
     pub fn reset(&mut self) {
+        // Shutdown event loops FIRST so threads blocked on I/O (e.g. socket/accept)
+        // get unblocked before we try to join them
+        self.event_loops.shutdown_all();
+
         self.wait_for_other_threads();
 
         // Reset saved frame pointer and gc return address to prevent
@@ -4382,9 +4386,6 @@ impl Runtime {
         self.relocation_depth.clear();
         self.variant_to_enum.clear();
         self.compiled_regexes.clear();
-
-        // Shutdown all event loops and their I/O threads to prevent stale references
-        self.event_loops.shutdown_all();
     }
 
     /// Export all documentation as JSON for the documentation generator.
@@ -4585,6 +4586,26 @@ impl Runtime {
             .as_ref()
             .expect("Compiler channel not initialized - this is a fatal error")
             .send(CompilerMessage::CompileString(_string.to_string()));
+        match response {
+            CompilerResponse::FunctionPointer(pointer) => Ok(pointer),
+            CompilerResponse::CompileError(msg) => Err(msg.into()),
+            _ => Err("Unexpected compiler response".into()),
+        }
+    }
+
+    pub fn compile_string_in_namespace(
+        &mut self,
+        string: &str,
+        namespace: &str,
+    ) -> Result<usize, Box<dyn Error>> {
+        let response = self
+            .compiler_channel
+            .as_ref()
+            .expect("Compiler channel not initialized - this is a fatal error")
+            .send(CompilerMessage::CompileStringInNamespace(
+                string.to_string(),
+                namespace.to_string(),
+            ));
         match response {
             CompilerResponse::FunctionPointer(pointer) => Ok(pointer),
             CompilerResponse::CompileError(msg) => Err(msg.into()),

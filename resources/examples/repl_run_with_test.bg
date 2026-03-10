@@ -1,0 +1,27 @@
+namespace repl_run_with_test
+
+use beagle.repl-main as repl-main
+
+// Simulate a main-thread workload using run-with-repl
+// (evals happen on background thread, like the VS Code workflow)
+
+let counter = atom(0)
+
+fn work-loop(n) {
+    if n <= 0 {
+        null
+    } else {
+        swap!(counter, fn(c) { c + 1 })
+        sleep(16)
+        work-loop(n - 1)
+    }
+}
+
+fn main() {
+    repl-main/run-with-repl("127.0.0.1", 7892, fn() {
+        sleep(200)
+        println("Server ready")
+        work-loop(300)
+        println("Done")
+    })
+}

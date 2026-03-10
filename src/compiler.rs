@@ -437,6 +437,27 @@ impl Compiler {
     }
 
     pub fn compile_string(&mut self, string: &str) -> Result<usize, Box<dyn Error>> {
+        self.compile_string_in_namespace(string, None)
+    }
+
+    pub fn compile_string_in_namespace(
+        &mut self,
+        string: &str,
+        namespace: Option<&str>,
+    ) -> Result<usize, Box<dyn Error>> {
+        // Switch to target namespace if specified, saving the current one
+        let saved_namespace_id = if let Some(ns_name) = namespace {
+            let current_id = self.current_namespace_id();
+            if let Some(ns_id) = self.get_namespace_id(ns_name) {
+                self.set_current_namespace(ns_id);
+                Some(current_id)
+            } else {
+                return Err(format!("Namespace '{}' not found", ns_name).into());
+            }
+        } else {
+            None
+        };
+
         // For REPL/eval, we use "repl" as the file name for diagnostics.
         // Each eval replaces the previous "repl" diagnostics.
         let mut parser = Parser::new("".to_string(), string.to_string())?;
@@ -462,12 +483,21 @@ impl Compiler {
         let (top_level, diagnostics) = match compile_result {
             Ok(result) => result,
             Err(e) => {
+                // Restore namespace before returning error
+                if let Some(saved_id) = saved_namespace_id {
+                    self.set_current_namespace(saved_id);
+                }
                 // Remove functions that were reserved during this failed compilation
                 let runtime = get_runtime().get_mut();
                 runtime.functions.truncate(functions_before);
                 return Err(e);
             }
         };
+
+        // Restore namespace
+        if let Some(saved_id) = saved_namespace_id {
+            self.set_current_namespace(saved_id);
+        }
 
         // Store diagnostics for "repl" (replaces previous REPL diagnostics)
         if let Ok(mut store) = self.diagnostic_store.lock() {
@@ -916,6 +946,20 @@ impl Compiler {
                     })
                     .map(|s| s.to_string())
                     .map_err(|e| e.into());
+            }
+
+            // Try include paths (-I flag)
+            for include_dir in &self.command_line_arguments.include_paths {
+                let include_path = Path::new(include_dir).join(candidate);
+                if include_path.exists() {
+                    return include_path
+                        .to_str()
+                        .ok_or_else(|| CompileError::PathConversion {
+                            path: format!("{:?}", include_path),
+                        })
+                        .map(|s| s.to_string())
+                        .map_err(|e| e.into());
+                }
             }
 
             // Try standard library paths
@@ -1440,6 +1484,7 @@ impl fmt::Debug for Compiler {
 
 pub enum CompilerMessage {
     CompileString(String),
+    CompileStringInNamespace(String, String), // (code, namespace_name)
     CompileFile(String),
     CompileSource(String, String),
     AddFunctionMarkExecutable(String, Vec<u8>, usize, usize),
@@ -1512,6 +1557,20 @@ impl CompilerThread {
                 Ok((message, work_done)) => match message {
                     CompilerMessage::CompileString(string) => {
                         match self.compiler.compile_string(&string) {
+                            Ok(pointer) => {
+                                work_done.mark_done(CompilerResponse::FunctionPointer(pointer));
+                            }
+                            Err(e) => {
+                                work_done
+                                    .mark_done(CompilerResponse::CompileError(format!("{}", e)));
+                            }
+                        }
+                    }
+                    CompilerMessage::CompileStringInNamespace(string, namespace) => {
+                        match self
+                            .compiler
+                            .compile_string_in_namespace(&string, Some(&namespace))
+                        {
                             Ok(pointer) => {
                                 work_done.mark_done(CompilerResponse::FunctionPointer(pointer));
                             }

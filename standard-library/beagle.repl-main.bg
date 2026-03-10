@@ -1,0 +1,329 @@
+namespace beagle.repl-main
+
+use beagle.core as core
+use beagle.socket as socket
+use beagle.async as async
+use beagle.repl as repl
+use beagle.repl-session as session
+
+// ============================================================================
+// Main-Thread REPL Server
+// ============================================================================
+// Runs the REPL server on a background thread but dispatches eval requests
+// to the main thread. This is required on macOS for GUI frameworks like
+// raylib/GLFW that must run on the main thread.
+//
+// Usage:
+//   use beagle.repl-main as repl-main
+//
+//   fn game-loop() {
+//       repl-main/process-eval-queue()
+//       // ... your rendering code ...
+//       game-loop()
+//   }
+//
+//   fn main() {
+//       repl-main/start("127.0.0.1", 7888)
+//       // ... init window, etc ...
+//       game-loop()
+//   }
+
+// -- Main thread eval queue --
+// Items are {id, code, result_atom} where result_atom is set by main thread
+// and polled by the server thread that owns the socket.
+let main_eval_queue = atom([])
+
+struct MainEvalRequest {
+    id           // string: request id
+    code         // string: code to evaluate
+    result_atom  // atom(null): main thread sets this to {output, value, error}
+}
+
+struct EvalResult {
+    output   // string: captured println/print output
+    value    // string: result value as string
+    error    // string or null: error message
+}
+
+/// Process pending eval requests on the main thread.
+///
+/// Call this in your game/render loop. It drains the eval queue
+/// and executes each request on the calling thread (which should
+/// be the main thread for GUI framework compatibility).
+///
+/// This is safe to call when the queue is empty (no-op).
+fn process-eval-queue() {
+    let requests = deref(main_eval_queue)
+
+    if length(requests) > 0 {
+        reset!(main_eval_queue, [])
+        process-requests(requests, 0)
+    }
+}
+
+fn process-requests(requests, i) {
+    if i < length(requests) {
+        let request = nth(requests, i)
+        process-single-request(request)
+        process-requests(requests, i + 1)
+    }
+}
+
+fn process-single-request(request) {
+    let buf = core/new-string-buffer()
+
+    let result = binding (core/out = buf) {
+        try {
+            eval(request.code)
+        } catch (e) {
+            {:error e}
+        }
+    }
+
+    let output = if buf.content != "" {
+        core/trim-right(buf.content)
+    } else {
+        ""
+    }
+
+    // Use a sentinel map to detect errors from the catch block
+    let is_error = type-of(result) == "Map" && get(result, :error) != null
+    if is_error {
+        reset!(request.result_atom, EvalResult {
+            output: output,
+            value: null,
+            error: to-string(get(result, :error))
+        })
+    } else {
+        reset!(request.result_atom, EvalResult {
+            output: output,
+            value: to-string(result),
+            error: null
+        })
+    }
+}
+
+// ============================================================================
+// Server implementation (runs on background thread)
+// ============================================================================
+
+fn send-response(client, response) {
+    let json = json-encode(response)
+    socket/write(client, json ++ "\n")
+}
+
+fn handle-eval(client, msg) {
+    let session_id = get(msg, "session")
+    let request_id = get(msg, "id")
+    let code = get(msg, "code")
+
+    if session_id == null || request_id == null || code == null {
+        let err_status = ["error"]
+        send-response(client, {:id request_id, :status err_status, :error "Missing required fields: session, id, code"})
+    } else {
+        // Queue for main thread and wait for result
+        let result_atom = atom(null)
+        let request = MainEvalRequest {
+            id: request_id,
+            code: code,
+            result_atom: result_atom
+        }
+
+        swap!(main_eval_queue, fn(q) { push(q, request) })
+
+        // Poll until main thread has processed it
+        while deref(result_atom) == null {
+            core/sleep(1)
+        }
+
+        // Send results back over the socket (on this thread which owns it)
+        let result = deref(result_atom)
+
+        if result.output != "" {
+            send-response(client, {:id request_id, :out result.output})
+        }
+
+        if result.error != null {
+            send-response(client, {:id request_id, :ex result.error})
+            let err_status = ["done"]
+            send-response(client, {:id request_id, :status err_status})
+        } else {
+            send-response(client, {:id request_id, :value result.value})
+            let done_status = ["done"]
+            send-response(client, {:id request_id, :status done_status})
+        }
+    }
+}
+
+fn handle-interrupt(client, msg) {
+    let request_id = get(msg, "id")
+    let done_status = ["done"]
+    send-response(client, {:id request_id, :status done_status})
+}
+
+fn handle-describe(client, msg) {
+    let request_id = get(msg, "id")
+    let ops = ["eval", "interrupt", "describe", "ls-sessions", "close"]
+    let versions = {:beagle "0.1.0", :protocol "1.0.0"}
+    let done_status = ["done"]
+    send-response(client, {:id request_id, :ops ops, :versions versions, :status done_status})
+}
+
+fn handle-ls-sessions(client, msg) {
+    let request_id = get(msg, "id")
+    let empty = []
+    let done_status = ["done"]
+    send-response(client, {:id request_id, :sessions empty, :status done_status})
+}
+
+fn handle-close(client, msg) {
+    let request_id = get(msg, "id")
+    let done_status = ["done"]
+    send-response(client, {:id request_id, :status done_status})
+}
+
+fn handle-message(client, msg) {
+    let op = get(msg, "op")
+
+    if op == null {
+        let err_status = ["error"]
+        send-response(client, {:status err_status, :error "Missing 'op' field"})
+    } else {
+        if op == "eval" {
+            handle-eval(client, msg)
+        } else {
+            if op == "interrupt" {
+                handle-interrupt(client, msg)
+            } else {
+                if op == "describe" {
+                    handle-describe(client, msg)
+                } else {
+                    if op == "ls-sessions" {
+                        handle-ls-sessions(client, msg)
+                    } else {
+                        if op == "close" {
+                            handle-close(client, msg)
+                        } else {
+                            let err_status = ["error"]
+                            send-response(client, {:status err_status, :error "Unknown operation: " ++ op})
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn extract-lines(data, buffer) {
+    let combined = buffer ++ data
+    let parts = core/split(combined, "\n")
+    let len = length(parts)
+
+    if len == 0 {
+        let empty_lines = []
+        {:lines empty_lines, :buffer combined}
+    } else {
+        let last = nth(parts, len - 1)
+        let mut complete_lines = []
+        let mut i = 0
+        while i < len - 1 {
+            complete_lines = push(complete_lines, nth(parts, i))
+            i = i + 1
+        }
+        {:lines complete_lines, :buffer last}
+    }
+}
+
+fn handle-client(client) {
+    let mut buffer = ""
+    let mut running = true
+
+    while running {
+        try {
+            let data = socket/read(client, 4096)
+
+            if data == null || data == "" {
+                running = false
+            } else {
+                let result = extract-lines(data, buffer)
+                buffer = get(result, :buffer)
+                let lines = get(result, :lines)
+
+                let mut i = 0
+                while i < length(lines) {
+                    let line = nth(lines, i)
+
+                    if length(line) > 0 {
+                        let msg = try { json-decode(line) } catch (e) { null }
+
+                        if msg == null {
+                            let err_status = ["error"]
+                            send-response(client, {:status err_status, :error "Invalid JSON"})
+                        } else {
+                            handle-message(client, msg)
+                        }
+                    }
+
+                    i = i + 1
+                }
+            }
+        } catch (e) {
+            println("Error handling client:", e)
+            running = false
+        }
+    }
+
+    try {
+        socket/close(client)
+    } catch (e) {
+        null
+    }
+}
+
+/// Start the REPL server on a background thread.
+///
+/// The server accepts connections and handles the JSON protocol,
+/// but all eval requests are queued for main thread processing.
+/// Call process-eval-queue() in your main loop to execute them.
+fn start(host, port) {
+    thread(fn() {
+        async/with-implicit-async(fn() {
+            let server = socket/listen(host, port)
+            println("REPL server listening on " ++ host ++ ":" ++ to-string(port))
+
+            let mut running = true
+            while running {
+                try {
+                    let client = socket/accept(server)
+                    println("Client connected")
+                    handle-client(client)
+                } catch (e) {
+                    println("Error accepting connection:", e)
+                }
+            }
+        })
+    })
+}
+
+/// Start the regular REPL server on a background thread and run
+/// main-fn on the main thread.
+///
+/// Evals from the REPL happen on background threads (normal session
+/// behavior). Since evals typically redefine functions, the main
+/// thread picks up changes naturally on the next call.
+///
+/// Examples:
+///   repl-main/run-with-repl("127.0.0.1", 7888, fn() {
+///       gui/init-window(800, 600, "My App")
+///       gui/set-target-fps(60)
+///       game-loop()
+///       gui/close-window()
+///   })
+fn run-with-repl(host, port, main-fn) {
+    thread(fn() {
+        async/with-implicit-async(fn() {
+            repl/start-repl-server(host, port)
+        })
+    })
+    main-fn()
+}

@@ -1482,7 +1482,20 @@ impl Parser {
             Token::Try => Ok(Some(self.parse_try()?)),
             Token::Throw => Ok(Some(self.parse_throw()?)),
             Token::Reset => Ok(Some(self.parse_reset()?)),
-            Token::Shift => Ok(Some(self.parse_shift()?)),
+            Token::Shift => {
+                // shift(fn(k) { ... }) is a delimited continuation form
+                // shift used as an identifier (e.g. variable name) won't be followed by '('
+                let saved_position = self.position;
+                self.consume(); // consume 'shift'
+                let next = self.peek_next_non_whitespace();
+                self.position = saved_position; // restore
+                if matches!(next, Token::OpenParen) {
+                    Ok(Some(self.parse_shift()?))
+                } else {
+                    self.consume();
+                    Ok(Some(Ast::Identifier("shift".to_string(), self.position)))
+                }
+            }
             Token::Perform => {
                 // Check if this looks like a perform statement: `perform <expr>`
                 // If followed by something that can't start an expression, treat as identifier
@@ -3356,6 +3369,13 @@ impl Parser {
                 self.consume();
                 Ok(Pattern::Identifier {
                     name: "future".to_string(),
+                    token_range: TokenRange::new(start, self.position),
+                })
+            }
+            Token::Shift => {
+                self.consume();
+                Ok(Pattern::Identifier {
+                    name: "shift".to_string(),
                     token_range: TokenRange::new(start, self.position),
                 })
             }

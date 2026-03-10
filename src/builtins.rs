@@ -8811,6 +8811,87 @@ extern "C" fn eval(stack_pointer: usize, frame_pointer: usize, code: usize) -> u
     f()
 }
 
+extern "C" fn eval_in_ns(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    code: usize,
+    namespace: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+
+    // Extract namespace string
+    let ns_str = match BuiltInTypes::get_kind(namespace) {
+        BuiltInTypes::String => runtime.get_string_literal(namespace),
+        BuiltInTypes::HeapObject => {
+            let bytes = runtime.get_string_bytes_vec(namespace);
+            match std::str::from_utf8(&bytes) {
+                Ok(s) => s.to_string(),
+                Err(e) => unsafe {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "EncodingError",
+                        format!("Namespace string contains invalid UTF-8: {}", e),
+                    );
+                },
+            }
+        }
+        _ => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "TypeError",
+                format!(
+                    "Expected string for namespace, got {:?}",
+                    BuiltInTypes::get_kind(namespace)
+                ),
+            );
+        },
+    };
+
+    // Extract code string
+    let code = match BuiltInTypes::get_kind(code) {
+        BuiltInTypes::String => runtime.get_string_literal(code),
+        BuiltInTypes::HeapObject => {
+            let bytes = runtime.get_string_bytes_vec(code);
+            match std::str::from_utf8(&bytes) {
+                Ok(s) => s.to_string(),
+                Err(e) => unsafe {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "EncodingError",
+                        format!("String contains invalid UTF-8: {}", e),
+                    );
+                },
+            }
+        }
+        _ => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "TypeError",
+                format!("Expected string, got {:?}", BuiltInTypes::get_kind(code)),
+            );
+        },
+    };
+
+    let result = match runtime.compile_string_in_namespace(&code, &ns_str) {
+        Ok(result) => result,
+        Err(e) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "CompileError",
+                format!("Compilation failed: {}", e),
+            );
+        },
+    };
+    mem::forget(code);
+    mem::forget(ns_str);
+    if result == 0 {
+        return BuiltInTypes::null_value() as usize;
+    }
+    let f: fn() -> usize = unsafe { transmute(result) };
+    f()
+}
+
 extern "C" fn sleep(time: usize) -> usize {
     let time = BuiltInTypes::untag(time);
     std::thread::sleep(std::time::Duration::from_millis(time as u64));
@@ -13249,7 +13330,15 @@ impl Runtime {
             eval as *const u8,
             true,
             &["code"],
-            "Evaluate a string as Beagle code at runtime.\n\nReturns the result of the evaluated expression.\n\nExamples:\n  (eval \"(+ 1 2)\")  ; => 3",
+            "Evaluate a string as Beagle code at runtime.\n\nReturns the result of the evaluated expression.\n\nExamples:\n  eval(\"1 + 2\")  ; => 3",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.core/eval-in-ns",
+            eval_in_ns as *const u8,
+            true,
+            &["code", "namespace"],
+            "Evaluate a string as Beagle code in a specific namespace.\n\nThe code is compiled with access to all bindings and imports of the given namespace.\n\nExamples:\n  eval-in-ns(\"my-fn(42)\", \"my_app\")",
         )?;
 
         self.add_builtin_with_doc(

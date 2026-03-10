@@ -1,0 +1,30 @@
+namespace binding_exception_safety_test
+
+use beagle.core as core
+
+fn main() {
+    // Test 1: binding with try/catch + eval error should not crash
+    // (tests that binding pop args aren't clobbered by exception longjmp)
+    let buffer = core/new-string-buffer()
+    let result = binding (core/out = buffer) {
+        try {
+            eval("undefined_var_xyz")
+        } catch (e) {
+            "caught"
+        }
+    }
+    println("test1:", result)
+
+    // Test 2: binding should work normally after
+    let buffer2 = core/new-string-buffer()
+    binding (core/out = buffer2) {
+        println("second binding")
+    }
+    println("test2 ok")
+    print(buffer2.content)
+}
+
+// @beagle.core.snapshot
+// test1: caught
+// test2 ok
+// second binding

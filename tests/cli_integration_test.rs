@@ -693,7 +693,8 @@ fn test_repl_unknown_command() {
 
 #[test]
 fn test_repl_struct_definition() {
-    let stdout = run_repl("struct Point { x, y }\nlet p = Point { x: 10, y: 20 }\np.x + p.y\n:quit\n");
+    let stdout =
+        run_repl("struct Point { x, y }\nlet p = Point { x: 10, y: 20 }\np.x + p.y\n:quit\n");
     assert!(
         stdout.contains("=> 30"),
         "Should define struct and access fields, got: {}",

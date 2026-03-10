@@ -1,0 +1,250 @@
+namespace repl_namespace_integration_test
+
+// Integration test: starts a real REPL server, connects via TCP,
+// sends eval requests over the JSON protocol, and verifies that
+// namespace tracking works correctly.
+
+use beagle.core as core
+use beagle.socket as socket
+use beagle.async as async
+
+// -- JSON protocol helpers (same as in beagle.repl) --
+
+fn send-response(client, response) {
+    let json = json-encode(response)
+    socket/write(client, json ++ "\n")
+}
+
+fn server-handle-eval(client, msg) {
+    let request_id = get(msg, "id")
+    let code = get(msg, "code")
+
+    let buf = core/new-string-buffer()
+    let result = binding (core/out = buf) {
+        try { eval(code) } catch (e) { {:error e} }
+    }
+
+    let output = if buf.content != "" { core/trim-right(buf.content) } else { "" }
+
+    if output != "" {
+        send-response(client, {:id request_id, :out output})
+    }
+
+    let is_error = type-of(result) == "Map" && get(result, :error) != null
+    if is_error {
+        send-response(client, {:id request_id, :ex to-string(get(result, :error))})
+        let s = ["done"]
+        send-response(client, {:id request_id, :status s})
+    } else {
+        send-response(client, {:id request_id, :value to-string(result)})
+        let s = ["done"]
+        send-response(client, {:id request_id, :status s})
+    }
+}
+
+fn server-handle-message(client, msg) {
+    let op = get(msg, "op")
+    if op == "eval" {
+        server-handle-eval(client, msg)
+    } else {
+        let s = ["done"]
+        send-response(client, {:id get(msg, "id"), :status s})
+    }
+}
+
+fn server-handle-client(client) {
+    let mut buffer = ""
+    let mut running = true
+
+    while running {
+        try {
+            let data = socket/read(client, 4096)
+            if data == null || data == "" {
+                running = false
+            } else {
+                let combined = buffer ++ data
+                let parts = core/split(combined, "\n")
+                let len = length(parts)
+                buffer = nth(parts, len - 1)
+
+                let mut i = 0
+                while i < len - 1 {
+                    let line = nth(parts, i)
+                    if length(line) > 0 {
+                        let msg = try { json-decode(line) } catch (e) { null }
+                        if msg != null {
+                            server-handle-message(client, msg)
+                        }
+                    }
+                    i = i + 1
+                }
+            }
+        } catch (e) {
+            running = false
+        }
+    }
+
+    try { socket/close(client) } catch (e) { null }
+}
+
+// -- Client helpers --
+
+fn read-all-lines(conn) {
+    let data = socket/read(conn, 4096)
+    if data == null || data == "" {
+        []
+    } else {
+        let parts = core/split(data, "\n")
+        let mut lines = []
+        let mut i = 0
+        while i < length(parts) {
+            let line = nth(parts, i)
+            if length(line) > 0 {
+                lines = push(lines, json-decode(line))
+            }
+            i = i + 1
+        }
+        lines
+    }
+}
+
+fn send-eval(conn, id, code) {
+    let msg = {:op "eval", :id id, :session "test-session", :code code}
+    socket/write(conn, json-encode(msg) ++ "\n")
+}
+
+fn collect-eval-result(conn) {
+    let mut value = null
+    let mut output = ""
+    let mut error = null
+    let mut done = false
+
+    while !done {
+        let responses = read-all-lines(conn)
+        let mut i = 0
+        while i < length(responses) {
+            let resp = nth(responses, i)
+            if get(resp, "value") != null {
+                value = get(resp, "value")
+            }
+            if get(resp, "out") != null {
+                output = output ++ get(resp, "out")
+            }
+            if get(resp, "ex") != null {
+                error = get(resp, "ex")
+            }
+            let status = get(resp, "status")
+            if status != null {
+                let mut j = 0
+                while j < length(status) {
+                    if nth(status, j) == "done" {
+                        done = true
+                    }
+                    j = j + 1
+                }
+            }
+            i = i + 1
+        }
+        if !done {
+            core/sleep(5)
+        }
+    }
+
+    {:value value, :output output, :error error}
+}
+
+fn eval-and-get-value(conn, id, code) {
+    send-eval(conn, id, code)
+    let result = collect-eval-result(conn)
+    let err = get(result, :error)
+    if err != null {
+        println("EVAL ERROR [" ++ id ++ "]: " ++ to-string(err))
+    }
+    let val = get(result, :value)
+    if val == null { "null" } else { val }
+}
+
+// -- Namespace-level bindings that should be accessible via eval --
+
+let TEST_CONST = 777
+
+fn test-add(a, b) {
+    a + b
+}
+
+fn main() {
+    let port = 18902
+    let server_ready = atom(false)
+
+    // Start a single-client REPL server on a background thread
+    thread(fn() {
+        async/with-implicit-async(fn() {
+            let server = socket/listen("127.0.0.1", port)
+            reset!(server_ready, true)
+
+            // Handle exactly one client, then exit
+            let client = socket/accept(server)
+            server-handle-client(client)
+            socket/close-listener(server)
+        })
+    })
+
+    // Wait for server to be ready
+    loop {
+        if deref(server_ready) { break(null) }
+        core/sleep(1)
+    }
+
+    // Connect as client and run tests
+    async/with-implicit-async(fn() {
+        let conn = socket/connect("127.0.0.1", port)
+
+        // Test 1: eval a simple expression
+        let v1 = eval-and-get-value(conn, "1", "1 + 2")
+        println("simple expr: " ++ v1)
+
+        // Test 2: eval can access functions defined in this namespace
+        let v2 = eval-and-get-value(conn, "2", "test-add(10, 20)")
+        println("namespace fn: " ++ v2)
+
+        // Test 3: eval can access let bindings in this namespace
+        let v3 = eval-and-get-value(conn, "3", "TEST_CONST")
+        println("namespace let: " ++ v3)
+
+        // Test 4: eval a non-namespace expression does NOT change the namespace
+        eval-and-get-value(conn, "4", "42 * 2")
+        let v4 = eval-and-get-value(conn, "5", "test-add(1, 1)")
+        println("stable after expr: " ++ v4)
+
+        // Test 5: eval("namespace X") changes the namespace
+        eval-and-get-value(conn, "6", "namespace repl_test_other_ns")
+        eval-and-get-value(conn, "7", "fn other-thing() { 999 }")
+        let v5 = eval-and-get-value(conn, "8", "other-thing()")
+        println("switched ns fn: " ++ v5)
+
+        // Test 6: switch back to original namespace, functions still accessible
+        eval-and-get-value(conn, "9", "namespace repl_namespace_integration_test")
+        let v6 = eval-and-get-value(conn, "10", "test-add(50, 50)")
+        println("back to original: " ++ v6)
+
+        // Test 7: let binding still accessible after round-trip
+        let v7 = eval-and-get-value(conn, "11", "TEST_CONST")
+        println("let after round-trip: " ++ v7)
+
+        socket/close(conn)
+    })
+
+    // Wait for server thread to finish
+    core/sleep(50)
+    println("done")
+}
+
+// @beagle.core.snapshot
+// simple expr: 3
+// namespace fn: 30
+// namespace let: 777
+// stable after expr: 2
+// switched ns fn: 999
+// back to original: 100
+// let after round-trip: 777
+// done

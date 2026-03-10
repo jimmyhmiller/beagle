@@ -3029,21 +3029,18 @@ impl AstCompiler<'_> {
 
                 // Compile the body
                 let mut body_result = Value::Null;
-                for (i, expr) in body.iter().enumerate() {
-                    if i == body.len() - 1 {
-                        // Last expression preserves tail position
-                        body_result = self.call_compile(expr)?;
-                    } else {
-                        self.not_tail_position();
-                        body_result = self.call_compile(expr)?;
-                        self.not_tail_position();
-                    }
+                for expr in body.iter() {
+                    self.not_tail_position();
+                    body_result = self.call_compile(expr)?;
                 }
 
-                // Pop the binding (exception safety handled by caller)
+                // Pop the binding - reload constants fresh since registers may have
+                // been clobbered by exception handler longjmp in release builds
+                let ns_id_pop = self.ir.assign_new(Value::TaggedConstant(namespace_id as isize));
+                let slot_pop = self.ir.assign_new(Value::TaggedConstant(slot as isize));
                 let _pop_result = self.call_builtin(
                     "beagle.core/_pop_dynamic_binding",
-                    vec![ns_id_reg.into(), slot_reg.into()],
+                    vec![ns_id_pop.into(), slot_pop.into()],
                 )?;
 
                 Ok(body_result)
@@ -4364,6 +4361,10 @@ impl AstCompiler<'_> {
             // Multi-arity function in beagle.core
             Ok("beagle.core/".to_string() + name)
         } else if self.create_free_if_closable(name).is_some() {
+            Ok(name.clone())
+        } else if self.get_accessible_variable(name).is_some() {
+            // Namespace-level let bindings (e.g. FFI functions stored in let bindings)
+            // that aren't in the current environment stack but exist in namespace bindings
             Ok(name.clone())
         } else {
             Err(CompileError::FunctionNotFound {

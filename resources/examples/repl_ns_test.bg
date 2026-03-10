@@ -1,0 +1,36 @@
+namespace repl_ns_test
+
+use beagle.repl-main as repl-main
+
+// Simulate a program with functions that the user would redefine from REPL
+
+let state = atom(0)
+
+fn helper(x) {
+    x * 2
+}
+
+fn render(value) {
+    println("Rendering:", helper(value))
+    value
+}
+
+fn work-loop(n) {
+    if n <= 0 {
+        null
+    } else {
+        render(deref(state))
+        swap!(state, fn(s) { s + 1 })
+        sleep(50)
+        work-loop(n - 1)
+    }
+}
+
+fn main() {
+    repl-main/run-with-repl("127.0.0.1", 7893, fn() {
+        sleep(200)
+        println("Server ready")
+        work-loop(100)
+        println("Done")
+    })
+}

@@ -1,0 +1,105 @@
+namespace repl_eval_test_client
+
+use beagle.socket as socket
+use beagle.core as core
+
+// Test client that connects to a REPL server and evals various code,
+// including function redefinitions (like what VS Code does)
+
+fn send-eval(sock, id, code) {
+    let msg = json-encode({:op "eval", :id to-string(id), :session "test", :code code})
+    socket/write(sock, msg ++ "\n")
+}
+
+fn read-until-done(sock) {
+    let mut done = false
+    let mut buffer = ""
+    let mut responses = []
+
+    while done == false {
+        let data = socket/read(sock, 4096)
+        if data == null || data == "" {
+            done = true
+        } else {
+            buffer = buffer ++ data
+            let parts = core/split(buffer, "\n")
+            let len = length(parts)
+            buffer = nth(parts, len - 1)
+
+            let mut i = 0
+            while i < len - 1 {
+                let line = nth(parts, i)
+                if length(line) > 0 {
+                    let parsed = try { json-decode(line) } catch (e) { null }
+                    if parsed != null {
+                        responses = push(responses, parsed)
+                        let status = get(parsed, "status")
+                        if status != null {
+                            done = true
+                        }
+                    }
+                }
+                i = i + 1
+            }
+        }
+    }
+    responses
+}
+
+fn main() {
+    sleep(500)
+    println("Connecting to REPL server...")
+    let sock = socket/connect("127.0.0.1", 7891)
+    println("Connected!")
+
+    // Test 1: Simple expression
+    println("Test 1: Simple eval")
+    send-eval(sock, 1, "1 + 2")
+    let r1 = read-until-done(sock)
+    println("Result:", r1)
+
+    // Test 2: println (uses dynamic binding for output capture)
+    println("Test 2: println eval")
+    send-eval(sock, 2, "println(\"hello from repl\")")
+    let r2 = read-until-done(sock)
+    println("Result:", r2)
+
+    // Test 3: Define a function (like VS Code eval of a function definition)
+    println("Test 3: Function definition")
+    send-eval(sock, 3, "fn my-render(x) { x * 2 }")
+    let r3 = read-until-done(sock)
+    println("Result:", r3)
+
+    // Test 4: Call the function we just defined
+    println("Test 4: Call defined function")
+    send-eval(sock, 4, "my-render(21)")
+    let r4 = read-until-done(sock)
+    println("Result:", r4)
+
+    // Test 5: Redefine a function with println inside (most likely trigger)
+    println("Test 5: Redefine function with println")
+    send-eval(sock, 5, "fn my-render(x) { println(\"rendering:\", x); x * 3 }")
+    let r5 = read-until-done(sock)
+    println("Result:", r5)
+
+    // Test 6: Call the redefined function
+    println("Test 6: Call redefined function")
+    send-eval(sock, 6, "my-render(10)")
+    let r6 = read-until-done(sock)
+    println("Result:", r6)
+
+    // Test 7: Multi-line function definition (like selecting a block in VS Code)
+    println("Test 7: Multi-line function")
+    send-eval(sock, 7, "fn draw-stuff(a, b) {\n    let c = a + b\n    println(\"drawing:\", c)\n    c * 2\n}")
+    let r7 = read-until-done(sock)
+    println("Result:", r7)
+
+    // Test 8: Call multi-line function
+    println("Test 8: Call multi-line function")
+    send-eval(sock, 8, "draw-stuff(10, 20)")
+    let r8 = read-until-done(sock)
+    println("Result:", r8)
+
+    socket/close(sock)
+    println("All tests completed!")
+}

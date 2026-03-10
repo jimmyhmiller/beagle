@@ -43,6 +43,7 @@ pub mod embedded_stdlib {
                 Some(include_str!("../standard-library/beagle.repl-session.bg"))
             }
             "beagle.repl.bg" => Some(include_str!("../standard-library/beagle.repl.bg")),
+            "beagle.repl-main.bg" => Some(include_str!("../standard-library/beagle.repl-main.bg")),
             "beagle.repl-interactive.bg" => Some(include_str!(
                 "../standard-library/beagle.repl-interactive.bg"
             )),
@@ -1008,6 +1009,7 @@ pub struct CommandLineArguments {
     print_parse: bool,
     print_builtin_calls: bool,
     update_snapshots: bool,
+    include_paths: Vec<String>,
 }
 
 fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Error>> {
@@ -1163,6 +1165,9 @@ struct RunArgs {
     /// Update snapshot expectations to match actual output
     #[clap(long)]
     update_snapshots: bool,
+    /// Additional directories to search for source files
+    #[clap(short = 'I', long = "include")]
+    include: Vec<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1197,6 +1202,7 @@ impl CommandLineArguments {
             print_parse: false,
             print_builtin_calls: false,
             update_snapshots: false,
+            include_paths: vec![],
         }
     }
 
@@ -1216,6 +1222,7 @@ impl CommandLineArguments {
             print_parse: false,
             print_builtin_calls: false,
             update_snapshots: false,
+            include_paths: vec![],
         }
     }
 
@@ -1235,6 +1242,7 @@ impl CommandLineArguments {
             print_parse: run_args.print_parse,
             print_builtin_calls: run_args.print_builtin_calls,
             update_snapshots: run_args.update_snapshots,
+            include_paths: run_args.include,
         }
     }
 }
@@ -1498,6 +1506,7 @@ fn cmd_test(test_args: TestArgs) -> Result<(), Box<dyn Error>> {
             print_parse: false,
             print_builtin_calls: false,
             update_snapshots: test_args.update_snapshots,
+            include_paths: vec![],
         };
 
         match main_inner(args) {
@@ -1598,6 +1607,7 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             print_parse: args.print_parse,
             print_builtin_calls: args.print_builtin_calls,
             update_snapshots: false,
+            include_paths: vec![],
         };
         main_inner(args)?;
         RUNTIME.get().unwrap().get_mut().reset();

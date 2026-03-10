@@ -1,0 +1,59 @@
+namespace eval_namespace_test
+
+// Tests that eval respects namespace tracking:
+// 1. eval compiles in the current namespace
+// 2. eval("namespace foo") changes the current namespace
+// 3. eval of non-namespace code does NOT change the namespace
+// 4. Namespace-level let bindings are accessible via eval in that namespace
+
+// Define some bindings in this namespace
+let MY_CONST = 42
+
+fn add-ten(x) {
+    x + 10
+}
+
+fn main() {
+    // Test 1: eval can access functions in the current namespace
+    let result = eval("add-ten(5)")
+    println(result)
+
+    // Test 2: eval can access let bindings in the current namespace
+    let result2 = eval("MY_CONST")
+    println(result2)
+
+    // Test 3: eval of a plain expression does not change the namespace
+    // (we can still call our functions after evaling something)
+    eval("1 + 2")
+    let result3 = add-ten(20)
+    println(result3)
+
+    // Test 4: eval("namespace X") changes the namespace
+    // After switching to a new namespace, the old bindings are no longer
+    // directly accessible (but the functions still exist in the runtime)
+    eval("namespace eval_ns_test_other")
+
+    // Define a function in the new namespace via eval
+    eval("fn other-fn() { 99 }")
+    let result4 = eval("other-fn()")
+    println(result4)
+
+    // Test 5: Switch back to original namespace
+    eval("namespace eval_namespace_test")
+    let result5 = eval("add-ten(100)")
+    println(result5)
+
+    // Test 6: The let binding is still accessible after switching back
+    let result6 = eval("MY_CONST")
+    println(result6)
+
+    "done"
+}
+
+// @beagle.core.snapshot
+// 15
+// 42
+// 30
+// 99
+// 110
+// 42

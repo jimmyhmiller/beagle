@@ -1,0 +1,27 @@
+namespace repl_main_test
+
+use beagle.repl-main as repl-main
+
+// Simulate a "main thread" workload without raylib
+// Just loop for a while so the REPL server can accept connections
+
+let counter = atom(0)
+
+fn work-loop(n) {
+    if n <= 0 {
+        null
+    } else {
+        repl-main/process-eval-queue()
+        swap!(counter, fn(c) { c + 1 })
+        sleep(16)
+        work-loop(n - 1)
+    }
+}
+
+fn main() {
+    repl-main/start("127.0.0.1", 7891)
+    sleep(200)
+    println("Server ready")
+    work-loop(300)
+    println("Done")
+}

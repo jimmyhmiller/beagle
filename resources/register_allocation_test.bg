@@ -1,6 +1,5 @@
 namespace register_allocation_test
 
-// no-std
 fn is_bitmap_indexed_node(n) {
     false
 }
@@ -52,3 +51,6 @@ fn main() {
     let added_leaf_box = 42
     assoc_node(n, shift, h, k, v, added_leaf_box)
 }
+
+// @beagle.core.snapshot
+// assoc_collision_node
