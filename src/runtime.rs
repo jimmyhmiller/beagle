@@ -655,7 +655,6 @@ pub trait Printer: Send + Sync {
     fn print_byte(&mut self, byte: u8);
     // Gross just for testing. I'll need to do better;
     fn get_output(&self) -> Vec<String>;
-    fn reset(&mut self);
 }
 
 pub struct DefaultPrinter;
@@ -680,9 +679,6 @@ impl Printer for DefaultPrinter {
         vec![]
     }
 
-    fn reset(&mut self) {
-        // no-op: DefaultPrinter doesn't buffer output
-    }
 }
 
 pub struct TestPrinter {
@@ -717,10 +713,6 @@ impl Printer for TestPrinter {
 
     fn get_output(&self) -> Vec<String> {
         self.output.clone()
-    }
-
-    fn reset(&mut self) {
-        self.output.clear();
     }
 }
 
@@ -2996,37 +2988,6 @@ pub struct Memory {
 }
 
 impl Memory {
-    fn reset(&mut self) {
-        // Full memory barrier before reset to ensure all pending stores are visible
-        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
-
-        let options = self.heap.get_allocation_options();
-        self.heap = Alloc::new(options);
-        let mut stacks = self
-            .stacks
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *stacks = vec![(
-            std::thread::current().id(),
-            create_stack_with_protected_page_after(STACK_SIZE),
-        )];
-        self.join_handles = vec![];
-        self.threads = vec![std::thread::current()];
-        self.stack_map = StackMap::new();
-        self.thread_globals.lock().unwrap().clear();
-        // Invalidate cached thread_local pointer since ThreadGlobals were cleared
-        CACHED_THREAD_GLOBAL.with(|c| c.set(std::ptr::null_mut()));
-
-        // Clear the effect handler stack
-        clear_handler_stack();
-
-        // Clear the dynamic variable stack
-        clear_dynamic_var_stack();
-
-        // Full memory barrier after reset to ensure all stores are visible
-        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
-    }
-
     fn active_threads(&mut self) -> usize {
         let mut completed_threads = vec![];
         for (index, thread) in self.join_handles.iter().enumerate() {
@@ -4319,73 +4280,6 @@ impl Runtime {
             .insert("beagle.core/Function".to_string(), fn_struct);
         let (id, _) = self.structs.get("beagle.core/Function").unwrap();
         self.function_struct_id = id;
-    }
-
-    pub fn reset(&mut self) {
-        // Shutdown event loops FIRST so threads blocked on I/O (e.g. socket/accept)
-        // get unblocked before we try to join them
-        self.event_loops.shutdown_all();
-
-        self.wait_for_other_threads();
-
-        // Reset saved frame pointer and gc return address to prevent
-        // stale values from being used during gc-always mode
-        crate::builtins::reset_saved_gc_context();
-
-        self.memory.reset();
-        self.namespaces = NamespaceManager::new();
-        self.structs = StructManager::new();
-        self.enums = EnumManager::new();
-        // Re-register the built-in Function struct after clearing
-        self.register_function_struct();
-        self.string_constants.clear();
-        self.ascii_char_cache = [0; 128];
-        self.keyword_constants.clear();
-        self.keyword_heap_ptrs.clear();
-        self.functions.clear();
-        self.jump_table_reserved = MmapOptions::new(MmapOptions::page_size() * 10000)
-            .expect("Failed to create mmap options for jump table")
-            .reserve()
-            .expect("Failed to reserve address space for jump table");
-        self.jump_table_base_ptr = self.jump_table_reserved.as_ptr() as usize;
-        self.jump_table_pages.clear();
-        self.jump_table_offset = 0;
-        self.printer.reset();
-        self.ffi_function_info.clear();
-        self.ffi_info_by_name.clear();
-        self.compiler_channel
-            .as_mut()
-            .expect("Compiler channel not initialized - this is a fatal error")
-            .send(CompilerMessage::Reset);
-        self.protocol_info.clear();
-        self.dispatch_tables.clear();
-
-        // Clear continuation and exception handler state to prevent stale pointers
-        self.exception_handlers = {
-            let mut map = HashMap::new();
-            map.insert(std::thread::current().id(), Vec::new());
-            map
-        };
-        self.prompt_handlers = {
-            let mut map = HashMap::new();
-            map.insert(std::thread::current().id(), Vec::new());
-            map
-        };
-        self.invocation_return_points = {
-            let mut map = HashMap::new();
-            map.insert(std::thread::current().id(), Vec::new());
-            map
-        };
-        self.skip_return_from_shift.clear();
-        self.return_from_shift_via_pop_prompt.clear();
-        self.is_handler_return.clear();
-        self.saved_continuation_ptr.clear();
-        self.thread_exception_handler_fns.clear();
-        self.default_exception_handler_fn = None;
-        self.stacks_for_continuation_swapping.clear();
-        self.relocation_depth.clear();
-        self.variant_to_enum.clear();
-        self.compiled_regexes.clear();
     }
 
     /// Export all documentation as JSON for the documentation generator.

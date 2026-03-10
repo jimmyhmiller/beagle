@@ -343,38 +343,6 @@ pub struct Compiler {
 }
 
 impl Compiler {
-    pub fn reset(&mut self) -> Result<(), CompileError> {
-        self.code_allocator = CodeAllocator::new();
-        self.property_look_up_cache = MmapOptions::new(MmapOptions::page_size() * 256)  // 1MB cache for property lookups
-            .map_err(|e| CompileError::MemoryMapping(format!("Failed to create mmap: {}", e)))?
-            .map_mut()
-            .map_err(|e| CompileError::MemoryMapping(format!("Failed to map mmap: {}", e)))?
-            .make_mut()
-            .map_err(|(_map, e)| {
-                CompileError::MemoryMapping(format!("Failed to make mmap mutable: {}", e))
-            })?;
-        self.property_look_up_cache_offset = 0;
-        self.protocol_dispatch_cache = MmapOptions::new(MmapOptions::page_size())
-            .map_err(|e| CompileError::MemoryMapping(format!("Failed to create mmap: {}", e)))?
-            .map_mut()
-            .map_err(|e| CompileError::MemoryMapping(format!("Failed to map mmap: {}", e)))?
-            .make_mut()
-            .map_err(|(_map, e)| {
-                CompileError::MemoryMapping(format!("Failed to make mmap mutable: {}", e))
-            })?;
-        self.protocol_dispatch_cache_offset = 0;
-        self.stack_map = StackMap::new();
-        self.pause_atom_ptr = None;
-        self.compiled_file_cache.clear();
-        self.multi_arity_functions.clear();
-        self.dynamic_vars.clear();
-        // If lock is poisoned, we can still clear by ignoring the error
-        if let Ok(mut store) = self.diagnostic_store.lock() {
-            store.clear_all();
-        }
-        Ok(())
-    }
-
     pub fn get_pause_atom(&self) -> usize {
         self.pause_atom_ptr.unwrap_or(0)
     }
@@ -1491,7 +1459,6 @@ pub enum CompilerMessage {
     CompileProtocolMethod(String, String, Vec<ProtocolMethodInfo>),
     SetPauseAtomPointer(usize),
     GetCodeBaseAddress,
-    Reset,
 }
 
 pub enum CompilerResponse {
@@ -1630,14 +1597,6 @@ impl CompilerThread {
                             }
                         }
                     }
-                    CompilerMessage::Reset => match self.compiler.reset() {
-                        Ok(_) => {
-                            work_done.mark_done(CompilerResponse::Done);
-                        }
-                        Err(e) => {
-                            work_done.mark_done(CompilerResponse::CompileError(format!("{}", e)));
-                        }
-                    },
                     CompilerMessage::CompileProtocolMethod(
                         protocol_name,
                         method_name,

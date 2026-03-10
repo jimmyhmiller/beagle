@@ -119,15 +119,6 @@ pub extern "C" fn gc_frame_unlink(prev: usize) {
     GC_FRAME_TOP.with(|cell| cell.set(prev));
 }
 
-/// Reset the saved frame pointer, stack pointer, and gc return address.
-/// Called by Runtime::reset() to clear stale values between test runs.
-pub fn reset_saved_gc_context() {
-    SAVED_FRAME_POINTER.with(|cell| cell.set(0));
-    SAVED_STACK_POINTER.with(|cell| cell.set(0));
-    SAVED_GC_RETURN_ADDR.with(|cell| cell.set(0));
-    GC_FRAME_TOP.with(|cell| cell.set(0));
-}
-
 /// Saved GC context - used to save/restore around calls back into Beagle
 pub struct SavedGcContext {
     pub frame_pointer: usize,

@@ -1491,38 +1491,34 @@ fn cmd_test(test_args: TestArgs) -> Result<(), Box<dyn Error>> {
 
         let gc_always = source.contains("// gc-always");
         let no_std = source.contains("// no-std");
-        let args = CommandLineArguments {
-            program: Some(file_str.to_string()),
-            program_args: vec![],
-            show_times: false,
-            show_gc_times: false,
-            print_ast: false,
-            no_gc: false,
-            gc_always,
-            test: true,
-            debug: false,
-            verbose: false,
-            no_std,
-            print_parse: false,
-            print_builtin_calls: false,
-            update_snapshots: test_args.update_snapshots,
-            include_paths: vec![],
-        };
 
-        match main_inner(args) {
-            Ok(_) => {
-                println!("  pass  {}", file_str);
-                passed += 1;
-            }
-            Err(e) => {
-                println!("  FAIL  {}", file_str);
-                for line in e.to_string().lines() {
-                    println!("        {}", line);
-                }
-                failed += 1;
-            }
+        let exe = std::env::current_exe()?;
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("run").arg("--test").arg(file_str);
+        if gc_always {
+            cmd.arg("--gc-always");
         }
-        RUNTIME.get().unwrap().get_mut().reset();
+        if no_std {
+            cmd.arg("--no-std");
+        }
+        if test_args.update_snapshots {
+            cmd.arg("--update-snapshots");
+        }
+
+        let output = cmd.output()?;
+
+        if output.status.success() {
+            println!("  pass  {}", file_str);
+            passed += 1;
+        } else {
+            println!("  FAIL  {}", file_str);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stderr.lines().chain(stdout.lines()) {
+                println!("        {}", line);
+            }
+            failed += 1;
+        }
     }
 
     println!();
@@ -1592,25 +1588,29 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
         println!("Running test: {}", path);
         let gc_always = args.gc_always || source.contains("// gc-always");
-        let args = CommandLineArguments {
-            program: Some(path.to_string()),
-            program_args: vec![],
-            show_times: args.show_times,
-            show_gc_times: args.show_gc_times,
-            print_ast: args.print_ast,
-            no_gc: args.no_gc,
-            gc_always,
-            test: true,
-            debug: args.debug,
-            verbose: args.verbose,
-            no_std: args.no_std,
-            print_parse: args.print_parse,
-            print_builtin_calls: args.print_builtin_calls,
-            update_snapshots: false,
-            include_paths: vec![],
-        };
-        main_inner(args)?;
-        RUNTIME.get().unwrap().get_mut().reset();
+        let no_std = args.no_std || source.contains("// no-std");
+
+        let exe = std::env::current_exe()?;
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("run").arg("--test").arg(path);
+        if gc_always {
+            cmd.arg("--gc-always");
+        }
+        if no_std {
+            cmd.arg("--no-std");
+        }
+
+        let output = cmd.output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(format!(
+                "Test failed: {}\n{}{}",
+                path,
+                stderr,
+                stdout
+            ).into());
+        }
     }
     Ok(())
 }
