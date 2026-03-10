@@ -1563,9 +1563,20 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 #[cfg(test)]
+fn find_beag_binary() -> std::path::PathBuf {
+    // In cargo test, current_exe() returns target/<profile>/deps/beag-<hash>.
+    // The actual beag binary is at target/<profile>/beag.
+    let test_exe = std::env::current_exe().expect("Failed to get current exe");
+    let deps_dir = test_exe.parent().expect("No parent for test exe");
+    let profile_dir = deps_dir.parent().expect("No parent for deps dir");
+    profile_dir.join("beag")
+}
+
+#[cfg(test)]
 fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     let mut test_files = discover_test_files(std::path::Path::new("resources"))?;
     sort_tests_by_deps(&mut test_files);
+    let exe = find_beag_binary();
 
     for test_file in &test_files {
         let path = test_file.to_str().unwrap();
@@ -1590,7 +1601,6 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         let gc_always = args.gc_always || source.contains("// gc-always");
         let no_std = args.no_std || source.contains("// no-std");
 
-        let exe = std::env::current_exe()?;
         let mut cmd = std::process::Command::new(&exe);
         cmd.arg("run").arg("--test").arg(path);
         if gc_always {
