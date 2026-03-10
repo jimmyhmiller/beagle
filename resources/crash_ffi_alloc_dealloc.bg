@@ -66,12 +66,12 @@ fn process_line(state, chunk, start, line_len) {
         if first == ">" {
             arr/write-field(state, 3, false)
         } else {
-            let line = uppercase(substring(chunk, start, line_len))
+            let line = uppercase(substring(chunk, start, start + line_len))
             add_line(state, line)
         }
     } else {
         if line_len >= 6 {
-            let prefix = substring(chunk, start, 6)
+            let prefix = substring(chunk, start, start + 6)
             if prefix == ">THREE" {
                 arr/write-field(state, 3, true)
             }

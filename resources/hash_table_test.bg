@@ -63,7 +63,7 @@ fn main() {
     println("Inserting 1-mers from ACGTACGT...")
     let mut i = 0
     while i < 8 {
-        let kmer = substring(seq, i, 1)
+        let kmer = substring(seq, i, i + 1)
         println(kmer)
         ht_increment(ht, kmer)
         i = i + 1

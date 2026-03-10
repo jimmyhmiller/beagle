@@ -16,7 +16,7 @@ fn main() {
     let mut count = 0
     i = 0
     while i < len - 3 {
-        let sub = substring(s, i, 3)
+        let sub = substring(s, i, i + 3)
         count = count + 1
         i = i + 1
     }

@@ -67,7 +67,7 @@ fn count_kmers_loop(seq, len, ht, i) {
     if i >= len {
         null
     } else {
-        let kmer = substring(seq, i, 1)
+        let kmer = substring(seq, i, i + 1)
         ht_increment(ht, kmer)
         count_kmers_loop(seq, len, ht, i + 1)
     }

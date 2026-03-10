@@ -500,12 +500,12 @@ fn handle-text-input(text, cursor) {
             if is-key-down(KEY_LEFT_SUPER) {
                 // Delete all text before cursor
                 TextInputResult {
-                    text: substring(result.text, result.cursor, length(result.text) - result.cursor),
+                    text: substring(result.text, result.cursor, length(result.text)),
                     cursor: 0
                 }
             } else {
                 let before = substring(result.text, 0, result.cursor - 1)
-                let after = substring(result.text, result.cursor, length(result.text) - result.cursor)
+                let after = substring(result.text, result.cursor, length(result.text))
                 TextInputResult {
                     text: before ++ after,
                     cursor: result.cursor - 1
@@ -522,7 +522,7 @@ fn handle-text-input(text, cursor) {
     let result3 = if is-key-pressed(KEY_DELETE) {
         if result2.cursor < length(result2.text) {
             let before = substring(result2.text, 0, result2.cursor)
-            let after = substring(result2.text, result2.cursor + 1, length(result2.text) - result2.cursor - 1)
+            let after = substring(result2.text, result2.cursor + 1, length(result2.text))
             TextInputResult {
                 text: before ++ after,
                 cursor: result2.cursor
@@ -560,7 +560,7 @@ fn consume-chars(text, cursor, char_code) {
     // Insert character at cursor position
     let ch = char-from-code(char_code)
     let before = substring(text, 0, cursor)
-    let after = substring(text, cursor, length(text) - cursor)
+    let after = substring(text, cursor, length(text))
     let new_text = before ++ ch ++ after
     let new_cursor = cursor + 1
 

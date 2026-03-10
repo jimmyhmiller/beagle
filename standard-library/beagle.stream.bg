@@ -1024,7 +1024,7 @@ extend SplitOnSource with StreamSource {
                 let message = core/substring(buf, 0, sep_idx)
                 let sep_len = core/length(self.delimiter)
                 let buf_len = core/length(buf)
-                let rest = core/substring(buf, sep_idx + sep_len, buf_len - (sep_idx + sep_len))
+                let rest = core/substring(buf, sep_idx + sep_len, buf_len)
                 reset!(self.buffer, rest)
                 final_result = StreamResult.Value { value: message }
                 found = true
@@ -1113,7 +1113,7 @@ extend BySizeSource with StreamSource {
             if buf_len >= self.size {
                 // Have enough bytes - emit chunk
                 let chunk = core/substring(buf, 0, self.size)
-                let rest = core/substring(buf, self.size, buf_len - self.size)
+                let rest = core/substring(buf, self.size, buf_len)
                 reset!(self.buffer, rest)
                 final_result = StreamResult.Value { value: chunk }
                 found = true

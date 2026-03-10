@@ -83,14 +83,14 @@ fn main() {
     let s5 = "say héllo world"
     let idx = index-of(s5, "héllo")
     println("index-of + substring round-trip:")
-    println(substring(s5, idx, 5))
+    println(substring(s5, idx, idx + 5))
 
     // Same with emoji
     let s6 = "hi 😊 there"
     let idx2 = index-of(s6, "there")
     println("index-of 'hi 😊 there' 'there':")
     println(idx2)
-    println(substring(s6, idx2, 5))
+    println(substring(s6, idx2, idx2 + 5))
 
     ""
 }

@@ -99,7 +99,7 @@ fn parse-cell-ref(text) {
         if col < 0 {
             null
         } else {
-            let row_str = substring(text, 1, length(text) - 1)
+            let row_str = substring(text, 1, length(text))
             let row = try-parse-int(row_str)
             if row == null {
                 null
@@ -133,7 +133,7 @@ fn try-parse-float(s) {
 // Returns a string (display value)
 fn evaluate-cell(text, cells) {
     if is-formula(text) {
-        let expr = substring(text, 1, length(text) - 1)
+        let expr = substring(text, 1, length(text))
         eval-expr(expr, cells)
     } else {
         text
@@ -179,7 +179,7 @@ fn eval-binary-op(expr, op, cells) {
         "#ERR"
     } else {
         let left_str = trim(substring(expr, 0, idx))
-        let right_str = trim(substring(expr, idx + 1, length(expr) - idx - 1))
+        let right_str = trim(substring(expr, idx + 1, length(expr)))
         let left_val = expr-to-number(left_str, cells)
         let right_val = expr-to-number(right_str, cells)
         if left_val == null || right_val == null {
@@ -217,13 +217,13 @@ fn expr-to-number(s, cells) {
 
 fn eval-sum(expr, cells) {
     // Parse sum(A1:B5)
-    let inner = substring(expr, 4, length(expr) - 5)
+    let inner = substring(expr, 4, length(expr) - 1)
     let colon_idx = index-of(inner, ":")
     if colon_idx < 0 {
         "#ERR"
     } else {
         let start_ref = parse-cell-ref(trim(substring(inner, 0, colon_idx)))
-        let end_ref = parse-cell-ref(trim(substring(inner, colon_idx + 1, length(inner) - colon_idx - 1)))
+        let end_ref = parse-cell-ref(trim(substring(inner, colon_idx + 1, length(inner))))
         if start_ref == null || end_ref == null {
             "#ERR"
         } else {
@@ -279,7 +279,7 @@ fn trim(s) {
     while end > start && get(s, end - 1) == " " {
         end = end - 1
     }
-    substring(s, start, end - start)
+    substring(s, start, end)
 }
 
 fn starts-with(s, prefix) {
@@ -294,7 +294,7 @@ fn ends-with(s, suffix) {
     if length(suffix) > length(s) {
         false
     } else {
-        substring(s, length(s) - length(suffix), length(suffix)) == suffix
+        substring(s, length(s) - length(suffix), length(s)) == suffix
     }
 }
 

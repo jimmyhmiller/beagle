@@ -60,7 +60,7 @@ fn parse_string(tokenizer) {
     consume(tokenizer)
     let start_pos = tokenizer.position
     let end_pos = find_string_end(tokenizer)
-    let str_val = substring(tokenizer.input, start_pos, end_pos - start_pos)
+    let str_val = substring(tokenizer.input, start_pos, end_pos)
     if tokenizer.position < tokenizer.length {
         consume(tokenizer)
     }
@@ -96,7 +96,7 @@ fn find_number_end(tokenizer) {
 fn parse_number(tokenizer) {
     let start_pos = tokenizer.position
     let end_pos = find_number_end(tokenizer)
-    let number_string = substring(tokenizer.input, start_pos, end_pos - start_pos)
+    let number_string = substring(tokenizer.input, start_pos, end_pos)
     to-number(number_string)
 }
 

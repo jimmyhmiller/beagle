@@ -747,14 +747,28 @@ extern "C" fn substring(
     frame_pointer: usize,
     string: usize,
     start: usize,
-    length: usize,
+    end: usize,
 ) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "substring");
     let runtime = get_runtime().get_mut();
     let string_pointer = runtime.register_temporary_root(string);
     let start = BuiltInTypes::untag(start);
-    let length = BuiltInTypes::untag(length);
+    let end = BuiltInTypes::untag(end);
+    if end < start {
+        unsafe {
+            runtime.unregister_temporary_root(string_pointer);
+            throw_runtime_error(
+                stack_pointer,
+                "IndexError",
+                format!(
+                    "substring end ({}) is less than start ({})",
+                    end, start
+                ),
+            );
+        }
+    }
+    let length = end - start;
     let result = match runtime.get_substring(stack_pointer, string, start, length) {
         Ok(s) => s.into(),
         Err(e) => unsafe {
@@ -13752,8 +13766,8 @@ impl Runtime {
             "beagle.core/substring",
             substring as *const u8,
             true,
-            &["string", "start", "length"],
-            "Extract a substring from a string.\n\nArguments:\n  string - The source string\n  start  - Starting index (0-based)\n  length - Number of characters to extract\n\nExamples:\n  (substring \"hello\" 1 3)  ; => \"ell\"",
+            &["string", "start", "end"],
+            "Extract a substring from a string.\n\nArguments:\n  string - The source string\n  start  - Starting index (0-based, inclusive)\n  end    - Ending index (exclusive)\n\nExamples:\n  (substring \"hello\" 1 4)  ; => \"ell\"",
         )?;
 
         self.add_builtin_with_doc(

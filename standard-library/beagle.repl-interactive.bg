@@ -64,7 +64,7 @@ fn handle-command(input) {
     let arg = if space-idx == -1 {
         ""
     } else {
-        trim(substring(input, space-idx + 1, length(input) - space-idx - 1))
+        trim(substring(input, space-idx + 1, length(input)))
     }
 
     if cmd == ":quit" || cmd == ":q" || cmd == ":exit" {

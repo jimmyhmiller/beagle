@@ -19,8 +19,8 @@ fn parse-date(s) {
             -1
         } else {
             let day_str = substring(s, 0, 2)
-            let month_str = substring(s, 3, 2)
-            let year_str = substring(s, 6, 4)
+            let month_str = substring(s, 3, 5)
+            let year_str = substring(s, 6, 10)
             let day = try-parse(day_str)
             let month = try-parse(month_str)
             let year = try-parse(year_str)
