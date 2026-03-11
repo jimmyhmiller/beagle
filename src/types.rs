@@ -795,8 +795,25 @@ impl HeapObject {
         unsafe { *pointer = new_header.to_usize() };
     }
 
+    pub fn write_struct_id_with_version(&mut self, struct_id: usize, layout_version: u8) {
+        let untagged = self.untagged();
+        let pointer = untagged as *mut usize;
+        let header = unsafe { *pointer };
+        let header = Header::from_usize(header);
+        let new_header = Header {
+            type_data: struct_id as u32,
+            type_flags: layout_version & 0xF,
+            ..header
+        };
+        unsafe { *pointer = new_header.to_usize() };
+    }
+
     pub fn get_struct_id(&self) -> usize {
         self.get_type_data()
+    }
+
+    pub fn get_layout_version(&self) -> u8 {
+        self.get_header().type_flags
     }
 
     pub fn get_type_data(&self) -> usize {
@@ -916,24 +933,28 @@ impl HeapObject {
 
 impl Ir {
     pub fn write_struct_id(&mut self, struct_pointer: Value, type_id: usize) {
+        self.write_struct_id_with_version(struct_pointer, type_id, 0);
+    }
+
+    pub fn write_struct_id_with_version(
+        &mut self,
+        struct_pointer: Value,
+        type_id: usize,
+        layout_version: u8,
+    ) {
         // Header layout (8 bytes, little-endian):
-        // - Byte 0: flags (bits 0-7)
+        // - Byte 0: flags bits 0-3, type_flags bits 4-7
         // - Bytes 1-2: size (bits 8-23)
         // - Bytes 3-6: type_data/struct_id (bits 24-55)
         // - Byte 7: type_id (bits 56-63)
         //
-        // Mask should preserve bytes 0-2 (flags+size) and byte 7 (type_id),
-        // while clearing bytes 3-6 (type_data) so we can write the struct_id.
-        let mask = 0xFF00_0000_00FF_FFFF_usize; // Preserve byte 7 and bytes 0-2
-        // Use RawValue to avoid automatic tagging - the struct_id is a raw value,
-        // not a tagged integer, and should be written as-is to the header.
-        self.heap_store_byte_offset_masked(
-            struct_pointer,
-            Value::RawValue(type_id),
-            0,
-            Header::type_data_offset(),
-            mask,
-        );
+        // Combined write: struct_id into bytes 3-6 and layout_version into bits 4-7.
+        // Mask preserves: byte 7 (type_id), bytes 1-2 (size), bits 0-3 of byte 0 (flags).
+        // Clears: bytes 3-6 (type_data) and bits 4-7 of byte 0 (type_flags).
+        let mask = 0xFF00_0000_00FF_FF0F_usize;
+        let combined = (type_id << 24) | (((layout_version & 0xF) as usize) << 4);
+        // Use byte_offset=0 because the combined value is already pre-shifted.
+        self.heap_store_byte_offset_masked(struct_pointer, Value::RawValue(combined), 0, 0, mask);
     }
 
     pub fn read_struct_id(&mut self, struct_pointer: Value) -> Value {

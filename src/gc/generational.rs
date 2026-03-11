@@ -813,10 +813,14 @@ impl GenerationalGC {
         let new_pointer = if heap_object.get_type_id() == 0 && !heap_object.is_opaque_object() {
             let is_closure = heap_object.get_object_type() == Some(BuiltInTypes::Closure);
             if !is_closure {
-                let shape_id = heap_object.get_struct_id();
+                let struct_id = heap_object.get_struct_id();
+                let layout_version = heap_object.get_layout_version();
                 let runtime = crate::get_runtime().get_mut();
                 if runtime.structs.has_pending_migrations() {
-                    if let Some(plan) = runtime.structs.migration_plan_for(shape_id) {
+                    if let Some(plan) = runtime
+                        .structs
+                        .migration_plan_for(struct_id, layout_version)
+                    {
                         self.copy_with_migration(&heap_object, plan)
                     } else {
                         // Normal copy
@@ -857,15 +861,16 @@ impl GenerationalGC {
         plan: &crate::runtime::MigrationPlan,
     ) -> *const u8 {
         // Build the new object data as a byte buffer and use copy_data_to_offset
+        // struct_id stays the same (stable ID), only layout version changes
         let old_header = old_object.get_header();
         let new_header = Header {
             type_id: old_header.type_id,
-            type_data: plan.new_shape_id as u32,
+            type_data: old_header.type_data, // struct_id unchanged
             size: plan.new_field_count as u16,
             opaque: old_header.opaque,
             marked: false,
             large: false,
-            type_flags: old_header.type_flags,
+            type_flags: plan.new_layout_version,
         };
 
         let total_words = 1 + plan.new_field_count; // header + fields

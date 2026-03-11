@@ -1310,7 +1310,7 @@ fn discover_test_files(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>,
 /// Parses `namespace` declarations and `use` statements from each file to build
 /// a dependency graph, then topological-sorts it. Files without dependencies
 /// (or with only stdlib deps) retain their original alphabetical order.
-fn sort_tests_by_deps(files: &mut Vec<std::path::PathBuf>) {
+fn sort_tests_by_deps(files: &mut [std::path::PathBuf]) {
     use std::collections::{HashMap, HashSet, VecDeque};
 
     // Build namespace→index map from each file's `namespace` declaration
@@ -1342,11 +1342,11 @@ fn sort_tests_by_deps(files: &mut Vec<std::path::PathBuf>) {
             if let Some(rest) = trimmed.strip_prefix("use ") {
                 // Parse `use <namespace> as <alias>` or `use <namespace>`
                 let ns_name = rest.split_whitespace().next().unwrap_or("");
-                if let Some(&dep_idx) = ns_to_idx.get(ns_name) {
-                    if dep_idx != i {
-                        deps[i].push(dep_idx);
-                        in_degree[dep_idx] += 0; // ensure entry exists
-                    }
+                if let Some(&dep_idx) = ns_to_idx.get(ns_name)
+                    && dep_idx != i
+                {
+                    deps[i].push(dep_idx);
+                    in_degree[dep_idx] += 0; // ensure entry exists
                 }
             }
         }
@@ -1365,8 +1365,8 @@ fn sort_tests_by_deps(files: &mut Vec<std::path::PathBuf>) {
 
     let mut queue: VecDeque<usize> = VecDeque::new();
     // Start with files that have no dependencies (in_deg == 0), in original order
-    for i in 0..n {
-        if in_deg[i] == 0 {
+    for (i, &deg) in in_deg.iter().enumerate().take(n) {
+        if deg == 0 {
             queue.push_back(i);
         }
     }
@@ -1404,7 +1404,7 @@ fn sort_tests_by_deps(files: &mut Vec<std::path::PathBuf>) {
     }
 
     // Reorder files according to topological order
-    let original: Vec<std::path::PathBuf> = files.clone();
+    let original: Vec<std::path::PathBuf> = files.to_vec();
     for (i, &orig_idx) in order.iter().enumerate() {
         files[i] = original[orig_idx].clone();
     }
@@ -1614,12 +1614,7 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
-            return Err(format!(
-                "Test failed: {}\n{}{}",
-                path,
-                stderr,
-                stdout
-            ).into());
+            return Err(format!("Test failed: {}\n{}{}", path, stderr, stdout).into());
         }
     }
     Ok(())

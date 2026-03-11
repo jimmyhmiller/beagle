@@ -411,7 +411,7 @@ impl Struct {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MigrationPlan {
     pub new_field_count: usize,
-    pub new_shape_id: usize,
+    pub new_layout_version: u8,
     /// For each field in the new layout: Some(old_index) or None (fill with null)
     pub field_map: Vec<Option<usize>>,
 }
@@ -419,13 +419,14 @@ pub struct MigrationPlan {
 pub struct StructManager {
     name_to_id: HashMap<String, usize>,
     structs: Vec<Struct>,
-    name_to_family_id: HashMap<String, usize>,
-    shape_id_to_family_id: Vec<usize>,
-    family_id_to_latest_shape: Vec<usize>,
-    family_id_to_shape_ids: Vec<Vec<usize>>,
-    migration_plans_by_shape: Vec<Option<MigrationPlan>>,
-    pending_migration_families: HashSet<usize>,
-    family_id_counter: usize,
+    /// Current layout version per struct_id (incremented on redefinition, wraps at 16)
+    layout_versions: Vec<u8>,
+    /// Old definitions per struct_id, keyed by layout version (for slow-path field resolution)
+    previous_definitions: Vec<Vec<(u8, Struct)>>,
+    /// Per struct_id, maps old_layout_version → plan to reach current layout
+    migration_plans: Vec<HashMap<u8, MigrationPlan>>,
+    /// Set of struct_ids with pending migrations (not yet GC'd)
+    pending_migration_ids: HashSet<usize>,
 }
 
 impl Default for StructManager {
@@ -439,47 +440,62 @@ impl StructManager {
         Self {
             name_to_id: HashMap::new(),
             structs: Vec::new(),
-            name_to_family_id: HashMap::new(),
-            shape_id_to_family_id: Vec::new(),
-            family_id_to_latest_shape: Vec::new(),
-            family_id_to_shape_ids: Vec::new(),
-            migration_plans_by_shape: Vec::new(),
-            pending_migration_families: HashSet::new(),
-            family_id_counter: 0,
+            layout_versions: Vec::new(),
+            previous_definitions: Vec::new(),
+            migration_plans: Vec::new(),
+            pending_migration_ids: HashSet::new(),
         }
     }
 
-    /// Insert a struct definition. Returns (shape_id, is_redefinition).
+    /// Insert a struct definition. Returns (struct_id, is_redefinition).
+    /// On redefinition, the struct_id stays the same (stable ID).
     pub fn insert(&mut self, name: String, s: Struct) -> (usize, bool) {
-        let new_shape_id = self.structs.len();
-        let is_redefinition = self.name_to_id.contains_key(&name);
+        if let Some(&existing_id) = self.name_to_id.get(&name) {
+            // Redefinition: keep the same struct_id, bump layout version
+            let old_version = self.layout_versions[existing_id];
+            let old_def = self.structs[existing_id].clone();
 
-        let family_id = if let Some(&existing_family) = self.name_to_family_id.get(&name) {
-            // Redefinition: reuse family_id, update latest shape
-            self.family_id_to_latest_shape[existing_family] = new_shape_id;
-            existing_family
+            // Save old definition
+            self.previous_definitions[existing_id].push((old_version, old_def));
+
+            // Increment layout version (wraps at 16)
+            let new_version = (old_version + 1) % 16;
+            self.layout_versions[existing_id] = new_version;
+
+            // Overwrite current definition
+            self.structs[existing_id] = s;
+
+            // Compute migration plans from ALL previous versions to current
+            let mut plans = HashMap::new();
+            for &(prev_version, ref prev_def) in &self.previous_definitions[existing_id] {
+                let field_map = self.structs[existing_id]
+                    .fields
+                    .iter()
+                    .map(|new_field| prev_def.fields.iter().position(|f| f == new_field))
+                    .collect();
+                plans.insert(
+                    prev_version,
+                    MigrationPlan {
+                        new_field_count: self.structs[existing_id].fields.len(),
+                        new_layout_version: new_version,
+                        field_map,
+                    },
+                );
+            }
+            self.migration_plans[existing_id] = plans;
+            self.pending_migration_ids.insert(existing_id);
+
+            (existing_id, true)
         } else {
-            // New struct: allocate family_id
-            let fid = self.family_id_counter;
-            self.family_id_counter += 1;
-            self.name_to_family_id.insert(name.clone(), fid);
-            self.family_id_to_latest_shape.push(new_shape_id);
-            self.family_id_to_shape_ids.push(Vec::new());
-            fid
-        };
-
-        self.name_to_id.insert(name, new_shape_id);
-        self.structs.push(s);
-        self.shape_id_to_family_id.push(family_id);
-        self.family_id_to_shape_ids[family_id].push(new_shape_id);
-        self.migration_plans_by_shape.push(None);
-
-        if is_redefinition {
-            self.pending_migration_families.insert(family_id);
-            self.refresh_family_migration_state(family_id);
+            // New struct: assign sequential ID
+            let new_id = self.structs.len();
+            self.name_to_id.insert(name, new_id);
+            self.structs.push(s);
+            self.layout_versions.push(0);
+            self.previous_definitions.push(Vec::new());
+            self.migration_plans.push(HashMap::new());
+            (new_id, false)
         }
-
-        (new_shape_id, is_redefinition)
     }
 
     pub fn get(&self, name: &str) -> Option<(usize, &Struct)> {
@@ -491,88 +507,46 @@ impl StructManager {
         self.structs.get(type_id)
     }
 
-    /// Check if a shape_id is the latest version for its family
-    pub fn is_latest_shape(&self, shape_id: usize) -> bool {
-        if let Some(&family_id) = self.shape_id_to_family_id.get(shape_id) {
-            self.family_id_to_latest_shape[family_id] == shape_id
-        } else {
-            true
-        }
+    /// Get the current layout version for a struct_id
+    pub fn get_current_layout_version(&self, struct_id: usize) -> u8 {
+        self.layout_versions.get(struct_id).copied().unwrap_or(0)
     }
 
-    /// Get the latest shape_id for the same family as the given shape_id
-    pub fn get_latest_shape_for(&self, shape_id: usize) -> usize {
-        if let Some(&family_id) = self.shape_id_to_family_id.get(shape_id) {
-            self.family_id_to_latest_shape[family_id]
-        } else {
-            shape_id
-        }
-    }
-
-    /// Get the family_id for a given shape_id
-    pub fn get_family_id(&self, shape_id: usize) -> Option<usize> {
-        self.shape_id_to_family_id.get(shape_id).copied()
-    }
-
-    /// Check if two shape_ids belong to the same family
-    pub fn same_family(&self, a: usize, b: usize) -> bool {
-        match (self.get_family_id(a), self.get_family_id(b)) {
-            (Some(fa), Some(fb)) => fa == fb,
-            _ => false,
-        }
-    }
-
-    /// Build a migration map: for each field in new_shape, the index in old_shape (or None)
-    fn build_migration_map(&self, old_shape: usize, new_shape: usize) -> Vec<Option<usize>> {
-        let old_def = &self.structs[old_shape];
-        let new_def = &self.structs[new_shape];
-        new_def
-            .fields
-            .iter()
-            .map(|new_field| old_def.fields.iter().position(|f| f == new_field))
-            .collect()
-    }
-
-    fn refresh_family_migration_state(&mut self, family_id: usize) {
-        let latest_shape = self.family_id_to_latest_shape[family_id];
-        for &shape_id in &self.family_id_to_shape_ids[family_id] {
-            if shape_id == latest_shape {
-                self.migration_plans_by_shape[shape_id] = None;
-            } else {
-                self.migration_plans_by_shape[shape_id] = Some(MigrationPlan {
-                    new_field_count: self.structs[latest_shape].fields.len(),
-                    new_shape_id: latest_shape,
-                    field_map: self.build_migration_map(shape_id, latest_shape),
-                });
-            }
-        }
+    /// Get an old definition by struct_id and layout_version
+    pub fn get_old_definition(&self, struct_id: usize, layout_version: u8) -> Option<&Struct> {
+        self.previous_definitions.get(struct_id).and_then(|defs| {
+            defs.iter()
+                .find(|(v, _)| *v == layout_version)
+                .map(|(_, def)| def)
+        })
     }
 
     pub fn has_pending_migrations(&self) -> bool {
-        !self.pending_migration_families.is_empty()
+        !self.pending_migration_ids.is_empty()
     }
 
     /// Called after a full-heap/full-live-set migration pass has rewritten all reachable
-    /// outdated objects to their latest shapes.
+    /// outdated objects to their latest layouts.
     pub fn complete_pending_migrations(&mut self) {
-        if self.pending_migration_families.is_empty() {
+        if self.pending_migration_ids.is_empty() {
             return;
         }
-
-        let pending_families: Vec<usize> = self.pending_migration_families.drain().collect();
-        for family_id in pending_families {
-            for &shape_id in &self.family_id_to_shape_ids[family_id] {
-                self.migration_plans_by_shape[shape_id] = None;
-            }
+        let pending: Vec<usize> = self.pending_migration_ids.drain().collect();
+        for struct_id in pending {
+            self.migration_plans[struct_id].clear();
+            self.previous_definitions[struct_id].clear();
         }
     }
 
-    /// Returns None if object doesn't need migration (already latest shape or
-    /// all pending migrations have already been completed).
-    pub fn migration_plan_for(&self, shape_id: usize) -> Option<&MigrationPlan> {
-        self.migration_plans_by_shape
-            .get(shape_id)
-            .and_then(|plan| plan.as_ref())
+    /// Returns None if object doesn't need migration (already current layout version).
+    pub fn migration_plan_for(
+        &self,
+        struct_id: usize,
+        layout_version: u8,
+    ) -> Option<&MigrationPlan> {
+        self.migration_plans
+            .get(struct_id)
+            .and_then(|plans| plans.get(&layout_version))
     }
 
     /// Iterate over all structs
@@ -596,56 +570,67 @@ mod struct_manager_tests {
     }
 
     #[test]
-    fn tracks_pending_migrations_per_family() {
+    fn tracks_pending_migrations_stable_id() {
         let mut structs = StructManager::new();
 
-        let (shape0, is_redefinition) =
+        let (id0, is_redefinition) =
             structs.insert("user/Foo".to_string(), make_struct("user/Foo", &["a"]));
         assert!(!is_redefinition);
         assert!(!structs.has_pending_migrations());
-        assert!(structs.migration_plan_for(shape0).is_none());
+        assert_eq!(structs.get_current_layout_version(id0), 0);
+        assert!(structs.migration_plan_for(id0, 0).is_none());
 
-        let (shape1, is_redefinition) =
+        // Redefinition: same struct_id, new layout version
+        let (id1, is_redefinition) =
             structs.insert("user/Foo".to_string(), make_struct("user/Foo", &["a", "b"]));
         assert!(is_redefinition);
+        assert_eq!(id1, id0); // stable ID!
+        assert_eq!(structs.get_current_layout_version(id0), 1);
         assert!(structs.has_pending_migrations());
-        let plan0 = structs.migration_plan_for(shape0).unwrap();
-        assert_eq!(plan0.new_shape_id, shape1);
+        // Old layout version 0 needs migration
+        let plan0 = structs.migration_plan_for(id0, 0).unwrap();
+        assert_eq!(plan0.new_layout_version, 1);
         assert_eq!(plan0.field_map, vec![Some(0), None]);
-        assert!(structs.migration_plan_for(shape1).is_none());
+        // Current layout version has no plan
+        assert!(structs.migration_plan_for(id0, 1).is_none());
 
-        let (shape2, is_redefinition) = structs.insert(
+        // Another redefinition
+        let (id2, is_redefinition) = structs.insert(
             "user/Foo".to_string(),
             make_struct("user/Foo", &["b", "a", "c"]),
         );
         assert!(is_redefinition);
-        let plan0 = structs.migration_plan_for(shape0).unwrap();
-        assert_eq!(plan0.new_shape_id, shape2);
+        assert_eq!(id2, id0); // still same ID
+        assert_eq!(structs.get_current_layout_version(id0), 2);
+        // Plans exist for both old versions
+        let plan0 = structs.migration_plan_for(id0, 0).unwrap();
+        assert_eq!(plan0.new_layout_version, 2);
         assert_eq!(plan0.field_map, vec![None, Some(0), None]);
-        let plan1 = structs.migration_plan_for(shape1).unwrap();
-        assert_eq!(plan1.new_shape_id, shape2);
+        let plan1 = structs.migration_plan_for(id0, 1).unwrap();
+        assert_eq!(plan1.new_layout_version, 2);
         assert_eq!(plan1.field_map, vec![Some(1), Some(0), None]);
 
         structs.complete_pending_migrations();
         assert!(!structs.has_pending_migrations());
-        assert!(structs.migration_plan_for(shape0).is_none());
-        assert!(structs.migration_plan_for(shape1).is_none());
-        assert!(structs.migration_plan_for(shape2).is_none());
+        assert!(structs.migration_plan_for(id0, 0).is_none());
+        assert!(structs.migration_plan_for(id0, 1).is_none());
+        assert!(structs.migration_plan_for(id0, 2).is_none());
     }
 
     #[test]
-    fn redefinition_only_marks_affected_family_pending() {
+    fn redefinition_only_marks_affected_struct_pending() {
         let mut structs = StructManager::new();
 
-        let (foo0, _) = structs.insert("user/Foo".to_string(), make_struct("user/Foo", &["a"]));
-        let (bar0, _) = structs.insert("user/Bar".to_string(), make_struct("user/Bar", &["x"]));
-        let (foo1, _) =
+        let (foo_id, _) = structs.insert("user/Foo".to_string(), make_struct("user/Foo", &["a"]));
+        let (bar_id, _) = structs.insert("user/Bar".to_string(), make_struct("user/Bar", &["x"]));
+        let (foo_id2, _) =
             structs.insert("user/Foo".to_string(), make_struct("user/Foo", &["a", "b"]));
 
+        assert_eq!(foo_id, foo_id2);
         assert!(structs.has_pending_migrations());
-        assert!(structs.migration_plan_for(foo0).is_some());
-        assert!(structs.migration_plan_for(foo1).is_none());
-        assert!(structs.migration_plan_for(bar0).is_none());
+        assert!(structs.migration_plan_for(foo_id, 0).is_some());
+        // bar has no migrations
+        assert!(structs.migration_plan_for(bar_id, 0).is_none());
     }
 }
 
@@ -678,7 +663,6 @@ impl Printer for DefaultPrinter {
     fn get_output(&self) -> Vec<String> {
         vec![]
     }
-
 }
 
 pub struct TestPrinter {
@@ -1234,10 +1218,10 @@ impl EventLoop {
         self.shutdown.store(true, Ordering::SeqCst);
         // Wake the thread so it sees the shutdown flag
         let _ = self.waker.wake();
-        if let Ok(mut guard) = self.event_loop_thread.lock() {
-            if let Some(handle) = guard.take() {
-                let _ = handle.join();
-            }
+        if let Ok(mut guard) = self.event_loop_thread.lock()
+            && let Some(handle) = guard.take()
+        {
+            let _ = handle.join();
         }
     }
 
@@ -2015,17 +1999,13 @@ impl EventLoopState {
 
             // Check per-socket read/write operations
             if let Some(&socket_id) = self.token_to_socket.get(&token_id) {
-                if is_readable {
-                    if let Some(read_op) = self.pending_reads.remove(&socket_id) {
-                        self.handle_socket_read(socket_id, read_op);
-                        processed += 1;
-                    }
+                if is_readable && let Some(read_op) = self.pending_reads.remove(&socket_id) {
+                    self.handle_socket_read(socket_id, read_op);
+                    processed += 1;
                 }
-                if is_writable {
-                    if let Some(write_op) = self.pending_writes.remove(&socket_id) {
-                        self.handle_socket_write(socket_id, write_op);
-                        processed += 1;
-                    }
+                if is_writable && let Some(write_op) = self.pending_writes.remove(&socket_id) {
+                    self.handle_socket_write(socket_id, write_op);
+                    processed += 1;
                 }
                 // Re-register with remaining interest if any ops still pending
                 let _ = self.update_socket_registration(socket_id);
@@ -2371,11 +2351,9 @@ fn event_loop_thread_main(
                 || s.completed_file_results.len() > initial_file_count
         }; // lock released
 
-        if should_notify {
-            if let Ok(mut ready) = results_notify.0.lock() {
-                *ready = true;
-                results_notify.1.notify_all();
-            }
+        if should_notify && let Ok(mut ready) = results_notify.0.lock() {
+            *ready = true;
+            results_notify.1.notify_all();
         }
 
         // Phase 4: Check shutdown
@@ -6025,10 +6003,7 @@ impl Runtime {
 
         // Call the function with the appropriate number of arguments
         let result = match args.len() {
-            0 => {
-                let trampoline: fn(u64, u64) -> u64 = unsafe { std::mem::transmute(trampoline) };
-                trampoline(stack_pointer as u64, function_pointer.into())
-            }
+            0 => trampoline(stack_pointer as u64, function_pointer.into()),
             1 => {
                 let trampoline: fn(u64, u64, u64) -> u64 =
                     unsafe { std::mem::transmute(trampoline) };
@@ -6547,13 +6522,8 @@ impl Runtime {
         let old_value = self.get_binding(namespace, slot);
 
         // Push the old value onto the binding stack for this thread
-        let thread_stacks = self
-            .dynamic_binding_stacks
-            .entry(thread_id)
-            .or_insert_with(HashMap::new);
-        let stack = thread_stacks
-            .entry((namespace, slot))
-            .or_insert_with(Vec::new);
+        let thread_stacks = self.dynamic_binding_stacks.entry(thread_id).or_default();
+        let stack = thread_stacks.entry((namespace, slot)).or_default();
         stack.push(old_value);
 
         // Update the namespace binding with the new value
@@ -6716,18 +6686,18 @@ impl Runtime {
 
         // Also add names from aliased namespaces
         let current_ns_id = self.namespaces.current_namespace;
-        if let Some(ns_mutex) = self.namespaces.namespaces.get(current_ns_id) {
-            if let Ok(ns) = ns_mutex.lock() {
-                for (alias, &ns_id) in &ns.aliases {
-                    if let Some(aliased_name) = self.namespaces.id_to_name.get(&ns_id) {
-                        let prefix = format!("{}/", aliased_name);
-                        for f in &self.functions {
-                            if !f.is_defined {
-                                continue;
-                            }
-                            if let Some(short) = f.name.strip_prefix(&prefix) {
-                                names.push(format!("{}/{}", alias, short));
-                            }
+        if let Some(ns_mutex) = self.namespaces.namespaces.get(current_ns_id)
+            && let Ok(ns) = ns_mutex.lock()
+        {
+            for (alias, &ns_id) in &ns.aliases {
+                if let Some(aliased_name) = self.namespaces.id_to_name.get(&ns_id) {
+                    let prefix = format!("{}/", aliased_name);
+                    for f in &self.functions {
+                        if !f.is_defined {
+                            continue;
+                        }
+                        if let Some(short) = f.name.strip_prefix(&prefix) {
+                            names.push(format!("{}/{}", alias, short));
                         }
                     }
                 }
@@ -7075,15 +7045,15 @@ impl Runtime {
         // These objects (PersistentVec, PersistentMap, etc.) don't have user-defined
         // struct definitions but do have known field layouts.
         let type_id = heap_object.get_type_id();
-        if type_id > 0 {
-            if let Some(field_index) = Self::typed_object_field_index(type_id as u8, string) {
-                return Ok((heap_object.get_field(field_index), field_index));
-            }
+        if type_id > 0
+            && let Some(field_index) = Self::typed_object_field_index(type_id as u8, string)
+        {
+            return Ok((heap_object.get_field(field_index), field_index));
         }
 
         let struct_type_id = heap_object.get_struct_id();
-        let struct_value = self.get_struct_by_id(struct_type_id);
-        if struct_value.is_none() {
+        let current_def = self.get_struct_by_id(struct_type_id);
+        if current_def.is_none() {
             let untagged = heap_object.untagged();
             let raw_header = unsafe { *(untagged as *const usize) };
             let is_forwarding = Header::is_forwarding_bit_set(raw_header);
@@ -7104,30 +7074,53 @@ impl Runtime {
                 struct_type_id
             );
         }
-        let struct_value = struct_value.unwrap();
+        let current_def = current_def.unwrap();
 
-        // Check the latest definition for field validity (removed fields error immediately)
-        let latest_shape_id = self.structs.get_latest_shape_for(struct_type_id);
-        if latest_shape_id != struct_type_id {
-            let latest_def = self
-                .get_struct_by_id(latest_shape_id)
-                .expect("Latest shape must exist");
-            if !latest_def.fields.iter().any(|f| f == string) {
-                let simple_name = latest_def
+        let layout_version = heap_object.get_layout_version();
+        let current_version = self.structs.get_current_layout_version(struct_type_id);
+
+        if layout_version == current_version {
+            // Object has current layout — use current definition
+            if let Some(field_index) = current_def.fields.iter().position(|f| f == string) {
+                Ok((heap_object.get_field(field_index), field_index))
+            } else {
+                let simple_name = current_def
                     .name
                     .split_once("/")
                     .map(|(_, n)| n)
-                    .unwrap_or(&latest_def.name);
+                    .unwrap_or(&current_def.name);
+                Err(format!("Field '{}' does not exist on {}", string, simple_name).into())
+            }
+        } else {
+            // Old-layout object — check current definition for field validity
+            if !current_def.fields.iter().any(|f| f == string) {
+                let simple_name = current_def
+                    .name
+                    .split_once("/")
+                    .map(|(_, n)| n)
+                    .unwrap_or(&current_def.name);
                 return Err(format!("Field '{}' does not exist on {}", string, simple_name).into());
             }
-        }
 
-        // Find field in object's actual layout
-        if let Some(field_index) = struct_value.fields.iter().position(|f| f == string) {
-            Ok((heap_object.get_field(field_index), field_index))
-        } else {
-            // Field was added after this object was created — return null
-            Ok((BuiltInTypes::null_value() as usize, usize::MAX))
+            // Look up old definition to find field in old layout
+            if let Some(old_def) = self
+                .structs
+                .get_old_definition(struct_type_id, layout_version)
+            {
+                if let Some(field_index) = old_def.fields.iter().position(|f| f == string) {
+                    Ok((heap_object.get_field(field_index), field_index))
+                } else {
+                    // Field was added after this object was created — return null
+                    Ok((BuiltInTypes::null_value() as usize, usize::MAX))
+                }
+            } else {
+                // No old definition found (migrations completed?) — try current layout
+                if let Some(field_index) = current_def.fields.iter().position(|f| f == string) {
+                    Ok((heap_object.get_field(field_index), field_index))
+                } else {
+                    Ok((BuiltInTypes::null_value() as usize, usize::MAX))
+                }
+            }
         }
     }
 
@@ -7386,34 +7379,40 @@ impl Runtime {
         let string_value = &self.string_constants[str_constant_ptr];
         let string = &string_value.str;
         let struct_type_id = heap_object.get_struct_id();
-        let struct_value = self
+        let current_def = self
             .get_struct_by_id(struct_type_id)
             .expect("Struct not found by ID - this is a fatal error");
 
-        // Check the latest definition for field validity (removed fields error immediately)
-        let latest_shape_id = self.structs.get_latest_shape_for(struct_type_id);
-        if latest_shape_id != struct_type_id {
-            let latest_def = self
-                .get_struct_by_id(latest_shape_id)
-                .expect("Latest shape must exist");
-            if !latest_def.fields.iter().any(|f| f == string) {
-                let simple_name = latest_def
-                    .name
-                    .split_once("/")
-                    .map(|(_, n)| n)
-                    .unwrap_or(&latest_def.name);
-                unsafe {
-                    crate::builtins::throw_runtime_error(
-                        stack_pointer,
-                        "FieldError",
-                        format!("Field '{}' does not exist on {}", string, simple_name),
-                    );
-                }
+        let layout_version = heap_object.get_layout_version();
+        let current_version = self.structs.get_current_layout_version(struct_type_id);
+
+        // Check current definition for field validity (removed fields error immediately)
+        if !current_def.fields.iter().any(|f| f == string) {
+            let simple_name = current_def
+                .name
+                .split_once("/")
+                .map(|(_, n)| n)
+                .unwrap_or(&current_def.name);
+            unsafe {
+                crate::builtins::throw_runtime_error(
+                    stack_pointer,
+                    "FieldError",
+                    format!("Field '{}' does not exist on {}", string, simple_name),
+                );
             }
         }
 
         // Find field in object's actual layout
-        let field_index = struct_value.fields.iter().position(|f| f == string);
+        let field_index = if layout_version == current_version {
+            current_def.fields.iter().position(|f| f == string)
+        } else if let Some(old_def) = self
+            .structs
+            .get_old_definition(struct_type_id, layout_version)
+        {
+            old_def.fields.iter().position(|f| f == string)
+        } else {
+            current_def.fields.iter().position(|f| f == string)
+        };
 
         let field_index = match field_index {
             Some(idx) => idx,
@@ -7432,25 +7431,20 @@ impl Runtime {
             }
         };
 
-        // Check if field is mutable (use latest definition for mutability)
-        let mutable_check_def = if latest_shape_id != struct_type_id {
-            self.get_struct_by_id(latest_shape_id).unwrap()
-        } else {
-            struct_value
-        };
-        let latest_field_index = mutable_check_def.fields.iter().position(|f| f == string);
-        if let Some(li) = latest_field_index {
-            if !mutable_check_def.is_field_mutable(li) {
-                unsafe {
-                    crate::builtins::throw_runtime_error(
-                        stack_pointer,
-                        "MutabilityError",
-                        format!(
-                            "Cannot mutate immutable field '{}' in struct '{}'",
-                            string, mutable_check_def.name
-                        ),
-                    );
-                }
+        // Check if field is mutable (use current definition for mutability)
+        let latest_field_index = current_def.fields.iter().position(|f| f == string);
+        if let Some(li) = latest_field_index
+            && !current_def.is_field_mutable(li)
+        {
+            unsafe {
+                crate::builtins::throw_runtime_error(
+                    stack_pointer,
+                    "MutabilityError",
+                    format!(
+                        "Cannot mutate immutable field '{}' in struct '{}'",
+                        string, current_def.name
+                    ),
+                );
             }
         }
 
@@ -8507,22 +8501,10 @@ impl Runtime {
 
     pub fn add_struct(&mut self, s: Struct) -> bool {
         let name = s.name.clone();
-        // Grab the old shape_id before insert (if this is a redefinition)
-        let old_shape_id = self.structs.get(&name).map(|(id, _)| id);
+        let (_struct_id, is_redefinition) = self.structs.insert(name.clone(), s);
 
-        let (new_shape_id, is_redefinition) = self.structs.insert(name.clone(), s);
-
-        if is_redefinition {
-            if let Some(old_id) = old_shape_id {
-                // Copy protocol dispatch entries from old shape to new shape
-                for table in self.dispatch_tables.values_mut() {
-                    if old_id < table.struct_dispatch.len() && table.struct_dispatch[old_id] != 0 {
-                        let fn_ptr = table.struct_dispatch[old_id];
-                        table.register(new_shape_id as isize, fn_ptr);
-                    }
-                }
-            }
-        }
+        // With stable IDs, dispatch entries at struct_id already point to the right methods.
+        // No need to copy dispatch entries on redefinition.
 
         // grab the simple name for the binding
         let (_, simple_name) = name

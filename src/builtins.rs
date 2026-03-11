@@ -45,11 +45,11 @@ thread_local! {
     static SAVED_GC_RETURN_ADDR: Cell<usize> = const { Cell::new(0) };
 }
 
-/// Top of the GC frame linked list. Points to the frame header address
-/// of the most recently entered Beagle function. Each frame's prev pointer
-/// (at [header_addr - 8], i.e. [FP-16]) links to the previous frame's header.
-/// GC walks this chain instead of the FP chain, so captured/restored
-/// continuation frames are naturally excluded/included.
+// Top of the GC frame linked list. Points to the frame header address
+// of the most recently entered Beagle function. Each frame's prev pointer
+// (at [header_addr - 8], i.e. [FP-16]) links to the previous frame's header.
+// GC walks this chain instead of the FP chain, so captured/restored
+// continuation frames are naturally excluded/included.
 thread_local! {
     static GC_FRAME_TOP: Cell<usize> = const { Cell::new(0) };
 }
@@ -761,10 +761,7 @@ extern "C" fn substring(
             throw_runtime_error(
                 stack_pointer,
                 "IndexError",
-                format!(
-                    "substring end ({}) is less than start ({})",
-                    end, start
-                ),
+                format!("substring end ({}) is less than start ({})", end, start),
             );
         }
     }
@@ -1288,14 +1285,13 @@ pub fn get_current_frame_pointer() -> usize {
     fp
 }
 
-/// Check if a struct's shape_id belongs to the expected family.
-/// Takes tagged shape_id and tagged expected_family_id, returns tagged bool.
+/// Check if a struct's struct_id matches the expected struct_id.
+/// With stable IDs, family_id == struct_id, so this is a direct comparison.
+/// Takes tagged shape_id and tagged expected_id, returns tagged bool.
 extern "C" fn check_struct_family(tagged_shape_id: usize, tagged_family_id: usize) -> usize {
     let shape_id = BuiltInTypes::untag(tagged_shape_id);
-    let expected_family = BuiltInTypes::untag(tagged_family_id);
-    let runtime = get_runtime().get_mut();
-    let actual_family = runtime.structs.get_family_id(shape_id);
-    if actual_family == Some(expected_family) {
+    let expected_id = BuiltInTypes::untag(tagged_family_id);
+    if shape_id == expected_id {
         BuiltInTypes::true_value() as usize
     } else {
         BuiltInTypes::false_value() as usize
@@ -1331,12 +1327,19 @@ extern "C" fn property_access(
                 throw_runtime_error(stack_pointer, "FieldError", error.to_string());
             }
         });
-    // Don't cache if field_index is usize::MAX (field was added after object creation, returned null)
+    // Don't cache if:
+    // - field_index is usize::MAX (field was added after object creation, returned null)
+    // - object has an old layout version (its field offsets differ from current layout)
     if index != usize::MAX {
-        let type_id = HeapObject::from_tagged(struct_pointer).get_struct_id();
-        let buffer = unsafe { from_raw_parts_mut(property_cache_location as *mut usize, 2) };
-        buffer[0] = type_id;
-        buffer[1] = index * 8;
+        let heap_obj = HeapObject::from_tagged(struct_pointer);
+        let struct_id = heap_obj.get_struct_id();
+        let layout_version = heap_obj.get_layout_version();
+        let current_version = runtime.structs.get_current_layout_version(struct_id);
+        if layout_version == current_version {
+            let buffer = unsafe { from_raw_parts_mut(property_cache_location as *mut usize, 2) };
+            buffer[0] = struct_id;
+            buffer[1] = index * 8;
+        }
     }
     result
 }
@@ -4810,9 +4813,9 @@ unsafe extern "C" fn invoke_beagle_callback(
         // unmarshalling arg N could move the heap object created for arg N-1.
         let mut beagle_args = Vec::with_capacity(num_args);
         let mut root_slots = Vec::new();
-        for i in 0..num_args {
+        for (i, arg_type) in arg_types.iter().enumerate().take(num_args) {
             let c_val = *c_args_ptr.add(i);
-            let beagle_val = match &arg_types[i] {
+            let beagle_val = match arg_type {
                 FFIType::U8 | FFIType::U16 | FFIType::U32 | FFIType::U64 => {
                     BuiltInTypes::Int.tag(c_val as isize) as usize
                 }
@@ -5042,7 +5045,8 @@ unsafe extern "C" fn invoke_beagle_callback(
         restore_gc_context(saved_ctx);
 
         // Marshal Beagle return value back to C
-        let c_result = match &return_type {
+
+        match &return_type {
             FFIType::Void => 0u64,
             FFIType::U8 | FFIType::U16 | FFIType::U32 | FFIType::U64 => {
                 BuiltInTypes::untag(result) as u64
@@ -5070,9 +5074,7 @@ unsafe extern "C" fn invoke_beagle_callback(
                 lo | (hi << 32)
             }
             _ => BuiltInTypes::untag(result) as u64,
-        };
-
-        c_result
+        }
     } // unsafe
 }
 
@@ -5103,7 +5105,7 @@ fn build_callback_trampoline(
 ) -> *const u8 {
     use crate::machine_code::arm_codegen::*;
 
-    let mut code: Vec<u32> = Vec::new();
+    let mut code: Vec<u32> = Vec::with_capacity(24);
 
     // === Prologue ===
     // stp x29, x30, [sp, #-16]!
@@ -5764,7 +5766,7 @@ fn build_ffi_trampoline() -> *const u8 {
         size: Size::S64,
     };
 
-    let mut code: Vec<u32> = Vec::new();
+    let mut code: Vec<u32> = Vec::with_capacity(48);
 
     // === Prologue ===
     // 0: stp x29, x30, [sp, #-16]!
@@ -6305,13 +6307,12 @@ unsafe fn dynamic_c_call(
 
     // For float/struct returns, the trampoline put d0:d1 bits into x0:x1,
     // which we get directly from (low, high).
-    if let FFIType::Structure(fields) = return_type {
-        if fields
+    if let FFIType::Structure(fields) = return_type
+        && fields
             .iter()
             .all(|f| matches!(f, FFIType::F32 | FFIType::F64))
-        {
-            return (low, if fields.len() > 1 { high } else { 0 });
-        }
+    {
+        return (low, if fields.len() > 1 { high } else { 0 });
     }
     if matches!(return_type, FFIType::F32 | FFIType::F64) {
         return (low, 0);
@@ -6860,18 +6861,22 @@ pub unsafe extern "C" fn copy_object_spread(
         }
     }
 
-    // Type-checked — delegate to the actual copy
-    let object_pointer_id = {
-        let runtime = get_runtime().get_mut();
-        runtime.register_temporary_root(object_pointer)
-    };
-    let to_pointer = {
-        let runtime = get_runtime().get_mut();
+    // Check if source object has an old layout that needs migration
+    let source_object = HeapObject::from_tagged(object_pointer);
+    let source_layout_version = source_object.get_layout_version();
+    let runtime = get_runtime().get_mut();
+    let current_version = runtime
+        .structs
+        .get_current_layout_version(expected_struct_id);
+
+    if source_layout_version == current_version {
+        // Same layout — fast path: simple copy
+        let object_pointer_id = runtime.register_temporary_root(object_pointer);
         let object = HeapObject::from_tagged(object_pointer);
         let header = object.get_header();
         let size = header.size as usize;
         let kind = BuiltInTypes::get_kind(object_pointer);
-        match runtime.allocate(size, stack_pointer, kind) {
+        let to_pointer = match runtime.allocate(size, stack_pointer, kind) {
             Ok(ptr) => ptr,
             Err(_) => unsafe {
                 runtime.unregister_temporary_root(object_pointer_id);
@@ -6881,22 +6886,96 @@ pub unsafe extern "C" fn copy_object_spread(
                     "Failed to allocate object copy - out of memory".to_string(),
                 );
             },
+        };
+        let object_pointer = runtime.unregister_temporary_root(object_pointer_id);
+        let mut to_object = HeapObject::from_tagged(to_pointer);
+        let object = HeapObject::from_tagged(object_pointer);
+        match runtime.copy_object(object, &mut to_object) {
+            Ok(ptr) => ptr,
+            Err(error) => {
+                let stack_pointer = get_current_stack_pointer();
+                println!("Error: {:?}", error);
+                unsafe { throw_error(stack_pointer, frame_pointer) };
+            }
         }
-    };
-    let object_pointer = {
-        let runtime = get_runtime().get_mut();
-        runtime.unregister_temporary_root(object_pointer_id)
-    };
-    let mut to_object = HeapObject::from_tagged(to_pointer);
-    let object = HeapObject::from_tagged(object_pointer);
-    let runtime = get_runtime().get_mut();
-    match runtime.copy_object(object, &mut to_object) {
-        Ok(ptr) => ptr,
-        Err(error) => {
-            let stack_pointer = get_current_stack_pointer();
-            println!("Error: {:?}", error);
-            unsafe { throw_error(stack_pointer, frame_pointer) };
+    } else {
+        // Different layout — migrate: allocate with current field count, map fields
+        let current_def = runtime
+            .get_struct_by_id(expected_struct_id)
+            .expect("Struct must exist");
+        let new_field_count = current_def.fields.len();
+
+        // Get migration plan (maps old field positions to new)
+        let field_map: Vec<Option<usize>> = if let Some(plan) = runtime
+            .structs
+            .migration_plan_for(expected_struct_id, source_layout_version)
+        {
+            plan.field_map.clone()
+        } else {
+            // No plan available — build one on the fly from old definition
+            if let Some(old_def) = runtime
+                .structs
+                .get_old_definition(expected_struct_id, source_layout_version)
+            {
+                current_def
+                    .fields
+                    .iter()
+                    .map(|new_field| old_def.fields.iter().position(|f| f == new_field))
+                    .collect()
+            } else {
+                // Fallback: identity map for overlapping fields, None for rest
+                (0..new_field_count)
+                    .map(|i| {
+                        let src_obj = HeapObject::from_tagged(object_pointer);
+                        let src_fields = src_obj.get_header().size as usize;
+                        if i < src_fields { Some(i) } else { None }
+                    })
+                    .collect()
+            }
+        };
+
+        let object_pointer_id = runtime.register_temporary_root(object_pointer);
+        let kind = BuiltInTypes::get_kind(object_pointer);
+        let to_pointer = match runtime.allocate(new_field_count, stack_pointer, kind) {
+            Ok(ptr) => ptr,
+            Err(_) => unsafe {
+                runtime.unregister_temporary_root(object_pointer_id);
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate object copy - out of memory".to_string(),
+                );
+            },
+        };
+        let object_pointer = runtime.unregister_temporary_root(object_pointer_id);
+
+        let source = HeapObject::from_tagged(object_pointer);
+        let mut dest = HeapObject::from_tagged(to_pointer);
+
+        // Write header with current struct_id and layout version
+        let source_header = source.get_header();
+        let new_header = crate::types::Header {
+            type_id: source_header.type_id,
+            type_data: expected_struct_id as u32,
+            size: new_field_count as u16,
+            opaque: source_header.opaque,
+            marked: false,
+            large: false,
+            type_flags: current_version,
+        };
+        dest.writer_header_direct(new_header);
+
+        // Map fields from old positions to new positions, null-fill missing
+        let null_val = BuiltInTypes::null_value() as usize;
+        for (new_idx, mapping) in field_map.iter().enumerate() {
+            let value = match mapping {
+                Some(old_idx) => source.get_field(*old_idx),
+                None => null_val,
+            };
+            dest.write_field(new_idx as i32, value);
         }
+
+        to_pointer
     }
 }
 
@@ -11332,12 +11411,11 @@ pub unsafe extern "C" fn return_from_shift_runtime(
                 return_jump_ptr(new_sp, new_fp, value, return_address, callee_saved.as_ptr(), std::ptr::null(), 0);
             } else {
                 // Restore saved frame from CapturedFrame heap object and link into GC chain
-                if saved_frame_ptr != 0 {
-                    if let Some(saved_frame) = CapturedFrame::from_tagged(saved_frame_ptr) {
+                if saved_frame_ptr != 0
+                    && let Some(saved_frame) = CapturedFrame::from_tagged(saved_frame_ptr) {
                         saved_frame.restore_to_stack(new_fp, unsafe { *(new_fp as *const usize) });
                         CapturedFrame::link_restored_frames_into_gc_chain(&[new_fp]);
                     }
-                }
 
                 unsafe {
                     asm!(

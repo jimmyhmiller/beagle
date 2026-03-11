@@ -926,6 +926,359 @@ fn test_repl_starts_socket_server() {
     let _ = child.wait();
 }
 
+#[test]
+fn test_repl_struct_hotreload_crash() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpStream;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    /// Read response lines from the socket REPL until we see a "done" status
+    /// or the read times out. Returns all lines concatenated.
+    fn read_until_done(reader: &mut BufReader<TcpStream>) -> String {
+        let mut all = String::new();
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    all.push_str(&line);
+                    if line.contains("done") {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        all
+    }
+
+    // Pick a port unlikely to collide (different offset from other test)
+    let port = 18856 + (std::process::id() % 1000) as u16;
+
+    let mut child = beag()
+        .arg("repl")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn beag repl");
+
+    let mut stdin = child.stdin.take().unwrap();
+
+    // Start the socket REPL server in a thread from the interactive REPL
+    let cmds = format!(
+        "use beagle.repl as repl\nthread(fn() {{ repl/start-repl-server(\"127.0.0.1\", {}) }})\n",
+        port
+    );
+    stdin
+        .write_all(cmds.as_bytes())
+        .expect("failed to write to repl stdin");
+    stdin.flush().unwrap();
+
+    // Poll until the server is accepting connections (max 10s)
+    let start = Instant::now();
+    let mut stream = None;
+    while start.elapsed() < Duration::from_secs(10) {
+        match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(s) => {
+                stream = Some(s);
+                break;
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+    let stream = stream.unwrap_or_else(|| {
+        let _ = child.kill();
+        panic!(
+            "Socket REPL server did not start within 10s on port {}",
+            port
+        );
+    });
+
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+
+    let mut writer = stream.try_clone().expect("failed to clone TcpStream");
+    let mut reader = BufReader::new(stream);
+
+    let mut send = |cmd: &str| {
+        writer.write_all(cmd.as_bytes()).unwrap();
+        writer.flush().unwrap();
+    };
+
+    // Helper to send an eval and read the response
+    let send_eval = |send: &mut dyn FnMut(&str),
+                     reader: &mut BufReader<TcpStream>,
+                     id: &str,
+                     code: &str|
+     -> String {
+        let escaped = code
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n");
+        let msg = format!(
+            "{{\"op\":\"eval\",\"id\":\"{}\",\"session\":\"hotreload-sess\",\"code\":\"{}\"}}\n",
+            id, escaped
+        );
+        send(&msg);
+        read_until_done(reader)
+    };
+
+    // --- Step 1: Define original game structs and functions (no raylib) ---
+    let initial_code = r#"
+namespace hotreload-test
+
+struct Ball { x, y, dy, size }
+struct Game { player_x, balls, score, missed, frame }
+
+let running = atom(true)
+
+fn spawn-ball() {
+    Ball { x: 100, y: 0, dy: 3, size: 20 }
+}
+
+fn update-balls(game) {
+    let mut new_balls = []
+    let mut new_missed = game.missed
+
+    for ball in game.balls {
+        let moved = Ball { ...ball, y: ball.y + ball.dy }
+        if moved.y > 600 {
+            new_missed = new_missed + 1
+        } else {
+            new_balls = push(new_balls, moved)
+        }
+    }
+
+    let final_balls = if game.frame % 20 == 0 {
+        push(new_balls, spawn-ball())
+    } else {
+        new_balls
+    }
+
+    Game { ...game, balls: final_balls, missed: new_missed }
+}
+
+fn update-player(game) {
+    game
+}
+
+fn render(game) {
+    // no-op: no raylib
+    game
+}
+
+fn game-loop(game) {
+    if deref(running) == false {
+        game
+    } else {
+        let game = update-player(game)
+        let game = update-balls(game)
+        render(game)
+        sleep(10)
+        game-loop(Game { ...game, frame: game.frame + 1 })
+    }
+}
+"#;
+
+    let resp = send_eval(&mut send, &mut reader, "init", initial_code);
+    assert!(
+        resp.contains("done"),
+        "Initial code eval should complete, got: {}",
+        resp
+    );
+
+    // --- Step 2: Start the game loop in a thread ---
+    let start_loop_code = r#"
+thread(fn() {
+    game-loop(Game {
+        player_x: 300,
+        balls: [],
+        score: 0,
+        missed: 0,
+        frame: 0
+    })
+})
+"#;
+
+    let resp = send_eval(&mut send, &mut reader, "start-loop", start_loop_code);
+    assert!(
+        resp.contains("done"),
+        "Start loop eval should complete, got: {}",
+        resp
+    );
+
+    // Let the game loop run a few iterations
+    std::thread::sleep(Duration::from_millis(200));
+
+    // --- Step 3, Change 3 Step 1: Redefine struct with new fields ---
+    let change3_step1 = r#"
+struct Bullet { x, y }
+struct Game { player_x, balls, score, missed, frame, bullets, shoot_cooldown }
+"#;
+
+    let resp = send_eval(&mut send, &mut reader, "change3-s1", change3_step1);
+    assert!(
+        resp.contains("done"),
+        "Change 3 step 1 should complete, got: {}",
+        resp
+    );
+
+    // --- Step 3, Change 3 Steps 2+3: Redefine functions that access new fields ---
+    // This is the critical moment: the running thread's game-loop will pick up
+    // the redefined update-player/render which access game.bullets and
+    // game.shoot_cooldown on old Game instances where those fields don't exist.
+    // This causes a crash (the whole process dies from accessing null fields).
+    let change3_crash = r#"
+fn update-player(game) {
+    let new_bullets = if game.shoot_cooldown == 0 {
+        push(game.bullets, Bullet { x: game.player_x + 25, y: 500 })
+    } else {
+        game.bullets
+    }
+
+    let new_cooldown = if game.shoot_cooldown > 0 {
+        game.shoot_cooldown - 1
+    } else {
+        0
+    }
+
+    Game { ...game, bullets: new_bullets, shoot_cooldown: new_cooldown }
+}
+
+fn update-bullets-and-balls(game) {
+    let mut live_bullets = []
+    for bullet in game.bullets {
+        let moved = Bullet { ...bullet, y: bullet.y - 12 }
+        if moved.y > 0 {
+            live_bullets = push(live_bullets, moved)
+        }
+    }
+    Game { ...game, bullets: live_bullets }
+}
+
+fn update-balls(game) {
+    let mut new_balls = []
+    let mut new_missed = game.missed
+
+    for ball in game.balls {
+        let moved = Ball { ...ball, y: ball.y + ball.dy }
+        if moved.y > 600 {
+            new_missed = new_missed + 1
+        } else {
+            new_balls = push(new_balls, moved)
+        }
+    }
+
+    let final_balls = if game.frame % 20 == 0 {
+        push(new_balls, spawn-ball())
+    } else {
+        new_balls
+    }
+
+    Game { ...game, balls: final_balls, missed: new_missed }
+}
+
+fn render(game) {
+    for bullet in game.bullets {
+        bullet
+    }
+    game
+}
+
+fn game-loop(game) {
+    if deref(running) == false {
+        game
+    } else {
+        let game = update-player(game)
+        let game = update-balls(game)
+        let game = update-bullets-and-balls(game)
+        render(game)
+        sleep(10)
+        game-loop(Game { ...game, frame: game.frame + 1 })
+    }
+}
+"#;
+
+    // Send the crash-inducing eval. The REPL may or may not respond before dying.
+    let escaped = change3_crash
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n");
+    let msg = format!(
+        "{{\"op\":\"eval\",\"id\":\"change3-crash\",\"session\":\"hotreload-sess\",\"code\":\"{}\"}}\n",
+        escaped
+    );
+    send(&msg);
+
+    // The running thread will pick up the new functions and crash when it tries
+    // to access game.bullets / game.shoot_cooldown on an old 5-field Game instance.
+    // This crash may kill the entire process (segfault from null field access).
+    // Give it time to happen.
+    std::thread::sleep(Duration::from_millis(1000));
+
+    // Try to read whatever response came back (may be empty if process died)
+    let crash_resp = read_until_done(&mut reader);
+    println!("=== Response after crash-inducing eval ===\n{}", crash_resp);
+
+    // Try to check if the REPL is still alive
+    let escaped_check = "1 + 1";
+    let check_msg = format!(
+        "{{\"op\":\"eval\",\"id\":\"alive-check\",\"session\":\"hotreload-sess\",\"code\":\"{}\"}}\n",
+        escaped_check
+    );
+    // The write itself may fail if the process is dead
+    let repl_alive = writer.write_all(check_msg.as_bytes()).is_ok() && writer.flush().is_ok();
+
+    let repl_responded = if repl_alive {
+        let resp = read_until_done(&mut reader);
+        println!("=== Alive check response ===\n{}", resp);
+        resp.contains("2")
+    } else {
+        println!("=== REPL process is dead (write failed) ===");
+        false
+    };
+
+    // Clean up
+    drop(reader);
+    drop(writer);
+    let _ = stdin.write_all(b":quit\n");
+    drop(stdin);
+    let _ = child.kill();
+    let output = child.wait_with_output().expect("failed to wait on child");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    println!("=== STDOUT ===\n{}", stdout);
+    println!("=== STDERR (crash output) ===\n{}", stderr);
+    println!("=== END ===");
+
+    // Document what happened:
+    // When a struct is redefined with new fields and functions accessing those
+    // fields are hot-reloaded while a thread holds old instances, the thread
+    // crashes by accessing fields that don't exist on the old struct layout.
+    //
+    // Current behavior: the crash takes down the entire process (not just the thread).
+    // Ideal behavior: only the thread should crash, and the REPL should survive.
+    if !repl_responded {
+        println!(
+            "CONFIRMED: Hot-reloading struct changes crashes the entire process.\n\
+             The thread's null field access takes down the REPL too.\n\
+             This is the bug documented in examples/raylib_game_changes.txt."
+        );
+    } else {
+        println!(
+            "REPL survived the thread crash. \
+             The thread died but the REPL continued working."
+        );
+    }
+
+    // The test passes either way — it's documenting the crash behavior.
+    // The important thing is that we reproduced the scenario.
+}
+
 // --- Helpers ---
 
 fn tempdir() -> PathBuf {

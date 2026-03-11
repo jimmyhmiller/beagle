@@ -273,23 +273,26 @@ impl CompactingHeap {
             return (result & !7) | (tagged_ptr & 7);
         }
 
-        // Check if this user struct needs migration to a new shape
+        // Check if this user struct needs migration to a new layout
         // IMPORTANT: Skip closures — they have type_id=0 but are NOT user structs.
         // Closures are tagged as Closure (tag 5), while user structs are HeapObject (tag 6).
         if heap_object.get_type_id() == 0 && !heap_object.is_opaque_object() {
             let object_type = heap_object.get_object_type();
             let is_closure = object_type == Some(BuiltInTypes::Closure);
             if !is_closure {
-                let shape_id = heap_object.get_struct_id();
+                let struct_id = heap_object.get_struct_id();
+                let layout_version = heap_object.get_layout_version();
                 let runtime = crate::get_runtime().get_mut();
-                if runtime.structs.has_pending_migrations() {
-                    if let Some(plan) = runtime.structs.migration_plan_for(shape_id) {
-                        let new_pointer = self.copy_with_migration(&heap_object, plan);
-                        debug_assert!(new_pointer % 8 == 0, "Pointer is not aligned");
-                        let tagged_new = object_type.unwrap().tag(new_pointer) as usize;
-                        unsafe { *pointer = Header::set_forwarding_bit(tagged_new) };
-                        return tagged_new;
-                    }
+                if runtime.structs.has_pending_migrations()
+                    && let Some(plan) = runtime
+                        .structs
+                        .migration_plan_for(struct_id, layout_version)
+                {
+                    let new_pointer = self.copy_with_migration(&heap_object, plan);
+                    debug_assert!(new_pointer % 8 == 0, "Pointer is not aligned");
+                    let tagged_new = object_type.unwrap().tag(new_pointer) as usize;
+                    unsafe { *pointer = Header::set_forwarding_bit(tagged_new) };
+                    return tagged_new;
                 }
             }
         }
@@ -312,16 +315,17 @@ impl CompactingHeap {
         old_object: &HeapObject,
         plan: &crate::runtime::MigrationPlan,
     ) -> isize {
-        // Build new header with updated shape_id and field count
+        // Build new header with updated layout version and field count
+        // struct_id stays the same (stable ID)
         let old_header = old_object.get_header();
         let new_header = Header {
             type_id: old_header.type_id,
-            type_data: plan.new_shape_id as u32,
+            type_data: old_header.type_data, // struct_id unchanged
             size: plan.new_field_count as u16,
             opaque: old_header.opaque,
             marked: false,
             large: false,
-            type_flags: old_header.type_flags,
+            type_flags: plan.new_layout_version,
         };
 
         // Allocate space: header (8 bytes) + fields

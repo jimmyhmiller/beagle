@@ -117,11 +117,11 @@ impl fmt::Display for CompileError {
                     let right = &function_name[dash_pos + 1..];
                     if !left.is_empty()
                         && !right.is_empty()
-                        && left.chars().next().map_or(false, |c| c.is_alphanumeric())
+                        && left.chars().next().is_some_and(|c| c.is_alphanumeric())
                         && right
                             .chars()
                             .next()
-                            .map_or(false, |c| c.is_alphanumeric() || c == '-')
+                            .is_some_and(|c| c.is_alphanumeric() || c == '-')
                     {
                         write!(
                             f,
@@ -147,11 +147,11 @@ impl fmt::Display for CompileError {
                     let right = &name[dash_pos + 1..];
                     if !left.is_empty()
                         && !right.is_empty()
-                        && left.chars().next().map_or(false, |c| c.is_alphanumeric())
+                        && left.chars().next().is_some_and(|c| c.is_alphanumeric())
                         && right
                             .chars()
                             .next()
-                            .map_or(false, |c| c.is_alphanumeric() || c == '-')
+                            .is_some_and(|c| c.is_alphanumeric() || c == '-')
                     {
                         write!(
                             f,
@@ -823,9 +823,15 @@ impl Compiler {
     }
 
     pub fn get_struct_family_id(&self, name: &str) -> Option<usize> {
+        // With stable IDs, family_id == struct_id
         let runtime = get_runtime().get_mut();
-        let (shape_id, _) = runtime.get_struct(name)?;
-        runtime.structs.get_family_id(shape_id)
+        let (struct_id, _) = runtime.get_struct(name)?;
+        Some(struct_id)
+    }
+
+    pub fn get_struct_layout_version(&self, struct_id: usize) -> u8 {
+        let runtime = get_runtime().get_mut();
+        runtime.structs.get_current_layout_version(struct_id)
     }
 
     /// Register a mapping from enum variant struct_id to enum name

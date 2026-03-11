@@ -419,12 +419,7 @@ fn stripslashes(s: &str) -> String {
                                     hex.push(ch);
                                 }
                                 if let Ok(code_point) = u32::from_str_radix(&hex, 16) {
-                                    if let Some(ch) = char::from_u32(code_point) {
-                                        ch
-                                    } else {
-                                        // Invalid code point, output replacement char
-                                        '\u{FFFD}'
-                                    }
+                                    char::from_u32(code_point).unwrap_or('\u{FFFD}')
                                 } else {
                                     // Invalid hex, output replacement char
                                     '\u{FFFD}'
@@ -3604,6 +3599,7 @@ impl Parser {
         })
     }
 
+    #[allow(clippy::type_complexity)]
     fn parse_struct_fields_creations(&mut self) -> ParseResult<(Option<Ast>, Vec<(String, Ast)>)> {
         let mut fields = Vec::new();
         let mut spread = None;

@@ -306,7 +306,7 @@ impl MarkAndSweep {
                     words.to_words(),
                     header_size
                 );
-                let pointer = unsafe { self.space.start.add(offset) as *const u8 };
+                let pointer = unsafe { self.space.start.add(offset) };
                 assert!(self.space.contains(pointer));
                 self.space.copy_data_to_offset(offset, data);
                 return Ok(AllocateAction::Allocated(pointer));
@@ -559,17 +559,21 @@ impl MarkAndSweep {
                 // Closures also have type_id=0 but must NOT be migrated as structs
                 let is_closure = heap_object.get_object_type() == Some(BuiltInTypes::Closure);
                 if !is_closure {
-                    let shape_id = heap_object.get_struct_id();
-                    if let Some(plan) = runtime.structs.migration_plan_for(shape_id) {
+                    let struct_id = heap_object.get_struct_id();
+                    let layout_version = heap_object.get_layout_version();
+                    if let Some(plan) = runtime
+                        .structs
+                        .migration_plan_for(struct_id, layout_version)
+                    {
                         let old_header = heap_object.get_header();
                         let new_header = Header {
                             type_id: old_header.type_id,
-                            type_data: plan.new_shape_id as u32,
+                            type_data: old_header.type_data, // struct_id unchanged
                             size: plan.new_field_count as u16,
                             opaque: old_header.opaque,
                             marked: false,
                             large: false,
-                            type_flags: old_header.type_flags,
+                            type_flags: plan.new_layout_version,
                         };
 
                         let total_bytes = 8 + plan.new_field_count * 8;

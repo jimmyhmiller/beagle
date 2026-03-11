@@ -2137,7 +2137,9 @@ impl AstCompiler<'_> {
                 );
 
                 let struct_pointer = self.ir.untag(struct_ptr);
-                self.ir.write_struct_id(struct_pointer, struct_id);
+                let layout_version = self.compiler.get_struct_layout_version(struct_id);
+                self.ir
+                    .write_struct_id_with_version(struct_pointer, struct_id, layout_version);
                 self.ir.write_fields(struct_pointer, &ordered_field_results);
 
                 Ok(self
@@ -2265,7 +2267,9 @@ impl AstCompiler<'_> {
                     );
 
                     let struct_pointer = self.ir.untag(struct_ptr);
-                    self.ir.write_struct_id(struct_pointer, struct_id);
+                    let layout_version = self.compiler.get_struct_layout_version(struct_id);
+                    self.ir
+                        .write_struct_id_with_version(struct_pointer, struct_id, layout_version);
 
                     for field in field_order.iter().rev() {
                         let reg = self.ir.pop_from_stack();
@@ -4765,10 +4769,11 @@ impl AstCompiler<'_> {
         {
             let namespace_id = self.compiler.current_namespace_id();
             // Check if this is a dynamic variable
-            if let Some((dyn_ns_id, dyn_slot)) = self.compiler.lookup_dynamic_var(name) {
-                if dyn_ns_id == namespace_id && dyn_slot == slot {
-                    return Some(VariableLocation::DynamicVariable(namespace_id, slot));
-                }
+            if let Some((dyn_ns_id, dyn_slot)) = self.compiler.lookup_dynamic_var(name)
+                && dyn_ns_id == namespace_id
+                && dyn_slot == slot
+            {
+                return Some(VariableLocation::DynamicVariable(namespace_id, slot));
             }
             Some(VariableLocation::NamespaceVariable(namespace_id, slot))
         } else {
@@ -4782,10 +4787,10 @@ impl AstCompiler<'_> {
                 // Check if this is a dynamic variable
                 if let Some((dyn_ns_id, dyn_slot)) =
                     self.compiler.lookup_dynamic_var(&qualified_name)
+                    && dyn_ns_id == namespace_id
+                    && dyn_slot == slot
                 {
-                    if dyn_ns_id == namespace_id && dyn_slot == slot {
-                        return Some(VariableLocation::DynamicVariable(namespace_id, slot));
-                    }
+                    return Some(VariableLocation::DynamicVariable(namespace_id, slot));
                 }
                 return Some(VariableLocation::NamespaceVariable(namespace_id, slot));
             }
