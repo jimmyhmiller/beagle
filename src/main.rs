@@ -1927,12 +1927,6 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             std::process::exit(1);
         };
 
-        // Force cleanup of all continuation state before main returns
-        // This prevents crashes during Runtime drop
-        runtime.invocation_return_points.clear();
-        runtime.prompt_handlers.clear();
-        runtime.return_from_shift_via_pop_prompt.clear();
-
         // Unregister main thread after Beagle code completes.
         // We're still registered but we're in Rust code now, not Beagle code.
         // If GC starts, it will wait for us to pause, but we can't pause from Rust.
@@ -2079,6 +2073,15 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         for thread in threads {
             thread.join().unwrap();
         }
+    }
+
+    // Clean up the main thread's per-thread continuation state after all threads have been joined.
+    // Child threads clean up their own data in their exit path.
+    {
+        let ptd = crate::runtime::per_thread_data();
+        ptd.invocation_return_points.clear();
+        ptd.prompt_handlers.clear();
+        ptd.return_from_shift_via_pop_prompt = false;
     }
 
     Ok(())

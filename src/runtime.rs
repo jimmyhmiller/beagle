@@ -3996,6 +3996,84 @@ impl CapturedFrame {
     }
 }
 
+/// Send+Sync wrapper for *mut PerThreadData so it can be stored in Mutex<Vec<...>>.
+/// SAFETY: PerThreadData is only accessed by its owning thread during execution,
+/// and by GC while all threads are paused.
+#[derive(Clone, Copy)]
+pub struct PerThreadDataPtr(pub *mut PerThreadData);
+unsafe impl Send for PerThreadDataPtr {}
+unsafe impl Sync for PerThreadDataPtr {}
+
+/// Per-thread state stored in thread-local storage. Each thread owns its own
+/// instance, eliminating data races without needing locks on the hot path.
+/// A registry of raw pointers on Runtime allows GC to scan all threads' data.
+pub struct PerThreadData {
+    pub exception_handlers: Vec<ExceptionHandler>,
+    pub prompt_handlers: Vec<PromptHandler>,
+    pub invocation_return_points: Vec<InvocationReturnPoint>,
+    pub dynamic_binding_stacks: HashMap<(usize, usize), Vec<usize>>,
+    pub return_from_shift_via_pop_prompt: bool,
+    pub is_handler_return: bool,
+    pub saved_continuation_ptr: usize,
+    pub relocation_depth: usize,
+    pub thread_exception_handler_fn: Option<usize>,
+}
+
+impl PerThreadData {
+    pub fn new() -> Self {
+        Self {
+            exception_handlers: Vec::new(),
+            prompt_handlers: Vec::new(),
+            invocation_return_points: Vec::new(),
+            dynamic_binding_stacks: HashMap::new(),
+            return_from_shift_via_pop_prompt: false,
+            is_handler_return: false,
+            saved_continuation_ptr: 0,
+            relocation_depth: 0,
+            thread_exception_handler_fn: None,
+        }
+    }
+}
+
+thread_local! {
+    static THREAD_DATA_PTR: std::cell::Cell<*mut PerThreadData> =
+        const { std::cell::Cell::new(std::ptr::null_mut()) };
+}
+
+/// Initialize per-thread data for the current thread. Returns the raw pointer
+/// for registration with the Runtime's per_thread_registry.
+pub fn init_per_thread_data() -> *mut PerThreadData {
+    let ptr = Box::into_raw(Box::new(PerThreadData::new()));
+    THREAD_DATA_PTR.with(|cell| cell.set(ptr));
+    ptr
+}
+
+/// Get the current thread's per-thread data. Panics if not initialized.
+#[inline]
+pub fn per_thread_data() -> &'static mut PerThreadData {
+    THREAD_DATA_PTR.with(|cell| {
+        let ptr = cell.get();
+        assert!(
+            !ptr.is_null(),
+            "Per-thread data not initialized for this thread"
+        );
+        unsafe { &mut *ptr }
+    })
+}
+
+/// Clean up the current thread's per-thread data.
+pub fn cleanup_per_thread_data() {
+    THREAD_DATA_PTR.with(|cell| {
+        let ptr = cell.get();
+        if !ptr.is_null() {
+            cell.set(std::ptr::null_mut());
+            unsafe {
+                drop(Box::from_raw(ptr));
+            }
+        }
+    });
+}
+
 pub struct Runtime {
     pub memory: Memory,
     pub libraries: Vec<Library>,
@@ -4040,43 +4118,13 @@ pub struct Runtime {
     /// Boxed to keep pointers stable when HashMap reallocates
     dispatch_tables: HashMap<String, Box<DispatchTable>>,
     stacks_for_continuation_swapping: Vec<ContinuationStack>,
-    // Per-thread try-catch handler stacks
-    pub exception_handlers: HashMap<ThreadId, Vec<ExceptionHandler>>,
-    // Per-thread prompt handler stacks for delimited continuations
-    pub prompt_handlers: HashMap<ThreadId, Vec<PromptHandler>>,
-    // Per-thread invocation return points for multi-shot continuations.
-    // When a continuation k is invoked via k(value), we push where to return to here.
-    // When the continuation body completes, return_from_shift pops from here.
-    pub invocation_return_points: HashMap<ThreadId, Vec<InvocationReturnPoint>>,
-    // Per-thread counter for how many return_from_shift calls to skip.
-    // This is incremented when continuations are fully invoked, to skip the
-    // spurious return_from_shift calls that happen when handlers return.
-    pub skip_return_from_shift: HashMap<ThreadId, usize>,
-    // Per-thread dynamic variable binding stacks
-    // Key = (namespace_id, slot), Value = stack of previous values
-    // Each thread has its own binding stacks for dynamic variable rebinding
-    pub dynamic_binding_stacks: HashMap<ThreadId, HashMap<(usize, usize), Vec<usize>>>,
-    // Per-thread flag indicating pop_prompt is calling return_from_shift.
-    // When set, return_from_shift should use InvocationReturnPoints.
-    // When not set (handler return case), it should use the passed continuation pointer.
-    pub return_from_shift_via_pop_prompt: HashMap<ThreadId, bool>,
-    // Per-thread flag indicating return_from_shift is being called from handler return
-    // (after `call-handler` in perform). When set, return_from_shift should skip
-    // popping InvocationReturnPoints and use the passed continuation pointer instead.
-    pub is_handler_return: HashMap<ThreadId, bool>,
-    /// Saved continuation pointer per thread for return_from_shift_handler.
-    /// After invoke_continuation_runtime copies modifications back, the cont_ptr
-    /// local on the stack may be null (it was captured before being assigned).
-    /// This saves the root continuation pointer so return_from_shift can use it.
-    pub saved_continuation_ptr: HashMap<ThreadId, usize>,
-    /// Depth of relocated stacks for each thread. When > 0, we're running on a
-    /// relocated stack and should not copy modifications back to "original_sp"
-    /// because the "original" is itself a relocated location.
-    pub relocation_depth: HashMap<ThreadId, usize>,
+    // All per-thread state is behind a Mutex to prevent data races when
+    // multiple threads access the Runtime concurrently via SyncUnsafeCell.
+    /// Registry of raw pointers to each thread's PerThreadData.
+    /// Used by GC to scan all threads' continuation state while threads are paused.
+    pub per_thread_registry: Mutex<Vec<PerThreadDataPtr>>,
     // Counter for generating unique prompt IDs to distinguish sequential handlers
     pub prompt_id_counter: AtomicUsize,
-    // Per-thread uncaught exception handlers (Beagle function pointers)
-    pub thread_exception_handler_fns: HashMap<ThreadId, usize>,
     // Global default uncaught exception handler (Beagle function pointer)
     pub default_exception_handler_fn: Option<usize>,
     // Namespace ID for keyword GC roots
@@ -4201,33 +4249,12 @@ impl Runtime {
                 is_used: AtomicBool::new(false),
                 stack: [0; 512],
             }],
-            exception_handlers: {
-                let mut map = HashMap::new();
-                map.insert(std::thread::current().id(), Vec::new());
-                map
+            per_thread_registry: {
+                // Initialize main thread's per-thread data
+                let ptr = init_per_thread_data();
+                Mutex::new(vec![PerThreadDataPtr(ptr)])
             },
-            prompt_handlers: {
-                let mut map = HashMap::new();
-                map.insert(std::thread::current().id(), Vec::new());
-                map
-            },
-            invocation_return_points: {
-                let mut map = HashMap::new();
-                map.insert(std::thread::current().id(), Vec::new());
-                map
-            },
-            skip_return_from_shift: HashMap::new(),
-            dynamic_binding_stacks: {
-                let mut map = HashMap::new();
-                map.insert(std::thread::current().id(), HashMap::new());
-                map
-            },
-            return_from_shift_via_pop_prompt: HashMap::new(),
-            is_handler_return: HashMap::new(),
-            saved_continuation_ptr: HashMap::new(),
-            relocation_depth: HashMap::new(),
             prompt_id_counter: AtomicUsize::new(1),
-            thread_exception_handler_fns: HashMap::new(),
             default_exception_handler_fn: None,
             keyword_namespace: 0, // Will be set when first keyword is allocated
             pending_heap_bindings: Mutex::new(Vec::new()),
@@ -5080,22 +5107,15 @@ impl Runtime {
 
     // Exception handling methods
     pub fn push_exception_handler(&mut self, handler: ExceptionHandler) {
-        let thread_id = std::thread::current().id();
-        self.exception_handlers
-            .entry(thread_id)
-            .or_default()
-            .push(handler);
+        per_thread_data().exception_handlers.push(handler);
     }
 
     pub fn pop_exception_handler(&mut self) -> Option<ExceptionHandler> {
-        let thread_id = std::thread::current().id();
-        self.exception_handlers.get_mut(&thread_id)?.pop()
+        per_thread_data().exception_handlers.pop()
     }
 
     pub fn set_thread_exception_handler(&mut self, handler_fn: usize) {
-        let thread_id = std::thread::current().id();
-        self.thread_exception_handler_fns
-            .insert(thread_id, handler_fn);
+        per_thread_data().thread_exception_handler_fn = Some(handler_fn);
     }
 
     pub fn set_default_exception_handler(&mut self, handler_fn: usize) {
@@ -5103,8 +5123,7 @@ impl Runtime {
     }
 
     pub fn get_thread_exception_handler(&self) -> Option<usize> {
-        let thread_id = std::thread::current().id();
-        self.thread_exception_handler_fns.get(&thread_id).copied()
+        per_thread_data().thread_exception_handler_fn
     }
 
     pub fn update_exception_handlers_after_gc(&mut self) {
@@ -5114,48 +5133,15 @@ impl Runtime {
 
     // Delimited continuation (prompt handler) methods
     pub fn push_prompt_handler(&mut self, handler: PromptHandler) {
-        let thread_id = std::thread::current().id();
-        self.prompt_handlers
-            .entry(thread_id)
-            .or_default()
-            .push(handler);
+        per_thread_data().prompt_handlers.push(handler);
     }
 
     pub fn pop_prompt_handler(&mut self) -> Option<PromptHandler> {
-        let thread_id = std::thread::current().id();
-        self.prompt_handlers.get_mut(&thread_id)?.pop()
+        per_thread_data().prompt_handlers.pop()
     }
 
     pub fn prompt_handler_count(&self) -> usize {
-        let thread_id = std::thread::current().id();
-        self.prompt_handlers
-            .get(&thread_id)
-            .map(|v| v.len())
-            .unwrap_or(0)
-    }
-
-    pub fn cleanup_finished_thread_handlers(&mut self) {
-        // Get list of active thread IDs
-        let active_thread_ids: std::collections::HashSet<ThreadId> = self
-            .memory
-            .threads
-            .iter()
-            .map(|t| t.id())
-            .chain(std::iter::once(std::thread::current().id()))
-            .collect();
-
-        // Remove exception handlers for threads that are no longer active
-        let dead_threads: Vec<ThreadId> = self
-            .exception_handlers
-            .keys()
-            .filter(|id| !active_thread_ids.contains(id))
-            .copied()
-            .collect();
-
-        for thread_id in dead_threads {
-            self.exception_handlers.remove(&thread_id);
-            self.thread_exception_handler_fns.remove(&thread_id);
-        }
+        per_thread_data().prompt_handlers.len()
     }
 
     pub fn create_exception(
@@ -6250,8 +6236,8 @@ impl Runtime {
         let thread_id = thread.thread().id();
         let main_thread_id = std::thread::current().id();
 
-        // Initialize exception handler stack for new thread
-        self.exception_handlers.insert(thread_id, Vec::new());
+        // Note: child thread initializes its own per-thread data via init_per_thread_data()
+        // in the run_thread builtin. No cross-thread initialization needed.
 
         self.memory.threads.push(thread.thread().clone());
         self.memory.join_handles.push(thread);
@@ -6351,8 +6337,7 @@ impl Runtime {
                 }
             }
 
-            // Clean up exception handlers for finished threads
-            self.cleanup_finished_thread_handlers();
+            // Per-thread data is cleaned up by each thread on exit via cleanup_per_thread_data()
         }
 
         // After all threads are joined, if any panicked, propagate the error
@@ -6516,15 +6501,18 @@ impl Runtime {
     /// Push a new dynamic binding (temporarily rebind a namespace variable)
     /// Saves the current value on a per-thread stack and sets the new value
     pub fn push_dynamic_binding(&mut self, namespace: usize, slot: usize, new_value: usize) {
-        let thread_id = std::thread::current().id();
-
         // Get the current value before we change it
         let old_value = self.get_binding(namespace, slot);
 
         // Push the old value onto the binding stack for this thread
-        let thread_stacks = self.dynamic_binding_stacks.entry(thread_id).or_default();
-        let stack = thread_stacks.entry((namespace, slot)).or_default();
-        stack.push(old_value);
+        {
+            let ptd = per_thread_data();
+            let stack = ptd
+                .dynamic_binding_stacks
+                .entry((namespace, slot))
+                .or_default();
+            stack.push(old_value);
+        }
 
         // Update the namespace binding with the new value
         let ns_obj = self
@@ -6546,13 +6534,10 @@ impl Runtime {
     /// Pop a dynamic binding (restore previous value)
     /// Restores the value from the per-thread binding stack
     pub fn pop_dynamic_binding(&mut self, namespace: usize, slot: usize) {
-        let thread_id = std::thread::current().id();
-
         // Pop the old value from the binding stack
-        let old_value = self
+        let old_value = per_thread_data()
             .dynamic_binding_stacks
-            .get_mut(&thread_id)
-            .and_then(|thread_stacks| thread_stacks.get_mut(&(namespace, slot)))
+            .get_mut(&(namespace, slot))
             .and_then(|stack| stack.pop())
             .expect("Dynamic binding stack underflow - pop without matching push");
 

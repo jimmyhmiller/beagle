@@ -4164,7 +4164,13 @@ pub extern "C" fn get_and_unregister_temp_root(temporary_root_id: usize) -> usiz
 /// 4. Run Beagle code (first instruction is __pause, handles any pending GC)
 /// 5. On cleanup: acquire gc_lock, decrement count, remove thread root, release
 pub extern "C" fn run_thread(_unused: usize) -> usize {
+    // Initialize per-thread data for this child thread and register with the runtime
+    let ptd_ptr = crate::runtime::init_per_thread_data();
     let runtime = get_runtime().get_mut();
+    {
+        let mut registry = runtime.per_thread_registry.lock().unwrap();
+        registry.push(crate::runtime::PerThreadDataPtr(ptd_ptr));
+    }
     let my_thread_id = thread::current().id();
 
     // === STARTUP ===
@@ -4271,6 +4277,13 @@ pub extern "C" fn run_thread(_unused: usize) -> usize {
                     .lock()
                     .unwrap()
                     .remove(&my_thread_id);
+                // Unregister per-thread data from the registry and clean it up
+                {
+                    let mut registry = runtime.per_thread_registry.lock().unwrap();
+                    registry.retain(|p| p.0 != ptd_ptr);
+                }
+                crate::runtime::cleanup_per_thread_data();
+
                 // Fire USDT probes for thread unregistration and exit
                 crate::gc::usdt_probes::fire_thread_unregister(new_count);
                 crate::gc::usdt_probes::fire_thread_exit();
@@ -10918,34 +10931,23 @@ pub unsafe extern "C" fn pop_prompt_runtime(
 ) -> usize {
     print_call_builtin(get_runtime().get(), "pop_prompt");
     let runtime = get_runtime().get_mut();
-    let thread_id = std::thread::current().id();
     let debug_prompts = runtime.get_command_line_args().debug;
 
+    let ptd = crate::runtime::per_thread_data();
+
     // Get the current prompt's ID BEFORE popping - this tells us which handle block is completing
-    let current_prompt_id = runtime
-        .prompt_handlers
-        .get(&thread_id)
-        .and_then(|handlers| handlers.last())
-        .map(|h| h.prompt_id);
+    let current_prompt_id = ptd.prompt_handlers.last().map(|h| h.prompt_id);
 
     if debug_prompts {
-        let rp_len = runtime
-            .invocation_return_points
-            .get(&thread_id)
-            .map(|rps| rps.len())
-            .unwrap_or(0);
-        let top_rp = runtime
-            .invocation_return_points
-            .get(&thread_id)
-            .and_then(|rps| rps.last())
-            .map(|rp| {
-                (
-                    rp.stack_pointer,
-                    rp.frame_pointer,
-                    rp.return_address,
-                    rp.prompt_id,
-                )
-            });
+        let rp_len = ptd.invocation_return_points.len();
+        let top_rp = ptd.invocation_return_points.last().map(|rp| {
+            (
+                rp.stack_pointer,
+                rp.frame_pointer,
+                rp.return_address,
+                rp.prompt_id,
+            )
+        });
         eprintln!(
             "[pop_prompt] current_prompt_id={:?} return_points={} top={:?} sp={:#x} fp={:#x}",
             current_prompt_id, rp_len, top_rp, stack_pointer, frame_pointer
@@ -10963,16 +10965,12 @@ pub unsafe extern "C" fn pop_prompt_runtime(
     //
     // Strategy: Check for return points FIRST, regardless of current_prompt_id.
     // Match on the prompt_id stored in the return point itself.
-    if let Some(return_points) = runtime.invocation_return_points.get(&thread_id)
-        && let Some(top_point) = return_points.last()
-    {
+    if let Some(top_point) = ptd.invocation_return_points.last() {
         let should_route =
             current_prompt_id.is_none() || current_prompt_id == Some(top_point.prompt_id);
 
         if should_route {
-            runtime
-                .return_from_shift_via_pop_prompt
-                .insert(thread_id, true);
+            ptd.return_from_shift_via_pop_prompt = true;
             unsafe {
                 return_from_shift_runtime(
                     stack_pointer,
@@ -10985,30 +10983,20 @@ pub unsafe extern "C" fn pop_prompt_runtime(
     }
 
     // Normal path - no matching invocation return point, just pop and return
-    // Only pop if there's actually a prompt to pop
-    if runtime.prompt_handler_count() > 0 {
-        runtime.pop_prompt_handler();
+    if !ptd.prompt_handlers.is_empty() {
+        ptd.prompt_handlers.pop();
     }
 
     // Clear invocation return points that belong to THIS handle block.
-    // This ensures subsequent sequential handlers don't see stale return points.
-    // NOTE: We do NOT manage continuation lifetime here - return_from_shift_runtime uses
-    // the continuation pointer passed by the compiler.
-    if let Some(prompt_id) = current_prompt_id
-        && let Some(return_points) = runtime.invocation_return_points.get_mut(&thread_id)
-    {
-        // Remove all return points that were created for this prompt
-        return_points.retain(|rp| rp.prompt_id != prompt_id);
+    if let Some(prompt_id) = current_prompt_id {
+        ptd.invocation_return_points
+            .retain(|rp| rp.prompt_id != prompt_id);
     }
 
     // When all prompts are done, clear ALL continuation state for this thread
-    if runtime.prompt_handler_count() == 0 {
-        if let Some(return_points) = runtime.invocation_return_points.get_mut(&thread_id) {
-            return_points.clear();
-        }
-        runtime.invocation_return_points.remove(&thread_id);
-        runtime.prompt_handlers.remove(&thread_id);
-        runtime.return_from_shift_via_pop_prompt.remove(&thread_id);
+    if ptd.prompt_handlers.is_empty() {
+        ptd.invocation_return_points.clear();
+        ptd.return_from_shift_via_pop_prompt = false;
     }
 
     BuiltInTypes::null_value() as usize
@@ -11311,49 +11299,30 @@ pub unsafe extern "C" fn return_from_shift_runtime(
     print_call_builtin(get_runtime().get(), "return_from_shift");
 
     let runtime = get_runtime().get_mut();
-    let thread_id = std::thread::current().id();
     let debug_prompts = runtime.get_command_line_args().debug;
 
-    // Check if we're being called from pop_prompt (via the flag).
-    let from_pop_prompt = runtime
-        .return_from_shift_via_pop_prompt
-        .remove(&thread_id)
-        .unwrap_or(false);
+    let ptd = crate::runtime::per_thread_data();
 
-    // Check if this is a handler return (after `call-handler` in perform).
-    let is_handler_return = runtime
-        .is_handler_return
-        .remove(&thread_id)
-        .unwrap_or(false);
+    let from_pop_prompt = std::mem::replace(&mut ptd.return_from_shift_via_pop_prompt, false);
+    let is_handler_return = std::mem::replace(&mut ptd.is_handler_return, false);
+    let return_point_opt = ptd.invocation_return_points.pop();
+    if return_point_opt.is_some() {
+        ptd.prompt_handlers.pop();
+        if ptd.relocation_depth > 0 {
+            ptd.relocation_depth -= 1;
+        }
+    }
 
-    // Check if there's an invocation return point (multi-shot continuation case).
-    if let Some(return_points) = runtime.invocation_return_points.get_mut(&thread_id)
-        && let Some(return_point) = return_points.pop()
-    {
-        let remaining = return_points.len();
+    if let Some(return_point) = return_point_opt {
         if debug_prompts {
             eprintln!(
-                "[return_from_shift] via_return_point from_pop_prompt={} remaining_after_pop={} rp_sp={:#x} rp_fp={:#x} ret_addr={:#x} prompt_id={}",
+                "[return_from_shift] via_return_point from_pop_prompt={} rp_sp={:#x} rp_fp={:#x} ret_addr={:#x} prompt_id={}",
                 from_pop_prompt,
-                remaining,
                 return_point.stack_pointer,
                 return_point.frame_pointer,
                 return_point.return_address,
                 return_point.prompt_id
             );
-        }
-
-        let _ = runtime.pop_prompt_handler();
-
-        let current_depth = runtime
-            .relocation_depth
-            .get(&thread_id)
-            .copied()
-            .unwrap_or(0);
-        if current_depth > 0 {
-            runtime
-                .relocation_depth
-                .insert(thread_id, current_depth - 1);
         }
 
         // Copy only mutable local/eval-slot ranges from the relocated segment back to
@@ -11448,11 +11417,8 @@ pub unsafe extern "C" fn return_from_shift_runtime(
     // No invocation return point - return to prompt handler using the passed continuation.
     // The cont_ptr local on the stack may be null (0x7) because it was captured before
     // being assigned. Use saved_continuation_ptr from invoke_continuation_runtime as fallback.
-    let saved = runtime
-        .saved_continuation_ptr
-        .get(&thread_id)
-        .copied()
-        .unwrap_or(0);
+    let ptd = crate::runtime::per_thread_data();
+    let saved = ptd.saved_continuation_ptr;
 
     let cont_ptr = if saved != 0 && BuiltInTypes::is_heap_pointer(saved) {
         if debug_prompts {
@@ -11472,7 +11438,7 @@ pub unsafe extern "C" fn return_from_shift_runtime(
                 );
             }
         }
-        runtime.saved_continuation_ptr.remove(&thread_id);
+        crate::runtime::per_thread_data().saved_continuation_ptr = 0;
         saved
     } else {
         let is_valid_cont_ptr = cont_ptr != 0
@@ -11612,9 +11578,7 @@ pub unsafe extern "C" fn return_from_shift_handler_runtime(
 ) -> ! {
     // SAFETY: We are in an unsafe function and caller guarantees valid stack/frame pointers
     unsafe {
-        let runtime = get_runtime().get_mut();
-        let thread_id = std::thread::current().id();
-        runtime.is_handler_return.insert(thread_id, true);
+        crate::runtime::per_thread_data().is_handler_return = true;
         return_from_shift_runtime(stack_pointer, frame_pointer, value, cont_ptr)
     }
 }
@@ -11636,18 +11600,20 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
 
     let runtime = get_runtime().get_mut();
     let debug_prompts = runtime.get_command_line_args().debug;
-    let thread_id = std::thread::current().id();
-
     // Save the continuation pointer so return_from_shift_handler can use it.
     // After copy-modifications-back, the cont_ptr local on the stack may be null
     // (it was captured before being assigned). Only save the first (root) pointer.
-    let already_had = runtime.saved_continuation_ptr.contains_key(&thread_id);
-    runtime
-        .saved_continuation_ptr
-        .entry(thread_id)
-        .or_insert(cont_ptr);
+    let (already_had, saved_for_debug) = {
+        let ptd = crate::runtime::per_thread_data();
+        let already_had = ptd.saved_continuation_ptr != 0;
+        if !already_had {
+            ptd.saved_continuation_ptr = cont_ptr;
+        }
+        let saved = ptd.saved_continuation_ptr;
+        (already_had, saved)
+    };
     if debug_prompts {
-        let saved = *runtime.saved_continuation_ptr.get(&thread_id).unwrap();
+        let saved = saved_for_debug;
         let cont_obj = ContinuationObject::from_tagged(cont_ptr).unwrap();
         eprintln!(
             "[invoke_cont] saved_cont_ptr: already_had={} saved={:#x} cont_ptr={:#x} cont_prompt_fp={:#x} cont_original_sp={:#x}",
@@ -11702,11 +11668,7 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
                 None
             };
             // Also protect saved_continuation_ptr (the root continuation) during allocation
-            let saved_cont = runtime
-                .saved_continuation_ptr
-                .get(&thread_id)
-                .copied()
-                .unwrap_or(0);
+            let saved_cont = crate::runtime::per_thread_data().saved_continuation_ptr;
             let saved_cont_root_id = if saved_cont != 0 && saved_cont != cont_ptr {
                 Some(runtime.register_temporary_root(saved_cont))
             } else {
@@ -11729,14 +11691,10 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
             // Update saved_continuation_ptr if GC moved the root continuation
             if let Some(root_id) = saved_cont_root_id {
                 let saved_cont_updated = runtime.unregister_temporary_root(root_id);
-                if let Some(saved) = runtime.saved_continuation_ptr.get_mut(&thread_id) {
-                    *saved = saved_cont_updated;
-                }
+                crate::runtime::per_thread_data().saved_continuation_ptr = saved_cont_updated;
             } else if saved_cont != 0 {
                 // saved_cont == cont_ptr, so they moved together
-                if let Some(saved) = runtime.saved_continuation_ptr.get_mut(&thread_id) {
-                    *saved = cont_ptr_updated;
-                }
+                crate::runtime::per_thread_data().saved_continuation_ptr = cont_ptr_updated;
             }
             frame_ptr
         } else {
@@ -11986,40 +11944,33 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
 
     let result_ptr = (new_fp as isize).wrapping_add(continuation.result_local()) as *mut usize;
     // Create InvocationReturnPoint for multi-shot support
-    let current_depth = runtime
-        .relocation_depth
-        .get(&thread_id)
-        .copied()
-        .unwrap_or(0);
-    let is_root_invocation = current_depth == 0;
-    runtime
-        .relocation_depth
-        .insert(thread_id, current_depth + 1);
+    let (current_depth, rp_len_for_debug) = {
+        let ptd = crate::runtime::per_thread_data();
+        let current_depth = ptd.relocation_depth;
+        ptd.relocation_depth = current_depth + 1;
 
-    runtime
-        .invocation_return_points
-        .entry(thread_id)
-        .or_default()
-        .push(crate::runtime::InvocationReturnPoint {
-            stack_pointer: beagle_sp,
-            frame_pointer: beagle_fp,
-            return_address: beagle_return_address,
-            callee_saved_regs,
-            saved_frame,
-            prompt_id,
-            relocated_sp: new_sp,
-            original_sp,
-            segment_len: stack_segment_size,
-            mutable_ranges,
-            is_root_invocation,
-        });
+        ptd.invocation_return_points
+            .push(crate::runtime::InvocationReturnPoint {
+                stack_pointer: beagle_sp,
+                frame_pointer: beagle_fp,
+                return_address: beagle_return_address,
+                callee_saved_regs,
+                saved_frame,
+                prompt_id,
+                relocated_sp: new_sp,
+                original_sp,
+                segment_len: stack_segment_size,
+                mutable_ranges,
+                is_root_invocation: current_depth == 0,
+            });
+
+        let rp_len = ptd.invocation_return_points.len();
+        (current_depth, rp_len)
+    };
+    let is_root_invocation = current_depth == 0;
 
     if debug_prompts {
-        let rp_len = runtime
-            .invocation_return_points
-            .get(&thread_id)
-            .map(|rps| rps.len())
-            .unwrap_or(0);
+        let rp_len = rp_len_for_debug;
         eprintln!(
             "[invoke_cont] push_return_point prompt_id={} stack_seg={} is_root={} depth={} rp_len={} new_sp={:#x} new_fp={:#x} original_sp={:#x} relocated_sp={:#x}",
             prompt_id,

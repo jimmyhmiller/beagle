@@ -1,7 +1,5 @@
 namespace thread
 
-// Skip: Threads can silently die under load, causing non-deterministic output
-
 use beagle.primitive as primitive
 
 struct Thing {

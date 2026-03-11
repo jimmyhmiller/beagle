@@ -1,7 +1,5 @@
 namespace exception_thread_isolation_test
 
-// Skip: Threads can silently die under system load, causing spin-wait to hang
-
 fn main() {
     let result1 = atom("unset")
     let result2 = atom("unset")

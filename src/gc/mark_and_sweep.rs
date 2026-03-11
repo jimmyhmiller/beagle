@@ -377,19 +377,23 @@ impl MarkAndSweep {
 
         // Mark InvocationReturnPoint saved_frame pointers as roots.
         // CapturedFrame objects are normal heap objects, so we just add them as roots.
+        // GC runs while all threads are paused at safepoints, so it's safe to
+        // iterate the registry and dereference each thread's per-thread data.
         {
             let runtime = crate::get_runtime().get();
-            for (_thread_id, rps) in runtime.invocation_return_points.iter() {
-                for rp in rps {
+            let registry = runtime.per_thread_registry.lock().unwrap();
+            for ptd_ptr in registry.iter() {
+                let ptd = unsafe { &*ptd_ptr.0 };
+                for rp in ptd.invocation_return_points.iter() {
                     if rp.saved_frame != 0 && BuiltInTypes::is_heap_pointer(rp.saved_frame) {
                         to_mark.push(HeapObject::from_tagged(rp.saved_frame));
                     }
                 }
-            }
-            // Mark saved_continuation_ptr (tagged ContinuationObject pointers)
-            for (_thread_id, ptr) in runtime.saved_continuation_ptr.iter() {
-                if *ptr != 0 && BuiltInTypes::is_heap_pointer(*ptr) {
-                    to_mark.push(HeapObject::from_tagged(*ptr));
+                // Mark saved_continuation_ptr (tagged ContinuationObject pointers)
+                if ptd.saved_continuation_ptr != 0
+                    && BuiltInTypes::is_heap_pointer(ptd.saved_continuation_ptr)
+                {
+                    to_mark.push(HeapObject::from_tagged(ptd.saved_continuation_ptr));
                 }
             }
         }

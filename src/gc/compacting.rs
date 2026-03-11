@@ -394,19 +394,25 @@ impl CompactingHeap {
     fn gc_continuations(&mut self) {
         let runtime = crate::get_runtime().get_mut();
 
-        // Process InvocationReturnPoint saved frames (CapturedFrame heap pointers).
-        for (_thread_id, rps) in runtime.invocation_return_points.iter_mut() {
-            for rp in rps.iter_mut() {
+        // GC runs while all threads are paused at safepoints, so it's safe to
+        // iterate the registry and dereference each thread's per-thread data.
+        let registry = runtime.per_thread_registry.lock().unwrap();
+        for ptd_ptr in registry.iter() {
+            let ptd = unsafe { &mut *ptd_ptr.0 };
+
+            // Process InvocationReturnPoint saved frames (CapturedFrame heap pointers).
+            for rp in ptd.invocation_return_points.iter_mut() {
                 if rp.saved_frame != 0 && BuiltInTypes::is_heap_pointer(rp.saved_frame) {
                     rp.saved_frame = self.copy_using_cheneys_algorithm(rp.saved_frame);
                 }
             }
-        }
 
-        // Process saved_continuation_ptr (tagged ContinuationObject pointers)
-        for (_thread_id, ptr) in runtime.saved_continuation_ptr.iter_mut() {
-            if *ptr != 0 && BuiltInTypes::is_heap_pointer(*ptr) {
-                *ptr = self.copy_using_cheneys_algorithm(*ptr);
+            // Process saved_continuation_ptr (tagged ContinuationObject pointers)
+            if ptd.saved_continuation_ptr != 0
+                && BuiltInTypes::is_heap_pointer(ptd.saved_continuation_ptr)
+            {
+                ptd.saved_continuation_ptr =
+                    self.copy_using_cheneys_algorithm(ptd.saved_continuation_ptr);
             }
         }
     }
