@@ -4049,6 +4049,11 @@ pub fn init_per_thread_data() -> *mut PerThreadData {
 }
 
 /// Get the current thread's per-thread data. Panics if not initialized.
+///
+/// SAFETY: The returned reference is derived from a raw pointer to thread-local data.
+/// Callers must not hold this reference across calls to functions that also call
+/// `per_thread_data()` — in practice this is safe because each call site uses the
+/// reference briefly and the data is only accessed by the owning thread.
 #[inline]
 pub fn per_thread_data() -> &'static mut PerThreadData {
     THREAD_DATA_PTR.with(|cell| {

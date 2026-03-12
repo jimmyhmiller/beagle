@@ -10933,56 +10933,69 @@ pub unsafe extern "C" fn pop_prompt_runtime(
     let runtime = get_runtime().get_mut();
     let debug_prompts = runtime.get_command_line_args().debug;
 
-    let ptd = crate::runtime::per_thread_data();
+    // Read values from per-thread data in a scoped block to avoid holding
+    // a &mut reference across the call to return_from_shift_runtime (which
+    // also accesses per-thread data — overlapping &mut would be UB).
+    let (current_prompt_id, should_route_to_return_from_shift) = {
+        let ptd = crate::runtime::per_thread_data();
 
-    // Get the current prompt's ID BEFORE popping - this tells us which handle block is completing
-    let current_prompt_id = ptd.prompt_handlers.last().map(|h| h.prompt_id);
+        // Get the current prompt's ID BEFORE popping - this tells us which handle block is completing
+        let current_prompt_id = ptd.prompt_handlers.last().map(|h| h.prompt_id);
 
-    if debug_prompts {
-        let rp_len = ptd.invocation_return_points.len();
-        let top_rp = ptd.invocation_return_points.last().map(|rp| {
-            (
-                rp.stack_pointer,
-                rp.frame_pointer,
-                rp.return_address,
-                rp.prompt_id,
-            )
-        });
-        eprintln!(
-            "[pop_prompt] current_prompt_id={:?} return_points={} top={:?} sp={:#x} fp={:#x}",
-            current_prompt_id, rp_len, top_rp, stack_pointer, frame_pointer
-        );
-    }
+        if debug_prompts {
+            let rp_len = ptd.invocation_return_points.len();
+            let top_rp = ptd.invocation_return_points.last().map(|rp| {
+                (
+                    rp.stack_pointer,
+                    rp.frame_pointer,
+                    rp.return_address,
+                    rp.prompt_id,
+                )
+            });
+            eprintln!(
+                "[pop_prompt] current_prompt_id={:?} return_points={} top={:?} sp={:#x} fp={:#x}",
+                current_prompt_id, rp_len, top_rp, stack_pointer, frame_pointer
+            );
+        }
 
-    // Check if there's an invocation return point for THIS handle block.
-    //
-    // For empty segments: the prompt was already popped by capture_continuation (perform/shift),
-    // and NOT re-pushed by invoke_continuation. So current_prompt_id will be None.
-    // But we still have an InvocationReturnPoint that we need to route through.
-    //
-    // For non-empty segments: the prompt was popped by capture_continuation, then RE-PUSHED
-    // by invoke_continuation at the relocated location. So current_prompt_id will match.
-    //
-    // Strategy: Check for return points FIRST, regardless of current_prompt_id.
-    // Match on the prompt_id stored in the return point itself.
-    if let Some(top_point) = ptd.invocation_return_points.last() {
-        let should_route =
-            current_prompt_id.is_none() || current_prompt_id == Some(top_point.prompt_id);
+        // Check if there's an invocation return point for THIS handle block.
+        //
+        // For empty segments: the prompt was already popped by capture_continuation (perform/shift),
+        // and NOT re-pushed by invoke_continuation. So current_prompt_id will be None.
+        // But we still have an InvocationReturnPoint that we need to route through.
+        //
+        // For non-empty segments: the prompt was popped by capture_continuation, then RE-PUSHED
+        // by invoke_continuation at the relocated location. So current_prompt_id will match.
+        //
+        // Strategy: Check for return points FIRST, regardless of current_prompt_id.
+        // Match on the prompt_id stored in the return point itself.
+        let should_route = if let Some(top_point) = ptd.invocation_return_points.last() {
+            current_prompt_id.is_none() || current_prompt_id == Some(top_point.prompt_id)
+        } else {
+            false
+        };
 
         if should_route {
             ptd.return_from_shift_via_pop_prompt = true;
-            unsafe {
-                return_from_shift_runtime(
-                    stack_pointer,
-                    frame_pointer,
-                    result_value,
-                    BuiltInTypes::null_value() as usize,
-                )
-            };
         }
+
+        (current_prompt_id, should_route)
+    };
+    // ptd borrow is dropped here
+
+    if should_route_to_return_from_shift {
+        unsafe {
+            return_from_shift_runtime(
+                stack_pointer,
+                frame_pointer,
+                result_value,
+                BuiltInTypes::null_value() as usize,
+            )
+        };
     }
 
     // Normal path - no matching invocation return point, just pop and return
+    let ptd = crate::runtime::per_thread_data();
     if !ptd.prompt_handlers.is_empty() {
         ptd.prompt_handlers.pop();
     }
@@ -11301,17 +11314,21 @@ pub unsafe extern "C" fn return_from_shift_runtime(
     let runtime = get_runtime().get_mut();
     let debug_prompts = runtime.get_command_line_args().debug;
 
-    let ptd = crate::runtime::per_thread_data();
-
-    let from_pop_prompt = std::mem::replace(&mut ptd.return_from_shift_via_pop_prompt, false);
-    let is_handler_return = std::mem::replace(&mut ptd.is_handler_return, false);
-    let return_point_opt = ptd.invocation_return_points.pop();
-    if return_point_opt.is_some() {
-        ptd.prompt_handlers.pop();
-        if ptd.relocation_depth > 0 {
-            ptd.relocation_depth -= 1;
+    // Read and mutate per-thread data in a scoped block to avoid holding a &mut
+    // reference across re-entrant calls or across the second per_thread_data() access below.
+    let (from_pop_prompt, is_handler_return, return_point_opt) = {
+        let ptd = crate::runtime::per_thread_data();
+        let from_pop_prompt = std::mem::replace(&mut ptd.return_from_shift_via_pop_prompt, false);
+        let is_handler_return = std::mem::replace(&mut ptd.is_handler_return, false);
+        let return_point_opt = ptd.invocation_return_points.pop();
+        if return_point_opt.is_some() {
+            ptd.prompt_handlers.pop();
+            if ptd.relocation_depth > 0 {
+                ptd.relocation_depth -= 1;
+            }
         }
-    }
+        (from_pop_prompt, is_handler_return, return_point_opt)
+    };
 
     if let Some(return_point) = return_point_opt {
         if debug_prompts {
@@ -11577,8 +11594,12 @@ pub unsafe extern "C" fn return_from_shift_handler_runtime(
     cont_ptr: usize,
 ) -> ! {
     // SAFETY: We are in an unsafe function and caller guarantees valid stack/frame pointers
+    // Set flag in a scoped block so the &mut borrow is dropped before calling
+    // return_from_shift_runtime (which also accesses per-thread data).
     unsafe {
-        crate::runtime::per_thread_data().is_handler_return = true;
+        {
+            crate::runtime::per_thread_data().is_handler_return = true;
+        }
         return_from_shift_runtime(stack_pointer, frame_pointer, value, cont_ptr)
     }
 }
