@@ -7686,7 +7686,34 @@ extern "C" fn repl_read_line(
         prompt_width.store(prompt.len(), Ordering::Relaxed);
         rl.helper_mut().unwrap().prompt_width = prompt.len();
 
-        match rl.readline(&prompt) {
+        // Register as c_calling before blocking in readline so GC triggered by
+        // other threads doesn't deadlock waiting for us to hit a safepoint.
+        {
+            let thread_state = runtime.thread_state.clone();
+            let (lock, condvar) = &*thread_state;
+            let mut state = lock.lock().unwrap();
+            state.register_c_call(frame_pointer);
+            condvar.notify_one();
+        }
+
+        let readline_result = rl.readline(&prompt);
+
+        // Unregister from c_calling and wait for any in-progress GC to finish.
+        {
+            let runtime = get_runtime().get_mut();
+            let thread_state = runtime.thread_state.clone();
+            let (lock, condvar) = &*thread_state;
+            {
+                let mut state = lock.lock().unwrap();
+                state.unregister_c_call();
+                condvar.notify_one();
+            }
+            while runtime.is_paused() {
+                thread::park();
+            }
+        }
+
+        match readline_result {
             Ok(line) => {
                 let runtime = get_runtime().get_mut();
                 match runtime.allocate_string(stack_pointer, line) {
