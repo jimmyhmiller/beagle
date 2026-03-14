@@ -854,11 +854,21 @@ fn test_repl_starts_socket_server() {
     send("{\"op\":\"describe\",\"id\":\"d1\"}\n");
 
     let describe_resp = read_until_done(&mut reader);
-    assert!(
-        describe_resp.contains("d1"),
-        "describe response should contain request id, got: {}",
-        describe_resp
-    );
+    if !describe_resp.contains("d1") {
+        // Capture stderr/stdout from child for diagnostics
+        drop(reader);
+        drop(writer);
+        let _ = stdin.write_all(b":quit\n");
+        drop(stdin);
+        let _ = child.kill();
+        let output = child.wait_with_output().expect("failed to wait on child");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        panic!(
+            "describe response should contain request id, got: {:?}\n\n--- STDERR ---\n{}\n--- STDOUT ---\n{}",
+            describe_resp, stderr, stdout
+        );
+    }
     assert!(
         describe_resp.contains("eval"),
         "describe should list eval op, got: {}",
@@ -1084,11 +1094,21 @@ fn game-loop(game) {
 "#;
 
     let resp = send_eval(&mut send, &mut reader, "init", initial_code);
-    assert!(
-        resp.contains("done"),
-        "Initial code eval should complete, got: {}",
-        resp
-    );
+    if !resp.contains("done") {
+        // Capture stderr/stdout from child for diagnostics
+        drop(reader);
+        drop(writer);
+        let _ = stdin.write_all(b":quit\n");
+        drop(stdin);
+        let _ = child.kill();
+        let output = child.wait_with_output().expect("failed to wait on child");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        panic!(
+            "Initial code eval should complete, got: {:?}\n\n--- STDERR ---\n{}\n--- STDOUT ---\n{}",
+            resp, stderr, stdout
+        );
+    }
 
     // --- Step 2: Start the game loop in a thread ---
     let start_loop_code = r#"
