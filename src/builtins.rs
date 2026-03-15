@@ -7695,6 +7695,8 @@ extern "C" fn repl_read_line(
             let mut state = lock.lock().unwrap();
             state.register_c_call(frame_pointer);
             condvar.notify_one();
+            let c_count = state.c_calling_stack_pointers.len();
+            eprintln!("[readline] registered as c_calling (fp={:#x}, c_calling_count={})", frame_pointer, c_count);
         }
 
         let readline_result = rl.readline(&prompt);
@@ -7705,6 +7707,7 @@ extern "C" fn repl_read_line(
         // memory.threads and won't be unparked by GC.
         {
             let runtime = get_runtime().get_mut();
+            eprintln!("[readline] returned, is_paused={}", runtime.is_paused());
             while runtime.is_paused() {
                 thread::yield_now();
             }
@@ -7716,6 +7719,7 @@ extern "C" fn repl_read_line(
                         let mut state = lock.lock().unwrap();
                         state.unregister_c_call();
                         condvar.notify_one();
+                        eprintln!("[readline] unregistered from c_calling");
                         break;
                     }
                     Err(_) => thread::yield_now(),
