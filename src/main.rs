@@ -1537,14 +1537,6 @@ fn cmd_test(test_args: TestArgs) -> Result<(), Box<dyn Error>> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    // Install a panic hook that always prints to stderr, ensuring child thread
-    // panics are visible even when stdout is piped/captured.
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        eprintln!("[PANIC] thread {:?}: {}", std::thread::current().id(), info);
-        default_hook(info);
-    }));
-
     let raw_args: Vec<String> = std::env::args().collect();
 
     // Bare file: beag file.bg [args...]
