@@ -7696,7 +7696,8 @@ extern "C" fn repl_read_line(
             state.register_c_call(frame_pointer);
             condvar.notify_one();
             let c_count = state.c_calling_stack_pointers.len();
-            eprintln!("[readline] registered as c_calling (fp={:#x}, c_calling_count={})", frame_pointer, c_count);
+            let registered = get_runtime().get_mut().registered_thread_count.load(std::sync::atomic::Ordering::Acquire);
+            eprintln!("[readline] registered as c_calling (fp={:#x}, c_calling={}, registered={})", frame_pointer, c_count, registered);
         }
 
         let readline_result = rl.readline(&prompt);
