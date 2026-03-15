@@ -7698,18 +7698,33 @@ extern "C" fn repl_read_line(
 
         let readline_result = rl.readline(&prompt);
 
-        // Unregister from c_calling and wait for any in-progress GC to finish.
+        // Unregister from c_calling. We must hold gc_lock while unregistering
+        // to prevent a race where GC starts between unregister and our next
+        // safepoint check — that would deadlock (GC waits for us, we wait for GC).
         {
             let runtime = get_runtime().get_mut();
-            let thread_state = runtime.thread_state.clone();
-            let (lock, condvar) = &*thread_state;
-            {
-                let mut state = lock.lock().unwrap();
-                state.unregister_c_call();
-                condvar.notify_one();
-            }
+            // Wait for any in-progress GC to finish first (we're still c_calling so
+            // GC won't be waiting for us).
             while runtime.is_paused() {
-                thread::park();
+                thread::yield_now();
+            }
+            // Acquire gc_lock to prevent new GC from starting during transition.
+            loop {
+                match runtime.gc_lock.try_lock() {
+                    Ok(_guard) => {
+                        let thread_state = runtime.thread_state.clone();
+                        let (lock, condvar) = &*thread_state;
+                        let mut state = lock.lock().unwrap();
+                        state.unregister_c_call();
+                        condvar.notify_one();
+                        // gc_lock released here — next allocation will hit a safepoint
+                        break;
+                    }
+                    Err(_) => {
+                        // gc_lock is held by GC — wait for it (we're still c_calling)
+                        thread::yield_now();
+                    }
+                }
             }
         }
 

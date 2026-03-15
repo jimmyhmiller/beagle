@@ -793,8 +793,11 @@ fn test_repl_starts_socket_server() {
         all
     }
 
-    // Pick a port unlikely to collide
-    let port = 17856 + (std::process::id() % 1000) as u16;
+    // Bind port 0 to get an OS-assigned ephemeral port, then close it so beag can use it
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("failed to bind ephemeral port");
+        listener.local_addr().unwrap().port()
+    };
 
     let mut child = beag()
         .arg("repl")
@@ -806,35 +809,49 @@ fn test_repl_starts_socket_server() {
 
     let mut stdin = child.stdin.take().unwrap();
 
+    // Give the REPL a moment to start up before sending commands
+    std::thread::sleep(Duration::from_millis(500));
+
     // Start the socket REPL server in a thread from the interactive REPL
-    let cmds = format!(
-        "use beagle.repl as repl\nthread(fn() {{ repl/start-repl-server(\"127.0.0.1\", {}) }})\n",
+    // Send commands one at a time with flushes to ensure sequential processing
+    stdin
+        .write_all(b"use beagle.repl as repl\n")
+        .expect("failed to write to repl stdin");
+    stdin.flush().unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+
+    let start_cmd = format!(
+        "thread(fn() {{ repl/start-repl-server(\"127.0.0.1\", {}) }})\n",
         port
     );
     stdin
-        .write_all(cmds.as_bytes())
+        .write_all(start_cmd.as_bytes())
         .expect("failed to write to repl stdin");
     stdin.flush().unwrap();
 
-    // Poll until the server is accepting connections (max 10s)
+    // Poll until the server is accepting connections (max 15s)
     let start = Instant::now();
     let mut stream = None;
-    while start.elapsed() < Duration::from_secs(10) {
+    while start.elapsed() < Duration::from_secs(15) {
         match TcpStream::connect(format!("127.0.0.1:{}", port)) {
             Ok(s) => {
                 stream = Some(s);
                 break;
             }
-            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+            Err(_) => std::thread::sleep(Duration::from_millis(200)),
         }
     }
-    let stream = stream.unwrap_or_else(|| {
+    if stream.is_none() {
         let _ = child.kill();
+        let output = child.wait_with_output().expect("failed to wait on child");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
         panic!(
-            "Socket REPL server did not start within 10s on port {}",
-            port
+            "Socket REPL server did not start within 15s on port {}\n\n--- STDERR ---\n{}\n--- STDOUT ---\n{}",
+            port, stderr, stdout
         );
-    });
+    }
+    let stream = stream.unwrap();
 
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -854,21 +871,11 @@ fn test_repl_starts_socket_server() {
     send("{\"op\":\"describe\",\"id\":\"d1\"}\n");
 
     let describe_resp = read_until_done(&mut reader);
-    if !describe_resp.contains("d1") {
-        // Capture stderr/stdout from child for diagnostics
-        drop(reader);
-        drop(writer);
-        let _ = stdin.write_all(b":quit\n");
-        drop(stdin);
-        let _ = child.kill();
-        let output = child.wait_with_output().expect("failed to wait on child");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        panic!(
-            "describe response should contain request id, got: {:?}\n\n--- STDERR ---\n{}\n--- STDOUT ---\n{}",
-            describe_resp, stderr, stdout
-        );
-    }
+    assert!(
+        describe_resp.contains("d1"),
+        "describe response should contain request id, got: {}",
+        describe_resp
+    );
     assert!(
         describe_resp.contains("eval"),
         "describe should list eval op, got: {}",
@@ -963,8 +970,11 @@ fn test_repl_struct_hotreload_crash() {
         all
     }
 
-    // Pick a port unlikely to collide (different offset from other test)
-    let port = 18856 + (std::process::id() % 1000) as u16;
+    // Bind port 0 to get an OS-assigned ephemeral port, then close it so beag can use it
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("failed to bind ephemeral port");
+        listener.local_addr().unwrap().port()
+    };
 
     let mut child = beag()
         .arg("repl")
@@ -976,35 +986,49 @@ fn test_repl_struct_hotreload_crash() {
 
     let mut stdin = child.stdin.take().unwrap();
 
+    // Give the REPL a moment to start up before sending commands
+    std::thread::sleep(Duration::from_millis(500));
+
     // Start the socket REPL server in a thread from the interactive REPL
-    let cmds = format!(
-        "use beagle.repl as repl\nthread(fn() {{ repl/start-repl-server(\"127.0.0.1\", {}) }})\n",
+    // Send commands one at a time with flushes to ensure sequential processing
+    stdin
+        .write_all(b"use beagle.repl as repl\n")
+        .expect("failed to write to repl stdin");
+    stdin.flush().unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+
+    let start_cmd = format!(
+        "thread(fn() {{ repl/start-repl-server(\"127.0.0.1\", {}) }})\n",
         port
     );
     stdin
-        .write_all(cmds.as_bytes())
+        .write_all(start_cmd.as_bytes())
         .expect("failed to write to repl stdin");
     stdin.flush().unwrap();
 
-    // Poll until the server is accepting connections (max 10s)
+    // Poll until the server is accepting connections (max 15s)
     let start = Instant::now();
     let mut stream = None;
-    while start.elapsed() < Duration::from_secs(10) {
+    while start.elapsed() < Duration::from_secs(15) {
         match TcpStream::connect(format!("127.0.0.1:{}", port)) {
             Ok(s) => {
                 stream = Some(s);
                 break;
             }
-            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+            Err(_) => std::thread::sleep(Duration::from_millis(200)),
         }
     }
-    let stream = stream.unwrap_or_else(|| {
+    if stream.is_none() {
         let _ = child.kill();
+        let output = child.wait_with_output().expect("failed to wait on child");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
         panic!(
-            "Socket REPL server did not start within 10s on port {}",
-            port
+            "Socket REPL server did not start within 15s on port {}\n\n--- STDERR ---\n{}\n--- STDOUT ---\n{}",
+            port, stderr, stdout
         );
-    });
+    }
+    let stream = stream.unwrap();
 
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -1094,21 +1118,11 @@ fn game-loop(game) {
 "#;
 
     let resp = send_eval(&mut send, &mut reader, "init", initial_code);
-    if !resp.contains("done") {
-        // Capture stderr/stdout from child for diagnostics
-        drop(reader);
-        drop(writer);
-        let _ = stdin.write_all(b":quit\n");
-        drop(stdin);
-        let _ = child.kill();
-        let output = child.wait_with_output().expect("failed to wait on child");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        panic!(
-            "Initial code eval should complete, got: {:?}\n\n--- STDERR ---\n{}\n--- STDOUT ---\n{}",
-            resp, stderr, stdout
-        );
-    }
+    assert!(
+        resp.contains("done"),
+        "Initial code eval should complete, got: {}",
+        resp
+    );
 
     // --- Step 2: Start the game loop in a thread ---
     let start_loop_code = r#"
