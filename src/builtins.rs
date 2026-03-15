@@ -7686,7 +7686,44 @@ extern "C" fn repl_read_line(
         prompt_width.store(prompt.len(), Ordering::Relaxed);
         rl.helper_mut().unwrap().prompt_width = prompt.len();
 
-        match rl.readline(&prompt) {
+        // Register as c_calling before blocking in readline so GC triggered by
+        // other threads can proceed without deadlocking on us.
+        {
+            let runtime = get_runtime().get_mut();
+            let thread_state = runtime.thread_state.clone();
+            let (lock, condvar) = &*thread_state;
+            let mut state = lock.lock().unwrap();
+            state.register_c_call(frame_pointer);
+            condvar.notify_one();
+        }
+
+        let readline_result = rl.readline(&prompt);
+
+        // Unregister from c_calling atomically using gc_lock to prevent a
+        // race where GC starts between unregister and our next safepoint.
+        // We use yield_now (not park) because the main thread is not in
+        // memory.threads and won't be unparked by GC.
+        {
+            let runtime = get_runtime().get_mut();
+            while runtime.is_paused() {
+                thread::yield_now();
+            }
+            loop {
+                match runtime.gc_lock.try_lock() {
+                    Ok(_guard) => {
+                        let thread_state = runtime.thread_state.clone();
+                        let (lock, condvar) = &*thread_state;
+                        let mut state = lock.lock().unwrap();
+                        state.unregister_c_call();
+                        condvar.notify_one();
+                        break;
+                    }
+                    Err(_) => thread::yield_now(),
+                }
+            }
+        }
+
+        match readline_result {
             Ok(line) => {
                 let runtime = get_runtime().get_mut();
                 match runtime.allocate_string(stack_pointer, line) {
