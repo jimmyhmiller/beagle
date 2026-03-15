@@ -768,7 +768,7 @@ fn test_repl_state_persists_across_evals() {
 
 #[test]
 fn test_repl_starts_socket_server() {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead, BufReader, Read as _, Write};
     use std::net::TcpStream;
     use std::process::Stdio;
     use std::time::{Duration, Instant};
@@ -793,11 +793,33 @@ fn test_repl_starts_socket_server() {
         all
     }
 
-    // Bind port 0 to get an OS-assigned ephemeral port, then close it so beag can use it
-    let port = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("failed to bind ephemeral port");
-        listener.local_addr().unwrap().port()
-    };
+    /// Wait for a specific string to appear in stdout of the child process.
+    /// Reads line by line, returns all output read so far.
+    fn wait_for_stdout(
+        reader: &mut BufReader<std::process::ChildStdout>,
+        needle: &str,
+        timeout: Duration,
+    ) -> (bool, String) {
+        let start = Instant::now();
+        let mut output = String::new();
+        while start.elapsed() < timeout {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    output.push_str(&line);
+                    if line.contains(needle) {
+                        return (true, output);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        (false, output)
+    }
+
+    // Pick a port unlikely to collide
+    let port = 17856 + (std::process::id() % 1000) as u16;
 
     let mut child = beag()
         .arg("repl")
@@ -808,50 +830,39 @@ fn test_repl_starts_socket_server() {
         .expect("failed to spawn beag repl");
 
     let mut stdin = child.stdin.take().unwrap();
+    let child_stdout = child.stdout.take().unwrap();
+    let mut stdout_reader = BufReader::new(child_stdout);
 
-    // Give the REPL a moment to start up before sending commands
-    std::thread::sleep(Duration::from_millis(500));
+    // Wait for the REPL banner to appear (confirms REPL is ready)
+    let (found, banner) = wait_for_stdout(&mut stdout_reader, "Ctrl-D", Duration::from_secs(10));
+    assert!(found, "REPL banner did not appear: {}", banner);
 
-    // Start the socket REPL server in a thread from the interactive REPL
-    // Send commands one at a time with flushes to ensure sequential processing
-    stdin
-        .write_all(b"use beagle.repl as repl\n")
-        .expect("failed to write to repl stdin");
-    stdin.flush().unwrap();
-    std::thread::sleep(Duration::from_millis(500));
-
-    let start_cmd = format!(
-        "thread(fn() {{ repl/start-repl-server(\"127.0.0.1\", {}) }})\n",
+    // Send commands to start the socket REPL server
+    let cmds = format!(
+        "use beagle.repl as repl\nthread(fn() {{ repl/start-repl-server(\"127.0.0.1\", {}) }})\n",
         port
     );
     stdin
-        .write_all(start_cmd.as_bytes())
+        .write_all(cmds.as_bytes())
         .expect("failed to write to repl stdin");
     stdin.flush().unwrap();
 
-    // Poll until the server is accepting connections (max 15s)
-    let start = Instant::now();
-    let mut stream = None;
-    while start.elapsed() < Duration::from_secs(15) {
-        match TcpStream::connect(format!("127.0.0.1:{}", port)) {
-            Ok(s) => {
-                stream = Some(s);
-                break;
-            }
-            Err(_) => std::thread::sleep(Duration::from_millis(200)),
-        }
-    }
-    if stream.is_none() {
+    // Wait for the server to print "listening" — confirms it actually started
+    let (found, output) = wait_for_stdout(&mut stdout_reader, "listening", Duration::from_secs(15));
+    if !found {
         let _ = child.kill();
-        let output = child.wait_with_output().expect("failed to wait on child");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
         panic!(
-            "Socket REPL server did not start within 15s on port {}\n\n--- STDERR ---\n{}\n--- STDOUT ---\n{}",
-            port, stderr, stdout
+            "Socket REPL server did not start on port {}.\nStdout so far: {}",
+            port, output
         );
     }
-    let stream = stream.unwrap();
+
+    // Now connect — server is confirmed running
+    let stream = TcpStream::connect(format!("127.0.0.1:{}", port))
+        .unwrap_or_else(|e| {
+            let _ = child.kill();
+            panic!("Failed to connect to REPL server on port {}: {}", port, e);
+        });
 
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -945,7 +956,7 @@ fn test_repl_starts_socket_server() {
 
 #[test]
 fn test_repl_struct_hotreload_crash() {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead, BufReader, Read as _, Write};
     use std::net::TcpStream;
     use std::process::Stdio;
     use std::time::{Duration, Instant};
@@ -970,11 +981,32 @@ fn test_repl_struct_hotreload_crash() {
         all
     }
 
-    // Bind port 0 to get an OS-assigned ephemeral port, then close it so beag can use it
-    let port = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("failed to bind ephemeral port");
-        listener.local_addr().unwrap().port()
-    };
+    /// Wait for a specific string to appear in stdout of the child process.
+    fn wait_for_stdout(
+        reader: &mut BufReader<std::process::ChildStdout>,
+        needle: &str,
+        timeout: Duration,
+    ) -> (bool, String) {
+        let start = Instant::now();
+        let mut output = String::new();
+        while start.elapsed() < timeout {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    output.push_str(&line);
+                    if line.contains(needle) {
+                        return (true, output);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        (false, output)
+    }
+
+    // Pick a port unlikely to collide (different offset from other test)
+    let port = 18856 + (std::process::id() % 1000) as u16;
 
     let mut child = beag()
         .arg("repl")
@@ -985,50 +1017,39 @@ fn test_repl_struct_hotreload_crash() {
         .expect("failed to spawn beag repl");
 
     let mut stdin = child.stdin.take().unwrap();
+    let child_stdout = child.stdout.take().unwrap();
+    let mut stdout_reader = BufReader::new(child_stdout);
 
-    // Give the REPL a moment to start up before sending commands
-    std::thread::sleep(Duration::from_millis(500));
+    // Wait for the REPL banner to appear
+    let (found, banner) = wait_for_stdout(&mut stdout_reader, "Ctrl-D", Duration::from_secs(10));
+    assert!(found, "REPL banner did not appear: {}", banner);
 
-    // Start the socket REPL server in a thread from the interactive REPL
-    // Send commands one at a time with flushes to ensure sequential processing
-    stdin
-        .write_all(b"use beagle.repl as repl\n")
-        .expect("failed to write to repl stdin");
-    stdin.flush().unwrap();
-    std::thread::sleep(Duration::from_millis(500));
-
-    let start_cmd = format!(
-        "thread(fn() {{ repl/start-repl-server(\"127.0.0.1\", {}) }})\n",
+    // Send commands to start the socket REPL server
+    let cmds = format!(
+        "use beagle.repl as repl\nthread(fn() {{ repl/start-repl-server(\"127.0.0.1\", {}) }})\n",
         port
     );
     stdin
-        .write_all(start_cmd.as_bytes())
+        .write_all(cmds.as_bytes())
         .expect("failed to write to repl stdin");
     stdin.flush().unwrap();
 
-    // Poll until the server is accepting connections (max 15s)
-    let start = Instant::now();
-    let mut stream = None;
-    while start.elapsed() < Duration::from_secs(15) {
-        match TcpStream::connect(format!("127.0.0.1:{}", port)) {
-            Ok(s) => {
-                stream = Some(s);
-                break;
-            }
-            Err(_) => std::thread::sleep(Duration::from_millis(200)),
-        }
-    }
-    if stream.is_none() {
+    // Wait for the server to print "listening"
+    let (found, output) = wait_for_stdout(&mut stdout_reader, "listening", Duration::from_secs(15));
+    if !found {
         let _ = child.kill();
-        let output = child.wait_with_output().expect("failed to wait on child");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
         panic!(
-            "Socket REPL server did not start within 15s on port {}\n\n--- STDERR ---\n{}\n--- STDOUT ---\n{}",
-            port, stderr, stdout
+            "Socket REPL server did not start on port {}.\nStdout so far: {}",
+            port, output
         );
     }
-    let stream = stream.unwrap();
+
+    // Now connect
+    let stream = TcpStream::connect(format!("127.0.0.1:{}", port))
+        .unwrap_or_else(|e| {
+            let _ = child.kill();
+            panic!("Failed to connect to REPL server on port {}: {}", port, e);
+        });
 
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
