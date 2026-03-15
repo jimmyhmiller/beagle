@@ -323,6 +323,25 @@ pub struct MultiArityInfo {
     pub arities: Vec<(usize, bool)>,
 }
 
+/// Holds compiled function data to be installed into the jump table later.
+/// Used for batch installation: all functions in an eval are compiled first,
+/// then their jump table entries are updated atomically, preventing partial
+/// states where some functions are new but others are still old.
+struct DeferredFunctionUpdate {
+    name: Option<String>,
+    pointer: *const u8,
+    code_size: usize,
+    max_locals: usize,
+    stack_map: Vec<(usize, StackMapDetails)>,
+    number_of_args: usize,
+    is_variadic: bool,
+    min_args: usize,
+    docstring: Option<String>,
+    arg_names: Vec<String>,
+    source_file: Option<String>,
+    source_line: Option<usize>,
+}
+
 pub struct Compiler {
     pub code_allocator: CodeAllocator,
     pub property_look_up_cache: MmapMut,
@@ -340,6 +359,10 @@ pub struct Compiler {
     pub multi_arity_functions: HashMap<String, MultiArityInfo>,
     /// Dynamic variables: name -> (namespace_id, slot)
     pub dynamic_vars: HashMap<String, (usize, usize)>,
+    /// When true, upsert_function defers jump table updates
+    defer_function_installs: bool,
+    /// Buffer of function updates to be applied atomically
+    deferred_updates: Vec<DeferredFunctionUpdate>,
 }
 
 impl Compiler {
@@ -441,6 +464,12 @@ impl Compiler {
             runtime.functions.len()
         };
 
+        // Enable deferred function installation: compile all functions in this
+        // eval, but don't update their jump table entries until the end.
+        // This prevents partial states where some functions are new (expecting
+        // new struct layout) while others are still old (producing old-layout objects).
+        self.defer_function_installs = true;
+
         let compile_result = self.compile_ast(
             ast,
             Some("REPL_FUNCTION".to_string()),
@@ -455,6 +484,9 @@ impl Compiler {
                 if let Some(saved_id) = saved_namespace_id {
                     self.set_current_namespace(saved_id);
                 }
+                // Discard any deferred updates from the failed compilation
+                self.deferred_updates.clear();
+                self.defer_function_installs = false;
                 // Remove functions that were reserved during this failed compilation
                 let runtime = get_runtime().get_mut();
                 runtime.functions.truncate(functions_before);
@@ -472,6 +504,10 @@ impl Compiler {
             store.set_file_diagnostics("repl".to_string(), diagnostics);
         }
 
+        // Flush all deferred function updates: make code executable and
+        // update all jump table entries atomically.
+        self.defer_function_installs = false;
+        self.flush_deferred_functions();
         self.code_allocator.make_executable();
         if let Some(top_level) = top_level {
             let function = self.get_function_by_name(&top_level).ok_or_else(|| {
@@ -1111,9 +1147,6 @@ impl Compiler {
         );
         let code = backend.compile_to_bytes();
         let pointer = self.add_code(&code)?;
-        let runtime = get_runtime().get_mut();
-        // TODO: Before this we did some weird stuff of mapping over the stack_map details
-        // and I don't remember why
         let stack_map = backend
             .translate_stack_map(pointer as usize)
             .iter()
@@ -1130,20 +1163,83 @@ impl Compiler {
                 )
             })
             .collect();
-        runtime.upsert_function(
-            function_name,
-            pointer,
-            code.len(),
-            max_locals,
-            stack_map,
-            number_of_args,
-            is_variadic,
-            min_args,
-            docstring,
-            arg_names,
-            source_file,
-            source_line,
-        )
+
+        if self.defer_function_installs {
+            // Batch mode: compile code but defer the jump table update.
+            // Code is written to executable pages but the jump table still
+            // points to the old function until flush_deferred_functions().
+            // make_executable is called later in flush_deferred_functions.
+            self.deferred_updates.push(DeferredFunctionUpdate {
+                name: function_name.map(|s| s.to_string()),
+                pointer,
+                code_size: code.len(),
+                max_locals,
+                stack_map,
+                number_of_args,
+                is_variadic,
+                min_args,
+                docstring,
+                arg_names,
+                source_file,
+                source_line,
+            });
+            // Return a placeholder — the real pointer will be set during flush.
+            // For now, return the code pointer (it's valid, just not in the jump table yet).
+            Ok(pointer as usize)
+        } else {
+            // Immediate mode: make executable and update jump table now.
+            // Make the new code executable BEFORE updating the jump table.
+            // Without this, there's a race: another thread following the jump table
+            // could try to execute the new code while the page is still writable
+            // (not executable), causing SIGBUS on ARM64 due to W^X enforcement.
+            self.code_allocator.make_executable();
+            let runtime = get_runtime().get_mut();
+            runtime.upsert_function(
+                function_name,
+                pointer,
+                code.len(),
+                max_locals,
+                stack_map,
+                number_of_args,
+                is_variadic,
+                min_args,
+                docstring,
+                arg_names,
+                source_file,
+                source_line,
+            )
+        }
+    }
+
+    /// Install all deferred function updates into the jump table atomically.
+    /// This ensures that other threads see either all old functions or all new
+    /// functions, never a mix that could lead to new functions being called
+    /// with old-layout struct values.
+    fn flush_deferred_functions(&mut self) {
+        if self.deferred_updates.is_empty() {
+            return;
+        }
+        // First make all new code pages executable
+        self.code_allocator.make_executable();
+        // Then install all functions into the jump table
+        let updates = std::mem::take(&mut self.deferred_updates);
+        let runtime = get_runtime().get_mut();
+        for update in updates {
+            let _ = runtime.upsert_function(
+                update.name.as_deref(),
+                update.pointer,
+                update.code_size,
+                update.max_locals,
+                update.stack_map,
+                update.number_of_args,
+                update.is_variadic,
+                update.min_args,
+                update.docstring,
+                update.arg_names,
+                update.source_file,
+                update.source_line,
+            );
+        }
     }
 
     pub fn upsert_function_bytes(
@@ -1156,6 +1252,7 @@ impl Compiler {
         min_args: usize,
     ) -> Result<usize, Box<dyn Error>> {
         let pointer = self.add_code(&code)?;
+        self.code_allocator.make_executable();
         let runtime = get_runtime().get_mut();
         let stack_map = vec![];
         runtime.upsert_function(
@@ -1518,6 +1615,8 @@ impl CompilerThread {
                 diagnostic_store,
                 multi_arity_functions: HashMap::new(),
                 dynamic_vars: HashMap::new(),
+                defer_function_installs: false,
+                deferred_updates: Vec::new(),
             },
             channel,
         })

@@ -2218,14 +2218,19 @@ impl AstCompiler<'_> {
                 };
 
                 if let Some(spread_expr) = spread {
-                    // Spread path: type-checked copy of source object, then patch explicit fields
+                    // Spread path: migrate source object to current layout, then patch explicit fields.
+                    // copy_object_spread always produces an object with the current layout,
+                    // so the write_field indices (computed at compile time) are correct.
                     self.not_tail_position();
                     let spread_val = self.call_compile(&spread_expr)?;
                     let spread_reg = self.ir.assign_new(spread_val);
                     let struct_id_val = self.ir.assign_new(Value::RawValue(struct_id));
                     let copy_ptr = self.call_builtin(
                         "beagle.builtin/copy-object-spread",
-                        vec![spread_reg.into(), struct_id_val.into()],
+                        vec![
+                            spread_reg.into(),
+                            struct_id_val.into(),
+                        ],
                     )?;
                     let copy_ptr_reg = self.ir.assign_new(copy_ptr);
                     let copy_ptr_raw = self.ir.untag(copy_ptr_reg.into());

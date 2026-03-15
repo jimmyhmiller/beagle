@@ -6830,8 +6830,9 @@ pub unsafe extern "C" fn copy_object(
     }
 }
 
-/// Like copy_object but checks the source struct_id matches expected_struct_id first.
-/// Throws a StructError with a descriptive message on mismatch or non-struct input.
+/// Copies a struct for spread syntax, migrating to the current layout if needed.
+/// The source object may have an old layout version — this function always produces
+/// a copy with the CURRENT layout, so the caller's compile-time field indices are correct.
 pub unsafe extern "C" fn copy_object_spread(
     stack_pointer: usize,
     frame_pointer: usize,
@@ -6874,16 +6875,16 @@ pub unsafe extern "C" fn copy_object_spread(
         }
     }
 
-    // Check if source object has an old layout that needs migration
     let source_object = HeapObject::from_tagged(object_pointer);
     let source_layout_version = source_object.get_layout_version();
+
     let runtime = get_runtime().get_mut();
     let current_version = runtime
         .structs
         .get_current_layout_version(expected_struct_id);
 
     if source_layout_version == current_version {
-        // Same layout — fast path: simple copy
+        // Source already has current layout — simple copy
         let object_pointer_id = runtime.register_temporary_root(object_pointer);
         let object = HeapObject::from_tagged(object_pointer);
         let header = object.get_header();
@@ -6912,44 +6913,37 @@ pub unsafe extern "C" fn copy_object_spread(
             }
         }
     } else {
-        // Different layout — migrate: allocate with current field count, map fields
-        let current_def = runtime
+        // Source has old layout — migrate to current layout.
+        // Look up current struct definition for target fields
+        let current_fields: Vec<String> = runtime
             .get_struct_by_id(expected_struct_id)
-            .expect("Struct must exist");
-        let new_field_count = current_def.fields.len();
+            .expect("Struct must exist")
+            .fields
+            .clone();
+        let current_field_count = current_fields.len();
 
-        // Get migration plan (maps old field positions to new)
-        let field_map: Vec<Option<usize>> = if let Some(plan) = runtime
+        // Look up source layout fields
+        let source_fields: Vec<String> = runtime
             .structs
-            .migration_plan_for(expected_struct_id, source_layout_version)
-        {
-            plan.field_map.clone()
-        } else {
-            // No plan available — build one on the fly from old definition
-            if let Some(old_def) = runtime
-                .structs
-                .get_old_definition(expected_struct_id, source_layout_version)
-            {
-                current_def
+            .get_old_definition(expected_struct_id, source_layout_version)
+            .map(|d| d.fields.clone())
+            .unwrap_or_else(|| {
+                runtime
+                    .get_struct_by_id(expected_struct_id)
+                    .expect("Struct must exist")
                     .fields
-                    .iter()
-                    .map(|new_field| old_def.fields.iter().position(|f| f == new_field))
-                    .collect()
-            } else {
-                // Fallback: identity map for overlapping fields, None for rest
-                (0..new_field_count)
-                    .map(|i| {
-                        let src_obj = HeapObject::from_tagged(object_pointer);
-                        let src_fields = src_obj.get_header().size as usize;
-                        if i < src_fields { Some(i) } else { None }
-                    })
-                    .collect()
-            }
-        };
+                    .clone()
+            });
+
+        // Build field map: for each field in current layout, find its position in source
+        let field_map: Vec<Option<usize>> = current_fields
+            .iter()
+            .map(|field| source_fields.iter().position(|f| f == field))
+            .collect();
 
         let object_pointer_id = runtime.register_temporary_root(object_pointer);
         let kind = BuiltInTypes::get_kind(object_pointer);
-        let to_pointer = match runtime.allocate(new_field_count, stack_pointer, kind) {
+        let to_pointer = match runtime.allocate(current_field_count, stack_pointer, kind) {
             Ok(ptr) => ptr,
             Err(_) => unsafe {
                 runtime.unregister_temporary_root(object_pointer_id);
@@ -6965,12 +6959,12 @@ pub unsafe extern "C" fn copy_object_spread(
         let source = HeapObject::from_tagged(object_pointer);
         let mut dest = HeapObject::from_tagged(to_pointer);
 
-        // Write header with current struct_id and layout version
+        // Write header with current layout version
         let source_header = source.get_header();
         let new_header = crate::types::Header {
             type_id: source_header.type_id,
             type_data: expected_struct_id as u32,
-            size: new_field_count as u16,
+            size: current_field_count as u16,
             opaque: source_header.opaque,
             marked: false,
             large: false,
@@ -6978,7 +6972,7 @@ pub unsafe extern "C" fn copy_object_spread(
         };
         dest.writer_header_direct(new_header);
 
-        // Map fields from old positions to new positions, null-fill missing
+        // Map fields from source to current layout, null-fill new fields
         let null_val = BuiltInTypes::null_value() as usize;
         for (new_idx, mapping) in field_map.iter().enumerate() {
             let value = match mapping {

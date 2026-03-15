@@ -1,0 +1,294 @@
+Steps eval'd to convert raylib_game.bg from "catch" to "shoot" mechanic
+========================================================================
+
+NOTE: This file was updated by a second session (2026-03-13).
+The entries below are from that session.  The old session's notes
+have been preserved further down under "PREVIOUS SESSION".
+
+════════════════════════════════════════════════════════════════
+CURRENT SESSION EVALS
+════════════════════════════════════════════════════════════════
+
+EVAL 1 — New FFI binding, Bullet struct, constants
+----------------------------------------------------
+
+  let IsKeyPressed = ffi/get-function(raylib, "IsKeyPressed",
+      [ffi/Type.I32], ffi/Type.I32)
+  let KEY_SPACE = 32
+
+  struct Bullet { x, y }
+
+  let BULLET_W     = 4
+  let BULLET_H     = 12
+  let BULLET_SPEED = 10
+  let ORANGE       = rgb(255, 161, 0)
+
+  - IsKeyPressed fires once per press (vs IsKeyDown which fires every frame).
+  - Bullet is a simple struct: x/y position only.
+  - ORANGE used to render bullets so they're visually distinct.
+  - Result: => 4278231551  (the ORANGE color value, eval succeeded)
+
+
+EVAL 2 — Redefine Game struct + all game logic + migration shim
+----------------------------------------------------------------
+
+  struct Game { player_x, balls, bullets, score, missed, frame }
+    Added "bullets" field. The old running Game had no bullets field.
+
+  fn bullet-hits-ball(bullet, ball)
+    AABB collision: checks if the bullet rectangle (BULLET_W x BULLET_H)
+    overlaps the ball square (ball.size x ball.size).
+
+  fn update-balls(game)  [REDEFINED]
+    1. Move all balls down by ball.dy → moved_balls list.
+    2. Move all game.bullets up by BULLET_SPEED; drop any that leave
+       the top of the screen.
+    3. If IsKeyPressed(KEY_SPACE) != 0, append a new Bullet centered
+       on the player paddle at PLAYER_Y.
+    4. Collision pass 1 (over moved_balls):
+         - ball hit by any bullet → score += ball.size, ball removed
+         - ball.y > HEIGHT        → missed++, ball removed
+         - otherwise              → ball survives
+    5. Collision pass 2 (over moved_bullets):
+         - bullet hit any ball in moved_balls → bullet removed
+         - otherwise                          → bullet survives
+    6. Spawn a new falling block every 40 frames (was 20 — slowed down
+       so the player has time to aim).
+    7. Returns updated Game with balls/bullets/score/missed.
+
+  fn render(game)  [REDEFINED]
+    - Draws paddle (unchanged).
+    - NEW: draws each bullet as ORANGE rectangle (BULLET_W x BULLET_H).
+    - Draws falling blocks (GOLD if size > 22, GREEN otherwise).
+    - HUD: "Arrow keys to move, SPACE to shoot, ESC to quit"
+
+  fn game-loop(game)  [REDEFINED — migration shim]
+    The old recursive game-loop was passing Game structs without a
+    "bullets" field.  On its next tail-call it calls this new definition.
+    Rather than touch game.bullets (which doesn't exist on the old value),
+    this shim ignores the incoming game entirely and starts a fresh
+    shooter game via shooter-loop().
+
+  fn shooter-loop(game)  [NEW]
+    The real shooter game loop:
+      update-player → update-balls (also handles bullets) → render
+      → recurse with frame+1
+    Uses Game { ...game, frame: game.frame + 1 } spread, which is safe
+    because every Game produced after the migration has the bullets field.
+
+  - Result: => function  (eval succeeded)
+
+SUSPECTED CRASH CAUSE (this session)
+--------------------------------------
+The game crashed despite both evals returning success.  Most likely:
+  - The old game-loop made one more recursive call *after* Game was
+    redefined but *before* game-loop was redefined, passing the old
+    struct into new update-balls which accessed game.bullets → panic.
+  - OR: redefining struct Game while a live instance is in-flight
+    caused a layout mismatch at runtime.
+
+FIX: Apply all changes directly in raylib_game.bg and restart cleanly
+instead of live-patching a running loop that already holds old Game values.
+
+════════════════════════════════════════════════════════════════
+PREVIOUS SESSION EVALS (kept for reference)
+════════════════════════════════════════════════════════════════
+
+
+STEP 1 — Change large squares from GOLD to SKYBLUE (succeeded, game kept running)
+----------------------------------------------------------------------------------
+fn render(game) {
+    BeginDrawing()
+    ClearBackground(BG)
+
+    // Player
+    DrawRectangle(game.player_x, PLAYER_Y, PLAYER_W, PLAYER_H, SKYBLUE)
+
+    // Balls
+    for ball in game.balls {
+        let c = if ball.size > 22 { SKYBLUE } else { GREEN }
+        DrawRectangle(ball.x, ball.y, ball.size, ball.size, c)
+    }
+
+    // HUD
+    DrawText("Arrow keys to move, ESC to quit", 10, 10, 16, GRAY)
+    DrawText("Score: " ++ to-string(game.score), WIDTH - 160, 10, 20, GREEN)
+    DrawText("Missed: " ++ to-string(game.missed), WIDTH - 160, 36, 20, RED)
+
+    EndDrawing()
+}
+
+
+STEP 2 — Change large squares from SKYBLUE to MAUVE (succeeded, game kept running)
+-----------------------------------------------------------------------------------
+Added:
+    let MAUVE = rgb(200, 150, 180)
+
+Updated render to use MAUVE for ball.size > 22 (same render fn as above, color changed).
+
+
+STEP 3 — Full shooter conversion (game CRASHED after this eval)
+---------------------------------------------------------------
+Everything below was eval'd in a single block:
+
+    struct Bullet { x, y }
+
+    let KEY_SPACE = 32
+    let BULLET_SPEED = 10
+    let BULLET_W = 4
+    let BULLET_H = 12
+    let SHOOT_COOLDOWN = 12
+
+    struct Game {
+        player_x
+        balls
+        bullets
+        score
+        missed
+        frame
+        cooldown
+    }
+
+    fn update-player(game) {
+        let dx = if IsKeyDown(KEY_LEFT) != 0 { 0 - SPEED } else { 0 }
+        let dx = if IsKeyDown(KEY_RIGHT) != 0 { dx + SPEED } else { dx }
+        let new_x = game.player_x + dx
+
+        let clamped = if new_x < 0 { 0 }
+            else if new_x + PLAYER_W > WIDTH { WIDTH - PLAYER_W }
+            else { new_x }
+
+        let new_cooldown = if game.cooldown > 0 { game.cooldown - 1 } else { 0 }
+        let fire = IsKeyDown(KEY_SPACE) != 0 && game.cooldown == 0
+
+        let new_bullets = if fire {
+            push(game.bullets, Bullet { x: clamped + PLAYER_W / 2 - BULLET_W / 2, y: PLAYER_Y - BULLET_H })
+        } else {
+            game.bullets
+        }
+        let new_cooldown = if fire { SHOOT_COOLDOWN } else { new_cooldown }
+
+        Game { ...game, player_x: clamped, bullets: new_bullets, cooldown: new_cooldown }
+    }
+
+    fn update-balls(game) {
+        let mut new_balls = []
+        let mut new_missed = game.missed
+
+        for ball in game.balls {
+            let moved = Ball { ...ball, y: ball.y + ball.dy }
+            if moved.y > HEIGHT {
+                new_missed = new_missed + 1
+            } else {
+                new_balls = push(new_balls, moved)
+            }
+        }
+
+        let final_balls = if game.frame % 20 == 0 {
+            push(new_balls, spawn-ball())
+        } else {
+            new_balls
+        }
+
+        Game { ...game, balls: final_balls, missed: new_missed }
+    }
+
+    fn update-player-bullets(game) {
+        let mut new_bullets = []
+        let mut live_balls = game.balls
+        let mut new_score = game.score
+
+        for b in game.bullets {
+            let moved = Bullet { x: b.x, y: b.y - BULLET_SPEED }
+            if moved.y + BULLET_H > 0 {
+                let mut did_hit = 0
+                let mut hit_score = 0
+                let mut remaining = []
+                for ball in live_balls {
+                    if did_hit != 0 {
+                        remaining = push(remaining, ball)
+                    } else if moved.x + BULLET_W > ball.x && moved.x < ball.x + ball.size
+                            && moved.y < ball.y + ball.size && moved.y + BULLET_H > ball.y {
+                        did_hit = 1
+                        hit_score = ball.size
+                    } else {
+                        remaining = push(remaining, ball)
+                    }
+                }
+                live_balls = remaining
+                if did_hit != 0 {
+                    new_score = new_score + hit_score
+                } else {
+                    new_bullets = push(new_bullets, moved)
+                }
+            }
+        }
+
+        Game { ...game, bullets: new_bullets, balls: live_balls, score: new_score }
+    }
+
+    fn render(game) {
+        BeginDrawing()
+        ClearBackground(BG)
+
+        DrawRectangle(game.player_x, PLAYER_Y, PLAYER_W, PLAYER_H, SKYBLUE)
+
+        for ball in game.balls {
+            let c = if ball.size > 22 { MAUVE } else { GREEN }
+            DrawRectangle(ball.x, ball.y, ball.size, ball.size, c)
+        }
+
+        for b in game.bullets {
+            DrawRectangle(b.x, b.y, BULLET_W, BULLET_H, WHITE)
+        }
+
+        DrawText("Arrow keys: move  SPACE: shoot  ESC: quit", 10, 10, 16, GRAY)
+        DrawText("Score: " ++ to-string(game.score), WIDTH - 160, 10, 20, GREEN)
+        DrawText("Missed: " ++ to-string(game.missed), WIDTH - 160, 36, 20, RED)
+
+        EndDrawing()
+    }
+
+    fn new-game-loop(game) {
+        if WindowShouldClose() != 0 {
+            game
+        } else {
+            let game = update-player(game)
+            let game = update-balls(game)
+            let game = update-player-bullets(game)
+            render(game)
+            new-game-loop(Game { ...game, frame: game.frame + 1 })
+        }
+    }
+
+    fn game-loop(old_game) {
+        new-game-loop(Game {
+            player_x: old_game.player_x,
+            balls: old_game.balls,
+            bullets: [],
+            score: old_game.score,
+            missed: old_game.missed,
+            frame: old_game.frame,
+            cooldown: 0
+        })
+    }
+
+SUSPECTED CRASH CAUSES
+----------------------
+1. Redefining `struct Game` with new fields (bullets, cooldown) while an old Game
+   instance is live in the recursive game-loop may have caused a struct layout conflict.
+
+2. The `game-loop` shim tries to access `old_game.bullets` and `old_game.cooldown`
+   which don't exist on the old struct — this likely panicked.
+   WAIT: the shim sets bullets: [] and cooldown: 0 explicitly, but it also does
+   `...game` spread in new-game-loop which uses the NEW struct layout. The old_game
+   passed to game-loop only has the old fields, so `old_game.player_x` etc. should
+   be fine. But `old_game.balls` is fine too.
+
+3. Nested `for` loops with `let mut` inside an outer `for` loop body — if Beagle
+   doesn't support mutable locals scoped inside loop bodies, update-player-bullets
+   would fail.
+
+4. `let fire = IsKeyDown(KEY_SPACE) != 0 && game.cooldown == 0` — using `&&` to
+   combine a != 0 check with an == 0 check across different expressions might have
+   a parsing/eval issue.

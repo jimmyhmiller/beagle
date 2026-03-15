@@ -308,7 +308,13 @@ struct Thread {
 fn __run_thread_start() {
     let thread-obj = primitive/__get-my-thread-obj();
     let f = thread-obj.closure;
-    f()
+    try {
+        f()
+    } catch (e) {
+        println("Uncaught exception in thread:")
+        println(e)
+        null
+    }
 }
 
 // Legacy function - kept for compatibility but no longer used.

@@ -2526,8 +2526,14 @@ fn __run_thread_start() {
     let loop_id = get-io-loop()
     let tasks = atom([])
     let handler = CooperativeHandler { tasks: tasks, loop_id: loop_id }
-    handle effect/Handler(Async) with handler {
-        f()
+    try {
+        handle effect/Handler(Async) with handler {
+            f()
+        }
+        scheduler-loop(handler)
+    } catch (e) {
+        println("Uncaught exception in thread:")
+        println(e)
+        null
     }
-    scheduler-loop(handler)
 }

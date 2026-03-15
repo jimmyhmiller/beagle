@@ -1,0 +1,228 @@
+RAYLIB GAME - CHANGES MADE
+==========================
+
+Starting point: the original raylib_game.bg file.
+
+
+─── CHANGE 1: Make small squares SKYBLUE (hot-reloaded via REPL) ───────────────
+
+Redefined render() so the small squares (size <= 22) use SKYBLUE instead of GREEN:
+
+    fn render(game) {
+        BeginDrawing()
+        ClearBackground(BG)
+
+        // Player
+        DrawRectangle(game.player_x, PLAYER_Y, PLAYER_W, PLAYER_H, SKYBLUE)
+
+        // Balls
+        for ball in game.balls {
+            let c = if ball.size > 22 { GOLD } else { SKYBLUE }   // <-- was GREEN
+            DrawRectangle(ball.x, ball.y, ball.size, ball.size, c)
+        }
+
+        // HUD
+        DrawText("Arrow keys to move, ESC to quit", 10, 10, 16, GRAY)
+        DrawText("Score: " ++ to-string(game.score), WIDTH - 160, 10, 20, GREEN)
+        DrawText("Missed: " ++ to-string(game.missed), WIDTH - 160, 36, 20, RED)
+
+        EndDrawing()
+    }
+
+
+─── CHANGE 2: Make largest square size 100 (hot-reloaded via REPL) ─────────────
+
+Redefined spawn-ball() to use 100 as the max random size instead of 30:
+
+    fn spawn-ball() {
+        let size = GetRandomValue(12, 100)   // <-- was GetRandomValue(12, 30)
+        Ball {
+            x: GetRandomValue(0, WIDTH - size),
+            y: 0 - size,
+            dy: GetRandomValue(3, 6),
+            size: size
+        }
+    }
+
+
+─── CHANGE 3: Add shooting mechanic (required full restart) ─────────────────────
+
+NOTE: This change modifies the Game struct, which means the running game will
+crash when hot-reloaded (the live game state has no `bullets` field). A full
+restart is required after making these changes.
+
+Step 1 - eval: Add new struct + key constant
+
+    struct Bullet { x, y }
+
+    struct Game {
+        player_x
+        balls
+        score
+        missed
+        frame
+        bullets           // <-- new
+        shoot_cooldown    // <-- new
+    }
+
+    let KEY_SPACE = 32
+
+
+Step 2 - eval: Redefine update-player + add update-bullets-and-balls + redefine update-balls
+
+    fn update-player(game) {
+        let dx = if IsKeyDown(KEY_LEFT) != 0 { 0 - SPEED } else { 0 }
+        let dx = if IsKeyDown(KEY_RIGHT) != 0 { dx + SPEED } else { dx }
+        let new_x = game.player_x + dx
+
+        let clamped = if new_x < 0 { 0 }
+            else if new_x + PLAYER_W > WIDTH { WIDTH - PLAYER_W }
+            else { new_x }
+
+        let new_bullets = if IsKeyDown(KEY_SPACE) != 0 && game.shoot_cooldown == 0 {
+            push(game.bullets, Bullet { x: clamped + PLAYER_W / 2, y: PLAYER_Y })
+        } else {
+            game.bullets
+        }
+
+        let new_cooldown = if IsKeyDown(KEY_SPACE) != 0 && game.shoot_cooldown == 0 {
+            10
+        } else if game.shoot_cooldown > 0 {
+            game.shoot_cooldown - 1
+        } else {
+            0
+        }
+
+        Game { ...game, player_x: clamped, bullets: new_bullets, shoot_cooldown: new_cooldown }
+    }
+
+    fn update-bullets-and-balls(game) {
+        let mut live_balls = game.balls
+        let mut new_score = game.score
+        let mut live_bullets = []
+
+        for bullet in game.bullets {
+            let moved = Bullet { ...bullet, y: bullet.y - 12 }
+            if moved.y < 0 {
+                // off screen, drop it
+            } else {
+                let mut hit = false
+                let mut remaining = []
+                for ball in live_balls {
+                    if !hit && moved.x >= ball.x && moved.x <= ball.x + ball.size
+                            && moved.y >= ball.y && moved.y <= ball.y + ball.size {
+                        new_score = new_score + ball.size
+                        hit = true
+                    } else {
+                        remaining = push(remaining, ball)
+                    }
+                }
+                live_balls = remaining
+                if !hit {
+                    live_bullets = push(live_bullets, moved)
+                }
+            }
+        }
+
+        Game { ...game, bullets: live_bullets, balls: live_balls, score: new_score }
+    }
+
+    fn update-balls(game) {
+        let mut new_balls = []
+        let mut new_missed = game.missed
+
+        for ball in game.balls {
+            let moved = Ball { ...ball, y: ball.y + ball.dy }
+
+            let hit_player = moved.x + moved.size > game.player_x
+                && moved.x < game.player_x + PLAYER_W
+                && moved.y + moved.size > PLAYER_Y
+                && moved.y < PLAYER_Y + PLAYER_H
+
+            if hit_player {
+                // caught by player, score handled elsewhere
+            } else if moved.y > HEIGHT {
+                new_missed = new_missed + 1
+            } else {
+                new_balls = push(new_balls, moved)
+            }
+        }
+
+        let final_balls = if game.frame % 20 == 0 {
+            push(new_balls, spawn-ball())
+        } else {
+            new_balls
+        }
+
+        Game { ...game, balls: final_balls, missed: new_missed }
+    }
+
+
+Step 3 - eval: Redefine render + game-loop
+(NOTE: this eval caused the crash because the struct change hit the live state)
+
+    fn render(game) {
+        BeginDrawing()
+        ClearBackground(BG)
+
+        DrawRectangle(game.player_x, PLAYER_Y, PLAYER_W, PLAYER_H, SKYBLUE)
+
+        for bullet in game.bullets {
+            DrawRectangle(bullet.x - 3, bullet.y, 6, 14, WHITE)
+        }
+
+        for ball in game.balls {
+            let c = if ball.size > 22 { GOLD } else { SKYBLUE }
+            DrawRectangle(ball.x, ball.y, ball.size, ball.size, c)
+        }
+
+        DrawText("Arrow keys to move, SPACE to shoot, ESC to quit", 10, 10, 16, GRAY)
+        DrawText("Score: " ++ to-string(game.score), WIDTH - 160, 10, 20, GREEN)
+        DrawText("Missed: " ++ to-string(game.missed), WIDTH - 160, 36, 20, RED)
+
+        EndDrawing()
+    }
+
+    fn game-loop(game) {
+        if WindowShouldClose() != 0 {
+            game
+        } else {
+            let game = update-player(game)
+            let game = update-balls(game)
+            let game = update-bullets-and-balls(game)
+            render(game)
+            game-loop(Game { ...game, frame: game.frame + 1 })
+        }
+    }
+
+
+Step 4 - After crash: updated the source file and restarted beagle_run.
+The main() initializer now includes the new fields:
+
+    fn main() {
+        InitWindow(WIDTH, HEIGHT, "Beagle + Raylib")
+        SetTargetFPS(60)
+
+        let result = game-loop(Game {
+            player_x: WIDTH / 2 - PLAYER_W / 2,
+            balls: [],
+            score: 0,
+            missed: 0,
+            frame: 0,
+            bullets: [],        // <-- new
+            shoot_cooldown: 0   // <-- new
+        })
+
+        println("Final score: " ++ to-string(result.score))
+        CloseWindow()
+    }
+
+
+─── LESSON LEARNED ──────────────────────────────────────────────────────────────
+
+Hot-reloading function bodies works great in Beagle's REPL.
+But changing a struct definition that is used by live in-memory data will crash,
+because the running game state (the `game` value being passed through game-loop)
+was constructed with the old struct shape and won't have the new fields.
+
+For struct changes: update the source file and do a full restart.
