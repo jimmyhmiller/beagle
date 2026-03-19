@@ -816,6 +816,13 @@ extern "C" fn split(
         .map(|s| s.to_string())
         .collect();
 
+    if delimiter_value == "\n" && parts.len() <= 3 {
+        eprintln!(
+            "[split] thread={:?} input_len={} delimiter='\\n' parts={:?}",
+            std::thread::current().id(), string_value.len(), parts
+        );
+    }
+
     match runtime.create_string_array(stack_pointer, &parts) {
         Ok(arr) => arr,
         Err(_) => unsafe {
