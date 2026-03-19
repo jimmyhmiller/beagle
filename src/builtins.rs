@@ -8129,6 +8129,7 @@ fn value_to_json_key(runtime: &Runtime, value: usize) -> Result<String, JsonErro
 /// Throws JsonError if the value cannot be encoded.
 extern "C" fn json_encode(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
+    eprintln!("[json_encode] called thread={:?}", std::thread::current().id());
     let runtime = get_runtime().get_mut();
 
     match value_to_json(runtime, value, 0) {
@@ -15512,6 +15513,7 @@ pub extern "C" fn call_handler_builtin(
     resume: usize,
 ) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
+    eprintln!("[call_handler] called thread={:?} op_value={:#x}", std::thread::current().id(), op_value);
 
     let runtime = get_runtime().get_mut();
 
