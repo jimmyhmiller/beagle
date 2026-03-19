@@ -4072,7 +4072,21 @@ pub unsafe extern "C" fn __pause(_stack_pointer: usize, frame_pointer: usize) ->
 
     while runtime.is_paused() {
         // Park can unpark itself even if I haven't called unpark
-        thread::park();
+        thread::park_timeout(std::time::Duration::from_secs(3));
+        if runtime.is_paused() && pause_start.elapsed() > std::time::Duration::from_secs(3) {
+            let thread_state_clone = runtime.thread_state.clone();
+            let (lock, _) = &*thread_state_clone;
+            let state = lock.lock().unwrap();
+            let registered = runtime.registered_thread_count.load(std::sync::atomic::Ordering::Acquire);
+            eprintln!(
+                "[__pause] STUCK for {:?} thread={:?} registered_threads={} c_calling={:?} paused_threads={}",
+                pause_start.elapsed(),
+                std::thread::current().id(),
+                registered,
+                state.c_calling_stack_pointers.keys().collect::<Vec<_>>(),
+                state.stack_pointers.len(),
+            );
+        }
     }
 
     // Apparently, I can't count on this not unparking
@@ -9020,9 +9034,47 @@ extern "C" fn eval_in_ns(
     f()
 }
 
-extern "C" fn sleep(time: usize) -> usize {
+extern "C" fn sleep(
+    _stack_pointer: usize,
+    frame_pointer: usize,
+    time: usize,
+) -> usize {
     let time = BuiltInTypes::untag(time);
+
+    // Register as c_calling before sleeping. Without this, GC would wait
+    // forever for this thread to hit a safepoint while it's blocked in sleep.
+    {
+        let runtime = get_runtime().get_mut();
+        let thread_state = runtime.thread_state.clone();
+        let (lock, condvar) = &*thread_state;
+        let mut state = lock.lock().unwrap();
+        state.register_c_call(frame_pointer);
+        condvar.notify_one();
+    }
+
     std::thread::sleep(std::time::Duration::from_millis(time as u64));
+
+    // Unregister from c_calling under gc_lock
+    {
+        let runtime = get_runtime().get_mut();
+        while runtime.is_paused() {
+            thread::yield_now();
+        }
+        loop {
+            match runtime.gc_lock.try_lock() {
+                Ok(_guard) => {
+                    let thread_state = runtime.thread_state.clone();
+                    let (lock, condvar) = &*thread_state;
+                    let mut state = lock.lock().unwrap();
+                    state.unregister_c_call();
+                    condvar.notify_one();
+                    break;
+                }
+                Err(_) => thread::yield_now(),
+            }
+        }
+    }
+
     BuiltInTypes::null_value() as usize
 }
 
@@ -9083,7 +9135,12 @@ extern "C" fn event_loop_create_threaded(pool_size: usize) -> usize {
 /// Run the event loop once, waiting for results with given timeout in milliseconds
 /// The dedicated I/O thread handles polling; this waits on Condvar for results.
 /// Returns the number of available results.
-extern "C" fn event_loop_run_once(loop_id: usize, timeout_ms: usize) -> usize {
+extern "C" fn event_loop_run_once(
+    _stack_pointer: usize,
+    frame_pointer: usize,
+    loop_id: usize,
+    timeout_ms: usize,
+) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
     let timeout_ms = BuiltInTypes::untag(timeout_ms) as u64;
     let runtime = get_runtime().get_mut();
@@ -9095,24 +9152,92 @@ extern "C" fn event_loop_run_once(loop_id: usize, timeout_ms: usize) -> usize {
         };
         event_loop.results_notify().clone()
     };
-    // Block on Condvar (runtime borrow is no longer held)
+
+    // Register as c_calling before blocking on the condvar. Without this,
+    // GC would wait forever for this thread to hit a safepoint while it's
+    // blocked on cvar.wait(), causing a deadlock. This was the root cause
+    // of socket REPL hangs on Linux x86-64 debug builds.
+    {
+        let thread_state = runtime.thread_state.clone();
+        let (lock, condvar) = &*thread_state;
+        let mut state = lock.lock().unwrap();
+        state.register_c_call(frame_pointer);
+        condvar.notify_one();
+    }
+
+    // Block on Condvar until the generation counter changes (runtime borrow is no longer held).
+    // Using a generation counter instead of a boolean ensures that when notify_all() wakes
+    // multiple waiting threads, each one independently detects new results. With a boolean,
+    // only the first thread to acquire the lock would see "ready=true" and the rest would
+    // block forever (or until the next notification).
+    let wait_start = std::time::Instant::now();
     {
         let (lock, cvar) = &*notify;
-        if let Ok(guard) = lock.lock() {
+        if let Ok(mut guard) = lock.lock() {
+            let gen_before = *guard;
             if timeout_ms == 0 {
-                // timeout_ms=0 means wait forever until notified (like Node.js epoll_wait)
-                if let Ok(mut guard) = cvar.wait(guard) {
-                    *guard = false;
+                // timeout_ms=0 means wait forever until generation changes
+                while *guard == gen_before {
+                    match cvar.wait(guard) {
+                        Ok(g) => guard = g,
+                        Err(e) => {
+                            guard = e.into_inner();
+                            break;
+                        }
+                    }
                 }
             } else {
                 // timeout_ms>0 means wait up to N milliseconds (cap at 50ms for safety)
-                let wait_time = std::time::Duration::from_millis(timeout_ms.min(50));
-                if let Ok((mut guard, _)) = cvar.wait_timeout(guard, wait_time) {
-                    *guard = false;
+                if *guard == gen_before {
+                    let wait_time = std::time::Duration::from_millis(timeout_ms.min(50));
+                    match cvar.wait_timeout(guard, wait_time) {
+                        Ok((g, _)) => guard = g,
+                        Err(e) => guard = e.into_inner().0,
+                    }
                 }
             }
+            drop(guard);
         }
     }
+    let wait_elapsed = wait_start.elapsed();
+    if wait_elapsed > std::time::Duration::from_secs(2) {
+        eprintln!(
+            "[event-loop-run-once] WARNING: condvar wait took {:?} (timeout_ms={}, loop_id={}, thread={:?})",
+            wait_elapsed, timeout_ms, loop_id, std::thread::current().id()
+        );
+    }
+
+    // Unregister from c_calling. Must hold gc_lock to prevent a race where
+    // GC starts between unregister and our next safepoint.
+    {
+        let runtime = get_runtime().get_mut();
+        let unreg_start = std::time::Instant::now();
+        while runtime.is_paused() {
+            thread::yield_now();
+        }
+        loop {
+            match runtime.gc_lock.try_lock() {
+                Ok(_guard) => {
+                    let thread_state = runtime.thread_state.clone();
+                    let (lock, condvar) = &*thread_state;
+                    let mut state = lock.lock().unwrap();
+                    state.unregister_c_call();
+                    condvar.notify_one();
+                    break;
+                }
+                Err(_) => thread::yield_now(),
+            }
+        }
+        let unreg_elapsed = unreg_start.elapsed();
+        if unreg_elapsed > std::time::Duration::from_secs(1) {
+            eprintln!(
+                "[event-loop-run-once] WARNING: unregister_c_call took {:?} (thread={:?})",
+                unreg_elapsed, std::thread::current().id()
+            );
+        }
+    }
+
+    let runtime = get_runtime().get_mut();
     let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(-1) as usize,
@@ -9300,6 +9425,7 @@ extern "C" fn tcp_write_async(
 
     // Get the data as bytes - handle both string literals and heap strings
     let data_str = runtime.get_string(stack_pointer, data);
+    eprintln!("[tcp_write_async] socket={} data_len={} thread={:?}", socket_id, data_str.len(), std::thread::current().id());
     let data_bytes = data_str.as_bytes().to_vec();
 
     let event_loop = match runtime.event_loops.get(loop_id) {
@@ -13430,7 +13556,7 @@ impl Runtime {
         self.add_builtin_with_doc(
             "beagle.core/sleep",
             sleep as *const u8,
-            false,
+            true,
             &["ms"],
             "Pause execution for the specified number of milliseconds.\n\nExamples:\n  (sleep 1000)  ; sleep for 1 second",
         )?;
@@ -13475,8 +13601,8 @@ impl Runtime {
         self.add_builtin_function(
             "beagle.core/event-loop-run-once",
             event_loop_run_once as *const u8,
-            false,
-            2,
+            true,
+            3, // stack_pointer + loop_id + timeout_ms (frame_pointer added automatically)
         )?;
         self.add_builtin_function(
             "beagle.core/event-loop-wake",

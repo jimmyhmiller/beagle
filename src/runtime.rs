@@ -1042,8 +1042,10 @@ pub struct EventLoop {
     shutdown: Arc<AtomicBool>,
     /// Handle to the event loop thread
     event_loop_thread: Mutex<Option<JoinHandle<()>>>,
-    /// Condvar to notify consumers when results are available
-    results_notify: Arc<(Mutex<bool>, Condvar)>,
+    /// Condvar to notify consumers when results are available.
+    /// The Mutex holds a generation counter that increments on each notification,
+    /// so multiple waiting threads can each detect new results independently.
+    results_notify: Arc<(Mutex<usize>, Condvar)>,
 }
 
 impl EventLoop {
@@ -1098,7 +1100,7 @@ impl EventLoop {
 
         let state = Arc::new(Mutex::new(state));
         let shutdown = Arc::new(AtomicBool::new(false));
-        let results_notify = Arc::new((Mutex::new(false), Condvar::new()));
+        let results_notify = Arc::new((Mutex::new(0usize), Condvar::new()));
 
         // Create TCP task channel
         let (tcp_task_tx, tcp_task_rx) = mpsc::channel::<TcpTask>();
@@ -1246,7 +1248,7 @@ impl EventLoop {
     }
 
     /// Get a reference to the results_notify Condvar
-    pub fn results_notify(&self) -> &Arc<(Mutex<bool>, Condvar)> {
+    pub fn results_notify(&self) -> &Arc<(Mutex<usize>, Condvar)> {
         &self.results_notify
     }
 
@@ -2316,43 +2318,72 @@ fn event_loop_thread_main(
     rx: mpsc::Receiver<TcpTask>,
     _waker: Arc<Waker>,
     shutdown: Arc<AtomicBool>,
-    results_notify: Arc<(Mutex<bool>, Condvar)>,
+    results_notify: Arc<(Mutex<usize>, Condvar)>,
 ) {
+    let mut iteration: u64 = 0;
+    let start = std::time::Instant::now();
     loop {
+        iteration += 1;
         // Phase 1: Lock state briefly — drain tasks and take poll/events out
-        let (mut poll, mut events, effective_timeout) = {
+        let (mut poll, mut events, effective_timeout, tasks_drained, pending_reads, pending_writes, tcp_results) = {
             let mut s = state.lock().unwrap();
             // Drain operation queue (non-blocking)
+            let mut drained = 0;
             while let Ok(task) = rx.try_recv() {
                 s.handle_tcp_task(task);
+                drained += 1;
             }
             let timeout = s.compute_poll_timeout(50);
             let poll = s.poll.take().expect("Poll must be present");
             let events = s.events.take().expect("Events must be present");
-            (poll, events, timeout)
+            let pr = s.pending_reads.len();
+            let pw = s.pending_writes.len();
+            let tr = s.completed_tcp_results.len();
+            (poll, events, timeout, drained, pr, pw, tr)
         }; // lock released — other threads can now access state freely
+
+        if tasks_drained > 0 || (iteration % 1000 == 0 && (pending_reads > 0 || pending_writes > 0)) {
+            eprintln!(
+                "[event-loop] iter={} elapsed={:?} drained={} pending_reads={} pending_writes={} tcp_results={}",
+                iteration, start.elapsed(), tasks_drained, pending_reads, pending_writes, tcp_results
+            );
+        }
 
         // Phase 2: Poll I/O events WITHOUT holding the lock
         let _ = poll.poll(&mut events, Some(effective_timeout));
 
+        let event_count = events.iter().count();
+
         // Phase 3: Lock state briefly — put poll/events back and process results
-        let should_notify = {
+        let (should_notify, new_tcp_results) = {
             let mut s = state.lock().unwrap();
             // IMPORTANT: Restore poll BEFORE processing events, because
             // process_events_and_timers may call update_socket_registration
             // which needs poll_mut() to re-register sockets with new interest.
             s.poll = Some(poll);
             let initial_file_count = s.completed_file_results.len();
+            let initial_tcp_count = s.completed_tcp_results.len();
             s.process_events_and_timers(&events);
             s.events = Some(events);
+            let new_tcp = s.completed_tcp_results.len() - initial_tcp_count;
             // Notify if TCP results, timers, or new file results arrived
-            !s.completed_tcp_results.is_empty()
+            let notify = !s.completed_tcp_results.is_empty()
                 || !s.completed_timers.is_empty()
-                || s.completed_file_results.len() > initial_file_count
+                || s.completed_file_results.len() > initial_file_count;
+            (notify, new_tcp)
         }; // lock released
 
-        if should_notify && let Ok(mut ready) = results_notify.0.lock() {
-            *ready = true;
+        if event_count > 0 || new_tcp_results > 0 {
+            eprintln!(
+                "[event-loop] iter={} events={} new_tcp_results={} should_notify={}",
+                iteration, event_count, new_tcp_results, should_notify
+            );
+        }
+
+        if should_notify {
+            if let Ok(mut generation) = results_notify.0.lock() {
+                *generation = generation.wrapping_add(1);
+            }
             results_notify.1.notify_all();
         }
 
