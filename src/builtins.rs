@@ -9126,35 +9126,23 @@ extern "C" fn event_loop_run_once(loop_id: usize, timeout_ms: usize) -> usize {
     let timeout_ms = BuiltInTypes::untag(timeout_ms) as u64;
     let runtime = get_runtime().get_mut();
 
-    let notify = {
-        let event_loop = match runtime.event_loops.get(loop_id) {
-            Some(el) => el,
-            None => return BuiltInTypes::Int.tag(-1) as usize,
-        };
-        event_loop.results_notify().clone()
+    // Simple polling: check for results, and if none, sleep briefly.
+    // Avoids condvar-based blocking which interacts badly with GC safepoint
+    // coordination on Linux x86-64 debug builds.
+    let event_loop = match runtime.event_loops.get(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
     };
-    // Block on Condvar until the generation counter changes.
-    // Always use a bounded wait (max 50ms) to guarantee forward progress
-    // even if a notification is missed. The generation counter ensures that
-    // if a notification arrived before we entered the wait, we return immediately.
-    {
-        let (lock, cvar) = &*notify;
-        if let Ok(mut guard) = lock.lock() {
-            let gen_before = *guard;
-            let wait_time = if timeout_ms == 0 {
-                std::time::Duration::from_millis(50)
-            } else {
-                std::time::Duration::from_millis(timeout_ms.min(50))
-            };
-            if *guard == gen_before {
-                match cvar.wait_timeout(guard, wait_time) {
-                    Ok((g, _)) => guard = g,
-                    Err(e) => guard = e.into_inner().0,
-                }
-            }
-            drop(guard);
-        }
+
+    let count = event_loop.tcp_results_count();
+    if count > 0 {
+        return BuiltInTypes::Int.tag(count as isize) as usize;
     }
+
+    // No results yet — yield and sleep briefly
+    let sleep_ms = if timeout_ms == 0 { 1 } else { timeout_ms.min(1) };
+    thread::sleep(std::time::Duration::from_millis(sleep_ms));
+
     let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(-1) as usize,
