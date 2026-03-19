@@ -15513,12 +15513,12 @@ pub extern "C" fn call_handler_builtin(
     resume: usize,
 ) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
-    eprintln!("[call_handler] called thread={:?} op_value={:#x}", std::thread::current().id(), op_value);
 
     let runtime = get_runtime().get_mut();
 
     // Get the enum type string (can be heap-allocated or string literal)
     let enum_type = runtime.get_string(stack_pointer, enum_type_ptr);
+    eprintln!("[call_handler] thread={:?} enum_type={}", std::thread::current().id(), enum_type);
 
     // Construct the protocol key: "beagle.effect/Handler<{enum_type}>"
     // Handler is always from beagle.effect (the core effect handler protocol)
