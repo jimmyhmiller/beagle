@@ -882,11 +882,19 @@ fn test_repl_starts_socket_server() {
     send("{\"op\":\"describe\",\"id\":\"d1\"}\n");
 
     let describe_resp = read_until_done(&mut reader);
-    assert!(
-        describe_resp.contains("d1"),
-        "describe response should contain request id, got: {}",
-        describe_resp
-    );
+    if !describe_resp.contains("d1") {
+        drop(reader);
+        drop(writer);
+        let _ = stdin.write_all(b":quit\n");
+        drop(stdin);
+        let _ = child.kill();
+        let output = child.wait_with_output().expect("wait_with_output");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        panic!(
+            "describe response should contain request id, got: {}\n=== CHILD STDERR ===\n{}",
+            describe_resp, stderr
+        );
+    }
     assert!(
         describe_resp.contains("eval"),
         "describe should list eval op, got: {}",

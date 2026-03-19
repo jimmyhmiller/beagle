@@ -11679,6 +11679,7 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
 ) -> ! {
     save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "invoke_continuation");
+    eprintln!("[invoke_cont_rt] called thread={:?} cont_ptr={:#x} value={:#x}", std::thread::current().id(), cont_ptr, value);
 
     let runtime = get_runtime().get_mut();
     let debug_prompts = runtime.get_command_line_args().debug;
