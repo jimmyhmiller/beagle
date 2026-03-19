@@ -9556,6 +9556,7 @@ extern "C" fn tcp_result_data(stack_pointer: usize, loop_id: usize) -> usize {
         }
     };
 
+    eprintln!("[tcp_result_data] thread={:?} data_len={} data={:?}", std::thread::current().id(), data.len(), &data[..data.len().min(80)]);
     let runtime = get_runtime().get_mut();
     runtime
         .allocate_string(stack_pointer, data)
