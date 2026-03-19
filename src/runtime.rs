@@ -2320,65 +2320,38 @@ fn event_loop_thread_main(
     shutdown: Arc<AtomicBool>,
     results_notify: Arc<(Mutex<usize>, Condvar)>,
 ) {
-    let mut iteration: u64 = 0;
-    let start = std::time::Instant::now();
     loop {
-        iteration += 1;
         // Phase 1: Lock state briefly — drain tasks and take poll/events out
-        let (mut poll, mut events, effective_timeout, tasks_drained, pending_reads, pending_writes, tcp_results) = {
+        let (mut poll, mut events, effective_timeout) = {
             let mut s = state.lock().unwrap();
             // Drain operation queue (non-blocking)
-            let mut drained = 0;
             while let Ok(task) = rx.try_recv() {
                 s.handle_tcp_task(task);
-                drained += 1;
             }
             let timeout = s.compute_poll_timeout(50);
             let poll = s.poll.take().expect("Poll must be present");
             let events = s.events.take().expect("Events must be present");
-            let pr = s.pending_reads.len();
-            let pw = s.pending_writes.len();
-            let tr = s.completed_tcp_results.len();
-            (poll, events, timeout, drained, pr, pw, tr)
+            (poll, events, timeout)
         }; // lock released — other threads can now access state freely
-
-        if tasks_drained > 0 || (iteration % 1000 == 0 && (pending_reads > 0 || pending_writes > 0)) {
-            eprintln!(
-                "[event-loop] iter={} elapsed={:?} drained={} pending_reads={} pending_writes={} tcp_results={}",
-                iteration, start.elapsed(), tasks_drained, pending_reads, pending_writes, tcp_results
-            );
-        }
 
         // Phase 2: Poll I/O events WITHOUT holding the lock
         let _ = poll.poll(&mut events, Some(effective_timeout));
 
-        let event_count = events.iter().count();
-
         // Phase 3: Lock state briefly — put poll/events back and process results
-        let (should_notify, new_tcp_results) = {
+        let should_notify = {
             let mut s = state.lock().unwrap();
             // IMPORTANT: Restore poll BEFORE processing events, because
             // process_events_and_timers may call update_socket_registration
             // which needs poll_mut() to re-register sockets with new interest.
             s.poll = Some(poll);
             let initial_file_count = s.completed_file_results.len();
-            let initial_tcp_count = s.completed_tcp_results.len();
             s.process_events_and_timers(&events);
             s.events = Some(events);
-            let new_tcp = s.completed_tcp_results.len() - initial_tcp_count;
             // Notify if TCP results, timers, or new file results arrived
-            let notify = !s.completed_tcp_results.is_empty()
+            !s.completed_tcp_results.is_empty()
                 || !s.completed_timers.is_empty()
-                || s.completed_file_results.len() > initial_file_count;
-            (notify, new_tcp)
+                || s.completed_file_results.len() > initial_file_count
         }; // lock released
-
-        if event_count > 0 || new_tcp_results > 0 {
-            eprintln!(
-                "[event-loop] iter={} events={} new_tcp_results={} should_notify={}",
-                iteration, event_count, new_tcp_results, should_notify
-            );
-        }
 
         if should_notify {
             if let Ok(mut generation) = results_notify.0.lock() {
