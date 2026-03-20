@@ -1762,19 +1762,32 @@ impl EventLoopState {
 
     /// Register/reregister a socket with its current combined interest
     fn update_socket_registration(&mut self, socket_id: usize) -> Result<(), String> {
+        let _has_read = self.pending_reads.contains_key(&socket_id);
+        let _has_write = self.pending_writes.contains_key(&socket_id);
         let interest = match self.socket_interest(socket_id) {
             Some(i) => i,
-            None => return Ok(()), // No pending ops, nothing to register
+            None => {
+                trace!("tcp", "io thread: update_socket_registration socket={} no interest (read={} write={})", socket_id, _has_read, _has_write);
+                return Ok(());
+            }
         };
         let token = self.get_or_create_socket_token(socket_id);
         if let Some(mut stream) = self.tcp_streams.remove(&socket_id) {
             let registry = self.poll_mut().registry();
             let result = registry
                 .register(&mut stream, token, interest)
-                .or_else(|_| registry.reregister(&mut stream, token, interest));
+                .or_else(|_e| {
+                    trace!("tcp", "io thread: register failed for socket={} token={}, trying reregister: {}", socket_id, token.0, _e);
+                    registry.reregister(&mut stream, token, interest)
+                });
             self.tcp_streams.insert(socket_id, stream);
+            match &result {
+                Ok(()) => trace!("tcp", "io thread: update_socket_registration socket={} token={} interest=read:{}/write:{} ok", socket_id, token.0, _has_read, _has_write),
+                Err(_e) => trace!("tcp", "io thread: update_socket_registration socket={} FAILED: {}", socket_id, _e),
+            }
             result.map_err(|e| e.to_string())
         } else {
+            trace!("tcp", "io thread: update_socket_registration socket={} not found in tcp_streams", socket_id);
             Err("Socket not found".to_string())
         }
     }
@@ -2361,7 +2374,7 @@ fn event_loop_thread_main(
 ) {
     loop {
         // Phase 1: Lock state briefly — drain tasks and take poll/events out
-        let (mut poll, mut events, effective_timeout, tasks_drained) = {
+        let (mut poll, mut events, effective_timeout, tasks_drained, _pending_reads_count, _pending_writes_count, _pending_ops_count) = {
             let mut s = state.lock().unwrap();
             // Drain operation queue (non-blocking)
             let mut tasks_drained = 0usize;
@@ -2370,17 +2383,23 @@ fn event_loop_thread_main(
                 tasks_drained += 1;
             }
             let timeout = s.compute_poll_timeout(50);
+            let _pr = s.pending_reads.len();
+            let _pw = s.pending_writes.len();
+            let _po = s.pending_ops.len();
             let poll = s.poll.take().expect("Poll must be present");
             let events = s.events.take().expect("Events must be present");
-            (poll, events, timeout, tasks_drained)
+            (poll, events, timeout, tasks_drained, _pr, _pw, _po)
         }; // lock released — other threads can now access state freely
 
         if tasks_drained > 0 {
-            trace!("event-loop", "io thread: drained {} tasks", tasks_drained);
+            trace!("event-loop", "io thread: drained {} tasks, pending: reads={} writes={} ops={}", tasks_drained, _pending_reads_count, _pending_writes_count, _pending_ops_count);
         }
 
         // Phase 2: Poll I/O events WITHOUT holding the lock
-        let _ = poll.poll(&mut events, Some(effective_timeout));
+        let poll_result = poll.poll(&mut events, Some(effective_timeout));
+        if let Err(ref _e) = poll_result {
+            trace!("event-loop", "io thread: poll error: {}", _e);
+        }
 
         let event_count = events.iter().count();
         if event_count > 0 {
