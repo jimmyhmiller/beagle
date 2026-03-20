@@ -1924,6 +1924,16 @@ impl EventLoopState {
                             error: e,
                             op_id,
                         });
+                    } else {
+                        // Edge-triggered epoll fix: data may have arrived before
+                        // we registered the socket. Try an immediate read so we
+                        // don't miss events that already happened.
+                        if let Some(read_op) = self.pending_reads.remove(&socket_id) {
+                            trace!("tcp", "io thread: attempting immediate read on socket={}", socket_id);
+                            self.handle_socket_read(socket_id, read_op);
+                            // Re-register if the read got WouldBlock (put back in pending_reads)
+                            let _ = self.update_socket_registration(socket_id);
+                        }
                     }
                 } else {
                     trace!("tcp", "io thread: Read socket {} not found", socket_id);
@@ -1960,6 +1970,14 @@ impl EventLoopState {
                             error: e,
                             op_id,
                         });
+                    } else {
+                        // Edge-triggered epoll fix: socket may already be writable.
+                        // Try an immediate write so we don't miss the edge.
+                        if let Some(write_op) = self.pending_writes.remove(&socket_id) {
+                            trace!("tcp", "io thread: attempting immediate write on socket={}", socket_id);
+                            self.handle_socket_write(socket_id, write_op);
+                            let _ = self.update_socket_registration(socket_id);
+                        }
                     }
                 } else {
                     trace!("tcp", "io thread: Write socket {} not found", socket_id);
