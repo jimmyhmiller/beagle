@@ -1931,8 +1931,10 @@ impl EventLoopState {
                         if let Some(read_op) = self.pending_reads.remove(&socket_id) {
                             trace!("tcp", "io thread: attempting immediate read on socket={}", socket_id);
                             self.handle_socket_read(socket_id, read_op);
-                            // Re-register if the read got WouldBlock (put back in pending_reads)
-                            let _ = self.update_socket_registration(socket_id);
+                            // Don't re-register here — the socket is already registered
+                            // from the update_socket_registration call above. With
+                            // edge-triggered epoll, re-registering after WouldBlock
+                            // can consume the edge and cause missed events.
                         }
                     }
                 } else {
@@ -1976,7 +1978,7 @@ impl EventLoopState {
                         if let Some(write_op) = self.pending_writes.remove(&socket_id) {
                             trace!("tcp", "io thread: attempting immediate write on socket={}", socket_id);
                             self.handle_socket_write(socket_id, write_op);
-                            let _ = self.update_socket_registration(socket_id);
+                            // Don't re-register — same reason as Read above.
                         }
                     }
                 } else {
@@ -2400,6 +2402,25 @@ fn event_loop_thread_main(
                 s.handle_tcp_task(task);
                 tasks_drained += 1;
             }
+
+            // Edge-triggered epoll fix: attempt all pending reads/writes
+            // every iteration. With edge-triggered mode, events can be missed
+            // if data arrives between reregister and poll. Attempting reads/writes
+            // here catches any data that's already buffered in the kernel.
+            let pending_read_sockets: Vec<usize> = s.pending_reads.keys().copied().collect();
+            for socket_id in pending_read_sockets {
+                if let Some(read_op) = s.pending_reads.remove(&socket_id) {
+                    s.handle_socket_read(socket_id, read_op);
+                    // handle_socket_read puts it back in pending_reads on WouldBlock
+                }
+            }
+            let pending_write_sockets: Vec<usize> = s.pending_writes.keys().copied().collect();
+            for socket_id in pending_write_sockets {
+                if let Some(write_op) = s.pending_writes.remove(&socket_id) {
+                    s.handle_socket_write(socket_id, write_op);
+                }
+            }
+
             let timeout = s.compute_poll_timeout(50);
             let _pr = s.pending_reads.len();
             let _pw = s.pending_writes.len();
