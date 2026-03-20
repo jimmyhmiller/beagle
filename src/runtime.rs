@@ -2408,6 +2408,9 @@ fn event_loop_thread_main(
             // if data arrives between reregister and poll. Attempting reads/writes
             // here catches any data that's already buffered in the kernel.
             let pending_read_sockets: Vec<usize> = s.pending_reads.keys().copied().collect();
+            if !pending_read_sockets.is_empty() {
+                trace!("event-loop", "io thread: trying {} pending reads", pending_read_sockets.len());
+            }
             for socket_id in pending_read_sockets {
                 if let Some(read_op) = s.pending_reads.remove(&socket_id) {
                     s.handle_socket_read(socket_id, read_op);
@@ -2421,7 +2424,11 @@ fn event_loop_thread_main(
                 }
             }
 
-            let timeout = s.compute_poll_timeout(50);
+            // Use short poll timeout when there are pending reads/writes,
+            // so loop-level non-blocking attempts retry quickly and catch
+            // data that arrived between mio registration and poll().
+            let base_timeout = if s.pending_reads.is_empty() && s.pending_writes.is_empty() { 50 } else { 1 };
+            let timeout = s.compute_poll_timeout(base_timeout);
             let _pr = s.pending_reads.len();
             let _pw = s.pending_writes.len();
             let _po = s.pending_ops.len();
