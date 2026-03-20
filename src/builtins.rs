@@ -9460,8 +9460,14 @@ extern "C" fn tcp_result_pop_for_atom(loop_id: usize, future_atom: usize) -> usi
                 TcpResult::ConnectErr { .. } => 2,
                 TcpResult::AcceptOk { .. } => 3,
                 TcpResult::AcceptErr { .. } => 4,
-                TcpResult::ReadOk { .. } => 5,
-                TcpResult::ReadErr { .. } => 6,
+                TcpResult::ReadOk { data, .. } => {
+                    eprintln!("[tcp_result_pop] thread={:?} type=ReadOk data_len={} data={:?}", std::thread::current().id(), data.len(), std::str::from_utf8(&data[..data.len().min(80)]).unwrap_or("<binary>"));
+                    5
+                },
+                TcpResult::ReadErr { error, .. } => {
+                    eprintln!("[tcp_result_pop] thread={:?} type=ReadErr error={}", std::thread::current().id(), error);
+                    6
+                },
                 TcpResult::WriteOk { .. } => 7,
                 TcpResult::WriteErr { .. } => 8,
             };
@@ -9470,6 +9476,8 @@ extern "C" fn tcp_result_pop_for_atom(loop_id: usize, future_atom: usize) -> usi
         }
     }
 }
+
+
 
 /// Get the future_atom from the current TCP result
 extern "C" fn tcp_result_future_atom(loop_id: usize) -> usize {
