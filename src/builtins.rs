@@ -9143,6 +9143,7 @@ extern "C" fn event_loop_create_threaded(pool_size: usize) -> usize {
 extern "C" fn event_loop_run_once(loop_id: usize, timeout_ms: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
     let timeout_ms = BuiltInTypes::untag(timeout_ms) as u64;
+    trace!("event-loop", "run_once enter: loop={} timeout={}ms", loop_id, timeout_ms);
     let runtime = get_runtime().get_mut();
 
     // Simple polling: check for results, and if none, sleep briefly.
@@ -9424,6 +9425,9 @@ extern "C" fn tcp_results_count(loop_id: usize) -> usize {
         None => return BuiltInTypes::Int.tag(0) as usize,
     };
     let count = event_loop.tcp_results_count();
+    if count > 0 {
+        trace!("tcp", "tcp_results_count: loop={} count={}", loop_id, count);
+    }
     BuiltInTypes::Int.tag(count as isize) as usize
 }
 
@@ -15708,7 +15712,9 @@ pub extern "C" fn call_handler_builtin(
     // The signature is just: fn handle(self, op, resume) -> result
     let func: extern "C" fn(usize, usize, usize) -> usize = unsafe { std::mem::transmute(fn_ptr) };
 
-    func(handler, op_value, resume)
+    let result = func(handler, op_value, resume);
+    trace!("handler", "call_handler returned: result={:#x}", result);
+    result
 }
 
 /// Allocates a Beagle struct from Rust using struct registry lookup.
