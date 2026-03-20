@@ -61,6 +61,9 @@ pub mod embedded_stdlib {
     all(target_arch = "x86_64", not(feature = "backend-arm64"))
 )))]
 mod arm;
+
+#[macro_use]
+mod trace;
 pub mod ast;
 pub mod backend;
 mod builtins;

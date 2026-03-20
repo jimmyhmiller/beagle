@@ -46,6 +46,7 @@ backend-x86-64 = []
 backend-llvm = []
 backend-cranelift = []
 debug-gc = []
+trace = []
 debug-continuation-gc = []
 heap-dump = ["serde"]
 

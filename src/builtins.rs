@@ -3934,6 +3934,7 @@ pub unsafe extern "C" fn new_thread(
     function: usize,
 ) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
+    trace!("scheduler", "new_thread: function={:#x}", function);
     let runtime = get_runtime().get_mut();
     runtime.new_thread(function, stack_pointer, frame_pointer);
     BuiltInTypes::null_value() as usize
@@ -4069,6 +4070,7 @@ pub unsafe extern "C" fn __pause(_stack_pointer: usize, frame_pointer: usize) ->
     usdt_probes::fire_thread_pause_enter();
     usdt_probes::fire_thread_state(ThreadStateCode::PausedForGc);
 
+    trace!("scheduler", "pause: entering GC safepoint");
     let pause_start = std::time::Instant::now();
 
     // Use frame_pointer passed from Beagle code for FP-chain stack walking
@@ -4087,6 +4089,7 @@ pub unsafe extern "C" fn __pause(_stack_pointer: usize, frame_pointer: usize) ->
     unpause_current_thread(runtime);
 
     let pause_duration_ns = pause_start.elapsed().as_nanos() as u64;
+    trace!("scheduler", "pause: resumed after {}us", pause_duration_ns / 1000);
 
     // Fire USDT probe for thread resuming
     usdt_probes::fire_thread_pause_exit(pause_duration_ns);
@@ -8136,7 +8139,7 @@ fn value_to_json_key(runtime: &Runtime, value: usize) -> Result<String, JsonErro
 /// Throws JsonError if the value cannot be encoded.
 extern "C" fn json_encode(stack_pointer: usize, frame_pointer: usize, value: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
-    eprintln!("[json_encode] called thread={:?}", std::thread::current().id());
+    trace!("handler", "json_encode called");
     let runtime = get_runtime().get_mut();
 
     match value_to_json(runtime, value, 0) {
@@ -8874,14 +8877,17 @@ extern "C" fn fs_file_size(stack_pointer: usize, frame_pointer: usize, path: usi
 /// Returns true if notified (a future completed), false if timed out.
 extern "C" fn future_wait(timeout_ms: usize) -> usize {
     let timeout = BuiltInTypes::untag(timeout_ms) as u64;
+    trace!("scheduler", "future_wait: timeout={}ms", timeout);
     let runtime = get_runtime().get_mut();
     let notified = runtime.future_wait_set.wait_timeout(timeout);
+    trace!("scheduler", "future_wait: returned notified={}", notified);
     BuiltInTypes::construct_boolean(notified) as usize
 }
 
 /// future_notify builtin - Notify all threads waiting on futures.
 /// Should be called after a future completes (after reset! on the future atom).
 extern "C" fn future_notify() -> usize {
+    trace!("scheduler", "future_notify: waking all waiters");
     let runtime = get_runtime().get_mut();
     runtime.future_wait_set.notify_all();
     BuiltInTypes::null_value() as usize
@@ -9034,6 +9040,7 @@ extern "C" fn sleep(
     time: usize,
 ) -> usize {
     let time = BuiltInTypes::untag(time);
+    trace!("scheduler", "sleep: {}ms", time);
 
     // Register as c_calling before sleeping. Without this, GC would wait
     // forever for this thread to hit a safepoint while it's blocked in sleep.
@@ -9112,8 +9119,12 @@ extern "C" fn event_loop_create(pool_size: usize) -> usize {
     let pool_size = BuiltInTypes::untag(pool_size);
     let runtime = get_runtime().get_mut();
 
+    trace!("event-loop", "event_loop_create: pool_size={}", pool_size);
     match runtime.event_loops.create(pool_size) {
-        Ok(id) => BuiltInTypes::Int.tag(id as isize) as usize,
+        Ok(id) => {
+            trace!("event-loop", "event_loop_create: ok id={}", id);
+            BuiltInTypes::Int.tag(id as isize) as usize
+        }
         Err(e) => {
             eprintln!("Failed to create event loop: {}", e);
             BuiltInTypes::Int.tag(-1) as usize
@@ -9144,6 +9155,7 @@ extern "C" fn event_loop_run_once(loop_id: usize, timeout_ms: usize) -> usize {
 
     let count = event_loop.tcp_results_count();
     if count > 0 {
+        trace!("event-loop", "run_once: loop={} has {} results ready", loop_id, count);
         return BuiltInTypes::Int.tag(count as isize) as usize;
     }
 
@@ -9156,6 +9168,7 @@ extern "C" fn event_loop_run_once(loop_id: usize, timeout_ms: usize) -> usize {
         None => return BuiltInTypes::Int.tag(-1) as usize,
     };
     let count = event_loop.tcp_results_count();
+    trace!("event-loop", "run_once: loop={} timeout={}ms results={}", loop_id, timeout_ms, count);
     BuiltInTypes::Int.tag(count as isize) as usize
 }
 
@@ -9164,6 +9177,7 @@ extern "C" fn event_loop_wake(loop_id: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
     let runtime = get_runtime().get_mut();
 
+    trace!("event-loop", "event_loop_wake: loop={}", loop_id);
     if let Some(event_loop) = runtime.event_loops.get(loop_id) {
         match event_loop.wake() {
             Ok(()) => BuiltInTypes::Int.tag(1) as usize,
@@ -9173,6 +9187,7 @@ extern "C" fn event_loop_wake(loop_id: usize) -> usize {
             }
         }
     } else {
+        trace!("event-loop", "event_loop_wake: loop {} not found", loop_id);
         BuiltInTypes::Int.tag(-1) as usize
     }
 }
@@ -9210,6 +9225,7 @@ extern "C" fn tcp_connect_async(
     let runtime = get_runtime().get_mut();
 
     let host_str = runtime.get_string_literal(host);
+    trace!("tcp", "tcp_connect_async: loop={} host={} port={} future_atom={}", loop_id, host_str, port, future_atom);
 
     // Parse the address
     let addr = match format!("{}:{}", host_str, port).parse::<std::net::SocketAddr>() {
@@ -9252,6 +9268,7 @@ extern "C" fn tcp_listen(
     let runtime = get_runtime().get_mut();
 
     let host_str = runtime.get_string_literal(host);
+    trace!("tcp", "tcp_listen: loop={} host={} port={} backlog={}", loop_id, host_str, port, backlog);
 
     // Parse the address
     let addr = match format!("{}:{}", host_str, port).parse::<std::net::SocketAddr>() {
@@ -9264,8 +9281,14 @@ extern "C" fn tcp_listen(
         None => return BuiltInTypes::Int.tag(-1) as usize,
     };
     match event_loop.submit_tcp_listen(addr, backlog) {
-        Ok(listener_id) => BuiltInTypes::Int.tag(listener_id as isize) as usize,
-        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+        Ok(listener_id) => {
+            trace!("tcp", "tcp_listen: ok listener_id={}", listener_id);
+            BuiltInTypes::Int.tag(listener_id as isize) as usize
+        }
+        Err(_e) => {
+            trace!("tcp", "tcp_listen: failed: {}", _e);
+            BuiltInTypes::Int.tag(-1) as usize
+        }
     }
 }
 
@@ -9282,6 +9305,7 @@ extern "C" fn tcp_accept_async(loop_id: usize, listener_id: usize, future_atom: 
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(-1) as usize,
     };
+    trace!("tcp", "tcp_accept_async: loop={} listener={} future_atom={}", loop_id, listener_id, future_atom);
     match event_loop.submit_tcp_op(crate::runtime::TcpOperation::Accept {
         listener_id,
         future_atom,
@@ -9306,6 +9330,7 @@ extern "C" fn tcp_read_async(
     let future_atom = BuiltInTypes::untag(future_atom);
     let runtime = get_runtime().get_mut();
 
+    trace!("tcp", "tcp_read_async: loop={} socket={} buf_size={} future_atom={}", loop_id, socket_id, buffer_size, future_atom);
     let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(-1) as usize,
@@ -9340,6 +9365,7 @@ extern "C" fn tcp_write_async(
     let data_str = runtime.get_string(stack_pointer, data);
     let data_bytes = data_str.as_bytes().to_vec();
 
+    trace!("tcp", "tcp_write_async: loop={} socket={} data_len={} future_atom={}", loop_id, socket_id, data_bytes.len(), future_atom);
     let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(-1) as usize,
@@ -9358,6 +9384,7 @@ extern "C" fn tcp_write_async(
 extern "C" fn tcp_close(loop_id: usize, socket_id: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
     let socket_id = BuiltInTypes::untag(socket_id);
+    trace!("tcp", "tcp_close: loop={} socket={}", loop_id, socket_id);
     let runtime = get_runtime().get_mut();
 
     let event_loop = match runtime.event_loops.get(loop_id) {
@@ -9419,16 +9446,41 @@ extern "C" fn tcp_result_pop(loop_id: usize) -> usize {
 
     match maybe_result {
         None => BuiltInTypes::Int.tag(0) as usize,
+        #[allow(unused_variables)]
         Some(result) => {
             let type_code = match &result {
-                TcpResult::ConnectOk { .. } => 1,
-                TcpResult::ConnectErr { .. } => 2,
-                TcpResult::AcceptOk { .. } => 3,
-                TcpResult::AcceptErr { .. } => 4,
-                TcpResult::ReadOk { .. } => 5,
-                TcpResult::ReadErr { .. } => 6,
-                TcpResult::WriteOk { .. } => 7,
-                TcpResult::WriteErr { .. } => 8,
+                TcpResult::ConnectOk { socket_id, future_atom, .. } => {
+                    trace!("tcp", "tcp_result_pop: ConnectOk socket={} future_atom={}", socket_id, future_atom);
+                    1
+                }
+                TcpResult::ConnectErr { error, future_atom, .. } => {
+                    trace!("tcp", "tcp_result_pop: ConnectErr error={} future_atom={}", error, future_atom);
+                    2
+                }
+                TcpResult::AcceptOk { socket_id, listener_id, future_atom, .. } => {
+                    trace!("tcp", "tcp_result_pop: AcceptOk socket={} listener={} future_atom={}", socket_id, listener_id, future_atom);
+                    3
+                }
+                TcpResult::AcceptErr { error, future_atom, .. } => {
+                    trace!("tcp", "tcp_result_pop: AcceptErr error={} future_atom={}", error, future_atom);
+                    4
+                }
+                TcpResult::ReadOk { data, future_atom, .. } => {
+                    trace!("tcp", "tcp_result_pop: ReadOk data_len={} future_atom={}", data.len(), future_atom);
+                    5
+                }
+                TcpResult::ReadErr { error, future_atom, .. } => {
+                    trace!("tcp", "tcp_result_pop: ReadErr error={} future_atom={}", error, future_atom);
+                    6
+                }
+                TcpResult::WriteOk { bytes_written, future_atom, .. } => {
+                    trace!("tcp", "tcp_result_pop: WriteOk bytes={} future_atom={}", bytes_written, future_atom);
+                    7
+                }
+                TcpResult::WriteErr { error, future_atom, .. } => {
+                    trace!("tcp", "tcp_result_pop: WriteErr error={} future_atom={}", error, future_atom);
+                    8
+                }
             };
             event_loop.set_current_result(result);
             BuiltInTypes::Int.tag(type_code) as usize
@@ -9454,22 +9506,41 @@ extern "C" fn tcp_result_pop_for_atom(loop_id: usize, future_atom: usize) -> usi
 
     match maybe_result {
         None => BuiltInTypes::Int.tag(0) as usize,
+        #[allow(unused_variables)]
         Some(result) => {
             let type_code = match &result {
-                TcpResult::ConnectOk { .. } => 1,
-                TcpResult::ConnectErr { .. } => 2,
-                TcpResult::AcceptOk { .. } => 3,
-                TcpResult::AcceptErr { .. } => 4,
+                TcpResult::ConnectOk { socket_id, .. } => {
+                    trace!("tcp", "tcp_result_pop_for_atom: ConnectOk socket={} future_atom={}", socket_id, future_atom);
+                    1
+                }
+                TcpResult::ConnectErr { error, .. } => {
+                    trace!("tcp", "tcp_result_pop_for_atom: ConnectErr error={} future_atom={}", error, future_atom);
+                    2
+                }
+                TcpResult::AcceptOk { socket_id, listener_id, .. } => {
+                    trace!("tcp", "tcp_result_pop_for_atom: AcceptOk socket={} listener={} future_atom={}", socket_id, listener_id, future_atom);
+                    3
+                }
+                TcpResult::AcceptErr { error, .. } => {
+                    trace!("tcp", "tcp_result_pop_for_atom: AcceptErr error={} future_atom={}", error, future_atom);
+                    4
+                }
                 TcpResult::ReadOk { data, .. } => {
-                    eprintln!("[tcp_result_pop] thread={:?} type=ReadOk data_len={} data={:?}", std::thread::current().id(), data.len(), std::str::from_utf8(&data[..data.len().min(80)]).unwrap_or("<binary>"));
+                    trace!("tcp", "tcp_result_pop_for_atom: ReadOk data_len={} future_atom={} data={:?}", data.len(), future_atom, std::str::from_utf8(&data[..data.len().min(120)]).unwrap_or("<binary>"));
                     5
-                },
+                }
                 TcpResult::ReadErr { error, .. } => {
-                    eprintln!("[tcp_result_pop] thread={:?} type=ReadErr error={}", std::thread::current().id(), error);
+                    trace!("tcp", "tcp_result_pop_for_atom: ReadErr error={} future_atom={}", error, future_atom);
                     6
-                },
-                TcpResult::WriteOk { .. } => 7,
-                TcpResult::WriteErr { .. } => 8,
+                }
+                TcpResult::WriteOk { bytes_written, .. } => {
+                    trace!("tcp", "tcp_result_pop_for_atom: WriteOk bytes={} future_atom={}", bytes_written, future_atom);
+                    7
+                }
+                TcpResult::WriteErr { error, .. } => {
+                    trace!("tcp", "tcp_result_pop_for_atom: WriteErr error={} future_atom={}", error, future_atom);
+                    8
+                }
             };
             event_loop.set_current_result(result);
             BuiltInTypes::Int.tag(type_code) as usize
@@ -9564,7 +9635,7 @@ extern "C" fn tcp_result_data(stack_pointer: usize, loop_id: usize) -> usize {
         }
     };
 
-    eprintln!("[tcp_result_data] thread={:?} data_len={} data={:?}", std::thread::current().id(), data.len(), &data[..data.len().min(80)]);
+    trace!("tcp", "tcp_result_data: data_len={} data={:?}", data.len(), &data[..data.len().min(80)]);
     let runtime = get_runtime().get_mut();
     runtime
         .allocate_string(stack_pointer, data)
@@ -9639,6 +9710,7 @@ extern "C" fn timer_set(loop_id: usize, delay_ms: usize, future_atom: usize) -> 
     };
 
     let timer_id = event_loop.timer_set(delay_ms, future_atom);
+    trace!("event-loop", "timer_set: loop={} delay={}ms future_atom={} timer_id={}", loop_id, delay_ms, future_atom, timer_id);
     BuiltInTypes::Int.tag(timer_id as isize) as usize
 }
 
@@ -11112,6 +11184,7 @@ pub unsafe extern "C" fn capture_continuation_runtime(
 ) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "capture_continuation");
+    trace!("continuation", "capture_continuation: resume_addr={:#x} result_offset={}", resume_address, result_local_offset);
     let runtime = get_runtime().get_mut();
     let debug_prompts = runtime.get_command_line_args().debug;
 
@@ -11696,7 +11769,7 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
 ) -> ! {
     save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "invoke_continuation");
-    eprintln!("[invoke_cont_rt] called thread={:?} cont_ptr={:#x} value={:#x}", std::thread::current().id(), cont_ptr, value);
+    trace!("continuation", "invoke_continuation: cont_ptr={:#x} value={:#x}", cont_ptr, value);
 
     let runtime = get_runtime().get_mut();
     let debug_prompts = runtime.get_command_line_args().debug;
@@ -15534,7 +15607,7 @@ pub extern "C" fn call_handler_builtin(
 
     // Get the enum type string (can be heap-allocated or string literal)
     let enum_type = runtime.get_string(stack_pointer, enum_type_ptr);
-    eprintln!("[call_handler] thread={:?} enum_type={}", std::thread::current().id(), enum_type);
+    trace!("handler", "call_handler: enum_type={}", enum_type);
 
     // Construct the protocol key: "beagle.effect/Handler<{enum_type}>"
     // Handler is always from beagle.effect (the core effect handler protocol)
