@@ -1767,7 +1767,13 @@ impl EventLoopState {
         let interest = match self.socket_interest(socket_id) {
             Some(i) => i,
             None => {
-                trace!("tcp", "io thread: update_socket_registration socket={} no interest (read={} write={})", socket_id, _has_read, _has_write);
+                trace!(
+                    "tcp",
+                    "io thread: update_socket_registration socket={} no interest (read={} write={})",
+                    socket_id,
+                    _has_read,
+                    _has_write
+                );
                 return Ok(());
             }
         };
@@ -1777,17 +1783,37 @@ impl EventLoopState {
             let result = registry
                 .register(&mut stream, token, interest)
                 .or_else(|_e| {
-                    trace!("tcp", "io thread: register failed for socket={} token={}, trying reregister: {}", socket_id, token.0, _e);
+                    trace!(
+                        "tcp",
+                        "io thread: register failed for socket={} token={}, trying reregister: {}",
+                        socket_id,
+                        token.0,
+                        _e
+                    );
                     registry.reregister(&mut stream, token, interest)
                 });
             self.tcp_streams.insert(socket_id, stream);
             match &result {
-                Ok(()) => trace!("tcp", "io thread: update_socket_registration socket={} token={} interest=read:{}/write:{} ok", socket_id, token.0, _has_read, _has_write),
-                Err(_e) => trace!("tcp", "io thread: update_socket_registration socket={} FAILED: {}", socket_id, _e),
+                Ok(()) => trace!(
+                    "tcp",
+                    "io thread: update_socket_registration socket={} token={} interest=read:{}/write:{} ok",
+                    socket_id,
+                    token.0,
+                    _has_read,
+                    _has_write
+                ),
+                Err(_e) => trace!(
+                    "tcp",
+                    "io thread: update_socket_registration socket={} FAILED: {}", socket_id, _e
+                ),
             }
             result.map_err(|e| e.to_string())
         } else {
-            trace!("tcp", "io thread: update_socket_registration socket={} not found in tcp_streams", socket_id);
+            trace!(
+                "tcp",
+                "io thread: update_socket_registration socket={} not found in tcp_streams",
+                socket_id
+            );
             Err("Socket not found".to_string())
         }
     }
@@ -1796,49 +1822,58 @@ impl EventLoopState {
     fn handle_tcp_task(&mut self, task: TcpTask) {
         match task.op {
             TcpOperation::Connect { addr, future_atom } => {
-                trace!("tcp", "io thread: handle Connect to {} future_atom={}", addr, future_atom);
+                trace!(
+                    "tcp",
+                    "io thread: handle Connect to {} future_atom={}", addr, future_atom
+                );
                 match TcpStream::connect(addr) {
-                Ok(mut stream) => {
-                    let socket_id = self.next_socket_id();
-                    let token = self.next_token();
-                    let op_id = self.next_op_id();
+                    Ok(mut stream) => {
+                        let socket_id = self.next_socket_id();
+                        let token = self.next_token();
+                        let op_id = self.next_op_id();
 
-                    if let Err(e) =
-                        self.poll_mut()
-                            .registry()
-                            .register(&mut stream, token, Interest::WRITABLE)
-                    {
-                        trace!("tcp", "io thread: Connect register failed: {}", e);
+                        if let Err(e) = self.poll_mut().registry().register(
+                            &mut stream,
+                            token,
+                            Interest::WRITABLE,
+                        ) {
+                            trace!("tcp", "io thread: Connect register failed: {}", e);
+                            self.completed_tcp_results.push(TcpResult::ConnectErr {
+                                future_atom,
+                                error: e.to_string(),
+                                op_id,
+                            });
+                            return;
+                        }
+
+                        trace!(
+                            "tcp",
+                            "io thread: Connect registered socket_id={} token={}",
+                            socket_id,
+                            token.0
+                        );
+                        self.tcp_streams.insert(socket_id, stream);
+                        self.token_to_socket.insert(token.0, socket_id);
+                        self.pending_ops.insert(
+                            token.0,
+                            PendingOperation::TcpConnect {
+                                future_atom,
+                                socket_id,
+                                op_id,
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        trace!("tcp", "io thread: Connect failed: {}", e);
+                        let op_id = self.next_op_id();
                         self.completed_tcp_results.push(TcpResult::ConnectErr {
                             future_atom,
                             error: e.to_string(),
                             op_id,
                         });
-                        return;
                     }
-
-                    trace!("tcp", "io thread: Connect registered socket_id={} token={}", socket_id, token.0);
-                    self.tcp_streams.insert(socket_id, stream);
-                    self.token_to_socket.insert(token.0, socket_id);
-                    self.pending_ops.insert(
-                        token.0,
-                        PendingOperation::TcpConnect {
-                            future_atom,
-                            socket_id,
-                            op_id,
-                        },
-                    );
                 }
-                Err(e) => {
-                    trace!("tcp", "io thread: Connect failed: {}", e);
-                    let op_id = self.next_op_id();
-                    self.completed_tcp_results.push(TcpResult::ConnectErr {
-                        future_atom,
-                        error: e.to_string(),
-                        op_id,
-                    });
-                }
-            }},
+            }
             TcpOperation::Listen {
                 addr,
                 backlog: _,
@@ -1846,22 +1881,26 @@ impl EventLoopState {
             } => {
                 trace!("tcp", "io thread: handle Listen on {}", addr);
                 match mio::net::TcpListener::bind(addr) {
-                Ok(listener) => {
-                    let listener_id = self.next_socket_id();
-                    trace!("tcp", "io thread: Listen ok listener_id={}", listener_id);
-                    self.tcp_listeners.insert(listener_id, listener);
-                    let _ = response_tx.send(Ok(listener_id));
+                    Ok(listener) => {
+                        let listener_id = self.next_socket_id();
+                        trace!("tcp", "io thread: Listen ok listener_id={}", listener_id);
+                        self.tcp_listeners.insert(listener_id, listener);
+                        let _ = response_tx.send(Ok(listener_id));
+                    }
+                    Err(e) => {
+                        trace!("tcp", "io thread: Listen failed: {}", e);
+                        let _ = response_tx.send(Err(e.to_string()));
+                    }
                 }
-                Err(e) => {
-                    trace!("tcp", "io thread: Listen failed: {}", e);
-                    let _ = response_tx.send(Err(e.to_string()));
-                }
-            }},
+            }
             TcpOperation::Accept {
                 listener_id,
                 future_atom,
             } => {
-                trace!("tcp", "io thread: handle Accept listener={} future_atom={}", listener_id, future_atom);
+                trace!(
+                    "tcp",
+                    "io thread: handle Accept listener={} future_atom={}", listener_id, future_atom
+                );
                 if let Some(mut listener) = self.tcp_listeners.remove(&listener_id) {
                     let token = self.next_token();
                     let op_id = self.next_op_id();
@@ -1905,7 +1944,13 @@ impl EventLoopState {
                 buffer_size,
                 future_atom,
             } => {
-                trace!("tcp", "io thread: handle Read socket={} buf_size={} future_atom={}", socket_id, buffer_size, future_atom);
+                trace!(
+                    "tcp",
+                    "io thread: handle Read socket={} buf_size={} future_atom={}",
+                    socket_id,
+                    buffer_size,
+                    future_atom
+                );
                 if self.tcp_streams.contains_key(&socket_id) {
                     let op_id = self.next_op_id();
                     self.pending_reads.insert(
@@ -1929,7 +1974,10 @@ impl EventLoopState {
                         // we registered the socket. Try an immediate read so we
                         // don't miss events that already happened.
                         if let Some(read_op) = self.pending_reads.remove(&socket_id) {
-                            trace!("tcp", "io thread: attempting immediate read on socket={}", socket_id);
+                            trace!(
+                                "tcp",
+                                "io thread: attempting immediate read on socket={}", socket_id
+                            );
                             self.handle_socket_read(socket_id, read_op);
                             // Don't re-register here — the socket is already registered
                             // from the update_socket_registration call above. With
@@ -1952,7 +2000,13 @@ impl EventLoopState {
                 data,
                 future_atom,
             } => {
-                trace!("tcp", "io thread: handle Write socket={} data_len={} future_atom={}", socket_id, data.len(), future_atom);
+                trace!(
+                    "tcp",
+                    "io thread: handle Write socket={} data_len={} future_atom={}",
+                    socket_id,
+                    data.len(),
+                    future_atom
+                );
                 if self.tcp_streams.contains_key(&socket_id) {
                     let op_id = self.next_op_id();
                     self.pending_writes.insert(
@@ -1976,7 +2030,10 @@ impl EventLoopState {
                         // Edge-triggered epoll fix: socket may already be writable.
                         // Try an immediate write so we don't miss the edge.
                         if let Some(write_op) = self.pending_writes.remove(&socket_id) {
-                            trace!("tcp", "io thread: attempting immediate write on socket={}", socket_id);
+                            trace!(
+                                "tcp",
+                                "io thread: attempting immediate write on socket={}", socket_id
+                            );
                             self.handle_socket_write(socket_id, write_op);
                             // Don't re-register — same reason as Read above.
                         }
@@ -2003,7 +2060,10 @@ impl EventLoopState {
                 }
             }
             TcpOperation::CloseListener { listener_id } => {
-                trace!("tcp", "io thread: handle CloseListener listener={}", listener_id);
+                trace!(
+                    "tcp",
+                    "io thread: handle CloseListener listener={}", listener_id
+                );
                 if let Some(mut listener) = self.tcp_listeners.remove(&listener_id) {
                     let _ = self.poll_mut().registry().deregister(&mut listener);
                 }
@@ -2043,7 +2103,13 @@ impl EventLoopState {
         }
 
         for (token_id, is_readable, is_writable) in tokens_to_process {
-            trace!("event-loop", "process event: token={} readable={} writable={}", token_id, is_readable, is_writable);
+            trace!(
+                "event-loop",
+                "process event: token={} readable={} writable={}",
+                token_id,
+                is_readable,
+                is_writable
+            );
             // First check pending_ops for Connect/Accept operations
             if let Some(op) = self.pending_ops.remove(&token_id) {
                 self.handle_tcp_event(token_id, op);
@@ -2064,7 +2130,10 @@ impl EventLoopState {
                 // Re-register with remaining interest if any ops still pending
                 let _ = self.update_socket_registration(socket_id);
             } else {
-                trace!("event-loop", "process event: token={} has no matching socket or pending op", token_id);
+                trace!(
+                    "event-loop",
+                    "process event: token={} has no matching socket or pending op", token_id
+                );
             }
         }
 
@@ -2190,7 +2259,13 @@ impl EventLoopState {
                 if let Some(stream) = self.tcp_streams.get(&socket_id) {
                     match stream.peer_addr() {
                         Ok(_addr) => {
-                            trace!("tcp", "io thread: ConnectOk socket={} addr={} future_atom={}", socket_id, _addr, future_atom);
+                            trace!(
+                                "tcp",
+                                "io thread: ConnectOk socket={} addr={} future_atom={}",
+                                socket_id,
+                                _addr,
+                                future_atom
+                            );
                             self.completed_tcp_results.push(TcpResult::ConnectOk {
                                 future_atom,
                                 socket_id,
@@ -2198,7 +2273,13 @@ impl EventLoopState {
                             });
                         }
                         Err(e) => {
-                            trace!("tcp", "io thread: ConnectErr socket={} error={} future_atom={}", socket_id, e, future_atom);
+                            trace!(
+                                "tcp",
+                                "io thread: ConnectErr socket={} error={} future_atom={}",
+                                socket_id,
+                                e,
+                                future_atom
+                            );
                             self.completed_tcp_results.push(TcpResult::ConnectErr {
                                 future_atom,
                                 error: e.to_string(),
@@ -2207,7 +2288,12 @@ impl EventLoopState {
                         }
                     }
                 } else {
-                    trace!("tcp", "io thread: ConnectErr socket={} not found future_atom={}", socket_id, future_atom);
+                    trace!(
+                        "tcp",
+                        "io thread: ConnectErr socket={} not found future_atom={}",
+                        socket_id,
+                        future_atom
+                    );
                     self.completed_tcp_results.push(TcpResult::ConnectErr {
                         future_atom,
                         error: "Socket not found".to_string(),
@@ -2224,7 +2310,14 @@ impl EventLoopState {
                     match listener.accept() {
                         Ok((stream, _addr)) => {
                             let socket_id = self.next_socket_id();
-                            trace!("tcp", "io thread: AcceptOk listener={} new_socket={} addr={} future_atom={}", listener_id, socket_id, _addr, future_atom);
+                            trace!(
+                                "tcp",
+                                "io thread: AcceptOk listener={} new_socket={} addr={} future_atom={}",
+                                listener_id,
+                                socket_id,
+                                _addr,
+                                future_atom
+                            );
                             self.tcp_streams.insert(socket_id, stream);
                             self.completed_tcp_results.push(TcpResult::AcceptOk {
                                 future_atom,
@@ -2234,7 +2327,13 @@ impl EventLoopState {
                             });
                         }
                         Err(e) => {
-                            trace!("tcp", "io thread: AcceptErr listener={} error={} future_atom={}", listener_id, e, future_atom);
+                            trace!(
+                                "tcp",
+                                "io thread: AcceptErr listener={} error={} future_atom={}",
+                                listener_id,
+                                e,
+                                future_atom
+                            );
                             self.completed_tcp_results.push(TcpResult::AcceptErr {
                                 future_atom,
                                 error: e.to_string(),
@@ -2243,7 +2342,12 @@ impl EventLoopState {
                         }
                     }
                 } else {
-                    trace!("tcp", "io thread: AcceptErr listener={} not found future_atom={}", listener_id, future_atom);
+                    trace!(
+                        "tcp",
+                        "io thread: AcceptErr listener={} not found future_atom={}",
+                        listener_id,
+                        future_atom
+                    );
                     self.completed_tcp_results.push(TcpResult::AcceptErr {
                         future_atom,
                         error: "Listener not found".to_string(),
@@ -2273,7 +2377,14 @@ impl EventLoopState {
             match result {
                 Ok(n) => {
                     buffer.truncate(n);
-                    trace!("tcp", "io thread: ReadOk socket={} bytes={} future_atom={} data={:?}", socket_id, n, future_atom, std::str::from_utf8(&buffer[..buffer.len().min(120)]).unwrap_or("<binary>"));
+                    trace!(
+                        "tcp",
+                        "io thread: ReadOk socket={} bytes={} future_atom={} data={:?}",
+                        socket_id,
+                        n,
+                        future_atom,
+                        std::str::from_utf8(&buffer[..buffer.len().min(120)]).unwrap_or("<binary>")
+                    );
                     self.completed_tcp_results.push(TcpResult::ReadOk {
                         future_atom,
                         data: buffer,
@@ -2281,7 +2392,12 @@ impl EventLoopState {
                     });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    trace!("tcp", "io thread: Read WouldBlock socket={} future_atom={}", socket_id, future_atom);
+                    trace!(
+                        "tcp",
+                        "io thread: Read WouldBlock socket={} future_atom={}",
+                        socket_id,
+                        future_atom
+                    );
                     // Put the read op back - it will be re-registered by the caller
                     self.pending_reads.insert(
                         socket_id,
@@ -2293,7 +2409,13 @@ impl EventLoopState {
                     );
                 }
                 Err(e) => {
-                    trace!("tcp", "io thread: ReadErr socket={} error={} future_atom={}", socket_id, e, future_atom);
+                    trace!(
+                        "tcp",
+                        "io thread: ReadErr socket={} error={} future_atom={}",
+                        socket_id,
+                        e,
+                        future_atom
+                    );
                     self.completed_tcp_results.push(TcpResult::ReadErr {
                         future_atom,
                         error: e.to_string(),
@@ -2302,7 +2424,10 @@ impl EventLoopState {
                 }
             }
         } else {
-            trace!("tcp", "io thread: ReadErr socket={} not found future_atom={}", socket_id, future_atom);
+            trace!(
+                "tcp",
+                "io thread: ReadErr socket={} not found future_atom={}", socket_id, future_atom
+            );
             self.completed_tcp_results.push(TcpResult::ReadErr {
                 future_atom,
                 error: "Socket not found".to_string(),
@@ -2329,14 +2454,27 @@ impl EventLoopState {
                 Ok(n) => {
                     let total_written = bytes_written + n;
                     if total_written >= data.len() {
-                        trace!("tcp", "io thread: WriteOk socket={} total_bytes={} future_atom={}", socket_id, total_written, future_atom);
+                        trace!(
+                            "tcp",
+                            "io thread: WriteOk socket={} total_bytes={} future_atom={}",
+                            socket_id,
+                            total_written,
+                            future_atom
+                        );
                         self.completed_tcp_results.push(TcpResult::WriteOk {
                             future_atom,
                             bytes_written: total_written,
                             op_id,
                         });
                     } else {
-                        trace!("tcp", "io thread: Write partial socket={} written={}/{} future_atom={}", socket_id, total_written, data.len(), future_atom);
+                        trace!(
+                            "tcp",
+                            "io thread: Write partial socket={} written={}/{} future_atom={}",
+                            socket_id,
+                            total_written,
+                            data.len(),
+                            future_atom
+                        );
                         // Partial write - put the write op back for more
                         self.pending_writes.insert(
                             socket_id,
@@ -2350,7 +2488,12 @@ impl EventLoopState {
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    trace!("tcp", "io thread: Write WouldBlock socket={} future_atom={}", socket_id, future_atom);
+                    trace!(
+                        "tcp",
+                        "io thread: Write WouldBlock socket={} future_atom={}",
+                        socket_id,
+                        future_atom
+                    );
                     // Put the write op back - it will be re-registered by the caller
                     self.pending_writes.insert(
                         socket_id,
@@ -2363,7 +2506,13 @@ impl EventLoopState {
                     );
                 }
                 Err(e) => {
-                    trace!("tcp", "io thread: WriteErr socket={} error={} future_atom={}", socket_id, e, future_atom);
+                    trace!(
+                        "tcp",
+                        "io thread: WriteErr socket={} error={} future_atom={}",
+                        socket_id,
+                        e,
+                        future_atom
+                    );
                     self.completed_tcp_results.push(TcpResult::WriteErr {
                         future_atom,
                         error: e.to_string(),
@@ -2372,7 +2521,10 @@ impl EventLoopState {
                 }
             }
         } else {
-            trace!("tcp", "io thread: WriteErr socket={} not found future_atom={}", socket_id, future_atom);
+            trace!(
+                "tcp",
+                "io thread: WriteErr socket={} not found future_atom={}", socket_id, future_atom
+            );
             self.completed_tcp_results.push(TcpResult::WriteErr {
                 future_atom,
                 error: "Socket not found".to_string(),
@@ -2394,7 +2546,15 @@ fn event_loop_thread_main(
 ) {
     loop {
         // Phase 1: Lock state briefly — drain tasks and take poll/events out
-        let (mut poll, mut events, effective_timeout, tasks_drained, _pending_reads_count, _pending_writes_count, _pending_ops_count) = {
+        let (
+            mut poll,
+            mut events,
+            effective_timeout,
+            tasks_drained,
+            _pending_reads_count,
+            _pending_writes_count,
+            _pending_ops_count,
+        ) = {
             let mut s = state.lock().unwrap();
             // Drain operation queue (non-blocking)
             let mut tasks_drained = 0usize;
@@ -2424,7 +2584,11 @@ fn event_loop_thread_main(
             // Use short poll timeout when there are pending reads/writes,
             // so loop-level non-blocking attempts retry quickly and catch
             // data that arrived between mio registration and poll().
-            let base_timeout = if s.pending_reads.is_empty() && s.pending_writes.is_empty() { 50 } else { 1 };
+            let base_timeout = if s.pending_reads.is_empty() && s.pending_writes.is_empty() {
+                50
+            } else {
+                1
+            };
             let timeout = s.compute_poll_timeout(base_timeout);
             let _pr = s.pending_reads.len();
             let _pw = s.pending_writes.len();
@@ -2435,7 +2599,14 @@ fn event_loop_thread_main(
         }; // lock released — other threads can now access state freely
 
         if tasks_drained > 0 {
-            trace!("event-loop", "io thread: drained {} tasks, pending: reads={} writes={} ops={}", tasks_drained, _pending_reads_count, _pending_writes_count, _pending_ops_count);
+            trace!(
+                "event-loop",
+                "io thread: drained {} tasks, pending: reads={} writes={} ops={}",
+                tasks_drained,
+                _pending_reads_count,
+                _pending_writes_count,
+                _pending_ops_count
+            );
         }
 
         // Phase 2: Poll I/O events WITHOUT holding the lock
@@ -2446,7 +2617,10 @@ fn event_loop_thread_main(
 
         let event_count = events.iter().count();
         if event_count > 0 {
-            trace!("event-loop", "io thread: poll returned {} events", event_count);
+            trace!(
+                "event-loop",
+                "io thread: poll returned {} events", event_count
+            );
         }
 
         // Phase 3: Lock state briefly — put poll/events back and process results
@@ -3658,6 +3832,12 @@ pub struct InvocationReturnPoint {
     pub is_root_invocation: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct SafeReturnContext {
+    pub value: usize,
+    pub return_point: InvocationReturnPoint,
+}
+
 /// Captured continuation: a snapshot of the stack between a shift point and its enclosing reset.
 /// This is stored as a heap object with type_id = TYPE_ID_CONTINUATION.
 pub struct ContinuationObject {
@@ -4140,12 +4320,14 @@ pub struct PerThreadData {
     pub exception_handlers: Vec<ExceptionHandler>,
     pub prompt_handlers: Vec<PromptHandler>,
     pub invocation_return_points: Vec<InvocationReturnPoint>,
+    pub safe_return_context: Option<SafeReturnContext>,
     pub dynamic_binding_stacks: HashMap<(usize, usize), Vec<usize>>,
     pub return_from_shift_via_pop_prompt: bool,
     pub is_handler_return: bool,
     pub saved_continuation_ptr: usize,
     pub relocation_depth: usize,
     pub thread_exception_handler_fn: Option<usize>,
+    pub native_scratch_stack: Vec<u8>,
 }
 
 impl PerThreadData {
@@ -4154,13 +4336,28 @@ impl PerThreadData {
             exception_handlers: Vec::new(),
             prompt_handlers: Vec::new(),
             invocation_return_points: Vec::new(),
+            safe_return_context: None,
             dynamic_binding_stacks: HashMap::new(),
             return_from_shift_via_pop_prompt: false,
             is_handler_return: false,
             saved_continuation_ptr: 0,
             relocation_depth: 0,
             thread_exception_handler_fn: None,
+            native_scratch_stack: Vec::new(),
         }
+    }
+
+    pub fn ensure_native_scratch_stack_top(&mut self) -> usize {
+        const SCRATCH_STACK_BYTES: usize = 1024 * 1024;
+        const ENTRY_SLACK_BYTES: usize = 256;
+
+        if self.native_scratch_stack.len() < SCRATCH_STACK_BYTES {
+            self.native_scratch_stack.resize(SCRATCH_STACK_BYTES, 0);
+        }
+
+        let base = self.native_scratch_stack.as_mut_ptr() as usize;
+        let top = (base + self.native_scratch_stack.len()) & !0xF;
+        top.saturating_sub(ENTRY_SLACK_BYTES)
     }
 }
 
@@ -6341,7 +6538,10 @@ impl Runtime {
             trace!("scheduler", "new thread: waiting for registration barrier");
             // Wait for main thread to finish registering us
             barrier_clone.wait();
-            trace!("scheduler", "new thread: barrier released, starting execution");
+            trace!(
+                "scheduler",
+                "new thread: barrier released, starting execution"
+            );
 
             // No c_calling registration here - run_thread handles GC coordination
             // by waiting for GC, acquiring gc_lock, and calling __pause as first instruction

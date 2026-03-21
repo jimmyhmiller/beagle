@@ -407,6 +407,18 @@ impl CompactingHeap {
                 }
             }
 
+            if let Some(ctx) = ptd.safe_return_context.as_mut() {
+                if ctx.return_point.saved_frame != 0
+                    && BuiltInTypes::is_heap_pointer(ctx.return_point.saved_frame)
+                {
+                    ctx.return_point.saved_frame =
+                        self.copy_using_cheneys_algorithm(ctx.return_point.saved_frame);
+                }
+                if BuiltInTypes::is_heap_pointer(ctx.value) {
+                    ctx.value = self.copy_using_cheneys_algorithm(ctx.value);
+                }
+            }
+
             // Process saved_continuation_ptr (tagged ContinuationObject pointers)
             if ptd.saved_continuation_ptr != 0
                 && BuiltInTypes::is_heap_pointer(ptd.saved_continuation_ptr)

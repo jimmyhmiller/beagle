@@ -389,6 +389,16 @@ impl MarkAndSweep {
                         to_mark.push(HeapObject::from_tagged(rp.saved_frame));
                     }
                 }
+                if let Some(ctx) = ptd.safe_return_context.as_ref() {
+                    if ctx.return_point.saved_frame != 0
+                        && BuiltInTypes::is_heap_pointer(ctx.return_point.saved_frame)
+                    {
+                        to_mark.push(HeapObject::from_tagged(ctx.return_point.saved_frame));
+                    }
+                    if BuiltInTypes::is_heap_pointer(ctx.value) {
+                        to_mark.push(HeapObject::from_tagged(ctx.value));
+                    }
+                }
                 // Mark saved_continuation_ptr (tagged ContinuationObject pointers)
                 if ptd.saved_continuation_ptr != 0
                     && BuiltInTypes::is_heap_pointer(ptd.saved_continuation_ptr)

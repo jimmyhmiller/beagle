@@ -354,6 +354,23 @@ impl GenerationalGC {
                 }
             }
 
+            if let Some(ctx) = ptd.safe_return_context.as_mut() {
+                if ctx.return_point.saved_frame != 0
+                    && BuiltInTypes::is_heap_pointer(ctx.return_point.saved_frame)
+                {
+                    let untagged = BuiltInTypes::untag(ctx.return_point.saved_frame);
+                    if self.young.contains(untagged as *const u8) {
+                        ctx.return_point.saved_frame = self.copy(ctx.return_point.saved_frame);
+                    }
+                }
+                if BuiltInTypes::is_heap_pointer(ctx.value) {
+                    let untagged = BuiltInTypes::untag(ctx.value);
+                    if self.young.contains(untagged as *const u8) {
+                        ctx.value = self.copy(ctx.value);
+                    }
+                }
+            }
+
             // Process saved_continuation_ptr (tagged ContinuationObject pointers)
             if ptd.saved_continuation_ptr != 0
                 && BuiltInTypes::is_heap_pointer(ptd.saved_continuation_ptr)

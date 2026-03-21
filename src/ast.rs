@@ -4108,7 +4108,8 @@ impl AstCompiler<'_> {
                     body_result = self.call_compile(ast)?;
                 }
 
-                // Store result and pop prompt
+                // Keep the handle result in a local across builtin calls that may clobber registers.
+                self.ir.store_local(captured_local, body_result);
                 self.ir.assign(result_reg, body_result);
                 self.ir.pop_prompt_handler(result_reg.into(), pop_prompt_fn_ptr);
 
@@ -4116,6 +4117,8 @@ impl AstCompiler<'_> {
                 let key_str2 = self.string_constant(protocol_key.clone());
                 let key_reg2 = self.ir.assign_new(key_str2);
                 let _ = self.call_builtin("beagle.builtin/pop-handler", vec![key_reg2.into()]);
+                let final_value = self.ir.load_local(captured_local);
+                self.ir.assign(result_reg, final_value);
 
                 self.ir.jump(after_handle);
 
@@ -4129,6 +4132,8 @@ impl AstCompiler<'_> {
                 let key_str3 = self.string_constant(protocol_key.clone());
                 let key_reg3 = self.ir.assign_new(key_str3);
                 let _ = self.call_builtin("beagle.builtin/pop-handler", vec![key_reg3.into()]);
+                let final_captured_value = self.ir.load_local(captured_local);
+                self.ir.assign(result_reg, final_captured_value);
 
                 self.ir.write_label(after_handle);
                 Ok(result_reg.into())

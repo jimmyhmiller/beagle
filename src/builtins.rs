@@ -819,7 +819,9 @@ extern "C" fn split(
     if delimiter_value == "\n" && parts.len() <= 3 {
         eprintln!(
             "[split] thread={:?} input_len={} delimiter='\\n' parts={:?}",
-            std::thread::current().id(), string_value.len(), parts
+            std::thread::current().id(),
+            string_value.len(),
+            parts
         );
     }
 
@@ -4089,7 +4091,11 @@ pub unsafe extern "C" fn __pause(_stack_pointer: usize, frame_pointer: usize) ->
     unpause_current_thread(runtime);
 
     let pause_duration_ns = pause_start.elapsed().as_nanos() as u64;
-    trace!("scheduler", "pause: resumed after {}us", pause_duration_ns / 1000);
+    trace!(
+        "scheduler",
+        "pause: resumed after {}us",
+        pause_duration_ns / 1000
+    );
 
     // Fire USDT probe for thread resuming
     usdt_probes::fire_thread_pause_exit(pause_duration_ns);
@@ -9034,11 +9040,7 @@ extern "C" fn eval_in_ns(
     f()
 }
 
-extern "C" fn sleep(
-    _stack_pointer: usize,
-    frame_pointer: usize,
-    time: usize,
-) -> usize {
+extern "C" fn sleep(_stack_pointer: usize, frame_pointer: usize, time: usize) -> usize {
     let time = BuiltInTypes::untag(time);
     trace!("scheduler", "sleep: {}ms", time);
 
@@ -9158,7 +9160,10 @@ extern "C" fn event_loop_run_once(
 
     let count = event_loop.tcp_results_count();
     if count > 0 {
-        trace!("event-loop", "run_once: loop={} has {} results ready", loop_id, count);
+        trace!(
+            "event-loop",
+            "run_once: loop={} has {} results ready", loop_id, count
+        );
         return BuiltInTypes::Int.tag(count as isize) as usize;
     }
 
@@ -9173,7 +9178,11 @@ extern "C" fn event_loop_run_once(
         condvar.notify_one();
     }
 
-    let sleep_ms = if timeout_ms == 0 { 1 } else { timeout_ms.min(1) };
+    let sleep_ms = if timeout_ms == 0 {
+        1
+    } else {
+        timeout_ms.min(1)
+    };
     thread::sleep(std::time::Duration::from_millis(sleep_ms));
 
     // Unregister from c_calling, waiting for any in-progress GC to finish
@@ -9203,7 +9212,10 @@ extern "C" fn event_loop_run_once(
         None => return BuiltInTypes::Int.tag(-1) as usize,
     };
     let count = event_loop.tcp_results_count();
-    trace!("event-loop", "run_once: loop={} timeout={}ms results={}", loop_id, timeout_ms, count);
+    trace!(
+        "event-loop",
+        "run_once: loop={} timeout={}ms results={}", loop_id, timeout_ms, count
+    );
     BuiltInTypes::Int.tag(count as isize) as usize
 }
 
@@ -9260,7 +9272,14 @@ extern "C" fn tcp_connect_async(
     let runtime = get_runtime().get_mut();
 
     let host_str = runtime.get_string_literal(host);
-    trace!("tcp", "tcp_connect_async: loop={} host={} port={} future_atom={}", loop_id, host_str, port, future_atom);
+    trace!(
+        "tcp",
+        "tcp_connect_async: loop={} host={} port={} future_atom={}",
+        loop_id,
+        host_str,
+        port,
+        future_atom
+    );
 
     // Parse the address
     let addr = match format!("{}:{}", host_str, port).parse::<std::net::SocketAddr>() {
@@ -9303,7 +9322,10 @@ extern "C" fn tcp_listen(
     let runtime = get_runtime().get_mut();
 
     let host_str = runtime.get_string_literal(host);
-    trace!("tcp", "tcp_listen: loop={} host={} port={} backlog={}", loop_id, host_str, port, backlog);
+    trace!(
+        "tcp",
+        "tcp_listen: loop={} host={} port={} backlog={}", loop_id, host_str, port, backlog
+    );
 
     // Parse the address
     let addr = match format!("{}:{}", host_str, port).parse::<std::net::SocketAddr>() {
@@ -9340,7 +9362,10 @@ extern "C" fn tcp_accept_async(loop_id: usize, listener_id: usize, future_atom: 
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(-1) as usize,
     };
-    trace!("tcp", "tcp_accept_async: loop={} listener={} future_atom={}", loop_id, listener_id, future_atom);
+    trace!(
+        "tcp",
+        "tcp_accept_async: loop={} listener={} future_atom={}", loop_id, listener_id, future_atom
+    );
     match event_loop.submit_tcp_op(crate::runtime::TcpOperation::Accept {
         listener_id,
         future_atom,
@@ -9365,7 +9390,14 @@ extern "C" fn tcp_read_async(
     let future_atom = BuiltInTypes::untag(future_atom);
     let runtime = get_runtime().get_mut();
 
-    trace!("tcp", "tcp_read_async: loop={} socket={} buf_size={} future_atom={}", loop_id, socket_id, buffer_size, future_atom);
+    trace!(
+        "tcp",
+        "tcp_read_async: loop={} socket={} buf_size={} future_atom={}",
+        loop_id,
+        socket_id,
+        buffer_size,
+        future_atom
+    );
     let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(-1) as usize,
@@ -9400,7 +9432,14 @@ extern "C" fn tcp_write_async(
     let data_str = runtime.get_string(stack_pointer, data);
     let data_bytes = data_str.as_bytes().to_vec();
 
-    trace!("tcp", "tcp_write_async: loop={} socket={} data_len={} future_atom={}", loop_id, socket_id, data_bytes.len(), future_atom);
+    trace!(
+        "tcp",
+        "tcp_write_async: loop={} socket={} data_len={} future_atom={}",
+        loop_id,
+        socket_id,
+        data_bytes.len(),
+        future_atom
+    );
     let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(-1) as usize,
@@ -9487,36 +9526,92 @@ extern "C" fn tcp_result_pop(loop_id: usize) -> usize {
         #[allow(unused_variables)]
         Some(result) => {
             let type_code = match &result {
-                TcpResult::ConnectOk { socket_id, future_atom, .. } => {
-                    trace!("tcp", "tcp_result_pop: ConnectOk socket={} future_atom={}", socket_id, future_atom);
+                TcpResult::ConnectOk {
+                    socket_id,
+                    future_atom,
+                    ..
+                } => {
+                    trace!(
+                        "tcp",
+                        "tcp_result_pop: ConnectOk socket={} future_atom={}",
+                        socket_id,
+                        future_atom
+                    );
                     1
                 }
-                TcpResult::ConnectErr { error, future_atom, .. } => {
-                    trace!("tcp", "tcp_result_pop: ConnectErr error={} future_atom={}", error, future_atom);
+                TcpResult::ConnectErr {
+                    error, future_atom, ..
+                } => {
+                    trace!(
+                        "tcp",
+                        "tcp_result_pop: ConnectErr error={} future_atom={}", error, future_atom
+                    );
                     2
                 }
-                TcpResult::AcceptOk { socket_id, listener_id, future_atom, .. } => {
-                    trace!("tcp", "tcp_result_pop: AcceptOk socket={} listener={} future_atom={}", socket_id, listener_id, future_atom);
+                TcpResult::AcceptOk {
+                    socket_id,
+                    listener_id,
+                    future_atom,
+                    ..
+                } => {
+                    trace!(
+                        "tcp",
+                        "tcp_result_pop: AcceptOk socket={} listener={} future_atom={}",
+                        socket_id,
+                        listener_id,
+                        future_atom
+                    );
                     3
                 }
-                TcpResult::AcceptErr { error, future_atom, .. } => {
-                    trace!("tcp", "tcp_result_pop: AcceptErr error={} future_atom={}", error, future_atom);
+                TcpResult::AcceptErr {
+                    error, future_atom, ..
+                } => {
+                    trace!(
+                        "tcp",
+                        "tcp_result_pop: AcceptErr error={} future_atom={}", error, future_atom
+                    );
                     4
                 }
-                TcpResult::ReadOk { data, future_atom, .. } => {
-                    trace!("tcp", "tcp_result_pop: ReadOk data_len={} future_atom={}", data.len(), future_atom);
+                TcpResult::ReadOk {
+                    data, future_atom, ..
+                } => {
+                    trace!(
+                        "tcp",
+                        "tcp_result_pop: ReadOk data_len={} future_atom={}",
+                        data.len(),
+                        future_atom
+                    );
                     5
                 }
-                TcpResult::ReadErr { error, future_atom, .. } => {
-                    trace!("tcp", "tcp_result_pop: ReadErr error={} future_atom={}", error, future_atom);
+                TcpResult::ReadErr {
+                    error, future_atom, ..
+                } => {
+                    trace!(
+                        "tcp",
+                        "tcp_result_pop: ReadErr error={} future_atom={}", error, future_atom
+                    );
                     6
                 }
-                TcpResult::WriteOk { bytes_written, future_atom, .. } => {
-                    trace!("tcp", "tcp_result_pop: WriteOk bytes={} future_atom={}", bytes_written, future_atom);
+                TcpResult::WriteOk {
+                    bytes_written,
+                    future_atom,
+                    ..
+                } => {
+                    trace!(
+                        "tcp",
+                        "tcp_result_pop: WriteOk bytes={} future_atom={}",
+                        bytes_written,
+                        future_atom
+                    );
                     7
                 }
-                TcpResult::WriteErr { error, future_atom, .. } => {
-                    trace!("tcp", "tcp_result_pop: WriteErr error={} future_atom={}", error, future_atom);
+                TcpResult::WriteErr {
+                    error, future_atom, ..
+                } => {
+                    trace!(
+                        "tcp",
+                        "tcp_result_pop: WriteErr error={} future_atom={}", error, future_atom
+                    );
                     8
                 }
             };
@@ -9548,35 +9643,81 @@ extern "C" fn tcp_result_pop_for_atom(loop_id: usize, future_atom: usize) -> usi
         Some(result) => {
             let type_code = match &result {
                 TcpResult::ConnectOk { socket_id, .. } => {
-                    trace!("tcp", "tcp_result_pop_for_atom: ConnectOk socket={} future_atom={}", socket_id, future_atom);
+                    trace!(
+                        "tcp",
+                        "tcp_result_pop_for_atom: ConnectOk socket={} future_atom={}",
+                        socket_id,
+                        future_atom
+                    );
                     1
                 }
                 TcpResult::ConnectErr { error, .. } => {
-                    trace!("tcp", "tcp_result_pop_for_atom: ConnectErr error={} future_atom={}", error, future_atom);
+                    trace!(
+                        "tcp",
+                        "tcp_result_pop_for_atom: ConnectErr error={} future_atom={}",
+                        error,
+                        future_atom
+                    );
                     2
                 }
-                TcpResult::AcceptOk { socket_id, listener_id, .. } => {
-                    trace!("tcp", "tcp_result_pop_for_atom: AcceptOk socket={} listener={} future_atom={}", socket_id, listener_id, future_atom);
+                TcpResult::AcceptOk {
+                    socket_id,
+                    listener_id,
+                    ..
+                } => {
+                    trace!(
+                        "tcp",
+                        "tcp_result_pop_for_atom: AcceptOk socket={} listener={} future_atom={}",
+                        socket_id,
+                        listener_id,
+                        future_atom
+                    );
                     3
                 }
                 TcpResult::AcceptErr { error, .. } => {
-                    trace!("tcp", "tcp_result_pop_for_atom: AcceptErr error={} future_atom={}", error, future_atom);
+                    trace!(
+                        "tcp",
+                        "tcp_result_pop_for_atom: AcceptErr error={} future_atom={}",
+                        error,
+                        future_atom
+                    );
                     4
                 }
                 TcpResult::ReadOk { data, .. } => {
-                    trace!("tcp", "tcp_result_pop_for_atom: ReadOk data_len={} future_atom={} data={:?}", data.len(), future_atom, std::str::from_utf8(&data[..data.len().min(120)]).unwrap_or("<binary>"));
+                    trace!(
+                        "tcp",
+                        "tcp_result_pop_for_atom: ReadOk data_len={} future_atom={} data={:?}",
+                        data.len(),
+                        future_atom,
+                        std::str::from_utf8(&data[..data.len().min(120)]).unwrap_or("<binary>")
+                    );
                     5
                 }
                 TcpResult::ReadErr { error, .. } => {
-                    trace!("tcp", "tcp_result_pop_for_atom: ReadErr error={} future_atom={}", error, future_atom);
+                    trace!(
+                        "tcp",
+                        "tcp_result_pop_for_atom: ReadErr error={} future_atom={}",
+                        error,
+                        future_atom
+                    );
                     6
                 }
                 TcpResult::WriteOk { bytes_written, .. } => {
-                    trace!("tcp", "tcp_result_pop_for_atom: WriteOk bytes={} future_atom={}", bytes_written, future_atom);
+                    trace!(
+                        "tcp",
+                        "tcp_result_pop_for_atom: WriteOk bytes={} future_atom={}",
+                        bytes_written,
+                        future_atom
+                    );
                     7
                 }
                 TcpResult::WriteErr { error, .. } => {
-                    trace!("tcp", "tcp_result_pop_for_atom: WriteErr error={} future_atom={}", error, future_atom);
+                    trace!(
+                        "tcp",
+                        "tcp_result_pop_for_atom: WriteErr error={} future_atom={}",
+                        error,
+                        future_atom
+                    );
                     8
                 }
             };
@@ -9585,8 +9726,6 @@ extern "C" fn tcp_result_pop_for_atom(loop_id: usize, future_atom: usize) -> usi
         }
     }
 }
-
-
 
 /// Get the future_atom from the current TCP result
 extern "C" fn tcp_result_future_atom(loop_id: usize) -> usize {
@@ -9673,7 +9812,12 @@ extern "C" fn tcp_result_data(stack_pointer: usize, loop_id: usize) -> usize {
         }
     };
 
-    trace!("tcp", "tcp_result_data: data_len={} data={:?}", data.len(), &data[..data.len().min(80)]);
+    trace!(
+        "tcp",
+        "tcp_result_data: data_len={} data={:?}",
+        data.len(),
+        &data[..data.len().min(80)]
+    );
     let runtime = get_runtime().get_mut();
     runtime
         .allocate_string(stack_pointer, data)
@@ -9748,7 +9892,14 @@ extern "C" fn timer_set(loop_id: usize, delay_ms: usize, future_atom: usize) -> 
     };
 
     let timer_id = event_loop.timer_set(delay_ms, future_atom);
-    trace!("event-loop", "timer_set: loop={} delay={}ms future_atom={} timer_id={}", loop_id, delay_ms, future_atom, timer_id);
+    trace!(
+        "event-loop",
+        "timer_set: loop={} delay={}ms future_atom={} timer_id={}",
+        loop_id,
+        delay_ms,
+        future_atom,
+        timer_id
+    );
     BuiltInTypes::Int.tag(timer_id as isize) as usize
 }
 
@@ -11230,7 +11381,12 @@ pub unsafe extern "C" fn capture_continuation_runtime(
 ) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "capture_continuation");
-    trace!("continuation", "capture_continuation: resume_addr={:#x} result_offset={}", resume_address, result_local_offset);
+    trace!(
+        "continuation",
+        "capture_continuation: resume_addr={:#x} result_offset={}",
+        resume_address,
+        result_local_offset
+    );
     let runtime = get_runtime().get_mut();
     let debug_prompts = runtime.get_command_line_args().debug;
 
@@ -11498,6 +11654,150 @@ pub unsafe extern "C" fn capture_continuation_runtime(
     cont_ptr
 }
 
+unsafe extern "C" fn continue_return_from_shift_on_safe_stack() -> ! {
+    let debug_prompts = get_runtime().get().get_command_line_args().debug;
+    let (mut value, return_point) = {
+        let ptd = crate::runtime::per_thread_data();
+        let ctx = ptd
+            .safe_return_context
+            .as_ref()
+            .expect("missing safe return context for continuation return")
+            .clone();
+        (ctx.value, ctx.return_point)
+    };
+
+    // Copy only mutable local/eval-slot ranges from the relocated segment back to
+    // the original location. Do not copy frame metadata (saved FP/LR, frame header,
+    // GC links, callee-saved registers), which would corrupt control flow.
+    if return_point.is_root_invocation && !return_point.mutable_ranges.is_empty() {
+        let total_copy_bytes: usize = return_point.mutable_ranges.iter().map(|r| r.len).sum();
+        if debug_prompts {
+            eprintln!(
+                "[return_from_shift] Copying mutable slots: {} ranges, {} bytes from relocated_sp={:#x} to original_sp={:#x}",
+                return_point.mutable_ranges.len(),
+                total_copy_bytes,
+                return_point.relocated_sp,
+                return_point.original_sp
+            );
+        }
+        for range in &return_point.mutable_ranges {
+            unsafe {
+                std::ptr::copy(
+                    (return_point.relocated_sp + range.offset) as *const u8,
+                    (return_point.original_sp + range.offset) as *mut u8,
+                    range.len,
+                );
+            }
+        }
+    }
+
+    value = unsafe {
+        let ptd = crate::runtime::per_thread_data();
+        ptd.safe_return_context
+            .as_ref()
+            .map(|ctx| std::ptr::read_volatile(&ctx.value))
+            .unwrap_or(value)
+    };
+
+    let new_sp = return_point.stack_pointer;
+    let new_fp = return_point.frame_pointer;
+    let return_address = return_point.return_address;
+    let callee_saved = return_point.callee_saved_regs;
+
+    // Restore the shift body's stack frame from CapturedFrame.
+    let saved_frame_ptr = return_point.saved_frame;
+
+    cfg_if::cfg_if! {
+        if #[cfg(target_arch = "x86_64")] {
+            if saved_frame_ptr != 0
+                && let Some(saved_frame) = CapturedFrame::from_tagged(saved_frame_ptr) {
+                    let caller_fp = saved_frame.saved_caller_fp();
+                    saved_frame.restore_to_stack(new_fp, caller_fp);
+                    CapturedFrame::link_restored_frames_into_gc_chain(&[new_fp]);
+                }
+
+            let runtime = get_runtime().get();
+            let return_jump_fn = runtime
+                .get_function_by_name("beagle.builtin/return-jump")
+                .expect("return-jump function not found");
+            let ptr: *const u8 = return_jump_fn.pointer.into();
+            let return_jump_ptr: extern "C" fn(usize, usize, usize, usize, *const usize, *const u8, usize) -> ! =
+                unsafe { std::mem::transmute(ptr) };
+            crate::runtime::per_thread_data().safe_return_context = None;
+            // Pass null for frame_src since we already restored via CapturedFrame
+            return_jump_ptr(new_sp, new_fp, value, return_address, callee_saved.as_ptr(), std::ptr::null(), 0);
+        } else {
+            if saved_frame_ptr != 0
+                && let Some(saved_frame) = CapturedFrame::from_tagged(saved_frame_ptr) {
+                    let caller_fp = saved_frame.saved_caller_fp();
+                    saved_frame.restore_to_stack(new_fp, caller_fp);
+                    CapturedFrame::link_restored_frames_into_gc_chain(&[new_fp]);
+                }
+
+            crate::runtime::per_thread_data().safe_return_context = None;
+            unsafe {
+                asm!(
+                    "ldr x19, [x9]",
+                    "ldr x20, [x9, #8]",
+                    "ldr x21, [x9, #16]",
+                    "ldr x22, [x9, #24]",
+                    "ldr x23, [x9, #32]",
+                    "ldr x24, [x9, #40]",
+                    "ldr x25, [x9, #48]",
+                    "ldr x26, [x9, #56]",
+                    "ldr x27, [x9, #64]",
+                    "ldr x28, [x9, #72]",
+                    "mov sp, x10",
+                    "mov x29, x11",
+                    "mov x0, x12",
+                    "br x13",
+                    in("x9") callee_saved.as_ptr(),
+                    in("x10") new_sp,
+                    in("x11") new_fp,
+                    in("x12") value,
+                    in("x13") return_address,
+                    options(noreturn)
+                );
+            }
+        }
+    }
+}
+
+unsafe fn jump_to_safe_return_stack() -> ! {
+    let stack_top = {
+        let ptd = crate::runtime::per_thread_data();
+        ptd.ensure_native_scratch_stack_top()
+    };
+
+    cfg_if::cfg_if! {
+        if #[cfg(target_arch = "x86_64")] {
+            unsafe {
+                asm!(
+                    "mov rsp, {stack_top}",
+                    "and rsp, -16",
+                    "call {target}",
+                    "ud2",
+                    stack_top = in(reg) stack_top,
+                    target = in(reg) continue_return_from_shift_on_safe_stack as usize,
+                    options(noreturn)
+                );
+            }
+        } else {
+            unsafe {
+                asm!(
+                    "mov sp, {stack_top}",
+                    "mov x16, {target}",
+                    "blr x16",
+                    "brk #0",
+                    stack_top = in(reg) stack_top,
+                    target = in(reg) continue_return_from_shift_on_safe_stack as usize,
+                    options(noreturn)
+                );
+            }
+        }
+    }
+}
+
 /// Return from shift body to the enclosing reset.
 /// This pops the prompt and jumps to the prompt handler with the given value.
 pub unsafe extern "C" fn return_from_shift_runtime(
@@ -11589,94 +11889,14 @@ pub unsafe extern "C" fn return_from_shift_runtime(
                 return_point.prompt_id
             );
         }
-
-        // Copy only mutable local/eval-slot ranges from the relocated segment back to
-        // the original location. Do not copy frame metadata (saved FP/LR, frame header,
-        // GC links, callee-saved registers), which would corrupt control flow.
-        if return_point.is_root_invocation && !return_point.mutable_ranges.is_empty() {
-            let total_copy_bytes: usize = return_point.mutable_ranges.iter().map(|r| r.len).sum();
-            if debug_prompts {
-                eprintln!(
-                    "[return_from_shift] Copying mutable slots: {} ranges, {} bytes from relocated_sp={:#x} to original_sp={:#x}",
-                    return_point.mutable_ranges.len(),
-                    total_copy_bytes,
-                    return_point.relocated_sp,
-                    return_point.original_sp
-                );
-            }
-            for range in &return_point.mutable_ranges {
-                unsafe {
-                    std::ptr::copy(
-                        (return_point.relocated_sp + range.offset) as *const u8,
-                        (return_point.original_sp + range.offset) as *mut u8,
-                        range.len,
-                    );
-                }
-            }
+        {
+            let ptd = crate::runtime::per_thread_data();
+            ptd.safe_return_context = Some(crate::runtime::SafeReturnContext {
+                value,
+                return_point,
+            });
         }
-
-        let new_sp = return_point.stack_pointer;
-        let new_fp = return_point.frame_pointer;
-        let return_address = return_point.return_address;
-        let callee_saved = return_point.callee_saved_regs;
-
-        // Restore the shift body's stack frame from CapturedFrame
-        let saved_frame_ptr = return_point.saved_frame;
-
-        cfg_if::cfg_if! {
-            if #[cfg(target_arch = "x86_64")] {
-                // Restore saved frame from CapturedFrame heap object and link into GC chain
-                if saved_frame_ptr != 0 {
-                    if let Some(saved_frame) = CapturedFrame::from_tagged(saved_frame_ptr) {
-                        let caller_fp = unsafe { *(new_fp as *const usize) };
-                        saved_frame.restore_to_stack(new_fp, caller_fp);
-                        CapturedFrame::link_restored_frames_into_gc_chain(&[new_fp]);
-                    }
-                }
-
-                let runtime = get_runtime().get();
-                let return_jump_fn = runtime
-                    .get_function_by_name("beagle.builtin/return-jump")
-                    .expect("return-jump function not found");
-                let ptr: *const u8 = return_jump_fn.pointer.into();
-                let return_jump_ptr: extern "C" fn(usize, usize, usize, usize, *const usize, *const u8, usize) -> ! =
-                    unsafe { std::mem::transmute(ptr) };
-                // Pass null for frame_src since we already restored via CapturedFrame
-                return_jump_ptr(new_sp, new_fp, value, return_address, callee_saved.as_ptr(), std::ptr::null(), 0);
-            } else {
-                // Restore saved frame from CapturedFrame heap object and link into GC chain
-                if saved_frame_ptr != 0
-                    && let Some(saved_frame) = CapturedFrame::from_tagged(saved_frame_ptr) {
-                        saved_frame.restore_to_stack(new_fp, unsafe { *(new_fp as *const usize) });
-                        CapturedFrame::link_restored_frames_into_gc_chain(&[new_fp]);
-                    }
-
-                unsafe {
-                    asm!(
-                        "ldr x19, [x9]",
-                        "ldr x20, [x9, #8]",
-                        "ldr x21, [x9, #16]",
-                        "ldr x22, [x9, #24]",
-                        "ldr x23, [x9, #32]",
-                        "ldr x24, [x9, #40]",
-                        "ldr x25, [x9, #48]",
-                        "ldr x26, [x9, #56]",
-                        "ldr x27, [x9, #64]",
-                        "ldr x28, [x9, #72]",
-                        "mov sp, x10",
-                        "mov x29, x11",
-                        "mov x0, x12",
-                        "br x13",
-                        in("x9") callee_saved.as_ptr(),
-                        in("x10") new_sp,
-                        in("x11") new_fp,
-                        in("x12") value,
-                        in("x13") return_address,
-                        options(noreturn)
-                    );
-                }
-            }
-        }
+        unsafe { jump_to_safe_return_stack() };
     }
 
     // No invocation return point - return to prompt handler using the passed continuation.
@@ -11688,12 +11908,12 @@ pub unsafe extern "C" fn return_from_shift_runtime(
     let saved_continuation = ContinuationObject::from_tagged(saved);
 
     let cont_ptr = if is_handler_return {
-        if let Some(saved_cont) = saved_continuation {
+        if let Some(_passed_continuation) = passed_continuation {
+            cont_ptr
+        } else if let Some(saved_cont) = saved_continuation {
             let _ = saved_cont;
             crate::runtime::per_thread_data().saved_continuation_ptr = 0;
             saved
-        } else if let Some(_passed_continuation) = passed_continuation {
-            cont_ptr
         } else {
             panic!(
                 "return_from_shift handler return without captured continuation or return point: cont_ptr={:#x}",
@@ -11776,8 +11996,43 @@ pub unsafe extern "C" fn return_from_shift_runtime(
             // Link restored frames into the GC chain
             CapturedFrame::link_restored_frames_into_gc_chain(&restored_fps);
         }
-    } else if debug_prompts {
-        eprintln!("[return_from_shift] Skipping stack segment restore (is_handler_return=true)");
+    } else {
+        let mut synced_handler_return = false;
+        let sync_ranges = {
+            let ptd = crate::runtime::per_thread_data();
+            if let Some(return_point) = ptd.invocation_return_points.last_mut() {
+                if return_point.is_root_invocation && !return_point.mutable_ranges.is_empty() {
+                    Some((
+                        return_point.prompt_id,
+                        return_point.relocated_sp,
+                        return_point.original_sp,
+                        std::mem::take(&mut return_point.mutable_ranges),
+                    ))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        if let Some((prompt_id, relocated_sp, original_sp, ranges)) = sync_ranges {
+            synced_handler_return = true;
+            let _ = prompt_id;
+            for range in &ranges {
+                unsafe {
+                    std::ptr::copy(
+                        (relocated_sp + range.offset) as *const u8,
+                        (original_sp + range.offset) as *mut u8,
+                        range.len,
+                    );
+                }
+            }
+        }
+        if debug_prompts && !synced_handler_return {
+            eprintln!(
+                "[return_from_shift] Skipping stack segment restore (is_handler_return=true)"
+            );
+        }
     }
 
     // Store the value in the result local
@@ -11859,7 +12114,10 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
 ) -> ! {
     save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "invoke_continuation");
-    trace!("continuation", "invoke_continuation: cont_ptr={:#x} value={:#x}", cont_ptr, value);
+    trace!(
+        "continuation",
+        "invoke_continuation: cont_ptr={:#x} value={:#x}", cont_ptr, value
+    );
 
     let runtime = get_runtime().get_mut();
     let debug_prompts = runtime.get_command_line_args().debug;
