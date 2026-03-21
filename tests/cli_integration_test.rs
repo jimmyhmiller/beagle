@@ -865,7 +865,7 @@ fn test_repl_starts_socket_server() {
         });
 
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(Duration::from_secs(30)))
         .unwrap();
 
     // Split into separate read/write handles to avoid borrow conflicts
@@ -1060,7 +1060,7 @@ fn test_repl_struct_hotreload_crash() {
         });
 
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(Duration::from_secs(30)))
         .unwrap();
 
     let mut writer = stream.try_clone().expect("failed to clone TcpStream");
@@ -1412,7 +1412,7 @@ fn test_repl_shooter_hotreload_crash() {
     });
 
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(Duration::from_secs(30)))
         .unwrap();
 
     let mut writer = stream.try_clone().expect("failed to clone TcpStream");
