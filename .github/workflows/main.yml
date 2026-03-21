@@ -78,5 +78,5 @@ jobs:
           if [ "${{ matrix.build-mode }}" = "release" ]; then
             RUST_BACKTRACE=1 cargo test --features ${{ matrix.gc-features }},${{ matrix.backend }} --release -- --test-threads=1
           else
-            BEAGLE_TRACE='*' RUST_BACKTRACE=1 cargo test --features ${{ matrix.gc-features }},${{ matrix.backend }},trace -- --test-threads=1
+            RUST_BACKTRACE=1 cargo test --features ${{ matrix.gc-features }},${{ matrix.backend }} -- --test-threads=1
           fi

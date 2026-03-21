@@ -2408,9 +2408,6 @@ fn event_loop_thread_main(
             // if data arrives between reregister and poll. Attempting reads/writes
             // here catches any data that's already buffered in the kernel.
             let pending_read_sockets: Vec<usize> = s.pending_reads.keys().copied().collect();
-            if !pending_read_sockets.is_empty() {
-                trace!("event-loop", "io thread: trying {} pending reads", pending_read_sockets.len());
-            }
             for socket_id in pending_read_sockets {
                 if let Some(read_op) = s.pending_reads.remove(&socket_id) {
                     s.handle_socket_read(socket_id, read_op);

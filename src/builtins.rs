@@ -9143,7 +9143,6 @@ extern "C" fn event_loop_create_threaded(pool_size: usize) -> usize {
 extern "C" fn event_loop_run_once(loop_id: usize, timeout_ms: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
     let timeout_ms = BuiltInTypes::untag(timeout_ms) as u64;
-    trace!("event-loop", "run_once enter: loop={} timeout={}ms", loop_id, timeout_ms);
     let runtime = get_runtime().get_mut();
 
     // Simple polling: check for results, and if none, sleep briefly.
