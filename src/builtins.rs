@@ -11908,17 +11908,26 @@ pub unsafe extern "C" fn return_from_shift_runtime(
     let saved_continuation = ContinuationObject::from_tagged(saved);
 
     let cont_ptr = if is_handler_return {
-        if let Some(_passed_continuation) = passed_continuation {
-            cont_ptr
-        } else if let Some(saved_cont) = saved_continuation {
-            let _ = saved_cont;
-            crate::runtime::per_thread_data().saved_continuation_ptr = 0;
-            saved
-        } else {
-            panic!(
-                "return_from_shift handler return without captured continuation or return point: cont_ptr={:#x}",
-                cont_ptr
-            );
+        match (passed_continuation, saved_continuation) {
+            (Some(passed_cont), Some(saved_cont)) => {
+                if passed_cont.prompt_id() != saved_cont.prompt_id() {
+                    cont_ptr
+                } else {
+                    crate::runtime::per_thread_data().saved_continuation_ptr = 0;
+                    saved
+                }
+            }
+            (Some(_passed_continuation), None) => cont_ptr,
+            (None, Some(_saved_cont)) => {
+                crate::runtime::per_thread_data().saved_continuation_ptr = 0;
+                saved
+            }
+            (None, None) => {
+                panic!(
+                    "return_from_shift handler return without captured continuation or return point: cont_ptr={:#x}",
+                    cont_ptr
+                );
+            }
         }
     } else if let Some(_passed_continuation) = passed_continuation {
         cont_ptr
