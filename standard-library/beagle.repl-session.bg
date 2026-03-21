@@ -17,7 +17,7 @@ use beagle.async as async
 struct EvalRequest {
     id           // string: request id
     code         // string: code to evaluate
-    callback     // function: fn(response-map) to send results
+    result_atom  // atom(null): set to [response-map] when eval completes
 }
 
 // Session - isolated evaluation context
@@ -42,8 +42,7 @@ fn create-session(id) {
     let running = atom(false)
     let cancel = atom(false)
 
-    // Spawn background eval thread with async I/O support
-    // (needed because callbacks may write to sockets)
+    // Spawn background eval thread with async I/O support for eval'd code.
     let eval_thread = thread(fn() {
         async/with-implicit-async(fn() {
             session-eval-loop(queue, running, cancel)
@@ -103,7 +102,7 @@ fn session-eval-loop(queue, running, cancel) {
 /// Process a single eval request with output capture.
 ///
 /// Uses dynamic var binding to capture all println/print output
-/// to a StringBuffer, then sends the captured output to the client.
+/// to a StringBuffer, then stores the response batch in request.result_atom.
 fn process-eval-request(request, cancel) {
     let buf = core/new-string-buffer()
 
@@ -123,53 +122,57 @@ fn process-eval-request(request, cancel) {
 
     // Check if cancelled
     if deref(cancel) {
-        // Send cancellation status
         let req_id = request.id
         let response_map = assoc({:id req_id}, :status, "cancelled")
-        request.callback(response_map)
+        reset!(request.result_atom, [response_map])
     } else {
-        // Send captured output (if any)
+        let mut responses = []
+
         if buf.content != "" {
             let output = core/trim-right(buf.content)
             let req_id = request.id
             let response_map = assoc({:id req_id}, :out, output)
-            request.callback(response_map)
+            responses = push(responses, response_map)
         }
 
-        // Send result value
         let req_id = request.id
         let val_str = to-string(result)
         let response_map = assoc({:id req_id}, :value, val_str)
-        request.callback(response_map)
+        responses = push(responses, response_map)
 
-        // Send done status
         let req_id = request.id
         let done_status = ["done"]
         let response_map = assoc({:id req_id}, :status, done_status)
-        request.callback(response_map)
+        responses = push(responses, response_map)
+
+        reset!(request.result_atom, responses)
     }
 }
 
 /// Submit code for evaluation in a session.
 ///
 /// The request is queued and the eval thread will process it.
-/// The response_fn is called with each response message.
+/// Returns an atom that will be set to the full response batch when done.
 ///
 /// Examples:
-///   session-eval(sess, "req-1", "(+ 1 2)", fn(resp) {
-///       println("Response:", resp)
-///   })
-fn session-eval(session, request_id, code, response_fn) {
+///   let result_atom = session-eval(sess, "req-1", "(+ 1 2)")
+///   while deref(result_atom) == null {
+///       core/sleep(1)
+///   }
+fn session-eval(session, request_id, code) {
+    let result_atom = atom(null)
     let request = EvalRequest {
         id: request_id,
         code: code,
-        callback: response_fn
+        result_atom: result_atom
     }
 
     // Add to queue
     swap!(session.message_queue, fn(queue) {
         push(queue, request)
     })
+
+    result_atom
 }
 
 /// Interrupt a running evaluation in a session.

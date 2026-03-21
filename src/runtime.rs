@@ -3602,6 +3602,8 @@ pub struct PromptHandler {
     pub result_local: isize,
     /// Unique ID for this prompt (to distinguish sequential handlers at same depth)
     pub prompt_id: usize,
+    /// True when this prompt was pushed for a relocated continuation invocation.
+    pub is_relocated: bool,
 }
 
 /// Invocation return point for multi-shot continuations.
@@ -3674,6 +3676,7 @@ impl ContinuationObject {
     const FIELD_PROMPT_LR: usize = 8;
     const FIELD_PROMPT_RESULT_LOCAL: usize = 9;
     const FIELD_PROMPT_ID: usize = 10;
+    const FIELD_PROMPT_IS_RELOCATED: usize = 11;
 
     pub fn from_tagged(tagged: usize) -> Option<Self> {
         let heap_obj = HeapObject::try_from_tagged(tagged)?;
@@ -3736,6 +3739,10 @@ impl ContinuationObject {
         BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_PROMPT_ID))
     }
 
+    pub fn prompt_is_relocated(&self) -> bool {
+        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_PROMPT_IS_RELOCATED)) != 0
+    }
+
     pub fn prompt_handler(&self) -> PromptHandler {
         PromptHandler {
             handler_address: self.handler_address(),
@@ -3744,6 +3751,7 @@ impl ContinuationObject {
             link_register: self.prompt_link_register(),
             result_local: self.prompt_result_local(),
             prompt_id: self.prompt_id(),
+            is_relocated: self.prompt_is_relocated(),
         }
     }
 
@@ -3797,6 +3805,10 @@ impl ContinuationObject {
         heap_obj.write_field(
             Self::FIELD_PROMPT_ID as i32,
             BuiltInTypes::Int.tag(prompt.prompt_id as isize) as usize,
+        );
+        heap_obj.write_field(
+            Self::FIELD_PROMPT_IS_RELOCATED as i32,
+            BuiltInTypes::Int.tag(prompt.is_relocated as isize) as usize,
         );
     }
 }

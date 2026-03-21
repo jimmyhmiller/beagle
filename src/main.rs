@@ -1979,6 +1979,10 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         println!("Time {:?}", time.elapsed());
     }
 
+    // Wait for threads spawned by main() before inspecting snapshot output or running
+    // test blocks. This avoids racing child-thread teardown against test-mode bookkeeping.
+    runtime.wait_for_other_threads();
+
     if has_expect {
         let source = std::fs::read_to_string(program.clone())?;
         let expected = match get_expect(&source) {
@@ -2068,15 +2072,7 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    loop {
-        let threads = std::mem::take(&mut runtime.memory.join_handles);
-        if threads.is_empty() {
-            break;
-        }
-        for thread in threads {
-            thread.join().unwrap();
-        }
-    }
+    runtime.wait_for_other_threads();
 
     // Clean up the main thread's per-thread continuation state after all threads have been joined.
     // Child threads clean up their own data in their exit path.

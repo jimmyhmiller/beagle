@@ -2402,10 +2402,16 @@ fn create-implicit-handler() {
 
 // Run a block with the implicit async handler
 fn with-implicit-async(thunk) {
-    let handler = create-implicit-handler()
+    let loop_id = get-io-loop()
+    let tasks = atom([])
+    let handler = CooperativeHandler { tasks: tasks, loop_id: loop_id }
+    let result_atom = atom(null)
     handle effect/Handler(Async) with handler {
-        thunk()
+        let result = thunk()
+        reset!(result_atom, result)
     }
+    scheduler-loop(handler)
+    deref(result_atom)
 }
 
 // ============================================================================

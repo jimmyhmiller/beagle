@@ -11103,6 +11103,7 @@ pub unsafe extern "C" fn push_prompt_runtime(
         link_register,
         result_local,
         prompt_id,
+        is_relocated: false,
     };
 
     runtime.push_prompt_handler(handler);
@@ -11194,10 +11195,17 @@ pub unsafe extern "C" fn pop_prompt_runtime(
             .retain(|rp| rp.prompt_id != prompt_id);
     }
 
-    // When all prompts are done, clear ALL continuation state for this thread
+    // When all prompts are done, clear ALL continuation state for this thread.
+    // saved_continuation_ptr only exists to bridge a single perform/handler-return
+    // when the stack local holding cont_ptr becomes stale after relocation.
+    // Once the prompt stack is empty, any leftover pointer belongs to an already
+    // completed invocation and must not leak into the next one.
     if ptd.prompt_handlers.is_empty() {
         ptd.invocation_return_points.clear();
         ptd.return_from_shift_via_pop_prompt = false;
+        ptd.is_handler_return = false;
+        ptd.saved_continuation_ptr = 0;
+        ptd.relocation_depth = 0;
     }
 
     BuiltInTypes::null_value() as usize
@@ -11443,7 +11451,7 @@ pub unsafe extern "C" fn capture_continuation_runtime(
     };
 
     // Allocate the continuation heap object
-    let cont_ptr = match runtime.allocate(11, stack_pointer, BuiltInTypes::HeapObject) {
+    let cont_ptr = match runtime.allocate(12, stack_pointer, BuiltInTypes::HeapObject) {
         Ok(ptr) => ptr,
         Err(_) => unsafe {
             if segment_root_id != 0 {
@@ -11503,15 +11511,66 @@ pub unsafe extern "C" fn return_from_shift_runtime(
     let runtime = get_runtime().get_mut();
     let debug_prompts = runtime.get_command_line_args().debug;
 
+    let resolve_handler_prompt_id = |cont_ptr: usize| -> Option<usize> {
+        let candidate = if cont_ptr != 0
+            && cont_ptr != BuiltInTypes::null_value() as usize
+            && BuiltInTypes::is_heap_pointer(cont_ptr)
+            && BuiltInTypes::untag(cont_ptr).is_multiple_of(8)
+        {
+            cont_ptr
+        } else {
+            let saved = crate::runtime::per_thread_data().saved_continuation_ptr;
+            if saved != 0
+                && saved != BuiltInTypes::null_value() as usize
+                && BuiltInTypes::is_heap_pointer(saved)
+                && BuiltInTypes::untag(saved).is_multiple_of(8)
+            {
+                saved
+            } else {
+                0
+            }
+        };
+
+        if candidate == 0 {
+            None
+        } else {
+            ContinuationObject::from_tagged(candidate).map(|cont| cont.prompt_id())
+        }
+    };
+
+    let handler_prompt_id = if crate::runtime::per_thread_data().is_handler_return {
+        resolve_handler_prompt_id(cont_ptr)
+    } else {
+        None
+    };
+
     // Read and mutate per-thread data in a scoped block to avoid holding a &mut
     // reference across re-entrant calls or across the second per_thread_data() access below.
     let (from_pop_prompt, is_handler_return, return_point_opt) = {
         let ptd = crate::runtime::per_thread_data();
         let from_pop_prompt = std::mem::replace(&mut ptd.return_from_shift_via_pop_prompt, false);
         let is_handler_return = std::mem::replace(&mut ptd.is_handler_return, false);
-        let return_point_opt = ptd.invocation_return_points.pop();
+        let should_pop_return_point = if is_handler_return {
+            match (handler_prompt_id, ptd.invocation_return_points.last()) {
+                (Some(expected_prompt_id), Some(top_return_point)) => {
+                    top_return_point.prompt_id == expected_prompt_id
+                }
+                (Some(_), None) => false,
+                (None, Some(_)) => true,
+                (None, None) => false,
+            }
+        } else {
+            true
+        };
+        let return_point_opt = if should_pop_return_point {
+            ptd.invocation_return_points.pop()
+        } else {
+            None
+        };
         if return_point_opt.is_some() {
-            ptd.prompt_handlers.pop();
+            if from_pop_prompt || !is_handler_return {
+                ptd.prompt_handlers.pop();
+            }
             if ptd.relocation_depth > 0 {
                 ptd.relocation_depth -= 1;
             }
@@ -11625,40 +11684,33 @@ pub unsafe extern "C" fn return_from_shift_runtime(
     // being assigned. Use saved_continuation_ptr from invoke_continuation_runtime as fallback.
     let ptd = crate::runtime::per_thread_data();
     let saved = ptd.saved_continuation_ptr;
+    let passed_continuation = ContinuationObject::from_tagged(cont_ptr);
+    let saved_continuation = ContinuationObject::from_tagged(saved);
 
-    let cont_ptr = if saved != 0 && BuiltInTypes::is_heap_pointer(saved) {
-        if debug_prompts {
-            if let Some(saved_cont) = ContinuationObject::from_tagged(saved) {
-                eprintln!(
-                    "[return_from_shift] using saved cont_ptr={:#x} (passed={:#x}) saved_prompt_sp={:#x} saved_prompt_fp={:#x} saved_original_sp={:#x}",
-                    saved,
-                    cont_ptr,
-                    saved_cont.prompt_stack_pointer(),
-                    saved_cont.prompt_frame_pointer(),
-                    saved_cont.original_sp()
-                );
-            } else {
-                eprintln!(
-                    "[return_from_shift] using saved cont_ptr={:#x} (passed={:#x}) [INVALID]",
-                    saved, cont_ptr
-                );
-            }
-        }
-        crate::runtime::per_thread_data().saved_continuation_ptr = 0;
-        saved
-    } else {
-        let is_valid_cont_ptr = cont_ptr != 0
-            && cont_ptr != BuiltInTypes::null_value() as usize
-            && BuiltInTypes::is_heap_pointer(cont_ptr)
-            && BuiltInTypes::untag(cont_ptr).is_multiple_of(8);
-
-        if !is_valid_cont_ptr {
+    let cont_ptr = if is_handler_return {
+        if let Some(saved_cont) = saved_continuation {
+            let _ = saved_cont;
+            crate::runtime::per_thread_data().saved_continuation_ptr = 0;
+            saved
+        } else if let Some(_passed_continuation) = passed_continuation {
+            cont_ptr
+        } else {
             panic!(
-                "return_from_shift called without captured continuation or return point: cont_ptr={:#x}",
+                "return_from_shift handler return without captured continuation or return point: cont_ptr={:#x}",
                 cont_ptr
             );
         }
+    } else if let Some(_passed_continuation) = passed_continuation {
         cont_ptr
+    } else if let Some(saved_cont) = saved_continuation {
+        let _ = saved_cont;
+        crate::runtime::per_thread_data().saved_continuation_ptr = 0;
+        saved
+    } else {
+        panic!(
+            "return_from_shift called without captured continuation or return point: cont_ptr={:#x}",
+            cont_ptr
+        );
     };
 
     let continuation = ContinuationObject::from_tagged(cont_ptr).unwrap_or_else(|| {
@@ -12155,10 +12207,18 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
 
     let result_ptr = (new_fp as isize).wrapping_add(continuation.result_local()) as *mut usize;
     // Create InvocationReturnPoint for multi-shot support
-    let (current_depth, rp_len_for_debug) = {
+    let (current_depth, rp_len_for_debug, is_root_invocation) = {
+        let captured_prompt = continuation.prompt_handler();
         let ptd = crate::runtime::per_thread_data();
+        let nested_relocated_prompts = ptd
+            .prompt_handlers
+            .iter()
+            .filter(|handler| handler.is_relocated)
+            .count()
+            + usize::from(captured_prompt.is_relocated);
         let current_depth = ptd.relocation_depth;
         ptd.relocation_depth = current_depth + 1;
+        let is_root_invocation = nested_relocated_prompts == 0;
 
         ptd.invocation_return_points
             .push(crate::runtime::InvocationReturnPoint {
@@ -12172,13 +12232,12 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
                 original_sp,
                 segment_len: stack_segment_size,
                 mutable_ranges,
-                is_root_invocation: current_depth == 0,
+                is_root_invocation,
             });
 
         let rp_len = ptd.invocation_return_points.len();
-        (current_depth, rp_len)
+        (current_depth, rp_len, is_root_invocation)
     };
-    let is_root_invocation = current_depth == 0;
 
     if debug_prompts {
         let rp_len = rp_len_for_debug;
@@ -12209,6 +12268,7 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
         link_register: continuation.prompt_link_register(),
         result_local: continuation.prompt_result_local(),
         prompt_id: continuation.prompt_id(),
+        is_relocated: true,
     };
     runtime.push_prompt_handler(relocated_prompt);
 

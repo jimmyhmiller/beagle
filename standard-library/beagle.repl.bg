@@ -57,9 +57,16 @@ fn handle-eval(client, msg) {
         send-response(client, {:id request_id, :status err_status, :error "Missing required fields: session, id, code"})
     } else {
         let sess = get-or-create-session(session_id)
-        session/session-eval(sess, request_id, code, fn(response) {
+        let result_atom = session/session-eval(sess, request_id, code)
+
+        while deref(result_atom) == null {
+            core/sleep(1)
+        }
+
+        let responses = deref(result_atom)
+        for response in responses {
             send-response(client, response)
-        })
+        }
     }
 }
 
