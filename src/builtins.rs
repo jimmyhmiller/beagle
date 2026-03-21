@@ -102,6 +102,24 @@ pub fn set_gc_frame_top(v: usize) {
     GC_FRAME_TOP.with(|cell| cell.set(v));
 }
 
+fn gc_chain_prev_for_restored_segment(
+    segment_start: usize,
+    segment_len: usize,
+    outermost_fp: usize,
+) -> usize {
+    let current_top = get_gc_frame_top();
+    let segment_end = segment_start.saturating_add(segment_len);
+
+    // If the current GC top already points into the segment we are restoring,
+    // that segment is being rewritten in place. Preserve the outermost frame's
+    // original predecessor instead of linking the segment back under its own top.
+    if current_top >= segment_start && current_top < segment_end {
+        unsafe { *((outermost_fp - 16) as *const usize) }
+    } else {
+        current_top
+    }
+}
+
 /// Called by JIT prologue AFTER arguments have been saved to locals.
 /// Links the new frame into the GC frame chain.
 /// Returns the old gc_frame_top (to be stored as the prev pointer at [FP-16]).
@@ -815,15 +833,6 @@ extern "C" fn split(
         .split(&delimiter_value)
         .map(|s| s.to_string())
         .collect();
-
-    if delimiter_value == "\n" && parts.len() <= 3 {
-        eprintln!(
-            "[split] thread={:?} input_len={} delimiter='\\n' parts={:?}",
-            std::thread::current().id(),
-            string_value.len(),
-            parts
-        );
-    }
 
     match runtime.create_string_array(stack_pointer, &parts) {
         Ok(arr) => arr,
@@ -11712,8 +11721,18 @@ unsafe extern "C" fn continue_return_from_shift_on_safe_stack() -> ! {
             if saved_frame_ptr != 0
                 && let Some(saved_frame) = CapturedFrame::from_tagged(saved_frame_ptr) {
                     let caller_fp = saved_frame.saved_caller_fp();
+                    let frame_size = saved_frame.total_stack_size();
+                    let frame_bottom = new_fp
+                        .checked_add(16)
+                        .and_then(|top| top.checked_sub(frame_size))
+                        .expect("safe return frame restore underflow computing frame_bottom");
+                    let gc_chain_prev =
+                        gc_chain_prev_for_restored_segment(frame_bottom, frame_size, new_fp);
                     saved_frame.restore_to_stack(new_fp, caller_fp);
-                    CapturedFrame::link_restored_frames_into_gc_chain(&[new_fp]);
+                    CapturedFrame::link_restored_frames_into_gc_chain_with_prev(
+                        &[new_fp],
+                        gc_chain_prev,
+                    );
                 }
 
             let runtime = get_runtime().get();
@@ -11730,8 +11749,18 @@ unsafe extern "C" fn continue_return_from_shift_on_safe_stack() -> ! {
             if saved_frame_ptr != 0
                 && let Some(saved_frame) = CapturedFrame::from_tagged(saved_frame_ptr) {
                     let caller_fp = saved_frame.saved_caller_fp();
+                    let frame_size = saved_frame.total_stack_size();
+                    let frame_bottom = new_fp
+                        .checked_add(16)
+                        .and_then(|top| top.checked_sub(frame_size))
+                        .expect("safe return frame restore underflow computing frame_bottom");
+                    let gc_chain_prev =
+                        gc_chain_prev_for_restored_segment(frame_bottom, frame_size, new_fp);
                     saved_frame.restore_to_stack(new_fp, caller_fp);
-                    CapturedFrame::link_restored_frames_into_gc_chain(&[new_fp]);
+                    CapturedFrame::link_restored_frames_into_gc_chain_with_prev(
+                        &[new_fp],
+                        gc_chain_prev,
+                    );
                 }
 
             crate::runtime::per_thread_data().safe_return_context = None;
@@ -11973,6 +12002,12 @@ pub unsafe extern "C" fn return_from_shift_runtime(
             let frames = CapturedFrame::collect_chain(segment_ptr);
             let original_sp = continuation.original_sp();
             let stack_segment_size: usize = frames.iter().map(|f| f.total_stack_size()).sum();
+            let outermost_fp = original_sp
+                .checked_add(stack_segment_size)
+                .and_then(|top| top.checked_sub(16))
+                .expect("return_from_shift restore underflow computing outermost_fp");
+            let gc_chain_prev =
+                gc_chain_prev_for_restored_segment(original_sp, stack_segment_size, outermost_fp);
 
             if debug_prompts {
                 eprintln!(
@@ -12003,7 +12038,10 @@ pub unsafe extern "C" fn return_from_shift_runtime(
             }
 
             // Link restored frames into the GC chain
-            CapturedFrame::link_restored_frames_into_gc_chain(&restored_fps);
+            CapturedFrame::link_restored_frames_into_gc_chain_with_prev(
+                &restored_fps,
+                gc_chain_prev,
+            );
         }
     } else {
         let mut synced_handler_return = false;
@@ -12377,6 +12415,12 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
         set_gc_frame_top(k_prev);
     }
 
+    let outermost_fp = new_sp
+        .checked_add(stack_segment_size)
+        .and_then(|top| top.checked_sub(16))
+        .expect("[invoke_cont] restore underflow computing outermost_fp");
+    let gc_chain_prev = gc_chain_prev_for_restored_segment(new_sp, stack_segment_size, outermost_fp);
+
     let mut restored_fps: Vec<usize> = Vec::with_capacity(frames.len());
     let mut mutable_ranges: Vec<crate::runtime::StackCopyRange> = Vec::with_capacity(frames.len());
     for (idx, frame) in frames.iter().enumerate() {
@@ -12441,7 +12485,7 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
     }
 
     // Link restored frames into the GC chain
-    CapturedFrame::link_restored_frames_into_gc_chain(&restored_fps);
+    CapturedFrame::link_restored_frames_into_gc_chain_with_prev(&restored_fps, gc_chain_prev);
 
     // The innermost frame's FP is prev_fp
     let new_fp = prev_fp;
@@ -12486,6 +12530,10 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
         let current_depth = ptd.relocation_depth;
         ptd.relocation_depth = current_depth + 1;
         let is_root_invocation = nested_relocated_prompts == 0;
+
+        if is_root_invocation {
+            ptd.saved_continuation_ptr = cont_ptr;
+        }
 
         ptd.invocation_return_points
             .push(crate::runtime::InvocationReturnPoint {

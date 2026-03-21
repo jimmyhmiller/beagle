@@ -46,9 +46,15 @@ fn server-handle-message(client, msg) {
     let op = get(msg, "op")
     if op == "eval" {
         server-handle-eval(client, msg)
+        true
+    } else if op == "shutdown" {
+        let s = ["done"]
+        send-response(client, {:id get(msg, "id"), :status s})
+        false
     } else {
         let s = ["done"]
         send-response(client, {:id get(msg, "id"), :status s})
+        true
     }
 }
 
@@ -73,7 +79,7 @@ fn server-handle-client(client) {
                     if length(line) > 0 {
                         let msg = try { json-decode(line) } catch (e) { null }
                         if msg != null {
-                            server-handle-message(client, msg)
+                            running = server-handle-message(client, msg)
                         }
                     }
                     i = i + 1
@@ -110,6 +116,11 @@ fn read-all-lines(conn) {
 
 fn send-eval(conn, id, code) {
     let msg = {:op "eval", :id id, :session "test-session", :code code}
+    socket/write(conn, json-encode(msg) ++ "\n")
+}
+
+fn send-shutdown(conn, id) {
+    let msg = {:op "shutdown", :id id}
     socket/write(conn, json-encode(msg) ++ "\n")
 }
 
@@ -231,6 +242,8 @@ fn main() {
         let v7 = eval-and-get-value(conn, "11", "TEST_CONST")
         println("let after round-trip: " ++ v7)
 
+        send-shutdown(conn, "12")
+        collect-eval-result(conn)
         socket/close(conn)
     })
 

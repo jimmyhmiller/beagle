@@ -2402,16 +2402,24 @@ fn create-implicit-handler() {
 
 // Run a block with the implicit async handler
 fn with-implicit-async(thunk) {
-    let loop_id = get-io-loop()
+    let loop_id = core/event-loop-create-threaded(4)
     let tasks = atom([])
     let handler = CooperativeHandler { tasks: tasks, loop_id: loop_id }
     let result_atom = atom(null)
-    handle effect/Handler(Async) with handler {
+    let initial-task = fn() {
         let result = thunk()
         reset!(result_atom, result)
     }
-    scheduler-loop(handler)
-    deref(result_atom)
+    reset!(tasks, [SchedulerTask { op: PendingOp.NewTask { thunk: initial-task }, resume: null }])
+    let result = try {
+        scheduler-loop(handler)
+        deref(result_atom)
+    } catch (e) {
+        core/event-loop-destroy(loop_id)
+        throw(e)
+    }
+    core/event-loop-destroy(loop_id)
+    result
 }
 
 // ============================================================================
@@ -2511,7 +2519,7 @@ fn scheduler-loop(handler) {
 // The runtime checks for beagle.async/__main__ and calls it if present.
 
 fn __main__(main_fn, args) {
-    let loop_id = get-io-loop()
+    let loop_id = core/event-loop-create-threaded(4)
     let tasks = atom([])
     let handler = CooperativeHandler { tasks: tasks, loop_id: loop_id }
     handle effect/Handler(Async) with handler {
@@ -2522,6 +2530,7 @@ fn __main__(main_fn, args) {
         }
     }
     scheduler-loop(handler)
+    core/event-loop-destroy(loop_id)
 }
 
 // Thread wrapper — gives each thread the same async handler setup as main.
@@ -2529,7 +2538,7 @@ fn __main__(main_fn, args) {
 fn __run_thread_start() {
     let thread-obj = primitive/__get-my-thread-obj();
     let f = thread-obj.closure;
-    let loop_id = get-io-loop()
+    let loop_id = core/event-loop-create-threaded(4)
     let tasks = atom([])
     let handler = CooperativeHandler { tasks: tasks, loop_id: loop_id }
     try {
@@ -2542,4 +2551,5 @@ fn __run_thread_start() {
         println(e)
         null
     }
+    core/event-loop-destroy(loop_id)
 }

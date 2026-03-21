@@ -4261,19 +4261,17 @@ impl CapturedFrame {
     /// Link a chain of restored frames into the GC frame linked list.
     /// `fps` is a list of frame pointers (outermost first, innermost last).
     /// Each frame's header is at [FP-8] and prev pointer at [FP-16].
+    /// `previous_top` is the header address that should sit below the outermost
+    /// restored frame in the final chain.
     /// After linking, the innermost frame becomes the new GC_FRAME_TOP.
-    pub fn link_restored_frames_into_gc_chain(fps: &[usize]) {
+    pub fn link_restored_frames_into_gc_chain_with_prev(fps: &[usize], previous_top: usize) {
         if fps.is_empty() {
             return;
         }
-        // Save the current gc_frame_top — the outermost restored frame's prev
-        // should point to whatever was on the chain before.
-        let current_top = crate::builtins::get_gc_frame_top();
 
         // Link outermost frame to the existing chain
         let outermost_fp = fps[0];
-        let outermost_header_addr = outermost_fp - 8;
-        unsafe { *((outermost_fp - 16) as *mut usize) = current_top };
+        unsafe { *((outermost_fp - 16) as *mut usize) = previous_top };
 
         // Link each subsequent frame to the previous one
         for i in 1..fps.len() {
@@ -4285,7 +4283,12 @@ impl CapturedFrame {
         let innermost_fp = fps[fps.len() - 1];
         let innermost_header_addr = innermost_fp - 8;
         crate::builtins::set_gc_frame_top(innermost_header_addr);
-        let _ = outermost_header_addr; // suppress warning
+    }
+
+    /// Link a restored frame chain under the current GC frame top.
+    pub fn link_restored_frames_into_gc_chain(fps: &[usize]) {
+        let current_top = crate::builtins::get_gc_frame_top();
+        Self::link_restored_frames_into_gc_chain_with_prev(fps, current_top);
     }
 
     /// Collect all frames in the chain into a Vec (outermost first).
