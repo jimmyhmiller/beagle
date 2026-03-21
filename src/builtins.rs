@@ -9159,9 +9159,10 @@ extern "C" fn event_loop_run_once(loop_id: usize, timeout_ms: usize) -> usize {
         return BuiltInTypes::Int.tag(count as isize) as usize;
     }
 
-    // No results yet — yield and sleep briefly
-    let sleep_ms = if timeout_ms == 0 { 1 } else { timeout_ms.min(1) };
-    thread::sleep(std::time::Duration::from_millis(sleep_ms));
+    // No results yet — yield to let other threads (including I/O thread) run.
+    // We must NOT use thread::sleep here because this is a managed Beagle thread
+    // without c_call registration, so sleeping would block GC safepoint coordination.
+    thread::yield_now();
 
     let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
