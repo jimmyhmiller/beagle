@@ -839,7 +839,7 @@ fn test_repl_starts_socket_server() {
 
     // Send commands to start the socket REPL server
     let cmds = format!(
-        "use beagle.repl as repl\nthread(fn() {{ repl/start-repl-server(\"127.0.0.1\", {}) }})\n",
+        "use beagle.repl as repl\nuse beagle.async as async\nthread(fn() {{ async/with-implicit-async(fn() {{ repl/start-repl-server(\"127.0.0.1\", {}) }}) }})\n",
         port
     );
     stdin
@@ -1034,7 +1034,7 @@ fn test_repl_struct_hotreload_crash() {
 
     // Send commands to start the socket REPL server
     let cmds = format!(
-        "use beagle.repl as repl\nthread(fn() {{ repl/start-repl-server(\"127.0.0.1\", {}) }})\n",
+        "use beagle.repl as repl\nuse beagle.async as async\nthread(fn() {{ async/with-implicit-async(fn() {{ repl/start-repl-server(\"127.0.0.1\", {}) }}) }})\n",
         port
     );
     stdin
@@ -1383,7 +1383,7 @@ fn test_repl_shooter_hotreload_crash() {
     let mut stdin = child.stdin.take().unwrap();
 
     let cmds = format!(
-        "use beagle.repl as repl\nthread(fn() {{ repl/start-repl-server(\"127.0.0.1\", {}) }})\n",
+        "use beagle.repl as repl\nuse beagle.async as async\nthread(fn() {{ async/with-implicit-async(fn() {{ repl/start-repl-server(\"127.0.0.1\", {}) }}) }})\n",
         port
     );
     stdin

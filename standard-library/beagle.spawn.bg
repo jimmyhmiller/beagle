@@ -139,12 +139,14 @@ fn handle-spawn-threaded(thunk) {
 
     // Spawn a thread that executes the thunk and updates the future
     thread(fn() {
-        try {
-            let result = thunk()
-            reset!(state_atom, async/FutureState.Resolved { value: result })
-        } catch (e) {
-            reset!(state_atom, async/FutureState.Rejected { error: e })
-        }
+        async/with-implicit-async(fn() {
+            try {
+                let result = thunk()
+                reset!(state_atom, async/FutureState.Resolved { value: result })
+            } catch (e) {
+                reset!(state_atom, async/FutureState.Rejected { error: e })
+            }
+        })
     })
 
     future
@@ -157,24 +159,26 @@ fn handle-spawn-with-token-threaded(thunk, token) {
 
     // Spawn a thread that checks cancellation periodically
     thread(fn() {
-        // Check if cancelled before starting
-        if deref(cancelled_atom) {
-            reset!(state_atom, async/FutureState.Cancelled {})
-            core/future-notify()
-        } else {
-            try {
-                let result = thunk()
-                // Check if cancelled after completion
-                if deref(cancelled_atom) {
-                    reset!(state_atom, async/FutureState.Cancelled {})
-                } else {
-                    reset!(state_atom, async/FutureState.Resolved { value: result })
+        async/with-implicit-async(fn() {
+            // Check if cancelled before starting
+            if deref(cancelled_atom) {
+                reset!(state_atom, async/FutureState.Cancelled {})
+                core/future-notify()
+            } else {
+                try {
+                    let result = thunk()
+                    // Check if cancelled after completion
+                    if deref(cancelled_atom) {
+                        reset!(state_atom, async/FutureState.Cancelled {})
+                    } else {
+                        reset!(state_atom, async/FutureState.Resolved { value: result })
+                    }
+                } catch (e) {
+                    reset!(state_atom, async/FutureState.Rejected { error: e })
                 }
-            } catch (e) {
-                reset!(state_atom, async/FutureState.Rejected { error: e })
+                core/future-notify()
             }
-            core/future-notify()
-        }
+        })
     })
 
     future
