@@ -9140,14 +9140,17 @@ extern "C" fn event_loop_create_threaded(pool_size: usize) -> usize {
 /// Run the event loop once, waiting for results with given timeout in milliseconds
 /// The dedicated I/O thread handles polling; this waits on Condvar for results.
 /// Returns the number of available results.
-extern "C" fn event_loop_run_once(loop_id: usize, timeout_ms: usize) -> usize {
+extern "C" fn event_loop_run_once(
+    _stack_pointer: usize,
+    frame_pointer: usize,
+    loop_id: usize,
+    timeout_ms: usize,
+) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
     let timeout_ms = BuiltInTypes::untag(timeout_ms) as u64;
     let runtime = get_runtime().get_mut();
 
     // Simple polling: check for results, and if none, sleep briefly.
-    // Avoids condvar-based blocking which interacts badly with GC safepoint
-    // coordination on Linux x86-64 debug builds.
     let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(-1) as usize,
@@ -9159,11 +9162,42 @@ extern "C" fn event_loop_run_once(loop_id: usize, timeout_ms: usize) -> usize {
         return BuiltInTypes::Int.tag(count as isize) as usize;
     }
 
-    // No results yet — yield to let other threads (including I/O thread) run.
-    // We must NOT use thread::sleep here because this is a managed Beagle thread
-    // without c_call registration, so sleeping would block GC safepoint coordination.
-    thread::yield_now();
+    // No results yet — sleep briefly to avoid busy-looping.
+    // Register as c_calling during sleep so GC doesn't wait for this thread
+    // to reach a safepoint (it can't while blocked in sleep).
+    {
+        let thread_state = runtime.thread_state.clone();
+        let (lock, condvar) = &*thread_state;
+        let mut state = lock.lock().unwrap();
+        state.register_c_call(frame_pointer);
+        condvar.notify_one();
+    }
 
+    let sleep_ms = if timeout_ms == 0 { 1 } else { timeout_ms.min(1) };
+    thread::sleep(std::time::Duration::from_millis(sleep_ms));
+
+    // Unregister from c_calling, waiting for any in-progress GC to finish
+    {
+        let runtime = get_runtime().get_mut();
+        while runtime.is_paused() {
+            thread::yield_now();
+        }
+        loop {
+            match runtime.gc_lock.try_lock() {
+                Ok(_guard) => {
+                    let thread_state = runtime.thread_state.clone();
+                    let (lock, condvar) = &*thread_state;
+                    let mut state = lock.lock().unwrap();
+                    state.unregister_c_call();
+                    condvar.notify_one();
+                    break;
+                }
+                Err(_) => thread::yield_now(),
+            }
+        }
+    }
+
+    let runtime = get_runtime().get_mut();
     let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
         None => return BuiltInTypes::Int.tag(-1) as usize,
@@ -13600,8 +13634,8 @@ impl Runtime {
         self.add_builtin_function(
             "beagle.core/event-loop-run-once",
             event_loop_run_once as *const u8,
-            false,
-            2,
+            true,
+            3, // stack_pointer + loop_id + timeout_ms (frame_pointer added by adjustment)
         )?;
         self.add_builtin_function(
             "beagle.core/event-loop-wake",
