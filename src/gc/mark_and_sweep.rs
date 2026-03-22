@@ -152,12 +152,21 @@ impl FreeListEntry {
 
 pub struct FreeList {
     ranges: Vec<FreeListEntry>, // always sorted by start
+    next_fit_index: usize,
 }
 
 impl FreeList {
     fn new(starting_range: FreeListEntry) -> Self {
         FreeList {
             ranges: vec![starting_range],
+            next_fit_index: 0,
+        }
+    }
+
+    fn empty_with_capacity(capacity: usize) -> Self {
+        FreeList {
+            ranges: Vec::with_capacity(capacity),
+            next_fit_index: 0,
         }
     }
 
@@ -182,10 +191,24 @@ impl FreeList {
             self.ranges[i].size += self.ranges[i + 1].size;
             self.ranges.remove(i + 1);
         }
+
+        if !self.ranges.is_empty() {
+            self.next_fit_index = self.next_fit_index.min(self.ranges.len() - 1);
+        } else {
+            self.next_fit_index = 0;
+        }
     }
 
     fn allocate(&mut self, size: usize) -> Option<usize> {
-        for (i, r) in self.ranges.iter_mut().enumerate() {
+        if self.ranges.is_empty() {
+            self.next_fit_index = 0;
+            return None;
+        }
+
+        let start = self.next_fit_index.min(self.ranges.len() - 1);
+        for step in 0..self.ranges.len() {
+            let i = (start + step) % self.ranges.len();
+            let r = &mut self.ranges[i];
             if r.can_hold(size) {
                 let addr = r.offset;
                 if addr % 8 != 0 {
@@ -202,14 +225,16 @@ impl FreeList {
                     self.ranges.remove(i);
                 }
 
+                if self.ranges.is_empty() {
+                    self.next_fit_index = 0;
+                } else {
+                    self.next_fit_index = i.min(self.ranges.len() - 1);
+                }
+
                 return Some(addr);
             }
         }
         None
-    }
-
-    fn iter(&self) -> impl Iterator<Item = &FreeListEntry> {
-        self.ranges.iter()
     }
 
     fn find_entry_contains(&self, offset: usize) -> Option<&FreeListEntry> {
@@ -218,6 +243,36 @@ impl FreeList {
 
     fn trailing_free_entry(&self) -> Option<&FreeListEntry> {
         self.ranges.last()
+    }
+
+    fn append_sorted_coalesced(&mut self, range: FreeListEntry) {
+        if range.size == 0 {
+            return;
+        }
+
+        if let Some(last) = self.ranges.last_mut() {
+            if last.end() == range.offset {
+                last.size += range.size;
+                return;
+            }
+
+            assert!(
+                last.end() < range.offset,
+                "GC internal error: free list append out of order ({:#x}..{:#x}) then ({:#x}..{:#x})",
+                last.offset,
+                last.end(),
+                range.offset,
+                range.end()
+            );
+        }
+
+        self.ranges.push(range);
+    }
+
+    fn prefer_trailing_range(&mut self) {
+        if !self.ranges.is_empty() {
+            self.next_fit_index = self.ranges.len() - 1;
+        }
     }
 }
 
@@ -242,23 +297,6 @@ impl MarkAndSweep {
     /// Get the size of this heap space in bytes
     pub fn heap_size(&self) -> usize {
         self.space.byte_count()
-    }
-
-    fn can_allocate(&self, words: usize) -> bool {
-        let words = Word::from_word(words);
-        // Large objects need 16-byte header, small objects need 8-byte header
-        let header_size = if words.to_words() > Header::MAX_INLINE_SIZE {
-            16
-        } else {
-            8
-        };
-        let size = words.to_bytes() + header_size;
-        let spot = self
-            .free_list
-            .iter()
-            .enumerate()
-            .find(|(_, x)| x.size >= size);
-        spot.is_some()
     }
 
     fn shrink_highmark_if_tail_is_free(&mut self) {
@@ -444,16 +482,30 @@ impl MarkAndSweep {
     }
 
     fn sweep(&mut self) {
+        let existing_range_count = self.free_list.ranges.len();
+        let mut old_ranges = std::mem::take(&mut self.free_list.ranges)
+            .into_iter()
+            .peekable();
+        let mut rebuilt_free_list = FreeList::empty_with_capacity(existing_range_count + 8);
         let mut offset = 0;
 
-        loop {
-            if offset > self.space.highmark {
-                break;
+        while offset <= self.space.highmark {
+            if let Some(entry) = old_ranges.peek().copied() {
+                assert!(
+                    entry.offset >= offset,
+                    "GC internal error: free list entry starts before sweep cursor ({:#x} < {:#x})",
+                    entry.offset,
+                    offset
+                );
             }
-            if let Some(entry) = self.free_list.find_entry_contains(offset) {
+
+            if let Some(entry) = old_ranges.peek().copied().filter(|entry| entry.offset == offset) {
+                rebuilt_free_list.append_sorted_coalesced(entry);
                 offset = entry.end();
+                old_ranges.next();
                 continue;
             }
+
             let heap_object = HeapObject::from_untagged(unsafe { self.space.start.add(offset) });
 
             let full_size = heap_object.full_size();
@@ -465,8 +517,7 @@ impl MarkAndSweep {
                 continue;
             }
             let size = full_size;
-            let entry = FreeListEntry { offset, size };
-            self.free_list.insert(entry);
+            rebuilt_free_list.append_sorted_coalesced(FreeListEntry { offset, size });
             offset += size;
             offset = (offset + 7) & !7;
             if offset % 8 != 0 {
@@ -485,6 +536,12 @@ impl MarkAndSweep {
             }
         }
 
+        for entry in old_ranges {
+            rebuilt_free_list.append_sorted_coalesced(entry);
+        }
+
+        rebuilt_free_list.prefer_trailing_range();
+        self.free_list = rebuilt_free_list;
         self.shrink_highmark_if_tail_is_free();
     }
 
@@ -720,11 +777,7 @@ impl Allocator for MarkAndSweep {
         words: usize,
         kind: crate::types::BuiltInTypes,
     ) -> Result<super::AllocateAction, Box<dyn std::error::Error>> {
-        if self.can_allocate(words) {
-            self.allocate_inner(Word::from_word(words), None, kind)
-        } else {
-            Ok(AllocateAction::Gc)
-        }
+        self.allocate_inner(Word::from_word(words), None, kind)
     }
 
     fn try_allocate_zeroed(
@@ -779,6 +832,48 @@ impl Allocator for MarkAndSweep {
 
     fn get_allocation_options(&self) -> AllocatorOptions {
         self.options
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FreeList, FreeListEntry};
+
+    #[test]
+    fn append_sorted_coalesced_merges_adjacent_ranges() {
+        let mut free_list = FreeList::empty_with_capacity(4);
+        free_list.append_sorted_coalesced(FreeListEntry { offset: 8, size: 8 });
+        free_list.append_sorted_coalesced(FreeListEntry {
+            offset: 16,
+            size: 16,
+        });
+        free_list.append_sorted_coalesced(FreeListEntry {
+            offset: 32,
+            size: 24,
+        });
+
+        assert_eq!(free_list.ranges.len(), 1);
+        assert_eq!(
+            free_list.ranges[0],
+            FreeListEntry {
+                offset: 8,
+                size: 48,
+            }
+        );
+    }
+
+    #[test]
+    fn append_sorted_coalesced_keeps_gaps_separate() {
+        let mut free_list = FreeList::empty_with_capacity(4);
+        free_list.append_sorted_coalesced(FreeListEntry { offset: 0, size: 8 });
+        free_list.append_sorted_coalesced(FreeListEntry {
+            offset: 24,
+            size: 8,
+        });
+
+        assert_eq!(free_list.ranges.len(), 2);
+        assert_eq!(free_list.ranges[0], FreeListEntry { offset: 0, size: 8 });
+        assert_eq!(free_list.ranges[1], FreeListEntry { offset: 24, size: 8 });
     }
 }
 
