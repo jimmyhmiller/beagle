@@ -12813,7 +12813,7 @@ pub extern "C" fn dispatch_multi_arity(
         let base_offset = 16 + i * 24; // header(8) + num_arities(8) + i * (3 * 8)
         let arity = unsafe { *((ptr + base_offset) as *const usize) };
         let arity = BuiltInTypes::untag(arity);
-        let fn_ptr = unsafe { *((ptr + base_offset + 8) as *const usize) };
+        let jt_ptr = unsafe { *((ptr + base_offset + 8) as *const usize) };
         let is_variadic = unsafe { *((ptr + base_offset + 16) as *const usize) };
         let is_variadic = is_variadic == BuiltInTypes::true_value() as usize;
 
@@ -12824,6 +12824,12 @@ pub extern "C" fn dispatch_multi_arity(
         });
 
         if !is_variadic && arity == arg_count {
+            // Load through the jump table to get the current code pointer.
+            // This indirection is what makes hot-reload work: eval updates
+            // the jump table entry, so we always get the latest code.
+            // The jump table stores Function-tagged pointers, so the loaded
+            // value is already correctly tagged.
+            let fn_ptr = unsafe { *(jt_ptr as *const usize) };
             return fn_ptr;
         }
     }
@@ -12833,11 +12839,12 @@ pub extern "C" fn dispatch_multi_arity(
         let base_offset = 16 + i * 24;
         let min_arity = unsafe { *((ptr + base_offset) as *const usize) };
         let min_arity = BuiltInTypes::untag(min_arity);
-        let fn_ptr = unsafe { *((ptr + base_offset + 8) as *const usize) };
+        let jt_ptr = unsafe { *((ptr + base_offset + 8) as *const usize) };
         let is_variadic = unsafe { *((ptr + base_offset + 16) as *const usize) };
         let is_variadic = is_variadic == BuiltInTypes::true_value() as usize;
 
         if is_variadic && arg_count >= min_arity {
+            let fn_ptr = unsafe { *(jt_ptr as *const usize) };
             return fn_ptr;
         }
     }

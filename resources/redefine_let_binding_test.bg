@@ -1,0 +1,44 @@
+namespace redefine_let_binding_test
+
+let MULTIPLIER = 10
+let GREETING = "Hello"
+
+fn compute(x) {
+    x * MULTIPLIER
+}
+
+fn greet(name) {
+    GREETING ++ ", " ++ name
+}
+
+fn main() {
+    println(compute(5))
+    println(greet("World"))
+
+    // Redefine namespace-level let binding
+    eval("let MULTIPLIER = 100")
+    println(compute(5))
+
+    eval("let GREETING = \"Hey\"")
+    println(greet("World"))
+
+    // Redefine the function too
+    eval("
+        fn compute(x) {
+            x * MULTIPLIER + 1
+        }
+    ")
+    println(compute(5))
+
+    // Redefine MULTIPLIER again
+    eval("let MULTIPLIER = 3")
+    println(compute(5))
+}
+
+// @beagle.core.snapshot
+// 50
+// Hello, World
+// 500
+// Hey, World
+// 501
+// 16

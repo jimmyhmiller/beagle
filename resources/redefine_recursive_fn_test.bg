@@ -1,0 +1,78 @@
+namespace redefine_recursive_fn_test
+
+fn fib(n) {
+    if n <= 1 {
+        n
+    } else {
+        fib(n - 1) + fib(n - 2)
+    }
+}
+
+fn factorial(n) {
+    if n <= 1 {
+        1
+    } else {
+        n * factorial(n - 1)
+    }
+}
+
+fn main() {
+    // Original recursive functions
+    println(fib(10))
+    println(factorial(5))
+
+    // Redefine fib to be iterative-style via tail recursion
+    eval("
+        fn fib-helper(n, a, b) {
+            if n == 0 {
+                a
+            } else {
+                fib-helper(n - 1, b, a + b)
+            }
+        }
+        fn fib(n) {
+            fib-helper(n, 0, 1)
+        }
+    ")
+
+    // Same results, different implementation
+    println(fib(10))
+    println(fib(20))
+
+    // Redefine factorial with accumulator
+    eval("
+        fn fact-acc(n, acc) {
+            if n <= 1 {
+                acc
+            } else {
+                fact-acc(n - 1, n * acc)
+            }
+        }
+        fn factorial(n) {
+            fact-acc(n, 1)
+        }
+    ")
+
+    println(factorial(5))
+    println(factorial(10))
+
+    // Redefine fib again to add memoization-like behavior (just return constant for testing)
+    eval("
+        fn fib(n) {
+            if n <= 1 { n }
+            else { fib(n - 1) + fib(n - 2) }
+        }
+    ")
+
+    // Back to naive recursive - still works
+    println(fib(10))
+}
+
+// @beagle.core.snapshot
+// 55
+// 120
+// 55
+// 6765
+// 120
+// 3628800
+// 55

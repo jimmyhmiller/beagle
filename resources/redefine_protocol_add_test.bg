@@ -1,0 +1,59 @@
+namespace redefine_protocol_add_test
+
+struct Point { x, y }
+
+protocol Printable {
+    fn display(self)
+}
+
+extend Point with Printable {
+    fn display(self) {
+        "(" ++ to-string(self.x) ++ ", " ++ to-string(self.y) ++ ")"
+    }
+}
+
+fn main() {
+    let p = Point { x: 3, y: 4 }
+    println(display(p))
+
+    // Define a new protocol and extend Point with it via eval
+    eval("
+        protocol Measurable {
+            fn measure(self)
+        }
+        extend Point with Measurable {
+            fn measure(self) {
+                self.x * self.x + self.y * self.y
+            }
+        }
+    ")
+
+    // Old protocol still works
+    println(display(p))
+
+    // New protocol works on existing object
+    eval("
+        let p = Point { x: 3, y: 4 }
+        println(measure(p))
+    ")
+
+    // Redefine struct, both protocols should survive
+    eval("struct Point { x, y, z }")
+
+    // Old object, old protocols
+    println(display(p))
+
+    eval("
+        let p2 = Point { x: 5, y: 12, z: 0 }
+        println(display(p2))
+        println(measure(p2))
+    ")
+}
+
+// @beagle.core.snapshot
+// (3, 4)
+// (3, 4)
+// 25
+// (3, 4)
+// (5, 12)
+// 169

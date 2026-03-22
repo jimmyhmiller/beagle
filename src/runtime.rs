@@ -1,5 +1,6 @@
 use libloading::Library;
 use mmap_rs::{Mmap, MmapMut, MmapOptions, Reserved};
+use nanoserde::SerJson;
 use regex::Regex;
 use std::{
     collections::{HashMap, HashSet},
@@ -8930,15 +8931,24 @@ impl Runtime {
         method_name: &str,
         f: usize,
     ) {
-        // TODO: When do I deal with duplicates?
-        self.protocol_info
+        // Update existing entry if this type+method combo already exists,
+        // otherwise add a new one. This allows protocol impls to be hot-reloaded.
+        let entries = self
+            .protocol_info
             .entry(protocol_name.to_string())
-            .or_default()
-            .push(ProtocolMethodInfo {
+            .or_default();
+        if let Some(existing) = entries
+            .iter_mut()
+            .find(|e| e._type == struct_name && e.method_name == method_name)
+        {
+            existing.fn_pointer = f;
+        } else {
+            entries.push(ProtocolMethodInfo {
                 _type: struct_name.to_string(),
                 method_name: method_name.to_string(),
                 fn_pointer: f,
             });
+        }
 
         // Also update the dispatch table for O(1) lookup
         // Key format: "protocol_namespace/method_name" (e.g., "myapp/dispatch")

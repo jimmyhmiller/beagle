@@ -1,0 +1,69 @@
+namespace redefine_higher_order_test
+
+fn double(x) {
+    x * 2
+}
+
+fn add-one(x) {
+    x + 1
+}
+
+fn apply-to-list(lst, f) {
+    map(lst, f)
+}
+
+fn main() {
+    // Pass function to map
+    let result = map([1, 2, 3], double)
+    println(result)
+
+    // Pass function to higher-order helper
+    let result2 = apply-to-list([10, 20, 30], add-one)
+    println(result2)
+
+    // Redefine double
+    eval("fn double(x) { x * x }")
+
+    // map with direct reference picks up new definition
+    let result3 = map([2, 3, 4], double)
+    println(result3)
+
+    // Redefine apply-to-list to also print
+    eval("
+        fn apply-to-list(lst, f) {
+            let result = map(lst, f)
+            println(\"applied!\")
+            result
+        }
+    ")
+
+    let result4 = apply-to-list([5, 6], double)
+    println(result4)
+
+    // Redefine the function used in filter
+    eval("
+        fn is-big(x) { x > 10 }
+    ")
+
+    eval("
+        let result5 = filter([5, 15, 3, 20, 8], is-big)
+        println(result5)
+    ")
+
+    // Redefine is-big to be stricter
+    eval("fn is-big(x) { x > 18 }")
+
+    eval("
+        let result6 = filter([5, 15, 3, 20, 8], is-big)
+        println(result6)
+    ")
+}
+
+// @beagle.core.snapshot
+// [2, 4, 6]
+// [11, 21, 31]
+// [4, 9, 16]
+// applied!
+// [25, 36]
+// [15, 20]
+// [20]

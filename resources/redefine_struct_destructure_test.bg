@@ -1,0 +1,76 @@
+namespace redefine_struct_destructure_test
+
+struct Point { x, y }
+
+fn print-point(p) {
+    let Point { x, y } = p
+    println(x)
+    println(y)
+    println(x + y)
+    println(x * y)
+}
+
+fn main() {
+    let p = Point { x: 10, y: 20 }
+    print-point(p)
+
+    // Redefine Point with extra field
+    eval("struct Point { x, y, z }")
+
+    // Old object: destructure still works for existing fields
+    let Point { x: a, y: b } = p
+    println(a)
+    println(b)
+    println(a + b)
+
+    // New object with new layout — destructure inside eval function
+    // (destructuring at eval top-level scope is not yet supported)
+    eval("
+        fn print-point-3(p) {
+            let Point { x: a, y: b, z: c } = p
+            println(a)
+            println(b)
+            println(c)
+            println(a + b + c)
+        }
+        print-point-3(Point { x: 100, y: 200, z: 300 })
+    ")
+
+    // Redefine Point with reordered fields
+    eval("struct Point { y, x }")
+
+    // New object with reordered layout
+    eval("
+        fn print-point-2(p) {
+            let Point { x: a, y: b } = p
+            println(a)
+            println(b)
+            println(a * b)
+        }
+        print-point-2(Point { y: 50, x: 25 })
+    ")
+
+    // BUG: This should work but doesn't —
+    // "Destructuring patterns not allowed at global scope"
+    // eval("
+    //     let p2 = Point { x: 10, y: 20 }
+    //     let Point { x: a, y: b } = p2
+    //     println(a)
+    // ")
+}
+
+// @beagle.core.snapshot
+// 10
+// 20
+// 30
+// 200
+// 10
+// 20
+// 30
+// 100
+// 200
+// 300
+// 600
+// 25
+// 50
+// 1250

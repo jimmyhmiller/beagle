@@ -1,0 +1,44 @@
+namespace redefine_pipe_test
+
+fn double(x) { x * 2 }
+fn add-ten(x) { x + 10 }
+fn negate(x) { 0 - x }
+
+fn pipeline(x) {
+    x |> double |> add-ten |> negate
+}
+
+fn main() {
+    println(pipeline(5))
+    println(pipeline(10))
+
+    // Redefine one function in the pipeline
+    eval("fn double(x) { x * 3 }")
+
+    println(pipeline(5))
+    println(pipeline(10))
+
+    // Redefine the pipeline itself
+    eval("
+        fn pipeline(x) {
+            x |> add-ten |> double |> negate
+        }
+    ")
+
+    println(pipeline(5))
+    println(pipeline(10))
+
+    // Redefine add-ten
+    eval("fn add-ten(x) { x + 100 }")
+
+    println(pipeline(5))
+}
+
+// @beagle.core.snapshot
+// -20
+// -30
+// -25
+// -40
+// -45
+// -60
+// -315

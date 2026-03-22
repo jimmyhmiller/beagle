@@ -1966,7 +1966,7 @@ impl AstCompiler<'_> {
                             (name.clone(), format!("{}_{}", target_type, name))
                         };
 
-                        self.call_compile(&Ast::Function {
+                        let compiled_fn_value = self.call_compile(&Ast::Function {
                             name: Some(new_name.clone()),
                             args: args.clone(),
                             rest_param: rest_param.clone(),
@@ -1974,19 +1974,10 @@ impl AstCompiler<'_> {
                             token_range: ast.token_range(),
                             docstring: None,
                         })?;
-                        let fully_qualified_name =
-                            format!("{}/{}", self.compiler.current_namespace_name(), new_name);
-                        let function = self
-                            .compiler
-                            .get_function_by_name(&fully_qualified_name)
-                            .unwrap();
-                        let function_pointer = self
-                            .compiler
-                            .get_function_pointer(function.clone())
-                            .unwrap();
-                        let function_pointer = Value::RawValue(
-                            BuiltInTypes::Function.tag(function_pointer as isize) as usize,
-                        );
+                        // Use the compiled function value directly instead of
+                        // looking it up by name, which fails during deferred
+                        // function installation (eval/REPL).
+                        let function_pointer = compiled_fn_value;
                         let target_type_const = self.string_constant(target_type.clone());
                         let target_type_reg = self.ir.assign_new(target_type_const);
                         let protocol_const = self.string_constant(protocol_mangled.clone());
@@ -2015,7 +2006,7 @@ impl AstCompiler<'_> {
                             let arity = case.args.len();
                             let method_name_with_arity = format!("{}${}", method_name, arity);
                             let new_name = format!("{}_{}${}", target_type, method_name, arity);
-                            self.call_compile(&Ast::Function {
+                            let compiled_fn_value = self.call_compile(&Ast::Function {
                                 name: Some(new_name.clone()),
                                 args: case.args.clone(),
                                 rest_param: case.rest_param.clone(),
@@ -2023,19 +2014,10 @@ impl AstCompiler<'_> {
                                 token_range: case.token_range,
                                 docstring: None,
                             })?;
-                            let fully_qualified_name =
-                                format!("{}/{}", self.compiler.current_namespace_name(), new_name);
-                            let function = self
-                                .compiler
-                                .get_function_by_name(&fully_qualified_name)
-                                .unwrap();
-                            let function_pointer = self
-                                .compiler
-                                .get_function_pointer(function.clone())
-                                .unwrap();
-                            let function_pointer = Value::RawValue(
-                                BuiltInTypes::Function.tag(function_pointer as isize) as usize,
-                            );
+                            // Use the compiled function value directly instead of
+                            // looking it up by name, which fails during deferred
+                            // function installation (eval/REPL).
+                            let function_pointer = compiled_fn_value;
                             let target_type_const = self.string_constant(target_type.clone());
                             let target_type_reg = self.ir.assign_new(target_type_const);
                             let protocol_const = self.string_constant(protocol_mangled.clone());
@@ -3496,30 +3478,35 @@ impl AstCompiler<'_> {
                     // Compile the arity function
                     let _fn_value = self.call_compile(&arity_function)?;
 
-                    // Get the function pointer by looking up the compiled function by name
-                    // (call_compile returns a Value::Register, not Value::Function)
+                    // Get the jump table pointer for this arity function.
+                    // We store jump table pointers (not raw code pointers) so that
+                    // dispatch_multi_arity loads through the jump table indirection.
+                    // This makes multi-arity functions hot-reloadable: when eval
+                    // redefines a function, flush_deferred_functions updates the
+                    // jump table entry, and subsequent dispatches pick up the new code.
                     if let Some(ref arity_fn_name) = arity_name {
                         let full_arity_name =
                             self.compiler.current_namespace_name() + "/" + arity_fn_name;
                         if let Some(function) = self.compiler.get_function_by_name(&full_arity_name)
-                            && let Some(fn_ptr) =
-                                self.compiler.get_pointer_for_function(function)
+                            && let Some(jt_ptr) =
+                                self.compiler.get_jump_table_pointer(function.clone())
                             {
-                                arity_function_pointers.push((arity, fn_ptr, is_variadic));
+                                arity_function_pointers.push((arity, jt_ptr, is_variadic));
                             }
                     }
                 }
 
-                // Now create the multi-arity dispatch structure
-                // For now, we allocate a MultiArityFunction heap object that stores:
+                // Now create the multi-arity dispatch structure that stores:
                 // - num_arities
-                // - for each: (arity_count, fn_ptr, is_variadic_flag)
-                // Then bind this to the function name
+                // - for each: (arity_count, jump_table_ptr, is_variadic_flag)
+                // The jump_table_ptr is an indirection: dispatch_multi_arity loads
+                // the current code pointer from the jump table at runtime, so
+                // hot-reloading works (eval updates the jump table entry).
 
                 // Allocate heap space for the multi-arity function object
                 let num_arities = arity_function_pointers.len();
                 // Layout: [header: 1 word] [num_arities: 1 word] [entries: num_arities * 3 words each]
-                // Each entry: [arity_count, fn_ptr, is_variadic]
+                // Each entry: [arity_count, jump_table_ptr, is_variadic]
                 let num_fields = 1 + num_arities * 3;
 
                 let allocate_fn = self
@@ -3562,7 +3549,7 @@ impl AstCompiler<'_> {
                 );
 
                 // Write each arity entry
-                for (i, (arity, fn_ptr, is_variadic)) in arity_function_pointers.iter().enumerate() {
+                for (i, (arity, jt_ptr, is_variadic)) in arity_function_pointers.iter().enumerate() {
                     let base_offset = 2 + i * 3;
                     // Arity count (tagged)
                     self.ir.heap_store_offset(
@@ -3570,11 +3557,12 @@ impl AstCompiler<'_> {
                         Value::TaggedConstant(*arity as isize),
                         base_offset,
                     );
-                    // Function pointer (tagged as Function)
-                    let tagged_fn = BuiltInTypes::Function.tag(*fn_ptr as isize);
+                    // Jump table pointer (raw address, NOT Function-tagged).
+                    // dispatch_multi_arity will load through this to get the
+                    // current code pointer, enabling hot-reload.
                     self.ir.heap_store_offset(
                         untagged_obj,
-                        Value::RawValue(tagged_fn as usize),
+                        Value::RawValue(*jt_ptr),
                         base_offset + 1,
                     );
                     // Is variadic flag (tagged bool)
@@ -4203,13 +4191,16 @@ impl AstCompiler<'_> {
         let resolved_name =
             if let Some(arity_name) = self.compiler.resolve_multi_arity_call(name, args.len()) {
                 arity_name
-            } else if let Some(info) = self.compiler.get_multi_arity_info(name) {
-                // This is a known multi-arity function but no arity matches
-                return Err(CompileError::MultiArityNoMatch {
-                    function_name: name.to_string(),
-                    arg_count: args.len(),
-                    available_arities: info.arities.iter().map(|(a, _)| *a).collect(),
-                });
+            } else if let Some(_info) = self.compiler.get_multi_arity_info(name) {
+                // Known multi-arity function but no compile-time arity match.
+                // Fall back to dynamic dispatch so eval-added arities work
+                // at runtime. The multi-arity heap object uses jump table
+                // indirection, so dispatch_multi_arity always gets the
+                // latest code pointer even after hot-reload.
+                {
+                    let function = self.get_variable_alloc_free_variable(name)?;
+                    return Ok(self.compile_closure_call(function, args));
+                }
             } else {
                 name.to_string()
             };
@@ -6199,7 +6190,7 @@ impl AstCompiler<'_> {
                     }
                 })?;
 
-                for field_pattern in fields.iter() {
+                for (fi, field_pattern) in fields.iter().enumerate() {
                     let property_location = Value::RawValue(self.compiler.add_property_lookup()?);
                     let property_location = self.ir.assign_new(property_location);
                     let constant_ptr = self.string_constant(field_pattern.field_name.clone());
@@ -6216,17 +6207,17 @@ impl AstCompiler<'_> {
                         .as_ref()
                         .unwrap_or(&field_pattern.field_name);
 
-                    // Convert Value to VariableLocation
-                    let location = match field_value {
-                        Value::Register(reg) => VariableLocation::Register(reg),
-                        _ => {
-                            let reg = self.ir.assign_new(field_value);
-                            VariableLocation::Register(reg)
-                        }
-                    };
-
-                    // Add to environment
-                    self.insert_variable(binding_name.clone(), location);
+                    // Store to a unique local to preserve across subsequent field
+                    // extractions. Use a unique name so we don't clobber locals
+                    // from outer scopes that share the same name.
+                    let reg = self.ir.assign_new(field_value);
+                    let unique_local_name = format!("__enum_field_{}_{}__", enum_name, fi);
+                    let local_index = self.find_or_insert_local(&unique_local_name);
+                    self.ir.store_local(local_index, reg.into());
+                    self.insert_variable(
+                        binding_name.clone(),
+                        VariableLocation::Local(local_index),
+                    );
                 }
             }
             Pattern::Struct { name, fields, .. } => {
@@ -6240,7 +6231,7 @@ impl AstCompiler<'_> {
                     }
                 })?;
 
-                for field_pattern in fields.iter() {
+                for (fi, field_pattern) in fields.iter().enumerate() {
                     let property_location = Value::RawValue(self.compiler.add_property_lookup()?);
                     let property_location = self.ir.assign_new(property_location);
                     let constant_ptr = self.string_constant(field_pattern.field_name.clone());
@@ -6257,17 +6248,17 @@ impl AstCompiler<'_> {
                         .as_ref()
                         .unwrap_or(&field_pattern.field_name);
 
-                    // Convert Value to VariableLocation
-                    let location = match field_value {
-                        Value::Register(reg) => VariableLocation::Register(reg),
-                        _ => {
-                            let reg = self.ir.assign_new(field_value);
-                            VariableLocation::Register(reg)
-                        }
-                    };
-
-                    // Add to environment
-                    self.insert_variable(binding_name.clone(), location);
+                    // Store to a unique local to preserve across subsequent field
+                    // extractions. Use a unique name so we don't clobber locals
+                    // from outer scopes that share the same name.
+                    let reg = self.ir.assign_new(field_value);
+                    let unique_local_name = format!("__struct_field_{}_{}__", name, fi);
+                    let local_index = self.find_or_insert_local(&unique_local_name);
+                    self.ir.store_local(local_index, reg.into());
+                    self.insert_variable(
+                        binding_name.clone(),
+                        VariableLocation::Local(local_index),
+                    );
                 }
             }
             Pattern::Array {

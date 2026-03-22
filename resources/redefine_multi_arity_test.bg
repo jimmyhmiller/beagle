@@ -1,0 +1,52 @@
+namespace redefine_multi_arity_test
+
+fn greet {
+    () => "Hello!"
+    (name) => "Hello, " ++ name ++ "!"
+    (greeting, name) => greeting ++ ", " ++ name ++ "!"
+}
+
+fn main() {
+    // Original multi-arity
+    println(greet())
+    println(greet("Alice"))
+    println(greet("Hey", "Bob"))
+
+    // Redefine with different defaults
+    eval("
+        fn greet {
+            () => \"Hi there!\"
+            (name) => \"Hi, \" ++ name ++ \"!\"
+            (greeting, name) => greeting ++ \" \" ++ name ++ \"!\"
+        }
+    ")
+
+    println(greet())
+    println(greet("Alice"))
+    println(greet("Hey", "Bob"))
+
+    // Redefine to add an arity
+    eval("
+        fn greet {
+            () => \"Yo!\"
+            (name) => \"Yo, \" ++ name ++ \"!\"
+            (greeting, name) => greeting ++ \" \" ++ name ++ \"!\"
+            (greeting, name, punctuation) => greeting ++ \" \" ++ name ++ punctuation
+        }
+    ")
+
+    println(greet())
+    println(greet("Alice"))
+    println(greet("Hey", "Bob", "..."))
+}
+
+// @beagle.core.snapshot
+// Hello!
+// Hello, Alice!
+// Hey, Bob!
+// Hi there!
+// Hi, Alice!
+// Hey Bob!
+// Yo!
+// Yo, Alice!
+// Hey Bob...

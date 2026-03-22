@@ -1,0 +1,65 @@
+namespace redefine_atom_test
+
+let counter = atom(0)
+
+fn increment() {
+    swap!(counter, fn(n) { n + 1 })
+}
+
+fn get-count() {
+    deref(counter)
+}
+
+fn main() {
+    increment()
+    increment()
+    increment()
+    println(get-count())
+
+    // Redefine increment to add 10 instead of 1
+    eval("
+        fn increment() {
+            swap!(counter, fn(n) { n + 10 })
+        }
+    ")
+
+    increment()
+    println(get-count())
+
+    // Redefine get-count to format
+    eval("
+        fn get-count() {
+            \"count=\" ++ to-string(deref(counter))
+        }
+    ")
+
+    println(get-count())
+
+    // Redefine increment to use reset! at threshold
+    eval("
+        fn increment() {
+            swap!(counter, fn(n) {
+                if n + 10 > 50 { 0 }
+                else { n + 10 }
+            })
+        }
+    ")
+
+    increment()
+    increment()
+    println(get-count())
+
+    increment()
+    println(get-count())
+
+    increment()
+    println(get-count())
+}
+
+// @beagle.core.snapshot
+// 3
+// 13
+// count=13
+// count=33
+// count=43
+// count=0

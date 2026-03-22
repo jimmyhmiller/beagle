@@ -1,0 +1,68 @@
+namespace redefine_try_catch_test
+
+fn risky(x) {
+    if x < 0 {
+        throw("negative!")
+    } else {
+        x * 2
+    }
+}
+
+fn safe-call(x) {
+    try {
+        risky(x)
+    } catch (e) {
+        -1
+    }
+}
+
+fn main() {
+    println(safe-call(5))
+    println(safe-call(-3))
+
+    // Redefine risky to throw on different condition
+    eval("
+        fn risky(x) {
+            if x > 100 {
+                throw(\"too big!\")
+            } else {
+                x + 1
+            }
+        }
+    ")
+
+    println(safe-call(5))
+    println(safe-call(-3))
+    println(safe-call(200))
+
+    // Redefine safe-call to have different error handling
+    eval("
+        fn safe-call(x) {
+            try {
+                risky(x)
+            } catch (e) {
+                println(\"caught: \" ++ to-string(e))
+                0
+            }
+        }
+    ")
+
+    println(safe-call(10))
+    println(safe-call(999))
+
+    // Redefine risky to never throw
+    eval("fn risky(x) { x }")
+
+    println(safe-call(999))
+}
+
+// @beagle.core.snapshot
+// 10
+// -1
+// 6
+// -2
+// -1
+// 11
+// caught: too big!
+// 0
+// 999

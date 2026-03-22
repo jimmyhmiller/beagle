@@ -1,0 +1,70 @@
+namespace redefine_mutual_recursion_test
+
+fn is-even(n) {
+    if n == 0 {
+        true
+    } else {
+        is-odd(n - 1)
+    }
+}
+
+fn is-odd(n) {
+    if n == 0 {
+        false
+    } else {
+        is-even(n - 1)
+    }
+}
+
+fn main() {
+    println(is-even(4))
+    println(is-odd(3))
+    println(is-even(5))
+
+    // Redefine is-odd to always return true
+    eval("
+        fn is-odd(n) {
+            true
+        }
+    ")
+
+    // is-even should pick up new is-odd
+    println(is-even(4))
+    println(is-even(5))
+    println(is-odd(0))
+
+    // Redefine is-even to count down by 2
+    eval("
+        fn is-even(n) {
+            if n == 0 { true }
+            else if n == 1 { false }
+            else { is-even(n - 2) }
+        }
+    ")
+
+    println(is-even(4))
+    println(is-even(5))
+
+    // Restore is-odd, is-even still uses the new definition
+    eval("
+        fn is-odd(n) {
+            if n == 0 { false }
+            else { is-even(n - 1) }
+        }
+    ")
+
+    println(is-odd(3))
+    println(is-odd(4))
+}
+
+// @beagle.core.snapshot
+// true
+// true
+// false
+// true
+// true
+// true
+// true
+// false
+// true
+// false

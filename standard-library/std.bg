@@ -443,6 +443,36 @@ extend Array with Length {
     }
 }
 
+extend Array with Seqable {
+    fn seq(arr) {
+        if primitive/size(arr) == 0 {
+            null
+        } else {
+            ArraySeq { arr: arr, index: 0 }
+        }
+    }
+}
+
+struct ArraySeq {
+    arr
+    index
+}
+
+extend ArraySeq with Seq {
+    fn first(seq) {
+        primitive/read-field(seq.arr, seq.index)
+    }
+
+    fn next(seq) {
+        let next-index = seq.index + 1
+        if next-index >= primitive/size(seq.arr) {
+            null
+        } else {
+            ArraySeq { arr: seq.arr, index: next-index }
+        }
+    }
+}
+
 // PersistentVector protocol extensions (Rust-backed vector from literals)
 extend PersistentVector with Length {
     fn length(vec) {

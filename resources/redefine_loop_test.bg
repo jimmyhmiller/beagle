@@ -1,0 +1,51 @@
+namespace redefine_loop_test
+
+fn transform(x) {
+    x * 2
+}
+
+fn should-stop(x) {
+    x > 100
+}
+
+fn main() {
+    // Build up a result using a loop that calls redefinable functions
+    let mut result = 1
+    for i in range(0, 5) {
+        result = transform(result)
+    }
+    println(result)
+
+    // Redefine transform
+    eval("fn transform(x) { x + 10 }")
+
+    let mut result2 = 0
+    for i in range(0, 5) {
+        result2 = transform(result2)
+    }
+    println(result2)
+
+    // Redefine in a while loop context
+    eval("fn transform(x) { x * 3 }")
+
+    let mut val = 1
+    while !should-stop(val) {
+        val = transform(val)
+    }
+    println(val)
+
+    // Redefine should-stop
+    eval("fn should-stop(x) { x > 50 }")
+
+    let mut val2 = 1
+    while !should-stop(val2) {
+        val2 = transform(val2)
+    }
+    println(val2)
+}
+
+// @beagle.core.snapshot
+// 32
+// 50
+// 243
+// 81

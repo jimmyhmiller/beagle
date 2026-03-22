@@ -1,0 +1,82 @@
+namespace redefine_struct_and_enum_together_test
+
+struct Vec2 { x, y }
+
+enum Shape {
+    Circle { center, radius },
+    Rect { origin, width, height }
+}
+
+fn area(shape) {
+    match shape {
+        Shape.Circle { center: c, radius: r } => r * r * 3,
+        Shape.Rect { origin: o, width: w, height: h } => w * h,
+        _ => 0
+    }
+}
+
+fn describe-shape(shape) {
+    match shape {
+        Shape.Circle { center: c, radius: r } =>
+            "circle r=" ++ to-string(r),
+        Shape.Rect { origin: o, width: w, height: h } =>
+            "rect " ++ to-string(w) ++ "x" ++ to-string(h),
+        _ => "unknown"
+    }
+}
+
+fn main() {
+    let c = Shape.Circle { center: Vec2 { x: 0, y: 0 }, radius: 10 }
+    let r = Shape.Rect { origin: Vec2 { x: 5, y: 5 }, width: 20, height: 30 }
+
+    println(describe-shape(c))
+    println(area(c))
+    println(describe-shape(r))
+    println(area(r))
+
+    // Add Triangle variant to Shape
+    eval("enum Shape { Circle { center, radius }, Rect { origin, width, height }, Triangle { a, b, c } }")
+
+    // Old values still work
+    println(describe-shape(c))
+    println(area(c))
+
+    // New variant + updated functions
+    eval("
+        fn describe-shape(shape) {
+            match shape {
+                Shape.Circle { center: c, radius: r } =>
+                    \"circle r=\" ++ to-string(r),
+                Shape.Rect { origin: o, width: w, height: h } =>
+                    \"rect \" ++ to-string(w) ++ \"x\" ++ to-string(h),
+                Shape.Triangle { a: a, b: b, c: c } =>
+                    \"triangle\",
+                _ => \"unknown\"
+            }
+        }
+    ")
+
+    eval("
+        let t = Shape.Triangle {
+            a: Vec2 { x: 0, y: 0 },
+            b: Vec2 { x: 10, y: 0 },
+            c: Vec2 { x: 5, y: 8 }
+        }
+        println(describe-shape(t))
+    ")
+
+    // Old values with updated function
+    println(describe-shape(c))
+    println(describe-shape(r))
+}
+
+// @beagle.core.snapshot
+// circle r=10
+// 300
+// rect 20x30
+// 600
+// circle r=10
+// 300
+// triangle
+// circle r=10
+// rect 20x30

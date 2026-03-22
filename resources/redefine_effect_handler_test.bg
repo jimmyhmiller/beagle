@@ -1,0 +1,102 @@
+namespace redefine_effect_handler_test
+
+use beagle.effect as effect
+
+enum Ask {
+    Question { prompt }
+}
+
+enum Log {
+    Message { text }
+}
+
+struct AskHandler {}
+struct LogHandler {}
+
+extend AskHandler with effect/Handler(Ask) {
+    fn handle(self, op, resume) {
+        match op {
+            Ask.Question { prompt: p } => {
+                resume("Alice")
+            }
+        }
+    }
+}
+
+extend LogHandler with effect/Handler(Log) {
+    fn handle(self, op, resume) {
+        match op {
+            Log.Message { text: t } => {
+                println("LOG: " ++ t)
+                resume(null)
+            }
+        }
+    }
+}
+
+fn program() {
+    let name = perform Ask.Question { prompt: "name?" }
+    perform Log.Message { text: "got: " ++ name }
+    "Hello, " ++ name
+}
+
+fn main() {
+    let ask_h = AskHandler {}
+    let log_h = LogHandler {}
+
+    let result = handle effect/Handler(Ask) with ask_h {
+        handle effect/Handler(Log) with log_h {
+            program()
+        }
+    }
+    println(result)
+
+    // Redefine program to do something different
+    eval("
+        fn program() {
+            let name = perform Ask.Question { prompt: \"who?\" }
+            perform Log.Message { text: \"name is \" ++ name }
+            \"Goodbye, \" ++ name
+        }
+    ")
+
+    let result2 = handle effect/Handler(Ask) with ask_h {
+        handle effect/Handler(Log) with log_h {
+            program()
+        }
+    }
+    println(result2)
+
+    // Redefine the handler to return a different name
+    eval("
+        struct AskHandler2 {}
+        extend AskHandler2 with effect/Handler(Ask) {
+            fn handle(self, op, resume) {
+                match op {
+                    Ask.Question { prompt: p } => {
+                        resume(\"Bob\")
+                    }
+                }
+            }
+        }
+    ")
+
+    eval("
+        let ask_h2 = AskHandler2 {}
+        let log_h = LogHandler {}
+        let result3 = handle effect/Handler(Ask) with ask_h2 {
+            handle effect/Handler(Log) with log_h {
+                program()
+            }
+        }
+        println(result3)
+    ")
+}
+
+// @beagle.core.snapshot
+// LOG: got: Alice
+// Hello, Alice
+// LOG: name is Alice
+// Goodbye, Alice
+// LOG: name is Bob
+// Goodbye, Bob

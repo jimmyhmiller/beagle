@@ -1,0 +1,40 @@
+namespace redefine_dynamic_var_test
+
+let dynamic separator = ", "
+
+fn join-words(a, b) {
+    a ++ separator ++ b
+}
+
+fn main() {
+    // Original dynamic var
+    println(join-words("hello", "world"))
+
+    // Bind to different value
+    binding (separator = " - ") {
+        println(join-words("hello", "world"))
+    }
+
+    // Back to default
+    println(join-words("hello", "world"))
+
+    // Redefine the function that uses the dynamic var
+    eval("
+        fn join-words(a, b) {
+            a ++ separator ++ b ++ separator ++ \"done\"
+        }
+    ")
+
+    println(join-words("hello", "world"))
+
+    binding (separator = " | ") {
+        println(join-words("hello", "world"))
+    }
+}
+
+// @beagle.core.snapshot
+// hello, world
+// hello - world
+// hello, world
+// hello, world, done
+// hello | world | done

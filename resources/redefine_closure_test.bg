@@ -1,0 +1,65 @@
+namespace redefine_closure_test
+
+fn make-multiplier(factor) {
+    fn(x) { x * factor }
+}
+
+fn transform(x) {
+    x + 1
+}
+
+fn main() {
+    // Closure captures factor
+    let double = make-multiplier(2)
+    let triple = make-multiplier(3)
+    println(double(5))
+    println(triple(5))
+
+    // Redefine make-multiplier - existing closures keep old behavior
+    eval("
+        fn make-multiplier(factor) {
+            fn(x) { x * factor + 100 }
+        }
+    ")
+
+    // Old closures unchanged
+    println(double(5))
+    println(triple(5))
+
+    // New closures get new behavior
+    eval("
+        let quad = make-multiplier(4)
+        println(quad(5))
+    ")
+
+    // Higher-order: closure that calls a redefinable function
+    let apply-transform = fn(x) { transform(x) }
+    println(apply-transform(10))
+
+    // Redefine the function the closure calls
+    eval("fn transform(x) { x * 10 }")
+
+    // Closure should pick up new definition
+    println(apply-transform(10))
+
+    // Closures stored in data structures
+    let fns = [make-multiplier(2), make-multiplier(3)]
+    eval("
+        let fns2 = [make-multiplier(2), make-multiplier(3)]
+        let f0 = fns2[0]
+        let f1 = fns2[1]
+        println(f0(10))
+        println(f1(10))
+    ")
+}
+
+// @beagle.core.snapshot
+// 10
+// 15
+// 10
+// 15
+// 120
+// 11
+// 100
+// 120
+// 130

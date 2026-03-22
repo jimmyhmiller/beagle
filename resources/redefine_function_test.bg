@@ -1,0 +1,49 @@
+namespace redefine_function_test
+
+fn greet(name) {
+    "Hello, " ++ name
+}
+
+fn compute(x) {
+    x * 2
+}
+
+fn caller(x) {
+    compute(x) + 10
+}
+
+fn main() {
+    // Original behavior
+    println(greet("World"))
+    println(compute(5))
+    println(caller(3))
+
+    // Redefine greet to change behavior
+    eval("fn greet(name) { \"Hi, \" ++ name ++ \"!\" }")
+    println(greet("World"))
+
+    // Redefine compute - caller should pick up new version
+    eval("fn compute(x) { x * x }")
+    println(compute(5))
+    println(caller(3))
+
+    // Redefine again
+    eval("fn compute(x) { x + 100 }")
+    println(compute(5))
+    println(caller(3))
+
+    // Redefine caller itself
+    eval("fn caller(x) { compute(x) * 2 }")
+    println(caller(3))
+}
+
+// @beagle.core.snapshot
+// Hello, World
+// 10
+// 16
+// Hi, World!
+// 25
+// 19
+// 105
+// 113
+// 206

@@ -1,0 +1,68 @@
+namespace redefine_enum_test
+
+enum Color { red, green, blue }
+
+fn color-name(c) {
+    match c {
+        Color.red => "red",
+        Color.green => "green",
+        Color.blue => "blue",
+        _ => "unknown"
+    }
+}
+
+fn main() {
+    // Original enum
+    let r = Color.red
+    let g = Color.green
+    let b = Color.blue
+    println(color-name(r))
+    println(color-name(g))
+    println(color-name(b))
+
+    // Redefine enum with new variant
+    eval("enum Color { red, green, blue, yellow }")
+
+    // Old values still match
+    println(color-name(r))
+    println(color-name(g))
+
+    // New variant
+    eval("
+        let y = Color.yellow
+        println(y)
+    ")
+
+    // Redefine color-name to handle new variant
+    eval("
+        fn color-name(c) {
+            match c {
+                Color.red => \"RED\",
+                Color.green => \"GREEN\",
+                Color.blue => \"BLUE\",
+                Color.yellow => \"YELLOW\",
+                _ => \"unknown\"
+            }
+        }
+    ")
+
+    // Old values with new function
+    println(color-name(r))
+    println(color-name(g))
+    println(color-name(b))
+
+    // New variant with new function
+    eval("println(color-name(Color.yellow))")
+}
+
+// @beagle.core.snapshot
+// red
+// green
+// blue
+// red
+// green
+// Color.yellow
+// RED
+// GREEN
+// BLUE
+// YELLOW

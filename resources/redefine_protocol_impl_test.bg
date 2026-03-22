@@ -1,0 +1,63 @@
+namespace redefine_protocol_impl_test
+
+struct Cat { name, lives }
+struct Dog { name, tricks }
+
+protocol Speak {
+    fn speak(self)
+}
+
+extend Cat with Speak {
+    fn speak(self) {
+        "Meow from " ++ self.name
+    }
+}
+
+extend Dog with Speak {
+    fn speak(self) {
+        "Woof from " ++ self.name
+    }
+}
+
+fn main() {
+    let cat = Cat { name: "Whiskers", lives: 9 }
+    let dog = Dog { name: "Rex", tricks: 5 }
+
+    // Original protocol dispatch
+    println(speak(cat))
+    println(speak(dog))
+
+    // Redefine Cat's speak implementation
+    eval("
+        extend Cat with Speak {
+            fn speak(self) {
+                \"Purr from \" ++ self.name ++ \" (\" ++ to-string(self.lives) ++ \" lives)\"
+            }
+        }
+    ")
+
+    // Old cat object, new implementation
+    println(speak(cat))
+    // Dog unchanged
+    println(speak(dog))
+
+    // Redefine Dog's speak
+    eval("
+        extend Dog with Speak {
+            fn speak(self) {
+                self.name ++ \" knows \" ++ to-string(self.tricks) ++ \" tricks!\"
+            }
+        }
+    ")
+
+    println(speak(cat))
+    println(speak(dog))
+}
+
+// @beagle.core.snapshot
+// Meow from Whiskers
+// Woof from Rex
+// Purr from Whiskers (9 lives)
+// Woof from Rex
+// Purr from Whiskers (9 lives)
+// Rex knows 5 tricks!

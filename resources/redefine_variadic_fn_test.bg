@@ -1,0 +1,62 @@
+namespace redefine_variadic_fn_test
+
+fn sum(...nums) {
+    reduce(nums, 0, fn(acc, n) { acc + n })
+}
+
+fn log(...args) {
+    let msg = reduce(args, "", fn(acc, a) {
+        if acc == "" { to-string(a) }
+        else { acc ++ " " ++ to-string(a) }
+    })
+    println(msg)
+}
+
+fn main() {
+    // Original variadic functions
+    println(sum(1, 2, 3))
+    println(sum(10, 20, 30, 40))
+    log("hello", "world", 42)
+
+    // Redefine sum to multiply instead
+    eval("
+        fn sum(...nums) {
+            reduce(nums, 1, fn(acc, n) { acc * n })
+        }
+    ")
+
+    println(sum(2, 3, 4))
+    println(sum(10, 20))
+
+    // Redefine log to add prefix
+    eval("
+        fn log(...args) {
+            let msg = reduce(args, \"[LOG]\", fn(acc, a) {
+                acc ++ \" \" ++ to-string(a)
+            })
+            println(msg)
+        }
+    ")
+
+    log("status:", "ok")
+    log(1, 2, 3)
+
+    // Redefine back to original sum
+    eval("
+        fn sum(...nums) {
+            reduce(nums, 0, fn(acc, n) { acc + n })
+        }
+    ")
+
+    println(sum(1, 2, 3))
+}
+
+// @beagle.core.snapshot
+// 6
+// 100
+// hello world 42
+// 24
+// 200
+// [LOG] status: ok
+// [LOG] 1 2 3
+// 6
