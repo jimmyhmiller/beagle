@@ -13,9 +13,10 @@ use beagle.core as core
 // This module provides the core async/await mechanism via the Async effect.
 // Users write normal code; the event loop and threading are invisible.
 //
-// The ImplicitAsyncHandler is the primary production handler, automatically
-// wrapped around main() by __main__. It combines threaded spawn/await with
-// event-loop-based sleep and async file I/O for best-of-both-worlds behavior.
+// The ImplicitAsyncHandler is the primary production handler. The runtime
+// wraps both main() and spawned thread entrypoints with it so async is
+// ambient. It combines threaded spawn/await with event-loop-based sleep and
+// async file I/O for best-of-both-worlds behavior.
 //
 // BlockingAsyncHandler is available for deterministic testing.
 
@@ -907,14 +908,12 @@ fn handle-spawn-threaded(thunk) {
 
     // Spawn a thread that executes the thunk and updates the future
     thread(fn() {
-        with-implicit-async(fn() {
-            try {
-                let result = thunk()
-                reset!(state_atom, FutureState.Resolved { value: result })
-            } catch (e) {
-                reset!(state_atom, FutureState.Rejected { error: e })
-            }
-        })
+        try {
+            let result = thunk()
+            reset!(state_atom, FutureState.Resolved { value: result })
+        } catch (e) {
+            reset!(state_atom, FutureState.Rejected { error: e })
+        }
     })
 
     future
@@ -928,26 +927,24 @@ fn handle-spawn-with-token-threaded(thunk, token) {
 
     // Spawn a thread that checks cancellation periodically
     thread(fn() {
-        with-implicit-async(fn() {
-            // Check if cancelled before starting
-            if deref(cancelled_atom) {
-                reset!(state_atom, FutureState.Cancelled {})
-                core/future-notify()
-            } else {
-                try {
-                    let result = thunk()
-                    // Check if cancelled after completion
-                    if deref(cancelled_atom) {
-                        reset!(state_atom, FutureState.Cancelled {})
-                    } else {
-                        reset!(state_atom, FutureState.Resolved { value: result })
-                    }
-                } catch (e) {
-                    reset!(state_atom, FutureState.Rejected { error: e })
+        // Check if cancelled before starting
+        if deref(cancelled_atom) {
+            reset!(state_atom, FutureState.Cancelled {})
+            core/future-notify()
+        } else {
+            try {
+                let result = thunk()
+                // Check if cancelled after completion
+                if deref(cancelled_atom) {
+                    reset!(state_atom, FutureState.Cancelled {})
+                } else {
+                    reset!(state_atom, FutureState.Resolved { value: result })
                 }
-                core/future-notify()
+            } catch (e) {
+                reset!(state_atom, FutureState.Rejected { error: e })
             }
-        })
+            core/future-notify()
+        }
     })
 
     future
@@ -1662,9 +1659,9 @@ fn spawn(thunk) {
     perform Async.Spawn { thunk: thunk }
 }
 
-/// Spawn a cooperative task. The thunk runs until its first IO operation,
-/// then the continuation is stashed for the scheduler to resume later.
-/// Only works under CooperativeHandler (i.e., in __main__).
+/// Spawn a cooperative task. Under CooperativeHandler this stays
+/// single-threaded. Under the ambient implicit handler it falls back
+/// to a normal background thread.
 fn cooperative-spawn(thunk) {
     perform Async.CoopSpawn { thunk: thunk }
 }
@@ -1927,30 +1924,8 @@ fn get-io-loop() {
     }
 }
 
-// Atom to store the threaded IO loop ID (for concurrent I/O)
-let __threaded_io_loop_atom = atom(null)
-
-// Get or create a threaded event loop for concurrent I/O operations.
-// Use this instead of get-io-loop() when multiple threads need to perform
-// socket I/O concurrently (e.g., REPL server with multiple connections).
-// The threaded event loop runs I/O polling on a dedicated thread, preventing
-// deadlocks that occur when multiple threads block on poll_once().
 fn get-io-loop-threaded() {
-    let loop_id = deref(__threaded_io_loop_atom)
-    if loop_id == null {
-        let new_loop = core/event-loop-create-threaded(4)
-        // Use CAS to avoid race where two threads both see null and both create loops
-        let swapped = compare-and-swap!(__threaded_io_loop_atom, null, new_loop)
-        if swapped {
-            new_loop
-        } else {
-            // Another thread won the race — destroy our loop, use theirs
-            core/event-loop-destroy(new_loop)
-            deref(__threaded_io_loop_atom)
-        }
-    } else {
-        loop_id
-    }
+    get-io-loop()
 }
 
 // ============================================================================
@@ -2172,12 +2147,12 @@ extend CooperativeHandler with effect/Handler(Async) {
 }
 
 // ============================================================================
-// ImplicitAsyncHandler - the primary production handler for main()
+// ImplicitAsyncHandler - the primary production handler
 // ============================================================================
-// This handler provides the implicit async context for main functions.
+// This handler provides the implicit ambient async context.
 // It combines threaded spawn/await (for correct concurrent futures) with
 // event-loop-based sleep and async file I/O (for non-blocking operations).
-// Automatically wrapped around main() by __main__.
+// The runtime installs it for main() and spawned threads.
 
 struct ImplicitAsyncHandler {}
 
@@ -2388,10 +2363,7 @@ extend ImplicitAsyncHandler with effect/Handler(Async) {
                 handle-spawn-with-token-threaded(thunk, token)
             },
             Async.CoopSpawn { thunk } => {
-                // No cooperative scheduler — just run synchronously under a handler
-                handle effect/Handler(Async) with self {
-                    thunk()
-                }
+                handle-spawn-threaded(thunk)
                 null
             }
         }
@@ -2402,28 +2374,6 @@ extend ImplicitAsyncHandler with effect/Handler(Async) {
 // Create the default implicit handler instance
 fn create-implicit-handler() {
     ImplicitAsyncHandler {}
-}
-
-// Run a block with the implicit async handler
-fn with-implicit-async(thunk) {
-    let loop_id = core/event-loop-create-threaded(4)
-    let tasks = atom([])
-    let handler = CooperativeHandler { tasks: tasks, loop_id: loop_id }
-    let result_atom = atom(null)
-    let initial-task = fn() {
-        let result = thunk()
-        reset!(result_atom, result)
-    }
-    reset!(tasks, [SchedulerTask { op: PendingOp.NewTask { thunk: initial-task }, resume: null }])
-    let result = try {
-        scheduler-loop(handler)
-        deref(result_atom)
-    } catch (e) {
-        core/event-loop-destroy(loop_id)
-        throw(e)
-    }
-    core/event-loop-destroy(loop_id)
-    result
 }
 
 // ============================================================================
@@ -2518,14 +2468,10 @@ fn scheduler-loop(handler) {
 // ============================================================================
 // Main Function Wrapper
 // ============================================================================
-// This function is called by the runtime to wrap main() with the implicit
-// async handler. It takes the main function pointer and optional args.
-// The runtime checks for beagle.async/__main__ and calls it if present.
-
+// This function is called by the runtime to provide the ambient async handler
+// for main(). It takes the main function pointer and optional args.
 fn __main__(main_fn, args) {
-    let loop_id = core/event-loop-create-threaded(4)
-    let tasks = atom([])
-    let handler = CooperativeHandler { tasks: tasks, loop_id: loop_id }
+    let handler = ImplicitAsyncHandler {}
     handle effect/Handler(Async) with handler {
         if args == null {
             main_fn()
@@ -2533,18 +2479,17 @@ fn __main__(main_fn, args) {
             main_fn(args)
         }
     }
-    scheduler-loop(handler)
-    core/event-loop-destroy(loop_id)
 }
 
-// Thread wrapper — gives each thread the same async handler setup as main.
-// Plain threads should stay plain. Async behavior is opt-in via
-// with-implicit-async and the thread-based async helpers above.
+// Thread wrapper — gives each thread the same ambient async handler as main.
 fn __run_thread_start() {
     let thread-obj = primitive/__get-my-thread-obj();
     let f = thread-obj.closure;
+    let handler = ImplicitAsyncHandler {}
     try {
-        f()
+        handle effect/Handler(Async) with handler {
+            f()
+        }
     } catch (e) {
         println("Uncaught exception in thread:")
         println(e)

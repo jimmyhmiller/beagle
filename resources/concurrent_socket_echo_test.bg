@@ -13,25 +13,23 @@ fn main() {
 
     // Start server in background thread
     thread(fn() {
-        async/with-implicit-async(fn() {
-            let listener = socket/listen("127.0.0.1", 19876)
+        let listener = socket/listen("127.0.0.1", 19876)
 
-            // Signal that server is ready
-            reset!(server_ready, true)
+        // Signal that server is ready
+        reset!(server_ready, true)
 
-            let conn = socket/accept(listener)
+        let conn = socket/accept(listener)
 
-            // Read data from client
-            let data = socket/read(conn, 1024)
-            reset!(server_result, data)
+        // Read data from client
+        let data = socket/read(conn, 1024)
+        reset!(server_result, data)
 
-            // Echo it back
-            socket/write(conn, data)
+        // Echo it back
+        socket/write(conn, data)
 
-            socket/close(conn)
-            socket/close-listener(listener)
-            reset!(server_done, true)
-        })
+        socket/close(conn)
+        socket/close-listener(listener)
+        reset!(server_done, true)
     })
 
     // Wait for server to be ready using atom barrier
@@ -43,16 +41,14 @@ fn main() {
     }
 
     // Client connects and exchanges data
-    async/with-implicit-async(fn() {
-        let conn = socket/connect("127.0.0.1", 19876)
+    let conn = socket/connect("127.0.0.1", 19876)
 
-        socket/write(conn, "Hello World")
+    socket/write(conn, "Hello World")
 
-        let response = socket/read(conn, 1024)
-        reset!(client_result, response)
+    let response = socket/read(conn, 1024)
+    reset!(client_result, response)
 
-        socket/close(conn)
-    })
+    socket/close(conn)
 
     // Wait for server to finish
     loop {

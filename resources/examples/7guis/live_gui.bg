@@ -214,9 +214,7 @@ fn main() {
 
     // Start REPL server on background thread
     thread(fn() {
-        async/with-implicit-async(fn() {
-            repl/start-repl-server("127.0.0.1", 7888)
-        })
+        repl/start-repl-server("127.0.0.1", 7888)
     })
 
     // Give the server a moment to start

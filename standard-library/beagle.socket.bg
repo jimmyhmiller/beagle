@@ -60,16 +60,16 @@ fn close-listener(listener) {
 }
 
 // ============================================================================
-// Cooperative Single-Threaded Server
+// Connection Server Helper
 // ============================================================================
-// on-connection uses the CooperativeHandler in beagle.async to multiplex
-// many connections on a single thread. When a callback does socket/read or
-// socket/write, the continuation is suspended and other connections run.
+// on-connection uses async/cooperative-spawn. Under CooperativeHandler this
+// multiplexes many connections on one thread. Under the ambient implicit
+// handler it falls back to a normal background thread per connection.
 
 // Accept connections and handle each one cooperatively on a single thread.
 // The callback receives a connection and can use socket/read, socket/write, etc.
-// Multiple clients are multiplexed via the event loop and continuations —
-// no threads are spawned.
+// Multiple clients are multiplexed via the event loop and continuations when
+// a cooperative handler is installed.
 fn on-connection(listener, callback) {
     loop {
         let conn = accept(listener)

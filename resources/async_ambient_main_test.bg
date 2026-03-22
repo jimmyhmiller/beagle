@@ -1,0 +1,34 @@
+namespace async_ambient_main_test
+
+use beagle.async as async
+
+fn main() {
+    let path = "/tmp/beagle_ambient_main_test.txt"
+
+    let write_result = async/write-file(path, "ambient main")
+    match write_result {
+        Result.Ok { value } => println("write: ok"),
+        Result.Err { error } => println("write: err")
+    }
+
+    let read_result = async/read-file(path)
+    match read_result {
+        Result.Ok { value } => println("read:", value),
+        Result.Err { error } => println("read: err")
+    }
+
+    let future = async/async(fn() { 20 + 22 })
+    println("future:", async/await(future))
+
+    let sleep_result = async/sleep(1)
+    match sleep_result {
+        Result.Ok { value } => println("sleep: ok"),
+        Result.Err { error } => println("sleep: err")
+    }
+}
+
+// @beagle.core.snapshot
+// write: ok
+// read: ambient main
+// future: 42
+// sleep: ok

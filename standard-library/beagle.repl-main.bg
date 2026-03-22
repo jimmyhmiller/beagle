@@ -287,21 +287,19 @@ fn handle-client(client) {
 /// Call process-eval-queue() in your main loop to execute them.
 fn start(host, port) {
     thread(fn() {
-        async/with-implicit-async(fn() {
-            let server = socket/listen(host, port)
-            println("REPL server listening on " ++ host ++ ":" ++ to-string(port))
+        let server = socket/listen(host, port)
+        println("REPL server listening on " ++ host ++ ":" ++ to-string(port))
 
-            let mut running = true
-            while running {
-                try {
-                    let client = socket/accept(server)
-                    println("Client connected")
-                    handle-client(client)
-                } catch (e) {
-                    println("Error accepting connection:", e)
-                }
+        let mut running = true
+        while running {
+            try {
+                let client = socket/accept(server)
+                println("Client connected")
+                handle-client(client)
+            } catch (e) {
+                println("Error accepting connection:", e)
             }
-        })
+        }
     })
 }
 
@@ -321,9 +319,7 @@ fn start(host, port) {
 ///   })
 fn run-with-repl(host, port, main-fn) {
     thread(fn() {
-        async/with-implicit-async(fn() {
-            repl/start-repl-server(host, port)
-        })
+        repl/start-repl-server(host, port)
     })
     main-fn()
 }

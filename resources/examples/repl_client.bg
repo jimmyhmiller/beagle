@@ -352,17 +352,15 @@ fn main() {
     println(color-dim("  Connecting to " ++ host ++ ":" ++ to-string(port) ++ "..."))
     println("")
 
-    async/with-implicit-async(fn() {
-        let conn = try-connect(host, port)
+    let conn = try-connect(host, port)
 
-        if conn != null {
-            println(color-dim("Type :help for commands, :quit to exit."))
-            println("")
-        } else {
-            println(color-dim("Starting in disconnected mode. Use :connect to try again."))
-            println("")
-        }
+    if conn != null {
+        println(color-dim("Type :help for commands, :quit to exit."))
+        println("")
+    } else {
+        println(color-dim("Starting in disconnected mode. Use :connect to try again."))
+        println("")
+    }
 
-        repl-loop(conn, session, 1, host, port)
-    })
+    repl-loop(conn, session, 1, host, port)
 }

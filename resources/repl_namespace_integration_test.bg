@@ -189,15 +189,13 @@ fn main() {
 
     // Start a single-client REPL server on a background thread
     thread(fn() {
-        async/with-implicit-async(fn() {
-            let server = socket/listen("127.0.0.1", port)
-            reset!(server_ready, true)
+        let server = socket/listen("127.0.0.1", port)
+        reset!(server_ready, true)
 
-            // Handle exactly one client, then exit
-            let client = socket/accept(server)
-            server-handle-client(client)
-            socket/close-listener(server)
-        })
+        // Handle exactly one client, then exit
+        let client = socket/accept(server)
+        server-handle-client(client)
+        socket/close-listener(server)
     })
 
     // Wait for server to be ready
@@ -207,45 +205,43 @@ fn main() {
     }
 
     // Connect as client and run tests
-    async/with-implicit-async(fn() {
-        let conn = socket/connect("127.0.0.1", port)
+    let conn = socket/connect("127.0.0.1", port)
 
-        // Test 1: eval a simple expression
-        let v1 = eval-and-get-value(conn, "1", "1 + 2")
-        println("simple expr: " ++ v1)
+    // Test 1: eval a simple expression
+    let v1 = eval-and-get-value(conn, "1", "1 + 2")
+    println("simple expr: " ++ v1)
 
-        // Test 2: eval can access functions defined in this namespace
-        let v2 = eval-and-get-value(conn, "2", "test-add(10, 20)")
-        println("namespace fn: " ++ v2)
+    // Test 2: eval can access functions defined in this namespace
+    let v2 = eval-and-get-value(conn, "2", "test-add(10, 20)")
+    println("namespace fn: " ++ v2)
 
-        // Test 3: eval can access let bindings in this namespace
-        let v3 = eval-and-get-value(conn, "3", "TEST_CONST")
-        println("namespace let: " ++ v3)
+    // Test 3: eval can access let bindings in this namespace
+    let v3 = eval-and-get-value(conn, "3", "TEST_CONST")
+    println("namespace let: " ++ v3)
 
-        // Test 4: eval a non-namespace expression does NOT change the namespace
-        eval-and-get-value(conn, "4", "42 * 2")
-        let v4 = eval-and-get-value(conn, "5", "test-add(1, 1)")
-        println("stable after expr: " ++ v4)
+    // Test 4: eval a non-namespace expression does NOT change the namespace
+    eval-and-get-value(conn, "4", "42 * 2")
+    let v4 = eval-and-get-value(conn, "5", "test-add(1, 1)")
+    println("stable after expr: " ++ v4)
 
-        // Test 5: eval("namespace X") changes the namespace
-        eval-and-get-value(conn, "6", "namespace repl_test_other_ns")
-        eval-and-get-value(conn, "7", "fn other-thing() { 999 }")
-        let v5 = eval-and-get-value(conn, "8", "other-thing()")
-        println("switched ns fn: " ++ v5)
+    // Test 5: eval("namespace X") changes the namespace
+    eval-and-get-value(conn, "6", "namespace repl_test_other_ns")
+    eval-and-get-value(conn, "7", "fn other-thing() { 999 }")
+    let v5 = eval-and-get-value(conn, "8", "other-thing()")
+    println("switched ns fn: " ++ v5)
 
-        // Test 6: switch back to original namespace, functions still accessible
-        eval-and-get-value(conn, "9", "namespace repl_namespace_integration_test")
-        let v6 = eval-and-get-value(conn, "10", "test-add(50, 50)")
-        println("back to original: " ++ v6)
+    // Test 6: switch back to original namespace, functions still accessible
+    eval-and-get-value(conn, "9", "namespace repl_namespace_integration_test")
+    let v6 = eval-and-get-value(conn, "10", "test-add(50, 50)")
+    println("back to original: " ++ v6)
 
-        // Test 7: let binding still accessible after round-trip
-        let v7 = eval-and-get-value(conn, "11", "TEST_CONST")
-        println("let after round-trip: " ++ v7)
+    // Test 7: let binding still accessible after round-trip
+    let v7 = eval-and-get-value(conn, "11", "TEST_CONST")
+    println("let after round-trip: " ++ v7)
 
-        send-shutdown(conn, "12")
-        collect-eval-result(conn)
-        socket/close(conn)
-    })
+    send-shutdown(conn, "12")
+    collect-eval-result(conn)
+    socket/close(conn)
 
     // Wait for server thread to finish
     core/sleep(50)

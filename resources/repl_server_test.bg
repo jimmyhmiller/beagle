@@ -161,18 +161,14 @@ fn main() {
 
     // Start server in background thread
     thread(fn() {
-        async/with-implicit-async(fn() {
-            repl/start-repl-server("127.0.0.1", 7888)
-        })
+        repl/start-repl-server("127.0.0.1", 7888)
     })
 
     // Wait for server to start
     core/sleep(200)
 
     // Run client tests
-    async/with-implicit-async(fn() {
-        test-client()
-    })
+    test-client()
 
     println("")
     println("done")

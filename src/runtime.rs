@@ -1,6 +1,5 @@
 use libloading::Library;
 use mmap_rs::{Mmap, MmapMut, MmapOptions, Reserved};
-use nanoserde::SerJson;
 use regex::Regex;
 use std::{
     collections::{HashMap, HashSet},
@@ -2661,63 +2660,78 @@ fn event_loop_thread_main(
 /// Storage for event loops in the runtime
 /// Each event loop is stored with a unique ID
 pub struct EventLoopRegistry {
-    loops: HashMap<usize, EventLoop>,
+    state: Mutex<EventLoopRegistryState>,
+}
+
+struct EventLoopRegistryState {
+    loops: HashMap<usize, Arc<EventLoop>>,
     next_id: usize,
 }
 
 impl EventLoopRegistry {
     pub fn new() -> Self {
         Self {
-            loops: HashMap::new(),
-            next_id: 1,
+            state: Mutex::new(EventLoopRegistryState {
+                loops: HashMap::new(),
+                next_id: 1,
+            }),
         }
     }
 
     /// Create a new event loop and return its ID
     /// Always spawns a dedicated I/O thread.
-    pub fn create(&mut self, pool_size: usize) -> Result<usize, String> {
-        let event_loop =
-            EventLoop::new(pool_size).map_err(|e| format!("Failed to create event loop: {}", e))?;
-        let id = self.next_id;
-        self.next_id += 1;
-        self.loops.insert(id, event_loop);
+    pub fn create(&self, pool_size: usize) -> Result<usize, String> {
+        let event_loop = Arc::new(
+            EventLoop::new(pool_size).map_err(|e| format!("Failed to create event loop: {}", e))?,
+        );
+        let mut state = self.state.lock().unwrap();
+        let id = state.next_id;
+        state.next_id += 1;
+        state.loops.insert(id, event_loop);
         Ok(id)
     }
 
     /// Get an immutable reference to an event loop by ID
-    pub fn get(&self, id: usize) -> Option<&EventLoop> {
-        self.loops.get(&id)
+    pub fn get(&self, id: usize) -> Option<Arc<EventLoop>> {
+        self.state.lock().unwrap().loops.get(&id).cloned()
     }
 
     /// Register an event loop and return its ID
-    pub fn register(&mut self, event_loop: EventLoop) -> usize {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.loops.insert(id, event_loop);
+    pub fn register(&self, event_loop: EventLoop) -> usize {
+        let mut state = self.state.lock().unwrap();
+        let id = state.next_id;
+        state.next_id += 1;
+        state.loops.insert(id, Arc::new(event_loop));
         id
     }
 
     /// Unregister (remove) an event loop by ID
     /// Automatically shuts down the I/O thread.
-    pub fn unregister(&mut self, id: usize) -> Option<EventLoop> {
-        if let Some(el) = self.loops.get(&id) {
+    pub fn unregister(&self, id: usize) -> Option<Arc<EventLoop>> {
+        let event_loop = self.state.lock().unwrap().loops.remove(&id);
+        if let Some(ref el) = event_loop {
             el.shutdown_thread();
         }
-        self.loops.remove(&id)
+        event_loop
     }
 
     /// Remove an event loop (alias for unregister)
-    pub fn remove(&mut self, id: usize) -> Option<EventLoop> {
+    pub fn remove(&self, id: usize) -> Option<Arc<EventLoop>> {
         self.unregister(id)
     }
 
     /// Shutdown all event loops and clear the registry.
     /// This must be called during runtime reset to properly cleanup threads.
-    pub fn shutdown_all(&mut self) {
-        for (_id, el) in self.loops.drain() {
+    pub fn shutdown_all(&self) {
+        let loops: Vec<_> = {
+            let mut state = self.state.lock().unwrap();
+            let drained = state.loops.drain().map(|(_, el)| el).collect();
+            state.next_id = 1;
+            drained
+        };
+        for el in loops {
             el.shutdown_thread();
         }
-        self.next_id = 1;
     }
 }
 

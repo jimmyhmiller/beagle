@@ -1,0 +1,56 @@
+namespace async_ambient_thread_test
+
+use beagle.async as async
+use beagle.core as core
+
+fn main() {
+    let path = "/tmp/beagle_ambient_thread_test.txt"
+    let write_status = atom("pending")
+    let read_value = atom("pending")
+    let future_value = atom(0)
+    let sleep_status = atom("pending")
+    let done = atom(false)
+
+    thread(fn() {
+        let write_result = async/write-file(path, "ambient thread")
+        match write_result {
+            Result.Ok { value } => reset!(write_status, "ok"),
+            Result.Err { error } => reset!(write_status, "err")
+        }
+
+        let read_result = async/read-file(path)
+        match read_result {
+            Result.Ok { value } => reset!(read_value, value),
+            Result.Err { error } => reset!(read_value, "err")
+        }
+
+        let future = async/async(fn() { 40 + 2 })
+        reset!(future_value, async/await(future))
+
+        let sleep_result = async/sleep(1)
+        match sleep_result {
+            Result.Ok { value } => reset!(sleep_status, "ok"),
+            Result.Err { error } => reset!(sleep_status, "err")
+        }
+
+        reset!(done, true)
+    })
+
+    loop {
+        if deref(done) {
+            break(null)
+        }
+        core/sleep(1)
+    }
+
+    println("write:", deref(write_status))
+    println("read:", deref(read_value))
+    println("future:", deref(future_value))
+    println("sleep:", deref(sleep_status))
+}
+
+// @beagle.core.snapshot
+// write: ok
+// read: ambient thread
+// future: 42
+// sleep: ok

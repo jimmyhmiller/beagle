@@ -768,7 +768,7 @@ fn test_repl_state_persists_across_evals() {
 
 #[test]
 fn test_repl_starts_socket_server() {
-    use std::io::{BufRead, BufReader, Read as _, Write};
+    use std::io::{BufRead, BufReader, Write};
     use std::net::TcpStream;
     use std::process::Stdio;
     use std::time::{Duration, Instant};
@@ -839,7 +839,7 @@ fn test_repl_starts_socket_server() {
 
     // Send commands to start the socket REPL server
     let cmds = format!(
-        "use beagle.repl as repl\nuse beagle.async as async\nthread(fn() {{ async/with-implicit-async(fn() {{ repl/start-repl-server(\"127.0.0.1\", {}) }}) }})\n",
+        "use beagle.repl as repl\nthread(fn() {{ repl/start-repl-server(\"127.0.0.1\", {}) }})\n",
         port
     );
     stdin
@@ -858,11 +858,10 @@ fn test_repl_starts_socket_server() {
     }
 
     // Now connect — server is confirmed running
-    let stream = TcpStream::connect(format!("127.0.0.1:{}", port))
-        .unwrap_or_else(|e| {
-            let _ = child.kill();
-            panic!("Failed to connect to REPL server on port {}: {}", port, e);
-        });
+    let stream = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap_or_else(|e| {
+        let _ = child.kill();
+        panic!("Failed to connect to REPL server on port {}: {}", port, e);
+    });
 
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -964,7 +963,7 @@ fn test_repl_starts_socket_server() {
 
 #[test]
 fn test_repl_struct_hotreload_crash() {
-    use std::io::{BufRead, BufReader, Read as _, Write};
+    use std::io::{BufRead, BufReader, Write};
     use std::net::TcpStream;
     use std::process::Stdio;
     use std::time::{Duration, Instant};
@@ -1034,7 +1033,7 @@ fn test_repl_struct_hotreload_crash() {
 
     // Send commands to start the socket REPL server
     let cmds = format!(
-        "use beagle.repl as repl\nuse beagle.async as async\nthread(fn() {{ async/with-implicit-async(fn() {{ repl/start-repl-server(\"127.0.0.1\", {}) }}) }})\n",
+        "use beagle.repl as repl\nthread(fn() {{ repl/start-repl-server(\"127.0.0.1\", {}) }})\n",
         port
     );
     stdin
@@ -1053,11 +1052,10 @@ fn test_repl_struct_hotreload_crash() {
     }
 
     // Now connect
-    let stream = TcpStream::connect(format!("127.0.0.1:{}", port))
-        .unwrap_or_else(|e| {
-            let _ = child.kill();
-            panic!("Failed to connect to REPL server on port {}: {}", port, e);
-        });
+    let stream = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap_or_else(|e| {
+        let _ = child.kill();
+        panic!("Failed to connect to REPL server on port {}: {}", port, e);
+    });
 
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -1383,7 +1381,7 @@ fn test_repl_shooter_hotreload_crash() {
     let mut stdin = child.stdin.take().unwrap();
 
     let cmds = format!(
-        "use beagle.repl as repl\nuse beagle.async as async\nthread(fn() {{ async/with-implicit-async(fn() {{ repl/start-repl-server(\"127.0.0.1\", {}) }}) }})\n",
+        "use beagle.repl as repl\nthread(fn() {{ repl/start-repl-server(\"127.0.0.1\", {}) }})\n",
         port
     );
     stdin

@@ -42,11 +42,9 @@ fn create-session(id) {
     let running = atom(false)
     let cancel = atom(false)
 
-    // Spawn background eval thread with async I/O support for eval'd code.
+    // Spawn background eval thread; ambient async is available in every thread.
     let eval_thread = thread(fn() {
-        async/with-implicit-async(fn() {
-            session-eval-loop(queue, running, cancel)
-        })
+        session-eval-loop(queue, running, cancel)
     })
 
     Session {
