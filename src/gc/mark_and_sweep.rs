@@ -499,7 +499,11 @@ impl MarkAndSweep {
                 );
             }
 
-            if let Some(entry) = old_ranges.peek().copied().filter(|entry| entry.offset == offset) {
+            if let Some(entry) = old_ranges
+                .peek()
+                .copied()
+                .filter(|entry| entry.offset == offset)
+            {
                 rebuilt_free_list.append_sorted_coalesced(entry);
                 offset = entry.end();
                 old_ranges.next();
@@ -873,7 +877,13 @@ mod tests {
 
         assert_eq!(free_list.ranges.len(), 2);
         assert_eq!(free_list.ranges[0], FreeListEntry { offset: 0, size: 8 });
-        assert_eq!(free_list.ranges[1], FreeListEntry { offset: 24, size: 8 });
+        assert_eq!(
+            free_list.ranges[1],
+            FreeListEntry {
+                offset: 24,
+                size: 8
+            }
+        );
     }
 }
 

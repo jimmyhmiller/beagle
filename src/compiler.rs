@@ -363,6 +363,8 @@ pub struct Compiler {
     defer_function_installs: bool,
     /// Buffer of function updates to be applied atomically
     deferred_updates: Vec<DeferredFunctionUpdate>,
+    /// Default value expressions for struct fields: fully_qualified_name -> [(field_index, default_ast)]
+    pub struct_defaults: HashMap<String, Vec<(usize, Ast)>>,
 }
 
 impl Compiler {
@@ -1617,6 +1619,7 @@ impl CompilerThread {
                 dynamic_vars: HashMap::new(),
                 defer_function_installs: false,
                 deferred_updates: Vec::new(),
+                struct_defaults: HashMap::new(),
             },
             channel,
         })

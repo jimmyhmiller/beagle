@@ -376,7 +376,7 @@ impl AstCompiler<'_> {
         let object = self.ir.assign_new(object);
         let untagged_object = self.ir.untag(object.into());
         // self.ir.breakpoint();
-        let struct_id = self.ir.read_struct_id(untagged_object);
+        let struct_id_versioned = self.ir.read_struct_id_versioned(untagged_object);
         let property_location = Value::RawValue(self.compiler.add_property_lookup().unwrap());
         let property_location = self.ir.assign_new(property_location);
         let property_value = self.ir.load_from_heap(property_location.into(), 0);
@@ -385,11 +385,11 @@ impl AstCompiler<'_> {
         let exit_property_access = self.ir.label("exit_property_access");
         let slow_property_path = self.ir.label("slow_property_path");
 
-        // Check if cached struct_id matches
+        // Check if cached struct_id+version matches
         self.ir.jump_if(
             slow_property_path,
             Condition::NotEqual,
-            struct_id,
+            struct_id_versioned,
             property_value,
         );
 

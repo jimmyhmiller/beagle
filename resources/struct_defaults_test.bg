@@ -1,0 +1,132 @@
+namespace struct_defaults_test
+
+struct Point { x: 0, y: 0 }
+
+struct Config {
+    name
+    debug: false
+    verbose: false
+    retries: 3
+}
+
+struct WithExprDefaults {
+    a: 1 + 2
+    b: 10 * 5
+}
+
+fn main() {
+    // === Basic defaults ===
+
+    // All defaults
+    let p = Point {}
+    println(p.x)
+    println(p.y)
+
+    // Partial override
+    let p2 = Point { x: 42 }
+    println(p2.x)
+    println(p2.y)
+
+    // Full override
+    let p3 = Point { x: 10, y: 20 }
+    println(p3.x)
+    println(p3.y)
+
+    // === Mix of required and defaulted fields ===
+
+    let c = Config { name: "test" }
+    println(c.name)
+    println(c.debug)
+    println(c.verbose)
+    println(c.retries)
+
+    // Override some defaults
+    let c2 = Config { name: "prod", debug: true }
+    println(c2.name)
+    println(c2.debug)
+    println(c2.verbose)
+    println(c2.retries)
+
+    // Override all defaults
+    let c3 = Config { name: "staging", debug: true, verbose: true, retries: 10 }
+    println(c3.name)
+    println(c3.debug)
+    println(c3.verbose)
+    println(c3.retries)
+
+    // === Expression defaults ===
+    let e = WithExprDefaults {}
+    println(e.a)
+    println(e.b)
+
+    let e2 = WithExprDefaults { a: 99 }
+    println(e2.a)
+    println(e2.b)
+
+    // === Spread still works with defaults ===
+    let p4 = Point { x: 100, y: 200 }
+    let p5 = Point { ...p4, x: 300 }
+    println(p5.x)
+    println(p5.y)
+
+    // === Defaults in function returns ===
+    println(make-point(7).x)
+    println(make-point(7).y)
+
+    // === Defaults used in loops ===
+    let mut sum = 0
+    for i in range(0, 3) {
+        let p = Point { x: i }
+        sum = sum + p.x + p.y
+    }
+    println(sum)
+
+    // === Missing required field is compile error ===
+    // (Can't test this at runtime - it's a compile-time error)
+    // Config {} would fail because 'name' has no default
+
+    // === Default values are evaluated per-instance ===
+    let p6 = Point { x: 1 }
+    let p7 = Point { x: 2 }
+    println(p6.x)
+    println(p7.x)
+    println(p6.y)
+    println(p7.y)
+}
+
+fn make-point(x) {
+    Point { x: x }
+}
+
+// @beagle.core.snapshot
+// 0
+// 0
+// 42
+// 0
+// 10
+// 20
+// test
+// false
+// false
+// 3
+// prod
+// true
+// false
+// 3
+// staging
+// true
+// true
+// 10
+// 3
+// 50
+// 99
+// 50
+// 300
+// 200
+// 7
+// 0
+// 3
+// 1
+// 2
+// 0
+// 0

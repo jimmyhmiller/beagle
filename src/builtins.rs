@@ -1350,12 +1350,16 @@ extern "C" fn property_access(
     // - object has an old layout version (its field offsets differ from current layout)
     if index != usize::MAX {
         let heap_obj = HeapObject::from_tagged(struct_pointer);
-        let struct_id = heap_obj.get_struct_id();
         let layout_version = heap_obj.get_layout_version();
+        let struct_id = heap_obj.get_struct_id();
         let current_version = runtime.structs.get_current_layout_version(struct_id);
         if layout_version == current_version {
+            // Store combined struct_id + layout_version so the fast path rejects
+            // old-layout objects (which have the same struct_id but different version).
+            let raw_header = unsafe { *(heap_obj.untagged() as *const usize) };
+            let combined = raw_header & 0x00FFFFFFFF0000F0;
             let buffer = unsafe { from_raw_parts_mut(property_cache_location as *mut usize, 2) };
-            buffer[0] = struct_id;
+            buffer[0] = combined;
             buffer[1] = index * 8;
         }
     }
@@ -1528,13 +1532,21 @@ extern "C" fn write_field(
     let index = runtime.write_field(stack_pointer, struct_pointer, str_constant_ptr, value);
     // Write barrier for generational GC - mark the card containing this object
     runtime.mark_card_for_object(struct_pointer);
-    let type_id = HeapObject::from_tagged(struct_pointer).get_struct_id();
-    // Cache layout: [struct_id, field_offset, is_mutable]
+    let heap_obj = HeapObject::from_tagged(struct_pointer);
+    let layout_version = heap_obj.get_layout_version();
+    let struct_id = heap_obj.get_struct_id();
+    let current_version = runtime.structs.get_current_layout_version(struct_id);
+    // Cache layout: [struct_id_versioned, field_offset, is_mutable]
     // We only reach here if field is mutable (otherwise write_field would have thrown)
-    let buffer = unsafe { from_raw_parts_mut(property_cache_location as *mut usize, 3) };
-    buffer[0] = type_id;
-    buffer[1] = index * 8;
-    buffer[2] = 1; // is_mutable = true
+    // Only cache for current-layout objects to prevent stale offset reuse
+    if layout_version == current_version {
+        let raw_header = unsafe { *(heap_obj.untagged() as *const usize) };
+        let combined = raw_header & 0x00FFFFFFFF0000F0;
+        let buffer = unsafe { from_raw_parts_mut(property_cache_location as *mut usize, 3) };
+        buffer[0] = combined;
+        buffer[1] = index * 8;
+        buffer[2] = 1; // is_mutable = true
+    }
     BuiltInTypes::null_value() as usize
 }
 
@@ -12419,7 +12431,8 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
         .checked_add(stack_segment_size)
         .and_then(|top| top.checked_sub(16))
         .expect("[invoke_cont] restore underflow computing outermost_fp");
-    let gc_chain_prev = gc_chain_prev_for_restored_segment(new_sp, stack_segment_size, outermost_fp);
+    let gc_chain_prev =
+        gc_chain_prev_for_restored_segment(new_sp, stack_segment_size, outermost_fp);
 
     let mut restored_fps: Vec<usize> = Vec::with_capacity(frames.len());
     let mut mutable_ranges: Vec<crate::runtime::StackCopyRange> = Vec::with_capacity(frames.len());

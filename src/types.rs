@@ -967,6 +967,19 @@ impl Ir {
 
         self.untag(shifted)
     }
+
+    /// Read a combined struct_id + layout_version from the object header.
+    /// Returns an opaque value suitable only for equality comparison with a cached value.
+    /// This ensures inline cache fast paths reject old-layout objects.
+    pub fn read_struct_id_versioned(&mut self, struct_pointer: Value) -> Value {
+        let result = self.heap_load(struct_pointer);
+        // Extract struct_id (bytes 3-6) and layout_version (bits 4-7 of byte 0) separately,
+        // then OR them together. Two masks needed because the combined mask isn't
+        // representable as an ARM64 bitmask immediate.
+        let struct_id_bits = self.and_imm(result, 0x00FFFFFFFF000000_u64);
+        let version_bits = self.and_imm(result, 0xF0_u64);
+        self.bitwise_or(struct_id_bits, version_bits)
+    }
     pub fn write_type_id(&mut self, struct_pointer: Value, type_id: Value) {
         let byte_offset = Header::type_id_offset();
         let mask = !(0xFF << (byte_offset * 8));

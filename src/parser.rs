@@ -2917,72 +2917,55 @@ impl Parser {
             false
         };
 
-        match self.current_token() {
+        let name = match self.current_token() {
             Token::Atom((start, end)) => {
                 let name = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
                     .map_err(|_| ParseError::InvalidUtf8 { location: self.current_source_location() })?;
-                let end_position = self.consume();
-                Ok(Ast::StructField {
-                    name,
-                    mutable,
-                    token_range: TokenRange::new(start_position, end_position),
-                    docstring,
-                })
+                self.consume();
+                name
             }
-            // Allow 'shift' and 'reset' as field names (they're only keywords in expression context)
-            Token::Shift => {
-                let end_position = self.consume();
-                Ok(Ast::StructField {
-                    name: "shift".to_string(),
-                    mutable,
-                    token_range: TokenRange::new(start_position, end_position),
-                    docstring,
-                })
-            }
-            Token::Reset => {
-                let end_position = self.consume();
-                Ok(Ast::StructField {
-                    name: "reset".to_string(),
-                    mutable,
-                    token_range: TokenRange::new(start_position, end_position),
-                    docstring,
-                })
-            }
-            Token::Perform => {
-                let end_position = self.consume();
-                Ok(Ast::StructField {
-                    name: "perform".to_string(),
-                    mutable,
-                    token_range: TokenRange::new(start_position, end_position),
-                    docstring,
-                })
-            }
-            Token::Handle => {
-                let end_position = self.consume();
-                Ok(Ast::StructField {
-                    name: "handle".to_string(),
-                    mutable,
-                    token_range: TokenRange::new(start_position, end_position),
-                    docstring,
-                })
-            }
-            Token::Future => {
-                let end_position = self.consume();
-                Ok(Ast::StructField {
-                    name: "future".to_string(),
-                    mutable,
-                    token_range: TokenRange::new(start_position, end_position),
-                    docstring,
-                })
-            }
-            Token::NewLine => Err(ParseError::InvalidExpression {
+            // Allow keywords as field names (they're only keywords in expression context)
+            Token::Shift => { self.consume(); "shift".to_string() }
+            Token::Reset => { self.consume(); "reset".to_string() }
+            Token::Perform => { self.consume(); "perform".to_string() }
+            Token::Handle => { self.consume(); "handle".to_string() }
+            Token::Future => { self.consume(); "future".to_string() }
+            Token::NewLine => return Err(ParseError::InvalidExpression {
                 message: "Expected field name but found newline. Note: struct fields should be separated by newlines, not commas. Use:\nstruct Foo {\n    field1\n    field2\n}".to_string(),
                 location: self.current_source_location(),
             }),
-            _ => Err(ParseError::UnexpectedToken {
+            _ => return Err(ParseError::UnexpectedToken {
                 expected: "field name".to_string(),
                 found: self.get_token_repr(),
                 location: self.current_source_location(),
+            }),
+        };
+
+        // Parse optional default value: `field_name: expr`
+        self.skip_spaces();
+        let default_value = if self.is_colon() {
+            self.consume(); // consume ':'
+            self.skip_spaces();
+            let expr = self.parse_expression(0, false, true)?.ok_or_else(|| {
+                ParseError::InvalidExpression {
+                    message: "Expected default value expression after ':'".to_string(),
+                    location: self.current_source_location(),
+                }
+            })?;
+            Some(Box::new(expr))
+        } else {
+            None
+        };
+
+        let end_position = self.position;
+
+        match self.current_token() {
+            _ => Ok(Ast::StructField {
+                name,
+                mutable,
+                default_value,
+                token_range: TokenRange::new(start_position, end_position),
+                docstring,
             }),
         }
     }

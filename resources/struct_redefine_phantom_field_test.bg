@@ -1,0 +1,139 @@
+namespace struct_redefine_phantom_field_test
+
+// Tests the fix for the "phantom field arithmetic" crash from the raylib game.
+// Bug: inline cache fast path checked struct_id but not layout_version.
+// When a new-layout instance populated the cache, then an old-layout instance
+// hit the fast path, it read past allocation bounds into garbage memory.
+//
+// With the fix, old-layout objects are deflected to the slow path, which
+// correctly returns null for fields that don't exist in the old layout.
+
+struct Point { x, y }
+
+// Store old objects in atoms so eval can access them
+let old_holder = atom(null)
+let old_holder2 = atom(null)
+
+fn main() {
+    // === Test 1: Basic phantom field read (the original crash) ===
+    let old_p = Point { x: 10, y: 20 }
+    reset!(old_holder, old_p)
+
+    // Allocate heap junk to fill memory with non-int values
+    let junk1 = [1.5, 2.5, 3.5, 4.5, 5.5]
+    let junk2 = ["hello", "world", "garbage"]
+    let junk3 = Point { x: 999, y: 888 }
+
+    eval("struct Point { x, y, z }")
+
+    eval("
+        fn get-z(p) { p.z }
+
+        // Populate cache with new-layout access
+        let new_p = Point { x: 1, y: 2, z: 100 }
+        println(get-z(new_p))
+
+        // Old-layout access should return null, not crash
+        let old_p = deref(old_holder)
+        println(get-z(old_p))
+
+        // Existing fields on old object still work
+        println(old_p.x)
+        println(old_p.y)
+
+        // Arithmetic on new-layout objects works fine
+        println(get-z(new_p) + 1)
+    ")
+
+    // === Test 2: Phantom field with comparison (the exact raylib crash) ===
+    eval("
+        fn cooldown-check(p) {
+            if get-z(p) != null {
+                if get-z(p) > 0 { get-z(p) - 1 } else { 0 }
+            } else {
+                null
+            }
+        }
+
+        let new_p = Point { x: 1, y: 2, z: 5 }
+        println(cooldown-check(new_p))
+
+        // Old object: z is null, should handle gracefully
+        let old_p = deref(old_holder)
+        println(cooldown-check(old_p))
+    ")
+
+    // === Test 3: Multiple field accesses with shared cache ===
+    eval("
+        fn get-all(p) {
+            to-string(p.x) ++ \",\" ++ to-string(p.y) ++ \",\" ++ to-string(p.z)
+        }
+
+        let new_p = Point { x: 1, y: 2, z: 3 }
+        println(get-all(new_p))
+
+        let old_p = deref(old_holder)
+        println(get-all(old_p))
+    ")
+
+    // === Test 4: Interleaved old/new access patterns ===
+    eval("
+        fn get-z2(p) { p.z }
+
+        let new1 = Point { x: 1, y: 2, z: 10 }
+        let old = deref(old_holder)
+        let new2 = Point { x: 3, y: 4, z: 20 }
+
+        // Alternate between old and new layout objects
+        println(get-z2(new1))
+        println(get-z2(old))
+        println(get-z2(new2))
+        println(get-z2(old))
+        println(get-z2(new1))
+    ")
+
+    // === Test 5: Spread from old object into new layout ===
+    eval("
+        let old_p = deref(old_holder)
+        let spread_p = Point { ...old_p, z: 42 }
+        println(spread_p.x)
+        println(spread_p.y)
+        println(spread_p.z)
+    ")
+
+    // === Test 6: Double redefinition ===
+    eval("struct Point { x, y, z, w }")
+    eval("
+        fn get-w(p) { p.w }
+
+        let new_p = Point { x: 1, y: 2, z: 3, w: 4 }
+        println(get-w(new_p))
+
+        // old_holder still has the original 2-field object
+        let old_p = deref(old_holder)
+        println(get-w(old_p))
+        println(old_p.x)
+    ")
+}
+
+// @beagle.core.snapshot
+// 100
+// null
+// 10
+// 20
+// 101
+// 4
+// null
+// 1,2,3
+// 10,20,null
+// 10
+// null
+// 20
+// null
+// 10
+// 10
+// 20
+// 42
+// 4
+// null
+// 10

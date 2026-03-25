@@ -68,6 +68,7 @@ pub enum Ast {
     StructField {
         name: String,
         mutable: bool,
+        default_value: Option<Box<Ast>>,
         token_range: TokenRange,
         docstring: Option<String>,
     },
@@ -2138,11 +2139,13 @@ impl AstCompiler<'_> {
 
                 // Collect struct metadata into owned values so we don't hold a borrow on
                 // self.compiler while calling call_compile (which needs &mut self).
-                let (struct_id, field_order, struct_size) = {
+                let (struct_id, field_order, struct_size, fields) = {
+                    let full_name = format!("{}/{}", namespace, name);
+                    let alt_name = format!("beagle.core/{}", name);
                     let (struct_id, struct_type) = match self
                         .compiler
-                        .get_struct(&format!("{}/{}", namespace, name))
-                        .or_else(|| self.compiler.get_struct(&format!("beagle.core/{}", name)))
+                        .get_struct(&full_name)
+                        .or_else(|| self.compiler.get_struct(&alt_name))
                     {
                         Some(s) => s,
                         None => {
@@ -2195,7 +2198,48 @@ impl AstCompiler<'_> {
                         }
                     }
 
-                    (struct_id, field_order, struct_type.size())
+                    let defined_fields = struct_type.fields.clone();
+                    let struct_size = struct_type.size();
+
+                    // Fill in missing fields from defaults (only when no spread)
+                    let mut fields = fields.clone();
+                    if spread.is_none() {
+                        let provided_fields: std::collections::HashSet<String> =
+                            fields.iter().map(|(n, _)| n.clone()).collect();
+
+                        // Look up defaults - try both possible names
+                        let lookup_name =
+                            if self.compiler.struct_defaults.contains_key(&full_name) {
+                                full_name
+                            } else {
+                                alt_name
+                            };
+                        let defaults = self.compiler.struct_defaults.get(&lookup_name).cloned();
+
+                        for (i, field_name) in defined_fields.iter().enumerate() {
+                            if !provided_fields.contains(field_name) {
+                                // Field not provided - check for default
+                                if let Some(ref defaults) = defaults {
+                                    if let Some((_, default_ast)) =
+                                        defaults.iter().find(|(idx, _)| *idx == i)
+                                    {
+                                        fields.push((field_name.clone(), default_ast.clone()));
+                                        field_order.push(i);
+                                        continue;
+                                    }
+                                }
+                                return Err(CompileError::StructFieldNotDefined {
+                                    struct_name: name.clone(),
+                                    field: format!(
+                                        "(missing field '{}' with no default value)",
+                                        field_name
+                                    ),
+                                });
+                            }
+                        }
+                    }
+
+                    (struct_id, field_order, struct_size, fields)
                     // struct_type borrow ends here
                 };
 
@@ -2492,12 +2536,12 @@ impl AstCompiler<'_> {
 
                 let untagged_object = self.ir.untag(object.into());
                 // self.ir.breakpoint();
-                let struct_id = self.ir.read_struct_id(untagged_object);
+                let struct_id_versioned = self.ir.read_struct_id_versioned(untagged_object);
                 let property_value = self.ir.load_from_heap(property_location.into(), 0);
                 self.ir.jump_if(
                     slow_property_path,
                     Condition::NotEqual,
-                    struct_id,
+                    struct_id_versioned,
                     property_value,
                 );
 
@@ -3053,7 +3097,7 @@ impl AstCompiler<'_> {
 
                     let object_reg = self.ir.assign_new(object_val);
                     let untagged_object = self.ir.untag(object_reg.into());
-                    let struct_id = self.ir.read_struct_id(untagged_object);
+                    let struct_id_versioned = self.ir.read_struct_id_versioned(untagged_object);
                     let property_location =
                         Value::RawValue(self.compiler.add_property_lookup().unwrap());
                     let property_location = self.ir.assign_new(property_location);
@@ -3063,11 +3107,11 @@ impl AstCompiler<'_> {
                     let exit_property_access = self.ir.label("exit_property_access");
                     let slow_property_path = self.ir.label("slow_property_path");
 
-                    // Check if cached struct_id matches
+                    // Check if cached struct_id+version matches
                     self.ir.jump_if(
                         slow_property_path,
                         Condition::NotEqual,
-                        struct_id,
+                        struct_id_versioned,
                         property_value,
                     );
 
@@ -4991,17 +5035,22 @@ impl AstCompiler<'_> {
                 let mut field_names = Vec::new();
                 let mut mutable_fields = Vec::new();
                 let mut field_docstrings = Vec::new();
-                for field in fields.iter() {
+                let mut defaults = Vec::new();
+                for (i, field) in fields.iter().enumerate() {
                     match field {
                         Ast::StructField {
                             name,
                             mutable,
+                            default_value,
                             docstring: field_doc,
                             ..
                         } => {
                             field_names.push(name.clone());
                             mutable_fields.push(*mutable);
                             field_docstrings.push(field_doc.clone());
+                            if let Some(default_expr) = default_value {
+                                defaults.push((i, *default_expr.clone()));
+                            }
                         }
                         Ast::Identifier(name, _) => {
                             // Backwards compatibility: identifiers are immutable by default
@@ -5019,8 +5068,14 @@ impl AstCompiler<'_> {
                         }
                     }
                 }
+                let full_name = format!("{}/{}", namespace, name);
+                if !defaults.is_empty() {
+                    self.compiler
+                        .struct_defaults
+                        .insert(full_name.clone(), defaults);
+                }
                 self.compiler.add_struct(Struct {
-                    name: format!("{}/{}", namespace, name),
+                    name: full_name,
                     fields: field_names,
                     mutable_fields,
                     docstring: docstring.clone(),
