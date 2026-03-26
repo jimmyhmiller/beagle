@@ -545,7 +545,8 @@ fn test_repl_variable_binding() {
 
 #[test]
 fn test_repl_error_handling() {
-    let stdout = run_repl("undefined_var\n1 + 2\n:quit\n");
+    // After an error, the REPL enters a resume prompt; :abort exits it
+    let stdout = run_repl("undefined_var\n:abort\n1 + 2\n:quit\n");
     assert!(
         stdout.contains("Error:"),
         "Should show error for undefined var, got: {}",
@@ -704,8 +705,8 @@ fn test_repl_struct_definition() {
 
 #[test]
 fn test_repl_multiple_errors_recover() {
-    // Multiple errors in a row should all recover
-    let stdout = run_repl("bad1\nbad2\n1 + 1\n:quit\n");
+    // Multiple errors in a row should all recover; :abort exits each resume prompt
+    let stdout = run_repl("bad1\n:abort\nbad2\n:abort\n1 + 1\n:quit\n");
     let error_count = stdout.matches("Error:").count();
     assert!(
         error_count >= 2,
