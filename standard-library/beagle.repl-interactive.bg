@@ -40,10 +40,11 @@ fn repl-loop() {
         let had-error = atom(false)
         let result = try {
             eval(input)
-        } catch (e) {
+        } catch (e, resume) {
             swap!(had-error, fn(_) { true })
             println("Error:", to-string(e))
-            null
+            println("  Enter expression to resume with, or :abort")
+            resume-prompt(resume)
         }
         if !deref(had-error) {
             if result != null {
@@ -51,6 +52,24 @@ fn repl-loop() {
             }
         }
         repl-loop()
+    }
+}
+
+fn resume-prompt(resume) {
+    let input = builtin/repl-read-line("resume> ")
+    if input == null || input == ":abort" || input == ":a" {
+        println("Aborted.")
+        null
+    } else if input == "" {
+        resume-prompt(resume)
+    } else {
+        try {
+            let value = eval(input)
+            resume(value)
+        } catch (e) {
+            println("Error:", to-string(e))
+            resume-prompt(resume)
+        }
     }
 }
 
@@ -77,7 +96,8 @@ fn handle-command(input) {
         println("  :clear            Clear screen")
         println("  :quit             Exit the REPL")
         println("")
-        println("  Evaluate any Beagle expression by typing it directly.")
+        println("  On exception, enter an expression at resume> to resume,")
+        println("  or :abort to abort.")
     } else if cmd == ":clear" {
         let esc = builtin/char-from-code(27)
         print(esc ++ "[2J" ++ esc ++ "[H")

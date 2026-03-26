@@ -392,15 +392,21 @@ pub extern "C" fn print_byte(value: usize) -> usize {
     0b111
 }
 
-/// Get the current value of a dynamic variable
+/// Get the current value of a dynamic variable.
+/// Checks thread-local binding stack first, falls back to root namespace value.
 pub unsafe extern "C" fn get_dynamic_var(namespace_id: usize, slot: usize) -> usize {
     let namespace_id = BuiltInTypes::untag(namespace_id);
     let slot = BuiltInTypes::untag(slot);
+    // Thread-local binding takes priority
+    if let Some(value) = crate::runtime::find_dynamic_binding(namespace_id, slot) {
+        return value;
+    }
+    // Fall back to root binding in namespace
     let runtime = get_runtime().get();
     runtime.get_namespace_binding(namespace_id, slot)
 }
 
-/// Push a new binding for a dynamic variable
+/// Push a new binding for a dynamic variable (thread-local only).
 pub unsafe extern "C" fn push_dynamic_binding(
     namespace_id: usize,
     slot: usize,
@@ -408,17 +414,15 @@ pub unsafe extern "C" fn push_dynamic_binding(
 ) -> usize {
     let namespace_id = BuiltInTypes::untag(namespace_id);
     let slot = BuiltInTypes::untag(slot);
-    let runtime = get_runtime().get_mut();
-    runtime.push_dynamic_binding(namespace_id, slot, new_value);
+    crate::runtime::push_dynamic_binding(namespace_id, slot, new_value);
     0b111 // null
 }
 
-/// Pop a dynamic variable binding, restoring the previous value
+/// Pop a dynamic variable binding (thread-local only).
 pub unsafe extern "C" fn pop_dynamic_binding(namespace_id: usize, slot: usize) -> usize {
     let namespace_id = BuiltInTypes::untag(namespace_id);
     let slot = BuiltInTypes::untag(slot);
-    let runtime = get_runtime().get_mut();
-    runtime.pop_dynamic_binding(namespace_id, slot);
+    crate::runtime::pop_dynamic_binding(namespace_id, slot);
     0b111 // null
 }
 
@@ -1584,7 +1588,7 @@ pub unsafe extern "C" fn throw_type_error(stack_pointer: usize, frame_pointer: u
             message_str,
             null_location,
         );
-        throw_exception(stack_pointer, frame_pointer, error);
+        throw_exception(stack_pointer, frame_pointer, error, 0, 0);
     }
 }
 
@@ -10940,6 +10944,9 @@ pub unsafe extern "C" fn push_exception_handler_runtime(
         frame_pointer,
         link_register,
         result_local,
+        handler_id: 0,
+        is_resumable: false,
+        resume_local: 0,
     };
 
     runtime.push_exception_handler(handler);
@@ -10953,10 +10960,55 @@ pub unsafe extern "C" fn pop_exception_handler_runtime() -> usize {
     BuiltInTypes::null_value() as usize
 }
 
+pub unsafe extern "C" fn push_resumable_exception_handler_runtime(
+    handler_address: usize,
+    result_local: isize,
+    resume_local: isize,
+    link_register: usize,
+    stack_pointer: usize,
+    frame_pointer: usize,
+) -> usize {
+    print_call_builtin(get_runtime().get(), "push_resumable_exception_handler");
+    let runtime = get_runtime().get_mut();
+
+    let handler_id = runtime
+        .prompt_id_counter
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+    let handler = crate::runtime::ExceptionHandler {
+        handler_address,
+        stack_pointer,
+        frame_pointer,
+        link_register,
+        result_local,
+        handler_id,
+        is_resumable: true,
+        resume_local,
+    };
+
+    runtime.push_exception_handler(handler);
+    BuiltInTypes::Int.tag(handler_id as isize) as usize
+}
+
+pub unsafe extern "C" fn pop_exception_handler_by_id_runtime(handler_id: usize) -> usize {
+    print_call_builtin(get_runtime().get(), "pop_exception_handler_by_id");
+    let expected_id = BuiltInTypes::untag_isize(handler_id as isize) as usize;
+    let _runtime = get_runtime().get_mut();
+    let ptd = crate::runtime::per_thread_data();
+    if let Some(top) = ptd.exception_handlers.last() {
+        if top.handler_id == expected_id {
+            ptd.exception_handlers.pop();
+        }
+    }
+    BuiltInTypes::null_value() as usize
+}
+
 pub unsafe extern "C" fn throw_exception(
     stack_pointer: usize,
     frame_pointer: usize,
     value: usize,
+    resume_address: usize,
+    resume_local_offset: isize,
 ) -> ! {
     save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "throw_exception");
@@ -10979,48 +11031,99 @@ pub unsafe extern "C" fn throw_exception(
         let runtime = get_runtime().get_mut();
         runtime.pop_exception_handler()
     } {
-        // Restore stack, frame, and link register pointers
-        let handler_address = handler.handler_address;
-        let new_sp = handler.stack_pointer;
-        let new_fp = handler.frame_pointer;
-        let new_lr = handler.link_register;
-        let result_local_offset = handler.result_local;
+        if handler.is_resumable {
+            // Resumable path: capture continuation like shift does, then jump to catch
+            // capture_continuation_runtime pops the topmost prompt handler
+            let cont_ptr = unsafe {
+                capture_continuation_runtime(
+                    stack_pointer,
+                    frame_pointer,
+                    resume_address,
+                    resume_local_offset,
+                )
+            };
 
-        let result_ptr = (new_fp as isize).wrapping_add(result_local_offset) as *mut usize;
-        unsafe {
-            *result_ptr = exception;
-        }
+            // Write exception to handler's result_local (exception binding)
+            let exception_ptr =
+                (handler.frame_pointer as isize).wrapping_add(handler.result_local) as *mut usize;
+            unsafe { *exception_ptr = exception };
 
-        // Jump to handler with restored SP, FP, and LR
-        unsafe {
-            cfg_if::cfg_if! {
-                if #[cfg(target_arch = "x86_64")] {
-                    // x86-64: restore RSP, RBP, and jump
-                    // The return address is already on the stack at [RBP + 8]
-                    // so we don't need to push it (unlike ARM64 which uses LR register)
-                    let _ = new_lr; // unused on x86-64, return addr is on stack
-                    asm!(
-                        "mov rsp, {0}",
-                        "mov rbp, {1}",
-                        "jmp {2}",
-                        in(reg) new_sp,
-                        in(reg) new_fp,
-                        in(reg) handler_address,
-                        options(noreturn)
-                    );
-                } else {
-                    // ARM64: restore SP, X29 (FP), X30 (LR), and branch
-                    asm!(
-                        "mov sp, {0}",
-                        "mov x29, {1}",
-                        "mov x30, {2}",
-                        "br {3}",
-                        in(reg) new_sp,
-                        in(reg) new_fp,
-                        in(reg) new_lr,
-                        in(reg) handler_address,
-                        options(noreturn)
-                    );
+            // Write raw continuation pointer to handler's resume_local
+            let resume_ptr =
+                (handler.frame_pointer as isize).wrapping_add(handler.resume_local) as *mut usize;
+            unsafe { *resume_ptr = cont_ptr };
+
+            // Jump to catch handler with restored SP, FP, and LR
+            let handler_address = handler.handler_address;
+            let new_sp = handler.stack_pointer;
+            let new_fp = handler.frame_pointer;
+            let new_lr = handler.link_register;
+
+            unsafe {
+                cfg_if::cfg_if! {
+                    if #[cfg(target_arch = "x86_64")] {
+                        let _ = new_lr;
+                        asm!(
+                            "mov rsp, {0}",
+                            "mov rbp, {1}",
+                            "jmp {2}",
+                            in(reg) new_sp,
+                            in(reg) new_fp,
+                            in(reg) handler_address,
+                            options(noreturn)
+                        );
+                    } else {
+                        asm!(
+                            "mov sp, {0}",
+                            "mov x29, {1}",
+                            "mov x30, {2}",
+                            "br {3}",
+                            in(reg) new_sp,
+                            in(reg) new_fp,
+                            in(reg) new_lr,
+                            in(reg) handler_address,
+                            options(noreturn)
+                        );
+                    }
+                }
+            }
+        } else {
+            // Non-resumable path: existing behavior
+            let handler_address = handler.handler_address;
+            let new_sp = handler.stack_pointer;
+            let new_fp = handler.frame_pointer;
+            let new_lr = handler.link_register;
+            let result_local_offset = handler.result_local;
+
+            let result_ptr = (new_fp as isize).wrapping_add(result_local_offset) as *mut usize;
+            unsafe { *result_ptr = exception };
+
+            unsafe {
+                cfg_if::cfg_if! {
+                    if #[cfg(target_arch = "x86_64")] {
+                        let _ = new_lr;
+                        asm!(
+                            "mov rsp, {0}",
+                            "mov rbp, {1}",
+                            "jmp {2}",
+                            in(reg) new_sp,
+                            in(reg) new_fp,
+                            in(reg) handler_address,
+                            options(noreturn)
+                        );
+                    } else {
+                        asm!(
+                            "mov sp, {0}",
+                            "mov x29, {1}",
+                            "mov x30, {2}",
+                            "br {3}",
+                            in(reg) new_sp,
+                            in(reg) new_fp,
+                            in(reg) new_lr,
+                            in(reg) handler_address,
+                            options(noreturn)
+                        );
+                    }
                 }
             }
         }
@@ -11144,7 +11247,7 @@ pub unsafe fn throw_runtime_error(stack_pointer: usize, kind: &str, message: Str
             message_str,
             null_location,
         );
-        throw_exception(stack_pointer, frame_pointer, error);
+        throw_exception(stack_pointer, frame_pointer, error, 0, 0);
     }
 }
 
@@ -13214,13 +13317,27 @@ impl Runtime {
             0,
         )?;
 
-        // throw_exception now takes (stack_pointer, frame_pointer, value)
+        // throw_exception takes (stack_pointer, frame_pointer, value, resume_address, resume_local_offset)
         self.add_builtin_function_with_fp(
             "beagle.builtin/throw-exception",
             throw_exception as *const u8,
             true,
             true,
-            3,
+            5,
+        )?;
+
+        self.add_builtin_function(
+            "beagle.builtin/push-resumable-exception-handler",
+            push_resumable_exception_handler_runtime as *const u8,
+            false,
+            6, // handler_address, result_local, resume_local, link_register, stack_pointer, frame_pointer
+        )?;
+
+        self.add_builtin_function(
+            "beagle.builtin/pop-exception-handler-by-id",
+            pop_exception_handler_by_id_runtime as *const u8,
+            false,
+            1, // handler_id
         )?;
 
         // Delimited continuation builtins

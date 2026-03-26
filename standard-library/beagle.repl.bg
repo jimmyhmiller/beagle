@@ -70,6 +70,66 @@ fn handle-eval(client, msg) {
     }
 }
 
+fn handle-resume(client, msg) {
+    let session_id = get(msg, "session")
+    let request_id = get(msg, "id")
+    let code = get(msg, "code")
+
+    if session_id == null || request_id == null {
+        let err_status = ["error"]
+        send-response(client, {:id request_id, :status err_status, :error "Missing required fields: session, id"})
+    } else {
+        let sessions = deref(sessions_atom)
+        let sess = get(sessions, session_id)
+
+        if sess == null {
+            let err_status = ["error"]
+            send-response(client, {:id request_id, :status err_status, :error "Session not found"})
+        } else {
+            let resume_code = if code == null { "null" } else { code }
+            let result_atom = session/session-resume(sess, request_id, resume_code)
+
+            while deref(result_atom) == null {
+                core/sleep(1)
+            }
+
+            let responses = deref(result_atom)
+            for response in responses {
+                send-response(client, response)
+            }
+        }
+    }
+}
+
+fn handle-abort(client, msg) {
+    let session_id = get(msg, "session")
+    let request_id = get(msg, "id")
+
+    if session_id == null {
+        let err_status = ["error"]
+        send-response(client, {:id request_id, :status err_status, :error "Missing required field: session"})
+    } else {
+        let sessions = deref(sessions_atom)
+        let sess = get(sessions, session_id)
+
+        if sess == null {
+            let err_status = ["error"]
+            send-response(client, {:id request_id, :status err_status, :error "Session not found"})
+        } else {
+            let result_atom = session/session-abort(sess, request_id)
+
+            while deref(result_atom) == null {
+                core/sleep(1)
+            }
+
+            let responses = deref(result_atom)
+            for response in responses {
+                send-response(client, response)
+            }
+        }
+    }
+}
+
 fn handle-interrupt(client, msg) {
     let session_id = get(msg, "session")
     let request_id = get(msg, "id")
@@ -94,8 +154,8 @@ fn handle-interrupt(client, msg) {
 
 fn handle-describe(client, msg) {
     let request_id = get(msg, "id")
-    let ops = ["eval", "interrupt", "describe", "ls-sessions", "close"]
-    let versions = {:beagle "0.1.0", :protocol "1.0.0"}
+    let ops = ["eval", "resume", "abort", "interrupt", "describe", "ls-sessions", "close"]
+    let versions = {:beagle "0.1.0", :protocol "1.1.0"}
     let done_status = ["done"]
     send-response(client, {:id request_id, :ops ops, :versions versions, :status done_status})
 }
@@ -139,20 +199,28 @@ fn handle-message(client, msg) {
         if op == "eval" {
             handle-eval(client, msg)
         } else {
-            if op == "interrupt" {
-                handle-interrupt(client, msg)
+            if op == "resume" {
+                handle-resume(client, msg)
             } else {
-                if op == "describe" {
-                    handle-describe(client, msg)
+                if op == "abort" {
+                    handle-abort(client, msg)
                 } else {
-                    if op == "ls-sessions" {
-                        handle-ls-sessions(client, msg)
+                    if op == "interrupt" {
+                        handle-interrupt(client, msg)
                     } else {
-                        if op == "close" {
-                            handle-close(client, msg)
+                        if op == "describe" {
+                            handle-describe(client, msg)
                         } else {
-                            let err_status = ["error"]
-                            send-response(client, {:status err_status, :error "Unknown operation: " ++ op})
+                            if op == "ls-sessions" {
+                                handle-ls-sessions(client, msg)
+                            } else {
+                                if op == "close" {
+                                    handle-close(client, msg)
+                                } else {
+                                    let err_status = ["error"]
+                                    send-response(client, {:status err_status, :error "Unknown operation: " ++ op})
+                                }
+                            }
                         }
                     }
                 }

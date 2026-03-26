@@ -3881,10 +3881,33 @@ impl Parser {
                 });
             };
 
+        // Check for optional second parameter: catch(e, resume)
+        self.skip_whitespace();
+        let resume_binding = if matches!(self.current_token(), Token::Comma) {
+            self.consume();
+            self.skip_whitespace();
+            if let Token::Atom((start, end)) = self.current_token() {
+                let binding = String::from_utf8(self.source.as_bytes()[start..end].to_vec())
+                    .map_err(|_| ParseError::InvalidUtf8 {
+                        location: self.current_source_location(),
+                    })?;
+                self.consume();
+                Some(binding)
+            } else {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "identifier for resume binding".to_string(),
+                    found: self.get_token_repr(),
+                    location: self.current_source_location(),
+                });
+            }
+        } else {
+            None
+        };
+
         self.skip_whitespace();
         if !matches!(self.current_token(), Token::CloseParen) {
             return Err(ParseError::MissingToken {
-                expected: "')' after exception binding".to_string(),
+                expected: "')' after catch bindings".to_string(),
                 location: self.current_source_location(),
             });
         }
@@ -3897,6 +3920,7 @@ impl Parser {
         Ok(Ast::Try {
             body,
             exception_binding,
+            resume_binding,
             catch_body,
             token_range: TokenRange::new(start_position, end_position),
         })

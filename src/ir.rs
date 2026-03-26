@@ -177,9 +177,11 @@ pub enum Instruction {
     Or(Value, Value, Value),
     Xor(Value, Value, Value),
     PushExceptionHandler(Label, Value, usize), // label, result_local, builtin_fn_ptr
-    PopExceptionHandler(usize),                // builtin_fn_ptr
-    Throw(Value, usize),                       // value, builtin_fn_ptr
-    ReadArgCount(Value), // Read arg count register (X9/R10) for variadic functions
+    PushResumableExceptionHandler(Value, Label, Value, Value, usize), // dest (handler_id), catch_label, exception_local, resume_local, builtin_fn_ptr
+    PopExceptionHandler(usize),                                       // builtin_fn_ptr
+    PopExceptionHandlerById(Value, usize), // handler_id_value, builtin_fn_ptr
+    Throw(Value, Label, usize, usize), // value, resume_label, resume_local_index, builtin_fn_ptr
+    ReadArgCount(Value),               // Read arg count register (X9/R10) for variadic functions
     Label(Label),
     // Delimited continuation instructions
     PushPromptHandler(Label, Value, usize), // prompt_handler_label, result_local, builtin_fn_ptr
@@ -524,10 +526,22 @@ impl Instruction {
             Instruction::PushExceptionHandler(_, local, _) => {
                 get_register!(local)
             }
+            Instruction::PushResumableExceptionHandler(
+                dest,
+                _,
+                exception_local,
+                resume_local,
+                _,
+            ) => {
+                get_registers!(dest, exception_local, resume_local)
+            }
             Instruction::PopExceptionHandler(_) => {
                 vec![]
             }
-            Instruction::Throw(value, _) => {
+            Instruction::PopExceptionHandlerById(handler_id, _) => {
+                get_register!(handler_id)
+            }
+            Instruction::Throw(value, _, _, _) => {
                 get_register!(value)
             }
             Instruction::ReadArgCount(a) => {
@@ -685,8 +699,22 @@ impl Instruction {
             Instruction::PushExceptionHandler(_, value, _) => {
                 replace_register!(value, old_register, new_register);
             }
+            Instruction::PushResumableExceptionHandler(
+                dest,
+                _,
+                exception_local,
+                resume_local,
+                _,
+            ) => {
+                replace_register!(dest, old_register, new_register);
+                replace_register!(exception_local, old_register, new_register);
+                replace_register!(resume_local, old_register, new_register);
+            }
             Instruction::PopExceptionHandler(_) => {}
-            Instruction::Throw(value, _) => {
+            Instruction::PopExceptionHandlerById(handler_id, _) => {
+                replace_register!(handler_id, old_register, new_register);
+            }
+            Instruction::Throw(value, _, _, _) => {
                 replace_register!(value, old_register, new_register);
             }
             Instruction::PushPromptHandler(_, value, _) => {
@@ -2512,9 +2540,10 @@ impl Ir {
                     let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
                     backend.call_builtin(fn_ptr);
                 }
-                Instruction::Throw(value, builtin_fn) => {
-                    // Call throw_exception builtin with stack pointer, frame pointer, and value
-                    // Arguments: (stack_pointer, frame_pointer, exception_value)
+                Instruction::Throw(value, resume_label, resume_local_index, builtin_fn) => {
+                    // Call throw_exception builtin with stack pointer, frame pointer, value,
+                    // resume_address, and resume_local_offset
+                    // Arguments: (stack_pointer, frame_pointer, exception_value, resume_address, resume_local_offset)
 
                     // Load stack pointer into arg 0
                     backend.get_stack_pointer_imm(backend.arg(0), 0);
@@ -2526,10 +2555,70 @@ impl Ir {
                     let value_reg = self.value_to_register(value, backend);
                     backend.mov_reg(backend.arg(2), value_reg);
 
-                    // Call the throw_exception builtin (does not return)
+                    // Load address of resume label into arg 3
+                    let resume_backend_label = ir_label_to_lang_label.get(resume_label).unwrap();
+                    backend.load_label_address(backend.arg(3), *resume_backend_label);
+
+                    // Load resume_local byte offset into arg 4
+                    let local_offset = backend.get_local_byte_offset(*resume_local_index);
+                    backend.mov_64(backend.arg(4), local_offset);
+
+                    // Call the throw_exception builtin (does not return normally)
                     let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
                     backend.call_builtin(fn_ptr);
-                    // Note: execution never continues past this point
+                    // Note: execution continues at resume_label only if handler is resumable and resume is called
+                }
+                Instruction::PushResumableExceptionHandler(
+                    dest,
+                    label,
+                    exception_local,
+                    resume_local,
+                    builtin_fn,
+                ) => {
+                    // Call push_resumable_exception_handler builtin
+                    // Arguments: (handler_address, result_local_offset, resume_local_offset, link_register, stack_pointer, frame_pointer)
+                    // Returns: handler_id (tagged int)
+
+                    let catch_label = ir_label_to_lang_label.get(label).unwrap();
+                    backend.load_label_address(backend.arg(0), *catch_label);
+
+                    let exception_index = exception_local.as_local();
+                    let exception_offset = backend.get_local_byte_offset(exception_index);
+                    backend.mov_64(backend.arg(1), exception_offset);
+
+                    let resume_index = resume_local.as_local();
+                    let resume_offset = backend.get_local_byte_offset(resume_index);
+                    backend.mov_64(backend.arg(2), resume_offset);
+
+                    backend.load_return_address(backend.arg(3));
+                    backend.get_stack_pointer_imm(backend.arg(4), 0);
+                    backend.mov_reg(backend.arg(5), backend.frame_pointer());
+
+                    let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
+                    backend.call_builtin(fn_ptr);
+
+                    // Store returned handler_id in dest
+                    let dest_spill = self.dest_spill(dest);
+                    let dest_reg = match dest {
+                        Value::Register(register) => backend.register_from_index(register.index),
+                        Value::Spill(_, _) => backend.temporary_register(),
+                        _ => panic!(
+                            "Unexpected dest type for PushResumableExceptionHandler: {:?}",
+                            dest
+                        ),
+                    };
+                    backend.mov_reg(dest_reg, backend.ret_reg());
+                    self.store_spill(dest_reg, dest_spill, backend);
+                    if matches!(dest, Value::Spill(_, _)) {
+                        backend.free_temporary_register(dest_reg);
+                    }
+                }
+                Instruction::PopExceptionHandlerById(handler_id, builtin_fn) => {
+                    let handler_id_reg = self.value_to_register(handler_id, backend);
+                    backend.mov_reg(backend.arg(0), handler_id_reg);
+
+                    let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
+                    backend.call_builtin(fn_ptr);
                 }
                 Instruction::PushPromptHandler(label, result_local, builtin_fn) => {
                     // Call push_prompt builtin
@@ -2728,14 +2817,48 @@ impl Ir {
         ));
     }
 
+    pub fn push_resumable_exception_handler(
+        &mut self,
+        handler: Label,
+        exception_local: Value,
+        resume_local: Value,
+        builtin_fn: usize,
+    ) -> Value {
+        let dest = self.volatile_register();
+        self.instructions
+            .push(Instruction::PushResumableExceptionHandler(
+                dest.into(),
+                handler,
+                exception_local,
+                resume_local,
+                builtin_fn,
+            ));
+        dest.into()
+    }
+
     pub fn pop_exception_handler(&mut self, builtin_fn: usize) {
         self.instructions
             .push(Instruction::PopExceptionHandler(builtin_fn));
     }
 
-    pub fn throw_value(&mut self, value: Value, builtin_fn: usize) {
+    pub fn pop_exception_handler_by_id(&mut self, handler_id: Value, builtin_fn: usize) {
         self.instructions
-            .push(Instruction::Throw(value, builtin_fn));
+            .push(Instruction::PopExceptionHandlerById(handler_id, builtin_fn));
+    }
+
+    pub fn throw_value(
+        &mut self,
+        value: Value,
+        resume_label: Label,
+        resume_local_index: usize,
+        builtin_fn: usize,
+    ) {
+        self.instructions.push(Instruction::Throw(
+            value,
+            resume_label,
+            resume_local_index,
+            builtin_fn,
+        ));
     }
 
     pub fn push_prompt_handler(&mut self, handler: Label, result_local: Value, builtin_fn: usize) {

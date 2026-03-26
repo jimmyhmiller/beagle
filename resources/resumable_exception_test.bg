@@ -1,0 +1,40 @@
+namespace resumable_exception_test
+
+fn main() {
+    // Test 1: Basic resumable exception - resume provides a value
+    let result = try {
+        let x = throw("need value") + 1
+        println(x)
+        x
+    } catch (e, resume) {
+        resume(42)
+    }
+    println(result)
+
+    // Test 2: Resumable exception without calling resume
+    let result2 = try {
+        throw("error")
+        println("should not print")
+    } catch (e, resume) {
+        println("caught without resume")
+        99
+    }
+    println(result2)
+
+    // Test 3: Non-resumable try/catch still works (single arg catch)
+    let result3 = try {
+        throw("old style")
+    } catch (e) {
+        println(e)
+        77
+    }
+    println(result3)
+}
+
+// @beagle.core.snapshot
+// 43
+// 43
+// caught without resume
+// 99
+// old style
+// 77

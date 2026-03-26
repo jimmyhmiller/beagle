@@ -7,44 +7,31 @@ use beagle.async as async
 // ============================================================================
 // Session Management for REPL Server
 // ============================================================================
-// Each session represents an isolated evaluation context with:
-// - Dedicated background thread for evaluation
-// - Message queue for pending requests
-// - Output capture via dynamic var binding
-// - Cancellation support for long-running evaluations
 
-// EvalRequest - message passed to eval thread
 struct EvalRequest {
-    id           // string: request id
-    code         // string: code to evaluate
-    result_atom  // atom(null): set to [response-map] when eval completes
+    id
+    code
+    result_atom
 }
 
-// Session - isolated evaluation context
 struct Session {
-    id              // string: unique session id
-    eval_thread     // OS thread handle
-    message_queue   // atom([EvalRequest]): pending evals
-    is_running      // atom(bool): eval in progress
-    cancel_token    // atom(bool): for interruption
-    ns              // string: current namespace
+    id
+    eval_thread
+    message_queue
+    is_running
+    cancel_token
+    resume_stack
+    ns
 }
 
-/// Create a new session with dedicated eval thread.
-///
-/// The session's thread runs session-eval-loop in the background,
-/// processing evaluation requests from the message queue.
-///
-/// Examples:
-///   let sess = create-session("sess-1")
 fn create-session(id) {
     let queue = atom([])
     let running = atom(false)
     let cancel = atom(false)
+    let resume_stack = atom([])
 
-    // Spawn background eval thread; ambient async is available in every thread.
     let eval_thread = thread(fn() {
-        session-eval-loop(queue, running, cancel)
+        session-eval-loop(queue, running, cancel, resume_stack)
     })
 
     Session {
@@ -53,110 +40,155 @@ fn create-session(id) {
         message_queue: queue,
         is_running: running,
         cancel_token: cancel,
+        resume_stack: resume_stack,
         ns: "user"
     }
 }
 
-/// Background loop that processes eval requests from the queue.
-///
-/// For each request:
-/// 1. Pop request from queue
-/// 2. Mark running = true
-/// 3. Create StringBuffer for output capture
-/// 4. Use dynamic var binding to capture println/print output
-/// 5. Evaluate code with try/catch
-/// 6. Send captured output to client
-/// 7. Send result value
-/// 8. Send status: done
-/// 9. Mark running = false
-///
-/// Checks cancel token and exits if cancelled.
-fn session-eval-loop(queue, running, cancel) {
+fn session-eval-loop(queue, running, cancel, resume_stack) {
     while deref(cancel) == false {
-        // Check for pending requests
         let requests = deref(queue)
-
         if empty?(requests) {
-            // No work - sleep briefly
             core/sleep(10)
         } else {
-            // Pop first request
             let request = first-of(requests)
             let remaining = rest(requests)
             reset!(queue, remaining)
-
-            // Mark as running
             reset!(running, true)
-
-            // Process the request
-            process-eval-request(request, cancel)
-
-            // Mark as not running
+            process-eval-request(request, cancel, queue, running, resume_stack)
             reset!(running, false)
         }
     }
 }
 
-/// Process a single eval request with output capture.
-///
-/// Uses dynamic var binding to capture all println/print output
-/// to a StringBuffer, then stores the response batch in request.result_atom.
-fn process-eval-request(request, cancel) {
+/// Build response list for a successful eval result.
+fn build-responses(req_id, buf, result) {
+    let mut responses = []
+    if buf.content != "" {
+        let output = core/trim-right(buf.content)
+        responses = push(responses, assoc({:id req_id}, :out, output))
+    }
+    let val_str = to-string(result)
+    responses = push(responses, assoc({:id req_id}, :value, val_str))
+    responses = push(responses, assoc({:id req_id}, :status, ["done"]))
+    responses
+}
+
+/// Process eval with resumable exception support.
+fn process-eval-request(request, cancel, queue, running, resume_stack) {
     let buf = core/new-string-buffer()
 
-    // Evaluate with output capture
-    let result = binding (core/out = buf) {
-        try {
-            // Check if cancelled before eval
-            if deref(cancel) {
-                null
-            } else {
+    // The try body returns ONLY the eval result.
+    // Response building happens outside so it's not part of the continuation.
+    let try_result = try {
+        if deref(cancel) {
+            null
+        } else {
+            binding (core/out = buf) {
                 eval(request.code)
             }
-        } catch (e) {
-            e
         }
-    }
-
-    // Check if cancelled
-    if deref(cancel) {
+    } catch (e, resume) {
         let req_id = request.id
-        let response_map = assoc({:id req_id}, :status, "cancelled")
-        reset!(request.result_atom, [response_map])
-    } else {
-        let mut responses = []
+        let ex_str = to-string(e)
 
+        // Build exception notification
+        let mut exc_responses = []
         if buf.content != "" {
             let output = core/trim-right(buf.content)
-            let req_id = request.id
-            let response_map = assoc({:id req_id}, :out, output)
-            responses = push(responses, response_map)
+            exc_responses = push(exc_responses, assoc({:id req_id}, :out, output))
         }
+        exc_responses = push(exc_responses, assoc({:id req_id}, :ex, ex_str))
 
+        let depth = length(deref(resume_stack)) + 1
+        let status_resp = assoc(assoc({:id req_id}, :status, ["error", "resumable"]), :suspend-depth, depth)
+        exc_responses = push(exc_responses, status_resp)
+
+        // Send exception to client
+        reset!(request.result_atom, exc_responses)
+
+        // Push our resume atom onto the stack
+        let my_resume = atom(null)
+        swap!(resume_stack, fn(stack) { push(stack, my_resume) })
+        reset!(running, false)
+
+        // Wait for resume/abort, processing nested evals in the meantime
+        let mut done = false
+        let mut final_result = null
+        while !done && !deref(cancel) {
+            let cmd = deref(my_resume)
+            if cmd != null {
+                reset!(my_resume, null)
+                let op = get(cmd, :op)
+                let cmd_result_atom = get(cmd, :result_atom)
+
+                if op == "resume" {
+                    let code = get(cmd, :code)
+                    reset!(running, true)
+
+                    // Pop ourselves from the stack before resuming
+                    swap!(resume_stack, fn(stack) {
+                        slice(stack, 0, length(stack) - 1)
+                    })
+
+                    let resume_buf = core/new-string-buffer()
+                    let resumed_result = binding (core/out = resume_buf) {
+                        try {
+                            let value = eval(code)
+                            resume(value)
+                        } catch (resume_e) {
+                            resume_e
+                        }
+                    }
+
+                    // resumed_result is the value the try body returned after resume
+                    let cmd_id = get(cmd, :id)
+                    let resume_responses = build-responses(cmd_id, resume_buf, resumed_result)
+                    reset!(cmd_result_atom, resume_responses)
+                    done = true
+                    final_result = resumed_result
+                } else {
+                    // abort
+                    swap!(resume_stack, fn(stack) {
+                        slice(stack, 0, length(stack) - 1)
+                    })
+                    let cmd_id = get(cmd, :id)
+                    reset!(cmd_result_atom, [assoc({:id cmd_id}, :status, ["done"])])
+                    done = true
+                }
+            }
+
+            // Process pending eval requests (for code fixes — these can also stack!)
+            if !done {
+                let pending = deref(queue)
+                if !empty?(pending) {
+                    let fix_request = first-of(pending)
+                    let fix_remaining = rest(pending)
+                    reset!(queue, fix_remaining)
+                    reset!(running, true)
+                    process-eval-request(fix_request, cancel, queue, running, resume_stack)
+                    reset!(running, false)
+                }
+            }
+
+            if !done {
+                core/sleep(10)
+            }
+        }
+        final_result
+    }
+
+    // Normal completion — build response OUTSIDE the try/catch
+    // so it's not part of the continuation captured at throw sites.
+    // The catch handler sets request.result_atom for exceptions.
+    // Only set it here if the catch handler hasn't already handled it.
+    if deref(request.result_atom) == null {
         let req_id = request.id
-        let val_str = to-string(result)
-        let response_map = assoc({:id req_id}, :value, val_str)
-        responses = push(responses, response_map)
-
-        let req_id = request.id
-        let done_status = ["done"]
-        let response_map = assoc({:id req_id}, :status, done_status)
-        responses = push(responses, response_map)
-
+        let responses = build-responses(req_id, buf, try_result)
         reset!(request.result_atom, responses)
     }
 }
 
-/// Submit code for evaluation in a session.
-///
-/// The request is queued and the eval thread will process it.
-/// Returns an atom that will be set to the full response batch when done.
-///
-/// Examples:
-///   let result_atom = session-eval(sess, "req-1", "(+ 1 2)")
-///   while deref(result_atom) == null {
-///       core/sleep(1)
-///   }
 fn session-eval(session, request_id, code) {
     let result_atom = atom(null)
     let request = EvalRequest {
@@ -164,48 +196,52 @@ fn session-eval(session, request_id, code) {
         code: code,
         result_atom: result_atom
     }
-
-    // Add to queue
     swap!(session.message_queue, fn(queue) {
         push(queue, request)
     })
-
     result_atom
 }
 
-/// Interrupt a running evaluation in a session.
-///
-/// Sets the cancel token, which the eval loop checks.
-/// The cancel token is reset after the current eval completes.
-///
-/// Examples:
-///   session-interrupt(sess)
+fn session-resume(session, request_id, code) {
+    let result_atom = atom(null)
+    let stack = deref(session.resume_stack)
+    if empty?(stack) {
+        let err_resp = assoc(assoc({:id request_id}, :status, ["error"]), :error, "No suspended exception to resume")
+        reset!(result_atom, [err_resp])
+    } else {
+        let top = last(stack)
+        reset!(top, {:op "resume", :id request_id, :code code, :result_atom result_atom})
+    }
+    result_atom
+}
+
+fn session-abort(session, request_id) {
+    let result_atom = atom(null)
+    let stack = deref(session.resume_stack)
+    if empty?(stack) {
+        let err_resp = assoc(assoc({:id request_id}, :status, ["error"]), :error, "No suspended exception to abort")
+        reset!(result_atom, [err_resp])
+    } else {
+        let top = last(stack)
+        reset!(top, {:op "abort", :id request_id, :result_atom result_atom})
+    }
+    result_atom
+}
+
 fn session-interrupt(session) {
     reset!(session.cancel_token, true)
-
-    // Wait briefly for eval to notice cancellation
     core/sleep(50)
-
-    // Reset token for next eval
     reset!(session.cancel_token, false)
 }
 
-/// Close a session and stop its eval thread.
-///
-/// Sets the cancel token permanently, causing the eval loop to exit.
-///
-/// Examples:
-///   session-close(sess)
 fn session-close(session) {
     reset!(session.cancel_token, true)
 }
 
-/// Check if a session is currently running an evaluation.
-///
-/// Examples:
-///   if session-busy?(sess) {
-///       println("Session is busy")
-///   }
 fn session-busy?(session) {
     deref(session.is_running)
+}
+
+fn session-suspend-depth(session) {
+    length(deref(session.resume_stack))
 }

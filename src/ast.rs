@@ -45,6 +45,132 @@ pub enum StringInterpolationPart {
     Expression(Box<Ast>),
 }
 
+/// Check if a variable name is referenced anywhere in an AST slice.
+/// Used to determine if the `resume` binding in `catch(e, resume)` is actually used.
+fn references_variable(body: &[Ast], name: &str) -> bool {
+    fn check(ast: &Ast, name: &str) -> bool {
+        match ast {
+            Ast::Identifier(ident, _) => {
+                if ident == name {
+                    return true;
+                }
+                false
+            }
+            Ast::Call {
+                name: call_name,
+                args,
+                ..
+            } => call_name == name || args.iter().any(|a| check(a, name)),
+            _ => {
+                // Generic recursive descent: check all child Vec<Ast> and Box<Ast>
+                check_children(ast, name)
+            }
+        }
+    }
+
+    fn check_children(ast: &Ast, name: &str) -> bool {
+        match ast {
+            // Nodes with body/elements Vec<Ast>
+            Ast::Program { elements, .. } => elements.iter().any(|a| check(a, name)),
+            Ast::Function { body, .. } => body.iter().any(|a| check(a, name)),
+            Ast::If {
+                condition,
+                then,
+                else_,
+                ..
+            } => {
+                check(condition, name)
+                    || then.iter().any(|a| check(a, name))
+                    || else_.iter().any(|a| check(a, name))
+            }
+            Ast::Let { value, .. } | Ast::LetMut { value, .. } | Ast::LetDynamic { value, .. } => {
+                check(value, name)
+            }
+            Ast::Binding {
+                value_expr, body, ..
+            } => check(value_expr, name) || body.iter().any(|a| check(a, name)),
+            Ast::CallExpr { callee, args, .. } => {
+                check(callee, name) || args.iter().any(|a| check(a, name))
+            }
+            Ast::Add { left, right, .. }
+            | Ast::Sub { left, right, .. }
+            | Ast::Mul { left, right, .. }
+            | Ast::Div { left, right, .. }
+            | Ast::Modulo { left, right, .. }
+            | Ast::Condition { left, right, .. }
+            | Ast::And { left, right, .. }
+            | Ast::Or { left, right, .. }
+            | Ast::ShiftLeft { left, right, .. }
+            | Ast::ShiftRight { left, right, .. }
+            | Ast::ShiftRightZero { left, right, .. }
+            | Ast::BitWiseAnd { left, right, .. }
+            | Ast::BitWiseOr { left, right, .. }
+            | Ast::BitWiseXor { left, right, .. } => check(left, name) || check(right, name),
+            Ast::Not { expr, .. } => check(expr, name),
+            Ast::PropertyAccess {
+                object, property, ..
+            } => check(object, name) || check(property, name),
+            Ast::IndexOperator { array, index, .. } => check(array, name) || check(index, name),
+            Ast::Assignment {
+                name: target,
+                value,
+                ..
+            } => check(target, name) || check(value, name),
+            Ast::Array { array, .. } => array.iter().any(|a| check(a, name)),
+            Ast::MapLiteral { pairs, .. } => {
+                pairs.iter().any(|(k, v)| check(k, name) || check(v, name))
+            }
+            Ast::SetLiteral { elements, .. } => elements.iter().any(|a| check(a, name)),
+            Ast::Try {
+                body, catch_body, ..
+            } => body.iter().any(|a| check(a, name)) || catch_body.iter().any(|a| check(a, name)),
+            Ast::Throw { value, .. } | Ast::Return { value, .. } | Ast::Break { value, .. } => {
+                check(value, name)
+            }
+            Ast::Match { value, arms, .. } => {
+                check(value, name)
+                    || arms
+                        .iter()
+                        .any(|arm| arm.body.iter().any(|a| check(a, name)))
+            }
+            Ast::Loop { body, .. } | Ast::Reset { body, .. } | Ast::Shift { body, .. } => {
+                body.iter().any(|a| check(a, name))
+            }
+            Ast::While {
+                condition, body, ..
+            }
+            | Ast::For {
+                collection: condition,
+                body,
+                ..
+            } => check(condition, name) || body.iter().any(|a| check(a, name)),
+            Ast::Perform { value, .. } => check(value, name),
+            Ast::Handle {
+                handler_instance,
+                body,
+                ..
+            } => check(handler_instance, name) || body.iter().any(|a| check(a, name)),
+            Ast::StructCreation { fields, spread, .. } => {
+                fields.iter().any(|(_, v)| check(v, name))
+                    || spread.as_ref().map_or(false, |s| check(s, name))
+            }
+            Ast::EnumCreation { fields, .. } => fields.iter().any(|(_, v)| check(v, name)),
+            Ast::Recurse { args, .. } | Ast::TailRecurse { args, .. } => {
+                args.iter().any(|a| check(a, name))
+            }
+            Ast::StringInterpolation { parts, .. } => parts.iter().any(|p| match p {
+                StringInterpolationPart::Expression(e) => check(e, name),
+                _ => false,
+            }),
+            Ast::Use { alias, .. } => check(alias, name),
+            // Leaf nodes
+            _ => false,
+        }
+    }
+
+    body.iter().any(|ast| check(ast, name))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ast {
     Program {
@@ -321,6 +447,7 @@ pub enum Ast {
     Try {
         body: Vec<Ast>,
         exception_binding: String,
+        resume_binding: Option<String>,
         catch_body: Vec<Ast>,
         token_range: TokenRange,
     },
@@ -1485,9 +1612,17 @@ impl AstCompiler<'_> {
             Ast::Try {
                 body,
                 exception_binding,
+                resume_binding,
                 catch_body,
-                ..
+                token_range,
             } => {
+                // Determine if this is a resumable try/catch at compile time
+                let is_resumable = match resume_binding {
+                    None => false,
+                    Some(ref name) if name == "_" => false,
+                    Some(ref name) => references_variable(catch_body.as_slice(), name),
+                };
+
                 // Create labels for catch block and continuation
                 let catch_label = self.ir.label("catch_block");
                 let after_catch = self.ir.label("after_catch");
@@ -1495,85 +1630,264 @@ impl AstCompiler<'_> {
                 // Create a result register that both try and catch will write to
                 let result_reg = self.ir.assign_new(Value::Null);
 
-                // Save any existing binding with this name to restore later
-                let saved_binding = self.get_variable(&exception_binding).clone();
+                // Save any existing bindings to restore later
+                let saved_exception_binding =
+                    self.get_variable(&exception_binding).clone();
+                let saved_resume_binding = resume_binding
+                    .as_ref()
+                    .and_then(|name| self.get_variable(name.as_str()).clone());
 
-                // Allocate local for exception object with a unique internal name
-                // Use the label index to ensure uniqueness across multiple try-catch blocks
+                // Allocate local for exception object
                 let unique_exception_name =
                     format!("__exception_{}_{}__", exception_binding, catch_label.index);
                 let exception_local = self.find_or_insert_local(&unique_exception_name);
-                // Initialize it to null and register it with IR so num_locals includes it
                 let null_reg = self.ir.assign_new(Value::Null);
                 self.ir.store_local(exception_local, null_reg.into());
 
-                // Get builtin function pointers
-                let push_handler_fn = self
-                    .compiler
-                    .find_function("beagle.builtin/push-exception-handler")
-                    .expect("push_exception_handler builtin not found");
-                let push_handler_fn_ptr = usize::from(push_handler_fn.pointer);
+                if is_resumable {
+                    // === RESUMABLE TRY/CATCH ===
+                    let resume_name = resume_binding.as_ref().unwrap();
+                    let prompt_handler_label = self.ir.label("prompt_handler");
 
-                let pop_handler_fn = self
-                    .compiler
-                    .find_function("beagle.builtin/pop-exception-handler")
-                    .expect("pop_exception_handler builtin not found");
-                let pop_handler_fn_ptr = usize::from(pop_handler_fn.pointer);
+                    // Allocate locals for resume, captured value, cont_ptr, handler_id
+                    let resume_local = self.find_or_insert_local(&format!(
+                        "__resume_{}_{}__",
+                        resume_name, catch_label.index
+                    ));
+                    let captured_local = self.find_or_insert_local(&format!(
+                        "__captured_resumable_{}__",
+                        token_range.start
+                    ));
+                    let cont_ptr_local = self.find_or_insert_local(&format!(
+                        "__cont_ptr_resumable_{}__",
+                        token_range.start
+                    ));
+                    let handler_id_local = self.find_or_insert_local(&format!(
+                        "__handler_id_{}__",
+                        catch_label.index
+                    ));
 
-                // Push exception handler
-                self.ir.push_exception_handler(
-                    catch_label,
-                    Value::Local(exception_local),
-                    push_handler_fn_ptr,
-                );
+                    // Initialize locals
+                    let null_reg2 = self.ir.assign_new(Value::Null);
+                    self.ir.store_local(resume_local, null_reg2.into());
+                    let null_reg3 = self.ir.assign_new(Value::Null);
+                    self.ir.store_local(captured_local, null_reg3.into());
+                    let null_reg4 = self.ir.assign_new(Value::Null);
+                    self.ir.store_local(cont_ptr_local, null_reg4.into());
+                    let null_reg5 = self.ir.assign_new(Value::Null);
+                    self.ir.store_local(handler_id_local, null_reg5.into());
 
-                // Compile try body - disable tail call optimization
-                // TCO would prevent proper stack frame setup, breaking exception handling
-                self.not_tail_position();
-                let mut try_result = Value::Null;
-                for ast in body.iter() {
+                    // Push resumable exception handler (returns handler_id)
+                    let push_resumable_fn = self
+                        .compiler
+                        .find_function("beagle.builtin/push-resumable-exception-handler")
+                        .expect("push-resumable-exception-handler builtin not found");
+                    let push_resumable_fn_ptr = usize::from(push_resumable_fn.pointer);
+
+                    let handler_id_value = self.ir.push_resumable_exception_handler(
+                        catch_label,
+                        Value::Local(exception_local),
+                        Value::Local(resume_local),
+                        push_resumable_fn_ptr,
+                    );
+                    // Store the returned handler_id
+                    let handler_id_reg = self.ir.assign_new(handler_id_value);
+                    self.ir.store_local(handler_id_local, handler_id_reg.into());
+
+                    // Push prompt handler (for continuation capture delimiter)
+                    let push_prompt_fn = self
+                        .compiler
+                        .find_function("beagle.builtin/push-prompt")
+                        .expect("push-prompt builtin not found");
+                    let push_prompt_fn_ptr = usize::from(push_prompt_fn.pointer);
+                    let pop_prompt_fn = self
+                        .compiler
+                        .find_function("beagle.builtin/pop-prompt")
+                        .expect("pop-prompt builtin not found");
+                    let pop_prompt_fn_ptr = usize::from(pop_prompt_fn.pointer);
+
+                    self.ir.push_prompt_handler(
+                        prompt_handler_label,
+                        Value::Local(captured_local),
+                        push_prompt_fn_ptr,
+                    );
+
+                    // Compile try body (no TCO)
                     self.not_tail_position();
-                    try_result = self.call_compile(ast)?;
-                }
+                    let mut try_result = Value::Null;
+                    for ast in body.iter() {
+                        self.not_tail_position();
+                        try_result = self.call_compile(ast)?;
+                    }
 
-                // Normal path: store result, pop handler and skip catch
-                self.ir.assign(result_reg, try_result);
-                self.ir.pop_exception_handler(pop_handler_fn_ptr);
-                self.ir.jump(after_catch);
+                    // Normal path: pop exception handler by id, pop prompt, skip catch
+                    self.ir.assign(result_reg, try_result);
+                    let pop_by_id_fn = self
+                        .compiler
+                        .find_function("beagle.builtin/pop-exception-handler-by-id")
+                        .expect("pop-exception-handler-by-id builtin not found");
+                    let pop_by_id_fn_ptr = usize::from(pop_by_id_fn.pointer);
+                    let handler_id_val = self.ir.load_local(handler_id_local);
+                    self.ir
+                        .pop_exception_handler_by_id(handler_id_val, pop_by_id_fn_ptr);
+                    self.ir
+                        .pop_prompt_handler(result_reg.into(), pop_prompt_fn_ptr);
+                    self.ir.jump(after_catch);
 
-                // Catch block (target of throw)
-                self.ir.write_label(catch_label);
+                    // Catch block
+                    self.ir.write_label(catch_label);
 
-                // Exception already stored in exception_local by throw
-                self.insert_variable(
-                    exception_binding.clone(),
-                    VariableLocation::Local(exception_local),
-                );
+                    // Bind exception
+                    self.insert_variable(
+                        exception_binding.clone(),
+                        VariableLocation::Local(exception_local),
+                    );
 
-                // Compile catch body - also disable tail call optimization
-                let mut catch_result = Value::Null;
-                for ast in catch_body.iter() {
-                    self.not_tail_position();
-                    catch_result = self.call_compile(ast)?;
-                }
+                    // Wrap raw continuation pointer in a closure (same pattern as shift)
+                    let raw_cont_ptr = self.ir.load_local(resume_local);
+                    let raw_cont_reg = self.ir.assign_new(raw_cont_ptr);
+                    self.ir.store_local(cont_ptr_local, raw_cont_reg.into());
 
-                // Store catch result in the same result register
-                self.ir.assign(result_reg, catch_result);
+                    // Create closure: make_closure(continuation_trampoline, 1, [cont_ptr])
+                    let trampoline_fn = self
+                        .compiler
+                        .find_function("beagle.builtin/continuation-trampoline")
+                        .expect("continuation-trampoline builtin not found");
+                    let trampoline_ptr = usize::from(trampoline_fn.pointer);
 
-                self.ir.write_label(after_catch);
+                    let free_var_ptr = self.ir.get_current_stack_position();
+                    let cont_ptr_for_closure = self.ir.load_local(cont_ptr_local);
+                    self.ir.push_to_stack(cont_ptr_for_closure);
 
-                // Restore the saved binding so subsequent code sees the original variable
-                if let Some(saved) = saved_binding.clone() {
-                    self.insert_variable(exception_binding.clone(), saved);
+                    let make_closure_fn = self
+                        .compiler
+                        .find_function("beagle.builtin/make-closure")
+                        .expect("make-closure builtin not found");
+                    let make_closure_ptr =
+                        self.compiler.get_function_pointer(make_closure_fn).unwrap();
+                    let make_closure_reg = self.ir.assign_new(make_closure_ptr);
+
+                    let tagged_trampoline =
+                        BuiltInTypes::Function.tag(trampoline_ptr as isize) as usize;
+                    let trampoline_reg =
+                        self.ir.assign_new(Value::RawValue(tagged_trampoline));
+                    let num_free_reg = self.ir.assign_new(Value::TaggedConstant(1));
+
+                    let stack_pointer = self.ir.get_stack_pointer_imm(0);
+                    let frame_pointer = self.ir.get_frame_pointer();
+
+                    let resume_closure = self.ir.call(
+                        make_closure_reg.into(),
+                        vec![
+                            stack_pointer,
+                            frame_pointer,
+                            trampoline_reg.into(),
+                            num_free_reg.into(),
+                            free_var_ptr,
+                        ],
+                    );
+
+                    let resume_closure_reg = self.ir.assign_new(resume_closure);
+                    self.ir
+                        .store_local(resume_local, resume_closure_reg.into());
+                    self.insert_variable(
+                        resume_name.clone(),
+                        VariableLocation::Local(resume_local),
+                    );
+
+                    // Compile catch body
+                    let mut catch_result = Value::Null;
+                    for ast in catch_body.iter() {
+                        self.not_tail_position();
+                        catch_result = self.call_compile(ast)?;
+                    }
+                    self.ir.assign(result_reg, catch_result);
+                    self.ir.jump(after_catch);
+
+                    // Prompt handler label (for continuation return path)
+                    self.ir.write_label(prompt_handler_label);
+                    let captured_value = self.ir.load_local(captured_local);
+                    self.ir.assign(result_reg, captured_value);
+
+                    self.ir.write_label(after_catch);
+
+                    // Restore saved bindings
+                    if let Some(saved) = saved_exception_binding.clone() {
+                        self.insert_variable(exception_binding.clone(), saved);
+                    } else {
+                        let current_env = self.environment_stack.last_mut().unwrap();
+                        current_env.variables.remove(exception_binding.as_str());
+                    }
+                    if let Some(saved) = saved_resume_binding.clone() {
+                        self.insert_variable(resume_name.clone(), saved);
+                    } else {
+                        let current_env = self.environment_stack.last_mut().unwrap();
+                        current_env.variables.remove(resume_name);
+                    }
                 } else {
-                    // Remove the exception binding if it didn't exist before
-                    let current_env = self.environment_stack.last_mut().unwrap();
-                    current_env.variables.remove(&exception_binding);
+                    // === NON-RESUMABLE TRY/CATCH (existing behavior) ===
+                    let push_handler_fn = self
+                        .compiler
+                        .find_function("beagle.builtin/push-exception-handler")
+                        .expect("push_exception_handler builtin not found");
+                    let push_handler_fn_ptr = usize::from(push_handler_fn.pointer);
+
+                    let pop_handler_fn = self
+                        .compiler
+                        .find_function("beagle.builtin/pop-exception-handler")
+                        .expect("pop_exception_handler builtin not found");
+                    let pop_handler_fn_ptr = usize::from(pop_handler_fn.pointer);
+
+                    self.ir.push_exception_handler(
+                        catch_label,
+                        Value::Local(exception_local),
+                        push_handler_fn_ptr,
+                    );
+
+                    // Compile try body (no TCO)
+                    self.not_tail_position();
+                    let mut try_result = Value::Null;
+                    for ast in body.iter() {
+                        self.not_tail_position();
+                        try_result = self.call_compile(ast)?;
+                    }
+
+                    // Normal path: store result, pop handler and skip catch
+                    self.ir.assign(result_reg, try_result);
+                    self.ir.pop_exception_handler(pop_handler_fn_ptr);
+                    self.ir.jump(after_catch);
+
+                    // Catch block
+                    self.ir.write_label(catch_label);
+                    self.insert_variable(
+                        exception_binding.clone(),
+                        VariableLocation::Local(exception_local),
+                    );
+
+                    let mut catch_result = Value::Null;
+                    for ast in catch_body.iter() {
+                        self.not_tail_position();
+                        catch_result = self.call_compile(ast)?;
+                    }
+                    self.ir.assign(result_reg, catch_result);
+
+                    self.ir.write_label(after_catch);
+
+                    // Restore saved binding
+                    if let Some(saved) = saved_exception_binding.clone() {
+                        self.insert_variable(exception_binding.clone(), saved);
+                    } else {
+                        let current_env = self.environment_stack.last_mut().unwrap();
+                        current_env.variables.remove(exception_binding.as_str());
+                    }
                 }
 
                 Ok(result_reg.into())
             }
-            Ast::Throw { value, .. } => {
+            Ast::Throw {
+                value,
+                token_range,
+            } => {
                 let exception_value = self.call_compile(&value)?;
                 // Ensure the exception value is in a register
                 let exception_value = match exception_value {
@@ -1584,14 +1898,27 @@ impl AstCompiler<'_> {
                         reg.into()
                     }
                 };
+
+                // Allocate a resume label and local for potential resumption
+                let resume_label = self.ir.label("throw_resume");
+                let resume_local_name =
+                    format!("__throw_resume_{}__", token_range.start);
+                let resume_local = self.find_or_insert_local(&resume_local_name);
+                let null_reg = self.ir.assign_new(Value::Null);
+                self.ir.store_local(resume_local, null_reg.into());
+
                 let throw_fn = self
                     .compiler
                     .find_function("beagle.builtin/throw-exception")
                     .expect("throw_exception builtin not found");
                 let throw_fn_ptr = usize::from(throw_fn.pointer);
-                self.ir.throw_value(exception_value, throw_fn_ptr);
-                // Throw never returns, but we need to return something for type checking
-                Ok(Value::Null)
+                self.ir
+                    .throw_value(exception_value, resume_label, resume_local, throw_fn_ptr);
+
+                // Resume point: reached only if handler is resumable and resume() is called
+                self.ir.write_label(resume_label);
+                let resumed_value = self.ir.load_local(resume_local);
+                Ok(resumed_value)
             }
             Ast::Match {
                 value,
@@ -5793,6 +6120,7 @@ impl AstCompiler<'_> {
             Ast::Try {
                 body,
                 exception_binding: _,
+                resume_binding: _,
                 catch_body,
                 token_range: _,
             } => {

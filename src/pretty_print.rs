@@ -493,9 +493,31 @@ impl PrettyPrint for Instruction {
                     result_local.pretty_print()
                 )
             }
+            Instruction::PushResumableExceptionHandler(
+                dest,
+                label,
+                exception_local,
+                resume_local,
+                _,
+            ) => {
+                format!(
+                    "{} = push_resumable_exception_handler {}, {}, {}",
+                    dest.pretty_print(),
+                    label.index,
+                    exception_local.pretty_print(),
+                    resume_local.pretty_print()
+                )
+            }
             Instruction::PopExceptionHandler(_) => "pop_exception_handler".to_string(),
-            Instruction::Throw(value, _) => {
-                format!("throw {}", value.pretty_print())
+            Instruction::PopExceptionHandlerById(handler_id, _) => {
+                format!("pop_exception_handler_by_id {}", handler_id.pretty_print())
+            }
+            Instruction::Throw(value, resume_label, _, _) => {
+                format!(
+                    "throw {} resume_at:{}",
+                    value.pretty_print(),
+                    resume_label.index
+                )
             }
             Instruction::GetFramePointer(dest) => {
                 format!("get_frame_pointer {}", dest.pretty_print())

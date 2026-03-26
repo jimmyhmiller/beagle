@@ -3772,6 +3772,9 @@ pub struct ExceptionHandler {
     pub frame_pointer: usize,
     pub link_register: usize,
     pub result_local: isize,
+    pub handler_id: usize,
+    pub is_resumable: bool,
+    pub resume_local: isize,
 }
 
 /// Prompt handler for delimited continuations.
@@ -4339,7 +4342,7 @@ pub struct PerThreadData {
     pub prompt_handlers: Vec<PromptHandler>,
     pub invocation_return_points: Vec<InvocationReturnPoint>,
     pub safe_return_context: Option<SafeReturnContext>,
-    pub dynamic_binding_stacks: HashMap<(usize, usize), Vec<usize>>,
+
     pub return_from_shift_via_pop_prompt: bool,
     pub is_handler_return: bool,
     pub saved_continuation_ptr: usize,
@@ -4355,7 +4358,7 @@ impl PerThreadData {
             prompt_handlers: Vec::new(),
             invocation_return_points: Vec::new(),
             safe_return_context: None,
-            dynamic_binding_stacks: HashMap::new(),
+
             return_from_shift_via_pop_prompt: false,
             is_handler_return: false,
             saved_continuation_ptr: 0,
@@ -6848,68 +6851,6 @@ impl Runtime {
     /// Get namespace binding - alias for get_binding (used by dynamic vars)
     pub fn get_namespace_binding(&self, namespace: usize, slot: usize) -> usize {
         self.get_binding(namespace, slot)
-    }
-
-    /// Upgrade all Function-tagged bindings to proper function objects (HeapObject structs).
-    /// Called on the main thread after compilation, where heap allocation is possible.
-    /// Push a new dynamic binding (temporarily rebind a namespace variable)
-    /// Saves the current value on a per-thread stack and sets the new value
-    pub fn push_dynamic_binding(&mut self, namespace: usize, slot: usize, new_value: usize) {
-        // Get the current value before we change it
-        let old_value = self.get_binding(namespace, slot);
-
-        // Push the old value onto the binding stack for this thread
-        {
-            let ptd = per_thread_data();
-            let stack = ptd
-                .dynamic_binding_stacks
-                .entry((namespace, slot))
-                .or_default();
-            stack.push(old_value);
-        }
-
-        // Update the namespace binding with the new value
-        let ns_obj = self
-            .namespaces
-            .namespaces
-            .get(namespace)
-            .expect("Namespace not found in push_dynamic_binding");
-        let mut ns = ns_obj
-            .lock()
-            .expect("Failed to lock namespace in push_dynamic_binding");
-        let name = ns
-            .ids
-            .get(slot)
-            .expect("Namespace slot not found in push_dynamic_binding")
-            .clone();
-        ns.bindings.insert(name, new_value);
-    }
-
-    /// Pop a dynamic binding (restore previous value)
-    /// Restores the value from the per-thread binding stack
-    pub fn pop_dynamic_binding(&mut self, namespace: usize, slot: usize) {
-        // Pop the old value from the binding stack
-        let old_value = per_thread_data()
-            .dynamic_binding_stacks
-            .get_mut(&(namespace, slot))
-            .and_then(|stack| stack.pop())
-            .expect("Dynamic binding stack underflow - pop without matching push");
-
-        // Restore the old value to the namespace binding
-        let ns_obj = self
-            .namespaces
-            .namespaces
-            .get(namespace)
-            .expect("Namespace not found in pop_dynamic_binding");
-        let mut ns = ns_obj
-            .lock()
-            .expect("Failed to lock namespace in pop_dynamic_binding");
-        let name = ns
-            .ids
-            .get(slot)
-            .expect("Namespace slot not found in pop_dynamic_binding")
-            .clone();
-        ns.bindings.insert(name, old_value);
     }
 
     pub fn reserve_namespace(&mut self, name: String) -> usize {

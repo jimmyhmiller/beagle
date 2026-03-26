@@ -1,0 +1,54 @@
+namespace resumable_eval_test
+
+use beagle.core as core
+
+fn main() {
+    // Test 1: Direct resumable try/catch with throw
+    println("test1: direct throw")
+    let r1 = try {
+        throw("boom") + 10
+    } catch (e, resume) {
+        println("caught:", e)
+        resume(32)
+    }
+    println("result:", r1)
+
+    // Test 2: throw inside eval
+    println("test2: eval throw")
+    let r2 = try {
+        eval("throw(\"eval-boom\")") + 10
+    } catch (e, resume) {
+        println("caught:", e)
+        resume(32)
+    }
+    println("result:", r2)
+
+    // Test 3: throw inside eval, in a thread (no println in thread to avoid binding issues)
+    let result_atom = atom(null)
+    let t = thread(fn() {
+        let r = try {
+            eval("throw(\"thread-boom\")") + 10
+        } catch (e, resume) {
+            resume(32)
+        }
+        reset!(result_atom, r)
+    })
+    let mut elapsed = 0
+    while deref(result_atom) == null && elapsed < 3000 {
+        core/sleep(10)
+        elapsed = elapsed + 10
+    }
+    println("test3: thread result:", deref(result_atom))
+
+    println("done")
+}
+
+// @beagle.core.snapshot
+// test1: direct throw
+//   caught: boom
+//   result: 42
+// test2: eval throw
+//   caught: eval-boom
+//   result: 42
+// test3: thread result: 42
+// done

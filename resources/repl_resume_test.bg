@@ -1,0 +1,161 @@
+namespace repl_resume_test
+
+use beagle.core as core
+use beagle.repl-session as session
+
+fn wait(a, ms) {
+    let mut e = 0
+    while deref(a) == null && e < ms { core/sleep(10); e = e + 10 }
+    deref(a)
+}
+
+fn get-value(responses) {
+    let mut value = null
+    for resp in responses { let v = get(resp, :value); if v != null { value = v } }
+    value
+}
+
+fn get-ex(responses) {
+    let mut ex = null
+    for resp in responses { let v = get(resp, :ex); if v != null { ex = v } }
+    ex
+}
+
+fn has-status?(responses, target) {
+    let mut found = false
+    for resp in responses {
+        let s = get(resp, :status)
+        if s != null {
+            for item in s {
+                if item == target { found = true }
+            }
+        }
+    }
+    found
+}
+
+fn get-depth(responses) {
+    let mut depth = null
+    for resp in responses { let v = get(resp, :suspend-depth); if v != null { depth = v } }
+    depth
+}
+
+// All tests collect results via atoms, then print at the end
+// (because binding(core/out) is global and captures other threads' println)
+
+fn main() {
+    // Collect all results, print at the very end after sessions are closed
+    let mut results = []
+
+    // Test 1: Basic eval
+    let sess1 = session/create-session("t1")
+    let r1 = session/session-eval(sess1, "r1", "1 + 2")
+    let resp1 = wait(r1, 3000)
+    let v1 = get-value(resp1)
+    results = push(results, "test-basic-eval: " ++ if v1 == "3" { "ok" } else { "FAIL got " ++ to-string(v1) })
+    session/session-close(sess1)
+    core/sleep(50)
+
+    // Test 2: Exception produces resumable status
+    let sess2 = session/create-session("t2")
+    let r2 = session/session-eval(sess2, "r1", "throw(\"test error\")")
+    let resp2 = wait(r2, 3000)
+    let is_resumable = has-status?(resp2, "resumable")
+    let ex2 = get-ex(resp2)
+    results = push(results, "test-exception-resumable: " ++ if is_resumable && ex2 != null { "ok" } else { "FAIL" })
+    let abort2 = session/session-abort(sess2, "a1")
+    wait(abort2, 3000)
+    session/session-close(sess2)
+    core/sleep(50)
+
+    // Test 3: Resume provides value
+    let sess3 = session/create-session("t3")
+    let r3 = session/session-eval(sess3, "r1", "throw(\"need val\") + 10")
+    let resp3 = wait(r3, 3000)
+    let is_res3 = has-status?(resp3, "resumable")
+    let resume3 = session/session-resume(sess3, "r2", "32")
+    let resp3r = wait(resume3, 3000)
+    let v3 = get-value(resp3r)
+    results = push(results, "test-resume: " ++ if is_res3 && v3 == "42" { "ok" } else { "FAIL: resumable=" ++ to-string(is_res3) ++ " val=" ++ to-string(v3) })
+    session/session-close(sess3)
+    core/sleep(50)
+
+    // Test 4: Abort returns without resuming
+    let sess4 = session/create-session("t4")
+    let r4 = session/session-eval(sess4, "r1", "throw(\"err\")")
+    wait(r4, 3000)
+    let abort4 = session/session-abort(sess4, "a1")
+    let resp4 = wait(abort4, 3000)
+    let done4 = has-status?(resp4, "done")
+    // Session should be usable after abort
+    let r4b = session/session-eval(sess4, "r2", "99")
+    let resp4b = wait(r4b, 3000)
+    let v4b = get-value(resp4b)
+    results = push(results, "test-abort: " ++ if done4 && v4b == "99" { "ok" } else { "FAIL" })
+    session/session-close(sess4)
+    core/sleep(50)
+
+    // Test 5: Eval during resume wait (code fixes)
+    let sess5 = session/create-session("t5")
+    let r5 = session/session-eval(sess5, "r1", "throw(\"broken\")")
+    wait(r5, 3000)
+    core/sleep(50)
+    let fix5 = session/session-eval(sess5, "r2", "1 + 1")
+    let resp5f = wait(fix5, 3000)
+    let v5f = get-value(resp5f)
+    let resume5 = session/session-resume(sess5, "r3", "0")
+    let resp5r = wait(resume5, 3000)
+    let done5 = has-status?(resp5r, "done")
+    results = push(results, "test-fix-during-wait: " ++ if v5f == "2" && done5 { "ok" } else { "FAIL fix=" ++ to-string(v5f) })
+    session/session-close(sess5)
+    core/sleep(50)
+
+    // Test 6: Stacking
+    let sess6 = session/create-session("t6")
+    let r6a = session/session-eval(sess6, "r1", "throw(\"outer\")")
+    let resp6a = wait(r6a, 3000)
+    core/sleep(50)
+    let depth6a = get-depth(resp6a)
+    let r6b = session/session-eval(sess6, "r2", "throw(\"inner\")")
+    let resp6b = wait(r6b, 3000)
+    core/sleep(50)
+    let depth6b = get-depth(resp6b)
+    // Resume innermost
+    let resume6i = session/session-resume(sess6, "r3", "\"inner-fixed\"")
+    let resp6i = wait(resume6i, 3000)
+    let v6i = get-value(resp6i)
+    // Resume outermost
+    let resume6o = session/session-resume(sess6, "r4", "\"outer-fixed\"")
+    let resp6o = wait(resume6o, 3000)
+    let v6o = get-value(resp6o)
+    results = push(results, "test-stacking: " ++ if depth6a == 1 && depth6b == 2 { "ok depths" } else { "FAIL depths " ++ to-string(depth6a) ++ "," ++ to-string(depth6b) })
+    results = push(results, "test-stacking-resume: " ++ if v6i != null && v6o != null { "ok" } else { "FAIL" })
+    session/session-close(sess6)
+    core/sleep(50)
+
+    // Test 7: Resume with no exception
+    let sess7 = session/create-session("t7")
+    let r7 = session/session-resume(sess7, "r1", "42")
+    let resp7 = wait(r7, 3000)
+    let err7 = has-status?(resp7, "error")
+    results = push(results, "test-resume-no-exception: " ++ if err7 { "ok" } else { "FAIL" })
+    session/session-close(sess7)
+    core/sleep(50)
+
+    // Print all results (safe now — all sessions closed, bindings cleared)
+    for r in results {
+        println(r)
+    }
+    println("done")
+}
+
+// @beagle.core.snapshot
+// test-basic-eval: ok
+// test-exception-resumable: ok
+// test-resume: ok
+// test-abort: ok
+// test-fix-during-wait: ok
+// test-stacking: ok depths
+// test-stacking-resume: ok
+// test-resume-no-exception: ok
+// done
