@@ -3738,6 +3738,10 @@ pub struct InvocationReturnPoint {
     /// but the handler's epilogue needs the original prev to correctly unlink from the
     /// GC chain. We save it here and restore it after the frame is reconstructed.
     pub saved_gc_prev: usize,
+    /// Whether this RP was created from a resumable exception continuation.
+    /// When true, non-root RPs will chain through parent RPs with the same prompt_id
+    /// to un-relocate the stack all the way back to the original location.
+    pub from_resumable_exception: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -3765,6 +3769,11 @@ impl ContinuationObject {
     const FIELD_PROMPT_RESULT_LOCAL: usize = 9;
     const FIELD_PROMPT_ID: usize = 10;
     const FIELD_PROMPT_IS_RELOCATED: usize = 11;
+    const FIELD_EXC_HANDLER_ADDRESS: usize = 12;
+    const FIELD_EXC_RESULT_LOCAL: usize = 13;
+    const FIELD_EXC_RESUME_LOCAL: usize = 14;
+    const FIELD_EXC_HANDLER_ID: usize = 15;
+    const FIELD_EXC_HAS_HANDLER: usize = 16;
 
     pub fn from_tagged(tagged: usize) -> Option<Self> {
         let heap_obj = HeapObject::try_from_tagged(tagged)?;
@@ -3843,6 +3852,55 @@ impl ContinuationObject {
         }
     }
 
+    pub fn exc_handler_address(&self) -> usize {
+        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_EXC_HANDLER_ADDRESS))
+    }
+
+    pub fn exc_result_local(&self) -> isize {
+        BuiltInTypes::untag_isize(self.heap_obj.get_field(Self::FIELD_EXC_RESULT_LOCAL) as isize)
+    }
+
+    pub fn exc_resume_local(&self) -> isize {
+        BuiltInTypes::untag_isize(self.heap_obj.get_field(Self::FIELD_EXC_RESUME_LOCAL) as isize)
+    }
+
+    pub fn exc_handler_id(&self) -> usize {
+        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_EXC_HANDLER_ID))
+    }
+
+    pub fn exc_has_handler(&self) -> bool {
+        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_EXC_HAS_HANDLER)) != 0
+    }
+
+    pub fn set_exc_handler_info(
+        &mut self,
+        handler_address: usize,
+        result_local: isize,
+        resume_local: isize,
+        handler_id: usize,
+    ) {
+        self.heap_obj.write_field(
+            Self::FIELD_EXC_HANDLER_ADDRESS as i32,
+            BuiltInTypes::Int.tag(handler_address as isize) as usize,
+        );
+        self.heap_obj.write_field(
+            Self::FIELD_EXC_RESULT_LOCAL as i32,
+            BuiltInTypes::Int.tag(result_local) as usize,
+        );
+        self.heap_obj.write_field(
+            Self::FIELD_EXC_RESUME_LOCAL as i32,
+            BuiltInTypes::Int.tag(resume_local) as usize,
+        );
+        self.heap_obj.write_field(
+            Self::FIELD_EXC_HANDLER_ID as i32,
+            BuiltInTypes::Int.tag(handler_id as isize) as usize,
+        );
+        self.heap_obj.write_field(
+            Self::FIELD_EXC_HAS_HANDLER as i32,
+            BuiltInTypes::Int.tag(1) as usize,
+        );
+    }
+
     pub fn initialize(
         heap_obj: &mut HeapObject,
         segment_ptr: usize,
@@ -3897,6 +3955,27 @@ impl ContinuationObject {
         heap_obj.write_field(
             Self::FIELD_PROMPT_IS_RELOCATED as i32,
             BuiltInTypes::Int.tag(prompt.is_relocated as isize) as usize,
+        );
+        // Exception handler fields default to 0 (no handler)
+        heap_obj.write_field(
+            Self::FIELD_EXC_HANDLER_ADDRESS as i32,
+            BuiltInTypes::Int.tag(0) as usize,
+        );
+        heap_obj.write_field(
+            Self::FIELD_EXC_RESULT_LOCAL as i32,
+            BuiltInTypes::Int.tag(0) as usize,
+        );
+        heap_obj.write_field(
+            Self::FIELD_EXC_RESUME_LOCAL as i32,
+            BuiltInTypes::Int.tag(0) as usize,
+        );
+        heap_obj.write_field(
+            Self::FIELD_EXC_HANDLER_ID as i32,
+            BuiltInTypes::Int.tag(0) as usize,
+        );
+        heap_obj.write_field(
+            Self::FIELD_EXC_HAS_HANDLER as i32,
+            BuiltInTypes::Int.tag(0) as usize,
         );
     }
 }

@@ -11184,6 +11184,19 @@ pub unsafe extern "C" fn throw_exception(
                 )
             };
 
+            // Store exception handler info in the continuation so it can be
+            // re-pushed when the continuation is invoked (for multi-throw support)
+            {
+                let mut cont_obj = ContinuationObject::from_tagged(cont_ptr)
+                    .expect("continuation pointer invalid after capture");
+                cont_obj.set_exc_handler_info(
+                    handler.handler_address,
+                    handler.result_local,
+                    handler.resume_local,
+                    handler.handler_id,
+                );
+            }
+
             // Write exception to handler's result_local (exception binding)
             let exception_ptr =
                 (handler.frame_pointer as isize).wrapping_add(handler.result_local) as *mut usize;
@@ -11872,7 +11885,7 @@ pub unsafe extern "C" fn capture_continuation_runtime(
     };
 
     // Allocate the continuation heap object
-    let cont_ptr = match runtime.allocate(12, stack_pointer, BuiltInTypes::HeapObject) {
+    let cont_ptr = match runtime.allocate(17, stack_pointer, BuiltInTypes::HeapObject) {
         Ok(ptr) => ptr,
         Err(_) => unsafe {
             if segment_root_id != 0 {
@@ -11931,25 +11944,107 @@ unsafe extern "C" fn continue_return_from_shift_on_safe_stack() -> ! {
         (ctx.value, ctx.return_point)
     };
 
-    // Copy only mutable local/eval-slot ranges from the relocated segment back to
-    // the original location. Do not copy frame metadata (saved FP/LR, frame header,
-    // GC links, callee-saved registers), which would corrupt control flow.
-    if return_point.is_root_invocation && !return_point.mutable_ranges.is_empty() {
-        let total_copy_bytes: usize = return_point.mutable_ranges.iter().map(|r| r.len).sum();
+    // Copy mutable local/eval-slot ranges from relocated segments back to their
+    // original locations. For nested throw/resume cycles (multiple throws after resume),
+    // chain through all return points with the same prompt_id to propagate changes
+    // all the way back to the original (root) stack location.
+    let return_address_to_use = return_point.return_address;
+    let mut effective_return_point = return_point;
+
+    if !effective_return_point.is_root_invocation && effective_return_point.from_resumable_exception
+    {
+        // Non-root resumable exception: copy mutable ranges from this level to its parent,
+        // then chain through parent RPs to un-relocate all the way back to the original stack.
+        if !effective_return_point.mutable_ranges.is_empty() {
+            if debug_prompts {
+                eprintln!(
+                    "[return_from_shift] Chained copy (non-root): {} ranges from relocated_sp={:#x} to original_sp={:#x}",
+                    effective_return_point.mutable_ranges.len(),
+                    effective_return_point.relocated_sp,
+                    effective_return_point.original_sp
+                );
+            }
+            for range in &effective_return_point.mutable_ranges {
+                unsafe {
+                    std::ptr::copy(
+                        (effective_return_point.relocated_sp + range.offset) as *const u8,
+                        (effective_return_point.original_sp + range.offset) as *mut u8,
+                        range.len,
+                    );
+                }
+            }
+        }
+
+        // Chain through parent RPs with the same prompt_id until we reach the root.
+        // This un-relocates the stack all the way back to the original location.
+        let prompt_id = effective_return_point.prompt_id;
+        loop {
+            let ptd = crate::runtime::per_thread_data();
+            if let Some(pos) = ptd
+                .invocation_return_points
+                .iter()
+                .rposition(|rp| rp.prompt_id == prompt_id)
+            {
+                let parent_rp = ptd.invocation_return_points.remove(pos);
+                if ptd.relocation_depth > 0 {
+                    ptd.relocation_depth -= 1;
+                }
+                // Pop the prompt handler that belongs to this parent level
+                if !ptd.prompt_handlers.is_empty() {
+                    ptd.prompt_handlers.pop();
+                }
+
+                // Copy parent's mutable ranges
+                if !parent_rp.mutable_ranges.is_empty() {
+                    if debug_prompts {
+                        eprintln!(
+                            "[return_from_shift] Chained copy (parent): {} ranges from relocated_sp={:#x} to original_sp={:#x} is_root={}",
+                            parent_rp.mutable_ranges.len(),
+                            parent_rp.relocated_sp,
+                            parent_rp.original_sp,
+                            parent_rp.is_root_invocation
+                        );
+                    }
+                    for range in &parent_rp.mutable_ranges {
+                        unsafe {
+                            std::ptr::copy(
+                                (parent_rp.relocated_sp + range.offset) as *const u8,
+                                (parent_rp.original_sp + range.offset) as *mut u8,
+                                range.len,
+                            );
+                        }
+                    }
+                }
+
+                effective_return_point = parent_rp;
+                if effective_return_point.is_root_invocation {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+    } else if effective_return_point.is_root_invocation
+        && !effective_return_point.mutable_ranges.is_empty()
+    {
         if debug_prompts {
             eprintln!(
                 "[return_from_shift] Copying mutable slots: {} ranges, {} bytes from relocated_sp={:#x} to original_sp={:#x}",
-                return_point.mutable_ranges.len(),
-                total_copy_bytes,
-                return_point.relocated_sp,
-                return_point.original_sp
+                effective_return_point.mutable_ranges.len(),
+                effective_return_point
+                    .mutable_ranges
+                    .iter()
+                    .map(|r| r.len)
+                    .sum::<usize>(),
+                effective_return_point.relocated_sp,
+                effective_return_point.original_sp
             );
         }
-        for range in &return_point.mutable_ranges {
+        for range in &effective_return_point.mutable_ranges {
             unsafe {
                 std::ptr::copy(
-                    (return_point.relocated_sp + range.offset) as *const u8,
-                    (return_point.original_sp + range.offset) as *mut u8,
+                    (effective_return_point.relocated_sp + range.offset) as *const u8,
+                    (effective_return_point.original_sp + range.offset) as *mut u8,
                     range.len,
                 );
             }
@@ -11964,13 +12059,15 @@ unsafe extern "C" fn continue_return_from_shift_on_safe_stack() -> ! {
             .unwrap_or(value)
     };
 
-    let new_sp = return_point.stack_pointer;
-    let new_fp = return_point.frame_pointer;
-    let return_address = return_point.return_address;
-    let callee_saved = return_point.callee_saved_regs;
+    // Use root RP's SP/FP/callee_saved (original stack) but keep the non-root RP's
+    // return_address (the correct code point in the catch block).
+    let new_sp = effective_return_point.stack_pointer;
+    let new_fp = effective_return_point.frame_pointer;
+    let return_address = return_address_to_use;
+    let callee_saved = effective_return_point.callee_saved_regs;
 
     // Restore the shift body's stack frame from CapturedFrame.
-    let saved_frame_ptr = return_point.saved_frame;
+    let saved_frame_ptr = effective_return_point.saved_frame;
 
     cfg_if::cfg_if! {
         if #[cfg(target_arch = "x86_64")] {
@@ -11991,7 +12088,7 @@ unsafe extern "C" fn continue_return_from_shift_on_safe_stack() -> ! {
                     );
                     // Restore the original GC prev pointer so the handler's epilogue
                     // correctly unlinks from the GC chain (avoiding cycles).
-                    unsafe { *((new_fp - 16) as *mut usize) = return_point.saved_gc_prev; }
+                    unsafe { *((new_fp - 16) as *mut usize) = effective_return_point.saved_gc_prev; }
                 }
 
             let runtime = get_runtime().get();
@@ -12022,7 +12119,7 @@ unsafe extern "C" fn continue_return_from_shift_on_safe_stack() -> ! {
                     );
                     // Restore the original GC prev pointer so the handler's epilogue
                     // correctly unlinks from the GC chain (avoiding cycles).
-                    unsafe { *((new_fp - 16) as *mut usize) = return_point.saved_gc_prev; }
+                    unsafe { *((new_fp - 16) as *mut usize) = effective_return_point.saved_gc_prev; }
                 }
 
             crate::runtime::per_thread_data().safe_return_context = None;
@@ -12552,7 +12649,22 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
         unsafe { *result_ptr = value };
 
         let relocated_prompt = continuation.prompt_handler();
-        runtime.push_prompt_handler(relocated_prompt);
+        runtime.push_prompt_handler(relocated_prompt.clone());
+
+        // Re-push exception handler if this continuation was captured from a resumable throw
+        if continuation.exc_has_handler() {
+            let exc_handler = crate::runtime::ExceptionHandler {
+                handler_address: continuation.exc_handler_address(),
+                stack_pointer: relocated_prompt.stack_pointer,
+                frame_pointer: relocated_prompt.frame_pointer,
+                link_register: relocated_prompt.link_register,
+                result_local: continuation.exc_result_local(),
+                handler_id: continuation.exc_handler_id(),
+                is_resumable: true,
+                resume_local: continuation.exc_resume_local(),
+            };
+            runtime.push_exception_handler(exc_handler);
+        }
 
         if debug_prompts {
             eprintln!(
@@ -12817,6 +12929,7 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
                 mutable_ranges,
                 is_root_invocation,
                 saved_gc_prev,
+                from_resumable_exception: continuation.exc_has_handler(),
             });
 
         let rp_len = ptd.invocation_return_points.len();
@@ -12855,6 +12968,21 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
         is_relocated: true,
     };
     runtime.push_prompt_handler(relocated_prompt);
+
+    // Re-push exception handler if this continuation was captured from a resumable throw
+    if continuation.exc_has_handler() {
+        let exc_handler = crate::runtime::ExceptionHandler {
+            handler_address: continuation.exc_handler_address(),
+            stack_pointer: relocated_prompt_sp,
+            frame_pointer: relocated_prompt_fp,
+            link_register: continuation.prompt_link_register(),
+            result_local: continuation.exc_result_local(),
+            handler_id: continuation.exc_handler_id(),
+            is_resumable: true,
+            resume_local: continuation.exc_resume_local(),
+        };
+        runtime.push_exception_handler(exc_handler);
+    }
 
     // Jump to the continuation
     cfg_if::cfg_if! {

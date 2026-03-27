@@ -1,0 +1,40 @@
+namespace resumable_multi_throw_test
+
+fn main() {
+    // Test 1: Two throws with resume
+    let result = try {
+        let a = throw("first") + 1
+        let b = throw("second") + 1
+        a + b
+    } catch (e, resume) {
+        resume(10)
+    }
+    println(result)
+
+    // Test 2: Three throws
+    let result2 = try {
+        let a = throw("a") + 1
+        let b = throw("b") + 2
+        let c = throw("c") + 3
+        a + b + c
+    } catch (e, resume) {
+        resume(100)
+    }
+    println(result2)
+
+    // Test 3: Single throw still works
+    let result3 = try {
+        throw("x") + 42
+    } catch (e, resume) {
+        resume(0)
+    }
+    println(result3)
+
+    println("done")
+}
+
+// @beagle.core.snapshot
+// 22
+// 306
+// 42
+// done
