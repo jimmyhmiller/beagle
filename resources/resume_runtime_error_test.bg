@@ -1,0 +1,29 @@
+namespace resume_runtime_error_test
+
+fn main() {
+    // Test 1: Resume from a TypeError (2 + "hello" is a type mismatch)
+    let result = try {
+        2 + "hello"
+    } catch (e, resume) {
+        println("caught type error")
+        resume(42)
+    }
+    println(result)
+
+    // Test 2: Resume from a CompileError (thrown by eval via throw_runtime_error)
+    let result2 = try {
+        eval("this is invalid syntax !!!")
+    } catch (e, resume) {
+        println("caught compile error")
+        resume(100)
+    }
+    println(result2)
+    println("done")
+}
+
+// @beagle.core.snapshot
+// caught type error
+// 42
+// caught compile error
+// 100
+// done

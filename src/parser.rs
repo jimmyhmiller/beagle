@@ -3933,7 +3933,7 @@ impl Parser {
         // throw is a function call: throw(value)
         if !matches!(self.current_token(), Token::OpenParen) {
             return Err(ParseError::MissingToken {
-                expected: "'(' after 'throw'".to_string(),
+                expected: "'(' after 'throw' — use throw(value) syntax".to_string(),
                 location: self.current_source_location(),
             });
         }

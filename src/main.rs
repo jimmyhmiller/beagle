@@ -956,10 +956,24 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
             src: RCX,
         });
         lang.instructions.push(X86Asm::MovRR { dest: RBP, src: R8 });
-        // Write result value: [R9] = R11
+        // Write result value: [R9] = R11 (skip if R9 == 0, i.e. builtin-thrown error)
+        let skip_write_nonempty = lang.get_label_index();
+        lang.instructions.push(X86Asm::TestRR { a: R9, b: R9 });
+        lang.instructions.push(X86Asm::Jcc {
+            label_index: skip_write_nonempty,
+            cond: crate::machine_code::x86_codegen::Condition::E,
+        });
         lang.instructions.push(X86Asm::MovMR {
             base: R9,
             offset: 0,
+            src: R11,
+        });
+        lang.instructions.push(X86Asm::Label {
+            index: skip_write_nonempty,
+        });
+        // Set RAX = value so builtin-thrown errors resume with correct return value
+        lang.instructions.push(X86Asm::MovRR {
+            dest: RAX,
             src: R11,
         });
         // Jump to resume_address (RSI)
@@ -975,10 +989,24 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
             src: RCX,
         });
         lang.instructions.push(X86Asm::MovRR { dest: RBP, src: R8 });
-        // Write result value: [R9] = R11
+        // Write result value: [R9] = R11 (skip if R9 == 0, i.e. builtin-thrown error)
+        let skip_write_empty = lang.get_label_index();
+        lang.instructions.push(X86Asm::TestRR { a: R9, b: R9 });
+        lang.instructions.push(X86Asm::Jcc {
+            label_index: skip_write_empty,
+            cond: crate::machine_code::x86_codegen::Condition::E,
+        });
         lang.instructions.push(X86Asm::MovMR {
             base: R9,
             offset: 0,
+            src: R11,
+        });
+        lang.instructions.push(X86Asm::Label {
+            index: skip_write_empty,
+        });
+        // Set RAX = value so builtin-thrown errors resume with correct return value
+        lang.instructions.push(X86Asm::MovRR {
+            dest: RAX,
             src: R11,
         });
         // Jump to resume_address (RSI)

@@ -743,10 +743,16 @@ impl Ast {
     ) -> CompileResult {
         let test_mode = compiler.command_line_arguments.test;
         let allocate_fn_pointer = compiler.allocate_fn_pointer()?;
+        let mut ir = Ir::new(allocate_fn_pointer);
+        if let Some(error_fn) = compiler.find_function("beagle.builtin/throw-type-error") {
+            if let Some(ptr) = compiler.get_function_pointer(error_fn) {
+                ir.error_fn_pointer = ptr;
+            }
+        }
         let mut ast_compiler = AstCompiler {
             ast: self.clone(),
             file_name: file_name.to_string(),
-            ir: Ir::new(allocate_fn_pointer),
+            ir,
             ir_range_to_token_range: vec![Vec::new()],
             name: None,
             compiler,
@@ -1022,7 +1028,15 @@ impl AstCompiler<'_> {
 
                 self.create_new_environment();
                 let allocate_fn_pointer = self.compiler.allocate_fn_pointer()?;
-                let old_ir = std::mem::replace(&mut self.ir, Ir::new(allocate_fn_pointer));
+                let mut new_ir = Ir::new(allocate_fn_pointer);
+                if let Some(error_fn) =
+                    self.compiler.find_function("beagle.builtin/throw-type-error")
+                {
+                    if let Some(ptr) = self.compiler.get_function_pointer(error_fn) {
+                        new_ir.error_fn_pointer = ptr;
+                    }
+                }
+                let old_ir = std::mem::replace(&mut self.ir, new_ir);
                 let old_name = self.name.clone();
                 let old_arity = self.current_function_arity;
                 let old_is_variadic = self.current_function_is_variadic;

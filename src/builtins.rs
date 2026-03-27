@@ -1721,6 +1721,7 @@ pub unsafe extern "C" fn throw_type_error(stack_pointer: usize, frame_pointer: u
     };
 
     let null_location = BuiltInTypes::Null.tag(0) as usize;
+    let resume_address = get_saved_gc_return_addr();
     unsafe {
         let error = create_error(
             stack_pointer,
@@ -1729,7 +1730,7 @@ pub unsafe extern "C" fn throw_type_error(stack_pointer: usize, frame_pointer: u
             message_str,
             null_location,
         );
-        throw_exception(stack_pointer, frame_pointer, error, 0, 0);
+        throw_exception(stack_pointer, frame_pointer, error, resume_address, 0);
     }
 }
 
@@ -9110,11 +9111,7 @@ extern "C" fn eval(stack_pointer: usize, frame_pointer: usize, code: usize) -> u
     let result = match runtime.compile_string(&code) {
         Ok(result) => result,
         Err(e) => unsafe {
-            throw_runtime_error(
-                stack_pointer,
-                "CompileError",
-                format!("Compilation failed: {}", e),
-            );
+            throw_runtime_error(stack_pointer, "CompileError", format!("{}", e));
         },
     };
     mem::forget(code);
@@ -9190,11 +9187,7 @@ extern "C" fn eval_in_ns(
     let result = match runtime.compile_string_in_namespace(&code, &ns_str) {
         Ok(result) => result,
         Err(e) => unsafe {
-            throw_runtime_error(
-                stack_pointer,
-                "CompileError",
-                format!("Compilation failed: {}", e),
-            );
+            throw_runtime_error(stack_pointer, "CompileError", format!("{}", e));
         },
     };
     mem::forget(code);
@@ -11393,6 +11386,9 @@ pub unsafe fn throw_runtime_error(stack_pointer: usize, kind: &str, message: Str
     let null_location = BuiltInTypes::Null.tag(0) as usize;
 
     // Create the Error struct and throw it
+    // Use the saved return address (the instruction after the builtin call in Beagle code)
+    // as the resume address, so that resuming from a caught runtime error works correctly.
+    let resume_address = get_saved_gc_return_addr();
     unsafe {
         let error = create_error(
             stack_pointer,
@@ -11401,7 +11397,7 @@ pub unsafe fn throw_runtime_error(stack_pointer: usize, kind: &str, message: Str
             message_str,
             null_location,
         );
-        throw_exception(stack_pointer, frame_pointer, error, 0, 0);
+        throw_exception(stack_pointer, frame_pointer, error, resume_address, 0);
     }
 }
 
@@ -12644,9 +12640,15 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
         let k_prev = unsafe { *((beagle_fp - 16) as *const usize) };
         set_gc_frame_top(k_prev);
 
-        let result_ptr = (continuation.original_fp() as isize)
-            .wrapping_add(continuation.result_local()) as *mut usize;
-        unsafe { *result_ptr = value };
+        let result_local = continuation.result_local();
+        let result_ptr = if result_local != 0 {
+            let ptr =
+                (continuation.original_fp() as isize).wrapping_add(result_local) as *mut usize;
+            unsafe { *ptr = value };
+            ptr as usize
+        } else {
+            0
+        };
 
         let relocated_prompt = continuation.prompt_handler();
         runtime.push_prompt_handler(relocated_prompt.clone());
@@ -12691,7 +12693,7 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
                     0,
                     continuation.original_sp(),
                     continuation.original_fp(),
-                    result_ptr as usize,
+                    result_ptr,
                     value,
                 );
             } else {
@@ -12702,11 +12704,13 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
                         "mov sp, {0}",
                         "mov x29, {1}",
                         "mov x30, {2}",
+                        "mov x0, {4}",
                         "br {3}",
                         in(reg) safe_sp,
                         in(reg) continuation.original_fp(),
                         in(reg) original_lr,
                         in(reg) resume_address,
+                        in(reg) value,
                         options(noreturn)
                     );
                 }
@@ -12891,7 +12895,8 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
         }
     }
 
-    let result_ptr = (new_fp as isize).wrapping_add(continuation.result_local()) as *mut usize;
+    let result_local = continuation.result_local();
+    let result_ptr = (new_fp as isize).wrapping_add(result_local) as *mut usize;
     // Create InvocationReturnPoint for multi-shot support
     let (current_depth, rp_len_for_debug, is_root_invocation) = {
         let captured_prompt = continuation.prompt_handler();
@@ -12994,27 +12999,32 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
             let ptr: *const u8 = jump_fn.pointer.into();
             let jump_ptr: extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> ! =
                 unsafe { std::mem::transmute(ptr) };
+            let safe_result_ptr = if result_local != 0 { result_ptr as usize } else { 0 };
             jump_ptr(
                 continuation.original_fp(),
                 resume_address,
                 stack_segment_size,
                 new_sp,
                 new_fp,
-                result_ptr as usize,
+                safe_result_ptr,
                 value,
             );
         } else {
-            unsafe { *result_ptr = value };
+            if result_local != 0 {
+                unsafe { *result_ptr = value };
+            }
             unsafe {
                 asm!(
                     "mov sp, {0}",
                     "mov x29, {1}",
                     "mov x30, {2}",
+                    "mov x0, {4}",
                     "br {3}",
                     in(reg) new_sp,
                     in(reg) new_fp,
                     in(reg) return_trampoline,
                     in(reg) resume_address,
+                    in(reg) value,
                     options(noreturn)
                 );
             }

@@ -768,6 +768,7 @@ pub struct Ir {
     pub num_locals: usize,
     allocate_fn_pointer: usize,
     after_return: Label,
+    pub error_fn_pointer: usize,
     pub ir_to_machine_code_range: Vec<(usize, MachineCodeRange)>,
     pub ir_range_to_token_range: Vec<(crate::ast::TokenRange, IRRange)>,
     /// Number of argument registers for the target architecture (8 for ARM64, 6 for x86-64)
@@ -799,6 +800,7 @@ impl Ir {
             num_locals: 0,
             allocate_fn_pointer,
             after_return: Label { index: 0 },
+            error_fn_pointer: 0,
             ir_to_machine_code_range: vec![],
             ir_range_to_token_range: vec![],
             num_arg_registers,
@@ -948,12 +950,15 @@ impl Ir {
         let a_is_float: Label = self.label("a_is_float");
         let both_floats: Label = self.label("both_floats");
         let after_slow: Label = self.label("after_slow");
+        let type_error_1: Label = self.label("type_error_1");
+        let type_error_2: Label = self.label("type_error_2");
+        let type_error_3: Label = self.label("type_error_3");
 
         // Check if a is an int (we know at least one operand is not an int from fast path)
         self.guard_int(a.into(), a_is_float);
 
         // a is int, so b must be float (since we failed the fast path)
-        self.guard_float(b.into(), self.after_return);
+        self.guard_float(b.into(), type_error_1);
 
         // Case: a is int, b is float - convert a to float
         {
@@ -980,7 +985,7 @@ impl Ir {
 
         // a is not int - check if a is float
         self.write_label(a_is_float);
-        self.guard_float(a.into(), self.after_return);
+        self.guard_float(a.into(), type_error_2);
 
         // a is float - check if b is int or float
         self.guard_int(b.into(), both_floats);
@@ -1007,7 +1012,7 @@ impl Ir {
 
         // Case: Both are floats
         self.write_label(both_floats);
-        self.guard_float(b.into(), self.after_return);
+        self.guard_float(b.into(), type_error_3);
 
         {
             // Allocate before float computation to avoid raw f64 in GPRs across GC safepoint
@@ -1029,6 +1034,21 @@ impl Ir {
         }
 
         self.write_label(after_slow);
+
+        // Emit type error handlers at the end (keeps the hot path compact)
+        let after_errors: Label = self.label("after_type_errors");
+        self.jump(after_errors);
+
+        self.write_label(type_error_1);
+        self.emit_type_error_with_resume(result_register, after_slow);
+
+        self.write_label(type_error_2);
+        self.emit_type_error_with_resume(result_register, after_slow);
+
+        self.write_label(type_error_3);
+        self.emit_type_error_with_resume(result_register, after_slow);
+
+        self.write_label(after_errors);
         Value::Register(result_register)
     }
 
@@ -3228,6 +3248,28 @@ impl Ir {
         let q_trunc = self.fround_to_zero(q);
         let q_times_b = self.mul_float(q_trunc, b);
         self.sub_float(a, q_times_b)
+    }
+
+    /// Emit an inline type error call that supports resume.
+    /// If the error is caught and resumed, the resume value becomes the result.
+    /// After the call, jumps to `after_label`.
+    fn emit_type_error_with_resume(
+        &mut self,
+        result_register: VirtualRegister,
+        after_label: Label,
+    ) {
+        if self.error_fn_pointer != 0 {
+            let stack_pointer = self.get_stack_pointer_imm(0);
+            let frame_pointer = self.get_frame_pointer();
+            let f = self.assign_new(Value::Function(self.error_fn_pointer));
+            let resumed_value = self.call_builtin(f.into(), vec![stack_pointer, frame_pointer]);
+            // If we reach here, the error was caught and resumed with a value
+            self.assign(result_register, resumed_value);
+            self.jump(after_label);
+        } else {
+            // Fallback: jump to the shared error handler (no resume support)
+            self.jump(self.after_return);
+        }
     }
 
     fn allocate(&mut self, size: Value) -> Value {
