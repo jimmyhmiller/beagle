@@ -431,6 +431,10 @@ impl CodegenBackend for Arm64Backend {
         self.inner.set_max_locals(max_locals);
     }
 
+    fn set_mark_local_index(&mut self, index: usize) {
+        self.inner.set_mark_local_index(index);
+    }
+
     fn increment_stack_size(&mut self, size: i32) {
         self.inner.increment_stack_size(size);
     }

@@ -89,3 +89,15 @@ pub const TYPE_ID_FRAME: u8 = 37;
 /// header.size = num_locals + num_callee_saved + 4 (metadata fields).
 /// GC traces only the first (4 + num_locals) fields; callee-saved values are not traced.
 pub const TYPE_ID_CAPTURED_FRAME: u8 = 38;
+
+/// Type ID for continuation mark entries (dynamic variable bindings stored in frames).
+/// Layout: [key, value, next]
+/// - key: tagged int (namespace_id << 16 | slot)
+/// - value: tagged value (the bound value, GC-traced)
+/// - next: tagged ptr to next MarkEntry or null
+/// Used by `binding(var = expr) { body }` to store per-frame dynamic bindings.
+pub const TYPE_ID_MARK_ENTRY: u8 = 39;
+
+/// Frame header flag: type_flags bit 1 (header bit 5) indicates the frame has continuation marks.
+/// When set, the lower 16 bits of type_data encode the mark local index.
+pub const FRAME_HAS_MARKS_FLAG: u8 = 0b0010; // bit 1 of type_flags

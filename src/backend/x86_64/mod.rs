@@ -429,6 +429,10 @@ impl CodegenBackend for X86_64Backend {
         self.inner.set_max_locals(max_locals);
     }
 
+    fn set_mark_local_index(&mut self, _index: usize) {
+        // TODO: x86_64 backend doesn't support continuation marks yet
+    }
+
     fn increment_stack_size(&mut self, size: i32) {
         self.inner.increment_stack_size(size);
     }

@@ -3376,17 +3376,23 @@ impl AstCompiler<'_> {
                         message: format!("Dynamic variable '{}' not found", var_name),
                     })?;
 
+                // Allocate the mark pointer local (shared across all bindings in this function)
+                let mark_local = self.find_or_insert_local("<mark_ptr>");
+                // Tell the IR so the backend can encode it in the frame header
+                self.ir.mark_local_index = Some(mark_local);
+
                 // Compile the new value for the binding
                 self.not_tail_position();
                 let value_compiled = self.call_compile(&value_expr)?;
                 let value_reg = self.ir.assign_new(value_compiled);
 
-                // Call builtin to push the binding
+                // Install continuation mark via builtin (needs frame pointer)
                 let ns_id_reg = self.ir.assign_new(Value::TaggedConstant(namespace_id as isize));
                 let slot_reg = self.ir.assign_new(Value::TaggedConstant(slot as isize));
-                let _push_result = self.call_builtin(
-                    "beagle.core/_push_dynamic_binding",
-                    vec![ns_id_reg.into(), slot_reg.into(), value_reg.into()],
+                let mark_idx_reg = self.ir.assign_new(Value::TaggedConstant(mark_local as isize));
+                let _install_result = self.call_builtin(
+                    "beagle.core/_install_continuation_mark",
+                    vec![ns_id_reg.into(), slot_reg.into(), value_reg.into(), mark_idx_reg.into()],
                 )?;
 
                 // Compile the body
@@ -3396,13 +3402,12 @@ impl AstCompiler<'_> {
                     body_result = self.call_compile(expr)?;
                 }
 
-                // Pop the binding - reload constants fresh since registers may have
-                // been clobbered by exception handler longjmp in release builds
-                let ns_id_pop = self.ir.assign_new(Value::TaggedConstant(namespace_id as isize));
-                let slot_pop = self.ir.assign_new(Value::TaggedConstant(slot as isize));
-                let _pop_result = self.call_builtin(
-                    "beagle.core/_pop_dynamic_binding",
-                    vec![ns_id_pop.into(), slot_pop.into()],
+                // Uninstall the mark - reload mark_local_index fresh since registers
+                // may have been clobbered by exception handler longjmp in release builds
+                let mark_idx_pop = self.ir.assign_new(Value::TaggedConstant(mark_local as isize));
+                let _uninstall_result = self.call_builtin(
+                    "beagle.core/_uninstall_continuation_mark",
+                    vec![mark_idx_pop.into()],
                 )?;
 
                 Ok(body_result)

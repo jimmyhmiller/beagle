@@ -240,6 +240,9 @@ pub trait CodegenBackend: Sized {
     // === Stack management ===
 
     fn set_max_locals(&mut self, max_locals: usize);
+    /// Set the local index of the continuation mark pointer for this function.
+    /// Called when the function contains `binding` expressions.
+    fn set_mark_local_index(&mut self, index: usize);
     fn increment_stack_size(&mut self, size: i32);
     fn set_all_locals_to_null(&mut self, null_register: Self::Register);
 

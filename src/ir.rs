@@ -772,6 +772,8 @@ pub struct Ir {
     pub ir_range_to_token_range: Vec<(crate::ast::TokenRange, IRRange)>,
     /// Number of argument registers for the target architecture (8 for ARM64, 6 for x86-64)
     num_arg_registers: usize,
+    /// If this function uses `binding`, the local index of the mark pointer.
+    pub mark_local_index: Option<usize>,
 }
 
 impl Ir {
@@ -800,6 +802,7 @@ impl Ir {
             ir_to_machine_code_range: vec![],
             ir_range_to_token_range: vec![],
             num_arg_registers,
+            mark_local_index: None,
         };
 
         me.insert_label("after_return", me.after_return);
@@ -1450,6 +1453,9 @@ impl Ir {
         let num_spills = linear_scan.location.len();
         self.num_locals += num_spills;
         backend.set_max_locals(self.num_locals);
+        if let Some(mark_idx) = self.mark_local_index {
+            backend.set_mark_local_index(mark_idx);
+        }
 
         // Inform the backend which callee-saved registers are used.
         // This allows the backend to save/restore them in prologue/epilogue

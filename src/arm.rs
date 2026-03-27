@@ -534,6 +534,9 @@ pub struct LowLevelArm {
     /// Number of callee-saved registers actually saved in this function's frame.
     /// Set by patch_prelude_and_epilogue().
     pub num_callee_saved: usize,
+    /// If this function contains `binding` expressions, the local index of the mark pointer.
+    /// Encoded in the frame header's type_data lower 16 bits so get_dynamic_var can find it.
+    pub mark_local_index: Option<usize>,
 }
 
 impl Default for LowLevelArm {
@@ -565,6 +568,7 @@ impl LowLevelArm {
             stack_map: HashMap::new(),
             used_callee_saved_registers: 0,
             num_callee_saved: 0,
+            mark_local_index: None,
         }
     }
 
@@ -1483,14 +1487,24 @@ impl LowLevelArm {
             // that lets GC know how many traced slots this frame has.
             {
                 let num_slots = (self.max_locals + self.max_stack_size) as usize;
+                // Encode mark local index in lower 16 bits of type_data if present.
+                // Upper 16 bits = num_slots (for GC/captured frame).
+                // Lower 16 bits = mark local index (for get_dynamic_var frame walk).
+                let mark_index_bits = self.mark_local_index.unwrap_or(0) as u32;
+                let type_data = ((num_slots as u32) << 16) | (mark_index_bits & 0xFFFF);
+                let type_flags = if self.mark_local_index.is_some() {
+                    crate::collections::FRAME_HAS_MARKS_FLAG
+                } else {
+                    0
+                };
                 let frame_header = crate::types::Header {
                     type_id: crate::collections::TYPE_ID_FRAME,
-                    type_data: (num_slots as u32) << 16,
+                    type_data,
                     size: num_slots as u16,
                     opaque: false,
                     marked: false,
                     large: false,
-                    type_flags: 0,
+                    type_flags,
                 };
                 let header_value = frame_header.to_usize();
 
@@ -1856,6 +1870,10 @@ impl LowLevelArm {
             imm12: bytes * 8,
             sh: 0,
         });
+    }
+
+    pub fn set_mark_local_index(&mut self, index: usize) {
+        self.mark_local_index = Some(index);
     }
 
     pub fn set_max_locals(&mut self, num_locals: usize) {
