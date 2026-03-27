@@ -1,0 +1,95 @@
+namespace gc_frame_chain_nested_handler_test
+// gc-always
+
+// Test nested effect handlers with GC stress. Nested handlers mean
+// multiple continuation captures/restores at different stack depths,
+// which is the most complex case for GC frame chain management.
+
+use beagle.effect as effect
+
+enum Outer {
+    GetOuter {}
+}
+
+enum Inner {
+    GetInner {}
+}
+
+struct OuterHandler { v }
+
+extend OuterHandler with effect/Handler(Outer) {
+    fn handle(self, op, resume) {
+        match op {
+            Outer.GetOuter {} => {
+                resume(self.v)
+            }
+        }
+    }
+}
+
+struct InnerHandler { v }
+
+extend InnerHandler with effect/Handler(Inner) {
+    fn handle(self, op, resume) {
+        match op {
+            Inner.GetInner {} => {
+                resume(self.v)
+            }
+        }
+    }
+}
+
+// Nested handlers: outer captures/restores, then inner captures/restores
+fn test_nested() {
+    let oh = OuterHandler { v: 10 }
+    let result = handle effect/Handler(Outer) with oh {
+        let x = perform Outer.GetOuter {}
+        // x = 10, now use inner handler
+        let ih = InnerHandler { v: 20 }
+        let inner_result = handle effect/Handler(Inner) with ih {
+            let y = perform Inner.GetInner {}
+            // Allocate to trigger GC
+            let arr = [x, y, x + y]
+            arr[2]
+        }
+        inner_result
+    }
+    println("nested:", result)
+}
+
+// Nested handlers in a loop
+fn loop_nested(n, acc) {
+    if n <= 0 {
+        acc
+    } else {
+        let oh = OuterHandler { v: n }
+        let result = handle effect/Handler(Outer) with oh {
+            let x = perform Outer.GetOuter {}
+            let ih = InnerHandler { v: n * 2 }
+            let inner = handle effect/Handler(Inner) with ih {
+                let y = perform Inner.GetInner {}
+                x + y
+            }
+            inner
+        }
+        // result = n + 2*n = 3*n
+        loop_nested(n - 1, acc + result)
+    }
+}
+
+fn test_loop_nested() {
+    let result = loop_nested(15, 0)
+    // Sum of 3*n for n=1..15 = 3 * (15*16/2) = 360
+    println("loop_nested:", result)
+}
+
+fn main() {
+    test_nested()
+    test_loop_nested()
+    println("done")
+}
+
+// @beagle.core.snapshot
+// nested: 30
+// loop_nested: 360
+// done

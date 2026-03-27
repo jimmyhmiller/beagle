@@ -1,0 +1,71 @@
+namespace gc_frame_chain_multishot_test
+// gc-always
+
+// Test that multi-shot continuations don't create GC frame chain cycles.
+// Multi-shot means the handler calls resume() multiple times. Each call
+// restores the saved frame, and the GC prev pointer must be correct for
+// each restoration. With gc-always, every allocation triggers a full GC
+// walk that would hang on a cycle.
+
+use beagle.effect as effect
+
+enum Choice {
+    Choose {}
+}
+
+struct Chooser {}
+
+extend Chooser with effect/Handler(Choice) {
+    fn handle(self, op, resume) {
+        // Multi-shot: invoke the continuation twice
+        let a = resume(1)
+        let b = resume(2)
+        a + b
+    }
+}
+
+fn test_multishot_gc() {
+    let chooser = Chooser {}
+    let result = handle effect/Handler(Choice) with chooser {
+        let x = perform Choice.Choose {}
+        // Allocate after resume to stress GC frame chain
+        let arr = [x, x * 10, x * 100]
+        arr[0] + arr[1] + arr[2]
+    }
+    // First resume(1): 1 + 10 + 100 = 111
+    // Second resume(2): 2 + 20 + 200 = 222
+    // Total: 111 + 222 = 333
+    println("multishot:", result)
+}
+
+// Multi-shot in a loop: each iteration does two resumes
+fn loop_multishot(n, acc) {
+    if n <= 0 {
+        acc
+    } else {
+        let chooser = Chooser {}
+        let result = handle effect/Handler(Choice) with chooser {
+            let x = perform Choice.Choose {}
+            x * n
+        }
+        // result = 1*n + 2*n = 3*n
+        loop_multishot(n - 1, acc + result)
+    }
+}
+
+fn test_loop_multishot() {
+    let result = loop_multishot(20, 0)
+    // Sum of 3*n for n=1..20 = 3 * (20*21/2) = 630
+    println("loop_multishot:", result)
+}
+
+fn main() {
+    test_multishot_gc()
+    test_loop_multishot()
+    println("done")
+}
+
+// @beagle.core.snapshot
+// multishot: 333
+// loop_multishot: 630
+// done

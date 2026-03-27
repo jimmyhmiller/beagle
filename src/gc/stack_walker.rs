@@ -42,6 +42,8 @@ impl StackWalker {
         F: FnMut(usize, usize),
     {
         let mut header_addr = gc_frame_top;
+        #[cfg(feature = "debug-gc")]
+        let mut fast = gc_frame_top;
 
         #[cfg(feature = "debug-gc")]
         eprintln!(
@@ -125,6 +127,24 @@ impl StackWalker {
             // prev_value is a raw address (not tagged), pointing to previous frame's header
             // A value of 0 means end of chain
             header_addr = prev_value;
+
+            #[cfg(feature = "debug-gc")]
+            {
+                // Floyd's cycle detection: advance hare two steps per tortoise step.
+                // If we ever detect a cycle, panic — it means the GC prev fix in
+                // continuation restore has a gap we need to investigate.
+                for _ in 0..2 {
+                    if fast != 0 {
+                        fast = unsafe { *((fast - 8) as *const usize) };
+                    }
+                }
+                if header_addr != 0 && header_addr == fast {
+                    panic!(
+                        "BUG: cycle in GC frame chain at {:#x} — saved_gc_prev fix didn't cover this case",
+                        header_addr
+                    );
+                }
+            }
         }
 
         #[cfg(feature = "debug-gc")]

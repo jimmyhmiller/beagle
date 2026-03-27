@@ -3132,125 +3132,10 @@ pub fn clear_handler_stack() {
     });
 }
 
-// ============================================================================
-// Dynamic Variable Stack (Thread-Local Rebinding)
-// ============================================================================
-
-/// An entry in the dynamic variable stack.
-/// Each entry maps a (namespace_id, slot) pair to a thread-local value.
-#[derive(Clone, Debug)]
-pub struct DynamicVarBinding {
-    /// Namespace ID where the dynamic var is defined
-    pub namespace_id: usize,
-    /// Slot within the namespace
-    pub slot: usize,
-    /// Slot in the GlobalObjectBlock that stores the bound value.
-    /// GC updates this slot when the value moves.
-    pub root_slot: usize,
-}
-
-/// Thread-local dynamic variable stack.
-/// Dynamic vars support thread-local rebinding with stack-like scoping.
-#[derive(Default)]
-pub struct DynamicVarStack {
-    bindings: Vec<DynamicVarBinding>,
-}
-
-impl DynamicVarStack {
-    pub fn new() -> Self {
-        DynamicVarStack {
-            bindings: Vec::new(),
-        }
-    }
-
-    /// Push a binding onto the stack
-    pub fn push(&mut self, namespace_id: usize, slot: usize, root_slot: usize) {
-        self.bindings.push(DynamicVarBinding {
-            namespace_id,
-            slot,
-            root_slot,
-        });
-    }
-
-    /// Pop the most recent binding for the given (namespace_id, slot)
-    pub fn pop(&mut self, namespace_id: usize, slot: usize) -> Option<DynamicVarBinding> {
-        // Find the last binding with matching namespace_id and slot
-        if let Some(idx) = self
-            .bindings
-            .iter()
-            .rposition(|b| b.namespace_id == namespace_id && b.slot == slot)
-        {
-            Some(self.bindings.remove(idx))
-        } else {
-            None
-        }
-    }
-
-    /// Find the most recent binding for the given (namespace_id, slot)
-    pub fn find(&self, namespace_id: usize, slot: usize) -> Option<&DynamicVarBinding> {
-        self.bindings
-            .iter()
-            .rfind(|b| b.namespace_id == namespace_id && b.slot == slot)
-    }
-
-    /// Clear all bindings (used on reset)
-    pub fn clear(&mut self) {
-        self.bindings.clear();
-    }
-}
-
-thread_local! {
-    /// Per-thread dynamic variable stack
-    pub static DYNAMIC_VAR_STACK: RefCell<DynamicVarStack> =
-        RefCell::new(DynamicVarStack::new());
-}
-
-/// Push a dynamic variable binding onto the current thread's stack
-pub fn push_dynamic_binding(namespace_id: usize, slot: usize, value: usize) {
-    // Register the value as a handle root so GC can update it when moved.
-    // This also keeps the value alive even though the stack entry lives in Rust memory.
-    let runtime = crate::get_runtime().get_mut();
-    let root_slot = runtime.register_temporary_root(value);
-    assert!(
-        root_slot != 0,
-        "Failed to register dynamic var binding as GC root"
-    );
-
-    DYNAMIC_VAR_STACK.with(|stack| stack.borrow_mut().push(namespace_id, slot, root_slot));
-}
-
-/// Pop a dynamic variable binding from the current thread's stack
-pub fn pop_dynamic_binding(namespace_id: usize, slot: usize) -> Option<usize> {
-    let runtime = crate::get_runtime().get_mut();
-    DYNAMIC_VAR_STACK.with(|stack| {
-        stack.borrow_mut().pop(namespace_id, slot).map(|binding| {
-            let value = runtime.get_handle_root(binding.root_slot);
-            runtime.remove_handle_root(binding.root_slot);
-            value
-        })
-    })
-}
-
-/// Find a dynamic variable binding in the current thread's stack
-pub fn find_dynamic_binding(namespace_id: usize, slot: usize) -> Option<usize> {
-    DYNAMIC_VAR_STACK.with(|stack| {
-        stack
-            .borrow()
-            .find(namespace_id, slot)
-            .map(|b| crate::get_runtime().get().get_handle_root(b.root_slot))
-    })
-}
-
-/// Clear the dynamic variable stack (called on reset)
-pub fn clear_dynamic_var_stack() {
-    let runtime = crate::get_runtime().get_mut();
-    DYNAMIC_VAR_STACK.with(|stack| {
-        let mut stack = stack.borrow_mut();
-        for binding in stack.bindings.drain(..) {
-            runtime.remove_handle_root(binding.root_slot);
-        }
-    });
-}
+// Dynamic variable bindings are now implemented via continuation marks.
+// See install_continuation_mark/uninstall_continuation_mark in builtins.rs.
+// Mark entries are stored as heap objects in frame-local slots, automatically
+// captured/restored with continuations and cleaned up on exception abort.
 
 pub struct Memory {
     heap: Alloc,
@@ -3848,6 +3733,11 @@ pub struct InvocationReturnPoint {
     /// Only root invocations should copy modifications back, because nested invocations
     /// have an "original_sp" that points to a relocated stack, not the true original.
     pub is_root_invocation: bool,
+    /// The GC prev pointer ([FP-16]) from the handler's frame at the time k(value)
+    /// was called. After continuation restore, link_restored_frames overwrites [FP-16],
+    /// but the handler's epilogue needs the original prev to correctly unlink from the
+    /// GC chain. We save it here and restore it after the frame is reconstructed.
+    pub saved_gc_prev: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -4159,11 +4049,17 @@ impl CapturedFrame {
 
         let mut obj = HeapObject::from_tagged(obj_ptr);
 
-        // Write header
+        // Read the original stack frame's header to preserve continuation mark metadata.
+        let original_frame_header = Header::from_usize(unsafe { *((fp - 8) as *const usize) });
+
+        // Write CapturedFrame heap object header. We pack the original frame's mark
+        // metadata (type_flags and mark_local_index in lower 16 bits of type_data)
+        // alongside num_locals (upper 16 bits of type_data) so that restore_to_stack
+        // can reconstruct the frame header with FRAME_HAS_MARKS_FLAG preserved.
         let is_large = total_fields > Header::MAX_INLINE_SIZE;
         obj.writer_header_direct(Header {
             type_id: TYPE_ID_CAPTURED_FRAME,
-            type_data: (num_slots as u32) << 16, // num_locals in upper 16 bits
+            type_data: ((num_slots as u32) << 16) | (original_frame_header.type_data & 0xFFFF), // mark_local_index in lower 16
             size: if is_large {
                 0xFFFF
             } else {
@@ -4172,7 +4068,7 @@ impl CapturedFrame {
             opaque: false,
             marked: false,
             large: is_large,
-            type_flags: 0,
+            type_flags: original_frame_header.type_flags,
         });
         if is_large {
             let size_ptr = (obj.untagged() + 8) as *mut usize;
@@ -4242,15 +4138,18 @@ impl CapturedFrame {
         // Write return address at [FP+8]
         unsafe { *((target_fp + 8) as *mut usize) = self.return_address() };
 
-        // Write frame header at [FP-8]
+        // Write frame header at [FP-8], restoring the original type_flags
+        // (FRAME_HAS_MARKS_FLAG) and mark_local_index so continuation marks
+        // survive capture/restore.
+        let captured_header = self.heap_obj.get_header();
         let frame_header = Header {
             type_id: crate::collections::TYPE_ID_FRAME,
-            type_data: (num_locals as u32) << 16,
+            type_data: ((num_locals as u32) << 16) | (captured_header.type_data & 0xFFFF), // restore mark_local_index
             size: num_locals as u16,
             opaque: false,
             marked: false,
             large: false,
-            type_flags: 0,
+            type_flags: captured_header.type_flags, // restore FRAME_HAS_MARKS_FLAG
         };
         unsafe { *((target_fp - 8) as *mut usize) = frame_header.to_usize() };
 

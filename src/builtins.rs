@@ -392,38 +392,179 @@ pub extern "C" fn print_byte(value: usize) -> usize {
     0b111
 }
 
+// Thread-local counter of active continuation marks.
+// When zero, get_dynamic_var skips the frame walk entirely (fast path).
+thread_local! {
+    static ACTIVE_MARKS_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Get the current value of a dynamic variable.
-/// Checks thread-local binding stack first, falls back to root namespace value.
+/// If any continuation marks are active, walks the GC frame chain looking for marks.
+/// Otherwise falls back directly to the root namespace value.
+#[allow(unsafe_op_in_unsafe_fn)]
 pub unsafe extern "C" fn get_dynamic_var(namespace_id: usize, slot: usize) -> usize {
-    let namespace_id = BuiltInTypes::untag(namespace_id);
-    let slot = BuiltInTypes::untag(slot);
-    // Thread-local binding takes priority
-    if let Some(value) = crate::runtime::find_dynamic_binding(namespace_id, slot) {
-        return value;
+    let ns_id = BuiltInTypes::untag(namespace_id);
+    let slot_val = BuiltInTypes::untag(slot);
+
+    // Fast path: no marks active anywhere, skip frame walk
+    let marks_active = ACTIVE_MARKS_COUNT.with(|c| c.get());
+    if marks_active > 0 {
+        let key = (ns_id << 16) | slot_val;
+
+        // Walk the GC frame chain looking for continuation marks.
+        let mut header_addr = get_gc_frame_top();
+        #[cfg(feature = "debug-gc")]
+        let mut fast = header_addr;
+        while header_addr != 0 {
+            let header_word = unsafe { *(header_addr as *const usize) };
+            let header = crate::types::Header::from_usize(header_word);
+
+            if header.type_flags & crate::collections::FRAME_HAS_MARKS_FLAG != 0 {
+                let mark_local_index = (header.type_data & 0xFFFF) as usize;
+                let mark_ptr_addr = header_addr
+                    .wrapping_sub(16)
+                    .wrapping_sub(mark_local_index * 8);
+                let mut entry_ptr = unsafe { *(mark_ptr_addr as *const usize) };
+
+                while entry_ptr != BuiltInTypes::null_value() as usize && entry_ptr != 0 {
+                    if BuiltInTypes::is_heap_pointer(entry_ptr) {
+                        let entry = crate::types::HeapObject::from_tagged(entry_ptr);
+                        if BuiltInTypes::untag(entry.get_field(0)) == key {
+                            return entry.get_field(1);
+                        }
+                        entry_ptr = entry.get_field(2);
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            header_addr = unsafe { *((header_addr.wrapping_sub(8)) as *const usize) };
+
+            #[cfg(feature = "debug-gc")]
+            {
+                for _ in 0..2 {
+                    if fast != 0 {
+                        fast = unsafe { *((fast.wrapping_sub(8)) as *const usize) };
+                    }
+                }
+                if header_addr != 0 && header_addr == fast {
+                    panic!(
+                        "BUG: cycle in GC frame chain at {:#x} during get_dynamic_var — saved_gc_prev fix didn't cover this case",
+                        header_addr
+                    );
+                }
+            }
+        }
     }
+
     // Fall back to root binding in namespace
     let runtime = get_runtime().get();
-    runtime.get_namespace_binding(namespace_id, slot)
+    runtime.get_namespace_binding(ns_id, slot_val)
 }
 
-/// Push a new binding for a dynamic variable (thread-local only).
-pub unsafe extern "C" fn push_dynamic_binding(
+/// Install a continuation mark in the caller's frame.
+/// Allocates a MarkEntry heap object and chains it to the mark pointer local.
+#[allow(unsafe_op_in_unsafe_fn)]
+pub unsafe extern "C" fn install_continuation_mark(
+    stack_pointer: usize,
+    frame_pointer: usize,
     namespace_id: usize,
     slot: usize,
-    new_value: usize,
+    value: usize,
+    mark_local_index: usize,
 ) -> usize {
-    let namespace_id = BuiltInTypes::untag(namespace_id);
-    let slot = BuiltInTypes::untag(slot);
-    crate::runtime::push_dynamic_binding(namespace_id, slot, new_value);
-    0b111 // null
+    save_gc_context!(stack_pointer, frame_pointer);
+    unsafe {
+        let ns_id = BuiltInTypes::untag(namespace_id);
+        let slot_val = BuiltInTypes::untag(slot);
+        let mark_local_idx = BuiltInTypes::untag(mark_local_index);
+        let key = BuiltInTypes::Int.tag(((ns_id << 16) | slot_val) as isize) as usize;
+
+        // Read current mark pointer from the caller's frame
+        let mark_ptr_addr = frame_pointer
+            .wrapping_sub(24)
+            .wrapping_sub(mark_local_idx * 8);
+        let old_mark_ptr = *(mark_ptr_addr as *const usize);
+
+        // Allocate a MarkEntry heap object (3 fields: key, value, next)
+        let runtime = get_runtime().get_mut();
+        let entry_ptr = match runtime.allocate(3, stack_pointer, BuiltInTypes::HeapObject) {
+            Ok(ptr) => ptr,
+            Err(_) => panic!("Failed to allocate MarkEntry"),
+        };
+        let mut entry = crate::types::HeapObject::from_tagged(entry_ptr);
+        entry.writer_header_direct(crate::types::Header {
+            type_id: crate::collections::TYPE_ID_MARK_ENTRY,
+            type_data: 0,
+            size: 3,
+            opaque: false,
+            marked: false,
+            large: false,
+            type_flags: 0,
+        });
+        entry.write_field(0, key);
+        entry.write_field(1, value);
+        entry.write_field(2, old_mark_ptr);
+
+        // Store new entry as the mark pointer
+        *(mark_ptr_addr as *mut usize) = entry_ptr;
+
+        // Increment active marks counter so get_dynamic_var knows to walk frames
+        ACTIVE_MARKS_COUNT.with(|c| c.set(c.get() + 1));
+
+        // Set the mark flag in the frame header if not already set
+        let header_addr = frame_pointer.wrapping_sub(8);
+        let header_word = *(header_addr as *const usize);
+        let mut header = crate::types::Header::from_usize(header_word);
+        if header.type_flags & crate::collections::FRAME_HAS_MARKS_FLAG == 0 {
+            header.type_flags |= crate::collections::FRAME_HAS_MARKS_FLAG;
+            header.type_data = (header.type_data & 0xFFFF0000) | (mark_local_idx as u32 & 0xFFFF);
+            *(header_addr as *mut usize) = header.to_usize();
+        }
+
+        0b111 // null
+    }
 }
 
-/// Pop a dynamic variable binding (thread-local only).
-pub unsafe extern "C" fn pop_dynamic_binding(namespace_id: usize, slot: usize) -> usize {
-    let namespace_id = BuiltInTypes::untag(namespace_id);
-    let slot = BuiltInTypes::untag(slot);
-    crate::runtime::pop_dynamic_binding(namespace_id, slot);
-    0b111 // null
+/// Uninstall the top continuation mark from the caller's frame.
+pub unsafe extern "C" fn uninstall_continuation_mark(
+    _stack_pointer: usize,
+    frame_pointer: usize,
+    mark_local_index: usize,
+) -> usize {
+    unsafe {
+        let mark_local_idx = BuiltInTypes::untag(mark_local_index);
+
+        // Read current mark pointer
+        let mark_ptr_addr = frame_pointer
+            .wrapping_sub(24)
+            .wrapping_sub(mark_local_idx * 8);
+        let mark_ptr = *(mark_ptr_addr as *const usize);
+
+        if mark_ptr != BuiltInTypes::null_value() as usize
+            && mark_ptr != 0
+            && BuiltInTypes::is_heap_pointer(mark_ptr)
+        {
+            let entry = crate::types::HeapObject::from_tagged(mark_ptr);
+            let next = entry.get_field(2);
+            *(mark_ptr_addr as *mut usize) = next;
+
+            // Decrement active marks counter
+            ACTIVE_MARKS_COUNT.with(|c| c.set(c.get().saturating_sub(1)));
+
+            // If no more marks in this frame, clear the flag
+            if next == BuiltInTypes::null_value() as usize || next == 0 {
+                let header_addr = frame_pointer.wrapping_sub(8);
+                let header_word = *(header_addr as *const usize);
+                let mut header = crate::types::Header::from_usize(header_word);
+                header.type_flags &= !crate::collections::FRAME_HAS_MARKS_FLAG;
+                *(header_addr as *mut usize) = header.to_usize();
+            }
+        }
+
+        0b111 // null
+    }
 }
 
 /// Mark the card containing an address as dirty for write barrier.
@@ -11848,6 +11989,9 @@ unsafe extern "C" fn continue_return_from_shift_on_safe_stack() -> ! {
                         &[new_fp],
                         gc_chain_prev,
                     );
+                    // Restore the original GC prev pointer so the handler's epilogue
+                    // correctly unlinks from the GC chain (avoiding cycles).
+                    unsafe { *((new_fp - 16) as *mut usize) = return_point.saved_gc_prev; }
                 }
 
             let runtime = get_runtime().get();
@@ -11876,6 +12020,9 @@ unsafe extern "C" fn continue_return_from_shift_on_safe_stack() -> ! {
                         &[new_fp],
                         gc_chain_prev,
                     );
+                    // Restore the original GC prev pointer so the handler's epilogue
+                    // correctly unlinks from the GC chain (avoiding cycles).
+                    unsafe { *((new_fp - 16) as *mut usize) = return_point.saved_gc_prev; }
                 }
 
             crate::runtime::per_thread_data().safe_return_context = None;
@@ -12651,6 +12798,11 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
             ptd.saved_continuation_ptr = cont_ptr;
         }
 
+        // Save the handler frame's GC prev pointer so we can restore it after
+        // the frame is reconstructed. link_restored_frames overwrites [FP-16],
+        // but the handler's epilogue needs the original prev for gc_frame_unlink.
+        let saved_gc_prev = unsafe { *((beagle_fp - 16) as *const usize) };
+
         ptd.invocation_return_points
             .push(crate::runtime::InvocationReturnPoint {
                 stack_pointer: beagle_sp,
@@ -12664,6 +12816,7 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
                 segment_len: stack_segment_size,
                 mutable_ranges,
                 is_root_invocation,
+                saved_gc_prev,
             });
 
         let rp_len = ptd.invocation_return_points.len();
@@ -13016,20 +13169,21 @@ impl Runtime {
             "Internal: Get the current value of a dynamic variable.",
         )?;
 
-        self.add_builtin_with_doc(
-            "beagle.core/_push_dynamic_binding",
-            push_dynamic_binding as *const u8,
-            false,
-            &["namespace_id", "slot", "new_value"],
-            "Internal: Push a new binding for a dynamic variable.",
+        // Continuation mark builtins (need frame pointer)
+        self.add_builtin_function_with_fp(
+            "beagle.core/_install_continuation_mark",
+            install_continuation_mark as *const u8,
+            true,
+            true,
+            6, // stack_pointer, frame_pointer, namespace_id, slot, value, mark_local_index
         )?;
 
-        self.add_builtin_with_doc(
-            "beagle.core/_pop_dynamic_binding",
-            pop_dynamic_binding as *const u8,
-            false,
-            &["namespace_id", "slot"],
-            "Internal: Pop a dynamic variable binding.",
+        self.add_builtin_function_with_fp(
+            "beagle.core/_uninstall_continuation_mark",
+            uninstall_continuation_mark as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, mark_local_index
         )?;
 
         // Multi-arity dispatch builtin (needs stack/frame pointer for throwing ArityError)

@@ -1,0 +1,71 @@
+namespace gc_frame_chain_continuation_test
+// gc-always
+
+// Test that the GC frame chain stays cycle-free after continuation
+// capture/restore. Previously, restoring a continuation would leave
+// stale prev pointers in [FP-16], causing the GC stack walker and
+// get_dynamic_var to loop infinitely.
+
+use beagle.effect as effect
+
+enum Get {
+    Value {}
+}
+
+struct GetHandler { v }
+
+extend GetHandler with effect/Handler(Get) {
+    fn handle(self, op, resume) {
+        match op {
+            Get.Value {} => {
+                resume(self.v)
+            }
+        }
+    }
+}
+
+// After the handler's frame is restored and its epilogue runs,
+// the GC prev pointer must be correct. Running GC (via gc-always)
+// after each allocation will walk the frame chain and crash/hang
+// if there's a cycle.
+fn test_single_invoke() {
+    let handler = GetHandler { v: 10 }
+    let result = handle effect/Handler(Get) with handler {
+        let x = perform Get.Value {}
+        // Allocate after resume to trigger GC frame chain walk
+        let node = [x, x + 1, x + 2]
+        node[0] + node[1] + node[2]
+    }
+    println("single:", result)
+}
+
+// Repeated invocations in a loop stress the frame chain linking/unlinking
+fn loop_invoke(n, acc) {
+    if n <= 0 {
+        acc
+    } else {
+        let handler = GetHandler { v: n }
+        let result = handle effect/Handler(Get) with handler {
+            let x = perform Get.Value {}
+            x * 2
+        }
+        loop_invoke(n - 1, acc + result)
+    }
+}
+
+fn test_loop_invoke() {
+    let result = loop_invoke(30, 0)
+    // Sum of 2*n for n=1..30 = 2 * (30*31/2) = 930
+    println("loop:", result)
+}
+
+fn main() {
+    test_single_invoke()
+    test_loop_invoke()
+    println("done")
+}
+
+// @beagle.core.snapshot
+// single: 33
+// loop: 930
+// done

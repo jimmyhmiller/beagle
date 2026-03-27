@@ -1,0 +1,96 @@
+namespace dynamic_var_across_continuation_test
+
+// Test that dynamic bindings (continuation marks) survive across
+// continuation capture and restore. Previously, restore_to_stack
+// hardcoded type_flags=0 in the frame header, losing the
+// FRAME_HAS_MARKS_FLAG and mark_local_index. This caused
+// get_dynamic_var to skip the restored frame entirely.
+
+use beagle.effect as effect
+
+let dynamic current_value = 0
+
+enum Get {
+    Val {}
+}
+
+struct GetHandler {}
+
+extend GetHandler with effect/Handler(Get) {
+    fn handle(self, op, resume) {
+        match op {
+            Get.Val {} => {
+                resume(null)
+            }
+        }
+    }
+}
+
+// Test 1: binding INSIDE the handled block, across a perform/resume
+fn test_binding_across_resume() {
+    let handler = GetHandler {}
+    let result = handle effect/Handler(Get) with handler {
+        binding (current_value = 42) {
+            // The binding sets a continuation mark in this frame.
+            // perform captures this frame, and resume restores it.
+            // After restore, current_value should still be 42.
+            perform Get.Val {}
+            current_value
+        }
+    }
+    println("across_resume:", result)
+}
+
+// Test 2: nested binding across resume
+fn test_nested_binding_across_resume() {
+    let handler = GetHandler {}
+    let result = handle effect/Handler(Get) with handler {
+        binding (current_value = 10) {
+            let before = current_value
+            perform Get.Val {}
+            let after = current_value
+            binding (current_value = 20) {
+                perform Get.Val {}
+                let inner = current_value
+                before + after + inner
+            }
+        }
+    }
+    // before=10, after=10, inner=20
+    println("nested_across_resume:", result)
+}
+
+// Test 3: binding across resume in a loop
+fn loop_with_binding(n, acc) {
+    if n <= 0 {
+        acc
+    } else {
+        let handler = GetHandler {}
+        let result = handle effect/Handler(Get) with handler {
+            binding (current_value = n * 10) {
+                perform Get.Val {}
+                current_value
+            }
+        }
+        loop_with_binding(n - 1, acc + result)
+    }
+}
+
+fn test_loop_binding() {
+    let result = loop_with_binding(5, 0)
+    // 50 + 40 + 30 + 20 + 10 = 150
+    println("loop_binding:", result)
+}
+
+fn main() {
+    test_binding_across_resume()
+    test_nested_binding_across_resume()
+    test_loop_binding()
+    println("done")
+}
+
+// @beagle.core.snapshot
+// across_resume: 42
+// nested_across_resume: 40
+// loop_binding: 150
+// done

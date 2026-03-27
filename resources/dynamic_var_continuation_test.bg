@@ -1,0 +1,90 @@
+namespace dynamic_var_continuation_test
+
+// Test that dynamic variables (continuation marks) work correctly
+// across continuation capture/restore. get_dynamic_var walks the GC
+// frame chain, so a cycle would cause it to loop infinitely.
+
+use beagle.effect as effect
+
+let dynamic current_multiplier = 1
+
+enum Get {
+    Value {}
+}
+
+struct GetHandler { v }
+
+extend GetHandler with effect/Handler(Get) {
+    fn handle(self, op, resume) {
+        match op {
+            Get.Value {} => {
+                resume(self.v)
+            }
+        }
+    }
+}
+
+// Read a dynamic var after a continuation resume
+fn test_dynamic_after_resume() {
+    let handler = GetHandler { v: 10 }
+    let result = handle effect/Handler(Get) with handler {
+        let x = perform Get.Value {}
+        // After resume, reading current_multiplier walks the frame chain
+        let m = current_multiplier
+        x * m
+    }
+    println("after_resume:", result)
+}
+
+// Dynamic var binding around a handler with continuation
+fn test_dynamic_binding_with_handler() {
+    binding (current_multiplier = 5) {
+        let handler = GetHandler { v: 7 }
+        let result = handle effect/Handler(Get) with handler {
+            let x = perform Get.Value {}
+            // After resume, the dynamic binding should still be visible
+            let m = current_multiplier
+            x * m
+        }
+        println("binding_with_handler:", result)
+    }
+    // Outside binding, multiplier is back to 1
+    println("after_binding:", current_multiplier)
+}
+
+// Dynamic var read in a loop with continuations
+fn loop_with_dynamic(n, acc) {
+    if n <= 0 {
+        acc
+    } else {
+        let handler = GetHandler { v: n }
+        let result = handle effect/Handler(Get) with handler {
+            let x = perform Get.Value {}
+            let m = current_multiplier
+            x * m
+        }
+        loop_with_dynamic(n - 1, acc + result)
+    }
+}
+
+fn test_loop_dynamic() {
+    binding (current_multiplier = 3) {
+        let result = loop_with_dynamic(10, 0)
+        // Sum of 3*n for n=1..10 = 3 * 55 = 165
+        println("loop_dynamic:", result)
+    }
+}
+
+fn main() {
+    test_dynamic_after_resume()
+    test_dynamic_binding_with_handler()
+    test_loop_dynamic()
+    println("done")
+}
+
+// @beagle.core.snapshot
+// after_resume: 10
+// binding_with_handler: 35
+// after_binding: 1
+// loop_dynamic: 165
+// done
