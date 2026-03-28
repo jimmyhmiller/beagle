@@ -1,0 +1,159 @@
+namespace continuation_stack_stress_test
+
+use beagle.core as core
+use beagle.socket as socket
+
+// ============================================================================
+// Continuation Stack Stress Tests
+// ============================================================================
+// These tests exercise the continuation invocation path that previously
+// caused stack exhaustion due to a 1MB safety margin per invocation.
+// Each socket/read and socket/write goes through the effect handler
+// (perform -> shift -> handler -> resume), so tight loops of IO
+// operations are the primary stress case.
+
+// -- Helper: read exactly one line byte-by-byte --
+fn read-line(conn) {
+    let mut line = ""
+    let mut done = false
+    while done == false {
+        let data = socket/read(conn, 1)
+        if data == null || data == "" { done = true }
+        else {
+            if data == "\n" { done = true }
+            else { line = line ++ data }
+        }
+    }
+    line
+}
+
+// -- Test 1: Byte-by-byte read of a long line --
+// Each byte triggers a continuation invoke.  A ~160 byte response
+// means ~160 continuation invocations in a tight loop.
+fn test-long-read() {
+    let port = 7930
+    let done_atom = atom(false)
+    let result_atom = atom(null)
+
+    thread(fn() {
+        let server = socket/listen("127.0.0.1", port)
+        let client = socket/accept(server)
+        socket/read(client, 4096)
+        let ops = ["eval", "resume", "abort", "interrupt", "describe", "ls-sessions", "close", "main-status", "main-resume", "main-abort"]
+        let versions = {:beagle "0.1.0", :protocol "1.2.0"}
+        let done_status = ["done"]
+        let response = {:id "1", :ops ops, :versions versions, :status done_status}
+        socket/write(client, json-encode(response) ++ "\n")
+        socket/close(client)
+    })
+
+    core/sleep(200)
+
+    let conn = socket/connect("127.0.0.1", port)
+    socket/write(conn, "{\"id\":\"1\"}\n")
+    let response = read-line(conn)
+    socket/close(conn)
+
+    let parsed = json-decode(response)
+    let status = get(parsed, "status")
+    if status != null && length(status) > 0 {
+        "ok"
+    } else {
+        "FAIL: bad response"
+    }
+}
+
+// -- Test 2: Many sequential reads --
+// Server sends multiple lines, client reads each byte-by-byte.
+fn test-multi-line-read() {
+    let port = 7931
+
+    thread(fn() {
+        let server = socket/listen("127.0.0.1", port)
+        let client = socket/accept(server)
+        let mut i = 0
+        while i < 20 {
+            socket/write(client, "{\"line\":" ++ to-string(i) ++ ",\"padding\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n")
+            i = i + 1
+        }
+        socket/close(client)
+    })
+
+    core/sleep(200)
+
+    let conn = socket/connect("127.0.0.1", port)
+    let mut count = 0
+    let mut i = 0
+    while i < 20 {
+        let line = read-line(conn)
+        if length(line) > 0 {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    socket/close(conn)
+
+    if count == 20 { "ok" } else { "FAIL: got " ++ to-string(count) ++ " lines" }
+}
+
+// -- Test 3: Many small writes --
+// Tests that socket/write (which also uses perform) doesn't exhaust stack.
+fn test-many-writes() {
+    let port = 7933
+
+    thread(fn() {
+        let server = socket/listen("127.0.0.1", port)
+        let client = socket/accept(server)
+        // Read all data
+        let mut total = ""
+        let mut reading = true
+        while reading {
+            let data = socket/read(client, 4096)
+            if data == null || data == "" { reading = false }
+            else { total = total ++ data }
+        }
+        // Count lines
+        let lines = core/split(total, "\n")
+        // Send count back before closing
+        socket/close(client)
+    })
+
+    core/sleep(200)
+
+    let conn = socket/connect("127.0.0.1", port)
+    let mut i = 0
+    while i < 200 {
+        socket/write(conn, to-string(i) ++ "\n")
+        i = i + 1
+    }
+    socket/close(conn)
+
+    // If we get here without crash, the writes didn't exhaust the stack
+    "ok"
+}
+
+// -- Test 4: Effect handler loop (non-IO) --
+// Tests that core/sleep (which uses perform) in a tight loop doesn't crash.
+fn test-sleep-loop() {
+    let mut i = 0
+    while i < 50 {
+        core/sleep(1)
+        i = i + 1
+    }
+    "ok"
+}
+
+fn main() {
+    println("test-long-read: " ++ test-long-read())
+    println("test-multi-line-read: " ++ test-multi-line-read())
+    println("test-many-writes: " ++ test-many-writes())
+    println("test-sleep-loop: " ++ test-sleep-loop())
+    println("done")
+}
+
+// @beagle.core.snapshot
+// test-long-read: ok
+// test-multi-line-read: ok
+// test-many-writes: ok
+// test-sleep-loop: ok
+// done

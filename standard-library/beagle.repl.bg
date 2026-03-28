@@ -13,6 +13,14 @@ use beagle.repl-session as session
 // Global session registry
 let sessions_atom = atom({})
 
+// Main-thread crash atom — set by repl-main when the main thread throws.
+// When non-null, holds {:error, :resume_atom}.
+let main_crash_atom = atom(null)
+
+fn register-main-crash-atom(a) {
+    reset!(main_crash_atom, a)
+}
+
 fn get-or-create-session(session_id) {
     let sessions = deref(sessions_atom)
     let existing = get(sessions, session_id)
@@ -152,10 +160,70 @@ fn handle-interrupt(client, msg) {
     }
 }
 
+fn handle-main-status(client, msg) {
+    let request_id = get(msg, "id")
+    let crash_holder = deref(main_crash_atom)
+    if crash_holder == null {
+        let done_status = ["done"]
+        send-response(client, {:id request_id, :status done_status, :main-thread "running"})
+    } else {
+        let crash = deref(crash_holder)
+        if crash == null {
+            let done_status = ["done"]
+            send-response(client, {:id request_id, :status done_status, :main-thread "running"})
+        } else {
+            let err = get(crash, :error)
+            let done_status = ["done"]
+            send-response(client, {:id request_id, :status done_status, :main-thread "suspended", :error err})
+        }
+    }
+}
+
+fn handle-main-resume(client, msg) {
+    let request_id = get(msg, "id")
+    let code = get(msg, "code")
+    let crash_holder = deref(main_crash_atom)
+    if crash_holder == null {
+        let err_status = ["error"]
+        send-response(client, {:id request_id, :status err_status, :error "No main-thread crash to resume"})
+    } else {
+        let crash = deref(crash_holder)
+        if crash == null {
+            let err_status = ["error"]
+            send-response(client, {:id request_id, :status err_status, :error "No main-thread crash to resume"})
+        } else {
+            let resume_atom = get(crash, :resume_atom)
+            reset!(resume_atom, {:op "resume", :code code})
+            let done_status = ["done"]
+            send-response(client, {:id request_id, :status done_status})
+        }
+    }
+}
+
+fn handle-main-abort(client, msg) {
+    let request_id = get(msg, "id")
+    let crash_holder = deref(main_crash_atom)
+    if crash_holder == null {
+        let err_status = ["error"]
+        send-response(client, {:id request_id, :status err_status, :error "No main-thread crash to abort"})
+    } else {
+        let crash = deref(crash_holder)
+        if crash == null {
+            let err_status = ["error"]
+            send-response(client, {:id request_id, :status err_status, :error "No main-thread crash to abort"})
+        } else {
+            let resume_atom = get(crash, :resume_atom)
+            reset!(resume_atom, {:op "abort"})
+            let done_status = ["done"]
+            send-response(client, {:id request_id, :status done_status})
+        }
+    }
+}
+
 fn handle-describe(client, msg) {
     let request_id = get(msg, "id")
-    let ops = ["eval", "resume", "abort", "interrupt", "describe", "ls-sessions", "close"]
-    let versions = {:beagle "0.1.0", :protocol "1.1.0"}
+    let ops = ["eval", "resume", "abort", "interrupt", "describe", "ls-sessions", "close", "main-status", "main-resume", "main-abort"]
+    let versions = {:beagle "0.1.0", :protocol "1.2.0"}
     let done_status = ["done"]
     send-response(client, {:id request_id, :ops ops, :versions versions, :status done_status})
 }
@@ -217,8 +285,20 @@ fn handle-message(client, msg) {
                                 if op == "close" {
                                     handle-close(client, msg)
                                 } else {
-                                    let err_status = ["error"]
-                                    send-response(client, {:status err_status, :error "Unknown operation: " ++ op})
+                                    if op == "main-status" {
+                                        handle-main-status(client, msg)
+                                    } else {
+                                        if op == "main-resume" {
+                                            handle-main-resume(client, msg)
+                                        } else {
+                                            if op == "main-abort" {
+                                                handle-main-abort(client, msg)
+                                            } else {
+                                                let err_status = ["error"]
+                                                send-response(client, {:status err_status, :error "Unknown operation: " ++ op})
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

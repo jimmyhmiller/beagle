@@ -1,0 +1,104 @@
+namespace repl_main_resume_test
+
+use beagle.core as core
+
+// ============================================================================
+// Test: resume from FieldError in run-with-recovery pattern
+// ============================================================================
+// Reproduces the SIGSEGV that occurs when:
+// 1. A function throws a FieldError (accessing nonexistent struct field)
+// 2. A resumable catch handler waits, then resumes
+//
+// This was caused by property_access not saving the GC context, so
+// throw_runtime_error used a stale resume_address for the continuation.
+
+struct Thing {
+    x
+    y
+}
+
+fn broken-function(t) {
+    // Access a field that doesn't exist — triggers FieldError
+    t.nonexistent_field + 1
+}
+
+// Mirrors repl-main/run-with-recovery exactly
+fn run-with-recovery(main-fn) {
+    try {
+        main-fn()
+    } catch (e, resume) {
+        let resume_atom = atom(null)
+
+        // Simulate REPL sending resume after a delay (from another thread)
+        thread(fn() {
+            core/sleep(100)
+            reset!(resume_atom, {:op "resume", :code null})
+        })
+
+        let mut done = false
+        while !done {
+            let cmd = deref(resume_atom)
+            if cmd != null {
+                let op = get(cmd, :op)
+                if op == "resume" {
+                    let code = get(cmd, :code)
+                    let value = if code != null { eval(code) } else { null }
+                    done = true
+                    resume(value)
+                } else {
+                    done = true
+                    null
+                }
+            } else {
+                core/sleep(10)
+            }
+        }
+    }
+}
+
+fn main() {
+    // Test 1: Simple resume from FieldError
+    let result1 = try {
+        let t = Thing { x: 10, y: 20 }
+        broken-function(t)
+    } catch (e, resume) {
+        resume(42)
+    }
+    // resume(42) makes property_access return 42, then + 1 = 43
+    println("test-simple-resume: " ++ if result1 == 43 { "ok" } else { "FAIL got " ++ to-string(result1) })
+
+    // Test 2: Resume from null property access
+    let result2 = try {
+        let x = null
+        x.some_field
+    } catch (e, resume) {
+        resume(99)
+    }
+    println("test-null-property-resume: " ++ if result2 == 99 { "ok" } else { "FAIL got " ++ to-string(result2) })
+
+    // Test 3: run-with-recovery pattern (wait + resume from another thread)
+    let recovered = atom(false)
+    thread(fn() {
+        run-with-recovery(fn() {
+            let t = Thing { x: 1, y: 2 }
+            broken-function(t)
+        })
+        reset!(recovered, true)
+    })
+
+    // Wait for recovery to complete
+    let mut i = 0
+    while !deref(recovered) && i < 300 {
+        core/sleep(10)
+        i = i + 1
+    }
+    println("test-recovery-pattern: " ++ if deref(recovered) { "ok" } else { "FAIL timeout" })
+
+    println("done")
+}
+
+// @beagle.core.snapshot
+// test-simple-resume: ok
+// test-null-property-resume: ok
+// test-recovery-pattern: ok
+// done

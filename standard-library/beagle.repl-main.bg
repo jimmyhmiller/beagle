@@ -317,9 +317,50 @@ fn start(host, port) {
 ///       game-loop()
 ///       gui/close-window()
 ///   })
+// Shared state for main-thread crash recovery.
+// When non-null, holds {:error, :resume_atom} — the REPL client can
+// inspect this and send a resume/abort command.
+let main_thread_crash = atom(null)
+
 fn run-with-repl(host, port, main-fn) {
+    repl/register-main-crash-atom(main_thread_crash)
     thread(fn() {
         repl/start-repl-server(host, port)
     })
-    main-fn()
+    run-with-recovery(main-fn)
+}
+
+fn run-with-recovery(main-fn) {
+    try {
+        main-fn()
+    } catch (e, resume) {
+        println("Uncaught exception in main thread (caught by REPL recovery):")
+        println(e)
+        println("Waiting for REPL resume or abort...")
+
+        let resume_atom = atom(null)
+        reset!(main_thread_crash, {:error to-string(e), :resume_atom resume_atom})
+
+        // Block until the REPL client tells us what to do
+        let mut done = false
+        while !done {
+            let cmd = deref(resume_atom)
+            if cmd != null {
+                reset!(main_thread_crash, null)
+                let op = get(cmd, :op)
+                if op == "resume" {
+                    let code = get(cmd, :code)
+                    let value = if code != null { eval(code) } else { null }
+                    done = true
+                    resume(value)
+                } else {
+                    // abort — just return null, letting main-fn exit
+                    done = true
+                    null
+                }
+            } else {
+                core/sleep(10)
+            }
+        }
+    }
 }

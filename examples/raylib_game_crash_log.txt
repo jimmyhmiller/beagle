@@ -1,0 +1,75 @@
+Raylib Shooting Game Conversion — Crash Log
+=============================================
+Date: 2026-03-27
+
+## What we were doing
+Converting raylib_game.bg from a "catch falling squares" game to a "shoot falling
+squares" game, via live REPL hot-reloading.
+
+## Changes made (via REPL eval, not saved to file)
+
+1. Added new structs:
+   - `struct Bullet { x, y }`
+   - `struct BulletResult { bullets, balls, hits }`
+
+2. Modified `struct Game` to add new fields:
+   - `bullets` (list of Bullet)
+   - `cooldown` (fire rate limiter)
+
+3. Added `let KEY_SPACE = 32`
+
+4. New function `update-bullets(bullets, balls)`:
+   - Moves each bullet upward (y - 10)
+   - Checks bullet-ball collisions
+   - Returns BulletResult struct with remaining bullets, balls, and hit score
+
+5. Modified `update-player(game)`:
+   - Added space bar shooting: spawns Bullet at player center when space pressed
+   - Added cooldown logic (8 frame cooldown between shots)
+
+6. Modified `update-balls(game)`:
+   - Removed catch/collision logic (player no longer catches)
+   - Enemies that reach bottom still count as missed
+   - Calls update-bullets() for bullet-enemy collisions
+   - Uses result.hits to add to score
+
+7. Modified `render(game)`:
+   - Player now has a turret (white rect above blue bar)
+   - Draws yellow bullets
+   - Enemies colored magenta (large) / cyan (small)
+   - Updated HUD text
+
+8. Modified `game-loop(game)`: no structural change, same flow
+
+9. `spawn-ball()`: tweaked to dy: 2-4 (slower) and size: 15-30
+
+## Crash #1
+- Error: `SystemError.TypeError { message: "Type mismatch in arithmetic operation..." }`
+- Location: `raylib_game/update-balls (repl:89)`
+- Stack: update-balls <- main <- repl runner
+- Cause: Used a mixed-type array `[bullets, balls, hits]` and `nth()` to return
+  multiple values from update-bullets. The integer `hits` lost its type info when
+  extracted via nth(), causing a type mismatch when doing `game.score + hit_score`.
+- Fix attempted: Replaced the array return with a `BulletResult` struct.
+
+## Crash #2
+- Error: Same — `SystemError.TypeError { message: "Type mismatch in arithmetic operation..." }`
+- Location: `raylib_game/update-balls (repl:85)`
+- Stack: update-balls <- main <- repl runner
+- Root cause: The `main()` function was NOT redefined via REPL — it still lives in
+  the on-disk file. It creates a Game struct with the OLD shape:
+    Game { player_x, balls, score: 0, missed: 0, frame: 0 }
+  But the REPL-redefined functions expect the NEW Game struct which has additional
+  fields: `bullets` and `cooldown`. When update-player accesses `game.bullets` and
+  `game.cooldown` on the old struct, those fields don't exist, returning
+  null/undefined values. These propagate through the game loop and eventually cause
+  the arithmetic type mismatch in update-balls when trying to add score.
+
+## Fix needed
+To make this work, EITHER:
+  (a) Redefine `main()` via REPL to create the new Game struct with all fields:
+      Game { player_x: ..., balls: [], bullets: [], score: 0, missed: 0, frame: 0, cooldown: 0 }
+  OR
+  (b) Write the full shooter version to the .bg file and restart fresh.
+
+Option (b) is more reliable since main() sets up the initial state and game loop.

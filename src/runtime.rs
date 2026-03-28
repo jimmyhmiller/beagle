@@ -3750,6 +3750,47 @@ pub struct SafeReturnContext {
     pub return_point: InvocationReturnPoint,
 }
 
+/// Pre-computed data for restoring continuation frames on the scratch stack.
+/// This allows the frame writes to target original_sp without overlapping
+/// the Rust function's own stack frame.  See the "Continuation Stack
+/// Restoration" doc for why this is necessary.
+pub struct SafeInvokeContext {
+    /// Per-frame restoration data: (target_fp, caller_fp, tagged CapturedFrame ptr)
+    pub frame_ops: Vec<(usize, usize, usize)>,
+    /// Mutable ranges (for copy-back on return)
+    pub mutable_ranges: Vec<StackCopyRange>,
+    /// Restored FP addresses (for GC chain linking)
+    pub restored_fps: Vec<usize>,
+    /// Where to restore (original_sp for root invocations)
+    pub new_sp: usize,
+    pub stack_segment_size: usize,
+    pub original_sp: usize,
+    /// GC chain predecessor for linking restored frames
+    pub gc_chain_prev: usize,
+    /// Return trampoline address
+    pub return_trampoline: usize,
+    /// Continuation resume address
+    pub resume_address: usize,
+    /// Value to pass to the continuation
+    pub value: usize,
+    /// Result local offset and pointer
+    pub result_local: isize,
+    /// Innermost FP after restoration
+    pub new_fp: usize,
+    /// Handler frame data for InvocationReturnPoint
+    pub beagle_sp: usize,
+    pub beagle_fp: usize,
+    pub beagle_return_address: usize,
+    pub callee_saved_regs: [usize; 10],
+    pub saved_frame: usize,
+    pub prompt_id: usize,
+    pub is_root_invocation: bool,
+    pub saved_gc_prev: usize,
+    pub from_resumable_exception: bool,
+    pub cont_ptr: usize,
+    pub debug_prompts: bool,
+}
+
 /// Captured continuation: a snapshot of the stack between a shift point and its enclosing reset.
 /// This is stored as a heap object with type_id = TYPE_ID_CONTINUATION.
 pub struct ContinuationObject {
@@ -4320,6 +4361,7 @@ pub struct PerThreadData {
     pub prompt_handlers: Vec<PromptHandler>,
     pub invocation_return_points: Vec<InvocationReturnPoint>,
     pub safe_return_context: Option<SafeReturnContext>,
+    pub safe_invoke_context: Option<SafeInvokeContext>,
 
     pub return_from_shift_via_pop_prompt: bool,
     pub is_handler_return: bool,
@@ -4336,6 +4378,7 @@ impl PerThreadData {
             prompt_handlers: Vec::new(),
             invocation_return_points: Vec::new(),
             safe_return_context: None,
+            safe_invoke_context: None,
 
             return_from_shift_via_pop_prompt: false,
             is_handler_return: false,
