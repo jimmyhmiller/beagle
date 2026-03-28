@@ -4369,6 +4369,13 @@ pub struct PerThreadData {
     pub relocation_depth: usize,
     pub thread_exception_handler_fn: Option<usize>,
     pub native_scratch_stack: Vec<u8>,
+
+    /// Pool of free segments for reuse.
+    pub segment_pool: Vec<StackSegment>,
+    /// Stack of currently active segments (parallel to prompt_handlers).
+    pub active_segments: Vec<StackSegment>,
+    /// Segments detached during continuation capture, keyed by prompt_id.
+    pub captured_segments: std::collections::HashMap<usize, StackSegment>,
 }
 
 impl PerThreadData {
@@ -4386,7 +4393,23 @@ impl PerThreadData {
             relocation_depth: 0,
             thread_exception_handler_fn: None,
             native_scratch_stack: Vec::new(),
+
+            segment_pool: Vec::new(),
+            active_segments: Vec::new(),
+            captured_segments: std::collections::HashMap::new(),
         }
+    }
+
+    /// Allocate a segment from the pool, or create a new one.
+    pub fn allocate_segment(&mut self) -> StackSegment {
+        self.segment_pool
+            .pop()
+            .unwrap_or_else(StackSegment::allocate)
+    }
+
+    /// Return a segment to the pool for reuse.
+    pub fn recycle_segment(&mut self, segment: StackSegment) {
+        self.segment_pool.push(segment);
     }
 
     pub fn ensure_native_scratch_stack_top(&mut self) -> usize {
@@ -4527,6 +4550,52 @@ pub struct Runtime {
     /// Struct ID for the built-in Function struct (beagle.core/Function).
     /// Function objects are regular HeapObject structs with this struct_id.
     pub function_struct_id: usize,
+}
+
+/// A stack segment for the Chez Scheme-style segmented stack.
+/// Each handle block runs on its own segment. Segments are mmap'd
+/// with a guard page at the bottom to catch overflow.
+pub struct StackSegment {
+    #[allow(dead_code)] // Held to keep the mmap region alive
+    mmap: MmapMut,
+    /// Lowest usable address (above the guard page).
+    pub base: usize,
+    /// Highest usable address (top of mmap region).
+    pub top: usize,
+    /// Usable size in bytes (top - base).
+    pub size: usize,
+}
+
+/// Default segment size: 2 MB.
+const SEGMENT_SIZE: usize = 2 * 1024 * 1024;
+
+impl StackSegment {
+    pub fn allocate() -> Self {
+        let page_size = MmapOptions::page_size();
+        let total_size = SEGMENT_SIZE + page_size;
+        let mmap = MmapOptions::new(total_size)
+            .expect("Failed to create mmap for stack segment")
+            .map_mut()
+            .expect("Failed to map stack segment memory");
+        // Protect the first page (guard page at lowest address).
+        let protected_area = &mmap[0..page_size];
+        unsafe {
+            libc::mprotect(
+                protected_area.as_ptr() as *mut libc::c_void,
+                page_size,
+                libc::PROT_NONE,
+            );
+        }
+        let raw_base = mmap.as_ptr() as usize;
+        let base = raw_base + page_size;
+        let top = raw_base + total_size;
+        Self {
+            mmap,
+            base,
+            top,
+            size: top - base,
+        }
+    }
 }
 
 pub fn create_stack_with_protected_page_after(stack_size: usize) -> MmapMut {

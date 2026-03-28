@@ -11556,7 +11556,10 @@ pub unsafe extern "C" fn push_prompt_runtime(
     };
 
     runtime.push_prompt_handler(handler);
-    BuiltInTypes::null_value() as usize
+
+    // Return the current stack pointer (no segment switch for now).
+    // The JIT code will MOV SP, X0 which is a no-op since we return the same SP.
+    stack_pointer
 }
 
 /// Pop the current prompt handler.
@@ -11657,7 +11660,8 @@ pub unsafe extern "C" fn pop_prompt_runtime(
         ptd.relocation_depth = 0;
     }
 
-    BuiltInTypes::null_value() as usize
+    // Return current SP — JIT code will MOV SP, X0 which is a no-op.
+    stack_pointer
 }
 
 /// Capture a continuation up to the nearest prompt.
@@ -12908,6 +12912,14 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
         nested_relocated_prompts == 0
     };
 
+    // Try to restore frames to their original location — zero descent.
+    // If a stale InvocationReturnPoint exists for this prompt, reuse its location
+    // (the previous invoke's frames are dead — they were captured into a new continuation).
+    // Otherwise, fall back to descent for the first invocation.
+    let original_sp = continuation.original_sp();
+
+    let stale_rp: Option<crate::runtime::InvocationReturnPoint> = None;
+
     // For now: always compute new_sp below actual_rsp with small margin.
     let actual_rsp: usize;
     #[cfg(target_arch = "x86_64")]
@@ -13055,7 +13067,10 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
         let current_depth = ptd.relocation_depth;
         ptd.relocation_depth = current_depth + 1;
 
-        if is_root_invocation {
+        // If we popped a stale RP, this invocation is effectively root
+        // (no outstanding RP for this prompt_id).
+        let effective_root = is_root_invocation || stale_rp.is_some();
+        if effective_root {
             ptd.saved_continuation_ptr = cont_ptr;
         }
 
@@ -13073,7 +13088,7 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
                 original_sp,
                 segment_len: stack_segment_size,
                 mutable_ranges,
-                is_root_invocation,
+                is_root_invocation: effective_root,
                 saved_gc_prev,
                 from_resumable_exception: continuation.exc_has_handler(),
             });

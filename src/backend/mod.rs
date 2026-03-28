@@ -292,6 +292,9 @@ pub trait CodegenBackend: Sized {
     /// Get the frame pointer register. Used for exception handling.
     fn frame_pointer(&self) -> Self::Register;
 
+    /// Get the stack pointer register (SP on ARM64, RSP on x86-64).
+    fn stack_pointer_reg(&self) -> Self::Register;
+
     /// Get the byte offset from frame pointer for a local variable.
     /// This is negative (locals are below FP).
     /// Used by exception handling to store the caught exception value.

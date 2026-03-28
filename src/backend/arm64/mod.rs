@@ -11,7 +11,7 @@ use crate::backend::CodegenBackend;
 use crate::common::Label;
 use crate::compiler::CompileError;
 use crate::ir::Condition;
-use crate::machine_code::arm_codegen::{ArmAsm, Register, X29, X30, ZERO_REGISTER};
+use crate::machine_code::arm_codegen::{ArmAsm, Register, SP, X29, X30, ZERO_REGISTER};
 
 /// ARM64 backend implementation.
 ///
@@ -492,6 +492,10 @@ impl CodegenBackend for Arm64Backend {
 
     fn frame_pointer(&self) -> Self::Register {
         X29
+    }
+
+    fn stack_pointer_reg(&self) -> Self::Register {
+        SP
     }
 
     fn get_local_byte_offset(&self, local_index: usize) -> isize {

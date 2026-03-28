@@ -10,7 +10,7 @@ use crate::backend::CodegenBackend;
 use crate::common::Label;
 use crate::compiler::CompileError;
 use crate::ir::Condition;
-use crate::machine_code::x86_codegen::{R11, RAX, RBP, X86Asm, X86Register};
+use crate::machine_code::x86_codegen::{R11, RAX, RBP, RSP, X86Asm, X86Register};
 use crate::x86::LowLevelX86;
 
 /// x86-64 backend implementation.
@@ -498,6 +498,10 @@ impl CodegenBackend for X86_64Backend {
 
     fn frame_pointer(&self) -> Self::Register {
         RBP
+    }
+
+    fn stack_pointer_reg(&self) -> Self::Register {
+        RSP
     }
 
     fn get_local_byte_offset(&self, local_index: usize) -> isize {
