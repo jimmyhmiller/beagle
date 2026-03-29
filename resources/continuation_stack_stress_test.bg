@@ -31,7 +31,7 @@ fn read-line(conn) {
 // Each byte triggers a continuation invoke.  A ~160 byte response
 // means ~160 continuation invocations in a tight loop.
 fn test-long-read() {
-    let port = 7930
+    let port = 29730
     let done_atom = atom(false)
     let result_atom = atom(null)
 
@@ -66,7 +66,7 @@ fn test-long-read() {
 // -- Test 2: Many sequential reads --
 // Server sends multiple lines, client reads each byte-by-byte.
 fn test-multi-line-read() {
-    let port = 7931
+    let port = 29731
 
     thread(fn() {
         let server = socket/listen("127.0.0.1", port)
@@ -99,7 +99,7 @@ fn test-multi-line-read() {
 // -- Test 3: Many small writes --
 // Tests that socket/write (which also uses perform) doesn't exhaust stack.
 fn test-many-writes() {
-    let port = 7933
+    let port = 29733
 
     thread(fn() {
         let server = socket/listen("127.0.0.1", port)

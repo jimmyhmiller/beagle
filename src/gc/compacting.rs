@@ -5,7 +5,7 @@ use libc::mprotect;
 use super::get_page_size;
 
 use crate::types::{BuiltInTypes, Header, HeapObject, Word};
-
+use crate::runtime::ContinuationObject;
 use super::{AllocateAction, Allocator, AllocatorOptions, stack_walker::StackWalker};
 
 const DEFAULT_PAGE_COUNT: usize = 1024;
@@ -225,6 +225,52 @@ pub struct CompactingHeap {
     options: AllocatorOptions,
 }
 impl CompactingHeap {
+    fn collect_live_continuation_segment_handles(&self, space: &Space) -> std::collections::HashSet<usize> {
+        let mut live_handles = std::collections::HashSet::new();
+        for object in space.object_iter_from_position(0) {
+            if object.is_zero_size() {
+                continue;
+            }
+            let object = HeapObject::from_untagged(object.untagged() as *const u8);
+            if let Some(cont) = ContinuationObject::from_heap_object(object) {
+                let handle_id = cont.segment_handle_id();
+                if handle_id != 0 {
+                    live_handles.insert(handle_id);
+                }
+            }
+        }
+        live_handles
+    }
+
+    fn scan_continuation_segment<F>(&mut self, object: &HeapObject, mut callback: F)
+    where
+        F: FnMut(usize, usize),
+    {
+        let object = HeapObject::from_untagged(object.untagged() as *const u8);
+        let Some(cont) = ContinuationObject::from_heap_object(object) else {
+            return;
+        };
+        let Some((segment_base, segment_top)) =
+            crate::runtime::find_captured_segment_bounds(cont.segment_handle_id())
+        else {
+            return;
+        };
+        StackWalker::walk_segment_roots(
+            cont.original_fp(),
+            segment_base,
+            segment_top,
+            |slot_addr, slot_value| callback(slot_addr, slot_value),
+        );
+    }
+
+    fn collect_continuation_segment_slots(&mut self, object: &HeapObject) -> Vec<(usize, usize)> {
+        let mut slots = Vec::new();
+        self.scan_continuation_segment(object, |slot_addr, slot_value| {
+            slots.push((slot_addr, slot_value));
+        });
+        slots
+    }
+
     fn copy_using_cheneys_algorithm(&mut self, tagged_ptr: usize) -> usize {
         let untagged = BuiltInTypes::untag(tagged_ptr);
 
@@ -388,6 +434,12 @@ impl CompactingHeap {
                     *datum = self.copy_using_cheneys_algorithm(*datum);
                 }
             }
+            let segment_slots = self.collect_continuation_segment_slots(&object);
+            for (slot_addr, slot_value) in segment_slots {
+                unsafe {
+                    *(slot_addr as *mut usize) = self.copy_using_cheneys_algorithm(slot_value);
+                }
+            }
         }
     }
 
@@ -400,31 +452,44 @@ impl CompactingHeap {
         for ptd_ptr in registry.iter() {
             let ptd = unsafe { &mut *ptd_ptr.0 };
 
-            // Process InvocationReturnPoint saved frames (CapturedFrame heap pointers).
-            for rp in ptd.invocation_return_points.iter_mut() {
-                if rp.saved_frame != 0 && BuiltInTypes::is_heap_pointer(rp.saved_frame) {
-                    rp.saved_frame = self.copy_using_cheneys_algorithm(rp.saved_frame);
+            for frame in ptd.suspended_frames.values_mut() {
+                for slot in frame.locals.iter_mut() {
+                    if BuiltInTypes::is_heap_pointer(*slot) {
+                        *slot = self.copy_using_cheneys_algorithm(*slot);
+                    }
+                }
+                for word in frame.trailing_words.iter_mut() {
+                    if BuiltInTypes::is_heap_pointer(*word) {
+                        *word = self.copy_using_cheneys_algorithm(*word);
+                    }
                 }
             }
 
             if let Some(ctx) = ptd.safe_return_context.as_mut() {
-                if ctx.return_point.saved_frame != 0
-                    && BuiltInTypes::is_heap_pointer(ctx.return_point.saved_frame)
-                {
-                    ctx.return_point.saved_frame =
-                        self.copy_using_cheneys_algorithm(ctx.return_point.saved_frame);
-                }
                 if BuiltInTypes::is_heap_pointer(ctx.value) {
                     ctx.value = self.copy_using_cheneys_algorithm(ctx.value);
                 }
             }
 
-            // Process saved_continuation_ptr (tagged ContinuationObject pointers)
-            if ptd.saved_continuation_ptr != 0
-                && BuiltInTypes::is_heap_pointer(ptd.saved_continuation_ptr)
-            {
-                ptd.saved_continuation_ptr =
-                    self.copy_using_cheneys_algorithm(ptd.saved_continuation_ptr);
+            if let Some(ctx) = ptd.safe_perform_context.as_mut() {
+                if BuiltInTypes::is_heap_pointer(ctx.handler) {
+                    ctx.handler = self.copy_using_cheneys_algorithm(ctx.handler);
+                }
+                if BuiltInTypes::is_heap_pointer(ctx.op_value) {
+                    ctx.op_value = self.copy_using_cheneys_algorithm(ctx.op_value);
+                }
+                if BuiltInTypes::is_heap_pointer(ctx.resume_closure) {
+                    ctx.resume_closure = self.copy_using_cheneys_algorithm(ctx.resume_closure);
+                }
+                if BuiltInTypes::is_heap_pointer(ctx.cont_ptr) {
+                    ctx.cont_ptr = self.copy_using_cheneys_algorithm(ctx.cont_ptr);
+                }
+            }
+
+            for saved_ptr in ptd.saved_continuation_ptrs.iter_mut() {
+                if *saved_ptr != 0 && BuiltInTypes::is_heap_pointer(*saved_ptr) {
+                    *saved_ptr = self.copy_using_cheneys_algorithm(*saved_ptr);
+                }
             }
         }
     }
@@ -506,7 +571,7 @@ impl Allocator for CompactingHeap {
         // will transitively process any objects newly copied by gc_continuations.
         let start_offset = self.to_space.allocation_offset;
 
-        // Process InvocationReturnPoint saved_frame pointers
+        // Process suspended caller-frame roots
         self.gc_continuations();
 
         unsafe { self.copy_remaining(start_offset) };
@@ -519,6 +584,9 @@ impl Allocator for CompactingHeap {
         }
 
         mem::swap(&mut self.from_space, &mut self.to_space);
+
+        let live_handles = self.collect_live_continuation_segment_handles(&self.from_space);
+        crate::runtime::recycle_unreachable_captured_segments(&live_handles);
 
         self.to_space.clear();
     }

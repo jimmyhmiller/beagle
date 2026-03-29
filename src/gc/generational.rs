@@ -11,6 +11,7 @@ use super::{
     AllocateAction, Allocator, AllocatorOptions, mark_and_sweep::MarkAndSweep,
     stack_walker::StackWalker,
 };
+use crate::runtime::ContinuationObject;
 
 /// Represents a reference to a GC root that needs updating after collection.
 /// Points to a mutable slot holding the root value (stack slots, GlobalObjectBlock entries).
@@ -335,6 +336,49 @@ pub struct GenerationalGC {
 }
 
 impl GenerationalGC {
+    fn collect_live_continuation_segment_handles(&mut self) -> std::collections::HashSet<usize> {
+        let mut live_handles = std::collections::HashSet::new();
+        self.old.walk_objects_mut(|_, heap_obj| {
+            let object = HeapObject::from_untagged(heap_obj.untagged() as *const u8);
+            if let Some(cont) = ContinuationObject::from_heap_object(object) {
+                let handle_id = cont.segment_handle_id();
+                if handle_id != 0 {
+                    live_handles.insert(handle_id);
+                }
+            }
+        });
+        live_handles
+    }
+
+    fn scan_continuation_segment<F>(&self, object: &HeapObject, mut callback: F)
+    where
+        F: FnMut(usize, usize),
+    {
+        let object = HeapObject::from_untagged(object.untagged() as *const u8);
+        let Some(cont) = ContinuationObject::from_heap_object(object) else {
+            return;
+        };
+        let Some((segment_base, segment_top)) =
+            crate::runtime::find_captured_segment_bounds(cont.segment_handle_id())
+        else {
+            return;
+        };
+        StackWalker::walk_segment_roots(
+            cont.original_fp(),
+            segment_base,
+            segment_top,
+            |slot_addr, slot_value| callback(slot_addr, slot_value),
+        );
+    }
+
+    fn collect_continuation_segment_slots(&self, object: &HeapObject) -> Vec<(usize, usize)> {
+        let mut slots = Vec::new();
+        self.scan_continuation_segment(object, |slot_addr, slot_value| {
+            slots.push((slot_addr, slot_value));
+        });
+        slots
+    }
+
     fn update_continuation_segments(&mut self) {
         let runtime = crate::get_runtime().get_mut();
 
@@ -344,25 +388,26 @@ impl GenerationalGC {
         for ptd_ptr in registry.iter() {
             let ptd = unsafe { &mut *ptd_ptr.0 };
 
-            // Process InvocationReturnPoint saved_frame pointers (CapturedFrame heap objects).
-            for rp in ptd.invocation_return_points.iter_mut() {
-                if rp.saved_frame != 0 && BuiltInTypes::is_heap_pointer(rp.saved_frame) {
-                    let untagged = BuiltInTypes::untag(rp.saved_frame);
-                    if self.young.contains(untagged as *const u8) {
-                        rp.saved_frame = self.copy(rp.saved_frame);
+            for frame in ptd.suspended_frames.values_mut() {
+                for slot in frame.locals.iter_mut() {
+                    if BuiltInTypes::is_heap_pointer(*slot) {
+                        let untagged = BuiltInTypes::untag(*slot);
+                        if self.young.contains(untagged as *const u8) {
+                            *slot = self.copy(*slot);
+                        }
+                    }
+                }
+                for word in frame.trailing_words.iter_mut() {
+                    if BuiltInTypes::is_heap_pointer(*word) {
+                        let untagged = BuiltInTypes::untag(*word);
+                        if self.young.contains(untagged as *const u8) {
+                            *word = self.copy(*word);
+                        }
                     }
                 }
             }
 
             if let Some(ctx) = ptd.safe_return_context.as_mut() {
-                if ctx.return_point.saved_frame != 0
-                    && BuiltInTypes::is_heap_pointer(ctx.return_point.saved_frame)
-                {
-                    let untagged = BuiltInTypes::untag(ctx.return_point.saved_frame);
-                    if self.young.contains(untagged as *const u8) {
-                        ctx.return_point.saved_frame = self.copy(ctx.return_point.saved_frame);
-                    }
-                }
                 if BuiltInTypes::is_heap_pointer(ctx.value) {
                     let untagged = BuiltInTypes::untag(ctx.value);
                     if self.young.contains(untagged as *const u8) {
@@ -371,13 +416,39 @@ impl GenerationalGC {
                 }
             }
 
-            // Process saved_continuation_ptr (tagged ContinuationObject pointers)
-            if ptd.saved_continuation_ptr != 0
-                && BuiltInTypes::is_heap_pointer(ptd.saved_continuation_ptr)
-            {
-                let untagged = BuiltInTypes::untag(ptd.saved_continuation_ptr);
-                if self.young.contains(untagged as *const u8) {
-                    ptd.saved_continuation_ptr = self.copy(ptd.saved_continuation_ptr);
+            if let Some(ctx) = ptd.safe_perform_context.as_mut() {
+                if BuiltInTypes::is_heap_pointer(ctx.handler) {
+                    let untagged = BuiltInTypes::untag(ctx.handler);
+                    if self.young.contains(untagged as *const u8) {
+                        ctx.handler = self.copy(ctx.handler);
+                    }
+                }
+                if BuiltInTypes::is_heap_pointer(ctx.op_value) {
+                    let untagged = BuiltInTypes::untag(ctx.op_value);
+                    if self.young.contains(untagged as *const u8) {
+                        ctx.op_value = self.copy(ctx.op_value);
+                    }
+                }
+                if BuiltInTypes::is_heap_pointer(ctx.resume_closure) {
+                    let untagged = BuiltInTypes::untag(ctx.resume_closure);
+                    if self.young.contains(untagged as *const u8) {
+                        ctx.resume_closure = self.copy(ctx.resume_closure);
+                    }
+                }
+                if BuiltInTypes::is_heap_pointer(ctx.cont_ptr) {
+                    let untagged = BuiltInTypes::untag(ctx.cont_ptr);
+                    if self.young.contains(untagged as *const u8) {
+                        ctx.cont_ptr = self.copy(ctx.cont_ptr);
+                    }
+                }
+            }
+
+            for saved_ptr in ptd.saved_continuation_ptrs.iter_mut() {
+                if *saved_ptr != 0 && BuiltInTypes::is_heap_pointer(*saved_ptr) {
+                    let untagged = BuiltInTypes::untag(*saved_ptr);
+                    if self.young.contains(untagged as *const u8) {
+                        *saved_ptr = self.copy(*saved_ptr);
+                    }
                 }
             }
         }
@@ -679,7 +750,7 @@ impl GenerationalGC {
 
         self.process_all_roots(stack_roots);
 
-        // Update InvocationReturnPoint saved_frame pointers
+        // Update suspended caller-frame roots
         self.update_continuation_segments();
 
         // Process old gen objects found on stack - update their young gen references.
@@ -796,6 +867,16 @@ impl GenerationalGC {
                     *field = self.copy(*field);
                     #[cfg(feature = "debug-gc")]
                     eprintln!("[GC DEBUG]   -> new value: {:#x}", *field);
+                }
+            }
+        }
+
+        let segment_slots = self.collect_continuation_segment_slots(&heap_obj);
+        for (slot_addr, slot_value) in segment_slots {
+            let untagged = BuiltInTypes::untag(slot_value);
+            if untagged != 0 && self.young.contains(untagged as *const u8) {
+                unsafe {
+                    *(slot_addr as *mut usize) = self.copy(slot_value);
                 }
             }
         }
@@ -938,6 +1019,15 @@ impl GenerationalGC {
                     }
                 }
             }
+            let segment_slots = self.collect_continuation_segment_slots(&object);
+            for (slot_addr, slot_value) in segment_slots {
+                let untagged = BuiltInTypes::untag(slot_value);
+                if untagged != 0 && self.young.contains(untagged as *const u8) {
+                    unsafe {
+                        *(slot_addr as *mut usize) = self.copy(slot_value);
+                    }
+                }
+            }
         }
         #[cfg(feature = "debug-gc")]
         eprintln!(
@@ -950,6 +1040,8 @@ impl GenerationalGC {
         usdt_probes::fire_gc_full_start(self.gc_count);
         self.minor_gc(gc_frame_tops, extra_roots);
         self.old.gc(gc_frame_tops, extra_roots);
+        let live_handles = self.collect_live_continuation_segment_handles();
+        crate::runtime::recycle_unreachable_captured_segments(&live_handles);
         usdt_probes::fire_gc_full_end(self.gc_count);
     }
 }

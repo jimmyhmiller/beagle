@@ -150,4 +150,64 @@ impl StackWalker {
         #[cfg(feature = "debug-gc")]
         eprintln!("[GC DEBUG] walk_stack_roots done");
     }
+
+    /// Walk stack roots in a detached stack segment by following the saved FP chain.
+    ///
+    /// `frame_pointer` is the innermost active Beagle frame within the detached segment.
+    /// `segment_base..segment_top` is the mapped stack region for that segment.
+    pub fn walk_segment_roots<F>(
+        frame_pointer: usize,
+        segment_base: usize,
+        segment_top: usize,
+        mut callback: F,
+    ) where
+        F: FnMut(usize, usize),
+    {
+        let mut fp = frame_pointer;
+        #[cfg(feature = "debug-gc")]
+        let mut fast = frame_pointer;
+
+        while fp >= segment_base && fp < segment_top && fp != 0 {
+            let header_addr = fp.saturating_sub(8);
+            let header_value = unsafe { *(header_addr as *const usize) };
+            let header = Header::from_usize(header_value);
+
+            if header.type_id != TYPE_ID_FRAME {
+                break;
+            }
+
+            let num_slots = header.size as usize;
+            for i in 0..num_slots {
+                let slot_addr = header_addr - 16 - (i * 8);
+                let slot_value = unsafe { *(slot_addr as *const usize) };
+                if BuiltInTypes::is_heap_pointer(slot_value) {
+                    let untagged = BuiltInTypes::untag(slot_value);
+                    if untagged != 0 && untagged.is_multiple_of(8) {
+                        callback(slot_addr, slot_value);
+                    }
+                }
+            }
+
+            let caller_fp = unsafe { *(fp as *const usize) };
+            if caller_fp == 0 || caller_fp <= fp {
+                break;
+            }
+            if caller_fp < segment_base || caller_fp >= segment_top {
+                break;
+            }
+            fp = caller_fp;
+
+            #[cfg(feature = "debug-gc")]
+            {
+                for _ in 0..2 {
+                    if fast >= segment_base && fast < segment_top && fast != 0 {
+                        fast = unsafe { *(fast as *const usize) };
+                    }
+                }
+                if fp != 0 && fp == fast {
+                    panic!("BUG: cycle in detached segment FP chain at {:#x}", fp);
+                }
+            }
+        }
+    }
 }

@@ -4,6 +4,7 @@ use libc::mprotect;
 
 use super::get_page_size;
 
+use crate::runtime::ContinuationObject;
 use crate::types::{BuiltInTypes, Header, HeapObject, Word};
 
 use super::{AllocateAction, Allocator, AllocatorOptions, stack_walker::StackWalker};
@@ -284,6 +285,47 @@ pub struct MarkAndSweep {
 
 // TODO: I got an issue with my freelist
 impl MarkAndSweep {
+    fn collect_live_continuation_segment_handles(&mut self) -> std::collections::HashSet<usize> {
+        let mut live_handles = std::collections::HashSet::new();
+        self.walk_objects_mut(|_, heap_obj| {
+            let object = HeapObject::from_untagged(heap_obj.untagged() as *const u8);
+            if let Some(cont) = ContinuationObject::from_heap_object(object) {
+                let handle_id = cont.segment_handle_id();
+                if handle_id != 0 {
+                    live_handles.insert(handle_id);
+                }
+            }
+        });
+        live_handles
+    }
+
+    fn push_continuation_segment_children(
+        &self,
+        object: &HeapObject,
+        to_mark: &mut Vec<HeapObject>,
+    ) {
+        let object = HeapObject::from_untagged(object.untagged() as *const u8);
+        let Some(cont) = ContinuationObject::from_heap_object(object) else {
+            return;
+        };
+        let Some((segment_base, segment_top)) =
+            crate::runtime::find_captured_segment_bounds(cont.segment_handle_id())
+        else {
+            return;
+        };
+        StackWalker::walk_segment_roots(
+            cont.original_fp(),
+            segment_base,
+            segment_top,
+            |_slot_addr, pointer| {
+                let untagged = BuiltInTypes::untag(pointer);
+                if untagged != 0 && untagged.is_multiple_of(8) {
+                    to_mark.push(HeapObject::from_tagged(pointer));
+                }
+            },
+        );
+    }
+
     /// Check if a pointer is within this allocator's space
     pub fn contains(&self, pointer: *const u8) -> bool {
         self.space.contains(pointer)
@@ -413,8 +455,6 @@ impl MarkAndSweep {
             to_mark.push(HeapObject::from_tagged(pointer));
         });
 
-        // Mark InvocationReturnPoint saved_frame pointers as roots.
-        // CapturedFrame objects are normal heap objects, so we just add them as roots.
         // GC runs while all threads are paused at safepoints, so it's safe to
         // iterate the registry and dereference each thread's per-thread data.
         {
@@ -422,26 +462,41 @@ impl MarkAndSweep {
             let registry = runtime.per_thread_registry.lock().unwrap();
             for ptd_ptr in registry.iter() {
                 let ptd = unsafe { &*ptd_ptr.0 };
-                for rp in ptd.invocation_return_points.iter() {
-                    if rp.saved_frame != 0 && BuiltInTypes::is_heap_pointer(rp.saved_frame) {
-                        to_mark.push(HeapObject::from_tagged(rp.saved_frame));
+                for frame in ptd.suspended_frames.values() {
+                    for slot in frame.locals.iter().copied() {
+                        if BuiltInTypes::is_heap_pointer(slot) {
+                            to_mark.push(HeapObject::from_tagged(slot));
+                        }
+                    }
+                    for word in frame.trailing_words.iter().copied() {
+                        if BuiltInTypes::is_heap_pointer(word) {
+                            to_mark.push(HeapObject::from_tagged(word));
+                        }
                     }
                 }
                 if let Some(ctx) = ptd.safe_return_context.as_ref() {
-                    if ctx.return_point.saved_frame != 0
-                        && BuiltInTypes::is_heap_pointer(ctx.return_point.saved_frame)
-                    {
-                        to_mark.push(HeapObject::from_tagged(ctx.return_point.saved_frame));
-                    }
                     if BuiltInTypes::is_heap_pointer(ctx.value) {
                         to_mark.push(HeapObject::from_tagged(ctx.value));
                     }
                 }
-                // Mark saved_continuation_ptr (tagged ContinuationObject pointers)
-                if ptd.saved_continuation_ptr != 0
-                    && BuiltInTypes::is_heap_pointer(ptd.saved_continuation_ptr)
-                {
-                    to_mark.push(HeapObject::from_tagged(ptd.saved_continuation_ptr));
+                if let Some(ctx) = ptd.safe_perform_context.as_ref() {
+                    if BuiltInTypes::is_heap_pointer(ctx.handler) {
+                        to_mark.push(HeapObject::from_tagged(ctx.handler));
+                    }
+                    if BuiltInTypes::is_heap_pointer(ctx.op_value) {
+                        to_mark.push(HeapObject::from_tagged(ctx.op_value));
+                    }
+                    if BuiltInTypes::is_heap_pointer(ctx.resume_closure) {
+                        to_mark.push(HeapObject::from_tagged(ctx.resume_closure));
+                    }
+                    if BuiltInTypes::is_heap_pointer(ctx.cont_ptr) {
+                        to_mark.push(HeapObject::from_tagged(ctx.cont_ptr));
+                    }
+                }
+                for saved_ptr in ptd.saved_continuation_ptrs.iter().copied() {
+                    if saved_ptr != 0 && BuiltInTypes::is_heap_pointer(saved_ptr) {
+                        to_mark.push(HeapObject::from_tagged(saved_ptr));
+                    }
                 }
             }
         }
@@ -455,6 +510,7 @@ impl MarkAndSweep {
             for child in object.get_heap_references() {
                 to_mark.push(child);
             }
+            self.push_continuation_segment_children(&object, &mut to_mark);
         }
     }
 
@@ -478,6 +534,7 @@ impl MarkAndSweep {
             for child in object.get_heap_references() {
                 to_mark.push(child);
             }
+            self.push_continuation_segment_children(&object, &mut to_mark);
         }
     }
 
@@ -819,6 +876,8 @@ impl Allocator for MarkAndSweep {
         self.sweep();
 
         self.migrate_outdated_structs(extra_roots);
+        let live_handles = self.collect_live_continuation_segment_handles();
+        crate::runtime::recycle_unreachable_captured_segments(&live_handles);
         if self.options.print_stats {
             println!("Mark and sweep took {:?}", start.elapsed());
         }

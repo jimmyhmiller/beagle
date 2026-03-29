@@ -2269,6 +2269,9 @@ fn handle-io-action(action) {
 
 extend ImplicitAsyncHandler with effect/Handler(Async) {
     fn handle(self, op, resume) {
+        // Acquire the shared I/O loop before destructuring file-operation payloads.
+        // Under forced GC, lazy loop creation can allocate on the first async file op.
+        let io_loop = get-io-loop()
         let result = match op {
             // Core async operations - use threaded await (polls with future-wait)
             Async.Await { future } => {
@@ -2291,70 +2294,70 @@ extend ImplicitAsyncHandler with effect/Handler(Async) {
 
             // File operations - use async thread pool I/O where available
             Async.ReadFile { path } => {
-                handle-read-file-async(get-io-loop(), path)
+                handle-read-file-async(io_loop, path)
             },
             Async.WriteFile { path, content } => {
-                handle-write-file-async(get-io-loop(), path, content)
+                handle-write-file-async(io_loop, path, content)
             },
             Async.AppendFile { path, content } => {
-                handle-append-file-async(get-io-loop(), path, content)
+                handle-append-file-async(io_loop, path, content)
             },
             Async.DeleteFile { path } => {
-                handle-delete-file-async(get-io-loop(), path)
+                handle-delete-file-async(io_loop, path)
             },
             Async.FileExists { path } => {
-                handle-file-exists-async(get-io-loop(), path)
+                handle-file-exists-async(io_loop, path)
             },
             Async.RenameFile { old_path, new_path } => {
-                handle-rename-file-async(get-io-loop(), old_path, new_path)
+                handle-rename-file-async(io_loop, old_path, new_path)
             },
             Async.CopyFile { src_path, dest_path } => {
-                handle-copy-file-async(get-io-loop(), src_path, dest_path)
+                handle-copy-file-async(io_loop, src_path, dest_path)
             },
             Async.ReadDir { path } => {
-                handle-read-dir-async(get-io-loop(), path)
+                handle-read-dir-async(io_loop, path)
             },
             Async.CreateDir { path } => {
-                handle-create-dir-async(get-io-loop(), path)
+                handle-create-dir-async(io_loop, path)
             },
             Async.CreateDirAll { path } => {
-                handle-create-dir-all-async(get-io-loop(), path)
+                handle-create-dir-all-async(io_loop, path)
             },
             Async.RemoveDir { path } => {
-                handle-remove-dir-async(get-io-loop(), path)
+                handle-remove-dir-async(io_loop, path)
             },
             Async.RemoveDirAll { path } => {
-                handle-remove-dir-all-async(get-io-loop(), path)
+                handle-remove-dir-all-async(io_loop, path)
             },
             Async.FileSize { path } => {
-                handle-file-size-async(get-io-loop(), path)
+                handle-file-size-async(io_loop, path)
             },
             Async.IsDirectory { path } => {
-                handle-is-directory-async(get-io-loop(), path)
+                handle-is-directory-async(io_loop, path)
             },
             Async.IsFile { path } => {
-                handle-is-file-async(get-io-loop(), path)
+                handle-is-file-async(io_loop, path)
             },
             Async.Open { path, mode } => {
-                handle-open-async(get-io-loop(), path, mode)
+                handle-open-async(io_loop, path, mode)
             },
             Async.Close { file } => {
-                handle-close-async(get-io-loop(), file)
+                handle-close-async(io_loop, file)
             },
             Async.Read { file, n } => {
-                handle-handle-read-async(get-io-loop(), file, n)
+                handle-handle-read-async(io_loop, file, n)
             },
             Async.Write { file, content } => {
-                handle-handle-write-async(get-io-loop(), file, content)
+                handle-handle-write-async(io_loop, file, content)
             },
             Async.ReadLine { file } => {
-                handle-handle-readline-async(get-io-loop(), file)
+                handle-handle-readline-async(io_loop, file)
             },
             Async.Flush { file } => {
-                handle-handle-flush-async(get-io-loop(), file)
+                handle-handle-flush-async(io_loop, file)
             },
             Async.Sleep { ms } => {
-                handle-sleep-event-loop(get-io-loop(), ms)
+                handle-sleep-event-loop(io_loop, ms)
             },
             Async.Spawn { thunk } => {
                 handle-spawn-threaded(thunk)

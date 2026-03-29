@@ -32,7 +32,7 @@ use crate::{
 };
 
 use crate::collections::{
-    GcHandle, HandleScope, PersistentMap, PersistentVec, TYPE_ID_ATOM, TYPE_ID_CAPTURED_FRAME,
+    GcHandle, HandleScope, PersistentMap, PersistentVec, TYPE_ID_ATOM,
     TYPE_ID_CONS_STRING, TYPE_ID_CONTINUATION, TYPE_ID_FUNCTION_OBJECT, TYPE_ID_KEYWORD,
     TYPE_ID_MULTI_ARITY_FUNCTION, TYPE_ID_PERSISTENT_MAP, TYPE_ID_PERSISTENT_SET,
     TYPE_ID_PERSISTENT_VEC, TYPE_ID_RAW_ARRAY, TYPE_ID_STRING, TYPE_ID_STRING_SLICE,
@@ -3679,22 +3679,12 @@ pub struct PromptHandler {
     pub result_local: isize,
     /// Unique ID for this prompt (to distinguish sequential handlers at same depth)
     pub prompt_id: usize,
-    /// True when this prompt was pushed for a relocated continuation invocation.
-    pub is_relocated: bool,
 }
 
 /// Invocation return point for multi-shot continuations.
 /// When a continuation k is invoked via k(value), we save where to return after the
 /// continuation body completes. This enables multiple invocations like [k(1), k(2), k(3)].
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct StackCopyRange {
-    /// Byte offset from segment base (relocated_sp/original_sp).
-    pub offset: usize,
-    /// Number of bytes to copy at this offset.
-    pub len: usize,
-}
-
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct InvocationReturnPoint {
@@ -3707,41 +3697,17 @@ pub struct InvocationReturnPoint {
     /// Callee-saved registers (x19-x28 on ARM64) that must be preserved
     /// These are saved when k() is called and restored when returning
     pub callee_saved_regs: [usize; 10],
-    /// Saved stack frame as a heap CapturedFrame pointer (tagged), or 0.
-    /// For multi-shot continuations, we need to preserve the shift body's locals
-    /// (including the continuation k) when the continuation body runs, because
-    /// the continuation body may write to stack locations that overlap with
-    /// the shift body's frame.
-    pub saved_frame: usize,
+    /// Saved suspended caller frame stored in per-thread suspended_frames, or 0.
+    pub suspended_frame_id: usize,
     /// Unique ID of the prompt handler that this return point belongs to.
     /// Used to match return points with their corresponding handle blocks.
     /// This distinguishes sequential handlers at the same stack depth.
     pub prompt_id: usize,
-    /// Where the continuation's stack segment was relocated to.
-    /// Used to copy modifications back to the original location.
-    pub relocated_sp: usize,
-    /// Original SP where the stack segment was captured from.
-    /// The modifications need to be copied back here.
-    pub original_sp: usize,
-    /// Length of the stack segment in bytes.
-    pub segment_len: usize,
-    /// Byte ranges within the segment that are mutable frame slots (locals/eval stack).
-    /// These are copied back to original_sp on root return; frame metadata is excluded.
-    pub mutable_ranges: Vec<StackCopyRange>,
-    /// Whether this is a "root" invocation from original code (true) or a nested
-    /// invocation from within a continuation body (false).
-    /// Only root invocations should copy modifications back, because nested invocations
-    /// have an "original_sp" that points to a relocated stack, not the true original.
-    pub is_root_invocation: bool,
     /// The GC prev pointer ([FP-16]) from the handler's frame at the time k(value)
     /// was called. After continuation restore, link_restored_frames overwrites [FP-16],
     /// but the handler's epilogue needs the original prev to correctly unlink from the
     /// GC chain. We save it here and restore it after the frame is reconstructed.
     pub saved_gc_prev: usize,
-    /// Whether this RP was created from a resumable exception continuation.
-    /// When true, non-root RPs will chain through parent RPs with the same prompt_id
-    /// to un-relocate the stack all the way back to the original location.
-    pub from_resumable_exception: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -3750,45 +3716,98 @@ pub struct SafeReturnContext {
     pub return_point: InvocationReturnPoint,
 }
 
-/// Pre-computed data for restoring continuation frames on the scratch stack.
-/// This allows the frame writes to target original_sp without overlapping
-/// the Rust function's own stack frame.  See the "Continuation Stack
-/// Restoration" doc for why this is necessary.
-pub struct SafeInvokeContext {
-    /// Per-frame restoration data: (target_fp, caller_fp, tagged CapturedFrame ptr)
-    pub frame_ops: Vec<(usize, usize, usize)>,
-    /// Mutable ranges (for copy-back on return)
-    pub mutable_ranges: Vec<StackCopyRange>,
-    /// Restored FP addresses (for GC chain linking)
-    pub restored_fps: Vec<usize>,
-    /// Where to restore (original_sp for root invocations)
-    pub new_sp: usize,
-    pub stack_segment_size: usize,
-    pub original_sp: usize,
-    /// GC chain predecessor for linking restored frames
-    pub gc_chain_prev: usize,
-    /// Return trampoline address
-    pub return_trampoline: usize,
-    /// Continuation resume address
-    pub resume_address: usize,
-    /// Value to pass to the continuation
-    pub value: usize,
-    /// Result local offset and pointer
-    pub result_local: isize,
-    /// Innermost FP after restoration
-    pub new_fp: usize,
-    /// Handler frame data for InvocationReturnPoint
-    pub beagle_sp: usize,
-    pub beagle_fp: usize,
-    pub beagle_return_address: usize,
-    pub callee_saved_regs: [usize; 10],
-    pub saved_frame: usize,
-    pub prompt_id: usize,
-    pub is_root_invocation: bool,
-    pub saved_gc_prev: usize,
-    pub from_resumable_exception: bool,
+#[derive(Debug, Clone)]
+pub struct SafePerformContext {
+    pub handler: usize,
+    pub op_value: usize,
+    pub resume_closure: usize,
     pub cont_ptr: usize,
-    pub debug_prompts: bool,
+    pub fn_ptr: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct SuspendedFrame {
+    pub return_address: usize,
+    pub saved_caller_fp: usize,
+    pub frame_size: usize,
+    pub num_locals: usize,
+    pub frame_type_flags: u8,
+    pub frame_type_data_low: u32,
+    pub locals: Vec<usize>,
+    pub trailing_words: Vec<usize>,
+}
+
+impl SuspendedFrame {
+    pub fn capture_from_stack(fp: usize, num_slots: usize, frame_bottom: usize) -> Self {
+        let return_address = unsafe { *((fp + 8) as *const usize) };
+        let saved_caller_fp = unsafe { *(fp as *const usize) };
+        let original_frame_header = Header::from_usize(unsafe { *((fp - 8) as *const usize) });
+        let frame_size = (fp + 16).saturating_sub(frame_bottom);
+        let header_and_locals_bytes = 16 + num_slots * 8;
+        let trailing_bytes = frame_size.saturating_sub(16 + header_and_locals_bytes);
+        let num_trailing_words = trailing_bytes / 8;
+
+        let mut locals = Vec::with_capacity(num_slots);
+        for i in 0..num_slots {
+            let slot_addr = fp.wrapping_sub(24).wrapping_sub(i * 8);
+            locals.push(unsafe { *(slot_addr as *const usize) });
+        }
+
+        let mut trailing_words = Vec::with_capacity(num_trailing_words);
+        for i in 0..num_trailing_words {
+            let word_addr = frame_bottom.wrapping_add(i * 8);
+            trailing_words.push(unsafe { *(word_addr as *const usize) });
+        }
+
+        Self {
+            return_address,
+            saved_caller_fp,
+            frame_size,
+            num_locals: num_slots,
+            frame_type_flags: original_frame_header.type_flags,
+            frame_type_data_low: original_frame_header.type_data & 0xFFFF,
+            locals,
+            trailing_words,
+        }
+    }
+
+    pub fn restore_to_stack(&self, target_fp: usize, gc_chain_prev: usize) {
+        unsafe { *(target_fp as *mut usize) = self.saved_caller_fp };
+        unsafe { *((target_fp + 8) as *mut usize) = self.return_address };
+
+        let frame_header = Header {
+            type_id: crate::collections::TYPE_ID_FRAME,
+            type_data: ((self.num_locals as u32) << 16) | self.frame_type_data_low,
+            size: self.num_locals as u16,
+            opaque: false,
+            marked: false,
+            large: false,
+            type_flags: self.frame_type_flags,
+        };
+        unsafe { *((target_fp - 8) as *mut usize) = frame_header.to_usize() };
+        unsafe { *((target_fp - 16) as *mut usize) = gc_chain_prev };
+
+        for (i, slot_value) in self.locals.iter().copied().enumerate() {
+            let slot_addr = target_fp.wrapping_sub(24).wrapping_sub(i * 8);
+            unsafe { *(slot_addr as *mut usize) = slot_value };
+        }
+
+        let frame_bottom = target_fp
+            .checked_add(16)
+            .and_then(|v| v.checked_sub(self.frame_size))
+            .expect("SuspendedFrame restore underflow computing frame_bottom");
+        for (i, word_value) in self.trailing_words.iter().copied().enumerate() {
+            let word_addr = frame_bottom.wrapping_add(i * 8);
+            unsafe { *(word_addr as *mut usize) = word_value };
+        }
+
+        crate::builtins::set_gc_frame_top(target_fp - 8);
+    }
+}
+
+pub struct ActiveSegment {
+    pub prompt_id: usize,
+    pub segment: StackSegment,
 }
 
 /// Captured continuation: a snapshot of the stack between a shift point and its enclosing reset.
@@ -3798,23 +3817,22 @@ pub struct ContinuationObject {
 }
 
 impl ContinuationObject {
-    const FIELD_SEGMENT: usize = 0;
-    const FIELD_ORIGINAL_SP: usize = 1;
-    const FIELD_ORIGINAL_FP: usize = 2;
-    const FIELD_RESUME_ADDRESS: usize = 3;
-    const FIELD_RESULT_LOCAL: usize = 4;
-    const FIELD_HANDLER_ADDRESS: usize = 5;
-    const FIELD_PROMPT_SP: usize = 6;
-    const FIELD_PROMPT_FP: usize = 7;
-    const FIELD_PROMPT_LR: usize = 8;
-    const FIELD_PROMPT_RESULT_LOCAL: usize = 9;
-    const FIELD_PROMPT_ID: usize = 10;
-    const FIELD_PROMPT_IS_RELOCATED: usize = 11;
-    const FIELD_EXC_HANDLER_ADDRESS: usize = 12;
-    const FIELD_EXC_RESULT_LOCAL: usize = 13;
-    const FIELD_EXC_RESUME_LOCAL: usize = 14;
-    const FIELD_EXC_HANDLER_ID: usize = 15;
-    const FIELD_EXC_HAS_HANDLER: usize = 16;
+    const FIELD_ORIGINAL_SP: usize = 0;
+    const FIELD_ORIGINAL_FP: usize = 1;
+    const FIELD_RESUME_ADDRESS: usize = 2;
+    const FIELD_RESULT_LOCAL: usize = 3;
+    const FIELD_HANDLER_ADDRESS: usize = 4;
+    const FIELD_PROMPT_SP: usize = 5;
+    const FIELD_PROMPT_FP: usize = 6;
+    const FIELD_PROMPT_LR: usize = 7;
+    const FIELD_PROMPT_RESULT_LOCAL: usize = 8;
+    const FIELD_PROMPT_ID: usize = 9;
+    const FIELD_EXC_HANDLER_ADDRESS: usize = 10;
+    const FIELD_EXC_RESULT_LOCAL: usize = 11;
+    const FIELD_EXC_RESUME_LOCAL: usize = 12;
+    const FIELD_EXC_HANDLER_ID: usize = 13;
+    const FIELD_EXC_HAS_HANDLER: usize = 14;
+    const FIELD_SEGMENT_HANDLE_ID: usize = 15;
 
     pub fn from_tagged(tagged: usize) -> Option<Self> {
         let heap_obj = HeapObject::try_from_tagged(tagged)?;
@@ -3831,10 +3849,6 @@ impl ContinuationObject {
 
     pub fn tagged_ptr(&self) -> usize {
         self.heap_obj.tagged_pointer()
-    }
-
-    pub fn segment_ptr(&self) -> usize {
-        self.heap_obj.get_field(Self::FIELD_SEGMENT)
     }
 
     pub fn original_sp(&self) -> usize {
@@ -3877,10 +3891,6 @@ impl ContinuationObject {
         BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_PROMPT_ID))
     }
 
-    pub fn prompt_is_relocated(&self) -> bool {
-        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_PROMPT_IS_RELOCATED)) != 0
-    }
-
     pub fn prompt_handler(&self) -> PromptHandler {
         PromptHandler {
             handler_address: self.handler_address(),
@@ -3889,7 +3899,6 @@ impl ContinuationObject {
             link_register: self.prompt_link_register(),
             result_local: self.prompt_result_local(),
             prompt_id: self.prompt_id(),
-            is_relocated: self.prompt_is_relocated(),
         }
     }
 
@@ -3911,6 +3920,10 @@ impl ContinuationObject {
 
     pub fn exc_has_handler(&self) -> bool {
         BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_EXC_HAS_HANDLER)) != 0
+    }
+
+    pub fn segment_handle_id(&self) -> usize {
+        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_SEGMENT_HANDLE_ID))
     }
 
     pub fn set_exc_handler_info(
@@ -3944,15 +3957,14 @@ impl ContinuationObject {
 
     pub fn initialize(
         heap_obj: &mut HeapObject,
-        segment_ptr: usize,
         original_sp: usize,
         original_fp: usize,
         resume_address: usize,
         result_local: isize,
         prompt: &PromptHandler,
+        segment_handle_id: usize,
     ) {
         heap_obj.write_type_id(TYPE_ID_CONTINUATION as usize);
-        heap_obj.write_field(Self::FIELD_SEGMENT as i32, segment_ptr);
         heap_obj.write_field(
             Self::FIELD_ORIGINAL_SP as i32,
             BuiltInTypes::Int.tag(original_sp as isize) as usize,
@@ -3993,10 +4005,6 @@ impl ContinuationObject {
             Self::FIELD_PROMPT_ID as i32,
             BuiltInTypes::Int.tag(prompt.prompt_id as isize) as usize,
         );
-        heap_obj.write_field(
-            Self::FIELD_PROMPT_IS_RELOCATED as i32,
-            BuiltInTypes::Int.tag(prompt.is_relocated as isize) as usize,
-        );
         // Exception handler fields default to 0 (no handler)
         heap_obj.write_field(
             Self::FIELD_EXC_HANDLER_ADDRESS as i32,
@@ -4018,330 +4026,10 @@ impl ContinuationObject {
             Self::FIELD_EXC_HAS_HANDLER as i32,
             BuiltInTypes::Int.tag(0) as usize,
         );
-    }
-}
-
-/// A captured stack frame promoted to the heap during continuation capture.
-/// Each CapturedFrame represents one native Beagle stack frame and links to
-/// its caller via the parent pointer. The GC traces these like normal heap objects.
-///
-/// Layout (as heap object fields):
-///   [0] parent          — tagged ptr to parent CapturedFrame (or null)
-///   [1] return_address  — tagged int: saved LR / return address
-///   [2] saved_caller_fp — tagged int: the saved caller FP from [FP+0] at capture time
-///   [3] frame_info      — tagged int: packs (num_locals << 32 | num_trailing_words << 16 | original_frame_size)
-///   [4..4+num_locals-1] — local/eval-stack slots (GC traced)
-///   [4+num_locals..]    — trailing frame words below locals (callee-saved + alignment padding)
-pub struct CapturedFrame {
-    heap_obj: HeapObject,
-}
-
-impl CapturedFrame {
-    const FIELD_PARENT: usize = 0;
-    const FIELD_RETURN_ADDRESS: usize = 1;
-    const FIELD_SAVED_FP_OFFSET: usize = 2;
-    const FIELD_FRAME_INFO: usize = 3;
-    const LOCALS_START: usize = 4;
-
-    pub fn from_tagged(tagged: usize) -> Option<Self> {
-        if tagged == 0 || tagged == BuiltInTypes::null_value() as usize {
-            return None;
-        }
-        let heap_obj = HeapObject::try_from_tagged(tagged)?;
-        if heap_obj.get_type_id() == TYPE_ID_CAPTURED_FRAME as usize {
-            Some(Self { heap_obj })
-        } else {
-            None
-        }
-    }
-
-    pub fn tagged_ptr(&self) -> usize {
-        self.heap_obj.tagged_pointer()
-    }
-
-    pub fn parent_tagged(&self) -> usize {
-        self.heap_obj.get_field(Self::FIELD_PARENT)
-    }
-
-    pub fn parent(&self) -> Option<CapturedFrame> {
-        CapturedFrame::from_tagged(self.parent_tagged())
-    }
-
-    pub fn return_address(&self) -> usize {
-        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_RETURN_ADDRESS))
-    }
-
-    /// Returns the saved caller FP that was at [FP+0] when this frame was captured.
-    /// Used to link the outermost frame back to its caller during stack reconstruction.
-    pub fn saved_caller_fp(&self) -> usize {
-        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_SAVED_FP_OFFSET))
-    }
-
-    /// Decode frame_info: (num_locals, num_trailing_words, original_frame_size)
-    fn decode_frame_info(&self) -> (usize, usize, usize) {
-        let info = BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_FRAME_INFO));
-        let num_locals = (info >> 32) & 0xFFFF;
-        let num_trailing_words = (info >> 16) & 0xFFFF;
-        let original_frame_size = info & 0xFFFF;
-        (num_locals, num_trailing_words, original_frame_size)
-    }
-
-    pub fn num_locals(&self) -> usize {
-        self.decode_frame_info().0
-    }
-
-    pub fn num_trailing_words(&self) -> usize {
-        self.decode_frame_info().1
-    }
-
-    /// Backward-compatible alias used in debug logging.
-    pub fn num_callee_saved(&self) -> usize {
-        self.num_trailing_words()
-    }
-
-    /// Total size of this frame on the native stack (in bytes).
-    /// This is the distance from frame's SP to the FP of the frame above it
-    /// (i.e., FP + 16 of this frame — the saved FP and LR/return address).
-    pub fn original_frame_size(&self) -> usize {
-        self.decode_frame_info().2
-    }
-
-    /// Total native stack bytes this frame needs when restored:
-    /// saved_fp(8) + saved_lr(8) + header(8) + prev(8) + num_locals*8 + trailing_words*8
-    /// = original_frame_size
-    pub fn total_stack_size(&self) -> usize {
-        self.original_frame_size()
-    }
-
-    /// Capture one native stack frame into a heap CapturedFrame object.
-    ///
-    /// # Arguments
-    /// * `fp` - Frame pointer of the frame to capture
-    /// * `num_slots` - Number of local/eval-stack slots (from TYPE_ID_FRAME header.size)
-    /// * `frame_bottom` - Bottom of this frame on the stack (next frame's SP, or the segment SP for innermost)
-    /// * `parent_tagged` - Tagged pointer to parent CapturedFrame (or null_value)
-    /// * `runtime` - Runtime for allocation
-    /// * `stack_pointer` - Current SP for GC context
-    ///
-    /// Returns the tagged pointer to the new CapturedFrame.
-    pub fn from_stack_frame(
-        fp: usize,
-        num_slots: usize,
-        frame_bottom: usize,
-        parent_tagged: usize,
-        runtime: &mut crate::Runtime,
-        stack_pointer: usize,
-    ) -> usize {
-        // The frame on the native stack looks like:
-        //   [FP+8]: saved LR / return address
-        //   [FP+0]: saved FP (caller's FP)
-        //   [FP-8]: frame header (TYPE_ID_FRAME)
-        //   [FP-16]: GC prev pointer
-        //   [FP-24]: local[0]
-        //   [FP-32]: local[1]
-        //   ...
-        //   [FP-24-i*8]: local[i]
-        //   Below locals: callee-saved registers
-        //   frame_bottom: bottom of this frame
-
-        let return_address = unsafe { *((fp + 8) as *const usize) };
-
-        // Calculate trailing-word count from frame geometry.
-        // This includes callee-saved register spill slots and any alignment padding.
-        // Frame layout: [saved_fp(8) + saved_lr(8)] + [header(8) + prev(8)] + [locals * 8] + [callee_saved * 8]
-        // frame_size = fp + 16 - frame_bottom  (the +16 is for saved FP and LR at the top)
-        let frame_size = (fp + 16).saturating_sub(frame_bottom);
-        let header_and_locals_bytes = 16 + num_slots * 8; // header(8) + prev(8) + locals
-        let trailing_bytes = frame_size.saturating_sub(16 + header_and_locals_bytes);
-        let num_trailing_words = trailing_bytes / 8;
-
-        // Total fields: 4 metadata + num_slots locals + trailing words
-        let total_fields = 4 + num_slots + num_trailing_words;
-
-        // Allocate the heap object
-        let obj_ptr = match runtime.allocate(total_fields, stack_pointer, BuiltInTypes::HeapObject)
-        {
-            Ok(ptr) => ptr,
-            Err(_) => {
-                panic!("Failed to allocate CapturedFrame - out of memory");
-            }
-        };
-
-        let mut obj = HeapObject::from_tagged(obj_ptr);
-
-        // Read the original stack frame's header to preserve continuation mark metadata.
-        let original_frame_header = Header::from_usize(unsafe { *((fp - 8) as *const usize) });
-
-        // Write CapturedFrame heap object header. We pack the original frame's mark
-        // metadata (type_flags and mark_local_index in lower 16 bits of type_data)
-        // alongside num_locals (upper 16 bits of type_data) so that restore_to_stack
-        // can reconstruct the frame header with FRAME_HAS_MARKS_FLAG preserved.
-        let is_large = total_fields > Header::MAX_INLINE_SIZE;
-        obj.writer_header_direct(Header {
-            type_id: TYPE_ID_CAPTURED_FRAME,
-            type_data: ((num_slots as u32) << 16) | (original_frame_header.type_data & 0xFFFF), // mark_local_index in lower 16
-            size: if is_large {
-                0xFFFF
-            } else {
-                total_fields as u16
-            },
-            opaque: false,
-            marked: false,
-            large: is_large,
-            type_flags: original_frame_header.type_flags,
-        });
-        if is_large {
-            let size_ptr = (obj.untagged() + 8) as *mut usize;
-            unsafe { *size_ptr = total_fields };
-        }
-
-        // Encode frame_info: pack (num_locals, num_trailing_words, original_frame_size)
-        let frame_info = ((num_slots & 0xFFFF) << 32)
-            | ((num_trailing_words & 0xFFFF) << 16)
-            | (frame_size & 0xFFFF);
-
-        // Write metadata fields
-        obj.write_field(Self::FIELD_PARENT as i32, parent_tagged);
-        obj.write_field(
-            Self::FIELD_RETURN_ADDRESS as i32,
-            BuiltInTypes::Int.tag(return_address as isize) as usize,
+        heap_obj.write_field(
+            Self::FIELD_SEGMENT_HANDLE_ID as i32,
+            BuiltInTypes::Int.tag(segment_handle_id as isize) as usize,
         );
-        // Store the saved caller FP: the value at [FP+0] on the native stack.
-        // This is needed to correctly link the outermost frame back to its caller
-        // when reconstructing the stack during continuation invocation.
-        let saved_caller_fp = unsafe { *(fp as *const usize) };
-        obj.write_field(
-            Self::FIELD_SAVED_FP_OFFSET as i32,
-            BuiltInTypes::Int.tag(saved_caller_fp as isize) as usize,
-        );
-        obj.write_field(
-            Self::FIELD_FRAME_INFO as i32,
-            BuiltInTypes::Int.tag(frame_info as isize) as usize,
-        );
-
-        // Copy locals from stack: [FP-24], [FP-32], ...
-        for i in 0..num_slots {
-            let slot_addr = fp.wrapping_sub(24).wrapping_sub(i * 8);
-            let slot_value = unsafe { *(slot_addr as *const usize) };
-            obj.write_field((Self::LOCALS_START + i) as i32, slot_value);
-        }
-
-        // Copy the trailing frame words from bottom to top.
-        // This preserves the exact frame tail (callee-saved slots + alignment padding)
-        // without guessing how many words are true register spills.
-        for i in 0..num_trailing_words {
-            let word_addr = frame_bottom.wrapping_add(i * 8);
-            let word_value = unsafe { *(word_addr as *const usize) };
-            obj.write_field((Self::LOCALS_START + num_slots + i) as i32, word_value);
-        }
-
-        obj_ptr
-    }
-
-    /// Restore this captured frame to the native stack at the given target FP.
-    ///
-    /// Writes: [target_fp+8] = return_address
-    ///         [target_fp+0] = caller_fp
-    ///         [target_fp-8] = frame header
-    ///         [target_fp-16] = GC prev pointer (0 placeholder, caller links into chain)
-    ///         [target_fp-24..] = locals
-    ///         below locals = callee-saved registers
-    ///
-    /// NOTE: This does NOT link the frame into the GC chain. The caller must
-    /// call link_restored_frames_into_gc_chain() after restoring all frames.
-    pub fn restore_to_stack(&self, target_fp: usize, caller_fp: usize) {
-        let (num_locals, num_trailing_words, frame_size) = self.decode_frame_info();
-
-        // Write saved FP (will be set by caller to point to next frame's FP)
-        unsafe { *(target_fp as *mut usize) = caller_fp };
-
-        // Write return address at [FP+8]
-        unsafe { *((target_fp + 8) as *mut usize) = self.return_address() };
-
-        // Write frame header at [FP-8], restoring the original type_flags
-        // (FRAME_HAS_MARKS_FLAG) and mark_local_index so continuation marks
-        // survive capture/restore.
-        let captured_header = self.heap_obj.get_header();
-        let frame_header = Header {
-            type_id: crate::collections::TYPE_ID_FRAME,
-            type_data: ((num_locals as u32) << 16) | (captured_header.type_data & 0xFFFF), // restore mark_local_index
-            size: num_locals as u16,
-            opaque: false,
-            marked: false,
-            large: false,
-            type_flags: captured_header.type_flags, // restore FRAME_HAS_MARKS_FLAG
-        };
-        unsafe { *((target_fp - 8) as *mut usize) = frame_header.to_usize() };
-
-        // Write placeholder prev pointer at [FP-16] (will be set by gc chain linking)
-        unsafe { *((target_fp - 16) as *mut usize) = 0 };
-
-        // Restore locals at [FP-24], [FP-32], ...
-        for i in 0..num_locals {
-            let slot_value = self.heap_obj.get_field(Self::LOCALS_START + i);
-            let slot_addr = target_fp.wrapping_sub(24).wrapping_sub(i * 8);
-            unsafe { *(slot_addr as *mut usize) = slot_value };
-        }
-
-        // Restore trailing frame words at the frame bottom.
-        let frame_bottom = target_fp
-            .checked_add(16)
-            .and_then(|v| v.checked_sub(frame_size))
-            .expect("CapturedFrame restore underflow computing frame_bottom");
-        for i in 0..num_trailing_words {
-            let word_value = self.heap_obj.get_field(Self::LOCALS_START + num_locals + i);
-            let word_addr = frame_bottom.wrapping_add(i * 8);
-            unsafe { *(word_addr as *mut usize) = word_value };
-        }
-    }
-
-    /// Link a chain of restored frames into the GC frame linked list.
-    /// `fps` is a list of frame pointers (outermost first, innermost last).
-    /// Each frame's header is at [FP-8] and prev pointer at [FP-16].
-    /// `previous_top` is the header address that should sit below the outermost
-    /// restored frame in the final chain.
-    /// After linking, the innermost frame becomes the new GC_FRAME_TOP.
-    pub fn link_restored_frames_into_gc_chain_with_prev(fps: &[usize], previous_top: usize) {
-        if fps.is_empty() {
-            return;
-        }
-
-        // Link outermost frame to the existing chain
-        let outermost_fp = fps[0];
-        unsafe { *((outermost_fp - 16) as *mut usize) = previous_top };
-
-        // Link each subsequent frame to the previous one
-        for i in 1..fps.len() {
-            let prev_header_addr = fps[i - 1] - 8;
-            unsafe { *((fps[i] - 16) as *mut usize) = prev_header_addr };
-        }
-
-        // The innermost frame is the new top
-        let innermost_fp = fps[fps.len() - 1];
-        let innermost_header_addr = innermost_fp - 8;
-        crate::builtins::set_gc_frame_top(innermost_header_addr);
-    }
-
-    /// Link a restored frame chain under the current GC frame top.
-    pub fn link_restored_frames_into_gc_chain(fps: &[usize]) {
-        let current_top = crate::builtins::get_gc_frame_top();
-        Self::link_restored_frames_into_gc_chain_with_prev(fps, current_top);
-    }
-
-    /// Collect all frames in the chain into a Vec (outermost first).
-    /// The chain starts from the outermost frame (stored as the continuation's segment_ptr)
-    /// and follows parent pointers toward the innermost frame.
-    pub fn collect_chain(outermost_tagged: usize) -> Vec<CapturedFrame> {
-        let mut frames = Vec::new();
-        let mut current = CapturedFrame::from_tagged(outermost_tagged);
-        while let Some(frame) = current {
-            frames.push(CapturedFrame {
-                heap_obj: HeapObject::from_tagged(frame.tagged_ptr()),
-            });
-            current = frame.parent();
-        }
-        // No reverse needed: the chain already goes outermost → innermost via parent pointers
-        frames
     }
 }
 
@@ -4361,21 +4049,29 @@ pub struct PerThreadData {
     pub prompt_handlers: Vec<PromptHandler>,
     pub invocation_return_points: Vec<InvocationReturnPoint>,
     pub safe_return_context: Option<SafeReturnContext>,
-    pub safe_invoke_context: Option<SafeInvokeContext>,
+    pub safe_perform_context: Option<SafePerformContext>,
 
     pub return_from_shift_via_pop_prompt: bool,
     pub is_handler_return: bool,
-    pub saved_continuation_ptr: usize,
-    pub relocation_depth: usize,
+    pub saved_continuation_ptrs: Vec<usize>,
     pub thread_exception_handler_fn: Option<usize>,
     pub native_scratch_stack: Vec<u8>,
+    pub native_perform_stack_pool: Vec<StackSegment>,
+    pub active_native_perform_stacks: Vec<StackSegment>,
 
     /// Pool of free segments for reuse.
     pub segment_pool: Vec<StackSegment>,
-    /// Stack of currently active segments (parallel to prompt_handlers).
-    pub active_segments: Vec<StackSegment>,
-    /// Segments detached during continuation capture, keyed by prompt_id.
+    /// Stack of currently active prompt-owned segments.
+    pub active_segments: Vec<ActiveSegment>,
+    /// Segments detached during continuation capture, keyed by segment handle ID.
     pub captured_segments: std::collections::HashMap<usize, StackSegment>,
+    /// Segment handle IDs captured under each prompt. Used for prompt-scoped bookkeeping.
+    pub prompt_captured_segments: std::collections::HashMap<usize, Vec<usize>>,
+    /// Segment handles detached during capture before the continuation object exists.
+    pub pending_captured_segment_handles: Vec<usize>,
+    /// Suspended caller frames preserved across segmented invoke/return.
+    pub suspended_frames: std::collections::HashMap<usize, SuspendedFrame>,
+    pub suspended_frame_id_counter: usize,
 }
 
 impl PerThreadData {
@@ -4385,18 +4081,23 @@ impl PerThreadData {
             prompt_handlers: Vec::new(),
             invocation_return_points: Vec::new(),
             safe_return_context: None,
-            safe_invoke_context: None,
+            safe_perform_context: None,
 
             return_from_shift_via_pop_prompt: false,
             is_handler_return: false,
-            saved_continuation_ptr: 0,
-            relocation_depth: 0,
+            saved_continuation_ptrs: Vec::new(),
             thread_exception_handler_fn: None,
             native_scratch_stack: Vec::new(),
+            native_perform_stack_pool: Vec::new(),
+            active_native_perform_stacks: Vec::new(),
 
             segment_pool: Vec::new(),
             active_segments: Vec::new(),
             captured_segments: std::collections::HashMap::new(),
+            prompt_captured_segments: std::collections::HashMap::new(),
+            pending_captured_segment_handles: Vec::new(),
+            suspended_frames: std::collections::HashMap::new(),
+            suspended_frame_id_counter: 1,
         }
     }
 
@@ -4412,6 +4113,89 @@ impl PerThreadData {
         self.segment_pool.push(segment);
     }
 
+    pub fn push_active_segment(&mut self, prompt_id: usize, segment: StackSegment) {
+        self.active_segments.push(ActiveSegment { prompt_id, segment });
+    }
+
+    pub fn pop_active_segment(&mut self, prompt_id: usize) -> Option<StackSegment> {
+        match self.active_segments.last() {
+            Some(active) if active.prompt_id == prompt_id => {
+                self.active_segments.pop().map(|active| active.segment)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn active_segment_for_prompt(&self, prompt_id: usize) -> Option<&StackSegment> {
+        self.active_segments
+            .iter()
+            .rev()
+            .find(|active| active.prompt_id == prompt_id)
+            .map(|active| &active.segment)
+    }
+
+    pub fn record_captured_segment(
+        &mut self,
+        prompt_id: usize,
+        segment_handle_id: usize,
+        segment: StackSegment,
+    ) {
+        self.captured_segments.insert(segment_handle_id, segment);
+        self.prompt_captured_segments
+            .entry(prompt_id)
+            .or_default()
+            .push(segment_handle_id);
+    }
+
+    pub fn store_suspended_frame(&mut self, frame: SuspendedFrame) -> usize {
+        let id = self.suspended_frame_id_counter;
+        self.suspended_frame_id_counter += 1;
+        self.suspended_frames.insert(id, frame);
+        id
+    }
+
+    pub fn mark_pending_captured_segment(&mut self, segment_handle_id: usize) {
+        self.pending_captured_segment_handles.push(segment_handle_id);
+    }
+
+    pub fn clear_pending_captured_segment(&mut self, segment_handle_id: usize) {
+        self.pending_captured_segment_handles
+            .retain(|id| *id != segment_handle_id);
+    }
+
+    pub fn take_suspended_frame(&mut self, frame_id: usize) -> Option<SuspendedFrame> {
+        if frame_id == 0 {
+            None
+        } else {
+            self.suspended_frames.remove(&frame_id)
+        }
+    }
+
+    pub fn current_saved_continuation_ptr(&self) -> usize {
+        self.saved_continuation_ptrs.last().copied().unwrap_or(0)
+    }
+
+    pub fn push_saved_continuation_ptr(&mut self, cont_ptr: usize) {
+        if cont_ptr == 0 {
+            return;
+        }
+        if self.saved_continuation_ptrs.last().copied() != Some(cont_ptr) {
+            self.saved_continuation_ptrs.push(cont_ptr);
+        }
+    }
+
+    pub fn clear_saved_continuations_for_prompt(&mut self, prompt_id: usize) {
+        self.saved_continuation_ptrs.retain(|ptr| {
+            ContinuationObject::from_tagged(*ptr)
+                .map(|cont| cont.prompt_id() != prompt_id)
+                .unwrap_or(false)
+        });
+    }
+
+    pub fn clear_all_saved_continuations(&mut self) {
+        self.saved_continuation_ptrs.clear();
+    }
+
     pub fn ensure_native_scratch_stack_top(&mut self) -> usize {
         const SCRATCH_STACK_BYTES: usize = 1024 * 1024;
         const ENTRY_SLACK_BYTES: usize = 256;
@@ -4423,6 +4207,31 @@ impl PerThreadData {
         let base = self.native_scratch_stack.as_mut_ptr() as usize;
         let top = (base + self.native_scratch_stack.len()) & !0xF;
         top.saturating_sub(ENTRY_SLACK_BYTES)
+    }
+
+    pub fn push_native_perform_stack(&mut self) -> usize {
+        const ENTRY_SLACK_BYTES: usize = 256;
+
+        let stack = self
+            .native_perform_stack_pool
+            .pop()
+            .unwrap_or_else(StackSegment::allocate);
+        let top = (stack.top & !0xF).saturating_sub(ENTRY_SLACK_BYTES);
+        self.active_native_perform_stacks.push(stack);
+        top
+    }
+
+    pub fn pop_native_perform_stack(&mut self) {
+        if let Some(stack) = self.active_native_perform_stacks.pop() {
+            self.native_perform_stack_pool.push(stack);
+        }
+    }
+
+    pub fn current_on_native_perform_stack(&self, addr: usize) -> bool {
+        self.active_native_perform_stacks
+            .last()
+            .map(|stack| stack.contains(addr))
+            .unwrap_or(false)
     }
 }
 
@@ -4521,6 +4330,8 @@ pub struct Runtime {
     pub per_thread_registry: Mutex<Vec<PerThreadDataPtr>>,
     // Counter for generating unique prompt IDs to distinguish sequential handlers
     pub prompt_id_counter: AtomicUsize,
+    // Counter for generating unique detached segment IDs for captured continuations
+    pub captured_segment_id_counter: AtomicUsize,
     // Global default uncaught exception handler (Beagle function pointer)
     pub default_exception_handler_fn: Option<usize>,
     // Namespace ID for keyword GC roots
@@ -4596,6 +4407,20 @@ impl StackSegment {
             size: top - base,
         }
     }
+
+    #[inline]
+    pub fn contains(&self, addr: usize) -> bool {
+        addr >= self.base && addr < self.top
+    }
+
+    pub fn clone_from(&self) -> Self {
+        let cloned = Self::allocate();
+        debug_assert_eq!(self.size, cloned.size);
+        unsafe {
+            std::ptr::copy_nonoverlapping(self.base as *const u8, cloned.base as *mut u8, self.size);
+        }
+        cloned
+    }
 }
 
 pub fn create_stack_with_protected_page_after(stack_size: usize) -> MmapMut {
@@ -4616,6 +4441,99 @@ pub fn create_stack_with_protected_page_after(stack_size: usize) -> MmapMut {
         );
     }
     stack
+}
+
+pub fn find_captured_segment_bounds(segment_handle_id: usize) -> Option<(usize, usize)> {
+    if segment_handle_id == 0 {
+        return None;
+    }
+    let runtime = crate::get_runtime().get();
+    let registry = runtime.per_thread_registry.lock().unwrap();
+    for ptd_ptr in registry.iter() {
+        let ptd = unsafe { &*ptd_ptr.0 };
+        if let Some(segment) = ptd.captured_segments.get(&segment_handle_id) {
+            return Some((segment.base, segment.top));
+        }
+    }
+    None
+}
+
+pub fn recycle_unreachable_captured_segments(
+    live_segment_handle_ids: &std::collections::HashSet<usize>,
+) {
+    fn retain_continuation_handle(
+        live_handles: &mut std::collections::HashSet<usize>,
+        value: usize,
+    ) {
+        if let Some(cont) = ContinuationObject::from_tagged(value) {
+            let handle_id = cont.segment_handle_id();
+            if handle_id != 0 {
+                live_handles.insert(handle_id);
+            }
+        }
+    }
+
+    let runtime = crate::get_runtime().get();
+    let mut live_handles = live_segment_handle_ids.clone();
+
+    {
+        let thread_globals = runtime.memory.thread_globals.lock().unwrap();
+        for tg in thread_globals.values() {
+            for block in tg.iter_blocks() {
+                for index in 0..GLOBAL_BLOCK_SIZE {
+                    let value = block.get_entry(index);
+                    if value != GLOBAL_BLOCK_FREE_SLOT {
+                        retain_continuation_handle(&mut live_handles, value);
+                    }
+                }
+            }
+        }
+    }
+
+    let registry = runtime.per_thread_registry.lock().unwrap();
+    for ptd_ptr in registry.iter() {
+        let ptd = unsafe { &mut *ptd_ptr.0 };
+
+        for saved_ptr in ptd.saved_continuation_ptrs.iter().copied() {
+            retain_continuation_handle(&mut live_handles, saved_ptr);
+        }
+        if let Some(ctx) = ptd.safe_perform_context.as_ref() {
+            retain_continuation_handle(&mut live_handles, ctx.cont_ptr);
+            retain_continuation_handle(&mut live_handles, ctx.resume_closure);
+            retain_continuation_handle(&mut live_handles, ctx.op_value);
+        }
+        if let Some(ctx) = ptd.safe_return_context.as_ref() {
+            retain_continuation_handle(&mut live_handles, ctx.value);
+        }
+        for frame in ptd.suspended_frames.values() {
+            for slot in frame.locals.iter().copied() {
+                retain_continuation_handle(&mut live_handles, slot);
+            }
+            for word in frame.trailing_words.iter().copied() {
+                retain_continuation_handle(&mut live_handles, word);
+            }
+        }
+        live_handles.extend(ptd.pending_captured_segment_handles.iter().copied());
+
+        let stale_segment_ids: Vec<usize> = ptd
+            .captured_segments
+            .keys()
+            .copied()
+            .filter(|segment_id| !live_handles.contains(segment_id))
+            .collect();
+
+        for segment_id in stale_segment_ids {
+            if let Some(segment) = ptd.captured_segments.remove(&segment_id) {
+                ptd.recycle_segment(segment);
+            }
+        }
+
+        ptd.prompt_captured_segments.retain(|_, segment_ids| {
+            segment_ids.retain(|segment_id| ptd.captured_segments.contains_key(segment_id));
+            !segment_ids.is_empty()
+        });
+
+    }
 }
 
 type ContinuationStackBuffer = [usize; 512];
@@ -4697,6 +4615,7 @@ impl Runtime {
                 Mutex::new(vec![PerThreadDataPtr(ptr)])
             },
             prompt_id_counter: AtomicUsize::new(1),
+            captured_segment_id_counter: AtomicUsize::new(1),
             default_exception_handler_fn: None,
             keyword_namespace: 0, // Will be set when first keyword is allocated
             pending_heap_bindings: Mutex::new(Vec::new()),

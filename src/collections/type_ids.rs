@@ -88,7 +88,6 @@ pub const TYPE_ID_FRAME: u8 = 37;
 /// The upper 16 bits of type_data encode num_locals (GC-traced slot count).
 /// header.size = num_locals + num_callee_saved + 4 (metadata fields).
 /// GC traces only the first (4 + num_locals) fields; callee-saved values are not traced.
-pub const TYPE_ID_CAPTURED_FRAME: u8 = 38;
 
 /// Type ID for continuation mark entries (dynamic variable bindings stored in frames).
 /// Layout: [key, value, next]

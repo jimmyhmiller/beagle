@@ -15,6 +15,16 @@ fn beag() -> Command {
     Command::new(beag_binary())
 }
 
+fn assert_command_success(output: &std::process::Output, context: &str) {
+    assert!(
+        output.status.success(),
+        "{} failed:\nstdout:\n{}\nstderr:\n{}",
+        context,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 // --- Version and Help ---
 
 #[test]
@@ -99,6 +109,116 @@ fn test_run_with_args() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(!stdout.is_empty() || true); // Just confirm it ran
     }
+}
+
+#[test]
+fn test_run_segmented_multishot_gc_always() {
+    let output = beag()
+        .args([
+            "run",
+            "--gc-always",
+            "resources/gc_frame_chain_multishot_test.bg",
+        ])
+        .output()
+        .expect("failed to run segmented multishot gc-always test");
+    assert_command_success(&output, "beag run --gc-always gc_frame_chain_multishot_test.bg");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.trim(), "multishot: 333\nloop_multishot: 630\ndone");
+}
+
+#[test]
+fn test_run_segmented_multishot_gc_always_repeatable() {
+    for _ in 0..3 {
+        let output = beag()
+            .args([
+                "run",
+                "--gc-always",
+                "resources/gc_frame_chain_multishot_test.bg",
+            ])
+            .output()
+            .expect("failed to run repeated segmented multishot gc-always test");
+        assert_command_success(
+            &output,
+            "beag run --gc-always gc_frame_chain_multishot_test.bg (repeat)",
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.trim(), "multishot: 333\nloop_multishot: 630\ndone");
+    }
+}
+
+#[test]
+fn test_run_handler_choice_multishot() {
+    let output = beag()
+        .args(["run", "resources/handler_choice_multishot_test.bg"])
+        .output()
+        .expect("failed to run handler_choice_multishot_test.bg");
+    assert_command_success(&output, "beag run handler_choice_multishot_test.bg");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "=== Choice Multishot Test ===\nExploring choice a: 1\nPicked: 1\nResult from a: 10\nExploring choice b: 2\nPicked: 2\nResult from b: 20\nFinal result: 30\n=== Test Complete ==="
+    );
+}
+
+#[test]
+fn test_run_sequential_handler_regression() {
+    let output = beag()
+        .args(["run", "resources/sequential_test.bg"])
+        .output()
+        .expect("failed to run sequential_test.bg");
+    assert_command_success(&output, "beag run sequential_test.bg");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "Starting test\nAbout to perform first\nHandler called, count: 0\nFirst result: 1\nAbout to perform second\nHandler called, count: 0\nSecond result: 1\nFinal result: 2"
+    );
+}
+
+#[test]
+fn test_run_async_future_basic_gc_always() {
+    let output = beag()
+        .args([
+            "run",
+            "--gc-always",
+            "resources/async_future_basic_test.bg",
+        ])
+        .output()
+        .expect("failed to run async_future_basic_test.bg with gc-always");
+    assert_command_success(&output, "beag run --gc-always async_future_basic_test.bg");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "=== Async Future Basic Test ===\nTest 1: Basic async/await\nResult: 42\nTest 2: Multiple futures\nResults: hello world\nTest 3: await-all\nAll results: [1, 2, 3]\nTest 4: Nested computation\nNested result: 30\nTest 5: Future state\nFuture is resolved with: done\n=== All tests passed ===\nFinal result: done"
+    );
+}
+
+#[test]
+fn test_run_event_loop_handler_gc_always() {
+    let output = beag()
+        .args([
+            "run",
+            "--gc-always",
+            "resources/event_loop_handler_test.bg",
+        ])
+        .output()
+        .expect("failed to run event_loop_handler_test.bg with gc-always");
+    assert_command_success(&output, "beag run --gc-always event_loop_handler_test.bg");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.trim(), "Sleep worked: true\nFile exists: true\ndone");
+}
+
+#[test]
+fn test_run_concurrent_socket_echo() {
+    let output = beag()
+        .args(["run", "resources/concurrent_socket_echo_test.bg"])
+        .output()
+        .expect("failed to run concurrent_socket_echo_test.bg");
+    assert_command_success(&output, "beag run concurrent_socket_echo_test.bg");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "Server received: Hello World\nClient received: Hello World\ndone"
+    );
 }
 
 #[test]
@@ -311,6 +431,18 @@ fn test_specific_file() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("1 passed"), "Should have 1 passing test");
+}
+
+#[test]
+fn test_segmented_multishot_snapshot_file() {
+    let output = beag()
+        .args(["test", "resources/gc_frame_chain_multishot_test.bg"])
+        .output()
+        .expect("failed to run beag test on gc_frame_chain_multishot_test.bg");
+    assert_command_success(&output, "beag test resources/gc_frame_chain_multishot_test.bg");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("1 passed"), "Should have 1 passing test");
+    assert!(stdout.contains("0 failed"), "Should have 0 failures");
 }
 
 #[test]

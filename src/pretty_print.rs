@@ -559,6 +559,16 @@ impl PrettyPrint for Instruction {
                     saves.pretty_print()
                 )
             }
+            Instruction::PerformEffect(handler, enum_type, op_value, label, local_index, _) => {
+                format!(
+                    "perform_effect {}, {}, {}, label_{}, local_{}",
+                    handler.pretty_print(),
+                    enum_type.pretty_print(),
+                    op_value.pretty_print(),
+                    label.index,
+                    local_index
+                )
+            }
             Instruction::ReturnFromShift(value, cont_ptr, _) => {
                 format!(
                     "return_from_shift {}, {}",

@@ -18,7 +18,7 @@ use crate::{
     gc::STACK_SIZE,
     get_runtime,
     runtime::{
-        CapturedFrame, ContinuationObject, DispatchTable, FFIInfo, FFIType, RawPtr, Runtime,
+        ContinuationObject, DispatchTable, FFIInfo, FFIType, RawPtr, Runtime,
     },
     types::{BuiltInTypes, Header, HeapObject},
 };
@@ -1710,6 +1710,7 @@ pub unsafe extern "C" fn throw_type_error(stack_pointer: usize, frame_pointer: u
             .allocate_string(stack_pointer, "TypeError".to_string())
             .expect("Failed to allocate kind string")
             .into();
+        let kind_root_id = runtime.register_temporary_root(kind);
         let msg = runtime
             .allocate_string(
                 stack_pointer,
@@ -1717,6 +1718,7 @@ pub unsafe extern "C" fn throw_type_error(stack_pointer: usize, frame_pointer: u
             )
             .expect("Failed to allocate message string")
             .into();
+        let kind = runtime.unregister_temporary_root(kind_root_id);
         (kind, msg)
     };
 
@@ -11160,6 +11162,15 @@ pub unsafe extern "C" fn throw_exception(
         }
     };
 
+    // A handler can throw while executing on a native perform stack. That is a
+    // non-local exit from `continue_perform_on_safe_stack`, so its normal cleanup
+    // path will never run. Pop the current perform stack before we jump away.
+    if crate::runtime::per_thread_data().current_on_native_perform_stack(stack_pointer)
+        || crate::runtime::per_thread_data().current_on_native_perform_stack(frame_pointer)
+    {
+        crate::runtime::per_thread_data().pop_native_perform_stack();
+    }
+
     // Pop handlers until we find one
     if let Some(handler) = {
         let runtime = get_runtime().get_mut();
@@ -11199,6 +11210,10 @@ pub unsafe extern "C" fn throw_exception(
             let resume_ptr =
                 (handler.frame_pointer as isize).wrapping_add(handler.resume_local) as *mut usize;
             unsafe { *resume_ptr = cont_ptr };
+            if let Some(cont_obj) = ContinuationObject::from_tagged(cont_ptr) {
+                crate::runtime::per_thread_data()
+                    .clear_pending_captured_segment(cont_obj.segment_handle_id());
+            }
 
             // Unwind the GC frame chain to the handler's level.
             // Frames deeper than the handler are being abandoned (SP/FP are
@@ -11362,20 +11377,57 @@ pub unsafe extern "C" fn create_error(
 
     let runtime = get_runtime().get_mut();
 
+    let kind_root = if BuiltInTypes::is_heap_pointer(kind_str) {
+        Some(runtime.register_temporary_root(kind_str))
+    } else {
+        None
+    };
+    let message_root = if BuiltInTypes::is_heap_pointer(message_str) {
+        Some(runtime.register_temporary_root(message_str))
+    } else {
+        None
+    };
+    let location_root = if BuiltInTypes::is_heap_pointer(location_str) {
+        Some(runtime.register_temporary_root(location_str))
+    } else {
+        None
+    };
+
+    let kind_str = kind_root
+        .map(|root| runtime.peek_temporary_root(root))
+        .unwrap_or(kind_str);
+    let message_str = message_root
+        .map(|root| runtime.peek_temporary_root(root))
+        .unwrap_or(message_str);
+    let location_str = location_root
+        .map(|root| runtime.peek_temporary_root(root))
+        .unwrap_or(location_str);
+
     // Extract the error kind string to determine which variant to create
     // Use get_string which handles both string constants and heap-allocated strings
     let kind = runtime.get_string(stack_pointer, kind_str);
-
     // Use the general struct creation helper
     let fields = vec![message_str, location_str];
-    runtime
+    let error = runtime
         .create_struct(
             "beagle.core/SystemError",
             Some(&kind),
             &fields,
             stack_pointer,
         )
-        .expect("Failed to create SystemError")
+        .expect("Failed to create SystemError");
+
+    if let Some(root) = kind_root {
+        runtime.unregister_temporary_root(root);
+    }
+    if let Some(root) = message_root {
+        runtime.unregister_temporary_root(root);
+    }
+    if let Some(root) = location_root {
+        runtime.unregister_temporary_root(root);
+    }
+
+    error
 }
 
 /// Helper to throw a runtime error with kind and message strings
@@ -11552,14 +11604,18 @@ pub unsafe extern "C" fn push_prompt_runtime(
         link_register,
         result_local,
         prompt_id,
-        is_relocated: false,
     };
+
+    let segment = crate::runtime::per_thread_data().allocate_segment();
+    let segment_top = segment.top & !0xF;
+    {
+        let ptd = crate::runtime::per_thread_data();
+        ptd.push_active_segment(prompt_id, segment);
+    }
 
     runtime.push_prompt_handler(handler);
 
-    // Return the current stack pointer (no segment switch for now).
-    // The JIT code will MOV SP, X0 which is a no-op since we return the same SP.
-    stack_pointer
+    segment_top
 }
 
 /// Pop the current prompt handler.
@@ -11577,11 +11633,12 @@ pub unsafe extern "C" fn pop_prompt_runtime(
     // Read values from per-thread data in a scoped block to avoid holding
     // a &mut reference across the call to return_from_shift_runtime (which
     // also accesses per-thread data — overlapping &mut would be UB).
-    let (current_prompt_id, should_route_to_return_from_shift) = {
+    let (current_prompt_id, current_prompt_sp, should_route_to_return_from_shift) = {
         let ptd = crate::runtime::per_thread_data();
 
         // Get the current prompt's ID BEFORE popping - this tells us which handle block is completing
         let current_prompt_id = ptd.prompt_handlers.last().map(|h| h.prompt_id);
+        let current_prompt_sp = ptd.prompt_handlers.last().map(|h| h.stack_pointer);
 
         if debug_prompts {
             let rp_len = ptd.invocation_return_points.len();
@@ -11620,7 +11677,7 @@ pub unsafe extern "C" fn pop_prompt_runtime(
             ptd.return_from_shift_via_pop_prompt = true;
         }
 
-        (current_prompt_id, should_route)
+        (current_prompt_id, current_prompt_sp, should_route)
     };
     // ptd borrow is dropped here
 
@@ -11643,8 +11700,19 @@ pub unsafe extern "C" fn pop_prompt_runtime(
 
     // Clear invocation return points that belong to THIS handle block.
     if let Some(prompt_id) = current_prompt_id {
+        if let Some(segment) = ptd.pop_active_segment(prompt_id) {
+            ptd.recycle_segment(segment);
+        }
         ptd.invocation_return_points
             .retain(|rp| rp.prompt_id != prompt_id);
+        let saved = ptd.current_saved_continuation_ptr();
+        if saved != 0
+            && ContinuationObject::from_tagged(saved)
+                .map(|cont| cont.prompt_id() == prompt_id)
+                .unwrap_or(false)
+        {
+            ptd.clear_saved_continuations_for_prompt(prompt_id);
+        }
     }
 
     // When all prompts are done, clear ALL continuation state for this thread.
@@ -11656,17 +11724,15 @@ pub unsafe extern "C" fn pop_prompt_runtime(
         ptd.invocation_return_points.clear();
         ptd.return_from_shift_via_pop_prompt = false;
         ptd.is_handler_return = false;
-        ptd.saved_continuation_ptr = 0;
-        ptd.relocation_depth = 0;
+        ptd.clear_all_saved_continuations();
     }
 
-    // Return current SP — JIT code will MOV SP, X0 which is a no-op.
-    stack_pointer
+    current_prompt_sp.unwrap_or(stack_pointer)
 }
 
 /// Capture a continuation up to the nearest prompt.
-/// This promotes each stack frame to a CapturedFrame heap object, forming a linked list.
-/// The GC traces CapturedFrame objects like any other heap object — no special scanning needed.
+/// Prompt-delimited execution runs on a prompt-owned segment, so capture
+/// detaches that segment and records it by segment handle.
 ///
 /// Arguments:
 /// - stack_pointer: current SP
@@ -11702,7 +11768,6 @@ pub unsafe extern "C" fn capture_continuation_runtime(
             );
         }
     };
-
     // NOTE: We intentionally do NOT clear InvocationReturnPoints here.
     let _thread_id = std::thread::current().id();
 
@@ -11712,209 +11777,35 @@ pub unsafe extern "C" fn capture_continuation_runtime(
     let capture_top = prompt_fp.saturating_add(frame_header_bytes).max(prompt_sp);
     let stack_size = capture_top.saturating_sub(stack_pointer);
 
-    // Walk the FP chain from innermost (current frame) to outermost (prompt frame),
-    // promoting each frame to a CapturedFrame heap object.
-    //
-    // Pass 1: Collect all FPs in the capture range
-    let mut fps: Vec<usize> = Vec::new();
-    let mut fp = frame_pointer;
-    while fp < prompt_fp {
-        let header_value = unsafe { *((fp - 8) as *const usize) };
-        let header = Header::from_usize(header_value);
-        if header.type_id != TYPE_ID_FRAME {
-            let caller_fp = unsafe { *(fp as *const usize) };
-            if caller_fp == 0 || caller_fp <= fp || caller_fp > capture_top {
-                break;
-            }
-            fp = caller_fp;
-            continue;
-        }
-        fps.push(fp);
-        let caller_fp = unsafe { *(fp as *const usize) };
-        if caller_fp == 0 || caller_fp <= fp || caller_fp > capture_top {
-            break;
-        }
-        fp = caller_fp;
+    let segment = {
+        let ptd = crate::runtime::per_thread_data();
+        ptd.pop_active_segment(prompt.prompt_id)
     }
-    // Include prompt frame too
-    if prompt_fp > 0 {
-        let header_value = unsafe { *((prompt_fp - 8) as *const usize) };
-        let header = Header::from_usize(header_value);
-        if header.type_id == TYPE_ID_FRAME {
-            fps.push(prompt_fp);
-        }
-    }
+    .unwrap_or_else(|| {
+        panic!(
+            "capture_continuation_runtime missing active segment for prompt {}. Segmented prompts are required.",
+            prompt.prompt_id
+        )
+    });
 
-    // Pass 2: Compute frame_bottom for each frame and promote to CapturedFrame
-    // fps[0] is innermost (lowest FP), fps[last] is outermost (highest FP)
-    let mut parent_frame: usize = BuiltInTypes::null_value() as usize;
+    let segment_handle_id = runtime
+        .captured_segment_id_counter
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    crate::runtime::per_thread_data().record_captured_segment(
+        prompt.prompt_id,
+        segment_handle_id,
+        segment,
+    );
+    crate::runtime::per_thread_data().mark_pending_captured_segment(segment_handle_id);
 
-    for (idx, &frame_fp) in fps.iter().enumerate() {
-        // frame_bottom: for innermost frame, it's stack_pointer.
-        // For other frames, the inner frame's FP+16 is roughly where this frame
-        // had its call site. However, the actual frame_bottom of this frame is
-        // computed from the inner frame's entry point.
-        // On x86: inner_fp = caller_rsp - 16 (call pushes 8 + push rbp pushes 8)
-        // On arm64: inner_fp = caller_rsp (stp x29,x30,[sp,-frame_size]! sets fp=sp)
-        // So this_frame's_call_rsp = inner_fp + 16 (x86) or inner_fp + 16 (arm64 for the STP slot)
-        //
-        // But the frame_bottom of this frame extends below the call site down to
-        // this frame's actual RSP. We DON'T need to go that low - we just need to know
-        // how far down the callee-saved registers go.
-        //
-        // Actually, the simplest way: compute frame_bottom from the known frame structure.
-        // We have num_slots from the header. The frame allocation is:
-        //   aligned_size = align_up(1 + num_slots + num_callee_saved, 2) * 8
-        //   frame_bottom = fp - aligned_size
-        //
-        // But we don't know num_callee_saved from the header. It's not stored there.
-        // Instead, we can compute it from the distance to the next inner frame:
-        //   If idx > 0: the inner frame's entry SP = fps[idx-1] + 16
-        //     This frame's allocation bottom should be at or below fps[idx-1] + 16
-        //     frame_bottom = if idx == 0 { stack_pointer } else { fps[idx-1] + 16 }
-        //   Wait no, fps[idx-1]+16 is the SP before the inner frame was called.
-        //   This is the SP value INSIDE this frame when it was about to call.
-        //   But after the call instruction, SP was decremented by 8 (ret addr pushed).
-        //   So actually, the inner function's rbp = this_frame's_sp_at_call - 16
-        //   => this_frame's_sp_at_call = fps[idx-1] + 16
-        //   And this_frame's actual RSP (frame bottom) is BELOW this_frame's_sp_at_call.
-        //   The distance: sp_at_call - rsp = the eval stack + intermediates used at call time.
-        //
-        //   Hmm, but we need the frame_bottom to know callee_saved_count.
-        //   Let's just use stack_pointer for the innermost frame and fps[idx-1]+16 for others.
-        //   This gives us the "visible bottom" of this frame from the inner frame's perspective.
-        //   Then callee_saved = (fp + 16 - frame_bottom - 8 - num_slots*8) / 8
-        //   But that might count padding as callee-saved...
-        //
-        //   Alternative approach: don't distinguish between callee-saved and padding.
-        //   Store everything between locals and frame_bottom as "callee-saved" fields.
-        //   Some might be padding (zeros), which is fine - they just won't be heap pointers.
-        //   The key invariant is that num_traced_slots returns ONLY the locals range.
-        let frame_bottom = if idx == 0 {
-            stack_pointer
-        } else {
-            // The inner frame's FP+16 is this frame's SP at the time of the call.
-            // On x86: callee does [call(push ret 8) + push rbp(8)] so inner_fp = sp_at_call - 16
-            // On ARM64: callee does stp x29,x30,[sp,-N]! so inner_fp = sp_at_call - N
-            // But sp_at_call = this frame's RSP when making the call. It could be the same
-            // as this frame's RSP if nothing else was pushed for the call.
-            // Using inner_fp + 16 as the boundary: this gives us everything from
-            // this frame's "call SP" down to the locals. Any words between the locals
-            // and this boundary are callee-saved + padding.
-            fps[idx - 1] + 16
-        };
+    // The detached segment now owns the captured Beagle frames. Execution
+    // continues below on Rust frames, but GC must no longer walk into the
+    // abandoned prompt-owned segment through the active chain.
+    set_gc_frame_top(prompt_fp.saturating_sub(8));
 
-        let header_value = unsafe { *((frame_fp - 8) as *const usize) };
-        let header = Header::from_usize(header_value);
-        let num_slots = header.size as usize;
-
-        // Protect parent_frame from GC during allocation
-        let parent_root_id = if parent_frame != BuiltInTypes::null_value() as usize {
-            runtime.register_temporary_root(parent_frame)
-        } else {
-            0
-        };
-
-        let captured_ptr = CapturedFrame::from_stack_frame(
-            frame_fp,
-            num_slots,
-            frame_bottom,
-            if parent_root_id != 0 {
-                // parent may have moved during allocation - use the root's current value
-                // Actually, register_temporary_root stores the value and returns an id.
-                // We need to get the potentially-updated value after allocation.
-                // But from_stack_frame does the allocation internally...
-                // So we need to unregister AFTER from_stack_frame to get the updated parent.
-                parent_frame // Will be updated below
-            } else {
-                parent_frame
-            },
-            runtime,
-            stack_pointer,
-        );
-
-        // Get potentially-updated parent value
-        if parent_root_id != 0 {
-            let _updated_parent = runtime.unregister_temporary_root(parent_root_id);
-            // The CapturedFrame already stored parent_frame at allocation time.
-            // If GC moved parent during allocation of captured_ptr, the parent field
-            // in captured_ptr has the OLD value. We need to fix this.
-            // Hmm, this is the stale GcHandle problem from MEMORY.md.
-            // We need a different approach: register parent as temp root BEFORE allocating,
-            // then after allocating, read the updated parent from the root and patch it.
-            //
-            // Actually, let me restructure: register parent root, allocate CapturedFrame,
-            // then get updated parent value and write it into the CapturedFrame.
-            let updated_parent = _updated_parent;
-            if updated_parent != parent_frame {
-                // GC moved the parent; patch the CapturedFrame's parent field
-                let obj = HeapObject::from_tagged(captured_ptr);
-                obj.write_field(0, updated_parent); // FIELD_PARENT = 0
-            }
-        }
-
-        parent_frame = captured_ptr;
-
-        if debug_prompts {
-            eprintln!(
-                "[capture_cont] frame #{}: fp={:#x} num_slots={} frame_bottom={:#x} captured_ptr={:#x}",
-                idx, frame_fp, num_slots, frame_bottom, captured_ptr
-            );
-        }
-    }
-
-    // Keep the original frames in the GC chain after capture.
-    // Execution continues in these same frames to build the resume closure and
-    // call the handler, so their locals/spills must remain visible to GC until
-    // a later non-local control transfer actually abandons them.
-
-    // Now parent_frame points to the outermost CapturedFrame.
-    // But we want the ContinuationObject's segment field to point to the innermost frame
-    // for reconstruction. Actually, the plan says "innermost frame" is the segment.
-    // But our chain is: innermost -> ... -> outermost (each frame's parent is the previous one).
-    // So parent_frame IS the outermost. We need the innermost.
-    // Actually, we built the chain walking from innermost to outermost, where each new frame
-    // becomes the new parent_frame. So parent_frame = outermost frame, and the innermost frame
-    // is the first one we created (which has parent=null).
-    //
-    // Wait, let me re-read: "Walk from innermost (current FP) to outermost (prompt FP).
-    // Each frame links to the previous via parent."
-    // So innermost.parent = null, next.parent = innermost, ... outermost.parent = second-to-last.
-    // parent_frame = outermost CapturedFrame.
-    //
-    // The plan says: "ContinuationObject.FIELD_SEGMENT = parent_frame (innermost frame)"
-    // But that contradicts - parent_frame is outermost.
-    //
-    // For reconstruction, we need to walk outermost to innermost. So storing the outermost
-    // and walking via parent gives us that order (outermost -> parent -> ... -> innermost).
-    // Wait no, parent goes from outermost back to innermost:
-    //   outermost.parent = second-to-outermost
-    //   ...
-    //   second.parent = innermost
-    //   innermost.parent = null
-    //
-    // So walking from outermost via parent gives: outermost, second-to-outermost, ..., innermost.
-    // That IS the order we need for reconstruction (outermost first on the stack, innermost last).
-    // Wait, actually for stack reconstruction we want outermost at the TOP (high addresses)
-    // and innermost at the BOTTOM (low addresses, near SP). So we reconstruct outermost first.
-    //
-    // Storing parent_frame (outermost) as the segment field works perfectly.
-    let segment_ptr = parent_frame;
-
-    // Protect the segment (CapturedFrame chain) while allocating continuation object
-    let segment_root_id = if segment_ptr != BuiltInTypes::null_value() as usize {
-        runtime.register_temporary_root(segment_ptr)
-    } else {
-        0
-    };
-
-    // Allocate the continuation heap object
-    let cont_ptr = match runtime.allocate(17, stack_pointer, BuiltInTypes::HeapObject) {
+    let cont_ptr = match runtime.allocate(16, stack_pointer, BuiltInTypes::HeapObject) {
         Ok(ptr) => ptr,
         Err(_) => unsafe {
-            if segment_root_id != 0 {
-                runtime.unregister_temporary_root(segment_root_id);
-            }
             throw_runtime_error(
                 stack_pointer,
                 "AllocationError",
@@ -11922,42 +11813,34 @@ pub unsafe extern "C" fn capture_continuation_runtime(
             );
         },
     };
-    let segment_ptr = if segment_root_id != 0 {
-        runtime.unregister_temporary_root(segment_root_id)
-    } else {
-        segment_ptr
-    };
 
     let mut cont_obj = HeapObject::from_tagged(cont_ptr);
     ContinuationObject::initialize(
         &mut cont_obj,
-        segment_ptr,
         stack_pointer,
         frame_pointer,
         resume_address,
         result_local_offset,
         &prompt,
+        segment_handle_id,
     );
 
     if debug_prompts {
         eprintln!(
-            "[capture_cont] prompt_id={} stack_size={} prompt_sp={:#x} prompt_fp={:#x} resume={:#x} cont_ptr={:#x} num_frames={}",
+            "[capture_cont] segmented prompt_id={} stack_size={} prompt_sp={:#x} prompt_fp={:#x} resume={:#x} cont_ptr={:#x}",
             prompt.prompt_id,
             stack_size,
             prompt_sp,
             prompt_fp,
             resume_address,
-            cont_ptr,
-            fps.len()
+            cont_ptr
         );
     }
 
-    // Return the continuation heap object pointer (tagged)
     cont_ptr
 }
 
 unsafe extern "C" fn continue_return_from_shift_on_safe_stack() -> ! {
-    let debug_prompts = get_runtime().get().get_command_line_args().debug;
     let (mut value, return_point) = {
         let ptd = crate::runtime::per_thread_data();
         let ctx = ptd
@@ -11968,113 +11851,6 @@ unsafe extern "C" fn continue_return_from_shift_on_safe_stack() -> ! {
         (ctx.value, ctx.return_point)
     };
 
-    // Copy mutable local/eval-slot ranges from relocated segments back to their
-    // original locations. For nested throw/resume cycles (multiple throws after resume),
-    // chain through all return points with the same prompt_id to propagate changes
-    // all the way back to the original (root) stack location.
-    let return_address_to_use = return_point.return_address;
-    let mut effective_return_point = return_point;
-
-    if !effective_return_point.is_root_invocation && effective_return_point.from_resumable_exception
-    {
-        // Non-root resumable exception: copy mutable ranges from this level to its parent,
-        // then chain through parent RPs to un-relocate all the way back to the original stack.
-        if !effective_return_point.mutable_ranges.is_empty() {
-            if debug_prompts {
-                eprintln!(
-                    "[return_from_shift] Chained copy (non-root): {} ranges from relocated_sp={:#x} to original_sp={:#x}",
-                    effective_return_point.mutable_ranges.len(),
-                    effective_return_point.relocated_sp,
-                    effective_return_point.original_sp
-                );
-            }
-            for range in &effective_return_point.mutable_ranges {
-                unsafe {
-                    std::ptr::copy(
-                        (effective_return_point.relocated_sp + range.offset) as *const u8,
-                        (effective_return_point.original_sp + range.offset) as *mut u8,
-                        range.len,
-                    );
-                }
-            }
-        }
-
-        // Chain through parent RPs with the same prompt_id until we reach the root.
-        // This un-relocates the stack all the way back to the original location.
-        let prompt_id = effective_return_point.prompt_id;
-        loop {
-            let ptd = crate::runtime::per_thread_data();
-            if let Some(pos) = ptd
-                .invocation_return_points
-                .iter()
-                .rposition(|rp| rp.prompt_id == prompt_id)
-            {
-                let parent_rp = ptd.invocation_return_points.remove(pos);
-                if ptd.relocation_depth > 0 {
-                    ptd.relocation_depth -= 1;
-                }
-                // Pop the prompt handler that belongs to this parent level
-                if !ptd.prompt_handlers.is_empty() {
-                    ptd.prompt_handlers.pop();
-                }
-
-                // Copy parent's mutable ranges
-                if !parent_rp.mutable_ranges.is_empty() {
-                    if debug_prompts {
-                        eprintln!(
-                            "[return_from_shift] Chained copy (parent): {} ranges from relocated_sp={:#x} to original_sp={:#x} is_root={}",
-                            parent_rp.mutable_ranges.len(),
-                            parent_rp.relocated_sp,
-                            parent_rp.original_sp,
-                            parent_rp.is_root_invocation
-                        );
-                    }
-                    for range in &parent_rp.mutable_ranges {
-                        unsafe {
-                            std::ptr::copy(
-                                (parent_rp.relocated_sp + range.offset) as *const u8,
-                                (parent_rp.original_sp + range.offset) as *mut u8,
-                                range.len,
-                            );
-                        }
-                    }
-                }
-
-                effective_return_point = parent_rp;
-                if effective_return_point.is_root_invocation {
-                    break;
-                }
-            } else {
-                break;
-            }
-        }
-    } else if effective_return_point.is_root_invocation
-        && !effective_return_point.mutable_ranges.is_empty()
-    {
-        if debug_prompts {
-            eprintln!(
-                "[return_from_shift] Copying mutable slots: {} ranges, {} bytes from relocated_sp={:#x} to original_sp={:#x}",
-                effective_return_point.mutable_ranges.len(),
-                effective_return_point
-                    .mutable_ranges
-                    .iter()
-                    .map(|r| r.len)
-                    .sum::<usize>(),
-                effective_return_point.relocated_sp,
-                effective_return_point.original_sp
-            );
-        }
-        for range in &effective_return_point.mutable_ranges {
-            unsafe {
-                std::ptr::copy(
-                    (effective_return_point.relocated_sp + range.offset) as *const u8,
-                    (effective_return_point.original_sp + range.offset) as *mut u8,
-                    range.len,
-                );
-            }
-        }
-    }
-
     value = unsafe {
         let ptd = crate::runtime::per_thread_data();
         ptd.safe_return_context
@@ -12083,36 +11859,28 @@ unsafe extern "C" fn continue_return_from_shift_on_safe_stack() -> ! {
             .unwrap_or(value)
     };
 
-    // Use root RP's SP/FP/callee_saved (original stack) but keep the non-root RP's
-    // return_address (the correct code point in the catch block).
-    let new_sp = effective_return_point.stack_pointer;
-    let new_fp = effective_return_point.frame_pointer;
-    let return_address = return_address_to_use;
-    let callee_saved = effective_return_point.callee_saved_regs;
+    let new_sp = return_point.stack_pointer;
+    let new_fp = return_point.frame_pointer;
+    let return_address = return_point.return_address;
+    let callee_saved = return_point.callee_saved_regs;
 
-    // Restore the shift body's stack frame from CapturedFrame.
-    let saved_frame_ptr = effective_return_point.saved_frame;
+    let suspended_frame = {
+        let ptd = crate::runtime::per_thread_data();
+        ptd.take_suspended_frame(return_point.suspended_frame_id)
+    };
 
     cfg_if::cfg_if! {
         if #[cfg(target_arch = "x86_64")] {
-            if saved_frame_ptr != 0
-                && let Some(saved_frame) = CapturedFrame::from_tagged(saved_frame_ptr) {
-                    let caller_fp = saved_frame.saved_caller_fp();
-                    let frame_size = saved_frame.total_stack_size();
+            if let Some(suspended_frame) = suspended_frame.as_ref() {
+                    let frame_size = suspended_frame.frame_size;
                     let frame_bottom = new_fp
                         .checked_add(16)
                         .and_then(|top| top.checked_sub(frame_size))
                         .expect("safe return frame restore underflow computing frame_bottom");
                     let gc_chain_prev =
                         gc_chain_prev_for_restored_segment(frame_bottom, frame_size, new_fp);
-                    saved_frame.restore_to_stack(new_fp, caller_fp);
-                    CapturedFrame::link_restored_frames_into_gc_chain_with_prev(
-                        &[new_fp],
-                        gc_chain_prev,
-                    );
-                    // Restore the original GC prev pointer so the handler's epilogue
-                    // correctly unlinks from the GC chain (avoiding cycles).
-                    unsafe { *((new_fp - 16) as *mut usize) = effective_return_point.saved_gc_prev; }
+                    suspended_frame.restore_to_stack(new_fp, gc_chain_prev);
+                    unsafe { *((new_fp - 16) as *mut usize) = return_point.saved_gc_prev; }
                 }
 
             let runtime = get_runtime().get();
@@ -12123,27 +11891,19 @@ unsafe extern "C" fn continue_return_from_shift_on_safe_stack() -> ! {
             let return_jump_ptr: extern "C" fn(usize, usize, usize, usize, *const usize, *const u8, usize) -> ! =
                 unsafe { std::mem::transmute(ptr) };
             crate::runtime::per_thread_data().safe_return_context = None;
-            // Pass null for frame_src since we already restored via CapturedFrame
+            // Pass null for frame_src since we restored the suspended caller frame directly.
             return_jump_ptr(new_sp, new_fp, value, return_address, callee_saved.as_ptr(), std::ptr::null(), 0);
         } else {
-            if saved_frame_ptr != 0
-                && let Some(saved_frame) = CapturedFrame::from_tagged(saved_frame_ptr) {
-                    let caller_fp = saved_frame.saved_caller_fp();
-                    let frame_size = saved_frame.total_stack_size();
+            if let Some(suspended_frame) = suspended_frame.as_ref() {
+                    let frame_size = suspended_frame.frame_size;
                     let frame_bottom = new_fp
                         .checked_add(16)
                         .and_then(|top| top.checked_sub(frame_size))
                         .expect("safe return frame restore underflow computing frame_bottom");
                     let gc_chain_prev =
                         gc_chain_prev_for_restored_segment(frame_bottom, frame_size, new_fp);
-                    saved_frame.restore_to_stack(new_fp, caller_fp);
-                    CapturedFrame::link_restored_frames_into_gc_chain_with_prev(
-                        &[new_fp],
-                        gc_chain_prev,
-                    );
-                    // Restore the original GC prev pointer so the handler's epilogue
-                    // correctly unlinks from the GC chain (avoiding cycles).
-                    unsafe { *((new_fp - 16) as *mut usize) = effective_return_point.saved_gc_prev; }
+                    suspended_frame.restore_to_stack(new_fp, gc_chain_prev);
+                    unsafe { *((new_fp - 16) as *mut usize) = return_point.saved_gc_prev; }
                 }
 
             crate::runtime::per_thread_data().safe_return_context = None;
@@ -12175,101 +11935,70 @@ unsafe extern "C" fn continue_return_from_shift_on_safe_stack() -> ! {
     }
 }
 
-/// Restore continuation frames and jump — runs on the scratch stack.
-///
-/// The scratch stack is a heap-allocated region that cannot overlap with
-/// the native/Beagle stack, so writing to original_sp is safe.
-unsafe extern "C" fn continue_invoke_on_safe_stack() -> ! {
+unsafe extern "C" fn continue_perform_on_safe_stack() -> ! {
     let ctx = {
         let ptd = crate::runtime::per_thread_data();
-        ptd.safe_invoke_context
+        ptd.safe_perform_context
             .take()
-            .expect("missing safe invoke context")
+            .expect("missing safe perform context")
     };
 
-    // Restore each frame to the target stack
-    for &(target_fp, caller_fp, tagged_ptr) in &ctx.frame_ops {
-        let frame = CapturedFrame::from_tagged(tagged_ptr)
-            .expect("[invoke_cont] Invalid CapturedFrame pointer during scratch-stack restore");
-        frame.restore_to_stack(target_fp, caller_fp);
+    let handler = ctx.handler;
+    let op_value = ctx.op_value;
+    let resume_closure = ctx.resume_closure;
+    let cont_ptr = ctx.cont_ptr;
+    let fn_ptr = ctx.fn_ptr;
+
+    let handler_result = unsafe {
+        call_beagle_fn_ptr3(get_runtime().get(), fn_ptr, handler, op_value, resume_closure)
+    };
+
+    if std::env::var("BEAGLE_DEBUG_PERFORM").is_ok() {
+        eprintln!(
+            "[perform_safe] handler returned result={:#x} cont_ptr={:#x}",
+            handler_result, cont_ptr
+        );
     }
 
-    // Link restored frames into the GC chain
-    CapturedFrame::link_restored_frames_into_gc_chain_with_prev(
-        &ctx.restored_fps,
-        ctx.gc_chain_prev,
-    );
+    crate::runtime::per_thread_data().pop_native_perform_stack();
 
-    // Write result value to the continuation's result local
-    if ctx.result_local != 0 {
-        let result_ptr = (ctx.new_fp as isize).wrapping_add(ctx.result_local) as *mut usize;
-        unsafe { *result_ptr = ctx.value };
-    }
-
-    // Extract everything we need from ctx, then drop it to free Vec
-    // buffers BEFORE the noreturn jump (otherwise they leak every call).
-    let new_sp = ctx.new_sp;
-    let new_fp = ctx.new_fp;
-    let resume_address = ctx.resume_address;
-    let value = ctx.value;
-    #[allow(unused_variables)]
-    let result_local = ctx.result_local;
-    #[allow(unused_variables)]
-    let stack_segment_size = ctx.stack_segment_size;
-    #[allow(unused_variables)]
-    let original_sp = ctx.original_sp;
-    #[allow(unused_variables)]
-    let return_trampoline = ctx.return_trampoline;
-    drop(ctx);
-
-    // Jump to the restored continuation
+    let stack_pointer: usize;
+    let frame_pointer: usize;
     cfg_if::cfg_if! {
         if #[cfg(target_arch = "x86_64")] {
-            let runtime = get_runtime().get();
-            let jump_fn = runtime
-                .get_function_by_name("beagle.builtin/invoke-continuation-jump")
-                .expect("invoke-continuation-jump function not found");
-            let ptr: *const u8 = jump_fn.pointer.into();
-            let jump_ptr: extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> ! =
-                unsafe { std::mem::transmute(ptr) };
-            let safe_result_ptr = if result_local != 0 {
-                (new_fp as isize).wrapping_add(result_local) as usize
-            } else {
-                0
-            };
-            jump_ptr(
-                original_sp,
-                resume_address,
-                stack_segment_size,
-                new_sp,
-                new_fp,
-                safe_result_ptr,
-                value,
-            );
+            unsafe {
+                std::arch::asm!(
+                    "mov {0}, rsp",
+                    "mov {1}, rbp",
+                    out(reg) stack_pointer,
+                    out(reg) frame_pointer,
+                );
+            }
         } else {
             unsafe {
-                asm!(
-                    "mov sp, {0}",
-                    "mov x29, {1}",
-                    "mov x30, {2}",
-                    "mov x0, {4}",
-                    "br {3}",
-                    in(reg) new_sp,
-                    in(reg) new_fp,
-                    in(reg) return_trampoline,
-                    in(reg) resume_address,
-                    in(reg) value,
-                    options(noreturn)
+                std::arch::asm!(
+                    "mov {0}, sp",
+                    "mov {1}, x29",
+                    out(reg) stack_pointer,
+                    out(reg) frame_pointer,
                 );
             }
         }
     }
+
+    unsafe {
+        return_from_shift_handler_runtime(stack_pointer, frame_pointer, handler_result, cont_ptr)
+    }
 }
 
-unsafe fn jump_to_safe_invoke_stack() -> ! {
+unsafe fn jump_to_safe_perform_stack() -> ! {
     let stack_top = {
         let ptd = crate::runtime::per_thread_data();
-        ptd.ensure_native_scratch_stack_top()
+        let _ = ptd
+            .safe_perform_context
+            .as_ref()
+            .expect("missing safe perform context");
+        ptd.push_native_perform_stack()
     };
 
     cfg_if::cfg_if! {
@@ -12281,7 +12010,7 @@ unsafe fn jump_to_safe_invoke_stack() -> ! {
                     "call {target}",
                     "ud2",
                     stack_top = in(reg) stack_top,
-                    target = in(reg) continue_invoke_on_safe_stack as usize,
+                    target = in(reg) continue_perform_on_safe_stack as usize,
                     options(noreturn)
                 );
             }
@@ -12293,7 +12022,7 @@ unsafe fn jump_to_safe_invoke_stack() -> ! {
                     "blr x16",
                     "brk #0",
                     stack_top = in(reg) stack_top,
-                    target = in(reg) continue_invoke_on_safe_stack as usize,
+                    target = in(reg) continue_perform_on_safe_stack as usize,
                     options(noreturn)
                 );
             }
@@ -12357,7 +12086,7 @@ pub unsafe extern "C" fn return_from_shift_runtime(
         {
             cont_ptr
         } else {
-            let saved = crate::runtime::per_thread_data().saved_continuation_ptr;
+            let saved = crate::runtime::per_thread_data().current_saved_continuation_ptr();
             if saved != 0
                 && saved != BuiltInTypes::null_value() as usize
                 && BuiltInTypes::is_heap_pointer(saved)
@@ -12406,11 +12135,15 @@ pub unsafe extern "C" fn return_from_shift_runtime(
             None
         };
         if return_point_opt.is_some() {
+            if !is_handler_return
+                && let Some(prompt_id) = return_point_opt.as_ref().map(|rp| rp.prompt_id)
+            {
+                if let Some(segment) = ptd.pop_active_segment(prompt_id) {
+                    ptd.recycle_segment(segment);
+                }
+            }
             if from_pop_prompt || !is_handler_return {
                 ptd.prompt_handlers.pop();
-            }
-            if ptd.relocation_depth > 0 {
-                ptd.relocation_depth -= 1;
             }
         }
         (from_pop_prompt, is_handler_return, return_point_opt)
@@ -12441,7 +12174,7 @@ pub unsafe extern "C" fn return_from_shift_runtime(
     // The cont_ptr local on the stack may be null (0x7) because it was captured before
     // being assigned. Use saved_continuation_ptr from invoke_continuation_runtime as fallback.
     let ptd = crate::runtime::per_thread_data();
-    let saved = ptd.saved_continuation_ptr;
+    let saved = ptd.current_saved_continuation_ptr();
     let passed_continuation = ContinuationObject::from_tagged(cont_ptr);
     let saved_continuation = ContinuationObject::from_tagged(saved);
 
@@ -12451,15 +12184,11 @@ pub unsafe extern "C" fn return_from_shift_runtime(
                 if passed_cont.prompt_id() != saved_cont.prompt_id() {
                     cont_ptr
                 } else {
-                    crate::runtime::per_thread_data().saved_continuation_ptr = 0;
                     saved
                 }
             }
             (Some(_passed_continuation), None) => cont_ptr,
-            (None, Some(_saved_cont)) => {
-                crate::runtime::per_thread_data().saved_continuation_ptr = 0;
-                saved
-            }
+            (None, Some(_saved_cont)) => saved,
             (None, None) => {
                 panic!(
                     "return_from_shift handler return without captured continuation or return point: cont_ptr={:#x}",
@@ -12471,7 +12200,6 @@ pub unsafe extern "C" fn return_from_shift_runtime(
         cont_ptr
     } else if let Some(saved_cont) = saved_continuation {
         let _ = saved_cont;
-        crate::runtime::per_thread_data().saved_continuation_ptr = 0;
         saved
     } else {
         panic!(
@@ -12497,98 +12225,15 @@ pub unsafe extern "C" fn return_from_shift_runtime(
             prompt.prompt_id
         );
     }
-
     let handler_address = prompt.handler_address;
     let new_sp = prompt.stack_pointer;
     let new_fp = prompt.frame_pointer;
     let new_lr = prompt.link_register;
     let result_local_offset = prompt.result_local;
 
-    // Restore the stack from CapturedFrame chain, BUT only if this is NOT a handler return.
+    // Segment-backed continuations return through prompt/handler metadata.
     if !is_handler_return {
-        let segment_ptr = continuation.segment_ptr();
-        if CapturedFrame::from_tagged(segment_ptr).is_some() {
-            let frames = CapturedFrame::collect_chain(segment_ptr);
-            let original_sp = continuation.original_sp();
-            let stack_segment_size: usize = frames.iter().map(|f| f.total_stack_size()).sum();
-            let outermost_fp = original_sp
-                .checked_add(stack_segment_size)
-                .and_then(|top| top.checked_sub(16))
-                .expect("return_from_shift restore underflow computing outermost_fp");
-            let gc_chain_prev =
-                gc_chain_prev_for_restored_segment(original_sp, stack_segment_size, outermost_fp);
-
-            if debug_prompts {
-                eprintln!(
-                    "[return_from_shift] Restoring {} frames to original_sp={:#x}",
-                    frames.len(),
-                    original_sp
-                );
-            }
-
-            // Reconstruct frames from outermost to innermost at original_sp
-            let mut current_top = original_sp + stack_segment_size;
-            let mut restored_fps: Vec<usize> = Vec::with_capacity(frames.len());
-            for (idx, frame) in frames.iter().enumerate() {
-                let frame_size = frame.total_stack_size();
-                let frame_bottom = current_top - frame_size;
-                let target_fp = current_top - 16;
-
-                let caller_fp = if idx == 0 {
-                    // Outermost frame: restore original saved caller FP
-                    frame.saved_caller_fp()
-                } else {
-                    current_top // Previous frame's FP
-                };
-
-                frame.restore_to_stack(target_fp, caller_fp);
-                restored_fps.push(target_fp);
-                current_top = frame_bottom;
-            }
-
-            // Link restored frames into the GC chain
-            CapturedFrame::link_restored_frames_into_gc_chain_with_prev(
-                &restored_fps,
-                gc_chain_prev,
-            );
-        }
-    } else {
-        let mut synced_handler_return = false;
-        let sync_ranges = {
-            let ptd = crate::runtime::per_thread_data();
-            if let Some(return_point) = ptd.invocation_return_points.last_mut() {
-                if return_point.is_root_invocation && !return_point.mutable_ranges.is_empty() {
-                    Some((
-                        return_point.prompt_id,
-                        return_point.relocated_sp,
-                        return_point.original_sp,
-                        std::mem::take(&mut return_point.mutable_ranges),
-                    ))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
-        if let Some((prompt_id, relocated_sp, original_sp, ranges)) = sync_ranges {
-            synced_handler_return = true;
-            let _ = prompt_id;
-            for range in &ranges {
-                unsafe {
-                    std::ptr::copy(
-                        (relocated_sp + range.offset) as *const u8,
-                        (original_sp + range.offset) as *mut u8,
-                        range.len,
-                    );
-                }
-            }
-        }
-        if debug_prompts && !synced_handler_return {
-            eprintln!(
-                "[return_from_shift] Skipping stack segment restore (is_handler_return=true)"
-            );
-        }
+        debug_assert_ne!(continuation.segment_handle_id(), 0);
     }
 
     // Store the value in the result local
@@ -12645,6 +12290,12 @@ pub unsafe extern "C" fn return_from_shift_handler_runtime(
     value: usize,
     cont_ptr: usize,
 ) -> ! {
+    if std::env::var("BEAGLE_DEBUG_PERFORM").is_ok() {
+        eprintln!(
+            "[return_from_shift_handler] value={:#x} cont_ptr={:#x}",
+            value, cont_ptr
+        );
+    }
     // SAFETY: We are in an unsafe function and caller guarantees valid stack/frame pointers
     // Set flag in a scoped block so the &mut borrow is dropped before calling
     // return_from_shift_runtime (which also accesses per-thread data).
@@ -12656,8 +12307,367 @@ pub unsafe extern "C" fn return_from_shift_handler_runtime(
     }
 }
 
+fn invoke_segmented_continuation(
+    continuation: &ContinuationObject,
+    value: usize,
+    debug_prompts: bool,
+    beagle_sp: usize,
+    beagle_fp: usize,
+    beagle_return_address: usize,
+    callee_saved_regs: [usize; 10],
+    suspended_frame_id: usize,
+    saved_gc_prev: usize,
+) -> ! {
+    let prompt_id = continuation.prompt_id();
+    let segment_handle_id = continuation.segment_handle_id();
+    let cloned_segment = {
+        let ptd = crate::runtime::per_thread_data();
+        ptd.captured_segments
+            .get(&segment_handle_id)
+            .map(|segment| segment.clone_from())
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing captured segment for prompt {} handle {}",
+                    prompt_id, segment_handle_id
+                )
+            })
+    };
+
+    let original_segment = {
+        let ptd = crate::runtime::per_thread_data();
+        ptd.captured_segments
+            .get(&segment_handle_id)
+            .map(|segment| (segment.base, segment.top))
+    }
+    .expect("captured segment disappeared during continuation invoke");
+
+    let (original_base, original_top) = original_segment;
+    let original_sp = continuation.original_sp();
+    let original_fp = continuation.original_fp();
+
+    if original_sp < original_base || original_sp > original_top {
+        panic!(
+            "[invoke_cont] original_sp {:#x} is outside captured segment [{:#x}, {:#x})",
+            original_sp, original_base, original_top
+        );
+    }
+    if original_fp < original_base || original_fp > original_top {
+        panic!(
+            "[invoke_cont] original_fp {:#x} is outside captured segment [{:#x}, {:#x})",
+            original_fp, original_base, original_top
+        );
+    }
+
+    let sp_offset = original_sp - original_base;
+    let fp_offset = original_fp - original_base;
+    let new_sp = cloned_segment.base + sp_offset;
+    let new_fp = cloned_segment.base + fp_offset;
+    let relocation = cloned_segment.base as isize - original_base as isize;
+
+    let mut relocate_fp = new_fp;
+    loop {
+        let caller_fp = unsafe { *(relocate_fp as *const usize) };
+        let relocated_caller_fp =
+            if caller_fp >= original_base && caller_fp < original_top {
+                (caller_fp as isize + relocation) as usize
+            } else {
+                caller_fp
+            };
+        if relocated_caller_fp != caller_fp {
+            unsafe {
+                *(relocate_fp as *mut usize) = relocated_caller_fp;
+            }
+        }
+
+        let gc_prev_slot = (relocate_fp - 16) as *mut usize;
+        let gc_prev = unsafe { *gc_prev_slot };
+        if gc_prev >= original_base && gc_prev < original_top {
+            unsafe {
+                *gc_prev_slot = (gc_prev as isize + relocation) as usize;
+            }
+        }
+
+        if relocated_caller_fp < cloned_segment.base || relocated_caller_fp >= cloned_segment.top {
+            break;
+        }
+        relocate_fp = relocated_caller_fp;
+    }
+
+    let mut outermost_fp = new_fp;
+    loop {
+        let caller_fp = unsafe { *(outermost_fp as *const usize) };
+        if !cloned_segment.contains(caller_fp) {
+            break;
+        }
+        outermost_fp = caller_fp;
+    }
+    unsafe {
+        *((outermost_fp + 8) as *mut usize) = continuation_return_trampoline as usize;
+    }
+
+    let result_local = continuation.result_local();
+    let result_ptr = if result_local != 0 {
+        (new_fp as isize).wrapping_add(result_local) as usize
+    } else {
+        0
+    };
+    if result_ptr != 0 {
+        unsafe {
+            *(result_ptr as *mut usize) = value;
+        }
+    }
+
+    let runtime = get_runtime().get_mut();
+    crate::runtime::per_thread_data()
+        .invocation_return_points
+        .push(crate::runtime::InvocationReturnPoint {
+            stack_pointer: beagle_sp,
+            frame_pointer: beagle_fp,
+            return_address: beagle_return_address,
+            callee_saved_regs,
+            suspended_frame_id,
+            prompt_id,
+            saved_gc_prev,
+        });
+    if std::env::var("BEAGLE_DEBUG_PERFORM").is_ok() {
+        eprintln!(
+            "[invoke_cont segmented-rp] prompt_id={} beagle_sp={:#x} beagle_fp={:#x} ret={:#x}",
+            prompt_id, beagle_sp, beagle_fp, beagle_return_address
+        );
+    }
+    runtime.push_prompt_handler(crate::runtime::PromptHandler {
+        handler_address: continuation.handler_address(),
+        stack_pointer: continuation.prompt_stack_pointer(),
+        frame_pointer: continuation.prompt_frame_pointer(),
+        link_register: continuation.prompt_link_register(),
+        result_local: continuation.prompt_result_local(),
+        prompt_id,
+    });
+    if continuation.exc_has_handler() {
+        runtime.push_exception_handler(crate::runtime::ExceptionHandler {
+            handler_address: continuation.exc_handler_address(),
+            stack_pointer: continuation.prompt_stack_pointer(),
+            frame_pointer: continuation.prompt_frame_pointer(),
+            link_register: continuation.prompt_link_register(),
+            result_local: continuation.exc_result_local(),
+            handler_id: continuation.exc_handler_id(),
+            is_resumable: true,
+            resume_local: continuation.exc_resume_local(),
+        });
+    }
+    crate::runtime::per_thread_data().push_active_segment(prompt_id, cloned_segment);
+    set_gc_frame_top(new_fp.saturating_sub(8));
+
+    if debug_prompts {
+        eprintln!(
+            "[invoke_cont] segmented prompt_id={} value={:#x} new_sp={:#x} new_fp={:#x}",
+            prompt_id, value, new_sp, new_fp
+        );
+    }
+
+    cfg_if::cfg_if! {
+        if #[cfg(target_arch = "x86_64")] {
+            let runtime = get_runtime().get();
+            let jump_fn = runtime
+                .get_function_by_name("beagle.builtin/invoke-continuation-jump")
+                .expect("invoke-continuation-jump function not found");
+            let ptr: *const u8 = jump_fn.pointer.into();
+            let jump_ptr: extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> ! =
+                unsafe { std::mem::transmute(ptr) };
+            jump_ptr(
+                new_fp,
+                continuation.resume_address(),
+                0,
+                new_sp,
+                new_fp,
+                result_ptr,
+                value,
+            );
+        } else {
+            unsafe {
+                asm!(
+                    "mov sp, {0}",
+                    "mov x29, {1}",
+                    "mov x30, {2}",
+                    "mov x0, {4}",
+                    "br {3}",
+                    in(reg) new_sp,
+                    in(reg) new_fp,
+                    in(reg) continuation_return_trampoline as usize,
+                    in(reg) continuation.resume_address(),
+                    in(reg) value,
+                    options(noreturn)
+                );
+            }
+        }
+    }
+}
+
+unsafe fn segmented_continuation_return(value: usize) -> ! {
+    if std::env::var("BEAGLE_DEBUG_PERFORM").is_ok() {
+        let ptd = crate::runtime::per_thread_data();
+        let top_prompt = ptd.prompt_handlers.last().map(|p| p.prompt_id);
+        let active_prompt = ptd
+            .prompt_handlers
+            .last()
+            .and_then(|prompt| ptd.active_segment_for_prompt(prompt.prompt_id).map(|_| prompt.prompt_id));
+        let top_rp = ptd.invocation_return_points.last().map(|rp| rp.prompt_id);
+        eprintln!(
+            "[cont_return] value={:#x} top_prompt={:?} active_prompt={:?} top_rp={:?} prompts={} active_segments={} rps={}",
+            value,
+            top_prompt,
+            active_prompt,
+            top_rp,
+            ptd.prompt_handlers.len(),
+            ptd.active_segments.len(),
+            ptd.invocation_return_points.len()
+        );
+    }
+    let prompt = {
+        let ptd = crate::runtime::per_thread_data();
+        ptd.prompt_handlers
+            .last()
+            .cloned()
+            .expect("segmented continuation returned without an active prompt")
+    };
+
+    let return_point = {
+        let ptd = crate::runtime::per_thread_data();
+        let should_pop = ptd
+            .invocation_return_points
+            .last()
+            .map(|rp| rp.prompt_id == prompt.prompt_id)
+            .unwrap_or(false);
+        if should_pop {
+            ptd.invocation_return_points.pop()
+        } else {
+            None
+        }
+    };
+
+    {
+        let ptd = crate::runtime::per_thread_data();
+        if let Some(segment) = ptd.pop_active_segment(prompt.prompt_id) {
+            ptd.recycle_segment(segment);
+        }
+        if ptd
+            .prompt_handlers
+            .last()
+            .map(|handler| handler.prompt_id == prompt.prompt_id)
+            .unwrap_or(false)
+        {
+            ptd.prompt_handlers.pop();
+        }
+    }
+
+    if let Some(return_point) = return_point {
+        if let Some(suspended_frame) = crate::runtime::per_thread_data()
+            .take_suspended_frame(return_point.suspended_frame_id)
+        {
+            suspended_frame.restore_to_stack(
+                return_point.frame_pointer,
+                return_point.saved_gc_prev,
+            );
+        }
+        if std::env::var("BEAGLE_DEBUG_PERFORM").is_ok() {
+            eprintln!(
+                "[cont_return rp] prompt_id={} sp={:#x} fp={:#x} ret={:#x} value={:#x}",
+                return_point.prompt_id,
+                return_point.stack_pointer,
+                return_point.frame_pointer,
+                return_point.return_address,
+                value
+            );
+        }
+        set_gc_frame_top(return_point.frame_pointer.saturating_sub(8));
+        cfg_if::cfg_if! {
+            if #[cfg(target_arch = "x86_64")] {
+                let runtime = get_runtime().get();
+                let return_jump_fn = runtime
+                    .get_function_by_name("beagle.builtin/return-jump")
+                    .expect("return-jump function not found");
+                let ptr: *const u8 = return_jump_fn.pointer.into();
+                let return_jump_ptr: extern "C" fn(usize, usize, usize, usize, *const usize, *const u8, usize) -> ! =
+                    unsafe { std::mem::transmute(ptr) };
+                return_jump_ptr(
+                    return_point.stack_pointer,
+                    return_point.frame_pointer,
+                    value,
+                    return_point.return_address,
+                    return_point.callee_saved_regs.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                );
+            } else {
+                unsafe {
+                    asm!(
+                        "ldr x19, [x9]",
+                        "ldr x20, [x9, #8]",
+                        "ldr x21, [x9, #16]",
+                        "ldr x22, [x9, #24]",
+                        "ldr x23, [x9, #32]",
+                        "ldr x24, [x9, #40]",
+                        "ldr x25, [x9, #48]",
+                        "ldr x26, [x9, #56]",
+                        "ldr x27, [x9, #64]",
+                        "ldr x28, [x9, #72]",
+                        "mov sp, x10",
+                        "mov x29, x11",
+                        "mov x0, x12",
+                        "br x13",
+                        in("x9") return_point.callee_saved_regs.as_ptr(),
+                        in("x10") return_point.stack_pointer,
+                        in("x11") return_point.frame_pointer,
+                        in("x12") value,
+                        in("x13") return_point.return_address,
+                        options(noreturn)
+                    );
+                }
+            }
+        }
+    }
+
+    set_gc_frame_top(prompt.frame_pointer.saturating_sub(8));
+
+    if prompt.result_local != 0 {
+        let result_ptr = (prompt.frame_pointer as isize).wrapping_add(prompt.result_local) as *mut usize;
+        unsafe { *result_ptr = value; }
+    }
+
+    let handler_address = prompt.handler_address;
+    let new_sp = prompt.stack_pointer;
+    let new_fp = prompt.frame_pointer;
+
+    cfg_if::cfg_if! {
+        if #[cfg(target_arch = "x86_64")] {
+            unsafe {
+                asm!(
+                    "mov rsp, {0}",
+                    "mov rbp, {1}",
+                    "jmp {2}",
+                    in(reg) new_sp,
+                    in(reg) new_fp,
+                    in(reg) handler_address,
+                    options(noreturn)
+                );
+            }
+        } else {
+            unsafe {
+                asm!(
+                    "mov sp, {0}",
+                    "mov x29, {1}",
+                    "br {2}",
+                    in(reg) new_sp,
+                    in(reg) new_fp,
+                    in(reg) handler_address,
+                    options(noreturn)
+                );
+            }
+        }
+    }
+}
+
 /// Invoke a captured continuation with a value.
-/// This reconstructs the stack from CapturedFrame heap objects and resumes execution.
 /// The callee_saved_regs parameter contains the callee-saved registers that Beagle was using
 /// when it called k() - these are saved at the very start of continuation_trampoline.
 #[allow(improper_ctypes_definitions, unused_variables)]
@@ -12682,482 +12692,106 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
     // (it was captured before being assigned). Only save the first (root) pointer.
     let (already_had, saved_for_debug) = {
         let ptd = crate::runtime::per_thread_data();
-        let already_had = ptd.saved_continuation_ptr != 0;
-        if !already_had {
-            ptd.saved_continuation_ptr = cont_ptr;
-        }
-        let saved = ptd.saved_continuation_ptr;
+        let already_had = ptd.current_saved_continuation_ptr() != 0;
+        ptd.push_saved_continuation_ptr(cont_ptr);
+        let saved = ptd.current_saved_continuation_ptr();
         (already_had, saved)
     };
+    let (cont_ptr, continuation) = if let Some(cont) = ContinuationObject::from_tagged(cont_ptr) {
+        (cont_ptr, cont)
+    } else {
+        let saved = crate::runtime::per_thread_data().current_saved_continuation_ptr();
+        if let Some(saved_cont) = ContinuationObject::from_tagged(saved) {
+            if std::env::var("BEAGLE_DEBUG_PERFORM").is_ok() {
+                eprintln!(
+                    "[invoke_cont] falling back to saved continuation: cont_ptr={:#x} saved={:#x}",
+                    cont_ptr, saved
+                );
+            }
+            (saved, saved_cont)
+        } else {
+            panic!(
+                "Invalid continuation pointer: {:#x}. This is a compiler bug - trying to invoke a continuation that doesn't exist.",
+                cont_ptr
+            );
+        }
+    };
+
     if debug_prompts {
         let saved = saved_for_debug;
-        let cont_obj = ContinuationObject::from_tagged(cont_ptr).unwrap();
         eprintln!(
             "[invoke_cont] saved_cont_ptr: already_had={} saved={:#x} cont_ptr={:#x} cont_prompt_fp={:#x} cont_original_sp={:#x}",
             already_had,
             saved,
             cont_ptr,
-            cont_obj.prompt_frame_pointer(),
-            cont_obj.original_sp()
+            continuation.prompt_frame_pointer(),
+            continuation.original_sp()
         );
     }
 
-    let continuation = ContinuationObject::from_tagged(cont_ptr).unwrap_or_else(|| {
-        panic!(
-            "Invalid continuation pointer: {:#x}. This is a compiler bug - trying to invoke a continuation that doesn't exist.",
-            cont_ptr
-        );
-    });
-
     let prompt_id = continuation.prompt_id();
+    if std::env::var("BEAGLE_DEBUG_PERFORM").is_ok() {
+        let ptd = crate::runtime::per_thread_data();
+        eprintln!(
+            "[invoke_cont] prompt_id={} original_sp={:#x} original_fp={:#x} rps={}",
+            prompt_id,
+            continuation.original_sp(),
+            continuation.original_fp(),
+            ptd.invocation_return_points.len()
+        );
+    }
 
-    // Get the CapturedFrame chain from the continuation's segment field
-    let segment_ptr = continuation.segment_ptr();
-    let has_frames = CapturedFrame::from_tagged(segment_ptr).is_some();
-
-    // Compute total stack size from CapturedFrame chain
-    let frames = CapturedFrame::collect_chain(segment_ptr);
-    let stack_segment_size: usize = frames.iter().map(|f| f.total_stack_size()).sum();
-
-    // We need to get the return address for where k() was called in Beagle code.
     let rust_fp = get_current_rust_frame_pointer();
     let trampoline_fp = unsafe { *(rust_fp as *const usize) };
     let beagle_fp = unsafe { *(trampoline_fp as *const usize) };
     let beagle_return_address = unsafe { *((trampoline_fp + 8) as *const usize) };
     let beagle_sp = trampoline_fp + 16;
-
-    // Save the shift body's stack frame as a CapturedFrame for multi-shot support.
-    // We promote the Beagle caller's frame to the heap so GC can trace it.
-    // NOTE: cont_ptr and value may be moved by GC during allocation, so we protect them.
-    let mut cont_ptr = cont_ptr;
-    let mut value = value;
-    let saved_frame = {
+    let saved_gc_prev = unsafe { *((beagle_fp - 16) as *const usize) };
+    let (segmented_cont_ptr, segmented_value, segmented_suspended_frame_id) = {
         let header_value = unsafe { *((beagle_fp - 8) as *const usize) };
         let header = Header::from_usize(header_value);
         if header.type_id == TYPE_ID_FRAME {
             let num_slots = header.size as usize;
-            // Protect cont_ptr during allocation
-            let cont_root_id = runtime.register_temporary_root(cont_ptr);
-            // Protect value if it's a heap pointer
-            let value_root_id = if BuiltInTypes::is_heap_pointer(value) {
-                Some(runtime.register_temporary_root(value))
-            } else {
-                None
-            };
-            // Also protect saved_continuation_ptr (the root continuation) during allocation
-            let saved_cont = crate::runtime::per_thread_data().saved_continuation_ptr;
-            let saved_cont_root_id = if saved_cont != 0 && saved_cont != cont_ptr {
-                Some(runtime.register_temporary_root(saved_cont))
-            } else {
-                None
-            };
-            let frame_ptr = CapturedFrame::from_stack_frame(
+            let frame = crate::runtime::SuspendedFrame::capture_from_stack(
                 beagle_fp,
                 num_slots,
                 beagle_sp,
-                BuiltInTypes::null_value() as usize,
-                runtime,
-                stack_pointer,
             );
-            let cont_ptr_updated = runtime.unregister_temporary_root(cont_root_id);
-            cont_ptr = cont_ptr_updated;
-            // Update value if GC moved it
-            if let Some(root_id) = value_root_id {
-                value = runtime.unregister_temporary_root(root_id);
-            }
-            // Update saved_continuation_ptr if GC moved the root continuation
-            if let Some(root_id) = saved_cont_root_id {
-                let saved_cont_updated = runtime.unregister_temporary_root(root_id);
-                crate::runtime::per_thread_data().saved_continuation_ptr = saved_cont_updated;
-            } else if saved_cont != 0 {
-                // saved_cont == cont_ptr, so they moved together
-                crate::runtime::per_thread_data().saved_continuation_ptr = cont_ptr_updated;
-            }
-            frame_ptr
+            let frame_id = crate::runtime::per_thread_data().store_suspended_frame(frame);
+            (cont_ptr, value, frame_id)
         } else {
-            0 // No frame header, no save
+            (cont_ptr, value, 0)
         }
     };
-
-    let continuation = ContinuationObject::from_tagged(cont_ptr).unwrap_or_else(|| {
+    let segment_handle_id = continuation.segment_handle_id();
+    if segment_handle_id == 0 {
         panic!(
-            "Continuation pointer became invalid after allocation: {:#x}",
-            cont_ptr
-        );
-    });
-
-    let resume_address = continuation.resume_address();
-
-    // Handle empty stack segment case (no captured frames)
-    if !has_frames {
-        // Unlink k_caller's frame from GC chain (its epilogue won't run)
-        let k_prev = unsafe { *((beagle_fp - 16) as *const usize) };
-        set_gc_frame_top(k_prev);
-
-        let result_local = continuation.result_local();
-        let result_ptr = if result_local != 0 {
-            let ptr =
-                (continuation.original_fp() as isize).wrapping_add(result_local) as *mut usize;
-            unsafe { *ptr = value };
-            ptr as usize
-        } else {
-            0
-        };
-
-        let relocated_prompt = continuation.prompt_handler();
-        runtime.push_prompt_handler(relocated_prompt.clone());
-
-        // Re-push exception handler if this continuation was captured from a resumable throw
-        if continuation.exc_has_handler() {
-            let exc_handler = crate::runtime::ExceptionHandler {
-                handler_address: continuation.exc_handler_address(),
-                stack_pointer: relocated_prompt.stack_pointer,
-                frame_pointer: relocated_prompt.frame_pointer,
-                link_register: relocated_prompt.link_register,
-                result_local: continuation.exc_result_local(),
-                handler_id: continuation.exc_handler_id(),
-                is_resumable: true,
-                resume_local: continuation.exc_resume_local(),
-            };
-            runtime.push_exception_handler(exc_handler);
-        }
-
-        if debug_prompts {
-            eprintln!(
-                "[invoke_cont] empty_segment prompt_id={} value={:#x} orig_sp={:#x} orig_fp={:#x}",
-                prompt_id,
-                value,
-                continuation.original_sp(),
-                continuation.original_fp()
-            );
-        }
-
-        cfg_if::cfg_if! {
-            if #[cfg(target_arch = "x86_64")] {
-                let runtime = get_runtime().get();
-                let jump_fn = runtime
-                    .get_function_by_name("beagle.builtin/invoke-continuation-jump")
-                    .expect("invoke-continuation-jump function not found");
-                let ptr: *const u8 = jump_fn.pointer.into();
-                let jump_ptr: extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> ! =
-                    unsafe { std::mem::transmute(ptr) };
-                jump_ptr(
-                    continuation.original_fp(),
-                    resume_address,
-                    0,
-                    continuation.original_sp(),
-                    continuation.original_fp(),
-                    result_ptr,
-                    value,
-                );
-            } else {
-                let original_lr = continuation.prompt_link_register();
-                let safe_sp = (stack_pointer - 16) & !0xF;
-                unsafe {
-                    asm!(
-                        "mov sp, {0}",
-                        "mov x29, {1}",
-                        "mov x30, {2}",
-                        "mov x0, {4}",
-                        "br {3}",
-                        in(reg) safe_sp,
-                        in(reg) continuation.original_fp(),
-                        in(reg) original_lr,
-                        in(reg) resume_address,
-                        in(reg) value,
-                        options(noreturn)
-                    );
-                }
-            }
-        }
-    }
-
-    // Non-empty stack segment - reconstruct from CapturedFrame chain
-    #[allow(unused_variables)]
-    let return_trampoline = continuation_return_trampoline as usize;
-
-    // Root invocation = no outstanding InvocationReturnPoint for this
-    // prompt_id.  This is more precise than counting relocated prompts:
-    // it correctly handles multi-shot continuations where the first
-    // (root) invocation pushed a non-relocated prompt.
-    // In an effect-handler loop (perform → handler → resume → perform → ...),
-    // the continuation never "returns" normally — each iteration jumps away
-    // via invoke_continuation_runtime.  This means the InvocationReturnPoint
-    // from the previous iteration is never popped by return_from_shift_runtime.
-    //
-    // Fix: if there's an outstanding RP for this prompt_id, pop it now.
-    // We're about to push a fresh one, so the old one is stale.  We also
-    // need to decrement relocation_depth to keep it balanced.
-    // In an effect-handler loop (perform → handler → resume → perform → ...),
-    // the continuation never "returns" normally — each iteration jumps away
-    // via invoke_continuation_runtime.  The InvocationReturnPoint from the
-    // previous iteration is never popped by return_from_shift_runtime.
-    //
-    // Fix: pop the stale RP and REUSE its stack slot.  The previous
-    // invocation placed restored frames at `relocated_sp`.  Those frames
-    // are now dead (we captured a new continuation from them).  We can
-    // restore the new frames to the exact same address — zero descent.
-    //
-    // If there's no stale RP, this is the first invocation — compute
-    // new_sp normally (below actual_rsp with a small margin).
-    let is_root_invocation = {
-        let captured_prompt = continuation.prompt_handler();
-        let ptd = crate::runtime::per_thread_data();
-        let nested_relocated_prompts = ptd
-            .prompt_handlers
-            .iter()
-            .filter(|handler| handler.is_relocated)
-            .count()
-            + usize::from(captured_prompt.is_relocated);
-        nested_relocated_prompts == 0
-    };
-
-    // Try to restore frames to their original location — zero descent.
-    // If a stale InvocationReturnPoint exists for this prompt, reuse its location
-    // (the previous invoke's frames are dead — they were captured into a new continuation).
-    // Otherwise, fall back to descent for the first invocation.
-    let original_sp = continuation.original_sp();
-
-    let stale_rp: Option<crate::runtime::InvocationReturnPoint> = None;
-
-    // For now: always compute new_sp below actual_rsp with small margin.
-    let actual_rsp: usize;
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        std::arch::asm!("mov {}, rsp", out(reg) actual_rsp);
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        actual_rsp = stack_pointer;
-    }
-    let safety_margin = 4096;
-    let new_sp = (actual_rsp - stack_segment_size - safety_margin) & !0xF;
-
-    // Re-read CapturedFrame chain (may have moved during saved_frame allocation)
-    let segment_ptr = continuation.segment_ptr();
-    let frames = CapturedFrame::collect_chain(segment_ptr);
-
-    // Validate frames before reconstruction
-    if frames.is_empty() && has_frames {
-        panic!(
-            "[invoke_cont] collect_chain returned empty but segment_ptr was non-null! segment_ptr={:#x}",
-            segment_ptr
+            "invoke_continuation_runtime got continuation without segment handle: cont_ptr={:#x}",
+            segmented_cont_ptr
         );
     }
-    let computed_size: usize = frames.iter().map(|f| f.total_stack_size()).sum();
-    if computed_size != stack_segment_size {
+    if !crate::runtime::per_thread_data()
+        .captured_segments
+        .contains_key(&segment_handle_id)
+    {
         panic!(
-            "[invoke_cont] Stack size mismatch: computed={} expected={}. frames.len()={}",
-            computed_size,
-            stack_segment_size,
-            frames.len()
+            "invoke_continuation_runtime missing captured segment {} for prompt {}",
+            segment_handle_id,
+            prompt_id
         );
     }
-    for (idx, frame) in frames.iter().enumerate() {
-        let ret_addr = frame.return_address();
-        if ret_addr == 0 {
-            let frame_size = frame.total_stack_size();
-            panic!(
-                "[invoke_cont] Frame {} has zero return address! tagged_ptr={:#x} frame_size={}",
-                idx,
-                frame.tagged_ptr(),
-                frame_size
-            );
-        }
-    }
 
-    // --- Phase 1: Pre-compute frame operations (no writes to target region) ---
-    //
-    // We compute where each frame will go and what its caller_fp should be,
-    // but do NOT write to the target stack yet.  The actual frame restoration
-    // happens on the scratch stack (Phase 3) so we don't clobber the Rust
-    // function's own stack frame which may overlap with the target region.
-
-    let original_sp = continuation.original_sp();
-    let relocation_offset = (new_sp as isize) - (original_sp as isize);
-
-    let mut current_top = new_sp + stack_segment_size;
-    let mut prev_fp: usize = 0;
-    let mut frame_ops: Vec<(usize, usize, usize)> = Vec::with_capacity(frames.len());
-    let mut restored_fps: Vec<usize> = Vec::with_capacity(frames.len());
-    let mut mutable_ranges: Vec<crate::runtime::StackCopyRange> = Vec::with_capacity(frames.len());
-
-    for (idx, frame) in frames.iter().enumerate() {
-        let frame_size = frame.total_stack_size();
-        let frame_bottom = current_top - frame_size;
-        let target_fp = current_top - 16;
-        let num_locals = frame.num_locals();
-
-        let caller_fp = if idx == 0 {
-            let saved_caller_fp = frame.saved_caller_fp();
-            if saved_caller_fp >= original_sp && saved_caller_fp < original_sp + stack_segment_size
-            {
-                (saved_caller_fp as isize + relocation_offset) as usize
-            } else {
-                saved_caller_fp
-            }
-        } else {
-            prev_fp
-        };
-
-        frame_ops.push((target_fp, caller_fp, frame.tagged_ptr()));
-        restored_fps.push(target_fp);
-
-        if num_locals > 0 {
-            let range_len = num_locals * 8;
-            let range_start = target_fp.checked_sub(16 + range_len).unwrap_or_else(|| {
-                panic!(
-                    "[invoke_cont] Mutable range underflow: target_fp={:#x} num_locals={}",
-                    target_fp, num_locals
-                )
-            });
-            let range_offset = range_start.checked_sub(new_sp).unwrap_or_else(|| {
-                panic!(
-                    "[invoke_cont] Mutable range below segment: start={:#x} new_sp={:#x}",
-                    range_start, new_sp
-                )
-            });
-            let range_end = range_offset.checked_add(range_len).unwrap_or_else(|| {
-                panic!(
-                    "[invoke_cont] Mutable range overflow: offset={} len={}",
-                    range_offset, range_len
-                )
-            });
-            if range_end > stack_segment_size {
-                panic!(
-                    "[invoke_cont] Mutable range out of bounds: offset={} len={} segment_len={}",
-                    range_offset, range_len, stack_segment_size
-                );
-            }
-            mutable_ranges.push(crate::runtime::StackCopyRange {
-                offset: range_offset,
-                len: range_len,
-            });
-        }
-
-        prev_fp = target_fp;
-        current_top = frame_bottom;
-    }
-
-    let new_fp = prev_fp;
-    let result_local = continuation.result_local();
-
-    // Done with frames — drop it now so its heap buffer doesn't leak
-    // when we noreturn-jump to the scratch stack below.
-    drop(frames);
-
-    // --- Phase 2: Bookkeeping that doesn't touch the target region ---
-
-    // Unlink k_caller from GC chain
-    {
-        let k_prev = unsafe { *((beagle_fp - 16) as *const usize) };
-        set_gc_frame_top(k_prev);
-    }
-
-    let outermost_fp = new_sp
-        .checked_add(stack_segment_size)
-        .and_then(|top| top.checked_sub(16))
-        .expect("[invoke_cont] restore underflow computing outermost_fp");
-    let gc_chain_prev =
-        gc_chain_prev_for_restored_segment(new_sp, stack_segment_size, outermost_fp);
-
-    // InvocationReturnPoint + prompt/exception handler push
-    {
-        let ptd = crate::runtime::per_thread_data();
-        let current_depth = ptd.relocation_depth;
-        ptd.relocation_depth = current_depth + 1;
-
-        // If we popped a stale RP, this invocation is effectively root
-        // (no outstanding RP for this prompt_id).
-        let effective_root = is_root_invocation || stale_rp.is_some();
-        if effective_root {
-            ptd.saved_continuation_ptr = cont_ptr;
-        }
-
-        let saved_gc_prev = unsafe { *((beagle_fp - 16) as *const usize) };
-
-        ptd.invocation_return_points
-            .push(crate::runtime::InvocationReturnPoint {
-                stack_pointer: beagle_sp,
-                frame_pointer: beagle_fp,
-                return_address: beagle_return_address,
-                callee_saved_regs,
-                saved_frame,
-                prompt_id,
-                relocated_sp: new_sp,
-                original_sp,
-                segment_len: stack_segment_size,
-                mutable_ranges,
-                is_root_invocation: effective_root,
-                saved_gc_prev,
-                from_resumable_exception: continuation.exc_has_handler(),
-            });
-    }
-
-    let relocated_prompt_sp =
-        (continuation.prompt_stack_pointer() as isize + relocation_offset) as usize;
-    let relocated_prompt_fp =
-        (continuation.prompt_frame_pointer() as isize + relocation_offset) as usize;
-
-    runtime.push_prompt_handler(crate::runtime::PromptHandler {
-        handler_address: continuation.handler_address(),
-        stack_pointer: relocated_prompt_sp,
-        frame_pointer: relocated_prompt_fp,
-        link_register: continuation.prompt_link_register(),
-        result_local: continuation.prompt_result_local(),
-        prompt_id: continuation.prompt_id(),
-        is_relocated: true,
-    });
-
-    if continuation.exc_has_handler() {
-        runtime.push_exception_handler(crate::runtime::ExceptionHandler {
-            handler_address: continuation.exc_handler_address(),
-            stack_pointer: relocated_prompt_sp,
-            frame_pointer: relocated_prompt_fp,
-            link_register: continuation.prompt_link_register(),
-            result_local: continuation.exc_result_local(),
-            handler_id: continuation.exc_handler_id(),
-            is_resumable: true,
-            resume_local: continuation.exc_resume_local(),
-        });
-    }
-
-    // --- Phase 3: Switch to scratch stack for frame restoration + jump ---
-    //
-    // The actual stack writes (restore_to_stack, GC chain linking, result
-    // write) happen from the scratch stack.  This is a separately allocated
-    // heap region that cannot overlap with the Beagle/native stack, so
-    // restoring to original_sp is safe.  This eliminates the old 1 MB
-    // "safety margin" that caused stack exhaustion in tight loops.
-    {
-        let ptd = crate::runtime::per_thread_data();
-        ptd.safe_invoke_context = Some(crate::runtime::SafeInvokeContext {
-            frame_ops,
-            mutable_ranges: Vec::new(), // already moved into InvocationReturnPoint
-            restored_fps,
-            new_sp,
-            stack_segment_size,
-            original_sp,
-            gc_chain_prev,
-            return_trampoline,
-            resume_address,
-            value,
-            result_local,
-            new_fp,
-            beagle_sp,
-            beagle_fp,
-            beagle_return_address,
-            callee_saved_regs,
-            saved_frame,
-            prompt_id,
-            is_root_invocation,
-            saved_gc_prev: 0, // already used above
-            from_resumable_exception: continuation.exc_has_handler(),
-            cont_ptr,
-            debug_prompts,
-        });
-    }
-    unsafe { jump_to_safe_invoke_stack() }
+    invoke_segmented_continuation(
+        &continuation,
+        segmented_value,
+        debug_prompts,
+        beagle_sp,
+        beagle_fp,
+        beagle_return_address,
+        callee_saved_regs,
+        segmented_suspended_frame_id,
+        saved_gc_prev,
+    )
 }
 
 // ============================================================================
@@ -13244,6 +12878,22 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
 
     // SAFETY: closure memory layout is known
     let cont_ptr = unsafe { *((untagged_closure + 32) as *const usize) };
+    let cont_ptr = if ContinuationObject::from_tagged(cont_ptr).is_some() {
+        cont_ptr
+    } else {
+        let saved = crate::runtime::per_thread_data().current_saved_continuation_ptr();
+        if ContinuationObject::from_tagged(saved).is_some() {
+            if std::env::var("BEAGLE_DEBUG_PERFORM").is_ok() {
+                eprintln!(
+                    "[continuation_trampoline] falling back to saved continuation: closure_cont={:#x} saved={:#x}",
+                    cont_ptr, saved
+                );
+            }
+            saved
+        } else {
+            cont_ptr
+        }
+    };
 
     // Now invoke the continuation, passing the saved callee-saved registers
     // SAFETY: invoke_continuation_runtime is an unsafe function
@@ -13261,6 +12911,44 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
 /// This gets SP/FP and calls return_from_shift_runtime.
 #[allow(unused_variables)]
 pub unsafe extern "C" fn continuation_return_trampoline(value: usize) -> ! {
+    let value = {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let return_value: usize;
+            unsafe {
+                std::arch::asm!("mov {0}, rax", out(reg) return_value);
+            }
+            return_value
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            value
+        }
+    };
+
+    let should_use_segmented_return = {
+        let ptd = crate::runtime::per_thread_data();
+        let top_prompt = ptd.prompt_handlers.last().map(|prompt| prompt.prompt_id);
+        let has_active = top_prompt
+            .and_then(|prompt_id| ptd.active_segment_for_prompt(prompt_id).map(|_| prompt_id));
+        if std::env::var("BEAGLE_DEBUG_PERFORM").is_ok() {
+            eprintln!(
+                "[cont_return] value={:#x} top_prompt={:?} active_prompt={:?} prompts={} active_segments={} rps={}",
+                value,
+                top_prompt,
+                has_active,
+                ptd.prompt_handlers.len(),
+                ptd.active_segments.len(),
+                ptd.invocation_return_points.len()
+            );
+        }
+        has_active.is_some()
+    };
+
+    if should_use_segmented_return {
+        unsafe { segmented_continuation_return(value) };
+    }
+
     // Get current stack pointer and frame pointer
     let stack_pointer: usize;
     let frame_pointer: usize;
@@ -15333,6 +15021,14 @@ impl Runtime {
             6, // stack_pointer, frame_pointer, handler, enum_type_ptr, op_value, resume
         )?;
 
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/perform-effect",
+            perform_effect_runtime as *const u8,
+            true,
+            true,
+            7, // stack_pointer, frame_pointer, handler, enum_type_ptr, op_value, resume_address, result_local_offset
+        )?;
+
         // ====================================================================
         // Reflection builtins for docstrings and namespace introspection
         // ====================================================================
@@ -16505,6 +16201,107 @@ pub extern "C" fn find_handler_builtin(stack_pointer: usize, protocol_key_ptr: u
     }
 }
 
+fn resolve_effect_handler_method(
+    runtime: &mut Runtime,
+    stack_pointer: usize,
+    enum_type_ptr: usize,
+) -> (usize, usize) {
+    let enum_type = runtime.get_string(stack_pointer, enum_type_ptr);
+    let protocol_key = format!("beagle.effect/Handler<{}>", enum_type);
+
+    let handler = match crate::runtime::find_handler(&protocol_key) {
+        Some(h) => h,
+        None => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "RuntimeError",
+                format!("No handler found for protocol {}", protocol_key),
+            );
+        },
+    };
+
+    let dispatch_table_ptr = runtime.get_dispatch_table_ptr(&protocol_key, "handle");
+    if dispatch_table_ptr.is_none() {
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "RuntimeError",
+                format!(
+                    "No handler registered for protocol {}, dispatch key beagle.effect/handle",
+                    protocol_key
+                ),
+            );
+        }
+    }
+
+    let dispatch_table = unsafe {
+        &*(dispatch_table_ptr.unwrap() as *const crate::runtime::DispatchTable)
+    };
+
+    let type_id = if BuiltInTypes::is_heap_pointer(handler) {
+        let heap_obj = HeapObject::from_tagged(handler);
+        let header_type_id = heap_obj.get_type_id();
+        if header_type_id == 0 {
+            heap_obj.get_struct_id()
+        } else {
+            let primitive_index = match header_type_id as u8 {
+                TYPE_ID_STRING_SLICE | TYPE_ID_CONS_STRING => 2,
+                _ => header_type_id,
+            };
+            0x8000_0000_0000_0000 | primitive_index
+        }
+    } else {
+        let kind = BuiltInTypes::get_kind(handler);
+        let tag = kind.get_tag() as usize;
+        let primitive_index = if tag == 2 { 2 } else { tag + 16 };
+        0x8000_0000_0000_0000 | primitive_index
+    };
+
+    let fn_ptr = if type_id & 0x8000_0000_0000_0000 != 0 {
+        let primitive_index = type_id & 0x7FFF_FFFF_FFFF_FFFF;
+        dispatch_table.lookup_primitive(primitive_index)
+    } else {
+        dispatch_table.lookup_struct(type_id)
+    };
+
+    if fn_ptr == 0 {
+        let handler_repr = runtime
+            .get_repr(handler, 0)
+            .unwrap_or_else(|| "<unknown>".to_string());
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "RuntimeError",
+                format!(
+                    "Handler type does not implement {} protocol. Handler: {}",
+                    protocol_key, handler_repr
+                ),
+            );
+        }
+    }
+
+    (handler, fn_ptr)
+}
+
+unsafe fn call_beagle_fn_ptr3(
+    runtime: &Runtime,
+    fn_ptr: usize,
+    arg0: usize,
+    arg1: usize,
+    arg2: usize,
+) -> usize {
+    let saved_ctx = save_current_gc_context();
+    let save_volatile_registers = runtime
+        .get_function_by_name("beagle.builtin/save_volatile_registers3")
+        .unwrap();
+    let save_volatile_registers = runtime.get_pointer(save_volatile_registers).unwrap();
+    let save_volatile_registers: fn(usize, usize, usize, usize) -> usize =
+        unsafe { std::mem::transmute(save_volatile_registers) };
+    let result = save_volatile_registers(arg0, arg1, arg2, fn_ptr);
+    restore_gc_context(saved_ctx);
+    result
+}
+
 /// Get the enum name for a value (by examining its struct_id/type_id)
 /// Returns a string pointer to the enum name, or null if not an enum variant
 pub extern "C" fn get_enum_type_builtin(
@@ -16574,100 +16371,10 @@ pub extern "C" fn call_handler_builtin(
     save_gc_context!(stack_pointer, frame_pointer);
 
     let runtime = get_runtime().get_mut();
+    let (handler, fn_ptr) = resolve_effect_handler_method(runtime, stack_pointer, enum_type_ptr);
 
-    // Get the enum type string (can be heap-allocated or string literal)
-    let enum_type = runtime.get_string(stack_pointer, enum_type_ptr);
-    trace!("handler", "call_handler: enum_type={}", enum_type);
-
-    // Construct the protocol key: "beagle.effect/Handler<{enum_type}>"
-    // Handler is always from beagle.effect (the core effect handler protocol)
-    let protocol_key = format!("beagle.effect/Handler<{}>", enum_type);
-
-    // GC SAFETY: Re-read the handler from GlobalObjectBlock to get the current
-    // (post-GC) pointer. The _handler parameter passed to this function may be
-    // stale if GC ran between find_handler and this call. The resume continuation
-    // allocation is a GC point that can cause the handler to move.
-    let handler = match crate::runtime::find_handler(&protocol_key) {
-        Some(h) => h,
-        None => unsafe {
-            throw_runtime_error(
-                stack_pointer,
-                "RuntimeError",
-                format!("No handler found for protocol {}", protocol_key),
-            );
-        },
-    };
-
-    // The dispatch key is "beagle.effect/handle" since Handler is in beagle.effect
-    let dispatch_key = "beagle.effect/handle".to_string();
-
-    // Look up the dispatch table
-    let dispatch_table_ptr = runtime.get_dispatch_table_ptr(&protocol_key, "handle");
-
-    if dispatch_table_ptr.is_none() {
-        unsafe {
-            throw_runtime_error(
-                stack_pointer,
-                "RuntimeError",
-                format!(
-                    "No handler registered for protocol {}, dispatch key {}",
-                    protocol_key, dispatch_key
-                ),
-            );
-        }
-    }
-
-    let dispatch_table_ptr = dispatch_table_ptr.unwrap();
-    let dispatch_table = unsafe { &*(dispatch_table_ptr as *const DispatchTable) };
-
-    // Get the type_id from the handler to look up the function
-    let type_id = if BuiltInTypes::is_heap_pointer(handler) {
-        let heap_obj = HeapObject::from_tagged(handler);
-        let header_type_id = heap_obj.get_type_id();
-
-        if header_type_id == 0 {
-            // Custom struct - use struct_id from type_data (raw value)
-            heap_obj.get_struct_id()
-        } else {
-            // Built-in heap type - map variant type_ids to base primitive index
-            let primitive_index = match header_type_id as u8 {
-                TYPE_ID_STRING_SLICE | TYPE_ID_CONS_STRING => 2, // → String
-                _ => header_type_id,
-            };
-            0x8000_0000_0000_0000 | primitive_index
-        }
-    } else {
-        // Tagged primitive
-        let kind = BuiltInTypes::get_kind(handler);
-        let tag = kind.get_tag() as usize;
-        let primitive_index = if tag == 2 { 2 } else { tag + 16 };
-        0x8000_0000_0000_0000 | primitive_index
-    };
-
-    // Look up function pointer in dispatch table
-    let fn_ptr = if type_id & 0x8000_0000_0000_0000 != 0 {
-        let primitive_index = type_id & 0x7FFF_FFFF_FFFF_FFFF;
-        dispatch_table.lookup_primitive(primitive_index)
-    } else {
-        // struct_id is already a raw value from get_struct_id()
-        dispatch_table.lookup_struct(type_id)
-    };
-
-    if fn_ptr == 0 {
-        let handler_repr = runtime
-            .get_repr(handler, 0)
-            .unwrap_or_else(|| "<unknown>".to_string());
-        unsafe {
-            throw_runtime_error(
-                stack_pointer,
-                "RuntimeError",
-                format!(
-                    "Handler type does not implement {} protocol. Handler: {}",
-                    protocol_key, handler_repr
-                ),
-            );
-        }
-    }
+    let _enum_type = runtime.get_string(stack_pointer, enum_type_ptr);
+    trace!("handler", "call_handler: enum_type={}", _enum_type);
 
     // Call the handle function: fn handle(self, op, resume) -> result
     // The function pointer is tagged, untag it
@@ -16681,6 +16388,129 @@ pub extern "C" fn call_handler_builtin(
     let result = func(handler, op_value, resume);
     trace!("handler", "call_handler returned: result={:#x}", result);
     result
+}
+
+pub unsafe extern "C" fn perform_effect_runtime(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    _handler: usize,
+    enum_type_ptr: usize,
+    op_value: usize,
+    resume_address: usize,
+    result_local_offset_raw: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let result_local_offset = result_local_offset_raw as isize;
+
+    let (op_root, enum_root) = {
+        let runtime = get_runtime().get_mut();
+        let op_root = if BuiltInTypes::is_heap_pointer(op_value) {
+            Some(runtime.register_temporary_root(op_value))
+        } else {
+            None
+        };
+        let enum_root = if BuiltInTypes::is_heap_pointer(enum_type_ptr) {
+            Some(runtime.register_temporary_root(enum_type_ptr))
+        } else {
+            None
+        };
+        (op_root, enum_root)
+    };
+
+    let cont_ptr = unsafe {
+        capture_continuation_runtime(
+            stack_pointer,
+            frame_pointer,
+            resume_address,
+            result_local_offset,
+        )
+    };
+
+    let runtime = get_runtime().get_mut();
+    let cont_root = runtime.register_temporary_root(cont_ptr);
+    if let Some(cont) = ContinuationObject::from_tagged(cont_ptr) {
+        crate::runtime::per_thread_data()
+            .clear_pending_captured_segment(cont.segment_handle_id());
+    }
+
+    let trampoline_fn = runtime
+        .get_function_by_name("beagle.builtin/continuation-trampoline")
+        .expect("continuation-trampoline builtin not found");
+    let tagged_trampoline =
+        BuiltInTypes::Function.tag(usize::from(trampoline_fn.pointer) as isize) as usize;
+
+    let resume_closure = match runtime.make_closure(stack_pointer, tagged_trampoline, &[cont_ptr]) {
+        Ok(closure) => closure,
+        Err(_) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                "Failed to allocate continuation closure".to_string(),
+            );
+        },
+    };
+    let resume_root = runtime.register_temporary_root(resume_closure);
+
+    let cont_ptr = runtime.peek_temporary_root(cont_root);
+    let op_value = op_root
+        .map(|root| runtime.peek_temporary_root(root))
+        .unwrap_or(op_value);
+    let enum_type_ptr = enum_root
+        .map(|root| runtime.peek_temporary_root(root))
+        .unwrap_or(enum_type_ptr);
+    let resume_closure = runtime.peek_temporary_root(resume_root);
+
+    let continuation = ContinuationObject::from_tagged(cont_ptr).unwrap_or_else(|| {
+        panic!("perform_effect_runtime got invalid continuation pointer {:#x}", cont_ptr)
+    });
+    let prompt_stack_pointer = continuation.prompt_stack_pointer();
+
+    if std::env::var("BEAGLE_DEBUG_PERFORM").is_ok() {
+        eprintln!(
+            "[perform_effect] cont={:#x} prompt_sp={:#x} prompt_fp={:#x} resume={:#x} op={:#x}",
+            cont_ptr,
+            prompt_stack_pointer,
+            continuation.prompt_frame_pointer(),
+            resume_address,
+            op_value
+        );
+    }
+
+    let (handler, fn_ptr_tagged) =
+        resolve_effect_handler_method(runtime, stack_pointer, enum_type_ptr);
+    let fn_ptr = BuiltInTypes::untag(fn_ptr_tagged);
+
+    crate::runtime::per_thread_data().push_saved_continuation_ptr(cont_ptr);
+
+    if std::env::var("BEAGLE_DEBUG_PERFORM").is_ok() {
+        eprintln!(
+            "[perform_effect] handler={:#x} fn_tagged={:#x} fn_raw={:#x}",
+            handler, fn_ptr_tagged, fn_ptr
+        );
+    }
+
+    {
+        let ptd = crate::runtime::per_thread_data();
+        ptd.safe_perform_context = Some(crate::runtime::SafePerformContext {
+            handler,
+            op_value,
+            resume_closure,
+            cont_ptr,
+            fn_ptr,
+        });
+    }
+
+    let runtime = get_runtime().get_mut();
+    runtime.unregister_temporary_root(cont_root);
+    if let Some(root) = op_root {
+        runtime.unregister_temporary_root(root);
+    }
+    if let Some(root) = enum_root {
+        runtime.unregister_temporary_root(root);
+    }
+    runtime.unregister_temporary_root(resume_root);
+
+    unsafe { jump_to_safe_perform_stack() }
 }
 
 /// Allocates a Beagle struct from Rust using struct registry lookup.

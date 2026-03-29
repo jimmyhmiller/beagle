@@ -1726,13 +1726,20 @@ impl AstCompiler<'_> {
                         push_prompt_fn_ptr,
                     );
 
-                    // Compile try body (no TCO)
+                    // Outline the try body into a thunk so resumable exception
+                    // capture always has a prompt-owned frame boundary.
+                    let try_thunk_fn = Ast::Function {
+                        name: None,
+                        args: vec![],
+                        rest_param: None,
+                        body: body.clone(),
+                        token_range,
+                        docstring: None,
+                    };
                     self.not_tail_position();
-                    let mut try_result = Value::Null;
-                    for ast in body.iter() {
-                        self.not_tail_position();
-                        try_result = self.call_compile(ast)?;
-                    }
+                    let try_thunk = self.call_compile(&try_thunk_fn)?;
+                    self.not_tail_position();
+                    let try_result = self.compile_closure_call_from_value(try_thunk, vec![]);
 
                     // Normal path: pop exception handler by id, pop prompt, skip catch
                     self.ir.assign(result_reg, try_result);
@@ -4003,6 +4010,20 @@ impl AstCompiler<'_> {
                 let null_reg = self.ir.assign_new(Value::Null);
                 self.ir.store_local(captured_local, null_reg.into());
 
+                // Outline the reset body into a thunk so it runs in its own frame.
+                // This is required for prompt-owned stack segments to have a real
+                // callable frame boundary instead of executing inline in the caller.
+                let thunk_fn = Ast::Function {
+                    name: None,
+                    args: vec![],
+                    rest_param: None,
+                    body: body.clone(),
+                    token_range,
+                    docstring: None,
+                };
+                self.not_tail_position();
+                let body_thunk = self.call_compile(&thunk_fn)?;
+
                 // Get builtin function pointers
                 let push_prompt_fn = self
                     .compiler
@@ -4023,13 +4044,10 @@ impl AstCompiler<'_> {
                     push_prompt_fn_ptr,
                 );
 
-                // Compile reset body - disable tail call optimization
+                // Execute the reset body through the outlined thunk so the body
+                // gets a fresh native frame on the prompt-owned stack.
                 self.not_tail_position();
-                let mut body_result = Value::Null;
-                for ast in body.iter() {
-                    self.not_tail_position();
-                    body_result = self.call_compile(ast)?;
-                }
+                let body_result = self.compile_closure_call_from_value(body_thunk, vec![]);
 
                 // Normal path: store result, pop prompt and skip handler
                 self.ir.assign(result_reg, body_result);
@@ -4287,97 +4305,22 @@ impl AstCompiler<'_> {
                 // Allocate locals for continuation closure and raw continuation pointer
                 let unique_cont_name = format!("__perform_cont_{}__", token_range.start);
                 let cont_local = self.find_or_insert_local(&unique_cont_name);
-                let cont_ptr_name = format!("__perform_cont_ptr_{}__", token_range.start);
-                let cont_ptr_local = self.find_or_insert_local(&cont_ptr_name);
+                let null_reg = self.ir.assign_new(Value::Null);
+                self.ir.store_local(cont_local, null_reg.into());
 
-                // Get builtin function pointers for continuation capture
-                let capture_fn = self
+                let perform_fn = self
                     .compiler
-                    .find_function("beagle.builtin/capture-continuation")
-                    .expect("capture-continuation builtin not found");
-                let capture_fn_ptr = usize::from(capture_fn.pointer);
+                    .find_function("beagle.builtin/perform-effect")
+                    .expect("perform-effect builtin not found");
+                let perform_fn_ptr = usize::from(perform_fn.pointer);
 
-                // Capture the continuation using the specialized instruction
-                let cont_index =
-                    self.ir
-                        .capture_continuation(after_shift, cont_local, capture_fn_ptr);
-                // Store the continuation pointer for later return_from_shift_handler
-                let cont_ptr_reg = self.ir.assign_new(cont_index);
-                self.ir.store_local(cont_ptr_local, cont_ptr_reg.into());
-
-                // Wrap the continuation pointer in a closure so it can be called like a function
-                let trampoline_fn = self
-                    .compiler
-                    .find_function("beagle.builtin/continuation-trampoline")
-                    .expect("continuation-trampoline builtin not found");
-                let trampoline_ptr = usize::from(trampoline_fn.pointer);
-
-                // Get the stack position BEFORE pushing (where the cont_ptr will go)
-                let free_var_ptr = self.ir.get_current_stack_position();
-
-                // Push the continuation pointer onto the stack as a captured variable
-                let cont_ptr_for_closure = self.ir.load_local(cont_ptr_local);
-                self.ir.push_to_stack(cont_ptr_for_closure);
-
-                // Call make_closure to create the continuation closure (resume function)
-                let make_closure = self
-                    .compiler
-                    .find_function("beagle.builtin/make-closure")
-                    .expect("make-closure builtin not found");
-                let make_closure_ptr = self.compiler.get_function_pointer(make_closure).unwrap();
-                let make_closure_reg = self.ir.assign_new(make_closure_ptr);
-
-                let tagged_trampoline =
-                    BuiltInTypes::Function.tag(trampoline_ptr as isize) as usize;
-                let trampoline_reg = self.ir.assign_new(Value::RawValue(tagged_trampoline));
-                let num_free_reg = self.ir.assign_new(Value::TaggedConstant(1));
-
-                let stack_pointer = self.ir.get_stack_pointer_imm(0);
-                let frame_pointer = self.ir.get_frame_pointer();
-
-                let resume_closure = self.ir.call(
-                    make_closure_reg.into(),
-                    vec![
-                        stack_pointer,
-                        frame_pointer,
-                        trampoline_reg.into(),
-                        num_free_reg.into(),
-                        free_var_ptr,
-                    ],
-                );
-
-                // Store the resume closure in local
-                let resume_closure_reg = self.ir.assign_new(resume_closure);
-                self.ir.store_local(cont_local, resume_closure_reg.into());
-
-                // Step 7: Call handler.handle(op, resume) via call-handler builtin
-                // call-handler takes: (handler, enum_type_ptr, op_value, resume)
-                // Register allocation handles saving/restoring heap pointers across calls
-                let handler_result = self.call_builtin(
-                    "beagle.builtin/call-handler",
-                    vec![
-                        handler_reg.into(),
-                        enum_type_reg.into(),
-                        op_reg.into(),
-                        resume_closure_reg.into(),
-                    ],
-                )?;
-
-                // The handler's result goes to the enclosing reset (handle block)
-                // Use return-from-shift-handler to set the is_handler_return flag,
-                // which prevents nested handlers from incorrectly consuming outer handler return points.
-                let return_to_reset_fn = self
-                    .compiler
-                    .find_function("beagle.builtin/return-from-shift-handler")
-                    .expect("return-from-shift-handler builtin not found");
-                let return_fn_ptr = usize::from(return_to_reset_fn.pointer);
-
-                let handler_result_reg = self.ir.assign_new(handler_result);
-                let cont_ptr_for_return = self.ir.load_local(cont_ptr_local);
-                self.ir.return_from_shift(
-                    handler_result_reg.into(),
-                    cont_ptr_for_return,
-                    return_fn_ptr,
+                self.ir.perform_effect(
+                    handler_reg.into(),
+                    enum_type_reg.into(),
+                    op_reg.into(),
+                    after_shift,
+                    cont_local,
+                    perform_fn_ptr,
                 );
 
                 // After shift label - this is where we land when continuation (resume) is invoked
@@ -4458,6 +4401,19 @@ impl AstCompiler<'_> {
                 let null_reg = self.ir.assign_new(Value::Null);
                 self.ir.store_local(captured_local, null_reg.into());
 
+                // Outline the handle body into a thunk so it executes in its own
+                // frame under the prompt rather than inline in the enclosing frame.
+                let thunk_fn = Ast::Function {
+                    name: None,
+                    args: vec![],
+                    rest_param: None,
+                    body: body.clone(),
+                    token_range,
+                    docstring: None,
+                };
+                self.not_tail_position();
+                let body_thunk = self.call_compile(&thunk_fn)?;
+
                 // Get prompt builtins
                 let push_prompt_fn = self
                     .compiler
@@ -4478,13 +4434,10 @@ impl AstCompiler<'_> {
                     push_prompt_fn_ptr,
                 );
 
-                // Compile body
+                // Execute the handle body through the outlined thunk so prompt
+                // entry has a distinct frame boundary.
                 self.not_tail_position();
-                let mut body_result = Value::Null;
-                for ast in body.iter() {
-                    self.not_tail_position();
-                    body_result = self.call_compile(ast)?;
-                }
+                let body_result = self.compile_closure_call_from_value(body_thunk, vec![]);
 
                 // Keep the handle result in a local across builtin calls that may clobber registers.
                 self.ir.store_local(captured_local, body_result);
@@ -6139,12 +6092,26 @@ impl AstCompiler<'_> {
             Ast::Try {
                 body,
                 exception_binding: _,
-                resume_binding: _,
+                resume_binding,
                 catch_body,
                 token_range: _,
             } => {
-                for ast in body.iter() {
-                    self.find_mutable_vars_that_need_boxing(ast);
+                let is_resumable = match resume_binding {
+                    None => false,
+                    Some(name) if name == "_" => false,
+                    Some(name) => references_variable(catch_body.as_slice(), name),
+                };
+
+                if is_resumable {
+                    self.track_function_mutable_variable_pass();
+                    for ast in body.iter() {
+                        self.find_mutable_vars_that_need_boxing(ast);
+                    }
+                    self.pop_function_mutable_variable_pass();
+                } else {
+                    for ast in body.iter() {
+                        self.find_mutable_vars_that_need_boxing(ast);
+                    }
                 }
                 for ast in catch_body.iter() {
                     self.find_mutable_vars_that_need_boxing(ast);
@@ -6213,9 +6180,11 @@ impl AstCompiler<'_> {
                 }
             }
             Ast::Reset { body, .. } => {
+                self.track_function_mutable_variable_pass();
                 for ast in body.iter() {
                     self.find_mutable_vars_that_need_boxing(ast);
                 }
+                self.pop_function_mutable_variable_pass();
             }
             Ast::Shift {
                 continuation_param,
@@ -6237,17 +6206,23 @@ impl AstCompiler<'_> {
                 ..
             } => {
                 self.find_mutable_vars_that_need_boxing(handler_instance);
+                self.track_function_mutable_variable_pass();
                 for ast in body.iter() {
                     self.find_mutable_vars_that_need_boxing(ast);
                 }
+                self.pop_function_mutable_variable_pass();
             }
             Ast::Future { body, .. } => {
+                self.track_function_mutable_variable_pass();
                 self.find_mutable_vars_that_need_boxing(body);
+                self.pop_function_mutable_variable_pass();
             }
             Ast::Test { body, .. } => {
+                self.track_function_mutable_variable_pass();
                 for expression in body.iter() {
                     self.find_mutable_vars_that_need_boxing(expression);
                 }
+                self.pop_function_mutable_variable_pass();
             }
         }
     }

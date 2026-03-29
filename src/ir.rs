@@ -189,6 +189,7 @@ pub enum Instruction {
     LoadLabelAddress(Value, Label), // dest, label - loads the address of a label into a register
     CaptureContinuation(Value, Label, usize, usize), // dest, resume_label, result_local_index, builtin_fn_ptr
     CaptureContinuationWithSaves(Value, Label, usize, usize, Vec<Value>), // dest, resume_label, result_local_index, builtin_fn_ptr, saved live roots
+    PerformEffect(Value, Value, Value, Label, usize, usize), // handler, enum_type, op_value, resume_label, result_local_index, builtin_fn_ptr
     ReturnFromShift(Value, Value, usize), // value, cont_ptr, builtin_fn_ptr - calls return_from_shift with current SP/FP
     RecordGcSafepoint, // Record a GC safepoint at the current position (for continuation resume points)
 }
@@ -568,6 +569,9 @@ impl Instruction {
                 }
                 result
             }
+            Instruction::PerformEffect(handler, enum_type, op_value, _, _, _) => {
+                get_registers!(handler, enum_type, op_value)
+            }
             Instruction::ReturnFromShift(value, cont_ptr, _) => {
                 get_registers!(value, cont_ptr)
             }
@@ -734,6 +738,11 @@ impl Instruction {
                 for save in saves {
                     replace_register!(save, old_register, new_register);
                 }
+            }
+            Instruction::PerformEffect(handler, enum_type, op_value, _, _, _) => {
+                replace_register!(handler, old_register, new_register);
+                replace_register!(enum_type, old_register, new_register);
+                replace_register!(op_value, old_register, new_register);
             }
             Instruction::ReturnFromShift(value, cont_ptr, _) => {
                 replace_register!(value, old_register, new_register);
@@ -2673,6 +2682,10 @@ impl Ir {
                     // Call the push_prompt builtin
                     let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
                     backend.call_builtin(fn_ptr);
+
+                    // The builtin returns the active stack pointer for the prompt body.
+                    // For segmented-stack execution this may differ from the caller's SP.
+                    backend.mov_reg(backend.stack_pointer_reg(), backend.ret_reg());
                 }
                 Instruction::PopPromptHandler(result_value, builtin_fn) => {
                     // Call pop_prompt builtin with result value as argument
@@ -2690,6 +2703,9 @@ impl Ir {
 
                     let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
                     backend.call_builtin(fn_ptr);
+
+                    // Restore the caller-visible stack pointer on prompt exit.
+                    backend.mov_reg(backend.stack_pointer_reg(), backend.ret_reg());
                 }
                 Instruction::LoadLabelAddress(dest, label) => {
                     // Load the address of a label into a register
@@ -2789,6 +2805,35 @@ impl Ir {
                         let save_reg = self.value_to_register(save, backend);
                         backend.pop_from_stack(save_reg);
                     }
+                }
+                Instruction::PerformEffect(
+                    handler,
+                    enum_type,
+                    op_value,
+                    resume_label,
+                    result_local_index,
+                    builtin_fn,
+                ) => {
+                    backend.get_stack_pointer_imm(backend.arg(0), 0);
+                    backend.mov_reg(backend.arg(1), backend.frame_pointer());
+
+                    let handler_reg = self.value_to_register(handler, backend);
+                    backend.mov_reg(backend.arg(2), handler_reg);
+
+                    let enum_type_reg = self.value_to_register(enum_type, backend);
+                    backend.mov_reg(backend.arg(3), enum_type_reg);
+
+                    let op_reg = self.value_to_register(op_value, backend);
+                    backend.mov_reg(backend.arg(4), op_reg);
+
+                    let resume_backend_label = ir_label_to_lang_label.get(resume_label).unwrap();
+                    backend.load_label_address(backend.arg(5), *resume_backend_label);
+
+                    let local_offset = backend.get_local_byte_offset(*result_local_index);
+                    backend.mov_64(backend.arg(6), local_offset);
+
+                    let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
+                    backend.call_builtin(fn_ptr);
                 }
                 Instruction::ReturnFromShift(value, cont_ptr, builtin_fn) => {
                     // Call return_from_shift builtin (does not return)
@@ -2924,6 +2969,25 @@ impl Ir {
     pub fn return_from_shift(&mut self, value: Value, cont_ptr: Value, builtin_fn: usize) {
         self.instructions
             .push(Instruction::ReturnFromShift(value, cont_ptr, builtin_fn));
+    }
+
+    pub fn perform_effect(
+        &mut self,
+        handler: Value,
+        enum_type: Value,
+        op_value: Value,
+        resume_label: Label,
+        result_local_index: usize,
+        builtin_fn: usize,
+    ) {
+        self.instructions.push(Instruction::PerformEffect(
+            handler,
+            enum_type,
+            op_value,
+            resume_label,
+            result_local_index,
+            builtin_fn,
+        ));
     }
 
     pub fn record_gc_safepoint(&mut self) {
