@@ -74,7 +74,7 @@ impl Space {
         self.segments[self.segment_offset].offset =
             (self.segments[self.segment_offset].offset + 7) & !7;
         debug_assert!(
-            self.segments[self.segment_offset].offset % 8 == 0,
+            self.segments[self.segment_offset].offset.is_multiple_of(8),
             "Heap offset is not aligned"
         );
     }
@@ -112,7 +112,7 @@ impl Space {
         }
         let pointer = self.write_object(self.segment_offset, offset, size);
         self.increment_current_offset(full_size);
-        assert!(pointer as usize % 8 == 0, "Pointer is not aligned");
+        assert!((pointer as usize).is_multiple_of(8), "Pointer is not aligned");
         Ok(pointer)
     }
 
@@ -184,7 +184,7 @@ impl Allocator for SimpleGeneration {
         if !options.gc {
             return;
         }
-        if self.gc_count % self.full_gc_frequency == 0 {
+        if self.gc_count.is_multiple_of(self.full_gc_frequency) {
             self.full_gc(stack_map, stack_pointers, options);
         } else {
             self.minor_gc(stack_map, stack_pointers, options);
@@ -255,7 +255,7 @@ impl SimpleGeneration {
             let stack_buffer = get_live_stack(*stack_base, *stack_pointer);
             for (i, (stack_offset, _)) in roots.iter().enumerate() {
                 debug_assert!(
-                    BuiltInTypes::untag(new_roots[i]) % 8 == 0,
+                    BuiltInTypes::untag(new_roots[i]).is_multiple_of(8),
                     "Pointer is not aligned"
                 );
                 stack_buffer[*stack_offset] = new_roots[i];
@@ -324,7 +324,7 @@ impl SimpleGeneration {
             if BuiltInTypes::is_heap_pointer(first_field) {
                 let untagged_data = BuiltInTypes::untag(first_field);
                 if !self.young.contains(untagged_data as *const u8) {
-                    debug_assert!(untagged_data % 8 == 0, "Pointer is not aligned");
+                    debug_assert!(untagged_data.is_multiple_of(8), "Pointer is not aligned");
                     return first_field;
                 }
             }
@@ -332,7 +332,7 @@ impl SimpleGeneration {
 
         let data = heap_object.get_full_object_data();
         let new_pointer = self.old.copy_data_to_offset(data);
-        debug_assert!(new_pointer as usize % 8 == 0, "Pointer is not aligned");
+        debug_assert!((new_pointer as usize).is_multiple_of(8), "Pointer is not aligned");
         // update header of original object to now be the forwarding pointer
         let tagged_new = BuiltInTypes::get_kind(root).tag(new_pointer as isize) as usize;
 
@@ -410,7 +410,7 @@ impl SimpleGeneration {
                 {
                     if BuiltInTypes::is_heap_pointer(*slot) {
                         let untagged = BuiltInTypes::untag(*slot);
-                        debug_assert!(untagged % 8 == 0, "Pointer is not aligned");
+                        debug_assert!(untagged.is_multiple_of(8), "Pointer is not aligned");
                         if !self.young.contains(untagged as *const u8) {
                             continue;
                         }

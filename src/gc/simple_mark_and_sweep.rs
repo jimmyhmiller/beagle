@@ -209,7 +209,7 @@ impl SimpleMarkSweepHeap {
         size: Word,
         data: Option<&[u8]>,
     ) -> *const u8 {
-        assert!(offset % 8 == 0, "Offset is not aligned");
+        assert!(offset.is_multiple_of(8), "Offset is not aligned");
         let memory = &mut self.space.segments[segment_offset].memory;
         let pointer = memory.as_ptr();
         let pointer = unsafe { pointer.add(offset) };
@@ -293,7 +293,7 @@ impl SimpleMarkSweepHeap {
         self.space.segments[self.space.segment_offset].offset =
             (self.space.segments[self.space.segment_offset].offset + 7) & !7;
         debug_assert!(
-            self.space.segments[self.space.segment_offset].offset % 8 == 0,
+            self.space.segments[self.space.segment_offset].offset.is_multiple_of(8),
             "Heap offset is not aligned"
         );
     }
@@ -359,7 +359,7 @@ impl SimpleMarkSweepHeap {
                 {
                     if BuiltInTypes::is_heap_pointer(*slot) {
                         let untagged = BuiltInTypes::untag(*slot);
-                        if untagged % 8 != 0 {
+                        if !untagged.is_multiple_of(8) {
                             println!("Not aligned");
                         }
                         // println!("Pushing mark 0x{:?}", stack[j]);

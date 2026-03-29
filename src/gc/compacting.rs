@@ -68,7 +68,7 @@ impl Iterator for ObjectIterator {
         let size = object.full_size();
 
         self.offset += size;
-        if self.offset % 8 != 0 {
+        if !self.offset.is_multiple_of(8) {
             panic!("Heap offset is not aligned");
         }
         Some(object)
@@ -141,7 +141,7 @@ impl Space {
         self.segments[self.segment_offset].offset =
             (self.segments[self.segment_offset].offset + 7) & !7;
         debug_assert!(
-            self.segments[self.segment_offset].offset % 8 == 0,
+            self.segments[self.segment_offset].offset.is_multiple_of(8),
             "Heap offset is not aligned"
         );
     }
@@ -179,7 +179,7 @@ impl Space {
         }
         let pointer = self.write_object(self.segment_offset, offset, size);
         self.increment_current_offset(full_size);
-        assert!(pointer as usize % 8 == 0, "Pointer is not aligned");
+        assert!((pointer as usize).is_multiple_of(8), "Pointer is not aligned");
         Ok(pointer)
     }
 
@@ -251,7 +251,7 @@ impl Allocator for CompactingHeap {
             let stack_buffer = get_live_stack(*stack_base, *stack_pointer);
             for (i, (stack_offset, _)) in roots.iter().enumerate() {
                 debug_assert!(
-                    BuiltInTypes::untag(new_roots[i]) % 8 == 0,
+                    BuiltInTypes::untag(new_roots[i]).is_multiple_of(8),
                     "Pointer is not aligned"
                 );
                 stack_buffer[*stack_offset] = new_roots[i];
@@ -366,7 +366,7 @@ impl CompactingHeap {
             if BuiltInTypes::is_heap_pointer(heap_object.get_field(0)) {
                 let untagged_data = BuiltInTypes::untag(first_field);
                 if self.to_space.contains(untagged_data as *const u8) {
-                    debug_assert!(untagged_data % 8 == 0, "Pointer is not aligned");
+                    debug_assert!(untagged_data.is_multiple_of(8), "Pointer is not aligned");
                     return first_field;
                 }
             }
@@ -420,7 +420,7 @@ impl CompactingHeap {
                     if BuiltInTypes::is_heap_pointer(*slot) {
                         roots.push((j, *slot));
                         let untagged = BuiltInTypes::untag(*slot);
-                        debug_assert!(untagged % 8 == 0, "Pointer is not aligned");
+                        debug_assert!(untagged.is_multiple_of(8), "Pointer is not aligned");
                         to_mark.push(*slot);
                     }
                 }

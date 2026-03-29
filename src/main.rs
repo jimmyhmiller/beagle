@@ -3,7 +3,7 @@
 use crate::machine_code::arm_codegen::{SP, X0, X1, X10, X2, X3, X4};
 use arm::LowLevelArm;
 use bincode::{config::standard, Decode, Encode};
-use clap::{command, Parser as ClapParser};
+use clap::Parser as ClapParser;
 #[allow(unused)]
 use gc::{
     compacting::CompactingHeap, mutex_allocator::MutexAllocator,
@@ -140,7 +140,7 @@ extern "C" fn allocate<Alloc: Allocator>(
         .unwrap();
 
     debug_assert!(BuiltInTypes::is_heap_pointer(result));
-    debug_assert!(BuiltInTypes::untag(result) % 8 == 0);
+    debug_assert!(BuiltInTypes::untag(result).is_multiple_of(8));
     result
 }
 
@@ -157,7 +157,7 @@ extern "C" fn allocate_float<Alloc: Allocator>(
         .unwrap();
 
     debug_assert!(BuiltInTypes::get_kind(result) == BuiltInTypes::Float);
-    debug_assert!(BuiltInTypes::untag(result) % 8 == 0);
+    debug_assert!(BuiltInTypes::untag(result).is_multiple_of(8));
     result
 }
 

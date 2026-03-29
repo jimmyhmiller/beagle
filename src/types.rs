@@ -243,7 +243,7 @@ impl HeapObject {
     }
 
     pub fn from_untagged(pointer: *const u8) -> Self {
-        assert!(pointer as usize % 8 == 0);
+        assert!((pointer as usize).is_multiple_of(8));
         HeapObject {
             pointer: pointer as usize,
             tagged: false,
@@ -284,7 +284,7 @@ impl HeapObject {
         let header = Header::from_usize(data);
         // TODO: This is number of bytes, not number of fields
         // so is this wrong?
-        if header.size % 8 != 0 {
+        if !header.size.is_multiple_of(8) {
             panic!("Size is not aligned");
         }
         header.size as usize
@@ -302,7 +302,7 @@ impl HeapObject {
         let size = self.full_size();
         let untagged = self.untagged();
         let pointer = untagged as *mut u8;
-        assert!(pointer as usize % 8 == 0);
+        assert!((pointer as usize).is_multiple_of(8));
         unsafe { std::slice::from_raw_parts(pointer, size) }
     }
 
@@ -348,11 +348,11 @@ impl HeapObject {
     }
 
     pub fn write_header(&mut self, field_size: Word) {
-        assert!(field_size.to_bytes() % 8 == 0);
+        assert!(field_size.to_bytes().is_multiple_of(8));
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
 
-        if field_size.to_bytes() % 8 != 0 {
+        if !field_size.to_bytes().is_multiple_of(8) {
             panic!("Size is not aligned");
         }
 

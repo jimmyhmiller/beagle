@@ -716,7 +716,7 @@ impl Compiler {
                 let value = BuiltInTypes::untag(value);
                 unsafe {
                     let pointer = value as *const u8;
-                    if pointer as usize % 8 != 0 {
+                    if !(pointer as usize).is_multiple_of(8) {
                         panic!("Not aligned");
                     }
                     let function_pointer = *(pointer as *const usize);
@@ -873,7 +873,7 @@ impl Compiler {
     }
 
     pub fn property_access(&self, struct_pointer: usize, str_constant_ptr: usize) -> usize {
-        if BuiltInTypes::untag(struct_pointer) % 8 != 0 {
+        if !BuiltInTypes::untag(struct_pointer).is_multiple_of(8) {
             panic!("Not aligned");
         }
         let heap_object = HeapObject::from_tagged(struct_pointer);
