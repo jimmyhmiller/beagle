@@ -12430,19 +12430,12 @@ fn invoke_segmented_continuation(
     let prompt_id = continuation.prompt_id();
     let mut resume_address = continuation.resume_address();
     let continuation_return_address = {
-        #[cfg(target_arch = "x86_64")]
-        {
-            continuation_return_trampoline as usize
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            let runtime = get_runtime().get();
-            let return_stub = runtime
-                .get_function_by_name("beagle.builtin/continuation-return-stub")
-                .expect("continuation-return-stub function not found");
-            let return_stub_ptr: usize = return_stub.pointer.into();
-            return_stub_ptr
-        }
+        let runtime = get_runtime().get();
+        let return_stub = runtime
+            .get_function_by_name("beagle.builtin/continuation-return-stub")
+            .expect("continuation-return-stub function not found");
+        let return_stub_ptr: usize = return_stub.pointer.into();
+        return_stub_ptr
     };
     let segment_handle_id = continuation.segment_handle_id();
     let cloned_segment = {

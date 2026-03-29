@@ -1164,6 +1164,41 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
             )
             .unwrap();
     }
+
+    // Generate continuation-return-stub
+    // When a segmented continuation's outermost frame returns via `ret`, RSP is
+    // 16-byte aligned (frame pointers are 16-aligned, and `leave; ret` adds 16).
+    // But Rust functions expect entry with RSP ≡ 8 (mod 16) (as after a `call`).
+    // This stub adjusts the alignment before jumping to continuation_return_trampoline.
+    {
+        use crate::builtins::continuation_return_trampoline;
+
+        let mut lang = x86::LowLevelX86::new();
+        // After Beagle `ret`, RSP is 16-aligned. Sub 8 to make it 8-mod-16.
+        lang.instructions.push(X86Asm::SubRI { dest: RSP, imm: 8 });
+        // Load and jump to continuation_return_trampoline (which is -> !)
+        let trampoline_ptr = continuation_return_trampoline as *const u8 as i64;
+        lang.instructions.push(X86Asm::MovRI {
+            dest: R11,
+            imm: trampoline_ptr,
+        });
+        lang.instructions.push(X86Asm::JmpR { target: R11 });
+
+        let code = lang.compile_to_bytes();
+        runtime
+            .add_function_mark_executable(
+                "beagle.builtin/continuation-return-stub".to_string(),
+                &code,
+                0,
+                1,
+            )
+            .unwrap();
+
+        let function = runtime
+            .get_function_by_name_mut("beagle.builtin/continuation-return-stub")
+            .unwrap();
+        function.is_builtin = true;
+    }
 }
 
 #[derive(Debug, Clone)]
