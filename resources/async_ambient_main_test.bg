@@ -1,9 +1,14 @@
 namespace async_ambient_main_test
 
 use beagle.async as async
+use beagle.core as core
 
 fn main() {
-    let path = "/tmp/beagle_ambient_main_test.txt"
+    let unique-suffix = to-string(core/thread-id()) ++ "-" ++ to-string(core/time-now())
+    let path = "/tmp/beagle_ambient_main_test_" ++ unique-suffix ++ ".txt"
+
+    // Keep this example repeatable when it is run multiple times in the same environment.
+    let _ = async/delete-file(path)
 
     let write_result = async/write-file(path, "ambient main")
     match write_result {
@@ -25,6 +30,8 @@ fn main() {
         Result.Ok { value } => println("sleep: ok"),
         Result.Err { error } => println("sleep: err")
     }
+
+    let _ = async/delete-file(path)
 }
 
 // @beagle.core.snapshot

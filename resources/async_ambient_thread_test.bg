@@ -4,12 +4,15 @@ use beagle.async as async
 use beagle.core as core
 
 fn main() {
-    let path = "/tmp/beagle_ambient_thread_test.txt"
+    let unique-suffix = to-string(core/thread-id()) ++ "-" ++ to-string(core/time-now())
+    let path = "/tmp/beagle_ambient_thread_test_" ++ unique-suffix ++ ".txt"
     let write_status = atom("pending")
     let read_value = atom("pending")
     let future_value = atom(0)
     let sleep_status = atom("pending")
     let done = atom(false)
+
+    let _ = async/delete-file(path)
 
     thread(fn() {
         let write_result = async/write-file(path, "ambient thread")
@@ -47,6 +50,8 @@ fn main() {
     println("read:", deref(read_value))
     println("future:", deref(future_value))
     println("sleep:", deref(sleep_status))
+
+    let _ = async/delete-file(path)
 }
 
 // @beagle.core.snapshot
