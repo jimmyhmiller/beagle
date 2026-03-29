@@ -15026,7 +15026,7 @@ impl Runtime {
             perform_effect_runtime as *const u8,
             true,
             true,
-            7, // stack_pointer, frame_pointer, handler, enum_type_ptr, op_value, resume_address, result_local_offset
+            6, // stack_pointer, frame_pointer, enum_type_ptr, op_value, resume_address, result_local_offset
         )?;
 
         // ====================================================================
@@ -16393,7 +16393,6 @@ pub extern "C" fn call_handler_builtin(
 pub unsafe extern "C" fn perform_effect_runtime(
     stack_pointer: usize,
     frame_pointer: usize,
-    _handler: usize,
     enum_type_ptr: usize,
     op_value: usize,
     resume_address: usize,

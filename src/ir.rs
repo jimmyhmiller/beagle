@@ -2817,20 +2817,19 @@ impl Ir {
                     backend.get_stack_pointer_imm(backend.arg(0), 0);
                     backend.mov_reg(backend.arg(1), backend.frame_pointer());
 
-                    let handler_reg = self.value_to_register(handler, backend);
-                    backend.mov_reg(backend.arg(2), handler_reg);
+                    let _ = handler;
 
                     let enum_type_reg = self.value_to_register(enum_type, backend);
-                    backend.mov_reg(backend.arg(3), enum_type_reg);
+                    backend.mov_reg(backend.arg(2), enum_type_reg);
 
                     let op_reg = self.value_to_register(op_value, backend);
-                    backend.mov_reg(backend.arg(4), op_reg);
+                    backend.mov_reg(backend.arg(3), op_reg);
 
                     let resume_backend_label = ir_label_to_lang_label.get(resume_label).unwrap();
-                    backend.load_label_address(backend.arg(5), *resume_backend_label);
+                    backend.load_label_address(backend.arg(4), *resume_backend_label);
 
                     let local_offset = backend.get_local_byte_offset(*result_local_index);
-                    backend.mov_64(backend.arg(6), local_offset);
+                    backend.mov_64(backend.arg(5), local_offset);
 
                     let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
                     backend.call_builtin(fn_ptr);
