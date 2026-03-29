@@ -11899,10 +11899,14 @@ unsafe fn capture_continuation_runtime_inner(
     let segment_handle_id = runtime
         .captured_segment_id_counter
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // Save the current GC frame chain top before cutting — this is the entry
+    // point for walking heap pointers within the captured segment during GC.
+    let captured_gc_frame_top = get_gc_frame_top();
     crate::runtime::per_thread_data().record_captured_segment(
         prompt.prompt_id,
         segment_handle_id,
         segment,
+        captured_gc_frame_top,
     );
     crate::runtime::per_thread_data().mark_pending_captured_segment(segment_handle_id);
 
@@ -11911,7 +11915,14 @@ unsafe fn capture_continuation_runtime_inner(
     // abandoned prompt-owned segment through the active chain.
     set_gc_frame_top(prompt_fp.saturating_sub(8));
 
-    let cont_ptr = match runtime.allocate(26, stack_pointer, BuiltInTypes::HeapObject) {
+    // Update saved GC context so that if GC runs during the continuation object
+    // allocation below, it walks frames from the prompt (on the main stack)
+    // rather than the detached segment. The original stack_pointer/frame_pointer
+    // point into the captured segment which is no longer in the GC frame chain.
+    save_frame_pointer(prompt_fp);
+    save_stack_pointer(prompt_sp);
+
+    let cont_ptr = match runtime.allocate(26, prompt_sp, BuiltInTypes::HeapObject) {
         Ok(ptr) => ptr,
         Err(_) => unsafe {
             throw_runtime_error(
@@ -12442,7 +12453,7 @@ fn invoke_segmented_continuation(
         let ptd = crate::runtime::per_thread_data();
         ptd.captured_segments
             .get(&segment_handle_id)
-            .map(|segment| segment.clone_from())
+            .map(|(segment, _gc_top)| segment.clone_from())
             .unwrap_or_else(|| {
                 panic!(
                     "missing captured segment for prompt {} handle {}",
@@ -12455,7 +12466,7 @@ fn invoke_segmented_continuation(
         let ptd = crate::runtime::per_thread_data();
         ptd.captured_segments
             .get(&segment_handle_id)
-            .map(|segment| (segment.base, segment.top))
+            .map(|(segment, _gc_top)| (segment.base, segment.top))
     }
     .expect("captured segment disappeared during continuation invoke");
 
@@ -16899,17 +16910,25 @@ pub unsafe extern "C" fn perform_effect_runtime(
             .clear_pending_captured_segment(cont.segment_handle_id());
     }
 
+    // After capture, the original stack_pointer points into the detached segment.
+    // Use the prompt's stack pointer for all subsequent allocations so that GC
+    // sees valid (main-stack) pointers.
+    let cont_obj = ContinuationObject::from_tagged(cont_ptr).unwrap_or_else(|| {
+        panic!("perform_effect_runtime got invalid continuation pointer {:#x}", cont_ptr)
+    });
+    let safe_sp = cont_obj.prompt_stack_pointer();
+
     let trampoline_fn = runtime
         .get_function_by_name("beagle.builtin/continuation-trampoline")
         .expect("continuation-trampoline builtin not found");
     let tagged_trampoline =
         BuiltInTypes::Function.tag(usize::from(trampoline_fn.pointer) as isize) as usize;
 
-    let resume_closure = match runtime.make_closure(stack_pointer, tagged_trampoline, &[cont_ptr]) {
+    let resume_closure = match runtime.make_closure(safe_sp, tagged_trampoline, &[cont_ptr]) {
         Ok(closure) => closure,
         Err(_) => unsafe {
             throw_runtime_error(
-                stack_pointer,
+                safe_sp,
                 "AllocationError",
                 "Failed to allocate continuation closure".to_string(),
             );
@@ -16943,7 +16962,7 @@ pub unsafe extern "C" fn perform_effect_runtime(
     }
 
     let (handler, fn_ptr_tagged) =
-        resolve_effect_handler_method(runtime, stack_pointer, enum_type_ptr);
+        resolve_effect_handler_method(runtime, safe_sp, enum_type_ptr);
     let fn_ptr = BuiltInTypes::untag(fn_ptr_tagged);
 
     crate::runtime::per_thread_data().push_saved_continuation_ptr(cont_ptr);

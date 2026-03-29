@@ -4080,7 +4080,10 @@ pub struct PerThreadData {
     /// Stack of currently active prompt-owned segments.
     pub active_segments: Vec<ActiveSegment>,
     /// Segments detached during continuation capture, keyed by segment handle ID.
-    pub captured_segments: std::collections::HashMap<usize, StackSegment>,
+    /// Tuple: (segment, gc_frame_chain_top) — the gc_frame_chain_top is the header
+    /// address of the topmost GC frame in the segment at capture time, needed so
+    /// the GC can walk and update heap pointers within captured segments.
+    pub captured_segments: std::collections::HashMap<usize, (StackSegment, usize)>,
     /// Segment handle IDs captured under each prompt. Used for prompt-scoped bookkeeping.
     pub prompt_captured_segments: std::collections::HashMap<usize, Vec<usize>>,
     /// Segment handles detached during capture before the continuation object exists.
@@ -4155,8 +4158,9 @@ impl PerThreadData {
         prompt_id: usize,
         segment_handle_id: usize,
         segment: StackSegment,
+        gc_frame_top: usize,
     ) {
-        self.captured_segments.insert(segment_handle_id, segment);
+        self.captured_segments.insert(segment_handle_id, (segment, gc_frame_top));
         self.prompt_captured_segments
             .entry(prompt_id)
             .or_default()
@@ -4467,7 +4471,7 @@ pub fn find_captured_segment_bounds(segment_handle_id: usize) -> Option<(usize, 
     let registry = runtime.per_thread_registry.lock().unwrap();
     for ptd_ptr in registry.iter() {
         let ptd = unsafe { &*ptd_ptr.0 };
-        if let Some(segment) = ptd.captured_segments.get(&segment_handle_id) {
+        if let Some((segment, _gc_top)) = ptd.captured_segments.get(&segment_handle_id) {
             return Some((segment.base, segment.top));
         }
     }
@@ -4539,7 +4543,7 @@ pub fn recycle_unreachable_captured_segments(
             .collect();
 
         for segment_id in stale_segment_ids {
-            if let Some(segment) = ptd.captured_segments.remove(&segment_id) {
+            if let Some((segment, _gc_top)) = ptd.captured_segments.remove(&segment_id) {
                 ptd.recycle_segment(segment);
             }
         }
