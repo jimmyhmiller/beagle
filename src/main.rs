@@ -96,6 +96,148 @@ pub struct Message {
     data: Data,
 }
 
+#[cfg(all(target_arch = "aarch64", not(feature = "backend-x86-64")))]
+fn compile_arm_continuation_return_stub(runtime: &mut Runtime) {
+    use crate::builtins::segmented_continuation_return;
+    use crate::machine_code::arm_codegen::{ArmAsm, StrImmGenSelector, X16, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X2, X3, X4, X5, X29, X30, SP};
+
+    let mut lang = arm::LowLevelArm::new();
+    for instr in arm::LowLevelArm::mov_64_bit_num(X16, segmented_continuation_return as usize as isize)
+    {
+        lang.instructions.push(instr);
+    }
+    lang.instructions.push(ArmAsm::Br { rn: X16 });
+    let code: Vec<u8> = lang
+        .instructions
+        .iter()
+        .flat_map(|instr| instr.encode().to_le_bytes())
+        .collect();
+
+    runtime
+        .add_function_mark_executable(
+            "beagle.builtin/continuation-return-stub".to_string(),
+            &code,
+            0,
+            1,
+        )
+        .unwrap();
+
+    let function = runtime
+        .get_function_by_name_mut("beagle.builtin/continuation-return-stub")
+        .unwrap();
+    function.is_builtin = true;
+    if std::env::var("BEAGLE_DEBUG_RESUME").is_ok() {
+        let ptr: usize = function.pointer.into();
+        eprintln!(
+            "[arm-stub] continuation-return-stub={:#x}",
+            ptr
+        );
+    }
+
+    use crate::builtins::continuation_trampoline_with_saved_regs_and_context;
+
+    let mut lang = arm::LowLevelArm::new();
+    lang.mov_reg(X3, SP);
+    lang.mov_reg(X4, X29);
+    lang.mov_reg(X5, X30);
+    lang.sub_stack_pointer(10);
+    let regs = [X19, X20, X21, X22, X23, X24, X25, X26, X27, X28];
+    for (i, reg) in regs.into_iter().enumerate() {
+        lang.instructions.push(ArmAsm::StrImmGen {
+            size: 0b11,
+            imm9: 0,
+            imm12: i as i32,
+            rn: SP,
+            rt: reg,
+            class_selector: StrImmGenSelector::UnsignedOffset,
+        });
+    }
+    lang.mov_reg(X2, SP);
+    for instr in arm::LowLevelArm::mov_64_bit_num(
+        X16,
+        continuation_trampoline_with_saved_regs_and_context as usize as isize,
+    ) {
+        lang.instructions.push(instr);
+    }
+    lang.call(X16);
+    lang.add_stack_pointer(10);
+    lang.ret();
+    let code: Vec<u8> = lang
+        .instructions
+        .iter()
+        .flat_map(|instr| instr.encode().to_le_bytes())
+        .collect();
+
+    runtime
+        .add_function_mark_executable(
+            "beagle.builtin/continuation-trampoline".to_string(),
+            &code,
+            0,
+            2,
+        )
+        .unwrap();
+
+    let function = runtime
+        .get_function_by_name_mut("beagle.builtin/continuation-trampoline")
+        .unwrap();
+    function.is_builtin = true;
+    if std::env::var("BEAGLE_DEBUG_RESUME").is_ok() {
+        let ptr: usize = function.pointer.into();
+        eprintln!("[arm-stub] continuation-trampoline={:#x}", ptr);
+    }
+
+    use crate::builtins::capture_continuation_runtime_with_saved_regs;
+
+    let mut lang = arm::LowLevelArm::new();
+    lang.sub_stack_pointer(10);
+    for (i, reg) in regs.into_iter().enumerate() {
+        lang.instructions.push(ArmAsm::StrImmGen {
+            size: 0b11,
+            imm9: 0,
+            imm12: i as i32,
+            rn: SP,
+            rt: reg,
+            class_selector: StrImmGenSelector::UnsignedOffset,
+        });
+    }
+    lang.mov_reg(X4, SP);
+    for instr in arm::LowLevelArm::mov_64_bit_num(
+        X16,
+        capture_continuation_runtime_with_saved_regs as usize as isize,
+    ) {
+        lang.instructions.push(instr);
+    }
+    lang.call(X16);
+    lang.add_stack_pointer(10);
+    lang.ret();
+    let code: Vec<u8> = lang
+        .instructions
+        .iter()
+        .flat_map(|instr| instr.encode().to_le_bytes())
+        .collect();
+
+    runtime
+        .add_function_mark_executable(
+            "beagle.builtin/capture-continuation".to_string(),
+            &code,
+            0,
+            4,
+        )
+        .unwrap();
+
+    let function = runtime
+        .get_function_by_name_mut("beagle.builtin/capture-continuation")
+        .unwrap();
+    function.is_builtin = true;
+    if std::env::var("BEAGLE_DEBUG_RESUME").is_ok() {
+        let ptr: usize = function.pointer.into();
+        eprintln!(
+            "[arm-stub] capture-continuation={:#x}",
+            ptr
+        );
+    }
+}
+
 // TODO: This should really live on the debugger side of things
 #[derive(Debug, Encode, Decode, Clone, SerJson)]
 enum Data {
@@ -1691,6 +1833,8 @@ fn run_repl(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         all(target_arch = "x86_64", not(feature = "backend-arm64"))
     ))]
     compile_continuation_trampolines(runtime);
+    #[cfg(all(target_arch = "aarch64", not(feature = "backend-x86-64")))]
+    compile_arm_continuation_return_stub(runtime);
 
     let mut top_levels = vec![];
     if !args.no_std {
@@ -1860,6 +2004,8 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         all(target_arch = "x86_64", not(feature = "backend-arm64"))
     ))]
     compile_continuation_trampolines(runtime);
+    #[cfg(all(target_arch = "aarch64", not(feature = "backend-x86-64")))]
+    compile_arm_continuation_return_stub(runtime);
 
     let compile_time = Instant::now();
 

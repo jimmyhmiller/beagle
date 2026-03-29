@@ -853,7 +853,7 @@ impl HeapObject {
             x if x == TYPE_ID_FRAME => (header.type_data >> 16) as usize,
             // Continuation: fixed metadata object with 16 fields; only heap-pointer
             // slots among them are traced by the collector.
-            x if x == TYPE_ID_CONTINUATION => 16,
+            x if x == TYPE_ID_CONTINUATION => 26,
             // FunctionObject: field 0 is a tagged function pointer, not a heap object
             x if x == TYPE_ID_FUNCTION_OBJECT => 0,
             // Regex: opaque index, not a heap pointer

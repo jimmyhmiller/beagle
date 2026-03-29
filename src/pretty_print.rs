@@ -791,6 +791,9 @@ impl PrettyPrint for ArmAsm {
             ArmAsm::Blr { rn } => {
                 format!("blr {}", rn.pretty_print())
             }
+            ArmAsm::Br { rn } => {
+                format!("br {}", rn.pretty_print())
+            }
             ArmAsm::Brk { imm16 } => {
                 format!("brk {}", imm16)
             }

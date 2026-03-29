@@ -208,6 +208,59 @@ pub fn get_current_rust_frame_pointer() -> usize {
     fp
 }
 
+#[inline(always)]
+fn capture_current_callee_saved_regs() -> [usize; 10] {
+    let mut saved_regs = [0usize; 10];
+    cfg_if::cfg_if! {
+        if #[cfg(target_arch = "aarch64")] {
+            unsafe {
+                std::arch::asm!(
+                    "str x19, [{0}]",
+                    "str x20, [{0}, #8]",
+                    "str x21, [{0}, #16]",
+                    "str x22, [{0}, #24]",
+                    "str x23, [{0}, #32]",
+                    "str x24, [{0}, #40]",
+                    "str x25, [{0}, #48]",
+                    "str x26, [{0}, #56]",
+                    "str x27, [{0}, #64]",
+                    "str x28, [{0}, #72]",
+                    in(reg) saved_regs.as_mut_ptr(),
+                );
+            }
+        } else if #[cfg(target_arch = "x86_64")] {
+            unsafe {
+                std::arch::asm!(
+                    "mov [{0}], rbx",
+                    "mov [{0} + 8], r12",
+                    "mov [{0} + 16], r13",
+                    "mov [{0} + 24], r14",
+                    "mov [{0} + 32], r15",
+                    in(reg) saved_regs.as_mut_ptr(),
+                );
+            }
+        }
+    }
+    saved_regs
+}
+
+fn decode_arm_mov_imm3(words: &[u32], reg: u8) -> Option<usize> {
+    if words.len() < 3 {
+        return None;
+    }
+    let mut value = 0usize;
+    for &word in words.iter().take(3) {
+        let rd = (word & 0x1f) as u8;
+        if rd != reg {
+            return None;
+        }
+        let imm16 = ((word >> 5) & 0xffff) as usize;
+        let hw = ((word >> 21) & 0x3) as usize;
+        value |= imm16 << (hw * 16);
+    }
+    Some(value)
+}
+
 #[allow(unused)]
 #[unsafe(no_mangle)]
 #[inline(never)]
@@ -264,6 +317,9 @@ pub fn debugger(_message: Message) {
 }
 
 pub unsafe extern "C" fn println_value(value: usize) -> usize {
+    if std::env::var("BEAGLE_DEBUG_RESUME").is_ok() {
+        eprintln!("[println_value] arg={:#x}", value);
+    }
     let runtime = get_runtime().get_mut();
     let result = runtime.println(value);
     if let Err(error) = result {
@@ -1833,6 +1889,17 @@ pub unsafe extern "C" fn build_rest_array_from_locals(
     first_local_index: usize,
     first_arg_index: usize,
 ) -> usize {
+    if std::env::var("BEAGLE_DEBUG_RESUME").is_ok() {
+        eprintln!(
+            "[build_rest_array] sp={:#x} fp={:#x} arg_count={:#x} min_args={:#x} first_local={} first_arg={:#x}",
+            stack_pointer,
+            frame_pointer,
+            arg_count,
+            min_args,
+            first_local_index,
+            first_arg_index
+        );
+    }
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
 
@@ -4495,7 +4562,7 @@ pub extern "C" fn get_my_thread_obj(stack_pointer: usize, frame_pointer: usize) 
     // the GC will have the correct return address pointing to Beagle code.
     save_gc_context!(stack_pointer, frame_pointer);
 
-    let runtime = get_runtime().get_mut();
+    let runtime = get_runtime().get();
     let thread_id = thread::current().id();
 
     // Read the Thread object from our GlobalObjectBlock's reserved slot.
@@ -9053,7 +9120,7 @@ extern "C" fn fs_file_size(stack_pointer: usize, frame_pointer: usize, path: usi
 extern "C" fn future_wait(timeout_ms: usize) -> usize {
     let timeout = BuiltInTypes::untag(timeout_ms) as u64;
     trace!("scheduler", "future_wait: timeout={}ms", timeout);
-    let runtime = get_runtime().get_mut();
+    let runtime = get_runtime().get();
     let notified = runtime.future_wait_set.wait_timeout(timeout);
     trace!("scheduler", "future_wait: returned notified={}", notified);
     BuiltInTypes::construct_boolean(notified) as usize
@@ -9063,7 +9130,7 @@ extern "C" fn future_wait(timeout_ms: usize) -> usize {
 /// Should be called after a future completes (after reset! on the future atom).
 extern "C" fn future_notify() -> usize {
     trace!("scheduler", "future_notify: waking all waiters");
-    let runtime = get_runtime().get_mut();
+    let runtime = get_runtime().get();
     runtime.future_wait_set.notify_all();
     BuiltInTypes::null_value() as usize
 }
@@ -9208,7 +9275,7 @@ extern "C" fn sleep(_stack_pointer: usize, frame_pointer: usize, time: usize) ->
     // Register as c_calling before sleeping. Without this, GC would wait
     // forever for this thread to hit a safepoint while it's blocked in sleep.
     {
-        let runtime = get_runtime().get_mut();
+        let runtime = get_runtime().get();
         let thread_state = runtime.thread_state.clone();
         let (lock, condvar) = &*thread_state;
         let mut state = lock.lock().unwrap();
@@ -9220,7 +9287,7 @@ extern "C" fn sleep(_stack_pointer: usize, frame_pointer: usize, time: usize) ->
 
     // Unregister from c_calling under gc_lock
     {
-        let runtime = get_runtime().get_mut();
+        let runtime = get_runtime().get();
         while runtime.is_paused() {
             thread::yield_now();
         }
@@ -9280,7 +9347,7 @@ extern "C" fn get_cpu_count() -> usize {
 /// Always spawns a dedicated I/O thread.
 extern "C" fn event_loop_create(pool_size: usize) -> usize {
     let pool_size = BuiltInTypes::untag(pool_size);
-    let runtime = get_runtime().get_mut();
+    let runtime = get_runtime().get();
 
     trace!("event-loop", "event_loop_create: pool_size={}", pool_size);
     match runtime.event_loops.create(pool_size) {
@@ -9348,7 +9415,7 @@ extern "C" fn event_loop_run_once(
 
     // Unregister from c_calling, waiting for any in-progress GC to finish
     {
-        let runtime = get_runtime().get_mut();
+        let runtime = get_runtime().get();
         while runtime.is_paused() {
             thread::yield_now();
         }
@@ -10045,7 +10112,7 @@ extern "C" fn timer_set(loop_id: usize, delay_ms: usize, future_atom: usize) -> 
     let loop_id = BuiltInTypes::untag(loop_id);
     let delay_ms = BuiltInTypes::untag(delay_ms) as u64;
     let future_atom = BuiltInTypes::untag(future_atom);
-    let runtime = get_runtime().get_mut();
+    let runtime = get_runtime().get();
 
     let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
@@ -10069,7 +10136,7 @@ extern "C" fn timer_set(loop_id: usize, delay_ms: usize, future_atom: usize) -> 
 extern "C" fn timer_cancel(loop_id: usize, timer_id: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
     let timer_id = BuiltInTypes::untag(timer_id);
-    let runtime = get_runtime().get_mut();
+    let runtime = get_runtime().get();
 
     let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
@@ -10083,7 +10150,7 @@ extern "C" fn timer_cancel(loop_id: usize, timer_id: usize) -> usize {
 /// Get the count of completed timers
 extern "C" fn timer_completed_count(loop_id: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
-    let runtime = get_runtime().get_mut();
+    let runtime = get_runtime().get();
 
     let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
@@ -10098,7 +10165,7 @@ extern "C" fn timer_completed_count(loop_id: usize) -> usize {
 /// Returns 0 if no completed timers
 extern "C" fn timer_pop_completed(loop_id: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
-    let runtime = get_runtime().get_mut();
+    let runtime = get_runtime().get();
 
     let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
@@ -10116,7 +10183,7 @@ extern "C" fn timer_pop_completed(loop_id: usize) -> usize {
 extern "C" fn timer_take_completed(loop_id: usize, future_atom: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);
     let future_atom = BuiltInTypes::untag(future_atom);
-    let runtime = get_runtime().get_mut();
+    let runtime = get_runtime().get();
 
     let event_loop = match runtime.event_loops.get(loop_id) {
         Some(el) => el,
@@ -11747,6 +11814,47 @@ pub unsafe extern "C" fn capture_continuation_runtime(
     resume_address: usize,
     result_local_offset: isize,
 ) -> usize {
+    let captured_callee_saved_regs = capture_current_callee_saved_regs();
+    unsafe {
+        capture_continuation_runtime_inner(
+            stack_pointer,
+            frame_pointer,
+            resume_address,
+            result_local_offset,
+            captured_callee_saved_regs,
+        )
+    }
+}
+
+pub unsafe extern "C" fn capture_continuation_runtime_with_saved_regs(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    resume_address: usize,
+    result_local_offset: isize,
+    saved_regs_ptr: *const usize,
+) -> usize {
+    let mut captured_callee_saved_regs = [0usize; 10];
+    for (i, reg) in captured_callee_saved_regs.iter_mut().enumerate() {
+        *reg = unsafe { *saved_regs_ptr.add(i) };
+    }
+    unsafe {
+        capture_continuation_runtime_inner(
+            stack_pointer,
+            frame_pointer,
+            resume_address,
+            result_local_offset,
+            captured_callee_saved_regs,
+        )
+    }
+}
+
+unsafe fn capture_continuation_runtime_inner(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    resume_address: usize,
+    result_local_offset: isize,
+    captured_callee_saved_regs: [usize; 10],
+) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "capture_continuation");
     trace!(
@@ -11803,7 +11911,7 @@ pub unsafe extern "C" fn capture_continuation_runtime(
     // abandoned prompt-owned segment through the active chain.
     set_gc_frame_top(prompt_fp.saturating_sub(8));
 
-    let cont_ptr = match runtime.allocate(16, stack_pointer, BuiltInTypes::HeapObject) {
+    let cont_ptr = match runtime.allocate(26, stack_pointer, BuiltInTypes::HeapObject) {
         Ok(ptr) => ptr,
         Err(_) => unsafe {
             throw_runtime_error(
@@ -11823,6 +11931,7 @@ pub unsafe extern "C" fn capture_continuation_runtime(
         result_local_offset,
         &prompt,
         segment_handle_id,
+        &captured_callee_saved_regs,
     );
 
     if debug_prompts {
@@ -12319,6 +12428,22 @@ fn invoke_segmented_continuation(
     saved_gc_prev: usize,
 ) -> ! {
     let prompt_id = continuation.prompt_id();
+    let mut resume_address = continuation.resume_address();
+    let continuation_return_address = {
+        #[cfg(target_arch = "x86_64")]
+        {
+            continuation_return_trampoline as usize
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let runtime = get_runtime().get();
+            let return_stub = runtime
+                .get_function_by_name("beagle.builtin/continuation-return-stub")
+                .expect("continuation-return-stub function not found");
+            let return_stub_ptr: usize = return_stub.pointer.into();
+            return_stub_ptr
+        }
+    };
     let segment_handle_id = continuation.segment_handle_id();
     let cloned_segment = {
         let ptd = crate::runtime::per_thread_data();
@@ -12364,6 +12489,179 @@ fn invoke_segmented_continuation(
     let new_fp = cloned_segment.base + fp_offset;
     let relocation = cloned_segment.base as isize - original_base as isize;
 
+    if std::env::var("BEAGLE_DEBUG_RESUME").is_ok() {
+        let runtime = get_runtime().get();
+        let resume_address = continuation.resume_address() as *const u8;
+        if let Some((function, offset)) = runtime.get_function_containing_pointer(resume_address) {
+            let function_start: usize = function.pointer.into();
+            eprintln!(
+                "[resume] function={} start={:#x} offset={:#x} resume={:#x} source={:?}:{:?} locals={} size={:#x}",
+                function.name,
+                function_start,
+                offset,
+                continuation.resume_address(),
+                function.source_file,
+                function.source_line,
+                function.number_of_locals,
+                function.size,
+            );
+            let dump_start = continuation.resume_address().saturating_sub(0x20);
+            let mut words = Vec::new();
+            for i in 0..32usize {
+                let addr = dump_start + i * 4;
+                let word = unsafe { *(addr as *const u32) };
+                words.push(format!("{:#010x}", word));
+            }
+            eprintln!(
+                "[resume-code] start={:#x} words={}",
+                dump_start,
+                words.join(" ")
+            );
+        } else {
+            eprintln!(
+                "[resume] unknown resume={:#x} original_sp={:#x} original_fp={:#x}",
+                continuation.resume_address(),
+                original_sp,
+                original_fp
+            );
+        }
+
+        let frame_words = [
+            unsafe { *((new_fp - 40) as *const usize) },
+            unsafe { *((new_fp - 32) as *const usize) },
+            unsafe { *((new_fp - 24) as *const usize) },
+            unsafe { *((new_fp - 16) as *const usize) },
+            unsafe { *((new_fp - 8) as *const usize) },
+            unsafe { *(new_fp as *const usize) },
+            unsafe { *((new_fp + 8) as *const usize) },
+        ];
+        eprintln!(
+            "[resume-frame] fp={:#x} slots[-40..+8]={:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}",
+            new_fp,
+            frame_words[0],
+            frame_words[1],
+            frame_words[2],
+            frame_words[3],
+            frame_words[4],
+            frame_words[5],
+            frame_words[6],
+        );
+        let mut sp_words = Vec::new();
+        for i in 0..20usize {
+            let addr = new_sp + i * 8;
+            let word = unsafe { *(addr as *const usize) };
+            sp_words.push(format!("{:#x}:{:#x}", addr, word));
+        }
+        eprintln!(
+            "[resume-stack] sp={:#x} words={}",
+            new_sp,
+            sp_words.join(" ")
+        );
+        let result_local = continuation.result_local();
+        let result_addr = (new_fp as isize).wrapping_add(result_local) as usize;
+        let result_word = unsafe { *(result_addr as *const usize) };
+        eprintln!(
+            "[resume-result-slot] offset={} addr={:#x} value={:#x} resume_value={:#x}",
+            result_local,
+            result_addr,
+            result_word,
+            value
+        );
+
+        let current_return = unsafe { *((new_fp + 8) as *const usize) };
+        if let Some((function, offset)) =
+            runtime.get_function_containing_pointer(current_return as *const u8)
+        {
+            eprintln!(
+                "[resume-caller] current-frame-caller={} start={:#x} offset={:#x} return={:#x}",
+                function.name,
+                {
+                    let function_start: usize = function.pointer.into();
+                    function_start
+                },
+                offset,
+                current_return
+            );
+            let dump_start = current_return.saturating_sub(0x20);
+            let mut words = Vec::new();
+            let mut raw_words = Vec::new();
+            for i in 0..24usize {
+                let addr = dump_start + i * 4;
+                let word = unsafe { *(addr as *const u32) };
+                raw_words.push(word);
+                words.push(format!("{:#010x}", word));
+            }
+            eprintln!(
+                "[resume-caller-code] start={:#x} words={}",
+                dump_start,
+                words.join(" ")
+            );
+            if let Some(cell_addr) = decode_arm_mov_imm3(&raw_words[0..3], 27) {
+                let cell_value = unsafe { *(cell_addr as *const usize) };
+                let mapped = ContinuationObject::from_tagged(cell_value)
+                    .map(|_| "continuation".to_string())
+                    .or_else(|| {
+                        if BuiltInTypes::get_kind(cell_value) == BuiltInTypes::Function {
+                            runtime
+                                .get_function_by_pointer(BuiltInTypes::untag(cell_value) as *const u8)
+                                .map(|f| f.name.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| format!("kind={:?}", BuiltInTypes::get_kind(cell_value)));
+                eprintln!(
+                    "[resume-caller-cell] first addr={:#x} value={:#x} mapped={}",
+                    cell_addr,
+                    cell_value,
+                    mapped
+                );
+            }
+            if let Some(cell_addr) = decode_arm_mov_imm3(&raw_words[11..14], 27) {
+                let cell_value = unsafe { *(cell_addr as *const usize) };
+                let mapped = if BuiltInTypes::get_kind(cell_value) == BuiltInTypes::Function {
+                    runtime
+                        .get_function_by_pointer(BuiltInTypes::untag(cell_value) as *const u8)
+                        .map(|f| f.name.clone())
+                        .unwrap_or_else(|| "unknown-function".to_string())
+                } else {
+                    format!("kind={:?}", BuiltInTypes::get_kind(cell_value))
+                };
+                eprintln!(
+                    "[resume-caller-cell] second addr={:#x} value={:#x} mapped={}",
+                    cell_addr,
+                    cell_value,
+                    mapped
+                );
+            }
+        } else {
+            eprintln!(
+                "[resume-caller] current-frame-caller unknown return={:#x}",
+                current_return
+            );
+        }
+
+        let caller_fp = unsafe { *(new_fp as *const usize) };
+        if caller_fp != 0 {
+            let caller_return = unsafe { *((caller_fp + 8) as *const usize) };
+            if let Some((function, offset)) =
+                runtime.get_function_containing_pointer(caller_return as *const u8)
+            {
+                eprintln!(
+                    "[resume-caller] parent-frame-caller={} offset={:#x} return={:#x}",
+                    function.name,
+                    offset,
+                    caller_return
+                );
+            } else {
+                eprintln!(
+                    "[resume-caller] parent-frame-caller unknown return={:#x}",
+                    caller_return
+                );
+            }
+        }
+    }
+
     let mut relocate_fp = new_fp;
     loop {
         let caller_fp = unsafe { *(relocate_fp as *const usize) };
@@ -12401,8 +12699,58 @@ fn invoke_segmented_continuation(
         }
         outermost_fp = caller_fp;
     }
+    if std::env::var("BEAGLE_DEBUG_PERFORM").is_ok() {
+        let old_return = unsafe { *((outermost_fp + 8) as *const usize) };
+        eprintln!(
+            "[invoke_cont outermost] prompt_id={} new_fp={:#x} outermost_fp={:#x} old_ret={:#x} new_ret={:#x}",
+            prompt_id,
+            new_fp,
+            outermost_fp,
+            old_return,
+            continuation_return_address
+        );
+    }
     unsafe {
-        *((outermost_fp + 8) as *mut usize) = continuation_return_trampoline as usize;
+        *((outermost_fp + 8) as *mut usize) = continuation_return_address;
+    }
+
+    // Re-anchor the actively resumed frame under the caller's live GC chain.
+    // ARM release resumes can land directly in a return-path cleanup sequence
+    // that immediately unlinks the current frame, so this predecessor must
+    // reflect the invocation context rather than the capture-time stack.
+    unsafe {
+        *((new_fp - 16) as *mut usize) = saved_gc_prev;
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        let words = unsafe {
+            [
+                *(resume_address as *const u32),
+                *((resume_address + 4) as *const u32),
+                *((resume_address + 8) as *const u32),
+                *((resume_address + 12) as *const u32),
+                *((resume_address + 16) as *const u32),
+                *((resume_address + 20) as *const u32),
+            ]
+        };
+        if words[0] == 0xf85e03b7
+            && words[1] == 0xaa1703fc
+            && words[2] == 0xaa1c03e0
+            && words[3] == 0x5400002e
+            && words[4] == 0xa9bf7be0
+            && words[5] == 0xf85f03a0
+        {
+            set_gc_frame_top(saved_gc_prev);
+            resume_address = resume_address.wrapping_add(0x2c);
+            if std::env::var("BEAGLE_DEBUG_RESUME").is_ok() {
+                eprintln!(
+                    "[resume-adjust] skipped gc_frame_unlink sequence new_resume={:#x} saved_gc_prev={:#x}",
+                    resume_address,
+                    saved_gc_prev
+                );
+            }
+        }
     }
 
     let result_local = continuation.result_local();
@@ -12414,6 +12762,14 @@ fn invoke_segmented_continuation(
     if result_ptr != 0 {
         unsafe {
             *(result_ptr as *mut usize) = value;
+        }
+        if std::env::var("BEAGLE_DEBUG_RESUME").is_ok() {
+            let written = unsafe { *(result_ptr as *const usize) };
+            eprintln!(
+                "[resume-result-write] addr={:#x} written={:#x}",
+                result_ptr,
+                written
+            );
         }
     }
 
@@ -12465,6 +12821,8 @@ fn invoke_segmented_continuation(
         );
     }
 
+    let captured_callee_saved_regs = continuation.captured_callee_saved_regs();
+
     cfg_if::cfg_if! {
         if #[cfg(target_arch = "x86_64")] {
             let runtime = get_runtime().get();
@@ -12486,6 +12844,16 @@ fn invoke_segmented_continuation(
         } else {
             unsafe {
                 asm!(
+                    "ldr x19, [x9]",
+                    "ldr x20, [x9, #8]",
+                    "ldr x21, [x9, #16]",
+                    "ldr x22, [x9, #24]",
+                    "ldr x23, [x9, #32]",
+                    "ldr x24, [x9, #40]",
+                    "ldr x25, [x9, #48]",
+                    "ldr x26, [x9, #56]",
+                    "ldr x27, [x9, #64]",
+                    "ldr x28, [x9, #72]",
                     "mov sp, {0}",
                     "mov x29, {1}",
                     "mov x30, {2}",
@@ -12493,9 +12861,10 @@ fn invoke_segmented_continuation(
                     "br {3}",
                     in(reg) new_sp,
                     in(reg) new_fp,
-                    in(reg) continuation_return_trampoline as usize,
-                    in(reg) continuation.resume_address(),
+                    in(reg) continuation_return_address,
+                    in(reg) resume_address,
                     in(reg) value,
+                    in("x9") captured_callee_saved_regs.as_ptr(),
                     options(noreturn)
                 );
             }
@@ -12503,7 +12872,7 @@ fn invoke_segmented_continuation(
     }
 }
 
-unsafe fn segmented_continuation_return(value: usize) -> ! {
+pub unsafe extern "C" fn segmented_continuation_return(value: usize) -> ! {
     if std::env::var("BEAGLE_DEBUG_PERFORM").is_ok() {
         let ptd = crate::runtime::per_thread_data();
         let top_prompt = ptd.prompt_handlers.last().map(|p| p.prompt_id);
@@ -12561,6 +12930,16 @@ unsafe fn segmented_continuation_return(value: usize) -> ! {
     }
 
     if let Some(return_point) = return_point {
+        if std::env::var("BEAGLE_DEBUG_RESUME").is_ok() {
+            eprintln!(
+                "[seg-ret] rp prompt_id={} sp={:#x} fp={:#x} ret={:#x} value={:#x}",
+                return_point.prompt_id,
+                return_point.stack_pointer,
+                return_point.frame_pointer,
+                return_point.return_address,
+                value
+            );
+        }
         if let Some(suspended_frame) = crate::runtime::per_thread_data()
             .take_suspended_frame(return_point.suspended_frame_id)
         {
@@ -12746,6 +13125,38 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
     let beagle_fp = unsafe { *(trampoline_fp as *const usize) };
     let beagle_return_address = unsafe { *((trampoline_fp + 8) as *const usize) };
     let beagle_sp = trampoline_fp + 16;
+    unsafe {
+        invoke_continuation_runtime_with_caller_context(
+            cont_ptr,
+            value,
+            callee_saved_regs,
+            debug_prompts,
+            beagle_sp,
+            beagle_fp,
+            beagle_return_address,
+        )
+    }
+}
+
+unsafe fn invoke_continuation_runtime_with_caller_context(
+    cont_ptr: usize,
+    value: usize,
+    callee_saved_regs: [usize; 10],
+    debug_prompts: bool,
+    beagle_sp: usize,
+    beagle_fp: usize,
+    beagle_return_address: usize,
+) -> ! {
+    let continuation = ContinuationObject::from_tagged(cont_ptr).unwrap_or_else(|| {
+        let saved = crate::runtime::per_thread_data().current_saved_continuation_ptr();
+        ContinuationObject::from_tagged(saved).unwrap_or_else(|| {
+            panic!(
+                "Invalid continuation pointer: {:#x}. This is a compiler bug - trying to invoke a continuation that doesn't exist.",
+                cont_ptr
+            )
+        })
+    });
+
     let saved_gc_prev = unsafe { *((beagle_fp - 16) as *const usize) };
     let (segmented_cont_ptr, segmented_value, segmented_suspended_frame_id) = {
         let header_value = unsafe { *((beagle_fp - 8) as *const usize) };
@@ -12770,6 +13181,7 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
             segmented_cont_ptr
         );
     }
+    let prompt_id = continuation.prompt_id();
     if !crate::runtime::per_thread_data()
         .captured_segments
         .contains_key(&segment_handle_id)
@@ -12897,8 +13309,70 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
 
     // Now invoke the continuation, passing the saved callee-saved registers
     // SAFETY: invoke_continuation_runtime is an unsafe function
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        let beagle_fp = unsafe { *(frame_pointer as *const usize) };
+        let beagle_return_address = unsafe { *((frame_pointer + 8) as *const usize) };
+        let beagle_sp = frame_pointer + 16;
+        invoke_continuation_runtime_with_caller_context(
+            cont_ptr,
+            value,
+            saved_regs,
+            get_runtime().get().get_command_line_args().debug,
+            beagle_sp,
+            beagle_fp,
+            beagle_return_address,
+        )
+    }
+    #[cfg(not(target_arch = "aarch64"))]
     unsafe {
         invoke_continuation_runtime(stack_pointer, frame_pointer, cont_ptr, value, saved_regs)
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+pub unsafe extern "C" fn continuation_trampoline_with_saved_regs_and_context(
+    closure_ptr: usize,
+    value: usize,
+    saved_regs_ptr: *const usize,
+    beagle_sp: usize,
+    beagle_fp: usize,
+    beagle_return_address: usize,
+) -> ! {
+    let mut saved_regs = [0usize; 10];
+    for (i, reg) in saved_regs.iter_mut().enumerate() {
+        *reg = unsafe { *saved_regs_ptr.add(i) };
+    }
+
+    let untagged_closure = BuiltInTypes::untag(closure_ptr);
+    let cont_ptr = unsafe { *((untagged_closure + 32) as *const usize) };
+    let cont_ptr = if ContinuationObject::from_tagged(cont_ptr).is_some() {
+        cont_ptr
+    } else {
+        let saved = crate::runtime::per_thread_data().current_saved_continuation_ptr();
+        if ContinuationObject::from_tagged(saved).is_some() {
+            if std::env::var("BEAGLE_DEBUG_PERFORM").is_ok() {
+                eprintln!(
+                    "[continuation_trampoline] falling back to saved continuation: closure_cont={:#x} saved={:#x}",
+                    cont_ptr, saved
+                );
+            }
+            saved
+        } else {
+            cont_ptr
+        }
+    };
+
+    unsafe {
+        invoke_continuation_runtime_with_caller_context(
+            cont_ptr,
+            value,
+            saved_regs,
+            get_runtime().get().get_command_line_args().debug,
+            beagle_sp,
+            beagle_fp,
+            beagle_return_address,
+        )
     }
 }
 

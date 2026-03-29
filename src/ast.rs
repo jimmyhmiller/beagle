@@ -1131,8 +1131,9 @@ impl AstCompiler<'_> {
                         self.ir.store_local(local, reg.into());
                         let local_var = VariableLocation::Local(local);
                         self.register_arg_location(index, local_var);
-                        // Bind the pattern variables from the argument value
-                        self.bind_pattern_variables(arg_pattern, reg.into())?;
+                        // Destructure from the saved local, not the volatile arg register.
+                        let saved_arg = self.ir.load_local(local);
+                        self.bind_pattern_variables(arg_pattern, saved_arg)?;
                     }
                 }
 

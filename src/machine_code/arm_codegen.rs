@@ -269,6 +269,10 @@ pub enum ArmAsm {
     /// Branch with Link to Register
     /// BLR  <Xn>
     Blr { rn: Register },
+    /// BR -- A64
+    /// Branch to Register
+    /// BR <Xn>
+    Br { rn: Register },
     /// BRK -- A64
     /// Breakpoint instruction
     /// BRK  #<imm>
@@ -843,6 +847,7 @@ impl ArmAsm {
                 0b1_00101_00000000000000000000000000 | (truncate_imm::<_, 26>(*imm26) << 0)
             }
             ArmAsm::Blr { rn } => 0b1101011_0_0_01_11111_0000_0_0_00000_00000 | (rn << 5),
+            ArmAsm::Br { rn } => 0b1101011_0_0_00_11111_0000_0_0_00000_00000 | (rn << 5),
             ArmAsm::Brk { imm16 } => {
                 0b11010100_001_0000000000000000_000_00 | ((*imm16 as u32) << 5)
             }

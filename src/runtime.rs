@@ -3833,6 +3833,8 @@ impl ContinuationObject {
     const FIELD_EXC_HANDLER_ID: usize = 13;
     const FIELD_EXC_HAS_HANDLER: usize = 14;
     const FIELD_SEGMENT_HANDLE_ID: usize = 15;
+    const FIELD_CAPTURED_CALLEE_SAVED_START: usize = 16;
+    const NUM_CAPTURED_CALLEE_SAVED: usize = 10;
 
     pub fn from_tagged(tagged: usize) -> Option<Self> {
         let heap_obj = HeapObject::try_from_tagged(tagged)?;
@@ -3926,6 +3928,16 @@ impl ContinuationObject {
         BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_SEGMENT_HANDLE_ID))
     }
 
+    pub fn captured_callee_saved_regs(&self) -> [usize; Self::NUM_CAPTURED_CALLEE_SAVED] {
+        let mut regs = [0usize; Self::NUM_CAPTURED_CALLEE_SAVED];
+        for (i, reg) in regs.iter_mut().enumerate() {
+            *reg = self
+                .heap_obj
+                .get_field(Self::FIELD_CAPTURED_CALLEE_SAVED_START + i);
+        }
+        regs
+    }
+
     pub fn set_exc_handler_info(
         &mut self,
         handler_address: usize,
@@ -3963,6 +3975,7 @@ impl ContinuationObject {
         result_local: isize,
         prompt: &PromptHandler,
         segment_handle_id: usize,
+        captured_callee_saved_regs: &[usize; Self::NUM_CAPTURED_CALLEE_SAVED],
     ) {
         heap_obj.write_type_id(TYPE_ID_CONTINUATION as usize);
         heap_obj.write_field(
@@ -4030,6 +4043,9 @@ impl ContinuationObject {
             Self::FIELD_SEGMENT_HANDLE_ID as i32,
             BuiltInTypes::Int.tag(segment_handle_id as isize) as usize,
         );
+        for (i, reg) in captured_callee_saved_regs.iter().enumerate() {
+            heap_obj.write_field((Self::FIELD_CAPTURED_CALLEE_SAVED_START + i) as i32, *reg);
+        }
     }
 }
 
@@ -6173,6 +6189,19 @@ impl Runtime {
         function: usize,
         free_variables: &[usize],
     ) -> Result<usize, Box<dyn Error>> {
+        let rooted_free_vars: Vec<(usize, usize)> = free_variables
+            .iter()
+            .copied()
+            .enumerate()
+            .filter_map(|(index, value)| {
+                if BuiltInTypes::is_heap_pointer(value) {
+                    Some((index, self.register_temporary_root(value)))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         let len = 8 + 8 + 8 + free_variables.len() * 8;
         let heap_pointer = self.allocate(len / 8, stack_pointer, BuiltInTypes::Closure)?;
         let heap_object = HeapObject::from_tagged(heap_pointer);
@@ -6191,8 +6220,22 @@ impl Runtime {
         heap_object.write_field(0, function);
         heap_object.write_field(1, BuiltInTypes::Int.tag(num_free as isize) as usize);
         heap_object.write_field(2, BuiltInTypes::Int.tag(num_locals as isize) as usize);
-        for (index, value) in free_variables.iter().enumerate() {
-            heap_object.write_field((index + 3) as i32, *value);
+        for (index, value) in free_variables.iter().copied().enumerate() {
+            let value = rooted_free_vars
+                .iter()
+                .find_map(|(rooted_index, root)| {
+                    if *rooted_index == index {
+                        Some(self.peek_temporary_root(*root))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(value);
+            heap_object.write_field((index + 3) as i32, value);
+        }
+
+        for (_, root) in rooted_free_vars {
+            self.unregister_temporary_root(root);
         }
 
         // Debug: Verify closure was created correctly
@@ -8640,6 +8683,19 @@ impl Runtime {
 
     pub fn get_function_by_pointer(&self, value: *const u8) -> Option<&Function> {
         self.functions.iter().find(|f| f.pointer == value.into())
+    }
+
+    pub fn get_function_containing_pointer(&self, value: *const u8) -> Option<(&Function, usize)> {
+        let addr = value as usize;
+        self.functions.iter().find_map(|f| {
+            let start: usize = f.pointer.into();
+            let end = start.checked_add(f.size)?;
+            if addr >= start && addr < end {
+                Some((f, addr - start))
+            } else {
+                None
+            }
+        })
     }
 
     pub fn get_function_by_pointer_mut(&mut self, value: *const u8) -> Option<&mut Function> {
