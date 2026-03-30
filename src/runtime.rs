@@ -32,10 +32,10 @@ use crate::{
 };
 
 use crate::collections::{
-    GcHandle, HandleScope, PersistentMap, PersistentVec, TYPE_ID_ATOM,
-    TYPE_ID_CONS_STRING, TYPE_ID_CONTINUATION, TYPE_ID_FUNCTION_OBJECT, TYPE_ID_KEYWORD,
-    TYPE_ID_MULTI_ARITY_FUNCTION, TYPE_ID_PERSISTENT_MAP, TYPE_ID_PERSISTENT_SET,
-    TYPE_ID_PERSISTENT_VEC, TYPE_ID_RAW_ARRAY, TYPE_ID_STRING, TYPE_ID_STRING_SLICE,
+    GcHandle, HandleScope, PersistentMap, PersistentVec, TYPE_ID_ATOM, TYPE_ID_CONS_STRING,
+    TYPE_ID_CONTINUATION, TYPE_ID_FUNCTION_OBJECT, TYPE_ID_KEYWORD, TYPE_ID_MULTI_ARITY_FUNCTION,
+    TYPE_ID_PERSISTENT_MAP, TYPE_ID_PERSISTENT_SET, TYPE_ID_PERSISTENT_VEC, TYPE_ID_RAW_ARRAY,
+    TYPE_ID_STRING, TYPE_ID_STRING_SLICE,
 };
 
 use std::cell::{Cell, RefCell};
@@ -109,8 +109,10 @@ impl GlobalObjectBlock {
         let next = heap_obj.get_field(0);
         if next == GLOBAL_BLOCK_FREE_SLOT || next == 0 {
             None
-        } else if BuiltInTypes::is_heap_pointer(next) {
-            Some(GlobalObjectBlock::from_tagged(next))
+        } else if let Some(next_obj) = HeapObject::try_from_tagged(next) {
+            Some(GlobalObjectBlock {
+                ptr: next_obj.tagged_pointer(),
+            })
         } else {
             None
         }
@@ -3703,10 +3705,13 @@ pub struct InvocationReturnPoint {
     /// Used to match return points with their corresponding handle blocks.
     /// This distinguishes sequential handlers at the same stack depth.
     pub prompt_id: usize,
-    /// The GC prev pointer ([FP-16]) from the handler's frame at the time k(value)
-    /// was called. After continuation restore, link_restored_frames overwrites [FP-16],
-    /// but the handler's epilogue needs the original prev to correctly unlink from the
-    /// GC chain. We save it here and restore it after the frame is reconstructed.
+    /// The GC-chain anchor from the caller context at the time k(value) was called.
+    ///
+    /// If the caller had a GC frame, this is that frame's original prev pointer
+    /// ([FP-16]). If the caller had no GC frame, this is the live GC_FRAME_TOP.
+    ///
+    /// Restored continuation frames are linked under this anchor, and return paths
+    /// use it to rebuild the caller's root chain when there is no frame to restore.
     pub saved_gc_prev: usize,
 }
 
@@ -3723,6 +3728,7 @@ pub struct SafePerformContext {
     pub resume_closure: usize,
     pub cont_ptr: usize,
     pub fn_ptr: usize,
+    pub prompt_handler: PromptHandler,
 }
 
 #[derive(Debug, Clone)]
@@ -3802,6 +3808,22 @@ impl SuspendedFrame {
         }
 
         crate::builtins::set_gc_frame_top(target_fp - 8);
+    }
+
+    pub fn restore_locals_to_stack(&self, target_fp: usize) {
+        for (i, slot_value) in self.locals.iter().copied().enumerate() {
+            let slot_addr = target_fp.wrapping_sub(24).wrapping_sub(i * 8);
+            unsafe { *(slot_addr as *mut usize) = slot_value };
+        }
+
+        let frame_bottom = target_fp
+            .checked_add(16)
+            .and_then(|v| v.checked_sub(self.frame_size))
+            .expect("SuspendedFrame local restore underflow computing frame_bottom");
+        for (i, word_value) in self.trailing_words.iter().copied().enumerate() {
+            let word_addr = frame_bottom.wrapping_add(i * 8);
+            unsafe { *(word_addr as *mut usize) = word_value };
+        }
     }
 }
 
@@ -4088,6 +4110,8 @@ pub struct PerThreadData {
     pub prompt_captured_segments: std::collections::HashMap<usize, Vec<usize>>,
     /// Segment handles detached during capture before the continuation object exists.
     pub pending_captured_segment_handles: Vec<usize>,
+    /// Prompt-frame snapshots keyed by captured segment handle ID.
+    pub captured_prompt_frames: std::collections::HashMap<usize, SuspendedFrame>,
     /// Suspended caller frames preserved across segmented invoke/return.
     pub suspended_frames: std::collections::HashMap<usize, SuspendedFrame>,
     pub suspended_frame_id_counter: usize,
@@ -4115,6 +4139,7 @@ impl PerThreadData {
             captured_segments: std::collections::HashMap::new(),
             prompt_captured_segments: std::collections::HashMap::new(),
             pending_captured_segment_handles: Vec::new(),
+            captured_prompt_frames: std::collections::HashMap::new(),
             suspended_frames: std::collections::HashMap::new(),
             suspended_frame_id_counter: 1,
         }
@@ -4133,7 +4158,8 @@ impl PerThreadData {
     }
 
     pub fn push_active_segment(&mut self, prompt_id: usize, segment: StackSegment) {
-        self.active_segments.push(ActiveSegment { prompt_id, segment });
+        self.active_segments
+            .push(ActiveSegment { prompt_id, segment });
     }
 
     pub fn pop_active_segment(&mut self, prompt_id: usize) -> Option<StackSegment> {
@@ -4143,6 +4169,13 @@ impl PerThreadData {
             }
             _ => None,
         }
+    }
+
+    pub fn remove_active_segment(&mut self, prompt_id: usize) -> Option<StackSegment> {
+        self.active_segments
+            .iter()
+            .rposition(|active| active.prompt_id == prompt_id)
+            .map(|index| self.active_segments.remove(index).segment)
     }
 
     pub fn active_segment_for_prompt(&self, prompt_id: usize) -> Option<&StackSegment> {
@@ -4160,7 +4193,8 @@ impl PerThreadData {
         segment: StackSegment,
         gc_frame_top: usize,
     ) {
-        self.captured_segments.insert(segment_handle_id, (segment, gc_frame_top));
+        self.captured_segments
+            .insert(segment_handle_id, (segment, gc_frame_top));
         self.prompt_captured_segments
             .entry(prompt_id)
             .or_default()
@@ -4174,8 +4208,17 @@ impl PerThreadData {
         id
     }
 
+    pub fn store_captured_prompt_frame(&mut self, segment_handle_id: usize, frame: SuspendedFrame) {
+        self.captured_prompt_frames.insert(segment_handle_id, frame);
+    }
+
+    pub fn captured_prompt_frame(&self, segment_handle_id: usize) -> Option<&SuspendedFrame> {
+        self.captured_prompt_frames.get(&segment_handle_id)
+    }
+
     pub fn mark_pending_captured_segment(&mut self, segment_handle_id: usize) {
-        self.pending_captured_segment_handles.push(segment_handle_id);
+        self.pending_captured_segment_handles
+            .push(segment_handle_id);
     }
 
     pub fn clear_pending_captured_segment(&mut self, segment_handle_id: usize) {
@@ -4193,6 +4236,26 @@ impl PerThreadData {
 
     pub fn current_saved_continuation_ptr(&self) -> usize {
         self.saved_continuation_ptrs.last().copied().unwrap_or(0)
+    }
+
+    pub fn remove_prompt_handler(&mut self, prompt_id: usize) -> Option<PromptHandler> {
+        self.prompt_handlers
+            .iter()
+            .rposition(|handler| handler.prompt_id == prompt_id)
+            .map(|index| self.prompt_handlers.remove(index))
+    }
+
+    pub fn saved_continuation_ptr_for_prompt(&self, prompt_id: usize) -> usize {
+        self.saved_continuation_ptrs
+            .iter()
+            .rev()
+            .copied()
+            .find(|ptr| {
+                ContinuationObject::from_tagged(*ptr)
+                    .map(|cont| cont.prompt_id() == prompt_id)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(0)
     }
 
     pub fn push_saved_continuation_ptr(&mut self, cont_ptr: usize) {
@@ -4437,7 +4500,11 @@ impl StackSegment {
         let cloned = Self::allocate();
         debug_assert_eq!(self.size, cloned.size);
         unsafe {
-            std::ptr::copy_nonoverlapping(self.base as *const u8, cloned.base as *mut u8, self.size);
+            std::ptr::copy_nonoverlapping(
+                self.base as *const u8,
+                cloned.base as *mut u8,
+                self.size,
+            );
         }
         cloned
     }
@@ -4473,6 +4540,21 @@ pub fn find_captured_segment_bounds(segment_handle_id: usize) -> Option<(usize, 
         let ptd = unsafe { &*ptd_ptr.0 };
         if let Some((segment, _gc_top)) = ptd.captured_segments.get(&segment_handle_id) {
             return Some((segment.base, segment.top));
+        }
+    }
+    None
+}
+
+pub fn find_captured_segment_info(segment_handle_id: usize) -> Option<(usize, usize, usize)> {
+    if segment_handle_id == 0 {
+        return None;
+    }
+    let runtime = crate::get_runtime().get();
+    let registry = runtime.per_thread_registry.lock().unwrap();
+    for ptd_ptr in registry.iter() {
+        let ptd = unsafe { &*ptd_ptr.0 };
+        if let Some((segment, gc_top)) = ptd.captured_segments.get(&segment_handle_id) {
+            return Some((segment.base, segment.top, *gc_top));
         }
     }
     None
@@ -4529,8 +4611,10 @@ pub fn recycle_unreachable_captured_segments(
             for slot in frame.locals.iter().copied() {
                 retain_continuation_handle(&mut live_handles, slot);
             }
-            for word in frame.trailing_words.iter().copied() {
-                retain_continuation_handle(&mut live_handles, word);
+        }
+        for frame in ptd.captured_prompt_frames.values() {
+            for slot in frame.locals.iter().copied() {
+                retain_continuation_handle(&mut live_handles, slot);
             }
         }
         live_handles.extend(ptd.pending_captured_segment_handles.iter().copied());
@@ -4546,13 +4630,13 @@ pub fn recycle_unreachable_captured_segments(
             if let Some((segment, _gc_top)) = ptd.captured_segments.remove(&segment_id) {
                 ptd.recycle_segment(segment);
             }
+            ptd.captured_prompt_frames.remove(&segment_id);
         }
 
         ptd.prompt_captured_segments.retain(|_, segment_ids| {
             segment_ids.retain(|segment_id| ptd.captured_segments.contains_key(segment_id));
             !segment_ids.is_empty()
         });
-
     }
 }
 

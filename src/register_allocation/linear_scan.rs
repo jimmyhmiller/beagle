@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use std::collections::{BTreeMap, HashMap};
 
-use crate::ir::{Instruction, Value, VirtualRegister};
+use crate::ir::{Instruction, SavedValue, Value, VirtualRegister};
 
 pub struct LinearScan {
     pub lifetimes: HashMap<VirtualRegister, (usize, usize)>,
@@ -220,17 +220,23 @@ impl LinearScan {
     }
 
     fn replace_calls_with_call_with_save(&mut self) {
-        for (i, instruction) in self.instructions.iter_mut().enumerate() {
-            if let Instruction::Call(dest, f, args, builtin) = &instruction.clone() {
+        for i in 0..self.instructions.len() {
+            let instruction = self.instructions[i].clone();
+            if let Instruction::Call(dest, f, args, builtin) = &instruction {
                 // println!("{}", instruction.pretty_print());
                 // We want to get all ranges that are valid at this point
                 // if they are not spilled (meaning there isn't an entry in location)
                 // we want to add them to the list of saves
                 let mut saves = Vec::new();
-                for (original_register, (start, end)) in self.lifetimes.iter() {
+                let live_ranges: Vec<(VirtualRegister, usize, usize)> = self
+                    .lifetimes
+                    .iter()
+                    .map(|(register, (start, end))| (*register, *start, *end))
+                    .collect();
+                for (original_register, start, end) in live_ranges {
                     // *end > i: register is used after the call (at instruction i+1 or later)
-                    if *start < i && *end > i && !self.location.contains_key(original_register) {
-                        let register = self.allocated_registers.get(original_register).unwrap();
+                    if start < i && end > i && !self.location.contains_key(&original_register) {
+                        let register = self.allocated_registers.get(&original_register).unwrap();
                         // We save ALL registers that are live across calls, including callee-saved.
                         // While the ABI guarantees callee-saved registers are preserved by the callee,
                         // our GC needs to be able to find and update heap pointers during collection.
@@ -241,33 +247,78 @@ impl LinearScan {
                         {
                             continue;
                         }
-                        saves.push(Value::Register(*register));
+                        saves.push(SavedValue {
+                            source: Value::Register(*register),
+                            local: self.new_stack_location(),
+                        });
                     }
                 }
-                *instruction = Instruction::CallWithSaves(*dest, *f, args.clone(), *builtin, saves);
+                self.instructions[i] =
+                    Instruction::CallWithSaves(*dest, *f, args.clone(), *builtin, saves);
             } else if let Instruction::CaptureContinuation(dest, label, local_index, builtin) =
-                &instruction.clone()
+                &instruction
             {
                 let mut saves = Vec::new();
-                for (original_register, (start, end)) in self.lifetimes.iter() {
-                    if *start < i && *end > i && !self.location.contains_key(original_register) {
-                        let register = self.allocated_registers.get(original_register).unwrap();
+                let live_ranges: Vec<(VirtualRegister, usize, usize)> = self
+                    .lifetimes
+                    .iter()
+                    .map(|(register, (start, end))| (*register, *start, *end))
+                    .collect();
+                for (original_register, start, end) in live_ranges {
+                    if start < i && end > i && !self.location.contains_key(&original_register) {
+                        let register = self.allocated_registers.get(&original_register).unwrap();
                         if let Value::Register(dest) = dest
                             && dest == register
                         {
                             continue;
                         }
-                        saves.push(Value::Register(*register));
+                        saves.push(SavedValue {
+                            source: Value::Register(*register),
+                            local: self.new_stack_location(),
+                        });
                     }
                 }
-                *instruction = Instruction::CaptureContinuationWithSaves(
+                self.instructions[i] = Instruction::CaptureContinuationWithSaves(
                     *dest,
                     *label,
                     *local_index,
                     *builtin,
                     saves,
                 );
-            } else if let Instruction::Recurse(dest, args) = instruction {
+            } else if let Instruction::PerformEffect(
+                handler,
+                enum_type,
+                op_value,
+                label,
+                local_index,
+                builtin,
+            ) = &instruction
+            {
+                let mut saves = Vec::new();
+                let live_ranges: Vec<(VirtualRegister, usize, usize)> = self
+                    .lifetimes
+                    .iter()
+                    .map(|(register, (start, end))| (*register, *start, *end))
+                    .collect();
+                for (original_register, start, end) in live_ranges {
+                    if start < i && end > i && !self.location.contains_key(&original_register) {
+                        let register = self.allocated_registers.get(&original_register).unwrap();
+                        saves.push(SavedValue {
+                            source: Value::Register(*register),
+                            local: self.new_stack_location(),
+                        });
+                    }
+                }
+                self.instructions[i] = Instruction::PerformEffectWithSaves(
+                    *handler,
+                    *enum_type,
+                    *op_value,
+                    *label,
+                    *local_index,
+                    *builtin,
+                    saves,
+                );
+            } else if let Instruction::Recurse(dest, args) = &instruction {
                 let mut saves = Vec::new();
                 for (original_register, (start, end)) in self.lifetimes.iter() {
                     // *end > i: register is used after the call (at instruction i+1 or later)
@@ -282,7 +333,7 @@ impl LinearScan {
                         saves.push(Value::Register(*register));
                     }
                 }
-                *instruction = Instruction::RecurseWithSaves(*dest, args.clone(), saves);
+                self.instructions[i] = Instruction::RecurseWithSaves(*dest, args.clone(), saves);
             }
         }
     }

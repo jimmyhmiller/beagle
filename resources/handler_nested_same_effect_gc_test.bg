@@ -1,0 +1,34 @@
+namespace handler_nested_same_effect_gc_test
+// gc-always
+
+use beagle.effect as effect
+
+enum E {
+    Log {}
+}
+
+struct H {}
+
+extend H with effect/Handler(E) {
+    fn handle(self, op, resume) {
+        match op {
+            E.Log {} => {
+                println("log")
+                resume(null)
+            }
+        }
+    }
+}
+
+fn main() {
+    handle effect/Handler(E) with H {} {
+        perform E.Log {}
+        handle effect/Handler(E) with H {} {
+            perform E.Log {}
+        }
+    }
+}
+
+// @beagle.core.snapshot
+// log
+// log

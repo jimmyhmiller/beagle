@@ -358,13 +358,13 @@ impl GenerationalGC {
         let Some(cont) = ContinuationObject::from_heap_object(object) else {
             return;
         };
-        let Some((segment_base, segment_top)) =
-            crate::runtime::find_captured_segment_bounds(cont.segment_handle_id())
+        let Some((segment_base, segment_top, gc_frame_top)) =
+            crate::runtime::find_captured_segment_info(cont.segment_handle_id())
         else {
             return;
         };
-        StackWalker::walk_segment_roots(
-            cont.original_fp(),
+        StackWalker::walk_segment_gc_roots(
+            gc_frame_top,
             segment_base,
             segment_top,
             |slot_addr, slot_value| callback(slot_addr, slot_value),
@@ -388,6 +388,37 @@ impl GenerationalGC {
         for ptd_ptr in registry.iter() {
             let ptd = unsafe { &mut *ptd_ptr.0 };
 
+            for handle_id in ptd.pending_captured_segment_handles.iter().copied() {
+                if let Some((segment, gc_frame_top)) = ptd.captured_segments.get(&handle_id) {
+                    let mut slots = Vec::new();
+                    StackWalker::walk_segment_gc_roots(
+                        *gc_frame_top,
+                        segment.base,
+                        segment.top,
+                        |slot_addr, slot_value| slots.push((slot_addr, slot_value)),
+                    );
+                    for (slot_addr, slot_value) in slots {
+                        let untagged = BuiltInTypes::untag(slot_value);
+                        if self.young.contains(untagged as *const u8) {
+                            unsafe {
+                                *(slot_addr as *mut usize) = self.copy(slot_value);
+                            }
+                        }
+                    }
+                }
+            }
+
+            for return_point in ptd.invocation_return_points.iter_mut() {
+                for reg in return_point.callee_saved_regs.iter_mut() {
+                    if BuiltInTypes::is_heap_pointer(*reg) {
+                        let untagged = BuiltInTypes::untag(*reg);
+                        if self.young.contains(untagged as *const u8) {
+                            *reg = self.copy(*reg);
+                        }
+                    }
+                }
+            }
+
             for frame in ptd.suspended_frames.values_mut() {
                 for slot in frame.locals.iter_mut() {
                     if BuiltInTypes::is_heap_pointer(*slot) {
@@ -397,11 +428,14 @@ impl GenerationalGC {
                         }
                     }
                 }
-                for word in frame.trailing_words.iter_mut() {
-                    if BuiltInTypes::is_heap_pointer(*word) {
-                        let untagged = BuiltInTypes::untag(*word);
+            }
+
+            for frame in ptd.captured_prompt_frames.values_mut() {
+                for slot in frame.locals.iter_mut() {
+                    if BuiltInTypes::is_heap_pointer(*slot) {
+                        let untagged = BuiltInTypes::untag(*slot);
                         if self.young.contains(untagged as *const u8) {
-                            *word = self.copy(*word);
+                            *slot = self.copy(*slot);
                         }
                     }
                 }
@@ -412,6 +446,14 @@ impl GenerationalGC {
                     let untagged = BuiltInTypes::untag(ctx.value);
                     if self.young.contains(untagged as *const u8) {
                         ctx.value = self.copy(ctx.value);
+                    }
+                }
+                for reg in ctx.return_point.callee_saved_regs.iter_mut() {
+                    if BuiltInTypes::is_heap_pointer(*reg) {
+                        let untagged = BuiltInTypes::untag(*reg);
+                        if self.young.contains(untagged as *const u8) {
+                            *reg = self.copy(*reg);
+                        }
                     }
                 }
             }

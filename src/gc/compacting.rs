@@ -4,9 +4,9 @@ use libc::mprotect;
 
 use super::get_page_size;
 
-use crate::types::{BuiltInTypes, Header, HeapObject, Word};
-use crate::runtime::ContinuationObject;
 use super::{AllocateAction, Allocator, AllocatorOptions, stack_walker::StackWalker};
+use crate::runtime::ContinuationObject;
+use crate::types::{BuiltInTypes, Header, HeapObject, Word};
 
 const DEFAULT_PAGE_COUNT: usize = 1024;
 // Aribtary number that should be changed when I have
@@ -70,6 +70,10 @@ impl Space {
                 panic!("Heap offset is not aligned");
             }
             std::ptr::copy_nonoverlapping(data.as_ptr(), start as *mut u8, data.len());
+            // Objects in to-space must start unmarked. Mark bits belong to the
+            // from-space traversal state and must not survive the copy.
+            let header_ptr = start as *mut usize;
+            *header_ptr = Header::clear_marked_bit(*header_ptr);
             new_pointer
         }
     }
@@ -225,7 +229,50 @@ pub struct CompactingHeap {
     options: AllocatorOptions,
 }
 impl CompactingHeap {
-    fn collect_live_continuation_segment_handles(&self, space: &Space) -> std::collections::HashSet<usize> {
+    fn is_plausible_from_space_object(&self, tagged_ptr: usize) -> bool {
+        let untagged = BuiltInTypes::untag(tagged_ptr);
+        if !untagged.is_multiple_of(8) || !self.from_space.contains_allocated(untagged as *const u8)
+        {
+            return false;
+        }
+
+        let start = self.from_space.start as usize;
+        let allocated_end = start + self.from_space.allocation_offset;
+        let remaining_bytes = allocated_end.saturating_sub(untagged);
+        if remaining_bytes < 8 {
+            return false;
+        }
+
+        let header_data = unsafe { *(untagged as *const usize) };
+        if Header::is_forwarding_bit_set(header_data) {
+            return true;
+        }
+
+        let header = Header::from_usize(header_data);
+        let (header_size, field_words) = if header.large {
+            if remaining_bytes < 16 {
+                return false;
+            }
+            let field_words = unsafe { *((untagged as *const usize).add(1)) };
+            (16usize, field_words)
+        } else {
+            (8usize, header.size as usize)
+        };
+
+        let Some(fields_size) = field_words.checked_mul(8) else {
+            return false;
+        };
+        let Some(full_size) = header_size.checked_add(fields_size) else {
+            return false;
+        };
+
+        full_size <= remaining_bytes && full_size.is_multiple_of(8)
+    }
+
+    fn collect_live_continuation_segment_handles(
+        &self,
+        space: &Space,
+    ) -> std::collections::HashSet<usize> {
         let mut live_handles = std::collections::HashSet::new();
         for object in space.object_iter_from_position(0) {
             if object.is_zero_size() {
@@ -250,13 +297,13 @@ impl CompactingHeap {
         let Some(cont) = ContinuationObject::from_heap_object(object) else {
             return;
         };
-        let Some((segment_base, segment_top)) =
-            crate::runtime::find_captured_segment_bounds(cont.segment_handle_id())
+        let Some((segment_base, segment_top, gc_frame_top)) =
+            crate::runtime::find_captured_segment_info(cont.segment_handle_id())
         else {
             return;
         };
-        StackWalker::walk_segment_roots(
-            cont.original_fp(),
+        StackWalker::walk_segment_gc_roots(
+            gc_frame_top,
             segment_base,
             segment_top,
             |slot_addr, slot_value| callback(slot_addr, slot_value),
@@ -294,6 +341,13 @@ impl CompactingHeap {
 
         // If already in to_space, it's been copied
         if self.to_space.contains(untagged as *const u8) {
+            return tagged_ptr;
+        }
+
+        // Stack/continuation scanning is conservative enough that stale words can
+        // occasionally look like heap pointers. Only copy values that still decode
+        // to an object fully contained in allocated from-space.
+        if !self.is_plausible_from_space_object(tagged_ptr) {
             return tagged_ptr;
         }
 
@@ -436,8 +490,9 @@ impl CompactingHeap {
             }
             let segment_slots = self.collect_continuation_segment_slots(&object);
             for (slot_addr, slot_value) in segment_slots {
+                let new_value = self.copy_using_cheneys_algorithm(slot_value);
                 unsafe {
-                    *(slot_addr as *mut usize) = self.copy_using_cheneys_algorithm(slot_value);
+                    *(slot_addr as *mut usize) = new_value;
                 }
             }
         }
@@ -452,15 +507,44 @@ impl CompactingHeap {
         for ptd_ptr in registry.iter() {
             let ptd = unsafe { &mut *ptd_ptr.0 };
 
+            for handle_id in ptd.pending_captured_segment_handles.iter().copied() {
+                if let Some((segment, gc_frame_top)) = ptd.captured_segments.get(&handle_id) {
+                    let mut slots = Vec::new();
+                    StackWalker::walk_segment_gc_roots(
+                        *gc_frame_top,
+                        segment.base,
+                        segment.top,
+                        |slot_addr, slot_value| slots.push((slot_addr, slot_value)),
+                    );
+                    for (slot_addr, slot_value) in slots {
+                        let new_value = self.copy_using_cheneys_algorithm(slot_value);
+                        unsafe {
+                            *(slot_addr as *mut usize) = new_value;
+                        }
+                    }
+                }
+            }
+
+            for return_point in ptd.invocation_return_points.iter_mut() {
+                for reg in return_point.callee_saved_regs.iter_mut() {
+                    if BuiltInTypes::is_heap_pointer(*reg) {
+                        *reg = self.copy_using_cheneys_algorithm(*reg);
+                    }
+                }
+            }
+
             for frame in ptd.suspended_frames.values_mut() {
                 for slot in frame.locals.iter_mut() {
                     if BuiltInTypes::is_heap_pointer(*slot) {
                         *slot = self.copy_using_cheneys_algorithm(*slot);
                     }
                 }
-                for word in frame.trailing_words.iter_mut() {
-                    if BuiltInTypes::is_heap_pointer(*word) {
-                        *word = self.copy_using_cheneys_algorithm(*word);
+            }
+
+            for frame in ptd.captured_prompt_frames.values_mut() {
+                for slot in frame.locals.iter_mut() {
+                    if BuiltInTypes::is_heap_pointer(*slot) {
+                        *slot = self.copy_using_cheneys_algorithm(*slot);
                     }
                 }
             }
@@ -468,6 +552,11 @@ impl CompactingHeap {
             if let Some(ctx) = ptd.safe_return_context.as_mut() {
                 if BuiltInTypes::is_heap_pointer(ctx.value) {
                     ctx.value = self.copy_using_cheneys_algorithm(ctx.value);
+                }
+                for reg in ctx.return_point.callee_saved_regs.iter_mut() {
+                    if BuiltInTypes::is_heap_pointer(*reg) {
+                        *reg = self.copy_using_cheneys_algorithm(*reg);
+                    }
                 }
             }
 

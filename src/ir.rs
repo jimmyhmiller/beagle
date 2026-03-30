@@ -29,7 +29,7 @@ pub enum Condition {
     GreaterThanOrEqual,
 }
 
-#[derive(Debug, Copy, Clone, Encode, Decode)]
+#[derive(Debug, Copy, Clone, PartialEq, Encode, Decode)]
 pub enum Value {
     Register(VirtualRegister),
     Spill(VirtualRegister, usize),
@@ -54,6 +54,12 @@ impl Value {
             _ => panic!("Expected local, got {:?}", self),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Encode, Decode)]
+pub struct SavedValue {
+    pub source: Value,
+    pub local: usize,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Encode, Decode)]
@@ -131,7 +137,7 @@ pub enum Instruction {
     LoadConstant(Value, Value),
     // bool is builtin?
     Call(Value, Value, Vec<Value>, bool),
-    CallWithSaves(Value, Value, Vec<Value>, bool, Vec<Value>),
+    CallWithSaves(Value, Value, Vec<Value>, bool, Vec<SavedValue>),
     HeapLoad(Value, Value, i32),
     HeapLoadReg(Value, Value, Value),
     HeapStore(Value, Value),
@@ -188,8 +194,9 @@ pub enum Instruction {
     PopPromptHandler(Value, usize),         // result_value, builtin_fn_ptr
     LoadLabelAddress(Value, Label), // dest, label - loads the address of a label into a register
     CaptureContinuation(Value, Label, usize, usize), // dest, resume_label, result_local_index, builtin_fn_ptr
-    CaptureContinuationWithSaves(Value, Label, usize, usize, Vec<Value>), // dest, resume_label, result_local_index, builtin_fn_ptr, saved live roots
+    CaptureContinuationWithSaves(Value, Label, usize, usize, Vec<SavedValue>), // dest, resume_label, result_local_index, builtin_fn_ptr, saved live roots
     PerformEffect(Value, Value, Value, Label, usize, usize), // handler, enum_type, op_value, resume_label, result_local_index, builtin_fn_ptr
+    PerformEffectWithSaves(Value, Value, Value, Label, usize, usize, Vec<SavedValue>), // handler, enum_type, op_value, resume_label, result_local_index, builtin_fn_ptr, saved live roots
     ReturnFromShift(Value, Value, usize), // value, cont_ptr, builtin_fn_ptr - calls return_from_shift with current SP/FP
     RecordGcSafepoint, // Record a GC safepoint at the current position (for continuation resume points)
 }
@@ -412,7 +419,7 @@ impl Instruction {
                 let mut result: Vec<VirtualRegister> =
                     args.iter().filter_map(|arg| get_registers!(arg)).collect();
                 for save in saves {
-                    if let Ok(register) = save.try_into() {
+                    if let Ok(register) = (&save.source).try_into() {
                         result.push(register);
                     }
                 }
@@ -563,7 +570,7 @@ impl Instruction {
             Instruction::CaptureContinuationWithSaves(dest, _, _, _, saves) => {
                 let mut result: Vec<VirtualRegister> = get_register!(dest);
                 for save in saves {
-                    if let Ok(register) = save.try_into() {
+                    if let Ok(register) = (&save.source).try_into() {
                         result.push(register);
                     }
                 }
@@ -571,6 +578,15 @@ impl Instruction {
             }
             Instruction::PerformEffect(handler, enum_type, op_value, _, _, _) => {
                 get_registers!(handler, enum_type, op_value)
+            }
+            Instruction::PerformEffectWithSaves(handler, enum_type, op_value, _, _, _, saves) => {
+                let mut result: Vec<VirtualRegister> = get_registers!(handler, enum_type, op_value);
+                for save in saves {
+                    if let Ok(register) = (&save.source).try_into() {
+                        result.push(register);
+                    }
+                }
+                result
             }
             Instruction::ReturnFromShift(value, cont_ptr, _) => {
                 get_registers!(value, cont_ptr)
@@ -695,7 +711,11 @@ impl Instruction {
                     replace_register!(value, old_register, new_register);
                 }
                 for save in saves {
-                    replace_register!(save, old_register, new_register);
+                    if let Value::Register(register) = save.source
+                        && register == old_register
+                    {
+                        save.source = new_register;
+                    }
                 }
             }
 
@@ -736,13 +756,29 @@ impl Instruction {
             Instruction::CaptureContinuationWithSaves(dest, _, _, _, saves) => {
                 replace_register!(dest, old_register, new_register);
                 for save in saves {
-                    replace_register!(save, old_register, new_register);
+                    if let Value::Register(register) = save.source
+                        && register == old_register
+                    {
+                        save.source = new_register;
+                    }
                 }
             }
             Instruction::PerformEffect(handler, enum_type, op_value, _, _, _) => {
                 replace_register!(handler, old_register, new_register);
                 replace_register!(enum_type, old_register, new_register);
                 replace_register!(op_value, old_register, new_register);
+            }
+            Instruction::PerformEffectWithSaves(handler, enum_type, op_value, _, _, _, saves) => {
+                replace_register!(handler, old_register, new_register);
+                replace_register!(enum_type, old_register, new_register);
+                replace_register!(op_value, old_register, new_register);
+                for save in saves {
+                    if let Value::Register(register) = save.source
+                        && register == old_register
+                    {
+                        save.source = new_register;
+                    }
+                }
             }
             Instruction::ReturnFromShift(value, cont_ptr, _) => {
                 replace_register!(value, old_register, new_register);
@@ -1479,8 +1515,7 @@ impl Ir {
         linear_scan.allocate();
 
         self.instructions = linear_scan.instructions.clone();
-        let num_spills = linear_scan.location.len();
-        self.num_locals += num_spills;
+        self.num_locals = linear_scan.stack_slot;
         backend.set_max_locals(self.num_locals);
         if let Some(mark_idx) = self.mark_local_index {
             backend.set_mark_local_index(mark_idx);
@@ -2208,15 +2243,10 @@ impl Ir {
                     }
                 }
                 Instruction::CallWithSaves(dest, function, args, builtin, saves) => {
-                    // The saves are stored using push_to_stack which uses RBP-relative
-                    // addressing and doesn't modify RSP. Therefore, stack args should
-                    // be placed at their standard RSP-relative positions WITHOUT
-                    // accounting for saves.
-
                     // Check if function is in a register that will be saved
                     let function_in_save = if let Value::Register(reg) = function {
                         saves.iter().any(|save| {
-                            if let Value::Register(save_reg) = save {
+                            if let Value::Register(save_reg) = save.source {
                                 save_reg.index == reg.index
                             } else {
                                 false
@@ -2237,11 +2267,11 @@ impl Ir {
                         None
                     };
 
-                    // Save registers that are live across the call
-                    // push_to_stack uses RBP-relative addressing, not RSP
+                    // Save registers that are live across the call into frame locals
+                    // so they are part of the GC-traced root set.
                     for save in saves.iter() {
-                        let save_reg = self.value_to_register(save, backend);
-                        backend.push_to_stack(save_reg);
+                        let save_reg = self.value_to_register(&save.source, backend);
+                        backend.store_local(save_reg, save.local as i32);
                     }
 
                     // Set up arguments
@@ -2294,10 +2324,10 @@ impl Ir {
                         backend.free_temporary_register(dest_reg);
                     }
 
-                    // Restore saved registers (in reverse order)
+                    // Restore saved registers from their tracked local slots.
                     for save in saves.iter().rev() {
-                        let save_reg = self.value_to_register(save, backend);
-                        backend.pop_from_stack(save_reg);
+                        let save_reg = self.value_to_register(&save.source, backend);
+                        backend.load_local(save_reg, save.local as i32);
                     }
                 }
                 Instruction::Compare(dest, a, b, condition) => {
@@ -2760,11 +2790,12 @@ impl Ir {
                     builtin_fn,
                     saves,
                 ) => {
-                    // Call capture_continuation builtin. Any live heap roots that must
-                    // survive this GC point are first materialized into frame slots.
+                    // Call capture_continuation builtin. Any live values that must
+                    // survive this GC point are first materialized into tracked
+                    // frame locals so the GC root chain can see them.
                     for save in saves.iter() {
-                        let save_reg = self.value_to_register(save, backend);
-                        backend.push_to_stack(save_reg);
+                        let save_reg = self.value_to_register(&save.source, backend);
+                        backend.store_local(save_reg, save.local as i32);
                     }
 
                     // Arguments: (stack_pointer, frame_pointer, resume_address, result_local_offset)
@@ -2800,10 +2831,10 @@ impl Ir {
                         backend.free_temporary_register(dest_reg);
                     }
 
-                    // Reload saved live roots from the frame after the GC point.
+                    // Reload saved values from their tracked local slots.
                     for save in saves.iter().rev() {
-                        let save_reg = self.value_to_register(save, backend);
-                        backend.pop_from_stack(save_reg);
+                        let save_reg = self.value_to_register(&save.source, backend);
+                        backend.load_local(save_reg, save.local as i32);
                     }
                 }
                 Instruction::PerformEffect(
@@ -2833,6 +2864,45 @@ impl Ir {
 
                     let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
                     backend.call_builtin(fn_ptr);
+                }
+                Instruction::PerformEffectWithSaves(
+                    handler,
+                    enum_type,
+                    op_value,
+                    resume_label,
+                    result_local_index,
+                    builtin_fn,
+                    saves,
+                ) => {
+                    for save in saves.iter() {
+                        let save_reg = self.value_to_register(&save.source, backend);
+                        backend.store_local(save_reg, save.local as i32);
+                    }
+
+                    backend.get_stack_pointer_imm(backend.arg(0), 0);
+                    backend.mov_reg(backend.arg(1), backend.frame_pointer());
+
+                    let _ = handler;
+
+                    let enum_type_reg = self.value_to_register(enum_type, backend);
+                    backend.mov_reg(backend.arg(2), enum_type_reg);
+
+                    let op_reg = self.value_to_register(op_value, backend);
+                    backend.mov_reg(backend.arg(3), op_reg);
+
+                    let resume_backend_label = ir_label_to_lang_label.get(resume_label).unwrap();
+                    backend.load_label_address(backend.arg(4), *resume_backend_label);
+
+                    let local_offset = backend.get_local_byte_offset(*result_local_index);
+                    backend.mov_64(backend.arg(5), local_offset);
+
+                    let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
+                    backend.call_builtin(fn_ptr);
+
+                    for save in saves.iter().rev() {
+                        let save_reg = self.value_to_register(&save.source, backend);
+                        backend.load_local(save_reg, save.local as i32);
+                    }
                 }
                 Instruction::ReturnFromShift(value, cont_ptr, builtin_fn) => {
                     // Call return_from_shift builtin (does not return)

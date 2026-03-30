@@ -1,6 +1,6 @@
 use crate::collections::{
-    TYPE_ID_CONTINUATION, TYPE_ID_FRAME, TYPE_ID_FUNCTION_OBJECT,
-    TYPE_ID_KEYWORD, TYPE_ID_REGEX, TYPE_ID_STRING,
+    TYPE_ID_CONTINUATION, TYPE_ID_FRAME, TYPE_ID_FUNCTION_OBJECT, TYPE_ID_KEYWORD, TYPE_ID_REGEX,
+    TYPE_ID_STRING,
 };
 use crate::ir::{Ir, Value};
 
@@ -439,7 +439,9 @@ impl HeapObject {
     }
 
     pub fn try_from_tagged(pointer: usize) -> Option<Self> {
-        if BuiltInTypes::is_heap_pointer(pointer) {
+        let untagged = BuiltInTypes::untag(pointer);
+        if BuiltInTypes::is_heap_pointer(pointer) && untagged >= 4096 && untagged.is_multiple_of(8)
+        {
             Some(HeapObject {
                 pointer,
                 tagged: true,
@@ -639,8 +641,7 @@ impl HeapObject {
         let fields = self.get_fields();
         fields
             .iter()
-            .filter(|x| BuiltInTypes::is_heap_pointer(**x) && BuiltInTypes::untag(**x) != 0)
-            .map(|&pointer| HeapObject::from_tagged(pointer))
+            .filter_map(|&pointer| HeapObject::try_from_tagged(pointer))
     }
 
     pub fn get_fields_mut(&mut self) -> &mut [usize] {

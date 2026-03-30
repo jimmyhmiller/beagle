@@ -1415,6 +1415,77 @@ impl LowLevelArm {
         }
     }
 
+    fn copy_register_value(&mut self, destination: Register, source: Register) {
+        if destination == source {
+            return;
+        }
+
+        if destination == SP || source == SP {
+            self.instructions.push(mov_sp(destination, source));
+        } else {
+            self.mov_reg(destination, source);
+        }
+    }
+
+    fn apply_byte_delta(&mut self, destination: Register, base: Register, byte_delta: i64) {
+        const MAX_IMM12: i64 = 4095;
+        const PAGE_SIZE: i64 = 4096;
+
+        self.copy_register_value(destination, base);
+
+        let mut remaining = byte_delta;
+        while remaining != 0 {
+            if remaining > 0 {
+                let pages = remaining / PAGE_SIZE;
+                if pages > 0 {
+                    let chunk_pages = pages.min(MAX_IMM12) as i32;
+                    self.instructions.push(ArmAsm::AddAddsubImm {
+                        sf: destination.sf(),
+                        rn: destination,
+                        rd: destination,
+                        imm12: chunk_pages,
+                        sh: 1,
+                    });
+                    remaining -= (chunk_pages as i64) * PAGE_SIZE;
+                } else {
+                    let chunk = remaining.min(MAX_IMM12) as i32;
+                    self.instructions.push(ArmAsm::AddAddsubImm {
+                        sf: destination.sf(),
+                        rn: destination,
+                        rd: destination,
+                        imm12: chunk,
+                        sh: 0,
+                    });
+                    remaining -= chunk as i64;
+                }
+            } else {
+                let bytes = -remaining;
+                let pages = bytes / PAGE_SIZE;
+                if pages > 0 {
+                    let chunk_pages = pages.min(MAX_IMM12) as i32;
+                    self.instructions.push(ArmAsm::SubAddsubImm {
+                        sf: destination.sf(),
+                        rn: destination,
+                        rd: destination,
+                        imm12: chunk_pages,
+                        sh: 1,
+                    });
+                    remaining += (chunk_pages as i64) * PAGE_SIZE;
+                } else {
+                    let chunk = bytes.min(MAX_IMM12) as i32;
+                    self.instructions.push(ArmAsm::SubAddsubImm {
+                        sf: destination.sf(),
+                        rn: destination,
+                        rd: destination,
+                        imm12: chunk,
+                        sh: 0,
+                    });
+                    remaining += chunk as i64;
+                }
+            }
+        }
+    }
+
     pub fn patch_prelude_and_epilogue(&mut self) {
         // Get list of callee-saved registers that need to be saved
         let used_callee_saved = self.get_used_callee_saved_registers();
@@ -1853,23 +1924,11 @@ impl LowLevelArm {
     }
 
     pub fn add_stack_pointer(&mut self, bytes: i32) {
-        self.instructions.push(ArmAsm::AddAddsubImm {
-            sf: SP.sf(),
-            rn: SP,
-            rd: SP,
-            imm12: bytes * 8,
-            sh: 0,
-        });
+        self.apply_byte_delta(SP, SP, (bytes as i64) * 8);
     }
 
     pub fn sub_stack_pointer(&mut self, bytes: i32) {
-        self.instructions.push(ArmAsm::SubAddsubImm {
-            sf: SP.sf(),
-            rn: SP,
-            rd: SP,
-            imm12: bytes * 8,
-            sh: 0,
-        });
+        self.apply_byte_delta(SP, SP, -((bytes as i64) * 8));
     }
 
     pub fn set_mark_local_index(&mut self, index: usize) {
@@ -1886,13 +1945,7 @@ impl LowLevelArm {
     }
 
     pub fn get_stack_pointer_imm(&mut self, destination: Register, offset: isize) {
-        self.instructions.push(ArmAsm::SubAddsubImm {
-            sf: destination.sf(),
-            rn: SP,
-            rd: destination,
-            imm12: offset as i32 * 8,
-            sh: 0,
-        });
+        self.apply_byte_delta(destination, SP, -((offset as i64) * 8));
     }
     pub fn get_stack_pointer(&mut self, destination: Register, offset: Register) {
         self.get_stack_pointer_imm(destination, 0);
@@ -1924,13 +1977,9 @@ impl LowLevelArm {
     }
 
     pub fn get_current_stack_position(&mut self, dest: Register) {
-        self.instructions.push(ArmAsm::SubAddsubImm {
-            sf: dest.sf(),
-            rn: X29,
-            rd: dest,
-            imm12: (self.max_locals + self.stack_size + 1 + Self::FRAME_HEADER_WORDS) * 8,
-            sh: 0,
-        });
+        let byte_offset =
+            ((self.max_locals + self.stack_size + 1 + Self::FRAME_HEADER_WORDS) as i64) * 8;
+        self.apply_byte_delta(dest, X29, -byte_offset);
     }
 
     pub fn set_all_locals_to_null(&mut self, null_register: Register) {

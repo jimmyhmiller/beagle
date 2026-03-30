@@ -121,7 +121,10 @@ fn test_run_segmented_multishot_gc_always() {
         ])
         .output()
         .expect("failed to run segmented multishot gc-always test");
-    assert_command_success(&output, "beag run --gc-always gc_frame_chain_multishot_test.bg");
+    assert_command_success(
+        &output,
+        "beag run --gc-always gc_frame_chain_multishot_test.bg",
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(stdout.trim(), "multishot: 333\nloop_multishot: 630\ndone");
 }
@@ -177,11 +180,7 @@ fn test_run_sequential_handler_regression() {
 #[test]
 fn test_run_async_future_basic_gc_always() {
     let output = beag()
-        .args([
-            "run",
-            "--gc-always",
-            "resources/async_future_basic_test.bg",
-        ])
+        .args(["run", "--gc-always", "resources/async_future_basic_test.bg"])
         .output()
         .expect("failed to run async_future_basic_test.bg with gc-always");
     assert_command_success(&output, "beag run --gc-always async_future_basic_test.bg");
@@ -195,16 +194,30 @@ fn test_run_async_future_basic_gc_always() {
 #[test]
 fn test_run_event_loop_handler_gc_always() {
     let output = beag()
-        .args([
-            "run",
-            "--gc-always",
-            "resources/event_loop_handler_test.bg",
-        ])
+        .args(["run", "--gc-always", "resources/event_loop_handler_test.bg"])
         .output()
         .expect("failed to run event_loop_handler_test.bg with gc-always");
     assert_command_success(&output, "beag run --gc-always event_loop_handler_test.bg");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(stdout.trim(), "Sleep worked: true\nFile exists: true\ndone");
+}
+
+#[test]
+fn test_run_nested_same_effect_handler_gc_always() {
+    let output = beag()
+        .args([
+            "run",
+            "--gc-always",
+            "resources/handler_nested_same_effect_gc_test.bg",
+        ])
+        .output()
+        .expect("failed to run handler_nested_same_effect_gc_test.bg with gc-always");
+    assert_command_success(
+        &output,
+        "beag run --gc-always handler_nested_same_effect_gc_test.bg",
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.trim(), "log\nlog");
 }
 
 #[test]
@@ -439,7 +452,10 @@ fn test_segmented_multishot_snapshot_file() {
         .args(["test", "resources/gc_frame_chain_multishot_test.bg"])
         .output()
         .expect("failed to run beag test on gc_frame_chain_multishot_test.bg");
-    assert_command_success(&output, "beag test resources/gc_frame_chain_multishot_test.bg");
+    assert_command_success(
+        &output,
+        "beag test resources/gc_frame_chain_multishot_test.bg",
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("1 passed"), "Should have 1 passing test");
     assert!(stdout.contains("0 failed"), "Should have 0 failures");

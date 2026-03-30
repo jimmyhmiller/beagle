@@ -38,6 +38,12 @@ impl PrettyPrint for Value {
     }
 }
 
+impl PrettyPrint for crate::ir::SavedValue {
+    fn pretty_print(&self) -> String {
+        format!("{} -> local_{}", self.source.pretty_print(), self.local)
+    }
+}
+
 impl PrettyPrint for VirtualRegister {
     fn pretty_print(&self) -> String {
         match self {
@@ -70,6 +76,17 @@ impl PrettyPrint for VirtualRegister {
 }
 
 impl PrettyPrint for Vec<Value> {
+    fn pretty_print(&self) -> String {
+        let mut result = String::new();
+        for value in self {
+            result.push_str(&value.pretty_print());
+            result.push_str(", ");
+        }
+        result
+    }
+}
+
+impl PrettyPrint for Vec<crate::ir::SavedValue> {
     fn pretty_print(&self) -> String {
         let mut result = String::new();
         for value in self {
@@ -569,6 +586,25 @@ impl PrettyPrint for Instruction {
                     local_index
                 )
             }
+            Instruction::PerformEffectWithSaves(
+                handler,
+                enum_type,
+                op_value,
+                label,
+                local_index,
+                _,
+                saves,
+            ) => {
+                format!(
+                    "perform_effect_with_saves {}, {}, {}, label_{}, local_{}, {}",
+                    handler.pretty_print(),
+                    enum_type.pretty_print(),
+                    op_value.pretty_print(),
+                    label.index,
+                    local_index,
+                    saves.pretty_print()
+                )
+            }
             Instruction::ReturnFromShift(value, cont_ptr, _) => {
                 format!(
                     "return_from_shift {}, {}",
@@ -721,15 +757,23 @@ impl PrettyPrint for ArmAsm {
                 rn,
                 rd,
             } => {
-                if *sh != 0 {
+                if *sh == 0 {
+                    format!(
+                        "add {}, {}, {}",
+                        rd.pretty_print(),
+                        rn.pretty_print(),
+                        imm12
+                    )
+                } else if *sh == 1 {
+                    format!(
+                        "add {}, {}, {}, lsl #12",
+                        rd.pretty_print(),
+                        rn.pretty_print(),
+                        imm12
+                    )
+                } else {
                     panic!("Need to deal with shift since I'm using it now");
                 }
-                format!(
-                    "add {}, {}, {}",
-                    rd.pretty_print(),
-                    rn.pretty_print(),
-                    imm12
-                )
             }
             ArmAsm::AddAddsubShift {
                 sf: _,
@@ -1186,16 +1230,23 @@ impl PrettyPrint for ArmAsm {
                 rn,
                 rd,
             } => {
-                // sh: 0,
-                if *sh != 0 {
+                if *sh == 0 {
+                    format!(
+                        "sub {}, {}, {}",
+                        rd.pretty_print(),
+                        rn.pretty_print(),
+                        imm12
+                    )
+                } else if *sh == 1 {
+                    format!(
+                        "sub {}, {}, {}, lsl #12",
+                        rd.pretty_print(),
+                        rn.pretty_print(),
+                        imm12
+                    )
+                } else {
                     panic!("Need to deal with shift since I'm using it now");
                 }
-                format!(
-                    "sub {}, {}, {}",
-                    rd.pretty_print(),
-                    rn.pretty_print(),
-                    imm12
-                )
             }
             ArmAsm::SubAddsubShift {
                 sf: _,

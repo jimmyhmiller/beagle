@@ -1,5 +1,6 @@
 use crate::collections::TYPE_ID_FRAME;
 use crate::types::{BuiltInTypes, Header};
+use std::collections::HashSet;
 
 /// Stack walker that traverses the GC frame linked list (Henderson/Pizderson frames).
 ///
@@ -42,8 +43,8 @@ impl StackWalker {
         F: FnMut(usize, usize),
     {
         let mut header_addr = gc_frame_top;
-        #[cfg(feature = "debug-gc")]
-        let mut fast = gc_frame_top;
+        let mut frames_seen = 0usize;
+        let mut seen_headers = HashSet::new();
 
         #[cfg(feature = "debug-gc")]
         eprintln!(
@@ -52,6 +53,20 @@ impl StackWalker {
         );
 
         while header_addr != 0 {
+            frames_seen += 1;
+            if frames_seen > 100_000 {
+                panic!(
+                    "BUG: runaway GC frame chain scan starting at {:#x} — probable cycle or corrupted prev pointer",
+                    gc_frame_top
+                );
+            }
+            if !seen_headers.insert(header_addr) {
+                panic!(
+                    "BUG: cycle in GC frame chain at {:#x} — repeated frame header",
+                    header_addr
+                );
+            }
+
             // Read frame header
             let header_value = unsafe { *(header_addr as *const usize) };
             let header = Header::from_usize(header_value);
@@ -126,25 +141,53 @@ impl StackWalker {
 
             // prev_value is a raw address (not tagged), pointing to previous frame's header
             // A value of 0 means end of chain
-            header_addr = prev_value;
-
-            #[cfg(feature = "debug-gc")]
-            {
-                // Floyd's cycle detection: advance hare two steps per tortoise step.
-                // If we ever detect a cycle, panic — it means the GC prev fix in
-                // continuation restore has a gap we need to investigate.
-                for _ in 0..2 {
-                    if fast != 0 {
-                        fast = unsafe { *((fast - 8) as *const usize) };
+            if prev_value != 0 {
+                if !prev_value.is_multiple_of(8) {
+                    let frame_pointer = header_addr + 8;
+                    let return_addr = unsafe { *((frame_pointer + 8) as *const usize) };
+                    let saved_fp = unsafe { *(frame_pointer as *const usize) };
+                    let slot_preview = (0..6usize)
+                        .map(|i| {
+                            let slot_addr = header_addr - 16 - (i * 8);
+                            let slot_value = unsafe { *(slot_addr as *const usize) };
+                            format!("{:#x}:{:#x}", slot_addr, slot_value)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if let Some((function, offset)) = crate::get_runtime()
+                        .get()
+                        .get_function_containing_pointer(return_addr as *const u8)
+                    {
+                        eprintln!(
+                            "[gc-prev-corrupt] frame_header={:#x} fp={:#x} ret={:#x} fn={}+{:#x} saved_fp={:#x} prev={:#x} slots={}",
+                            header_addr,
+                            frame_pointer,
+                            return_addr,
+                            function.name,
+                            offset,
+                            saved_fp,
+                            prev_value,
+                            slot_preview
+                        );
+                    } else {
+                        eprintln!(
+                            "[gc-prev-corrupt] frame_header={:#x} fp={:#x} ret={:#x} saved_fp={:#x} prev={:#x} slots={}",
+                            header_addr,
+                            frame_pointer,
+                            return_addr,
+                            saved_fp,
+                            prev_value,
+                            slot_preview
+                        );
                     }
-                }
-                if header_addr != 0 && header_addr == fast {
+                    crate::builtins::dump_gc_chain_trace();
                     panic!(
-                        "BUG: cycle in GC frame chain at {:#x} — saved_gc_prev fix didn't cover this case",
-                        header_addr
+                        "BUG: misaligned GC prev pointer {:#x} from frame header {:#x}",
+                        prev_value, header_addr
                     );
                 }
             }
+            header_addr = prev_value;
         }
 
         #[cfg(feature = "debug-gc")]
@@ -155,6 +198,7 @@ impl StackWalker {
     ///
     /// `frame_pointer` is the innermost active Beagle frame within the detached segment.
     /// `segment_base..segment_top` is the mapped stack region for that segment.
+    #[allow(dead_code)]
     pub fn walk_segment_roots<F>(
         frame_pointer: usize,
         segment_base: usize,
@@ -208,6 +252,73 @@ impl StackWalker {
                     panic!("BUG: cycle in detached segment FP chain at {:#x}", fp);
                 }
             }
+        }
+    }
+
+    /// Walk roots in a detached segment using the saved GC-frame linked list.
+    ///
+    /// This is the detached-segment analogue of `walk_stack_roots`: it follows
+    /// the frame-header prev chain captured at continuation capture time, but
+    /// stops when the chain leaves the detached segment.
+    pub fn walk_segment_gc_roots<F>(
+        gc_frame_top: usize,
+        segment_base: usize,
+        segment_top: usize,
+        mut callback: F,
+    ) where
+        F: FnMut(usize, usize),
+    {
+        let mut header_addr = gc_frame_top;
+        let mut frames_seen = 0usize;
+        let mut seen_headers = HashSet::new();
+
+        while header_addr >= segment_base && header_addr < segment_top && header_addr != 0 {
+            frames_seen += 1;
+            if frames_seen > 100_000 {
+                panic!(
+                    "BUG: runaway detached GC-frame scan starting at {:#x}",
+                    gc_frame_top
+                );
+            }
+            if !seen_headers.insert(header_addr) {
+                panic!(
+                    "BUG: cycle in detached GC-frame chain at {:#x}",
+                    header_addr
+                );
+            }
+
+            let header_value = unsafe { *(header_addr as *const usize) };
+            let header = Header::from_usize(header_value);
+            if header.type_id != TYPE_ID_FRAME {
+                break;
+            }
+
+            let num_slots = header.size as usize;
+            for i in 0..num_slots {
+                let slot_addr = header_addr - 16 - (i * 8);
+                let slot_value = unsafe { *(slot_addr as *const usize) };
+                if BuiltInTypes::is_heap_pointer(slot_value) {
+                    let untagged = BuiltInTypes::untag(slot_value);
+                    if untagged != 0 && untagged.is_multiple_of(8) {
+                        callback(slot_addr, slot_value);
+                    }
+                }
+            }
+
+            let prev_value = unsafe { *((header_addr - 8) as *const usize) };
+            if prev_value == 0 {
+                break;
+            }
+            if !prev_value.is_multiple_of(8) {
+                panic!(
+                    "BUG: misaligned detached GC prev pointer {:#x} from frame header {:#x}",
+                    prev_value, header_addr
+                );
+            }
+            if prev_value < segment_base || prev_value >= segment_top {
+                break;
+            }
+            header_addr = prev_value;
         }
     }
 }

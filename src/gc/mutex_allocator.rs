@@ -41,10 +41,6 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         bytes: usize,
         kind: BuiltInTypes,
     ) -> Result<AllocateAction, Box<dyn Error>> {
-        if self.registered_threads.load(Ordering::Acquire) == 0 {
-            return self.alloc.try_allocate(bytes, kind);
-        }
-
         let lock = self.mutex.lock().unwrap();
         let result = self.alloc.try_allocate(bytes, kind);
         drop(lock);
@@ -56,10 +52,6 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         words: usize,
         kind: BuiltInTypes,
     ) -> Result<AllocateAction, Box<dyn Error>> {
-        if self.registered_threads.load(Ordering::Acquire) == 0 {
-            return self.alloc.try_allocate_zeroed(words, kind);
-        }
-
         let lock = self.mutex.lock().unwrap();
         let result = self.alloc.try_allocate_zeroed(words, kind);
         drop(lock);
@@ -67,18 +59,12 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
     }
 
     fn gc(&mut self, gc_frame_tops: &[usize], extra_roots: &[(*mut usize, usize)]) {
-        if self.registered_threads.load(Ordering::Acquire) == 0 {
-            return self.alloc.gc(gc_frame_tops, extra_roots);
-        }
         let lock = self.mutex.lock().unwrap();
         self.alloc.gc(gc_frame_tops, extra_roots);
         drop(lock)
     }
 
     fn grow(&mut self) {
-        if self.registered_threads.load(Ordering::Acquire) == 0 {
-            return self.alloc.grow();
-        }
         let lock = self.mutex.lock().unwrap();
         self.alloc.grow();
         drop(lock)

@@ -1273,6 +1273,21 @@ impl AstCompiler<'_> {
                     .clone()
                     .map(|name| self.compiler.current_namespace_name() + "/" + &name);
 
+                if let Some(filter) = std::env::var("BEAGLE_DEBUG_IR_FILTER").ok()
+                    && full_function_name
+                        .as_deref()
+                        .map(|function_name| function_name.contains(&filter))
+                        .unwrap_or(false)
+                {
+                    eprintln!(
+                        "[ir_dump] function={}",
+                        full_function_name.as_deref().unwrap_or("<anonymous>")
+                    );
+                    for instruction in self.ir.instructions.iter() {
+                        eprintln!("{}", instruction.pretty_print());
+                    }
+                }
+
                 // Extract argument names from patterns for reflection
                 let arg_names: Vec<String> = args.iter()
                     .flat_map(|pattern| pattern.binding_names())

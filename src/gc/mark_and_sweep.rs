@@ -283,6 +283,44 @@ pub struct MarkAndSweep {
     options: AllocatorOptions,
 }
 
+struct PendingMark {
+    object_ptr: usize,
+    source_addr: usize,
+    source_kind: &'static str,
+}
+
+fn should_log_suspicious_mark(object: &HeapObject) -> bool {
+    if std::env::var("BEAGLE_DEBUG_SUSPECT_MARK").is_err() {
+        return false;
+    }
+    let header = object.get_header();
+    header.type_id == 0 && header.type_data == 0 && header.size == 0
+}
+
+fn log_suspicious_mark(pending: &PendingMark) {
+    let object = HeapObject::from_tagged(pending.object_ptr);
+    if !should_log_suspicious_mark(&object) {
+        return;
+    }
+
+    let raw_header = unsafe { *(object.untagged() as *const usize) };
+    let header = object.get_header();
+    eprintln!(
+        "[suspect-mark] object={:#x} raw_header={:#x} header=(type_id={} type_data={} size={} flags={} marked={} opaque={} large={}) source_kind={} source_addr={:#x}",
+        pending.object_ptr,
+        raw_header,
+        header.type_id,
+        header.type_data,
+        header.size,
+        header.type_flags,
+        header.marked,
+        header.opaque,
+        header.large,
+        pending.source_kind,
+        pending.source_addr
+    );
+}
+
 // TODO: I got an issue with my freelist
 impl MarkAndSweep {
     fn collect_live_continuation_segment_handles(&mut self) -> std::collections::HashSet<usize> {
@@ -302,25 +340,29 @@ impl MarkAndSweep {
     fn push_continuation_segment_children(
         &self,
         object: &HeapObject,
-        to_mark: &mut Vec<HeapObject>,
+        to_mark: &mut Vec<PendingMark>,
     ) {
         let object = HeapObject::from_untagged(object.untagged() as *const u8);
         let Some(cont) = ContinuationObject::from_heap_object(object) else {
             return;
         };
-        let Some((segment_base, segment_top)) =
-            crate::runtime::find_captured_segment_bounds(cont.segment_handle_id())
+        let Some((segment_base, segment_top, gc_frame_top)) =
+            crate::runtime::find_captured_segment_info(cont.segment_handle_id())
         else {
             return;
         };
-        StackWalker::walk_segment_roots(
-            cont.original_fp(),
+        StackWalker::walk_segment_gc_roots(
+            gc_frame_top,
             segment_base,
             segment_top,
-            |_slot_addr, pointer| {
+            |slot_addr, pointer| {
                 let untagged = BuiltInTypes::untag(pointer);
                 if untagged != 0 && untagged.is_multiple_of(8) {
-                    to_mark.push(HeapObject::from_tagged(pointer));
+                    to_mark.push(PendingMark {
+                        object_ptr: pointer,
+                        source_addr: slot_addr,
+                        source_kind: "captured-segment-root",
+                    });
                 }
             },
         );
@@ -444,15 +486,22 @@ impl MarkAndSweep {
     }
 
     fn mark_from_chain(&self, gc_frame_top: usize) {
-        let mut to_mark: Vec<HeapObject> = Vec::with_capacity(128);
-
-        StackWalker::walk_stack_roots(gc_frame_top, |_slot_addr, pointer| {
-            let untagged = BuiltInTypes::untag(pointer);
-            // Skip null and misaligned pointers
-            if untagged == 0 || !untagged.is_multiple_of(8) {
-                return;
+        let mut to_mark: Vec<PendingMark> = Vec::with_capacity(128);
+        let push_root = |to_mark: &mut Vec<PendingMark>,
+                         value: usize,
+                         source_addr: usize,
+                         source_kind: &'static str| {
+            if let Some(object) = HeapObject::try_from_tagged(value) {
+                to_mark.push(PendingMark {
+                    object_ptr: object.tagged_pointer(),
+                    source_addr,
+                    source_kind,
+                });
             }
-            to_mark.push(HeapObject::from_tagged(pointer));
+        };
+
+        StackWalker::walk_stack_roots(gc_frame_top, |slot_addr, pointer| {
+            push_root(&mut to_mark, pointer, slot_addr, "stack-root");
         });
 
         // GC runs while all threads are paused at safepoints, so it's safe to
@@ -462,53 +511,75 @@ impl MarkAndSweep {
             let registry = runtime.per_thread_registry.lock().unwrap();
             for ptd_ptr in registry.iter() {
                 let ptd = unsafe { &*ptd_ptr.0 };
+                for handle_id in ptd.pending_captured_segment_handles.iter().copied() {
+                    if let Some((segment, gc_frame_top)) = ptd.captured_segments.get(&handle_id) {
+                        StackWalker::walk_segment_gc_roots(
+                            *gc_frame_top,
+                            segment.base,
+                            segment.top,
+                            |slot_addr, pointer| {
+                                push_root(
+                                    &mut to_mark,
+                                    pointer,
+                                    slot_addr,
+                                    "pending-captured-segment-root",
+                                );
+                            },
+                        );
+                    }
+                }
+                for return_point in ptd.invocation_return_points.iter() {
+                    for reg in return_point.callee_saved_regs.iter().copied() {
+                        push_root(&mut to_mark, reg, 0, "invocation-return-reg");
+                    }
+                }
                 for frame in ptd.suspended_frames.values() {
                     for slot in frame.locals.iter().copied() {
-                        if BuiltInTypes::is_heap_pointer(slot) {
-                            to_mark.push(HeapObject::from_tagged(slot));
-                        }
+                        push_root(&mut to_mark, slot, 0, "suspended-frame-local");
                     }
-                    for word in frame.trailing_words.iter().copied() {
-                        if BuiltInTypes::is_heap_pointer(word) {
-                            to_mark.push(HeapObject::from_tagged(word));
-                        }
+                }
+                for frame in ptd.captured_prompt_frames.values() {
+                    for slot in frame.locals.iter().copied() {
+                        push_root(&mut to_mark, slot, 0, "captured-prompt-local");
                     }
                 }
                 if let Some(ctx) = ptd.safe_return_context.as_ref() {
-                    if BuiltInTypes::is_heap_pointer(ctx.value) {
-                        to_mark.push(HeapObject::from_tagged(ctx.value));
+                    push_root(&mut to_mark, ctx.value, 0, "safe-return-value");
+                    for reg in ctx.return_point.callee_saved_regs.iter().copied() {
+                        push_root(&mut to_mark, reg, 0, "safe-return-reg");
                     }
                 }
                 if let Some(ctx) = ptd.safe_perform_context.as_ref() {
-                    if BuiltInTypes::is_heap_pointer(ctx.handler) {
-                        to_mark.push(HeapObject::from_tagged(ctx.handler));
-                    }
-                    if BuiltInTypes::is_heap_pointer(ctx.op_value) {
-                        to_mark.push(HeapObject::from_tagged(ctx.op_value));
-                    }
-                    if BuiltInTypes::is_heap_pointer(ctx.resume_closure) {
-                        to_mark.push(HeapObject::from_tagged(ctx.resume_closure));
-                    }
-                    if BuiltInTypes::is_heap_pointer(ctx.cont_ptr) {
-                        to_mark.push(HeapObject::from_tagged(ctx.cont_ptr));
-                    }
+                    push_root(&mut to_mark, ctx.handler, 0, "safe-perform-handler");
+                    push_root(&mut to_mark, ctx.op_value, 0, "safe-perform-op");
+                    push_root(
+                        &mut to_mark,
+                        ctx.resume_closure,
+                        0,
+                        "safe-perform-resume-closure",
+                    );
+                    push_root(&mut to_mark, ctx.cont_ptr, 0, "safe-perform-cont");
                 }
                 for saved_ptr in ptd.saved_continuation_ptrs.iter().copied() {
-                    if saved_ptr != 0 && BuiltInTypes::is_heap_pointer(saved_ptr) {
-                        to_mark.push(HeapObject::from_tagged(saved_ptr));
-                    }
+                    push_root(&mut to_mark, saved_ptr, 0, "saved-continuation");
                 }
             }
         }
 
-        while let Some(object) = to_mark.pop() {
+        while let Some(pending) = to_mark.pop() {
+            log_suspicious_mark(&pending);
+            let object = HeapObject::from_tagged(pending.object_ptr);
             if object.marked() {
                 continue;
             }
 
             object.mark();
             for child in object.get_heap_references() {
-                to_mark.push(child);
+                to_mark.push(PendingMark {
+                    object_ptr: child.tagged_pointer(),
+                    source_addr: pending.object_ptr,
+                    source_kind: "heap-child",
+                });
             }
             self.push_continuation_segment_children(&object, &mut to_mark);
         }
@@ -517,22 +588,31 @@ impl MarkAndSweep {
     /// Mark extra roots from shadow stacks (HandleScope handles).
     /// These are heap pointers stored in Rust-side Vec buffers.
     fn mark_extra_roots(&self, extra_roots: &[(*mut usize, usize)]) {
-        let mut to_mark: Vec<HeapObject> = Vec::new();
+        let mut to_mark: Vec<PendingMark> = Vec::new();
         for &(slot_addr, _cached_value) in extra_roots {
             let value = unsafe { *slot_addr };
             if BuiltInTypes::is_heap_pointer(value) && BuiltInTypes::untag(value) != 0 {
-                let obj = HeapObject::from_tagged(value);
-                to_mark.push(obj);
+                to_mark.push(PendingMark {
+                    object_ptr: value,
+                    source_addr: slot_addr as usize,
+                    source_kind: "extra-root",
+                });
             }
         }
-        while let Some(object) = to_mark.pop() {
+        while let Some(pending) = to_mark.pop() {
+            log_suspicious_mark(&pending);
+            let object = HeapObject::from_tagged(pending.object_ptr);
             if object.marked() {
                 continue;
             }
 
             object.mark();
             for child in object.get_heap_references() {
-                to_mark.push(child);
+                to_mark.push(PendingMark {
+                    object_ptr: child.tagged_pointer(),
+                    source_addr: pending.object_ptr,
+                    source_kind: "heap-child",
+                });
             }
             self.push_continuation_segment_children(&object, &mut to_mark);
         }
