@@ -1319,12 +1319,18 @@ impl LowLevelX86 {
             // We must save/restore argument registers around the call since they
             // haven't been saved to locals yet by the compiler.
             // Save all 6 argument registers (RDI, RSI, RDX, RCX, R8, R9)
+            // and R10 (arg count register for variadic calling convention).
+            // R10 is caller-saved and will be clobbered by the gc_frame_link call.
+            // We push 7 registers + 1 alignment pad = 8 pushes (64 bytes) to keep
+            // RSP 16-byte aligned for the gc_frame_link call.
             inserted_instructions.push(X86Asm::Push { reg: RDI });
             inserted_instructions.push(X86Asm::Push { reg: RSI });
             inserted_instructions.push(X86Asm::Push { reg: RDX });
             inserted_instructions.push(X86Asm::Push { reg: RCX });
             inserted_instructions.push(X86Asm::Push { reg: R8 });
             inserted_instructions.push(X86Asm::Push { reg: R9 });
+            inserted_instructions.push(X86Asm::Push { reg: R10 });
+            inserted_instructions.push(X86Asm::SubRI { dest: RSP, imm: 8 }); // alignment pad
             // Call gc_frame_link(frame_header_addr=RBP-8)
             inserted_instructions.push(X86Asm::Lea {
                 dest: RDI,
@@ -1343,7 +1349,9 @@ impl LowLevelX86 {
                 offset: -16,
                 src: RAX,
             });
-            // Restore argument registers
+            // Restore argument registers and R10 (arg count)
+            inserted_instructions.push(X86Asm::AddRI { dest: RSP, imm: 8 }); // remove alignment pad
+            inserted_instructions.push(X86Asm::Pop { reg: R10 });
             inserted_instructions.push(X86Asm::Pop { reg: R9 });
             inserted_instructions.push(X86Asm::Pop { reg: R8 });
             inserted_instructions.push(X86Asm::Pop { reg: RCX });
