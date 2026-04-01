@@ -1,6 +1,5 @@
 use core::panic;
 use std::{
-    arch::asm,
     cell::{Cell, RefCell},
     collections::VecDeque,
     error::Error,
@@ -358,55 +357,28 @@ macro_rules! save_gc_context {
 
 /// Read the current frame pointer register.
 /// Used by GC to walk the stack starting from the current Rust function's frame.
-/// MUST be inlined so we read the caller's frame pointer, not this function's.
+/// MUST be inlined so the trampoline reads the caller's frame pointer, not this function's.
 #[inline(always)]
 pub fn get_current_rust_frame_pointer() -> usize {
-    let fp: usize;
-    cfg_if::cfg_if! {
-        if #[cfg(target_arch = "x86_64")] {
-            unsafe { core::arch::asm!("mov {}, rbp", out(reg) fp) };
-        } else if #[cfg(target_arch = "aarch64")] {
-            unsafe { core::arch::asm!("mov {}, x29", out(reg) fp) };
-        } else {
-            compile_error!("Unsupported architecture");
-        }
-    }
-    fp
+    let runtime = get_runtime().get();
+    let fn_entry = runtime
+        .get_function_by_name("beagle.builtin/read-fp")
+        .expect("read-fp trampoline not found");
+    let read_fp: extern "C" fn() -> usize =
+        unsafe { std::mem::transmute::<_, _>(fn_entry.pointer) };
+    read_fp()
 }
 
 #[inline(always)]
 fn capture_current_callee_saved_regs() -> [usize; 10] {
     let mut saved_regs = [0usize; 10];
-    cfg_if::cfg_if! {
-        if #[cfg(target_arch = "aarch64")] {
-            unsafe {
-                std::arch::asm!(
-                    "str x19, [{0}]",
-                    "str x20, [{0}, #8]",
-                    "str x21, [{0}, #16]",
-                    "str x22, [{0}, #24]",
-                    "str x23, [{0}, #32]",
-                    "str x24, [{0}, #40]",
-                    "str x25, [{0}, #48]",
-                    "str x26, [{0}, #56]",
-                    "str x27, [{0}, #64]",
-                    "str x28, [{0}, #72]",
-                    in(reg) saved_regs.as_mut_ptr(),
-                );
-            }
-        } else if #[cfg(target_arch = "x86_64")] {
-            unsafe {
-                std::arch::asm!(
-                    "mov [{0}], rbx",
-                    "mov [{0} + 8], r12",
-                    "mov [{0} + 16], r13",
-                    "mov [{0} + 24], r14",
-                    "mov [{0} + 32], r15",
-                    in(reg) saved_regs.as_mut_ptr(),
-                );
-            }
-        }
-    }
+    let runtime = get_runtime().get();
+    let save_fn = runtime
+        .get_function_by_name("beagle.builtin/save-callee-regs")
+        .expect("save-callee-regs function not found");
+    let save_callee_regs: extern "C" fn(*mut usize) =
+        unsafe { std::mem::transmute::<_, _>(save_fn.pointer) };
+    save_callee_regs(saved_regs.as_mut_ptr());
     saved_regs
 }
 
@@ -1658,24 +1630,13 @@ extern "C" fn make_function_object(
 }
 
 pub fn get_current_stack_pointer() -> usize {
-    use core::arch::asm;
-    let sp: usize;
-    unsafe {
-        cfg_if::cfg_if! {
-            if #[cfg(target_arch = "x86_64")] {
-                asm!(
-                    "mov {0}, rsp",
-                    out(reg) sp
-                );
-            } else {
-                asm!(
-                    "mov {0}, sp",
-                    out(reg) sp
-                );
-            }
-        }
-    }
-    sp
+    let runtime = get_runtime().get();
+    let fn_entry = runtime
+        .get_function_by_name("beagle.builtin/read-sp")
+        .expect("read-sp trampoline not found");
+    let read_sp: extern "C" fn() -> usize =
+        unsafe { std::mem::transmute::<_, _>(fn_entry.pointer) };
+    read_sp()
 }
 
 /// Get the current frame pointer (RBP on x86-64, X29 on ARM64).
@@ -1683,24 +1644,13 @@ pub fn get_current_stack_pointer() -> usize {
 /// frame pointers, making FP-chain traversal unreliable for GC.
 #[allow(dead_code)]
 pub fn get_current_frame_pointer() -> usize {
-    use core::arch::asm;
-    let fp: usize;
-    unsafe {
-        cfg_if::cfg_if! {
-            if #[cfg(target_arch = "x86_64")] {
-                asm!(
-                    "mov {0}, rbp",
-                    out(reg) fp
-                );
-            } else {
-                asm!(
-                    "mov {0}, x29",
-                    out(reg) fp
-                );
-            }
-        }
-    }
-    fp
+    let runtime = get_runtime().get();
+    let fn_entry = runtime
+        .get_function_by_name("beagle.builtin/read-fp")
+        .expect("read-fp trampoline not found");
+    let read_fp: extern "C" fn() -> usize =
+        unsafe { std::mem::transmute::<_, _>(fn_entry.pointer) };
+    read_fp()
 }
 
 /// Check if a struct's struct_id matches the expected struct_id.
@@ -3258,23 +3208,14 @@ fn print_stack(_stack_pointer: usize) {
     let stack_base = runtime.get_stack_base();
     let stack_begin = stack_base - STACK_SIZE;
 
-    // Get the current frame pointer directly from the register
-    let fp: usize;
-    let mut current_frame_ptr = unsafe {
-        cfg_if::cfg_if! {
-            if #[cfg(target_arch = "x86_64")] {
-                asm!(
-                    "mov {0}, rbp",
-                    out(reg) fp
-                );
-            } else {
-                asm!(
-                    "mov {0}, x29",
-                    out(reg) fp
-                );
-            }
-        }
-        fp
+    // Get the current frame pointer via JIT trampoline
+    let mut current_frame_ptr = {
+        let fn_entry = runtime
+            .get_function_by_name("beagle.builtin/read-fp")
+            .expect("read-fp trampoline not found");
+        let read_fp: extern "C" fn() -> usize =
+            unsafe { std::mem::transmute::<_, _>(fn_entry.pointer) };
+        read_fp()
     };
 
     println!("Stack trace:");
@@ -5299,11 +5240,13 @@ unsafe extern "C" fn invoke_beagle_callback(
 
         // Get a valid stack pointer for GC context.
         // We're being called from C code, so get the current stack pointer.
-        let stack_pointer: usize;
-        #[cfg(target_arch = "aarch64")]
-        std::arch::asm!("mov {}, sp", out(reg) stack_pointer);
-        #[cfg(target_arch = "x86_64")]
-        std::arch::asm!("mov {}, rsp", out(reg) stack_pointer);
+        let stack_pointer: usize = {
+            let fn_entry = runtime
+                .get_function_by_name("beagle.builtin/read-sp")
+                .expect("read-sp trampoline not found");
+            let read_sp: extern "C" fn() -> usize = std::mem::transmute::<_, _>(fn_entry.pointer);
+            read_sp()
+        };
 
         // Unmarshal C args to Beagle values.
         // Heap-allocated args (Pointer structs, Floats) must be registered as temporary
@@ -11535,32 +11478,26 @@ pub unsafe extern "C" fn throw_exception(
             let new_fp = handler.frame_pointer;
             let new_lr = handler.link_register;
 
-            unsafe {
-                cfg_if::cfg_if! {
-                    if #[cfg(target_arch = "x86_64")] {
-                        let _ = new_lr;
-                        asm!(
-                            "mov rsp, {0}",
-                            "mov rbp, {1}",
-                            "jmp {2}",
-                            in(reg) new_sp,
-                            in(reg) new_fp,
-                            in(reg) handler_address,
-                            options(noreturn)
-                        );
-                    } else {
-                        asm!(
-                            "mov sp, {0}",
-                            "mov x29, {1}",
-                            "mov x30, {2}",
-                            "br {3}",
-                            in(reg) new_sp,
-                            in(reg) new_fp,
-                            in(reg) new_lr,
-                            in(reg) handler_address,
-                            options(noreturn)
-                        );
-                    }
+            cfg_if::cfg_if! {
+                if #[cfg(target_arch = "x86_64")] {
+                    let _ = new_lr;
+                    let runtime = get_runtime().get();
+                    let handler_jump_fn = runtime
+                        .get_function_by_name("beagle.builtin/handler-jump")
+                        .expect("handler-jump function not found");
+                    let ptr: *const u8 = handler_jump_fn.pointer.into();
+                    let handler_jump: extern "C" fn(usize, usize, usize) -> ! =
+                        unsafe { std::mem::transmute(ptr) };
+                    handler_jump(new_sp, new_fp, handler_address);
+                } else {
+                    let runtime = get_runtime().get();
+                    let return_jump_fn = runtime
+                        .get_function_by_name("beagle.builtin/return-jump")
+                        .expect("return-jump function not found");
+                    let ptr: *const u8 = return_jump_fn.pointer.into();
+                    let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
+                        unsafe { std::mem::transmute(ptr) };
+                    return_jump(new_sp, new_fp, new_lr, handler_address, std::ptr::null(), 0);
                 }
             }
         } else {
@@ -11584,32 +11521,26 @@ pub unsafe extern "C" fn throw_exception(
             let result_ptr = (new_fp as isize).wrapping_add(result_local_offset) as *mut usize;
             unsafe { *result_ptr = exception };
 
-            unsafe {
-                cfg_if::cfg_if! {
-                    if #[cfg(target_arch = "x86_64")] {
-                        let _ = new_lr;
-                        asm!(
-                            "mov rsp, {0}",
-                            "mov rbp, {1}",
-                            "jmp {2}",
-                            in(reg) new_sp,
-                            in(reg) new_fp,
-                            in(reg) handler_address,
-                            options(noreturn)
-                        );
-                    } else {
-                        asm!(
-                            "mov sp, {0}",
-                            "mov x29, {1}",
-                            "mov x30, {2}",
-                            "br {3}",
-                            in(reg) new_sp,
-                            in(reg) new_fp,
-                            in(reg) new_lr,
-                            in(reg) handler_address,
-                            options(noreturn)
-                        );
-                    }
+            cfg_if::cfg_if! {
+                if #[cfg(target_arch = "x86_64")] {
+                    let _ = new_lr;
+                    let runtime = get_runtime().get();
+                    let handler_jump_fn = runtime
+                        .get_function_by_name("beagle.builtin/handler-jump")
+                        .expect("handler-jump function not found");
+                    let ptr: *const u8 = handler_jump_fn.pointer.into();
+                    let handler_jump: extern "C" fn(usize, usize, usize) -> ! =
+                        unsafe { std::mem::transmute(ptr) };
+                    handler_jump(new_sp, new_fp, handler_address);
+                } else {
+                    let runtime = get_runtime().get();
+                    let return_jump_fn = runtime
+                        .get_function_by_name("beagle.builtin/return-jump")
+                        .expect("return-jump function not found");
+                    let ptr: *const u8 = return_jump_fn.pointer.into();
+                    let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
+                        unsafe { std::mem::transmute(ptr) };
+                    return_jump(new_sp, new_fp, new_lr, handler_address, std::ptr::null(), 0);
                 }
             }
         }
@@ -12276,30 +12207,14 @@ unsafe extern "C" fn continue_return_from_shift_on_safe_stack() -> ! {
                 }
 
             crate::runtime::per_thread_data().safe_return_context = None;
-            unsafe {
-                asm!(
-                    "ldr x19, [x9]",
-                    "ldr x20, [x9, #8]",
-                    "ldr x21, [x9, #16]",
-                    "ldr x22, [x9, #24]",
-                    "ldr x23, [x9, #32]",
-                    "ldr x24, [x9, #40]",
-                    "ldr x25, [x9, #48]",
-                    "ldr x26, [x9, #56]",
-                    "ldr x27, [x9, #64]",
-                    "ldr x28, [x9, #72]",
-                    "mov sp, x10",
-                    "mov x29, x11",
-                    "mov x0, x12",
-                    "br x13",
-                    in("x9") callee_saved.as_ptr(),
-                    in("x10") new_sp,
-                    in("x11") new_fp,
-                    in("x12") value,
-                    in("x13") return_address,
-                    options(noreturn)
-                );
-            }
+            let runtime = get_runtime().get();
+            let return_jump_fn = runtime
+                .get_function_by_name("beagle.builtin/return-jump")
+                .expect("return-jump function not found");
+            let ptr: *const u8 = return_jump_fn.pointer.into();
+            let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
+                unsafe { std::mem::transmute(ptr) };
+            return_jump(new_sp, new_fp, 0, return_address, callee_saved.as_ptr(), value);
         }
     }
 }
@@ -12338,29 +12253,15 @@ unsafe extern "C" fn continue_perform_on_safe_stack() -> ! {
 
     crate::runtime::per_thread_data().pop_native_perform_stack();
 
-    let stack_pointer: usize;
-    let frame_pointer: usize;
-    cfg_if::cfg_if! {
-        if #[cfg(target_arch = "x86_64")] {
-            unsafe {
-                std::arch::asm!(
-                    "mov {0}, rsp",
-                    "mov {1}, rbp",
-                    out(reg) stack_pointer,
-                    out(reg) frame_pointer,
-                );
-            }
-        } else {
-            unsafe {
-                std::arch::asm!(
-                    "mov {0}, sp",
-                    "mov {1}, x29",
-                    out(reg) stack_pointer,
-                    out(reg) frame_pointer,
-                );
-            }
-        }
-    }
+    let (stack_pointer, frame_pointer) = {
+        let runtime = get_runtime().get();
+        let fn_entry = runtime
+            .get_function_by_name("beagle.builtin/read-sp-fp")
+            .expect("read-sp-fp trampoline not found");
+        let read_sp_fp: extern "C" fn() -> (usize, usize) =
+            unsafe { std::mem::transmute::<_, _>(fn_entry.pointer) };
+        read_sp_fp()
+    };
 
     let resolved_cont_ptr = {
         let saved = crate::runtime::per_thread_data().current_saved_continuation_ptr();
@@ -12395,33 +12296,13 @@ unsafe fn jump_to_safe_perform_stack() -> ! {
         ptd.push_native_perform_stack()
     };
 
-    cfg_if::cfg_if! {
-        if #[cfg(target_arch = "x86_64")] {
-            unsafe {
-                asm!(
-                    "mov rsp, {stack_top}",
-                    "and rsp, -16",
-                    "call {target}",
-                    "ud2",
-                    stack_top = in(reg) stack_top,
-                    target = in(reg) continue_perform_on_safe_stack as usize,
-                    options(noreturn)
-                );
-            }
-        } else {
-            unsafe {
-                asm!(
-                    "mov sp, {stack_top}",
-                    "mov x16, {target}",
-                    "blr x16",
-                    "brk #0",
-                    stack_top = in(reg) stack_top,
-                    target = in(reg) continue_perform_on_safe_stack as usize,
-                    options(noreturn)
-                );
-            }
-        }
-    }
+    let runtime = get_runtime().get();
+    let switch_fn = runtime
+        .get_function_by_name("beagle.builtin/stack-switch")
+        .expect("stack-switch function not found");
+    let ptr: *const u8 = switch_fn.pointer.into();
+    let stack_switch: extern "C" fn(usize, usize) -> ! = unsafe { std::mem::transmute(ptr) };
+    stack_switch(stack_top, continue_perform_on_safe_stack as usize);
 }
 
 unsafe fn jump_to_safe_return_stack() -> ! {
@@ -12430,33 +12311,13 @@ unsafe fn jump_to_safe_return_stack() -> ! {
         ptd.ensure_native_scratch_stack_top()
     };
 
-    cfg_if::cfg_if! {
-        if #[cfg(target_arch = "x86_64")] {
-            unsafe {
-                asm!(
-                    "mov rsp, {stack_top}",
-                    "and rsp, -16",
-                    "call {target}",
-                    "ud2",
-                    stack_top = in(reg) stack_top,
-                    target = in(reg) continue_return_from_shift_on_safe_stack as usize,
-                    options(noreturn)
-                );
-            }
-        } else {
-            unsafe {
-                asm!(
-                    "mov sp, {stack_top}",
-                    "mov x16, {target}",
-                    "blr x16",
-                    "brk #0",
-                    stack_top = in(reg) stack_top,
-                    target = in(reg) continue_return_from_shift_on_safe_stack as usize,
-                    options(noreturn)
-                );
-            }
-        }
-    }
+    let runtime = get_runtime().get();
+    let switch_fn = runtime
+        .get_function_by_name("beagle.builtin/stack-switch")
+        .expect("stack-switch function not found");
+    let ptr: *const u8 = switch_fn.pointer.into();
+    let stack_switch: extern "C" fn(usize, usize) -> ! = unsafe { std::mem::transmute(ptr) };
+    stack_switch(stack_top, continue_return_from_shift_on_safe_stack as usize);
 }
 
 unsafe fn return_from_shift_runtime_inner(
@@ -12619,57 +12480,26 @@ unsafe fn return_from_shift_runtime_inner(
     cfg_if::cfg_if! {
         if #[cfg(target_arch = "x86_64")] {
             let _ = new_lr;
-            unsafe {
-                asm!(
-                    "mov rsp, {0}",
-                    "mov rbp, {1}",
-                    "jmp {2}",
-                    in(reg) new_sp,
-                    in(reg) new_fp,
-                    in(reg) handler_address,
-                    options(noreturn)
-                );
-            }
+            let runtime = get_runtime().get();
+            let handler_jump_fn = runtime
+                .get_function_by_name("beagle.builtin/handler-jump")
+                .expect("handler-jump function not found");
+            let ptr: *const u8 = handler_jump_fn.pointer.into();
+            let handler_jump: extern "C" fn(usize, usize, usize) -> ! =
+                unsafe { std::mem::transmute(ptr) };
+            handler_jump(new_sp, new_fp, handler_address);
         } else {
+            let runtime = get_runtime().get();
+            let return_jump_fn = runtime
+                .get_function_by_name("beagle.builtin/return-jump")
+                .expect("return-jump function not found");
+            let ptr: *const u8 = return_jump_fn.pointer.into();
+            let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
+                unsafe { std::mem::transmute(ptr) };
             if let Some(callee_saved_regs) = captured_callee_saved_regs.as_ref() {
-                unsafe {
-                    asm!(
-                        "ldr x19, [x9]",
-                        "ldr x20, [x9, #8]",
-                        "ldr x21, [x9, #16]",
-                        "ldr x22, [x9, #24]",
-                        "ldr x23, [x9, #32]",
-                        "ldr x24, [x9, #40]",
-                        "ldr x25, [x9, #48]",
-                        "ldr x26, [x9, #56]",
-                        "ldr x27, [x9, #64]",
-                        "ldr x28, [x9, #72]",
-                        "mov sp, {0}",
-                        "mov x29, {1}",
-                        "mov x30, {2}",
-                        "br {3}",
-                        in(reg) new_sp,
-                        in(reg) new_fp,
-                        in(reg) new_lr,
-                        in(reg) handler_address,
-                        in("x9") callee_saved_regs.as_ptr(),
-                        options(noreturn)
-                    );
-                }
+                return_jump(new_sp, new_fp, new_lr, handler_address, callee_saved_regs.as_ptr(), 0);
             } else {
-                unsafe {
-                    asm!(
-                        "mov sp, {0}",
-                        "mov x29, {1}",
-                        "mov x30, {2}",
-                        "br {3}",
-                        in(reg) new_sp,
-                        in(reg) new_fp,
-                        in(reg) new_lr,
-                        in(reg) handler_address,
-                        options(noreturn)
-                    );
-                }
+                return_jump(new_sp, new_fp, new_lr, handler_address, std::ptr::null(), 0);
             }
         }
     }
@@ -13170,32 +13000,14 @@ fn invoke_segmented_continuation(
                 value,
             );
         } else {
-            unsafe {
-                asm!(
-                    "ldr x19, [x9]",
-                    "ldr x20, [x9, #8]",
-                    "ldr x21, [x9, #16]",
-                    "ldr x22, [x9, #24]",
-                    "ldr x23, [x9, #32]",
-                    "ldr x24, [x9, #40]",
-                    "ldr x25, [x9, #48]",
-                    "ldr x26, [x9, #56]",
-                    "ldr x27, [x9, #64]",
-                    "ldr x28, [x9, #72]",
-                    "mov sp, {0}",
-                    "mov x29, {1}",
-                    "mov x30, {2}",
-                    "mov x0, {4}",
-                    "br {3}",
-                    in(reg) new_sp,
-                    in(reg) new_fp,
-                    in(reg) continuation_return_address,
-                    in(reg) resume_address,
-                    in(reg) value,
-                    in("x9") captured_callee_saved_regs.as_ptr(),
-                    options(noreturn)
-                );
-            }
+            let runtime = get_runtime().get();
+            let return_jump_fn = runtime
+                .get_function_by_name("beagle.builtin/return-jump")
+                .expect("return-jump function not found");
+            let ptr: *const u8 = return_jump_fn.pointer.into();
+            let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
+                unsafe { std::mem::transmute(ptr) };
+            return_jump(new_sp, new_fp, continuation_return_address, resume_address, captured_callee_saved_regs.as_ptr(), value);
         }
     }
 }
@@ -13321,30 +13133,14 @@ pub unsafe extern "C" fn segmented_continuation_return(value: usize) -> ! {
                     0,
                 );
             } else {
-                unsafe {
-                    asm!(
-                        "ldr x19, [x9]",
-                        "ldr x20, [x9, #8]",
-                        "ldr x21, [x9, #16]",
-                        "ldr x22, [x9, #24]",
-                        "ldr x23, [x9, #32]",
-                        "ldr x24, [x9, #40]",
-                        "ldr x25, [x9, #48]",
-                        "ldr x26, [x9, #56]",
-                        "ldr x27, [x9, #64]",
-                        "ldr x28, [x9, #72]",
-                        "mov sp, x10",
-                        "mov x29, x11",
-                        "mov x0, x12",
-                        "br x13",
-                        in("x9") return_point.callee_saved_regs.as_ptr(),
-                        in("x10") return_point.stack_pointer,
-                        in("x11") return_point.frame_pointer,
-                        in("x12") value,
-                        in("x13") return_point.return_address,
-                        options(noreturn)
-                    );
-                }
+                let runtime = get_runtime().get();
+                let return_jump_fn = runtime
+                    .get_function_by_name("beagle.builtin/return-jump")
+                    .expect("return-jump function not found");
+                let ptr: *const u8 = return_jump_fn.pointer.into();
+                let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
+                    unsafe { std::mem::transmute(ptr) };
+                return_jump(return_point.stack_pointer, return_point.frame_pointer, 0, return_point.return_address, return_point.callee_saved_regs.as_ptr(), value);
             }
         }
     }
@@ -13367,31 +13163,23 @@ pub unsafe extern "C" fn segmented_continuation_return(value: usize) -> ! {
     cfg_if::cfg_if! {
         if #[cfg(target_arch = "x86_64")] {
             let _ = new_lr;
-            unsafe {
-                asm!(
-                    "mov rsp, {0}",
-                    "mov rbp, {1}",
-                    "jmp {2}",
-                    in(reg) new_sp,
-                    in(reg) new_fp,
-                    in(reg) handler_address,
-                    options(noreturn)
-                );
-            }
+            let runtime = get_runtime().get();
+            let handler_jump_fn = runtime
+                .get_function_by_name("beagle.builtin/handler-jump")
+                .expect("handler-jump function not found");
+            let ptr: *const u8 = handler_jump_fn.pointer.into();
+            let handler_jump: extern "C" fn(usize, usize, usize) -> ! =
+                unsafe { std::mem::transmute(ptr) };
+            handler_jump(new_sp, new_fp, handler_address);
         } else {
-            unsafe {
-                asm!(
-                    "mov sp, {0}",
-                    "mov x29, {1}",
-                    "mov x30, {2}",
-                    "br {3}",
-                    in(reg) new_sp,
-                    in(reg) new_fp,
-                    in(reg) new_lr,
-                    in(reg) handler_address,
-                    options(noreturn)
-                );
-            }
+            let runtime = get_runtime().get();
+            let return_jump_fn = runtime
+                .get_function_by_name("beagle.builtin/return-jump")
+                .expect("return-jump function not found");
+            let ptr: *const u8 = return_jump_fn.pointer.into();
+            let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
+                unsafe { std::mem::transmute(ptr) };
+            return_jump(new_sp, new_fp, new_lr, handler_address, std::ptr::null(), 0);
         }
     }
 }
@@ -13569,61 +13357,42 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
     // Save callee-saved registers IMMEDIATELY before any Rust code runs
     // These are the registers Beagle was using when it called k()
     let mut saved_regs = [0usize; 10];
-    // SAFETY: inline assembly to save callee-saved registers
-    cfg_if::cfg_if! {
-        if #[cfg(target_arch = "aarch64")] {
-            unsafe {
-                std::arch::asm!(
-                    "str x19, [{0}]",
-                    "str x20, [{0}, #8]",
-                    "str x21, [{0}, #16]",
-                    "str x22, [{0}, #24]",
-                    "str x23, [{0}, #32]",
-                    "str x24, [{0}, #40]",
-                    "str x25, [{0}, #48]",
-                    "str x26, [{0}, #56]",
-                    "str x27, [{0}, #64]",
-                    "str x28, [{0}, #72]",
-                    in(reg) saved_regs.as_mut_ptr(),
-                );
-            }
-        } else if #[cfg(target_arch = "x86_64")] {
-            unsafe {
-                std::arch::asm!(
-                    "mov [{0}], rbx",
-                    "mov [{0} + 8], r12",
-                    "mov [{0} + 16], r13",
-                    "mov [{0} + 24], r14",
-                    "mov [{0} + 32], r15",
-                    in(reg) saved_regs.as_mut_ptr(),
-                );
-            }
-        }
+    {
+        let runtime = get_runtime().get();
+        let save_fn = runtime
+            .get_function_by_name("beagle.builtin/save-callee-regs")
+            .expect("save-callee-regs function not found");
+        let save_callee_regs: extern "C" fn(*mut usize) =
+            unsafe { std::mem::transmute::<_, _>(save_fn.pointer) };
+        save_callee_regs(saved_regs.as_mut_ptr());
     }
 
-    // Get current stack pointer and frame pointer
+    // Get current stack pointer and frame pointer via JIT trampolines
     #[cfg(target_arch = "x86_64")]
     let stack_pointer: usize;
     let frame_pointer: usize;
 
-    // SAFETY: inline assembly to read SP/FP registers
-    cfg_if::cfg_if! {
-        if #[cfg(target_arch = "x86_64")] {
-            unsafe {
-                std::arch::asm!(
-                    "mov {0}, rsp",
-                    "mov {1}, rbp",
-                    out(reg) stack_pointer,
-                    out(reg) frame_pointer,
-                );
-            }
-        } else {
-            unsafe {
-                std::arch::asm!(
-                    "mov {0}, x29",
-                    out(reg) frame_pointer,
-                );
-            }
+    {
+        let runtime = get_runtime().get();
+        #[cfg(target_arch = "x86_64")]
+        {
+            let fn_entry = runtime
+                .get_function_by_name("beagle.builtin/read-sp-fp")
+                .expect("read-sp-fp trampoline not found");
+            let read_sp_fp: extern "C" fn() -> (usize, usize) =
+                unsafe { std::mem::transmute::<_, _>(fn_entry.pointer) };
+            let (sp, fp) = read_sp_fp();
+            stack_pointer = sp;
+            frame_pointer = fp;
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let fn_entry = runtime
+                .get_function_by_name("beagle.builtin/read-fp")
+                .expect("read-fp trampoline not found");
+            let read_fp: extern "C" fn() -> usize =
+                unsafe { std::mem::transmute::<_, _>(fn_entry.pointer) };
+            frame_pointer = read_fp();
         }
     }
 
@@ -13737,20 +13506,8 @@ pub unsafe extern "C" fn continuation_trampoline_with_saved_regs_and_context(
 #[allow(dead_code)]
 #[allow(unused_variables)]
 pub unsafe extern "C" fn continuation_return_trampoline(value: usize) -> ! {
-    let value = {
-        #[cfg(target_arch = "x86_64")]
-        {
-            let return_value: usize;
-            unsafe {
-                std::arch::asm!("mov {0}, rax", out(reg) return_value);
-            }
-            return_value
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            value
-        }
-    };
+    // On x86-64, the continuation-return-stub passes RAX (JIT return value) as the
+    // first argument (RDI -> value), so we can use `value` directly on all platforms.
 
     let should_use_segmented_return = {
         let ptd = crate::runtime::per_thread_data();
@@ -13775,32 +13532,16 @@ pub unsafe extern "C" fn continuation_return_trampoline(value: usize) -> ! {
         unsafe { segmented_continuation_return(value) };
     }
 
-    // Get current stack pointer and frame pointer
-    let stack_pointer: usize;
-    let frame_pointer: usize;
-
-    // SAFETY: inline assembly to read SP/FP registers
-    cfg_if::cfg_if! {
-        if #[cfg(target_arch = "x86_64")] {
-            unsafe {
-                std::arch::asm!(
-                    "mov {0}, rsp",
-                    "mov {1}, rbp",
-                    out(reg) stack_pointer,
-                    out(reg) frame_pointer,
-                );
-            }
-        } else {
-            unsafe {
-                std::arch::asm!(
-                    "mov {0}, sp",
-                    "mov {1}, x29",
-                    out(reg) stack_pointer,
-                    out(reg) frame_pointer,
-                );
-            }
-        }
-    }
+    // Get current stack pointer and frame pointer via JIT trampoline
+    let (stack_pointer, frame_pointer) = {
+        let runtime = get_runtime().get();
+        let fn_entry = runtime
+            .get_function_by_name("beagle.builtin/read-sp-fp")
+            .expect("read-sp-fp trampoline not found");
+        let read_sp_fp: extern "C" fn() -> (usize, usize) =
+            unsafe { std::mem::transmute::<_, _>(fn_entry.pointer) };
+        read_sp_fp()
+    };
 
     // Route through return_from_shift_runtime so multi-shot works
     // SAFETY: return_from_shift_runtime is an unsafe function

@@ -431,6 +431,13 @@ pub enum X86Asm {
     },
     /// RET
     Ret,
+    /// UD2 (undefined instruction trap)
+    Ud2,
+    /// LEA r64, [RSP + imm8] — used for reading caller's RSP from a callee
+    LeaRspOffset {
+        dest: X86Register,
+        offset: i8,
+    },
 
     // === Stack instructions ===
     /// PUSH r64
@@ -885,6 +892,26 @@ impl X86Asm {
             X86Asm::Ret => {
                 // RET: C3
                 vec![0xC3]
+            }
+
+            X86Asm::Ud2 => {
+                // UD2: 0F 0B
+                vec![0x0F, 0x0B]
+            }
+
+            X86Asm::LeaRspOffset { dest, offset } => {
+                // LEA r64, [RSP + disp8]: REX.W + 8D /r with SIB byte (RSP requires SIB)
+                // ModRM = 01 (disp8) reg dest, rm=100 (SIB follows)
+                // SIB = 00 100 100 (scale=1, index=RSP/none, base=RSP)
+                let r = dest.index & 0x7;
+                let rex_r = dest.needs_rex_ext();
+                vec![
+                    rex(true, rex_r, false, false),
+                    0x8D,
+                    0x44 | (r << 3), // ModRM: mod=01, reg=dest, rm=100(SIB)
+                    0x24,            // SIB: scale=00, index=100(none), base=100(RSP)
+                    *offset as u8,
+                ]
             }
 
             // === Stack instructions ===

@@ -7,7 +7,7 @@
 //   - Building for x86_64 architecture (and no explicit ARM64 feature)
 cfg_if::cfg_if! {
     if #[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))] {
-        use crate::machine_code::x86_codegen::{RCX, RDX, RSI, RDI, R8, R9, R10, RSP, X86Asm};
+        use crate::machine_code::x86_codegen::{RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11, RSP, X86Asm};
     } else {
         use crate::machine_code::arm_codegen::{SP, X0, X1, X2, X3, X4, X10};
     }
@@ -294,6 +294,198 @@ fn compile_arm_continuation_return_stub(runtime: &mut Runtime) {
     if std::env::var("BEAGLE_DEBUG_RESUME").is_ok() {
         let ptr: usize = function.pointer.into();
         eprintln!("[arm-stub] perform-effect={:#x}", ptr);
+    }
+
+    // ========================================================================
+    // ARM64 return-jump trampoline
+    // Unified trampoline for all "restore registers + jump" operations.
+    // Args: X0=new_sp, X1=new_fp, X2=new_lr, X3=jump_target,
+    //       X4=callee_saved_ptr (NULL to skip), X5=value (placed in X0)
+    // ========================================================================
+    {
+        use crate::machine_code::arm_codegen::{ArmAsm, LdrImmGenSelector, X0, X1, ZERO_REGISTER};
+        let mut lang = arm::LowLevelArm::new();
+
+        // Save jump_target to X16 (scratch) before we clobber argument registers
+        lang.mov_reg(X16, X3);
+
+        // Conditional callee-saved restore: skip if X4 == NULL
+        // CMP X4, XZR sets flags; B.EQ skips past 10 LDR instructions
+        // imm19=11 because the offset is PC-relative from B.EQ itself (need to skip 10 LDRs + land past them)
+        lang.compare(X4, ZERO_REGISTER);
+        lang.instructions.push(arm::jump_equal(11));
+
+        // Load x19-x28 from array at X4
+        let callee_regs = [X19, X20, X21, X22, X23, X24, X25, X26, X27, X28];
+        for (i, reg) in callee_regs.iter().enumerate() {
+            lang.instructions.push(ArmAsm::LdrImmGen {
+                rt: *reg,
+                rn: X4,
+                imm9: 0,
+                imm12: i as i32,
+                size: 0b11,
+                class_selector: LdrImmGenSelector::UnsignedOffset,
+            });
+        }
+
+        // skip_restore lands here:
+        // Set SP, FP, LR from arguments
+        lang.mov_reg(SP, X0);
+        lang.mov_reg(X29, X1);
+        lang.mov_reg(X30, X2);
+
+        // Set return value in X0
+        lang.mov_reg(X0, X5);
+
+        // Jump to target
+        lang.instructions.push(ArmAsm::Br { rn: X16 });
+
+        let code: Vec<u8> = lang
+            .instructions
+            .iter()
+            .flat_map(|instr| instr.encode().to_le_bytes())
+            .collect();
+        runtime
+            .add_function_mark_executable("beagle.builtin/return-jump".to_string(), &code, 0, 6)
+            .unwrap();
+        let function = runtime
+            .get_function_by_name_mut("beagle.builtin/return-jump")
+            .unwrap();
+        function.is_builtin = true;
+    }
+
+    // ========================================================================
+    // ARM64 stack-switch trampoline
+    // Args: X0=stack_top, X1=target function pointer
+    // ========================================================================
+    {
+        use crate::machine_code::arm_codegen::ArmAsm;
+        let mut lang = arm::LowLevelArm::new();
+
+        // Switch SP to new stack
+        lang.mov_reg(SP, X0);
+        // Save target to scratch register and call it
+        lang.mov_reg(X16, X1);
+        lang.call(X16);
+        // Unreachable trap
+        lang.instructions.push(ArmAsm::Brk { imm16: 0 });
+
+        let code: Vec<u8> = lang
+            .instructions
+            .iter()
+            .flat_map(|instr| instr.encode().to_le_bytes())
+            .collect();
+        runtime
+            .add_function_mark_executable("beagle.builtin/stack-switch".to_string(), &code, 0, 2)
+            .unwrap();
+        let function = runtime
+            .get_function_by_name_mut("beagle.builtin/stack-switch")
+            .unwrap();
+        function.is_builtin = true;
+    }
+
+    // ========================================================================
+    // ARM64 read-fp trampoline: returns X29 (frame pointer)
+    // ========================================================================
+    {
+        use crate::machine_code::arm_codegen::X0;
+        let mut lang = arm::LowLevelArm::new();
+        lang.mov_reg(X0, X29);
+        lang.ret();
+        let code: Vec<u8> = lang
+            .instructions
+            .iter()
+            .flat_map(|instr| instr.encode().to_le_bytes())
+            .collect();
+        runtime
+            .add_function_mark_executable("beagle.builtin/read-fp".to_string(), &code, 0, 0)
+            .unwrap();
+        let function = runtime
+            .get_function_by_name_mut("beagle.builtin/read-fp")
+            .unwrap();
+        function.is_builtin = true;
+    }
+
+    // ========================================================================
+    // ARM64 read-sp trampoline: returns SP (BLR doesn't modify SP)
+    // ========================================================================
+    {
+        use crate::machine_code::arm_codegen::X0;
+        let mut lang = arm::LowLevelArm::new();
+        lang.mov_reg(X0, SP);
+        lang.ret();
+        let code: Vec<u8> = lang
+            .instructions
+            .iter()
+            .flat_map(|instr| instr.encode().to_le_bytes())
+            .collect();
+        runtime
+            .add_function_mark_executable("beagle.builtin/read-sp".to_string(), &code, 0, 0)
+            .unwrap();
+        let function = runtime
+            .get_function_by_name_mut("beagle.builtin/read-sp")
+            .unwrap();
+        function.is_builtin = true;
+    }
+
+    // ========================================================================
+    // ARM64 read-sp-fp trampoline: returns X0=SP, X1=X29
+    // ========================================================================
+    {
+        use crate::machine_code::arm_codegen::{X0, X1};
+        let mut lang = arm::LowLevelArm::new();
+        lang.mov_reg(X0, SP);
+        lang.mov_reg(X1, X29);
+        lang.ret();
+        let code: Vec<u8> = lang
+            .instructions
+            .iter()
+            .flat_map(|instr| instr.encode().to_le_bytes())
+            .collect();
+        runtime
+            .add_function_mark_executable("beagle.builtin/read-sp-fp".to_string(), &code, 0, 0)
+            .unwrap();
+        let function = runtime
+            .get_function_by_name_mut("beagle.builtin/read-sp-fp")
+            .unwrap();
+        function.is_builtin = true;
+    }
+
+    // ========================================================================
+    // ARM64 save-callee-regs trampoline: saves x19-x28 to [X0]
+    // ========================================================================
+    {
+        use crate::machine_code::arm_codegen::{ArmAsm, StrImmGenSelector, X0};
+        let mut lang = arm::LowLevelArm::new();
+        let callee_regs = [X19, X20, X21, X22, X23, X24, X25, X26, X27, X28];
+        for (i, reg) in callee_regs.iter().enumerate() {
+            lang.instructions.push(ArmAsm::StrImmGen {
+                size: 0b11,
+                imm9: 0,
+                imm12: i as i32,
+                rn: X0,
+                rt: *reg,
+                class_selector: StrImmGenSelector::UnsignedOffset,
+            });
+        }
+        lang.ret();
+        let code: Vec<u8> = lang
+            .instructions
+            .iter()
+            .flat_map(|instr| instr.encode().to_le_bytes())
+            .collect();
+        runtime
+            .add_function_mark_executable(
+                "beagle.builtin/save-callee-regs".to_string(),
+                &code,
+                0,
+                1,
+            )
+            .unwrap();
+        let function = runtime
+            .get_function_by_name_mut("beagle.builtin/save-callee-regs")
+            .unwrap();
+        function.is_builtin = true;
     }
 }
 
@@ -1233,6 +1425,12 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
         use crate::builtins::continuation_return_trampoline;
 
         let mut lang = x86::LowLevelX86::new();
+        // Pass the JIT return value (RAX) as the first argument (RDI) so
+        // the Rust function receives it without needing inline asm to read RAX.
+        lang.instructions.push(X86Asm::MovRR {
+            dest: RDI,
+            src: RAX,
+        });
         // After Beagle `ret`, RSP is 16-aligned. Sub 8 to make it 8-mod-16.
         lang.instructions.push(X86Asm::SubRI { dest: RSP, imm: 8 });
         // Load and jump to continuation_return_trampoline (which is -> !)
@@ -1255,6 +1453,172 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
 
         let function = runtime
             .get_function_by_name_mut("beagle.builtin/continuation-return-stub")
+            .unwrap();
+        function.is_builtin = true;
+    }
+
+    // ========================================================================
+    // x86-64 handler-jump trampoline
+    // Simple SP/FP restore + jump (no callee-saved restore).
+    // Args: RDI=new_sp, RSI=new_fp, RDX=jump_target
+    // ========================================================================
+    {
+        let mut lang = x86::LowLevelX86::new();
+        lang.instructions.push(X86Asm::MovRR {
+            dest: RSP,
+            src: RDI,
+        });
+        lang.instructions.push(X86Asm::MovRR {
+            dest: RBP,
+            src: RSI,
+        });
+        lang.instructions.push(X86Asm::JmpR { target: RDX });
+        let code = lang.compile_to_bytes();
+        runtime
+            .add_function_mark_executable("beagle.builtin/handler-jump".to_string(), &code, 0, 3)
+            .unwrap();
+        let function = runtime
+            .get_function_by_name_mut("beagle.builtin/handler-jump")
+            .unwrap();
+        function.is_builtin = true;
+    }
+
+    // ========================================================================
+    // x86-64 stack-switch trampoline
+    // Args: RDI=stack_top, RSI=target function pointer
+    // ========================================================================
+    {
+        let mut lang = x86::LowLevelX86::new();
+        // Switch to new stack and align to 16 bytes
+        lang.instructions.push(X86Asm::MovRR {
+            dest: RSP,
+            src: RDI,
+        });
+        lang.instructions.push(X86Asm::AndRI {
+            dest: RSP,
+            imm: -16,
+        });
+        // Call target function
+        lang.instructions.push(X86Asm::CallR { target: RSI });
+        // Unreachable trap
+        lang.instructions.push(X86Asm::Ud2);
+        let code = lang.compile_to_bytes();
+        runtime
+            .add_function_mark_executable("beagle.builtin/stack-switch".to_string(), &code, 0, 2)
+            .unwrap();
+        let function = runtime
+            .get_function_by_name_mut("beagle.builtin/stack-switch")
+            .unwrap();
+        function.is_builtin = true;
+    }
+
+    // ========================================================================
+    // x86-64 read-fp trampoline: returns RBP
+    // ========================================================================
+    {
+        let mut lang = x86::LowLevelX86::new();
+        lang.instructions.push(X86Asm::MovRR {
+            dest: RAX,
+            src: RBP,
+        });
+        lang.instructions.push(X86Asm::Ret);
+        let code = lang.compile_to_bytes();
+        runtime
+            .add_function_mark_executable("beagle.builtin/read-fp".to_string(), &code, 0, 0)
+            .unwrap();
+        let function = runtime
+            .get_function_by_name_mut("beagle.builtin/read-fp")
+            .unwrap();
+        function.is_builtin = true;
+    }
+
+    // ========================================================================
+    // x86-64 read-sp trampoline: returns caller's RSP (compensate for CALL push)
+    // ========================================================================
+    {
+        let mut lang = x86::LowLevelX86::new();
+        // LEA RAX, [RSP+8] to get caller's RSP (CALL pushed 8 bytes)
+        lang.instructions.push(X86Asm::LeaRspOffset {
+            dest: RAX,
+            offset: 8,
+        });
+        lang.instructions.push(X86Asm::Ret);
+        let code = lang.compile_to_bytes();
+        runtime
+            .add_function_mark_executable("beagle.builtin/read-sp".to_string(), &code, 0, 0)
+            .unwrap();
+        let function = runtime
+            .get_function_by_name_mut("beagle.builtin/read-sp")
+            .unwrap();
+        function.is_builtin = true;
+    }
+
+    // ========================================================================
+    // x86-64 read-sp-fp trampoline: returns RAX=caller's RSP, RDX=RBP
+    // ========================================================================
+    {
+        let mut lang = x86::LowLevelX86::new();
+        lang.instructions.push(X86Asm::LeaRspOffset {
+            dest: RAX,
+            offset: 8,
+        });
+        lang.instructions.push(X86Asm::MovRR {
+            dest: RDX,
+            src: RBP,
+        });
+        lang.instructions.push(X86Asm::Ret);
+        let code = lang.compile_to_bytes();
+        runtime
+            .add_function_mark_executable("beagle.builtin/read-sp-fp".to_string(), &code, 0, 0)
+            .unwrap();
+        let function = runtime
+            .get_function_by_name_mut("beagle.builtin/read-sp-fp")
+            .unwrap();
+        function.is_builtin = true;
+    }
+
+    // ========================================================================
+    // x86-64 save-callee-regs trampoline: saves RBX, R12-R15 to [RDI]
+    // ========================================================================
+    {
+        let mut lang = x86::LowLevelX86::new();
+        lang.instructions.push(X86Asm::MovMR {
+            base: RDI,
+            offset: 0,
+            src: RBX,
+        });
+        lang.instructions.push(X86Asm::MovMR {
+            base: RDI,
+            offset: 8,
+            src: R12,
+        });
+        lang.instructions.push(X86Asm::MovMR {
+            base: RDI,
+            offset: 16,
+            src: R13,
+        });
+        lang.instructions.push(X86Asm::MovMR {
+            base: RDI,
+            offset: 24,
+            src: R14,
+        });
+        lang.instructions.push(X86Asm::MovMR {
+            base: RDI,
+            offset: 32,
+            src: R15,
+        });
+        lang.instructions.push(X86Asm::Ret);
+        let code = lang.compile_to_bytes();
+        runtime
+            .add_function_mark_executable(
+                "beagle.builtin/save-callee-regs".to_string(),
+                &code,
+                0,
+                1,
+            )
+            .unwrap();
+        let function = runtime
+            .get_function_by_name_mut("beagle.builtin/save-callee-regs")
             .unwrap();
         function.is_builtin = true;
     }
