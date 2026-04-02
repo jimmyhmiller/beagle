@@ -12182,7 +12182,7 @@ unsafe fn capture_continuation_runtime_inner(
     crate::runtime::per_thread_data().pending_heap_segments.push((segment_heap_ptr, gc_frame_offset, stack_size));
 
     // Allocate the continuation object itself (28 fields).
-    let cont_ptr = match runtime.allocate(28, prompt_sp, BuiltInTypes::HeapObject) {
+    let cont_ptr = match runtime.allocate(29, prompt_sp, BuiltInTypes::HeapObject) {
         Ok(ptr) => ptr,
         Err(_) => unsafe {
             throw_runtime_error(
@@ -12213,6 +12213,16 @@ unsafe fn capture_continuation_runtime_inner(
         stack_size,
         &captured_callee_saved_regs,
     );
+
+    // Set the original data base so compacting GC can detect segment moves.
+    if segment_heap_ptr != BuiltInTypes::null_value() as usize {
+        let seg_obj = HeapObject::from_tagged(segment_heap_ptr);
+        let data_base = seg_obj.untagged() + seg_obj.header_size();
+        let mut cont = ContinuationObject::from_heap_object(
+            HeapObject::from_untagged(cont_obj.untagged() as *const u8)
+        ).unwrap();
+        cont.set_segment_original_data_base(data_base);
+    }
 
     // Store the captured prompt frame keyed by cont_ptr (not segment_handle_id).
     // We use cont_ptr as the key since there's no longer a segment_handle_id.

@@ -2267,15 +2267,21 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             }
         });
 
-        let output_status = child.wait()?;
-        let stdout = {
-            let mut buf = Vec::new();
-            if let Some(mut stdout) = child.stdout.take() {
+        // Read stdout concurrently with wait to avoid deadlock when the pipe
+        // buffer fills up (child blocks on write, parent blocks on wait).
+        let stdout_handle = child.stdout.take().map(|stdout| {
+            std::thread::spawn(move || {
                 use std::io::Read;
-                stdout.read_to_end(&mut buf)?;
-            }
-            buf
-        };
+                let mut buf = Vec::new();
+                let mut stdout = stdout;
+                let _ = stdout.read_to_end(&mut buf);
+                buf
+            })
+        });
+        let output_status = child.wait()?;
+        let stdout = stdout_handle
+            .map(|h| h.join().unwrap_or_default())
+            .unwrap_or_default();
         let _ = monitor.join();
         let elapsed = start.elapsed();
         let rss = peak_rss_kb.load(std::sync::atomic::Ordering::Relaxed);

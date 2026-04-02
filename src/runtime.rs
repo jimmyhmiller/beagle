@@ -3857,7 +3857,10 @@ impl ContinuationObject {
     const FIELD_SEGMENT_PTR: usize = 15;
     const FIELD_SEGMENT_GC_FRAME_OFFSET: usize = 16;
     const FIELD_SEGMENT_SIZE: usize = 17;
-    const FIELD_CAPTURED_CALLEE_SAVED_START: usize = 18;
+    /// The data base address at capture time. Used by compacting GC to compute
+    /// the relocation delta when the segment object moves.
+    const FIELD_SEGMENT_ORIGINAL_DATA_BASE: usize = 18;
+    const FIELD_CAPTURED_CALLEE_SAVED_START: usize = 19;
     const NUM_CAPTURED_CALLEE_SAVED: usize = 10;
 
     pub fn from_tagged(tagged: usize) -> Option<Self> {
@@ -3963,8 +3966,23 @@ impl ContinuationObject {
         BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_SEGMENT_SIZE))
     }
 
+    /// Returns the data base address at the time the segment was captured.
+    pub fn segment_original_data_base(&self) -> usize {
+        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_SEGMENT_ORIGINAL_DATA_BASE))
+    }
+
+    /// Sets the original data base address for compacting GC relocation detection.
+    pub fn set_segment_original_data_base(&mut self, data_base: usize) {
+        self.heap_obj.write_field(
+            Self::FIELD_SEGMENT_ORIGINAL_DATA_BASE as i32,
+            BuiltInTypes::Int.tag(data_base as isize) as usize,
+        );
+    }
+
     /// Returns (segment_data_base, segment_data_top, gc_frame_top) for this continuation's
     /// captured segment. Returns None if segment_ptr is null.
+    /// If the segment has been moved by compacting GC, this also relocates interior
+    /// frame chain pointers to the new location.
     pub fn segment_info(&self) -> Option<(usize, usize, usize)> {
         let seg_tagged = self.segment_ptr();
         if seg_tagged == 0 || seg_tagged == BuiltInTypes::null_value() as usize {
@@ -3974,6 +3992,50 @@ impl ContinuationObject {
         let data_base = seg_obj.untagged() + seg_obj.header_size();
         let size = self.segment_size();
         let gc_offset = self.segment_gc_frame_offset();
+        let original_base = self.segment_original_data_base();
+
+        // If the segment moved (compacting GC), relocate interior frame chain
+        // pointers (FP chain and GC prev links) to the new location.
+        if original_base != 0 && original_base != data_base {
+            let delta = data_base as isize - original_base as isize;
+            let mut header_addr = data_base + gc_offset;
+            while header_addr >= data_base && header_addr < data_base + size && header_addr != 0 {
+                // Relocate prev pointer at [header_addr - 8]
+                let prev_slot = (header_addr - 8) as *mut usize;
+                let prev_val = unsafe { *prev_slot };
+                if prev_val >= original_base && prev_val < original_base + size {
+                    unsafe { *prev_slot = (prev_val as isize + delta) as usize; }
+                } else {
+                    break;
+                }
+
+                // Relocate FP at the frame (caller FP stored at the frame's data)
+                // FP is stored above the header: at header_addr + 8 is the frame pointer location
+                // Actually, we need to walk via the frame layout:
+                // [FP + 0] = saved caller FP, [FP - 8] = header, [FP - 16] = prev
+                // So FP = header_addr + 8. The saved caller FP is at *(FP) = *(header_addr + 8)
+                let fp = header_addr + 8;
+                let caller_fp_slot = fp as *mut usize;
+                let caller_fp = unsafe { *caller_fp_slot };
+                if caller_fp >= original_base && caller_fp < original_base + size {
+                    unsafe { *caller_fp_slot = (caller_fp as isize + delta) as usize; }
+                }
+
+                let new_prev = unsafe { *prev_slot };
+                if new_prev == 0 || new_prev < data_base || new_prev >= data_base + size {
+                    break;
+                }
+                header_addr = new_prev;
+            }
+
+            // Update the stored original base to the current base so we don't
+            // relocate again on the next call.
+            self.heap_obj.write_field(
+                Self::FIELD_SEGMENT_ORIGINAL_DATA_BASE as i32,
+                BuiltInTypes::Int.tag(data_base as isize) as usize,
+            );
+        }
+
         Some((data_base, data_base + size, data_base + gc_offset))
     }
 
@@ -4114,6 +4176,11 @@ impl ContinuationObject {
         heap_obj.write_field(
             Self::FIELD_SEGMENT_SIZE as i32,
             BuiltInTypes::Int.tag(segment_size as isize) as usize,
+        );
+        // Store 0 initially — will be set after we know the data base address
+        heap_obj.write_field(
+            Self::FIELD_SEGMENT_ORIGINAL_DATA_BASE as i32,
+            BuiltInTypes::Int.tag(0) as usize,
         );
         for (i, reg) in captured_callee_saved_regs.iter().enumerate() {
             heap_obj.write_field((Self::FIELD_CAPTURED_CALLEE_SAVED_START + i) as i32, *reg);
