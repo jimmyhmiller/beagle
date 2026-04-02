@@ -2241,11 +2241,13 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             cmd.arg("--no-std");
         }
 
+        // Let stderr pass through so trace output is visible in CI logs
+        cmd.stderr(std::process::Stdio::inherit());
+
         let output = cmd.output()?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
-            return Err(format!("Test failed: {}\n{}{}", path, stderr, stdout).into());
+            return Err(format!("Test failed: {}\n{}", path, stdout).into());
         }
     }
     Ok(())
