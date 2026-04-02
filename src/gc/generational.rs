@@ -944,6 +944,10 @@ impl GenerationalGC {
         if !BuiltInTypes::is_heap_pointer(root) {
             return root;
         }
+        let untagged = BuiltInTypes::untag(root);
+        if !untagged.is_multiple_of(8) || untagged == 0 {
+            return root;
+        }
 
         let heap_object = HeapObject::from_tagged(root);
         let tag = BuiltInTypes::get_kind(root);

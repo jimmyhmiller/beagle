@@ -1278,21 +1278,13 @@ impl LowLevelX86 {
             let byte_offset_at_insert: usize =
                 self.instructions[..=index].iter().map(|i| i.size()).sum();
 
-            // Insert MOV instructions for callee-saved registers right after SUB
-            // We store at increasing offsets from RSP
             let mut inserted_instructions = Vec::new();
-            for (i, reg) in used_callee_saved.iter().enumerate() {
-                // Store at [RSP + i*8]
-                let instr = X86Asm::MovMR {
-                    base: RSP,
-                    offset: (i * 8) as i32,
-                    src: *reg,
-                };
-                inserted_instructions.push(instr);
-            }
 
             // Write frame header at [RBP-8]. This is a heap-object-style header
             // that lets GC know how many traced slots this frame has.
+            // Only scan locals + eval stack — these are Beagle-managed tagged values.
+            // Callee-saved register spill slots are NOT included because they can
+            // hold arbitrary non-tagged values (code addresses, raw integers).
             let num_slots = (self.max_locals + self.max_stack_size) as usize;
             let frame_header = Header {
                 type_id: crate::collections::TYPE_ID_FRAME,
@@ -1359,9 +1351,9 @@ impl LowLevelX86 {
             inserted_instructions.push(X86Asm::Pop { reg: RSI });
             inserted_instructions.push(X86Asm::Pop { reg: RDI });
 
-            // Zero out local and eval stack slots to prevent GC from seeing garbage.
-            // Locals start at [RBP-24] (after frame header at [RBP-8] and prev ptr at [RBP-16]).
-            let slots_to_zero = self.max_locals + self.max_stack_size;
+            // Zero out GC-scanned frame slots to prevent GC from seeing garbage.
+            // Only zero locals + eval stack (the num_slots range that GC scans).
+            let slots_to_zero = (self.max_locals + self.max_stack_size) as i32;
             if slots_to_zero > 0 {
                 let null_value = BuiltInTypes::null_value() as i32;
 
@@ -1380,6 +1372,16 @@ impl LowLevelX86 {
                         src: R11,
                     });
                 }
+            }
+
+            // Save callee-saved registers AFTER zeroing so they aren't overwritten.
+            // They are stored at increasing offsets from RSP (bottom of frame).
+            for (i, reg) in used_callee_saved.iter().enumerate() {
+                inserted_instructions.push(X86Asm::MovMR {
+                    base: RSP,
+                    offset: (i * 8) as i32,
+                    src: *reg,
+                });
             }
 
             // Calculate total byte size of inserted instructions

@@ -13119,7 +13119,7 @@ fn invoke_segmented_continuation(
             let jump_ptr: extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> ! =
                 unsafe { std::mem::transmute(ptr) };
             jump_ptr(
-                new_fp,
+                captured_callee_saved_regs.as_ptr() as usize,
                 continuation.resume_address(),
                 0,
                 new_sp,

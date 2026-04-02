@@ -1315,11 +1315,11 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
     // Generate invoke_continuation_jump
     // This is called from invoke_continuation_runtime to jump to the continuation
     // Arguments (System V AMD64 ABI):
-    // RDI = original_fp (used for empty stack segment case)
+    // RDI = callee_saved_regs pointer (array of saved RBX, R12-R15)
     // RSI = resume_address
-    // RDX = stack_segment_size (0 for empty)
-    // RCX = new_sp (for non-empty)
-    // R8 = new_fp (for non-empty)
+    // RDX = (unused, always 0)
+    // RCX = new_sp
+    // R8 = new_fp
     // R9 = result_ptr (where to store the result value)
     // [RSP+8] = value (the result value to store)
     {
@@ -1332,17 +1332,35 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
             offset: 8, // 7th argument
         });
 
-        // Check if stack_segment_size (RDX) is 0
-        lang.instructions.push(X86Asm::TestRR { a: RDX, b: RDX });
-
-        // If zero, jump to empty path
-        let empty_label = lang.get_label_index();
-        lang.instructions.push(X86Asm::Jcc {
-            label_index: empty_label,
-            cond: crate::machine_code::x86_codegen::Condition::E,
+        // Restore callee-saved registers from the array pointed to by RDI.
+        // These registers may hold heap pointers that were updated by GC
+        // since the continuation was captured.
+        lang.instructions.push(X86Asm::MovRM {
+            dest: RBX,
+            base: RDI,
+            offset: 0,
+        });
+        lang.instructions.push(X86Asm::MovRM {
+            dest: R12,
+            base: RDI,
+            offset: 8,
+        });
+        lang.instructions.push(X86Asm::MovRM {
+            dest: R13,
+            base: RDI,
+            offset: 16,
+        });
+        lang.instructions.push(X86Asm::MovRM {
+            dest: R14,
+            base: RDI,
+            offset: 24,
+        });
+        lang.instructions.push(X86Asm::MovRM {
+            dest: R15,
+            base: RDI,
+            offset: 32,
         });
 
-        // Non-empty stack segment path:
         // Set RSP = new_sp (RCX), RBP = new_fp (R8)
         lang.instructions.push(X86Asm::MovRR {
             dest: RSP,
@@ -1350,10 +1368,10 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
         });
         lang.instructions.push(X86Asm::MovRR { dest: RBP, src: R8 });
         // Write result value: [R9] = R11 (skip if R9 == 0, i.e. builtin-thrown error)
-        let skip_write_nonempty = lang.get_label_index();
+        let skip_write = lang.get_label_index();
         lang.instructions.push(X86Asm::TestRR { a: R9, b: R9 });
         lang.instructions.push(X86Asm::Jcc {
-            label_index: skip_write_nonempty,
+            label_index: skip_write,
             cond: crate::machine_code::x86_codegen::Condition::E,
         });
         lang.instructions.push(X86Asm::MovMR {
@@ -1362,40 +1380,7 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
             src: R11,
         });
         lang.instructions.push(X86Asm::Label {
-            index: skip_write_nonempty,
-        });
-        // Set RAX = value so builtin-thrown errors resume with correct return value
-        lang.instructions.push(X86Asm::MovRR {
-            dest: RAX,
-            src: R11,
-        });
-        // Jump to resume_address (RSI)
-        lang.instructions.push(X86Asm::JmpR { target: RSI });
-
-        // Empty stack segment path:
-        // For empty segments, restore the original stack/frame pointers from when
-        // the continuation was captured. RCX contains original_sp, R8 contains original_fp.
-        lang.instructions.push(X86Asm::Label { index: empty_label });
-        // Set RSP = original_sp (RCX), RBP = original_fp (R8)
-        lang.instructions.push(X86Asm::MovRR {
-            dest: RSP,
-            src: RCX,
-        });
-        lang.instructions.push(X86Asm::MovRR { dest: RBP, src: R8 });
-        // Write result value: [R9] = R11 (skip if R9 == 0, i.e. builtin-thrown error)
-        let skip_write_empty = lang.get_label_index();
-        lang.instructions.push(X86Asm::TestRR { a: R9, b: R9 });
-        lang.instructions.push(X86Asm::Jcc {
-            label_index: skip_write_empty,
-            cond: crate::machine_code::x86_codegen::Condition::E,
-        });
-        lang.instructions.push(X86Asm::MovMR {
-            base: R9,
-            offset: 0,
-            src: R11,
-        });
-        lang.instructions.push(X86Asm::Label {
-            index: skip_write_empty,
+            index: skip_write,
         });
         // Set RAX = value so builtin-thrown errors resume with correct return value
         lang.instructions.push(X86Asm::MovRR {

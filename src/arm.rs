@@ -1523,30 +1523,18 @@ impl LowLevelArm {
             //   ...
             //   [SP]      -> Last saved callee-saved reg (or padding)
             //
-            // We save at SP-relative offsets since SP is now at the bottom of our frame.
-            for (i, reg) in used_callee_saved.iter().enumerate() {
-                // Store at [SP + i*8] using STR with unsigned offset
-                // For 64-bit STR, imm12 is scaled by 8, so imm12=i means byte offset i*8
-                alloc_instructions.push(ArmAsm::StrImmGen {
-                    rt: *reg,
-                    rn: SP,
-                    imm9: 0,
-                    imm12: i as i32,
-                    size: 0b11, // 64-bit
-                    class_selector: StrImmGenSelector::UnsignedOffset,
-                });
-            }
+            // NOTE: Callee-saved register saves are deferred until AFTER zeroing
+            // to prevent them from being overwritten by the zero fill.
 
-            // CRITICAL FIX: Zero out local and eval stack slots to prevent GC from
-            // seeing garbage. When GC runs, the stack walker scans all locals and
-            // the full eval stack area (max_stack_size). Uninitialized slots could
-            // contain stale pointers from previous stack usage or previous GC cycles.
-            // Initialize all local AND eval stack slots to null (0x7, tagged null).
+            // CRITICAL FIX: Zero out all GC-scanned frame slots to prevent GC from
+            // seeing garbage. This includes locals, eval stack, alignment padding,
+            // and callee-saved register spill slots. Callee-saved regs are
+            // overwritten immediately after with their actual values.
             //
             // NOTE: STUR has a 9-bit signed immediate (-256 to 255), so for large stack
             // frames we need a different approach. We use X10 as a pointer that we decrement.
             let null_value = crate::types::BuiltInTypes::null_value() as i32;
-            let slots_to_zero = self.max_locals + self.max_stack_size;
+            let slots_to_zero = (self.max_locals + self.max_stack_size) as i32;
 
             #[cfg(feature = "debug-gc")]
             eprintln!(
@@ -1557,6 +1545,9 @@ impl LowLevelArm {
             // Write frame header at [X29-8]. This is a heap-object-style header
             // that lets GC know how many traced slots this frame has.
             {
+                // Only scan locals + eval stack — these are Beagle-managed tagged values.
+                // Callee-saved register spill slots are NOT included because they can
+                // hold arbitrary non-tagged values.
                 let num_slots = (self.max_locals + self.max_stack_size) as usize;
                 // Encode mark local index in lower 16 bits of type_data if present.
                 // Upper 16 bits = num_slots (for GC/captured frame).
@@ -1734,7 +1725,8 @@ impl LowLevelArm {
                     sh: 0,
                 });
 
-                // Store null to each local and eval stack slot, decrementing X10 after each store
+                // Store null to each slot (locals, eval stack, padding, callee-saved area),
+                // decrementing X10 after each store
                 for _ in 0..slots_to_zero {
                     // Store X11 to [X10], then X10 = X10 - 8 (post-decrement)
                     // Use STR with post-index: str x11, [x10], #-8
@@ -1747,6 +1739,21 @@ impl LowLevelArm {
                         class_selector: StrImmGenSelector::PostIndex,
                     });
                 }
+            }
+
+            // Save callee-saved registers AFTER zeroing so they aren't overwritten.
+            // They are stored at increasing offsets from SP (bottom of frame).
+            for (i, reg) in used_callee_saved.iter().enumerate() {
+                // Store at [SP + i*8] using STR with unsigned offset
+                // For 64-bit STR, imm12 is scaled by 8, so imm12=i means byte offset i*8
+                alloc_instructions.push(ArmAsm::StrImmGen {
+                    rt: *reg,
+                    rn: SP,
+                    imm9: 0,
+                    imm12: i as i32,
+                    size: 0b11, // 64-bit
+                    class_selector: StrImmGenSelector::UnsignedOffset,
+                });
             }
 
             let delta = alloc_instructions.len() as isize - 1;
