@@ -12045,10 +12045,8 @@ unsafe fn capture_continuation_runtime_inner(
 
     let prompt_sp = prompt.stack_pointer;
     let prompt_fp = prompt.frame_pointer;
-    let frame_header_bytes = std::mem::size_of::<usize>() * 2; // saved FP + LR/return address
-    let capture_top = prompt_fp.saturating_add(frame_header_bytes).max(prompt_sp);
-    let stack_size = capture_top.saturating_sub(stack_pointer);
 
+    // Pop the mmap segment that this handle block was executing on.
     let segment = {
         let ptd = crate::runtime::per_thread_data();
         ptd.pop_active_segment(prompt.prompt_id)
@@ -12060,52 +12058,147 @@ unsafe fn capture_continuation_runtime_inner(
         )
     });
 
-    let segment_handle_id = runtime
-        .captured_segment_id_counter
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // The occupied portion of the segment is from stack_pointer (current SP,
+    // at the bottom of the frames) up to the top of the segment (where RSP
+    // was set on handle block entry). The segment grows downward from the top.
+    let segment_used_top = segment.top & !0xF; // aligned top, same as push_prompt_runtime
+    let stack_size = segment_used_top.saturating_sub(stack_pointer);
+
     // Save the current GC frame chain top before cutting — this is the entry
     // point for walking heap pointers within the captured segment during GC.
     let captured_gc_frame_top = get_gc_frame_top();
-    crate::runtime::per_thread_data().record_captured_segment(
-        prompt.prompt_id,
-        segment_handle_id,
-        segment,
-        captured_gc_frame_top,
-    );
-    crate::runtime::per_thread_data().mark_pending_captured_segment(segment_handle_id);
+
+    // Compute the GC frame top offset relative to the segment base.
+    // This offset will be stored in the ContinuationObject so GC can
+    // reconstruct the frame chain within the heap-allocated copy.
+    let gc_frame_offset = if captured_gc_frame_top >= segment.base && captured_gc_frame_top < segment.top {
+        captured_gc_frame_top - stack_pointer
+    } else {
+        // GC frame top is outside the segment (e.g., on main stack) — no frames to walk
+        0
+    };
+
+    // Capture the prompt frame snapshot (for restoring prompt frame locals on resume)
     let prompt_header = Header::from_usize(unsafe { *((prompt_fp - 8) as *const usize) });
-    if prompt_header.type_id == TYPE_ID_FRAME {
-        let prompt_frame = crate::runtime::SuspendedFrame::capture_from_stack(
+    let captured_prompt_frame = if prompt_header.type_id == TYPE_ID_FRAME {
+        Some(crate::runtime::SuspendedFrame::capture_from_stack(
             prompt_fp,
             prompt_header.size as usize,
             prompt_sp,
-        );
-        crate::runtime::per_thread_data()
-            .store_captured_prompt_frame(segment_handle_id, prompt_frame);
-    }
+        ))
+    } else {
+        None
+    };
 
-    // The detached segment now owns the captured Beagle frames. Execution
-    // continues below on Rust frames, but GC must no longer walk into the
-    // abandoned prompt-owned segment through the active chain.
+    // Unlink captured frames from the GC chain before allocating on the heap.
+    // GC must not walk into the mmap segment after we recycle it.
     set_gc_frame_top(prompt_fp.saturating_sub(8));
 
-    // Update saved GC context so that if GC runs during the continuation object
-    // allocation below, it walks frames from the prompt (on the main stack)
-    // rather than the detached segment. The original stack_pointer/frame_pointer
-    // point into the captured segment which is no longer in the GC frame chain.
+    // Update saved GC context so that if GC runs during heap allocation below,
+    // it walks frames from the prompt (on the main stack) rather than the
+    // captured segment. The original stack_pointer/frame_pointer point into the
+    // captured segment which is no longer in the GC frame chain.
     save_frame_pointer(prompt_fp);
     save_stack_pointer(prompt_sp);
 
-    let cont_ptr = match runtime.allocate(26, prompt_sp, BuiltInTypes::HeapObject) {
+    // --- Allocate heap objects for the captured segment and continuation ---
+
+    // Allocate an opaque bytes heap object to hold the captured stack frames.
+    // Size in words, rounded up.
+    let segment_words = (stack_size + 7) / 8;
+    let segment_heap_ptr = if segment_words > 0 {
+        match runtime.allocate(segment_words, prompt_sp, BuiltInTypes::HeapObject) {
+            Ok(ptr) => {
+                // Mark as opaque so GC doesn't scan the raw bytes as pointer fields.
+                // We scan them specially via walk_segment_gc_roots.
+                let seg_obj = HeapObject::from_tagged(ptr);
+                let header_ptr = seg_obj.untagged() as *mut usize;
+                let mut header_val = unsafe { *header_ptr };
+                header_val |= 0x2; // Set opaque bit (bit 1 in header)
+                unsafe { *header_ptr = header_val; }
+
+                // Copy the occupied frames from the mmap segment into the heap object.
+                let data_ptr = seg_obj.untagged() + seg_obj.header_size();
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        stack_pointer as *const u8,
+                        data_ptr as *mut u8,
+                        stack_size,
+                    );
+                }
+
+                // Relocate interior pointers (FP chain and GC prev links) within the
+                // heap copy so they reference addresses within the heap object instead
+                // of the original mmap segment.
+                let relocation = data_ptr as isize - stack_pointer as isize;
+                let fp_offset = frame_pointer - stack_pointer;
+                let mut relocate_fp = data_ptr + fp_offset;
+                loop {
+                    let caller_fp = unsafe { *(relocate_fp as *const usize) };
+                    if caller_fp >= stack_pointer && caller_fp < segment_used_top {
+                        let relocated = (caller_fp as isize + relocation) as usize;
+                        unsafe { *(relocate_fp as *mut usize) = relocated; }
+                    } else {
+                        break;
+                    }
+
+                    // Also relocate gc_prev pointer at [fp - 16]
+                    let gc_prev_slot = (relocate_fp - 16) as *mut usize;
+                    let gc_prev = unsafe { *gc_prev_slot };
+                    if gc_prev >= stack_pointer && gc_prev < segment_used_top {
+                        unsafe { *gc_prev_slot = (gc_prev as isize + relocation) as usize; }
+                    }
+
+                    let next_fp = unsafe { *(relocate_fp as *const usize) };
+                    if next_fp < data_ptr || next_fp >= data_ptr + stack_size {
+                        break;
+                    }
+                    relocate_fp = next_fp;
+                }
+
+                ptr
+            }
+            Err(_) => unsafe {
+                throw_runtime_error(
+                    prompt_sp,
+                    "AllocationError",
+                    "Failed to allocate captured segment - out of memory".to_string(),
+                );
+            },
+        }
+    } else {
+        BuiltInTypes::null_value() as usize
+    };
+
+    // Recycle the mmap segment back to the pool immediately — the frame data
+    // now lives in the heap object.
+    crate::runtime::per_thread_data().recycle_segment(segment);
+
+    // Protect segment_heap_ptr across the next allocation (which may trigger GC
+    // and move the segment object). We push it to both:
+    // 1. saved_continuation_ptrs — so GC marks/moves it as a root
+    // 2. pending_heap_segments — so GC can walk interior heap pointers in the segment
+    crate::runtime::per_thread_data().saved_continuation_ptrs.push(segment_heap_ptr);
+    crate::runtime::per_thread_data().pending_heap_segments.push((segment_heap_ptr, gc_frame_offset, stack_size));
+
+    // Allocate the continuation object itself (28 fields).
+    let cont_ptr = match runtime.allocate(28, prompt_sp, BuiltInTypes::HeapObject) {
         Ok(ptr) => ptr,
         Err(_) => unsafe {
             throw_runtime_error(
-                stack_pointer,
+                prompt_sp,
                 "AllocationError",
                 "Failed to allocate continuation object - out of memory".to_string(),
             );
         },
     };
+
+    // Read back the (potentially relocated) segment_heap_ptr and pop the protection.
+    crate::runtime::per_thread_data().pending_heap_segments.pop();
+    let segment_heap_ptr = crate::runtime::per_thread_data()
+        .saved_continuation_ptrs
+        .pop()
+        .unwrap_or(segment_heap_ptr);
 
     let mut cont_obj = HeapObject::from_tagged(cont_ptr);
     ContinuationObject::initialize(
@@ -12115,16 +12208,25 @@ unsafe fn capture_continuation_runtime_inner(
         resume_address,
         result_local_offset,
         &prompt,
-        segment_handle_id,
+        segment_heap_ptr,
+        gc_frame_offset,
+        stack_size,
         &captured_callee_saved_regs,
     );
 
+    // Store the captured prompt frame keyed by cont_ptr (not segment_handle_id).
+    // We use cont_ptr as the key since there's no longer a segment_handle_id.
+    if let Some(prompt_frame) = captured_prompt_frame {
+        crate::runtime::per_thread_data()
+            .store_captured_prompt_frame(cont_ptr, prompt_frame);
+    }
+
     if debug_prompts {
         eprintln!(
-            "[capture_cont] segmented prompt_id={} segment_handle={} stack_size={} prompt_sp={:#x} prompt_fp={:#x} resume={:#x} cont_ptr={:#x}",
+            "[capture_cont] segmented prompt_id={} stack_size={} segment_heap={:#x} prompt_sp={:#x} prompt_fp={:#x} resume={:#x} cont_ptr={:#x}",
             prompt.prompt_id,
-            segment_handle_id,
             stack_size,
+            segment_heap_ptr,
             prompt_sp,
             prompt_fp,
             resume_address,
@@ -12460,7 +12562,7 @@ unsafe fn return_from_shift_runtime_inner(
     // Segment-backed continuations return through prompt/handler metadata.
     if !is_handler_return {
         if let Some(continuation) = ContinuationObject::from_tagged(cont_ptr) {
-            debug_assert_ne!(continuation.segment_handle_id(), 0);
+            debug_assert_ne!(continuation.segment_ptr(), 0);
         }
     }
 
@@ -12564,53 +12666,95 @@ fn invoke_segmented_continuation(
         let return_stub_ptr: usize = return_stub.pointer.into();
         return_stub_ptr
     };
-    let segment_handle_id = continuation.segment_handle_id();
-    let cloned_segment = {
-        let ptd = crate::runtime::per_thread_data();
-        ptd.captured_segments
-            .get(&segment_handle_id)
-            .map(|(segment, _gc_top)| segment.clone_from())
-            .unwrap_or_else(|| {
-                panic!(
-                    "missing captured segment for prompt {} handle {}",
-                    prompt_id, segment_handle_id
-                )
-            })
-    };
+    // Read the captured segment data from the heap-allocated opaque bytes object.
+    let seg_tagged = continuation.segment_ptr();
+    let seg_size = continuation.segment_size();
+    let seg_gc_frame_offset = continuation.segment_gc_frame_offset();
 
-    let original_segment = {
-        let ptd = crate::runtime::per_thread_data();
-        ptd.captured_segments
-            .get(&segment_handle_id)
-            .map(|(segment, _gc_top)| (segment.base, segment.top))
+    if seg_tagged == 0 || seg_tagged == BuiltInTypes::null_value() as usize || seg_size == 0 {
+        panic!(
+            "invoke_segmented_continuation: continuation has no captured segment data (ptr={:#x} size={})",
+            seg_tagged, seg_size
+        );
     }
-    .expect("captured segment disappeared during continuation invoke");
 
-    let (original_base, original_top) = original_segment;
+    let seg_heap_obj = HeapObject::from_tagged(seg_tagged);
+    let seg_data_base = seg_heap_obj.untagged() + seg_heap_obj.header_size();
+
+    // Allocate an execution segment (mmap) to copy the frames into.
+    // The resumed code will execute on this segment (RSP points into it).
+    let cloned_segment = crate::runtime::per_thread_data().allocate_segment();
+
+    // The captured frames are stored at [seg_data_base..seg_data_base+seg_size].
+    // In the heap object, interior pointers were relocated relative to seg_data_base.
+    // We need to copy them into the execution segment and relocate to the segment's base.
+    //
+    // The original capture stored frames starting at original_sp. In the heap object,
+    // the data starts at offset 0. We place the frames at the TOP of the execution
+    // segment (since stacks grow downward).
+    let exec_base = cloned_segment.top - seg_size;
+    let exec_base = exec_base & !0xF; // 16-byte align
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            seg_data_base as *const u8,
+            exec_base as *mut u8,
+            seg_size,
+        );
+    }
+
+    // The original SP/FP are absolute addresses from the original mmap segment.
+    // During capture, we stored the original values but the heap copy has pointers
+    // relative to seg_data_base. We need to compute offsets.
     let original_sp = continuation.original_sp();
     let original_fp = continuation.original_fp();
 
-    if original_sp < original_base || original_sp > original_top {
-        panic!(
-            "[invoke_cont] original_sp {:#x} is outside captured segment [{:#x}, {:#x})",
-            original_sp, original_base, original_top
-        );
-    }
-    if original_fp < original_base || original_fp > original_top {
-        panic!(
-            "[invoke_cont] original_fp {:#x} is outside captured segment [{:#x}, {:#x})",
-            original_fp, original_base, original_top
-        );
+    // The capture copied bytes from [original_sp..capture_top] into the heap object
+    // starting at seg_data_base. So:
+    //   offset_in_heap = addr - original_sp
+    //   addr_in_exec = exec_base + offset_in_heap
+    let sp_offset = 0; // SP was at the start of captured data
+    let fp_offset = original_fp - original_sp;
+
+    let new_sp = exec_base + sp_offset;
+    let new_fp = exec_base + fp_offset;
+
+    // Relocation: heap object addresses → execution segment addresses
+    let relocation = exec_base as isize - seg_data_base as isize;
+
+    // Relocate interior pointers (FP chain, GC prev links) from heap addresses
+    // to execution segment addresses.
+    {
+        let mut relocate_fp = new_fp;
+        loop {
+            let caller_fp = unsafe { *(relocate_fp as *const usize) };
+            // Check if caller_fp is within the heap object's data range
+            if caller_fp >= seg_data_base && caller_fp < seg_data_base + seg_size {
+                let relocated = (caller_fp as isize + relocation) as usize;
+                unsafe { *(relocate_fp as *mut usize) = relocated; }
+            } else {
+                break;
+            }
+
+            // Also relocate gc_prev pointer at [fp - 16]
+            let gc_prev_slot = (relocate_fp - 16) as *mut usize;
+            let gc_prev = unsafe { *gc_prev_slot };
+            if gc_prev >= seg_data_base && gc_prev < seg_data_base + seg_size {
+                unsafe { *gc_prev_slot = (gc_prev as isize + relocation) as usize; }
+            }
+
+            let next_fp = unsafe { *(relocate_fp as *const usize) };
+            if next_fp < exec_base || next_fp >= exec_base + seg_size {
+                break;
+            }
+            relocate_fp = next_fp;
+        }
     }
 
-    let sp_offset = original_sp - original_base;
-    let fp_offset = original_fp - original_base;
-    let new_sp = cloned_segment.base + sp_offset;
-    let new_fp = cloned_segment.base + fp_offset;
-    let relocation = cloned_segment.base as isize - original_base as isize;
-
+    // Use cont_ptr as the key for prompt frame lookup (matches capture code)
+    let cont_tagged = continuation.tagged_ptr();
     if let Some(prompt_frame) = crate::runtime::per_thread_data()
-        .captured_prompt_frame(segment_handle_id)
+        .captured_prompt_frame(cont_tagged)
         .cloned()
     {
         if std::env::var("BEAGLE_DEBUG_RESUME").is_ok() {
@@ -12622,9 +12766,9 @@ fn invoke_segmented_continuation(
                 .collect::<Vec<_>>()
                 .join(" ");
             eprintln!(
-                "[resume-prompt-frame] prompt_id={} segment_handle={} prompt_fp={:#x} locals={}",
+                "[resume-prompt-frame] prompt_id={} segment_ptr={:#x} prompt_fp={:#x} locals={}",
                 prompt_id,
-                segment_handle_id,
+                seg_tagged,
                 continuation.prompt_frame_pointer(),
                 preview
             );
@@ -12822,38 +12966,12 @@ fn invoke_segmented_continuation(
         }
     }
 
-    let mut relocate_fp = new_fp;
-    loop {
-        let caller_fp = unsafe { *(relocate_fp as *const usize) };
-        let relocated_caller_fp = if caller_fp >= original_base && caller_fp < original_top {
-            (caller_fp as isize + relocation) as usize
-        } else {
-            caller_fp
-        };
-        if relocated_caller_fp != caller_fp {
-            unsafe {
-                *(relocate_fp as *mut usize) = relocated_caller_fp;
-            }
-        }
-
-        let gc_prev_slot = (relocate_fp - 16) as *mut usize;
-        let gc_prev = unsafe { *gc_prev_slot };
-        if gc_prev >= original_base && gc_prev < original_top {
-            unsafe {
-                *gc_prev_slot = (gc_prev as isize + relocation) as usize;
-            }
-        }
-
-        if relocated_caller_fp < cloned_segment.base || relocated_caller_fp >= cloned_segment.top {
-            break;
-        }
-        relocate_fp = relocated_caller_fp;
-    }
-
+    // Relocation was already done above when copying from heap to execution segment.
+    // Find the outermost frame in the execution segment.
     let mut outermost_fp = new_fp;
     loop {
         let caller_fp = unsafe { *(outermost_fp as *const usize) };
-        if !cloned_segment.contains(caller_fp) {
+        if caller_fp < exec_base || caller_fp >= exec_base + seg_size {
             break;
         }
         outermost_fp = caller_fp;
@@ -13308,23 +13426,14 @@ unsafe fn invoke_continuation_runtime_with_caller_context(
             (cont_ptr, value, 0)
         }
     };
-    let segment_handle_id = continuation.segment_handle_id();
-    if segment_handle_id == 0 {
+    let seg_ptr = continuation.segment_ptr();
+    if seg_ptr == 0 || seg_ptr == BuiltInTypes::null_value() as usize {
         panic!(
-            "invoke_continuation_runtime got continuation without segment handle: cont_ptr={:#x}",
+            "invoke_continuation_runtime got continuation without segment data: cont_ptr={:#x}",
             segmented_cont_ptr
         );
     }
     let prompt_id = continuation.prompt_id();
-    if !crate::runtime::per_thread_data()
-        .captured_segments
-        .contains_key(&segment_handle_id)
-    {
-        panic!(
-            "invoke_continuation_runtime missing captured segment {} for prompt {}",
-            segment_handle_id, prompt_id
-        );
-    }
 
     invoke_segmented_continuation(
         &continuation,

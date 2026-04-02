@@ -324,17 +324,10 @@ fn log_suspicious_mark(pending: &PendingMark) {
 // TODO: I got an issue with my freelist
 impl MarkAndSweep {
     fn collect_live_continuation_segment_handles(&mut self) -> std::collections::HashSet<usize> {
-        let mut live_handles = std::collections::HashSet::new();
-        self.walk_objects_mut(|_, heap_obj| {
-            let object = HeapObject::from_untagged(heap_obj.untagged() as *const u8);
-            if let Some(cont) = ContinuationObject::from_heap_object(object) {
-                let handle_id = cont.segment_handle_id();
-                if handle_id != 0 {
-                    live_handles.insert(handle_id);
-                }
-            }
-        });
-        live_handles
+        // Captured segments are now heap-allocated opaque bytes objects referenced
+        // directly from ContinuationObjects. GC manages their lifetime automatically.
+        // No segment handle IDs to collect.
+        std::collections::HashSet::new()
     }
 
     fn push_continuation_segment_children(
@@ -346,9 +339,7 @@ impl MarkAndSweep {
         let Some(cont) = ContinuationObject::from_heap_object(object) else {
             return;
         };
-        let Some((segment_base, segment_top, gc_frame_top)) =
-            crate::runtime::find_captured_segment_info(cont.segment_handle_id())
-        else {
+        let Some((segment_base, segment_top, gc_frame_top)) = cont.segment_info() else {
             return;
         };
         StackWalker::walk_segment_gc_roots(
@@ -511,6 +502,30 @@ impl MarkAndSweep {
             let registry = runtime.per_thread_registry.lock().unwrap();
             for ptd_ptr in registry.iter() {
                 let ptd = unsafe { &*ptd_ptr.0 };
+                // Scan heap-allocated pending segment objects that haven't been
+                // attached to a ContinuationObject yet. These contain captured stack
+                // frames whose interior heap pointers must be traced.
+                for &(seg_tagged, gc_frame_offset, seg_size) in ptd.pending_heap_segments.iter() {
+                    if BuiltInTypes::is_heap_pointer(seg_tagged) && seg_size > 0 {
+                        let seg_obj = HeapObject::from_tagged(seg_tagged);
+                        let data_base = seg_obj.untagged() + seg_obj.header_size();
+                        let gc_frame_top = data_base + gc_frame_offset;
+                        StackWalker::walk_segment_gc_roots(
+                            gc_frame_top,
+                            data_base,
+                            data_base + seg_size,
+                            |slot_addr, pointer| {
+                                push_root(
+                                    &mut to_mark,
+                                    pointer,
+                                    slot_addr,
+                                    "pending-heap-segment-root",
+                                );
+                            },
+                        );
+                    }
+                }
+                // Also scan old-style pending segments if any remain
                 for handle_id in ptd.pending_captured_segment_handles.iter().copied() {
                     if let Some((segment, gc_frame_top)) = ptd.captured_segments.get(&handle_id) {
                         StackWalker::walk_segment_gc_roots(

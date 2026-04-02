@@ -2228,8 +2228,7 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             continue;
         }
 
-        println!("Running test: {}", path);
-        trace!("test", "=== START test: {} ===", path);
+        eprintln!("[test] START {}", path);
         let gc_always = args.gc_always || source.contains("// gc-always");
         let no_std = args.no_std || source.contains("// no-std");
 
@@ -2241,17 +2240,52 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         if no_std {
             cmd.arg("--no-std");
         }
+        cmd.stdout(std::process::Stdio::piped());
 
-        // Let stderr pass through so trace output is visible in CI logs
-        cmd.stderr(std::process::Stdio::inherit());
+        let start = std::time::Instant::now();
+        let mut child = cmd.spawn()?;
+        let pid = child.id();
 
-        let output = cmd.output()?;
-        if !output.status.success() {
-            trace!("test", "=== FAIL test: {} ===", path);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            return Err(format!("Test failed: {}\n{}", path, stdout).into());
+        // Sample peak RSS while child runs
+        let peak_rss_kb = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let peak_rss_clone = peak_rss_kb.clone();
+        let monitor = std::thread::spawn(move || {
+            let status_path = format!("/proc/{}/status", pid);
+            loop {
+                if let Ok(contents) = std::fs::read_to_string(&status_path) {
+                    for line in contents.lines() {
+                        if let Some(val) = line.strip_prefix("VmRSS:") {
+                            if let Ok(kb) = val.trim().trim_end_matches(" kB").trim().parse::<u64>() {
+                                peak_rss_clone.fetch_max(kb, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                    }
+                } else {
+                    break; // process exited
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        });
+
+        let output_status = child.wait()?;
+        let stdout = {
+            let mut buf = Vec::new();
+            if let Some(mut stdout) = child.stdout.take() {
+                use std::io::Read;
+                stdout.read_to_end(&mut buf)?;
+            }
+            buf
+        };
+        let _ = monitor.join();
+        let elapsed = start.elapsed();
+        let rss = peak_rss_kb.load(std::sync::atomic::Ordering::Relaxed);
+
+        if !output_status.success() {
+            let stdout_str = String::from_utf8_lossy(&stdout);
+            eprintln!("[test] FAIL {} ({:.2}s, peak_rss={}KB)", path, elapsed.as_secs_f64(), rss);
+            return Err(format!("Test failed: {}\n{}", path, stdout_str).into());
         }
-        trace!("test", "=== PASS test: {} ===", path);
+        eprintln!("[test] PASS {} ({:.2}s, peak_rss={}KB)", path, elapsed.as_secs_f64(), rss);
     }
     Ok(())
 }

@@ -3854,8 +3854,10 @@ impl ContinuationObject {
     const FIELD_EXC_RESUME_LOCAL: usize = 12;
     const FIELD_EXC_HANDLER_ID: usize = 13;
     const FIELD_EXC_HAS_HANDLER: usize = 14;
-    const FIELD_SEGMENT_HANDLE_ID: usize = 15;
-    const FIELD_CAPTURED_CALLEE_SAVED_START: usize = 16;
+    const FIELD_SEGMENT_PTR: usize = 15;
+    const FIELD_SEGMENT_GC_FRAME_OFFSET: usize = 16;
+    const FIELD_SEGMENT_SIZE: usize = 17;
+    const FIELD_CAPTURED_CALLEE_SAVED_START: usize = 18;
     const NUM_CAPTURED_CALLEE_SAVED: usize = 10;
 
     pub fn from_tagged(tagged: usize) -> Option<Self> {
@@ -3946,8 +3948,45 @@ impl ContinuationObject {
         BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_EXC_HAS_HANDLER)) != 0
     }
 
+    /// Returns the tagged heap pointer to the opaque bytes object containing captured stack frames.
+    pub fn segment_ptr(&self) -> usize {
+        self.heap_obj.get_field(Self::FIELD_SEGMENT_PTR)
+    }
+
+    /// Returns the offset of the GC frame chain top within the segment data.
+    pub fn segment_gc_frame_offset(&self) -> usize {
+        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_SEGMENT_GC_FRAME_OFFSET))
+    }
+
+    /// Returns the size of the captured segment data in bytes.
+    pub fn segment_size(&self) -> usize {
+        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_SEGMENT_SIZE))
+    }
+
+    /// Returns (segment_data_base, segment_data_top, gc_frame_top) for this continuation's
+    /// captured segment. Returns None if segment_ptr is null.
+    pub fn segment_info(&self) -> Option<(usize, usize, usize)> {
+        let seg_tagged = self.segment_ptr();
+        if seg_tagged == 0 || seg_tagged == BuiltInTypes::null_value() as usize {
+            return None;
+        }
+        let seg_obj = HeapObject::from_tagged(seg_tagged);
+        let data_base = seg_obj.untagged() + seg_obj.header_size();
+        let size = self.segment_size();
+        let gc_offset = self.segment_gc_frame_offset();
+        Some((data_base, data_base + size, data_base + gc_offset))
+    }
+
+    // Keep backward-compatible accessor during migration — reads segment_ptr field as integer
     pub fn segment_handle_id(&self) -> usize {
-        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_SEGMENT_HANDLE_ID))
+        // During migration: if segment_ptr is a heap pointer, return 0 (new path)
+        // If it's a tagged int, return the untagged value (old path — should not happen after migration)
+        let val = self.heap_obj.get_field(Self::FIELD_SEGMENT_PTR);
+        if BuiltInTypes::is_heap_pointer(val) || val == 0 || val == BuiltInTypes::null_value() as usize {
+            0
+        } else {
+            BuiltInTypes::untag(val)
+        }
     }
 
     pub fn captured_callee_saved_regs(&self) -> [usize; Self::NUM_CAPTURED_CALLEE_SAVED] {
@@ -3996,7 +4035,9 @@ impl ContinuationObject {
         resume_address: usize,
         result_local: isize,
         prompt: &PromptHandler,
-        segment_handle_id: usize,
+        segment_ptr: usize,
+        segment_gc_frame_offset: usize,
+        segment_size: usize,
         captured_callee_saved_regs: &[usize; Self::NUM_CAPTURED_CALLEE_SAVED],
     ) {
         heap_obj.write_type_id(TYPE_ID_CONTINUATION as usize);
@@ -4061,9 +4102,18 @@ impl ContinuationObject {
             Self::FIELD_EXC_HAS_HANDLER as i32,
             BuiltInTypes::Int.tag(0) as usize,
         );
+        // segment_ptr is already a tagged heap pointer — store directly
         heap_obj.write_field(
-            Self::FIELD_SEGMENT_HANDLE_ID as i32,
-            BuiltInTypes::Int.tag(segment_handle_id as isize) as usize,
+            Self::FIELD_SEGMENT_PTR as i32,
+            segment_ptr,
+        );
+        heap_obj.write_field(
+            Self::FIELD_SEGMENT_GC_FRAME_OFFSET as i32,
+            BuiltInTypes::Int.tag(segment_gc_frame_offset as isize) as usize,
+        );
+        heap_obj.write_field(
+            Self::FIELD_SEGMENT_SIZE as i32,
+            BuiltInTypes::Int.tag(segment_size as isize) as usize,
         );
         for (i, reg) in captured_callee_saved_regs.iter().enumerate() {
             heap_obj.write_field((Self::FIELD_CAPTURED_CALLEE_SAVED_START + i) as i32, *reg);
@@ -4110,6 +4160,11 @@ pub struct PerThreadData {
     pub prompt_captured_segments: std::collections::HashMap<usize, Vec<usize>>,
     /// Segment handles detached during capture before the continuation object exists.
     pub pending_captured_segment_handles: Vec<usize>,
+    /// Heap-allocated segment objects pending attachment to a ContinuationObject.
+    /// Each entry is (tagged_heap_ptr, gc_frame_offset, segment_size) so GC can
+    /// walk interior heap pointers during the brief window between segment allocation
+    /// and ContinuationObject creation.
+    pub pending_heap_segments: Vec<(usize, usize, usize)>,
     /// Prompt-frame snapshots keyed by captured segment handle ID.
     pub captured_prompt_frames: std::collections::HashMap<usize, SuspendedFrame>,
     /// Suspended caller frames preserved across segmented invoke/return.
@@ -4134,6 +4189,7 @@ impl PerThreadData {
             native_perform_stack_pool: Vec::new(),
             active_native_perform_stacks: Vec::new(),
 
+            pending_heap_segments: Vec::new(),
             segment_pool: Vec::new(),
             active_segments: Vec::new(),
             captured_segments: std::collections::HashMap::new(),

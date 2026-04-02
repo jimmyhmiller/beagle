@@ -278,13 +278,7 @@ impl CompactingHeap {
             if object.is_zero_size() {
                 continue;
             }
-            let object = HeapObject::from_untagged(object.untagged() as *const u8);
-            if let Some(cont) = ContinuationObject::from_heap_object(object) {
-                let handle_id = cont.segment_handle_id();
-                if handle_id != 0 {
-                    live_handles.insert(handle_id);
-                }
-            }
+            // Captured segments are now heap-allocated — no handle IDs to collect.
         }
         live_handles
     }
@@ -297,9 +291,7 @@ impl CompactingHeap {
         let Some(cont) = ContinuationObject::from_heap_object(object) else {
             return;
         };
-        let Some((segment_base, segment_top, gc_frame_top)) =
-            crate::runtime::find_captured_segment_info(cont.segment_handle_id())
-        else {
+        let Some((segment_base, segment_top, gc_frame_top)) = cont.segment_info() else {
             return;
         };
         StackWalker::walk_segment_gc_roots(
@@ -507,6 +499,28 @@ impl CompactingHeap {
         for ptd_ptr in registry.iter() {
             let ptd = unsafe { &mut *ptd_ptr.0 };
 
+            // Scan heap-allocated pending segments
+            for &(seg_tagged, gc_frame_offset, seg_size) in ptd.pending_heap_segments.iter() {
+                if BuiltInTypes::is_heap_pointer(seg_tagged) && seg_size > 0 {
+                    let seg_obj = HeapObject::from_tagged(seg_tagged);
+                    let data_base = seg_obj.untagged() + seg_obj.header_size();
+                    let gc_frame_top = data_base + gc_frame_offset;
+                    let mut slots = Vec::new();
+                    StackWalker::walk_segment_gc_roots(
+                        gc_frame_top,
+                        data_base,
+                        data_base + seg_size,
+                        |slot_addr, slot_value| slots.push((slot_addr, slot_value)),
+                    );
+                    for (slot_addr, slot_value) in slots {
+                        let new_value = self.copy_using_cheneys_algorithm(slot_value);
+                        unsafe {
+                            *(slot_addr as *mut usize) = new_value;
+                        }
+                    }
+                }
+            }
+            // Also scan old-style pending segments
             for handle_id in ptd.pending_captured_segment_handles.iter().copied() {
                 if let Some((segment, gc_frame_top)) = ptd.captured_segments.get(&handle_id) {
                     let mut slots = Vec::new();
