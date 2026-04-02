@@ -12078,17 +12078,11 @@ unsafe fn capture_continuation_runtime_inner(
         0
     };
 
-    // Capture the prompt frame snapshot (for restoring prompt frame locals on resume)
-    let prompt_header = Header::from_usize(unsafe { *((prompt_fp - 8) as *const usize) });
-    let captured_prompt_frame = if prompt_header.type_id == TYPE_ID_FRAME {
-        Some(crate::runtime::SuspendedFrame::capture_from_stack(
-            prompt_fp,
-            prompt_header.size as usize,
-            prompt_sp,
-        ))
-    } else {
-        None
-    };
+    // NOTE: prompt frame capture is deferred until AFTER all heap allocations
+    // to avoid the "stale GcHandle after allocation" problem. The prompt frame's
+    // locals are on the main stack and may be updated in-place by GC if it runs
+    // during allocation. Capturing before allocation would freeze stale pointers
+    // in the Rust Vec.
 
     // Unlink captured frames from the GC chain before allocating on the heap.
     // GC must not walk into the mmap segment after we recycle it.
@@ -12224,9 +12218,17 @@ unsafe fn capture_continuation_runtime_inner(
         cont.set_segment_original_data_base(data_base);
     }
 
-    // Store the captured prompt frame keyed by cont_ptr (not segment_handle_id).
-    // We use cont_ptr as the key since there's no longer a segment_handle_id.
-    if let Some(prompt_frame) = captured_prompt_frame {
+    // Capture the prompt frame NOW, after all heap allocations are done.
+    // The prompt frame's locals are on the main stack and may have been updated
+    // in-place by GC during allocation. Capturing after allocation ensures we get
+    // the current (post-GC) pointer values, not stale from-space addresses.
+    let prompt_header = Header::from_usize(unsafe { *((prompt_fp - 8) as *const usize) });
+    if prompt_header.type_id == TYPE_ID_FRAME {
+        let prompt_frame = crate::runtime::SuspendedFrame::capture_from_stack(
+            prompt_fp,
+            prompt_header.size as usize,
+            prompt_sp,
+        );
         crate::runtime::per_thread_data()
             .store_captured_prompt_frame(cont_ptr, prompt_frame);
     }
