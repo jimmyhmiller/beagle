@@ -20,7 +20,7 @@ pub struct TraceFilter {
 impl TraceFilter {
     pub fn from_env() -> Self {
         match std::env::var("BEAGLE_TRACE") {
-            Ok(val) if val == "*" => TraceFilter {
+            Ok(val) if val == "*" || val.eq_ignore_ascii_case("all") => TraceFilter {
                 enabled: true,
                 categories: None,
             },
