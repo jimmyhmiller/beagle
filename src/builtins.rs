@@ -12704,8 +12704,10 @@ fn invoke_segmented_continuation(
     // The original capture stored frames starting at original_sp. In the heap object,
     // the data starts at offset 0. We place the frames at the TOP of the execution
     // segment (since stacks grow downward).
-    let exec_base = cloned_segment.top - seg_size;
-    let exec_base = exec_base & !0xF; // 16-byte align
+    // Place frames at the TOP of the execution segment, matching the original
+    // layout where frames grew downward from segment_used_top.
+    let exec_top = cloned_segment.top & !0xF; // same alignment as push_prompt_runtime
+    let exec_base = exec_top - seg_size;
 
     unsafe {
         std::ptr::copy_nonoverlapping(
