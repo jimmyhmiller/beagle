@@ -2229,6 +2229,7 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         }
 
         println!("Running test: {}", path);
+        trace!("test", "=== START test: {} ===", path);
         let gc_always = args.gc_always || source.contains("// gc-always");
         let no_std = args.no_std || source.contains("// no-std");
 
@@ -2246,9 +2247,11 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
         let output = cmd.output()?;
         if !output.status.success() {
+            trace!("test", "=== FAIL test: {} ===", path);
             let stdout = String::from_utf8_lossy(&output.stdout);
             return Err(format!("Test failed: {}\n{}", path, stdout).into());
         }
+        trace!("test", "=== PASS test: {} ===", path);
     }
     Ok(())
 }

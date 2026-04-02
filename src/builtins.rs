@@ -12022,7 +12022,7 @@ unsafe fn capture_continuation_runtime_inner(
     save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "capture_continuation");
     trace!(
-        "continuation",
+        "continuation-detail",
         "capture_continuation: resume_addr={:#x} result_offset={}",
         resume_address,
         result_local_offset
@@ -13198,7 +13198,7 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
     save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "invoke_continuation");
     trace!(
-        "continuation",
+        "continuation-detail",
         "invoke_continuation: cont_ptr={:#x} value={:#x}", cont_ptr, value
     );
 
