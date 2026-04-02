@@ -852,9 +852,10 @@ impl HeapObject {
             x if x == TYPE_ID_STRING || x == TYPE_ID_KEYWORD => 0,
             // Frame objects: num_slots encoded in upper 16 bits of type_data
             x if x == TYPE_ID_FRAME => (header.type_data >> 16) as usize,
-            // Continuation: fixed metadata object with 16 fields; only heap-pointer
-            // slots among them are traced by the collector.
-            x if x == TYPE_ID_CONTINUATION => 26,
+            // Continuation: trace fields 0..19 (metadata + segment_ptr).
+            // Fields 19+ are raw callee-saved register values (not tagged pointers)
+            // and must NOT be scanned by the GC.
+            x if x == TYPE_ID_CONTINUATION => 19,
             // FunctionObject: field 0 is a tagged function pointer, not a heap object
             x if x == TYPE_ID_FUNCTION_OBJECT => 0,
             // Regex: opaque index, not a heap pointer
