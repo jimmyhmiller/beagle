@@ -76,7 +76,7 @@ jobs:
       - name: Run Rust tests with features (${{ matrix.build-mode }})
         run: |
           if [ "${{ matrix.build-mode }}" = "release" ]; then
-            RUST_BACKTRACE=1 cargo test --features ${{ matrix.gc-features }},${{ matrix.backend }} --release -- --test-threads=1
+            BEAGLE_TRACE=all RUST_BACKTRACE=1 cargo test --features ${{ matrix.gc-features }},${{ matrix.backend }},trace --release -- --test-threads=1
           else
-            RUST_BACKTRACE=1 cargo test --features ${{ matrix.gc-features }},${{ matrix.backend }} -- --test-threads=1
+            BEAGLE_TRACE=all RUST_BACKTRACE=1 cargo test --features ${{ matrix.gc-features }},${{ matrix.backend }},trace -- --test-threads=1
           fi
