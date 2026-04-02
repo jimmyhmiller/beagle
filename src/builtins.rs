@@ -12693,6 +12693,15 @@ fn invoke_segmented_continuation(
     let seg_heap_obj = HeapObject::from_tagged(seg_tagged);
     let seg_data_base = seg_heap_obj.untagged() + seg_heap_obj.header_size();
 
+    if debug_prompts || std::env::var("BEAGLE_DEBUG_INVOKE").is_ok() {
+        eprintln!(
+            "[invoke_seg_cont] seg_tagged={:#x} seg_size={} gc_offset={} seg_data_base={:#x} original_sp={:#x} original_fp={:#x} resume={:#x} prompt_id={}",
+            seg_tagged, seg_size, seg_gc_frame_offset, seg_data_base,
+            continuation.original_sp(), continuation.original_fp(),
+            continuation.resume_address(), prompt_id,
+        );
+    }
+
     // Allocate an execution segment (mmap) to copy the frames into.
     // The resumed code will execute on this segment (RSP points into it).
     let cloned_segment = crate::runtime::per_thread_data().allocate_segment();
@@ -12723,12 +12732,25 @@ fn invoke_segmented_continuation(
     let original_sp = continuation.original_sp();
     let original_fp = continuation.original_fp();
 
-    // The capture copied bytes from [original_sp..capture_top] into the heap object
-    // starting at seg_data_base. So:
+    // The capture copied bytes from [original_sp..segment_used_top] into the heap
+    // object starting at seg_data_base. So:
     //   offset_in_heap = addr - original_sp
     //   addr_in_exec = exec_base + offset_in_heap
     let sp_offset = 0; // SP was at the start of captured data
-    let fp_offset = original_fp - original_sp;
+    let fp_offset = if original_fp >= original_sp && original_fp < original_sp + seg_size {
+        original_fp - original_sp
+    } else {
+        // FP is outside the captured segment (e.g., on the main stack).
+        // This happens when capture occurs at the prompt frame itself.
+        // In this case, we can't restore FP from the segment data — use the
+        // continuation's prompt_frame_pointer instead.
+        eprintln!(
+            "[invoke_seg_cont] WARNING: original_fp {:#x} outside captured data [{:#x}..{:#x}], using prompt_fp",
+            original_fp, original_sp, original_sp + seg_size
+        );
+        // For now, fall back to the old behavior — this needs investigation
+        original_fp - original_sp
+    };
 
     let new_sp = exec_base + sp_offset;
     let new_fp = exec_base + fp_offset;
@@ -13104,10 +13126,10 @@ fn invoke_segmented_continuation(
     crate::runtime::per_thread_data().push_active_segment(prompt_id, cloned_segment);
     set_gc_frame_top(new_fp.saturating_sub(8));
 
-    if debug_prompts {
+    if debug_prompts || std::env::var("BEAGLE_DEBUG_INVOKE").is_ok() {
         eprintln!(
-            "[invoke_cont] segmented prompt_id={} value={:#x} new_sp={:#x} new_fp={:#x}",
-            prompt_id, value, new_sp, new_fp
+            "[invoke_cont] segmented prompt_id={} value={:#x} new_sp={:#x} new_fp={:#x} exec_base={:#x} exec_top={:#x} resume={:#x}",
+            prompt_id, value, new_sp, new_fp, exec_base, exec_top, resume_address
         );
     }
 
