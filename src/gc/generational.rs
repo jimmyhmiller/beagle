@@ -1424,7 +1424,7 @@ impl GenerationalGC {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "generational"))]
 mod tests {
     use super::*;
     use crate::runtime::ContinuationObject;
