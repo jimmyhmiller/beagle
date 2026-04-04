@@ -2128,9 +2128,9 @@ fn cmd_test(test_args: TestArgs) -> Result<(), Box<dyn Error>> {
             passed += 1;
         } else {
             println!("  FAIL  {}", file_str);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stderr.lines().chain(stdout.lines()) {
+            let failure =
+                format_test_process_failure(file_str, output.status, &output.stdout, &output.stderr);
+            for line in failure.lines() {
                 println!("        {}", line);
             }
             failed += 1;
@@ -2188,6 +2188,55 @@ fn find_beag_binary() -> std::path::PathBuf {
     profile_dir.join("beag")
 }
 
+fn describe_exit_status(status: std::process::ExitStatus) -> String {
+    if let Some(code) = status.code() {
+        return format!("exit code {}", code);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+
+        if let Some(signal) = status.signal() {
+            return format!("signal {}", signal);
+        }
+    }
+
+    "unknown exit status".to_string()
+}
+
+fn format_test_process_failure(
+    path: &str,
+    status: std::process::ExitStatus,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> String {
+    let mut message = format!(
+        "Test failed: {} ({})",
+        path,
+        describe_exit_status(status)
+    );
+
+    let stderr_str = String::from_utf8_lossy(stderr);
+    let stdout_str = String::from_utf8_lossy(stdout);
+
+    if !stderr_str.trim().is_empty() {
+        message.push_str("\n\nstderr:\n");
+        message.push_str(&stderr_str);
+    }
+
+    if !stdout_str.trim().is_empty() {
+        message.push_str("\n\nstdout:\n");
+        message.push_str(&stdout_str);
+    }
+
+    if stderr_str.trim().is_empty() && stdout_str.trim().is_empty() {
+        message.push_str("\n\nprocess produced no output");
+    }
+
+    message
+}
+
 #[cfg(test)]
 fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     let mut test_files = discover_test_files(std::path::Path::new("resources"))?;
@@ -2226,6 +2275,7 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             cmd.arg("--no-std");
         }
         cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
 
         let start = std::time::Instant::now();
         let mut child = cmd.spawn()?;
@@ -2263,8 +2313,20 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
                 buf
             })
         });
+        let stderr_handle = child.stderr.take().map(|stderr| {
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut buf = Vec::new();
+                let mut stderr = stderr;
+                let _ = stderr.read_to_end(&mut buf);
+                buf
+            })
+        });
         let output_status = child.wait()?;
         let stdout = stdout_handle
+            .map(|h| h.join().unwrap_or_default())
+            .unwrap_or_default();
+        let stderr = stderr_handle
             .map(|h| h.join().unwrap_or_default())
             .unwrap_or_default();
         let _ = monitor.join();
@@ -2272,9 +2334,8 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         let rss = peak_rss_kb.load(std::sync::atomic::Ordering::Relaxed);
 
         if !output_status.success() {
-            let stdout_str = String::from_utf8_lossy(&stdout);
             eprintln!("[test] FAIL {} ({:.2}s, peak_rss={}KB)", path, elapsed.as_secs_f64(), rss);
-            return Err(format!("Test failed: {}\n{}", path, stdout_str).into());
+            return Err(format_test_process_failure(path, output_status, &stdout, &stderr).into());
         }
         eprintln!("[test] PASS {} ({:.2}s, peak_rss={}KB)", path, elapsed.as_secs_f64(), rss);
     }
