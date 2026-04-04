@@ -1255,7 +1255,12 @@ impl LowLevelX86 {
         let num_callee_saved = used_callee_saved.len();
         self.num_callee_saved = num_callee_saved;
 
-        // Calculate stack size: 2 for frame header (header + prev pointer) + locals + eval stack + callee-saved
+        // Calculate stack size: 2 for frame header (header + prev pointer) plus
+        // locals, eval stack, and the ABI callee-saved spill area.
+        //
+        // Only locals + eval stack are part of the Beagle root set. The
+        // callee-saved spill slots exist purely for ABI preservation and may
+        // contain non-root values, so GC must not scan them.
         let mut slots = 2 + self.max_locals + self.max_stack_size + num_callee_saved as i32;
         if slots % 2 != 0 {
             slots += 1;
@@ -1282,9 +1287,8 @@ impl LowLevelX86 {
 
             // Write frame header at [RBP-8]. This is a heap-object-style header
             // that lets GC know how many traced slots this frame has.
-            // Only scan locals + eval stack — these are Beagle-managed tagged values.
-            // Callee-saved register spill slots are NOT included because they can
-            // hold arbitrary non-tagged values (code addresses, raw integers).
+            // Only locals and eval stack slots are traced. Saved callee-saved
+            // registers live below that region and are not part of the root set.
             let num_slots = (self.max_locals + self.max_stack_size) as usize;
             let frame_header = Header {
                 type_id: crate::collections::TYPE_ID_FRAME,
@@ -1351,9 +1355,9 @@ impl LowLevelX86 {
             inserted_instructions.push(X86Asm::Pop { reg: RSI });
             inserted_instructions.push(X86Asm::Pop { reg: RDI });
 
-            // Zero out GC-scanned frame slots to prevent GC from seeing garbage.
-            // Only zero locals + eval stack (the num_slots range that GC scans).
-            let slots_to_zero = (self.max_locals + self.max_stack_size) as i32;
+            // Zero out the traced frame payload so GC never sees uninitialized
+            // garbage in locals or eval stack before they are written.
+            let slots_to_zero = self.max_locals + self.max_stack_size;
             if slots_to_zero > 0 {
                 let null_value = BuiltInTypes::null_value() as i32;
 
@@ -1363,8 +1367,8 @@ impl LowLevelX86 {
                     imm: null_value,
                 });
 
-                // Store null to each local and eval stack slot at [RBP - (i+3)*8]
-                // (skipping [RBP-8] header and [RBP-16] prev pointer)
+                // Store null to each traced slot at [RBP - (i+3)*8]
+                // (skipping [RBP-8] header and [RBP-16] prev pointer).
                 for i in 0..slots_to_zero {
                     inserted_instructions.push(X86Asm::MovMR {
                         base: RBP,

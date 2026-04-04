@@ -487,7 +487,25 @@ impl HeapObject {
         if header.large {
             // For large objects, the actual size is in the word after the header
             let size_ptr = unsafe { pointer.add(1) };
-            unsafe { *size_ptr * 8 }
+            let size_words = unsafe { *size_ptr };
+            match size_words.checked_mul(8) {
+                Some(size_bytes) => size_bytes,
+                None => {
+                    eprintln!(
+                        "[heap-object-invalid-size] tagged={} untagged={:#x} raw_header={:#x} type_id={} inline_size={} size_words={:#x} opaque={} large={}",
+                        self.tagged,
+                        untagged,
+                        data,
+                        header.type_id,
+                        header.size,
+                        size_words,
+                        header.opaque,
+                        header.large
+                    );
+                    eprintln!("{:?}", std::backtrace::Backtrace::force_capture());
+                    panic!("invalid large object size");
+                }
+            }
         } else {
             header.size as usize * 8
         }
@@ -852,10 +870,12 @@ impl HeapObject {
             x if x == TYPE_ID_STRING || x == TYPE_ID_KEYWORD => 0,
             // Frame objects: num_slots encoded in upper 16 bits of type_data
             x if x == TYPE_ID_FRAME => (header.type_data >> 16) as usize,
-            // Continuation: trace fields 0..19 (metadata + segment_ptr).
-            // Fields 19+ are raw callee-saved register values (not tagged pointers)
-            // and must NOT be scanned by the GC.
-            x if x == TYPE_ID_CONTINUATION => 19,
+            // Continuations own the full resume snapshot, including the
+            // captured callee-saved value registers that will be restored on
+            // invocation. Those register slots contain tagged Beagle values
+            // (or null/integers) and must move with the rest of the
+            // continuation state under GC.
+            x if x == TYPE_ID_CONTINUATION => 33,
             // FunctionObject: field 0 is a tagged function pointer, not a heap object
             x if x == TYPE_ID_FUNCTION_OBJECT => 0,
             // Regex: opaque index, not a heap pointer

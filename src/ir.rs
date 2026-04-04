@@ -1650,6 +1650,70 @@ impl Ir {
         }
     }
 
+    fn continuation_saved_reg_slot(register: VirtualRegister) -> Option<usize> {
+        cfg_if::cfg_if! {
+            if #[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))] {
+                match register.index {
+                    16 => Some(0), // RBX
+                    12 => Some(1), // R12
+                    13 => Some(2), // R13
+                    14 => Some(3), // R14
+                    15 => Some(4), // R15
+                    _ => None,
+                }
+            } else {
+                if (19..=28).contains(&register.index) {
+                    Some(register.index - 19)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn emit_continuation_saved_regs_arg<B: CodegenBackend>(
+        &self,
+        backend: &mut B,
+        saves: &[SavedValue],
+        total_args: usize,
+        saved_regs_arg_index: usize,
+    ) {
+        const NUM_CAPTURED_CALLEE_SAVED: usize = 10;
+
+        let num_stack_args = total_args.saturating_sub(backend.num_arg_registers());
+        let buffer_base_offset = num_stack_args as i32;
+
+        let null_reg = backend.temporary_register();
+        backend.mov_64(null_reg, BuiltInTypes::null_value());
+        for slot in 0..NUM_CAPTURED_CALLEE_SAVED {
+            backend.push_to_end_of_stack(null_reg, buffer_base_offset + slot as i32);
+        }
+        backend.free_temporary_register(null_reg);
+
+        for save in saves {
+            let Value::Register(register) = save.source else {
+                continue;
+            };
+            let Some(slot) = Self::continuation_saved_reg_slot(register) else {
+                continue;
+            };
+            let save_reg = self.value_to_register(&save.source, backend);
+            backend.push_to_end_of_stack(save_reg, buffer_base_offset + slot as i32);
+        }
+
+        let saved_regs_ptr = backend.temporary_register();
+        backend.get_stack_pointer_imm(saved_regs_ptr, (buffer_base_offset as isize) * 8);
+        if saved_regs_arg_index < backend.num_arg_registers() {
+            backend.mov_reg(backend.arg(saved_regs_arg_index as u8), saved_regs_ptr);
+        } else {
+            backend.push_to_end_of_stack(
+                saved_regs_ptr,
+                (saved_regs_arg_index - backend.num_arg_registers()) as i32,
+            );
+        }
+        backend.free_temporary_register(saved_regs_ptr);
+    }
+
     fn compile_instructions<B: CodegenBackend>(
         &mut self,
         backend: &mut B,
@@ -2749,7 +2813,9 @@ impl Ir {
                     result_local_index,
                     builtin_fn,
                 ) => {
-                    // Get current stack pointer into arg 0
+                    // Pass the real machine stack pointer. Continuation resume
+                    // restores native execution state, so the saved SP must be
+                    // the hardware SP, not a logical eval-stack position.
                     backend.get_stack_pointer_imm(backend.arg(0), 0);
 
                     // Get current frame pointer into arg 1
@@ -2762,6 +2828,13 @@ impl Ir {
                     // Load result_local byte offset into arg 3 (as signed value)
                     let local_offset = backend.get_local_byte_offset(*result_local_index);
                     backend.mov_64(backend.arg(3), local_offset);
+
+                    // No live callee-saved register snapshot was materialized for
+                    // this site, so pass a null saved_regs_ptr.
+                    let saved_regs_ptr = backend.temporary_register();
+                    backend.mov_64(saved_regs_ptr, 0);
+                    backend.mov_reg(backend.arg(4), saved_regs_ptr);
+                    backend.free_temporary_register(saved_regs_ptr);
 
                     // Call the builtin
                     let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
@@ -2790,17 +2863,11 @@ impl Ir {
                     builtin_fn,
                     saves,
                 ) => {
-                    // Call capture_continuation builtin. Any live values that must
-                    // survive this GC point are first materialized into tracked
-                    // frame locals so the GC root chain can see them.
-                    for save in saves.iter() {
-                        let save_reg = self.value_to_register(&save.source, backend);
-                        backend.store_local(save_reg, save.local as i32);
-                    }
-
                     // Arguments: (stack_pointer, frame_pointer, resume_address, result_local_offset)
 
-                    // Get current stack pointer into arg 0
+                    // Pass the real machine stack pointer. Continuation resume
+                    // restores native execution state, so the saved SP must be
+                    // the hardware SP, not a logical eval-stack position.
                     backend.get_stack_pointer_imm(backend.arg(0), 0);
 
                     // Get current frame pointer into arg 1
@@ -2813,6 +2880,8 @@ impl Ir {
                     // Load result_local byte offset into arg 3 (as signed value)
                     let local_offset = backend.get_local_byte_offset(*result_local_index);
                     backend.mov_64(backend.arg(3), local_offset);
+
+                    self.emit_continuation_saved_regs_arg(backend, saves, 5, 4);
 
                     // Call the builtin
                     let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
@@ -2829,12 +2898,6 @@ impl Ir {
                     self.store_spill(dest_reg, dest_spill, backend);
                     if matches!(dest, Value::Spill(_, _)) {
                         backend.free_temporary_register(dest_reg);
-                    }
-
-                    // Reload saved values from their tracked local slots.
-                    for save in saves.iter().rev() {
-                        let save_reg = self.value_to_register(&save.source, backend);
-                        backend.load_local(save_reg, save.local as i32);
                     }
                 }
                 Instruction::PerformEffect(
@@ -2862,6 +2925,15 @@ impl Ir {
                     let local_offset = backend.get_local_byte_offset(*result_local_index);
                     backend.mov_64(backend.arg(5), local_offset);
 
+                    let saved_regs_ptr = backend.temporary_register();
+                    backend.mov_64(saved_regs_ptr, 0);
+                    if backend.num_arg_registers() > 6 {
+                        backend.mov_reg(backend.arg(6), saved_regs_ptr);
+                    } else {
+                        backend.push_to_end_of_stack(saved_regs_ptr, 0);
+                    }
+                    backend.free_temporary_register(saved_regs_ptr);
+
                     let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
                     backend.call_builtin(fn_ptr);
                 }
@@ -2874,11 +2946,6 @@ impl Ir {
                     builtin_fn,
                     saves,
                 ) => {
-                    for save in saves.iter() {
-                        let save_reg = self.value_to_register(&save.source, backend);
-                        backend.store_local(save_reg, save.local as i32);
-                    }
-
                     backend.get_stack_pointer_imm(backend.arg(0), 0);
                     backend.mov_reg(backend.arg(1), backend.frame_pointer());
 
@@ -2896,13 +2963,10 @@ impl Ir {
                     let local_offset = backend.get_local_byte_offset(*result_local_index);
                     backend.mov_64(backend.arg(5), local_offset);
 
+                    self.emit_continuation_saved_regs_arg(backend, saves, 7, 6);
+
                     let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
                     backend.call_builtin(fn_ptr);
-
-                    for save in saves.iter().rev() {
-                        let save_reg = self.value_to_register(&save.source, backend);
-                        backend.load_local(save_reg, save.local as i32);
-                    }
                 }
                 Instruction::ReturnFromShift(value, cont_ptr, builtin_fn) => {
                     // Call return_from_shift builtin (does not return)

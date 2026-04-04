@@ -291,15 +291,17 @@ impl CompactingHeap {
         let Some(cont) = ContinuationObject::from_heap_object(object) else {
             return;
         };
-        let Some((segment_base, segment_top, gc_frame_top)) = cont.segment_info() else {
+        let Some((segment_base, segment_top, gc_frame_top)) = cont.segment_gc_frame_info() else {
             return;
         };
-        StackWalker::walk_segment_gc_roots(
-            gc_frame_top,
-            segment_base,
-            segment_top,
-            |slot_addr, slot_value| callback(slot_addr, slot_value),
-        );
+        if gc_frame_top >= segment_base && gc_frame_top < segment_top {
+            StackWalker::walk_segment_gc_roots(
+                gc_frame_top,
+                segment_base,
+                segment_top,
+                |slot_addr, slot_value| callback(slot_addr, slot_value),
+            );
+        }
     }
 
     fn collect_continuation_segment_slots(&mut self, object: &HeapObject) -> Vec<(usize, usize)> {
@@ -500,19 +502,19 @@ impl CompactingHeap {
             let ptd = unsafe { &mut *ptd_ptr.0 };
 
             // Scan heap-allocated pending segments
-            for &(seg_tagged, gc_frame_offset, seg_size) in ptd.pending_heap_segments.iter() {
-                if BuiltInTypes::is_heap_pointer(seg_tagged) && seg_size > 0 {
-                    let seg_obj = HeapObject::from_tagged(seg_tagged);
+            for (seg_tagged, _gc_frame_offset, seg_size, _original_data_base) in
+                ptd.pending_heap_segments.iter_mut()
+            {
+                if BuiltInTypes::is_heap_pointer(*seg_tagged) && *seg_size > 0 {
+                    let seg_obj = HeapObject::from_tagged(*seg_tagged);
                     let data_base = seg_obj.untagged() + seg_obj.header_size();
-                    let gc_frame_top = data_base + gc_frame_offset;
-                    let mut slots = Vec::new();
-                    StackWalker::walk_segment_gc_roots(
-                        gc_frame_top,
-                        data_base,
-                        data_base + seg_size,
-                        |slot_addr, slot_value| slots.push((slot_addr, slot_value)),
-                    );
-                    for (slot_addr, slot_value) in slots {
+                    let scan_size = *seg_size & !0x7;
+                    for word_offset in (0..scan_size).step_by(8) {
+                        let slot_addr = data_base + word_offset;
+                        let slot_value = unsafe { *(slot_addr as *const usize) };
+                        if !BuiltInTypes::is_heap_pointer(slot_value) {
+                            continue;
+                        }
                         let new_value = self.copy_using_cheneys_algorithm(slot_value);
                         unsafe {
                             *(slot_addr as *mut usize) = new_value;
@@ -548,14 +550,6 @@ impl CompactingHeap {
             }
 
             for frame in ptd.suspended_frames.values_mut() {
-                for slot in frame.locals.iter_mut() {
-                    if BuiltInTypes::is_heap_pointer(*slot) {
-                        *slot = self.copy_using_cheneys_algorithm(*slot);
-                    }
-                }
-            }
-
-            for frame in ptd.captured_prompt_frames.values_mut() {
                 for slot in frame.locals.iter_mut() {
                     if BuiltInTypes::is_heap_pointer(*slot) {
                         *slot = self.copy_using_cheneys_algorithm(*slot);

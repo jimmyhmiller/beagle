@@ -23,6 +23,19 @@ use std::collections::HashSet;
 pub struct StackWalker;
 
 impl StackWalker {
+    fn detached_frame_live_slots(header_addr: usize, header: Header) -> usize {
+        let frame_pointer = header_addr + 8;
+        let return_addr = unsafe { *((frame_pointer + 8) as *const usize) };
+        let max_slots = header.size as usize;
+        crate::get_runtime()
+            .get()
+            .memory
+            .stack_map
+            .find_stack_data(return_addr)
+            .map(|details| (details.number_of_locals + details.current_stack_size).min(max_slots))
+            .unwrap_or(max_slots)
+    }
+
     /// Collect all heap pointers from the GC frame chain for a single thread.
     /// `gc_frame_top` is the address of the topmost frame's header (or 0 for empty).
     pub fn collect_stack_roots(gc_frame_top: usize) -> Vec<(usize, usize)> {
@@ -220,7 +233,7 @@ impl StackWalker {
                 break;
             }
 
-            let num_slots = header.size as usize;
+            let num_slots = Self::detached_frame_live_slots(header_addr, header);
             for i in 0..num_slots {
                 let slot_addr = header_addr - 16 - (i * 8);
                 let slot_value = unsafe { *(slot_addr as *const usize) };
@@ -293,7 +306,7 @@ impl StackWalker {
                 break;
             }
 
-            let num_slots = header.size as usize;
+            let num_slots = Self::detached_frame_live_slots(header_addr, header);
             for i in 0..num_slots {
                 let slot_addr = header_addr - 16 - (i * 8);
                 let slot_value = unsafe { *(slot_addr as *const usize) };

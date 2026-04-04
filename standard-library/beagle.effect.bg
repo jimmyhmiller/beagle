@@ -1,5 +1,7 @@
 namespace beagle.effect
 
+use beagle.builtin as builtin
+
 // ============================================================================
 // Effect Handler Protocol
 // ============================================================================
@@ -53,4 +55,8 @@ protocol Handler(T) {
     //   - Not call resume at all (abort the computation)
     //   - Transform the result before/after calling resume
     fn handle(self, op, resume)
+}
+
+fn resume-tail(resume, value) {
+    builtin/resume-tail(resume, value)
 }

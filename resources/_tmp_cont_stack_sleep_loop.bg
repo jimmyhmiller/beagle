@@ -1,0 +1,12 @@
+namespace tmp_cont_stack_sleep_loop
+
+use beagle.core as core
+
+fn main() {
+    let mut i = 0
+    while i < 50 {
+        core/sleep(1)
+        i = i + 1
+    }
+    println("ok")
+}

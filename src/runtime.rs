@@ -34,8 +34,8 @@ use crate::{
 use crate::collections::{
     GcHandle, HandleScope, PersistentMap, PersistentVec, TYPE_ID_ATOM, TYPE_ID_CONS_STRING,
     TYPE_ID_CONTINUATION, TYPE_ID_FUNCTION_OBJECT, TYPE_ID_KEYWORD, TYPE_ID_MULTI_ARITY_FUNCTION,
-    TYPE_ID_PERSISTENT_MAP, TYPE_ID_PERSISTENT_SET, TYPE_ID_PERSISTENT_VEC, TYPE_ID_RAW_ARRAY,
-    TYPE_ID_STRING, TYPE_ID_STRING_SLICE,
+    TYPE_ID_FRAME, TYPE_ID_PERSISTENT_MAP, TYPE_ID_PERSISTENT_SET, TYPE_ID_PERSISTENT_VEC,
+    TYPE_ID_RAW_ARRAY, TYPE_ID_STRING, TYPE_ID_STRING_SLICE,
 };
 
 use std::cell::{Cell, RefCell};
@@ -123,6 +123,7 @@ impl GlobalObjectBlock {
         let heap_obj = HeapObject::from_tagged(self.ptr);
         let next_ptr = next.map_or(GLOBAL_BLOCK_FREE_SLOT, |b| b.ptr);
         heap_obj.write_field(0, next_ptr);
+        crate::get_runtime().get_mut().write_barrier(self.ptr, next_ptr);
     }
 
     /// Get the count of active entries (note: doesn't account for freed slots)
@@ -152,7 +153,17 @@ impl GlobalObjectBlock {
     pub fn set_entry(&self, index: usize, value: usize) {
         debug_assert!(index < GLOBAL_BLOCK_SIZE);
         let heap_obj = HeapObject::from_tagged(self.ptr);
+        if std::env::var("BEAGLE_DEBUG_ROOT_SLOT2").is_ok() && index == 2 {
+            eprintln!(
+                "[global-block:set-entry] block={:#x} index={} value={:#x} kind={:?}",
+                self.ptr,
+                index,
+                value,
+                BuiltInTypes::get_kind(value)
+            );
+        }
         heap_obj.write_field((GLOBAL_BLOCK_HEADER_FIELDS + index) as i32, value);
+        crate::get_runtime().get_mut().write_barrier(self.ptr, value);
     }
 
     /// Check if a slot is free
@@ -262,6 +273,14 @@ impl ThreadGlobal {
                 if block.is_entry_free(i) {
                     block.set_entry(i, value);
                     let slot = block_num * GLOBAL_BLOCK_SIZE + i;
+                    if std::env::var("BEAGLE_DEBUG_ROOT_SLOT2").is_ok() && slot == 2 {
+                        eprintln!(
+                            "[root-slot2:add] value={:#x} kind={:?}",
+                            value,
+                            BuiltInTypes::get_kind(value)
+                        );
+                        eprintln!("{:?}", std::backtrace::Backtrace::force_capture());
+                    }
                     self.next_free_slot = slot + 1;
                     return Some(slot);
                 }
@@ -278,6 +297,13 @@ impl ThreadGlobal {
     pub fn remove_root(&mut self, slot: usize) -> usize {
         let (block, index) = self.find_slot(slot);
         let value = block.get_entry(index);
+        if std::env::var("BEAGLE_DEBUG_ROOT_SLOT2").is_ok() && slot == 2 {
+            eprintln!(
+                "[root-slot2:remove] value={:#x} kind={:?}",
+                value,
+                BuiltInTypes::get_kind(value)
+            );
+        }
         block.set_entry(index, GLOBAL_BLOCK_FREE_SLOT);
         // Update hint if this slot is earlier
         if slot < self.next_free_slot {
@@ -921,6 +947,21 @@ pub enum TcpResult {
     },
 }
 
+impl TcpResult {
+    pub fn op_id(&self) -> usize {
+        match self {
+            TcpResult::ConnectOk { op_id, .. }
+            | TcpResult::ConnectErr { op_id, .. }
+            | TcpResult::AcceptOk { op_id, .. }
+            | TcpResult::AcceptErr { op_id, .. }
+            | TcpResult::ReadOk { op_id, .. }
+            | TcpResult::ReadErr { op_id, .. }
+            | TcpResult::WriteOk { op_id, .. }
+            | TcpResult::WriteErr { op_id, .. } => *op_id,
+        }
+    }
+}
+
 /// Opaque handle for async file operations
 /// This is a thread-safe identifier that does NOT contain any Beagle heap references
 pub type OperationHandle = u64;
@@ -992,20 +1033,24 @@ pub enum TcpOperation {
     Connect {
         addr: std::net::SocketAddr,
         future_atom: usize,
+        op_id: usize,
     },
     Accept {
         listener_id: usize,
         future_atom: usize,
+        op_id: usize,
     },
     Read {
         socket_id: usize,
         buffer_size: usize,
         future_atom: usize,
+        op_id: usize,
     },
     Write {
         socket_id: usize,
         data: Vec<u8>,
         future_atom: usize,
+        op_id: usize,
     },
     Listen {
         addr: std::net::SocketAddr,
@@ -1036,6 +1081,10 @@ pub struct EventLoop {
     waker: Arc<Waker>,
     /// Current result being inspected (after pop), per-thread for concurrent safety.
     current_results: Mutex<HashMap<ThreadId, TcpResult>>,
+    /// Current results being inspected on the op_id path.
+    /// Keyed by stable op_id instead of thread identity so concurrent socket
+    /// operations on the same loop cannot overwrite each other's payloads.
+    current_results_by_op_id: Mutex<HashMap<usize, TcpResult>>,
     /// Channel to send file operations to thread pool
     file_task_tx: mpsc::Sender<FileTask>,
     /// Channel sender for submitting TCP operations to the event loop thread
@@ -1130,6 +1179,7 @@ impl EventLoop {
             state,
             waker,
             current_results: Mutex::new(HashMap::new()),
+            current_results_by_op_id: Mutex::new(HashMap::new()),
             file_task_tx,
             tcp_task_tx,
             shutdown,
@@ -1215,6 +1265,19 @@ impl EventLoop {
             } => *fa == future_atom,
         });
         pos.map(|i| state.completed_tcp_results.remove(i))
+    }
+
+    pub fn pop_tcp_result_for_op_id(&self, op_id: usize) -> Option<TcpResult> {
+        let mut state = self.state.lock().ok()?;
+        let pos = state
+            .completed_tcp_results
+            .iter()
+            .position(|result| result.op_id() == op_id)?;
+        Some(state.completed_tcp_results.remove(pos))
+    }
+
+    pub fn next_tcp_op_id(&self) -> usize {
+        self.state.lock().unwrap().next_op_id()
     }
 
     /// Shutdown the event loop thread gracefully
@@ -1370,6 +1433,19 @@ impl EventLoop {
     pub fn current_result(&self) -> Option<TcpResult> {
         let tid = std::thread::current().id();
         self.current_results.lock().unwrap().get(&tid).cloned()
+    }
+
+    /// Set the current result for an op_id-specific inspection flow.
+    pub fn set_current_result_for_op_id(&self, op_id: usize, result: TcpResult) {
+        self.current_results_by_op_id
+            .lock()
+            .unwrap()
+            .insert(op_id, result);
+    }
+
+    /// Take the pending inspected result for `op_id`.
+    pub fn take_current_result_for_op_id(&self, op_id: usize) -> Option<TcpResult> {
+        self.current_results_by_op_id.lock().unwrap().remove(&op_id)
     }
 }
 
@@ -1823,7 +1899,11 @@ impl EventLoopState {
     /// Handle a TCP task submitted via channel
     fn handle_tcp_task(&mut self, task: TcpTask) {
         match task.op {
-            TcpOperation::Connect { addr, future_atom } => {
+            TcpOperation::Connect {
+                addr,
+                future_atom,
+                op_id,
+            } => {
                 trace!(
                     "tcp",
                     "io thread: handle Connect to {} future_atom={}", addr, future_atom
@@ -1832,8 +1912,6 @@ impl EventLoopState {
                     Ok(mut stream) => {
                         let socket_id = self.next_socket_id();
                         let token = self.next_token();
-                        let op_id = self.next_op_id();
-
                         if let Err(e) = self.poll_mut().registry().register(
                             &mut stream,
                             token,
@@ -1867,7 +1945,6 @@ impl EventLoopState {
                     }
                     Err(e) => {
                         trace!("tcp", "io thread: Connect failed: {}", e);
-                        let op_id = self.next_op_id();
                         self.completed_tcp_results.push(TcpResult::ConnectErr {
                             future_atom,
                             error: e.to_string(),
@@ -1898,6 +1975,7 @@ impl EventLoopState {
             TcpOperation::Accept {
                 listener_id,
                 future_atom,
+                op_id,
             } => {
                 trace!(
                     "tcp",
@@ -1905,8 +1983,6 @@ impl EventLoopState {
                 );
                 if let Some(mut listener) = self.tcp_listeners.remove(&listener_id) {
                     let token = self.next_token();
-                    let op_id = self.next_op_id();
-
                     let registry = self.poll_mut().registry();
                     let result = registry
                         .register(&mut listener, token, Interest::READABLE)
@@ -1933,7 +2009,6 @@ impl EventLoopState {
                         },
                     );
                 } else {
-                    let op_id = self.next_op_id();
                     self.completed_tcp_results.push(TcpResult::AcceptErr {
                         future_atom,
                         error: "Listener not found".to_string(),
@@ -1945,6 +2020,7 @@ impl EventLoopState {
                 socket_id,
                 buffer_size,
                 future_atom,
+                op_id,
             } => {
                 trace!(
                     "tcp",
@@ -1954,7 +2030,6 @@ impl EventLoopState {
                     future_atom
                 );
                 if self.tcp_streams.contains_key(&socket_id) {
-                    let op_id = self.next_op_id();
                     self.pending_reads.insert(
                         socket_id,
                         PendingReadOp {
@@ -1989,7 +2064,6 @@ impl EventLoopState {
                     }
                 } else {
                     trace!("tcp", "io thread: Read socket {} not found", socket_id);
-                    let op_id = self.next_op_id();
                     self.completed_tcp_results.push(TcpResult::ReadErr {
                         future_atom,
                         error: "Socket not found".to_string(),
@@ -2001,6 +2075,7 @@ impl EventLoopState {
                 socket_id,
                 data,
                 future_atom,
+                op_id,
             } => {
                 trace!(
                     "tcp",
@@ -2010,7 +2085,6 @@ impl EventLoopState {
                     future_atom
                 );
                 if self.tcp_streams.contains_key(&socket_id) {
-                    let op_id = self.next_op_id();
                     self.pending_writes.insert(
                         socket_id,
                         PendingWriteOp {
@@ -2042,7 +2116,6 @@ impl EventLoopState {
                     }
                 } else {
                     trace!("tcp", "io thread: Write socket {} not found", socket_id);
-                    let op_id = self.next_op_id();
                     self.completed_tcp_results.push(TcpResult::WriteErr {
                         future_atom,
                         error: "Socket not found".to_string(),
@@ -2379,6 +2452,16 @@ impl EventLoopState {
             match result {
                 Ok(n) => {
                     buffer.truncate(n);
+                    if std::env::var("BEAGLE_DEBUG_TCP_PAYLOADS").is_ok() {
+                        eprintln!(
+                            "[tcp-read-ok] socket={} op_id={} bytes={} data={:?}",
+                            socket_id,
+                            op_id,
+                            n,
+                            std::str::from_utf8(&buffer[..buffer.len().min(120)])
+                                .unwrap_or("<binary>")
+                        );
+                    }
                     trace!(
                         "tcp",
                         "io thread: ReadOk socket={} bytes={} future_atom={} data={:?}",
@@ -2455,6 +2538,17 @@ impl EventLoopState {
             match result {
                 Ok(n) => {
                     let total_written = bytes_written + n;
+                    if std::env::var("BEAGLE_DEBUG_TCP_PAYLOADS").is_ok() {
+                        let preview_end = total_written.min(data.len()).min(120);
+                        eprintln!(
+                            "[tcp-write] socket={} op_id={} wrote={}/{} data={:?}",
+                            socket_id,
+                            op_id,
+                            total_written,
+                            data.len(),
+                            std::str::from_utf8(&data[..preview_end]).unwrap_or("<binary>")
+                        );
+                    }
                     if total_written >= data.len() {
                         trace!(
                             "tcp",
@@ -3838,6 +3932,154 @@ pub struct ContinuationObject {
     heap_obj: HeapObject,
 }
 
+pub fn relocate_segment_caller_fp_links(
+    data_base: usize,
+    size: usize,
+    fp_offset: usize,
+    original_base: usize,
+) -> usize {
+    if size == 0 || original_base == 0 {
+        return original_base;
+    }
+    if original_base == data_base {
+        return data_base;
+    }
+
+    let delta = data_base as isize - original_base as isize;
+
+    if fp_offset < size {
+        let mut fp = data_base + fp_offset;
+        while fp >= data_base && fp < data_base + size && fp != 0 {
+            let caller_fp_slot = fp as *mut usize;
+            let caller_fp = unsafe { *caller_fp_slot };
+            let next_fp = if caller_fp >= original_base && caller_fp < original_base + size {
+                let relocated = (caller_fp as isize + delta) as usize;
+                unsafe { *caller_fp_slot = relocated; }
+                relocated
+            } else {
+                caller_fp
+            };
+
+            if next_fp == 0 || next_fp < data_base || next_fp >= data_base + size {
+                break;
+            }
+            fp = next_fp;
+        }
+    }
+
+    data_base
+}
+
+pub fn relocate_segment_gc_prev_links(
+    data_base: usize,
+    size: usize,
+    gc_frame_offset: usize,
+    original_base: usize,
+) -> usize {
+    if size == 0 || gc_frame_offset >= size || original_base == 0 {
+        return original_base;
+    }
+    if original_base == data_base {
+        return data_base;
+    }
+
+    let delta = data_base as isize - original_base as isize;
+    let mut header_addr = data_base + gc_frame_offset;
+    while header_addr >= data_base && header_addr < data_base + size && header_addr != 0 {
+        let header = Header::from_usize(unsafe { *(header_addr as *const usize) });
+        if header.type_id != TYPE_ID_FRAME {
+            return original_base;
+        }
+
+        let prev_slot = (header_addr - 8) as *mut usize;
+        let prev_val = unsafe { *prev_slot };
+        let next_header = if prev_val >= original_base && prev_val < original_base + size {
+            let relocated = (prev_val as isize + delta) as usize;
+            unsafe { *prev_slot = relocated; }
+            relocated
+        } else {
+            prev_val
+        };
+
+        if next_header == 0 || next_header < data_base || next_header >= data_base + size {
+            break;
+        }
+        header_addr = next_header;
+    }
+
+    data_base
+}
+
+pub fn rebuild_segment_gc_prev_links_from_caller_chain(
+    data_base: usize,
+    size: usize,
+    fp_offset: usize,
+    outer_prev: usize,
+) -> Option<usize> {
+    if size == 0 || fp_offset >= size {
+        return None;
+    }
+
+    let segment_top = data_base + size;
+    let mut fp = data_base + fp_offset;
+    let gc_frame_top = fp.checked_sub(8)?;
+
+    while fp >= data_base + 8 && fp < segment_top {
+        let header_addr = fp - 8;
+        let header = Header::from_usize(unsafe { *(header_addr as *const usize) });
+        if header.type_id != TYPE_ID_FRAME {
+            return None;
+        }
+
+        let caller_fp = unsafe { *(fp as *const usize) };
+        let prev_value = if caller_fp >= data_base + 8 && caller_fp < segment_top {
+            caller_fp - 8
+        } else {
+            outer_prev
+        };
+        unsafe {
+            *((fp - 16) as *mut usize) = prev_value;
+        }
+
+        if caller_fp < data_base + 8 || caller_fp >= segment_top {
+            break;
+        }
+        fp = caller_fp;
+    }
+
+    Some(gc_frame_top)
+}
+
+pub fn patch_segment_gc_prev_outer_anchor(
+    data_base: usize,
+    size: usize,
+    gc_frame_offset: usize,
+    outer_prev: usize,
+) -> usize {
+    if size == 0 || gc_frame_offset >= size {
+        return 0;
+    }
+
+    let mut header_addr = data_base + gc_frame_offset;
+    let gc_frame_top = header_addr;
+    while header_addr >= data_base && header_addr < data_base + size && header_addr != 0 {
+        let header = Header::from_usize(unsafe { *(header_addr as *const usize) });
+        if header.type_id != TYPE_ID_FRAME {
+            return 0;
+        }
+
+        let prev_slot = (header_addr - 8) as *mut usize;
+        let prev_val = unsafe { *prev_slot };
+        if prev_val == 0 || prev_val < data_base || prev_val >= data_base + size {
+            unsafe { *prev_slot = outer_prev; }
+            break;
+        }
+        header_addr = prev_val;
+    }
+
+    gc_frame_top
+}
+
 impl ContinuationObject {
     const FIELD_ORIGINAL_SP: usize = 0;
     const FIELD_ORIGINAL_FP: usize = 1;
@@ -3855,12 +4097,16 @@ impl ContinuationObject {
     const FIELD_EXC_HANDLER_ID: usize = 13;
     const FIELD_EXC_HAS_HANDLER: usize = 14;
     const FIELD_SEGMENT_PTR: usize = 15;
-    const FIELD_SEGMENT_GC_FRAME_OFFSET: usize = 16;
-    const FIELD_SEGMENT_SIZE: usize = 17;
+    const FIELD_SEGMENT_FRAME_POINTER_OFFSET: usize = 16;
+    const FIELD_SEGMENT_GC_FRAME_OFFSET: usize = 17;
+    const FIELD_SEGMENT_SIZE: usize = 18;
     /// The data base address at capture time. Used by compacting GC to compute
     /// the relocation delta when the segment object moves.
-    const FIELD_SEGMENT_ORIGINAL_DATA_BASE: usize = 18;
-    const FIELD_CAPTURED_CALLEE_SAVED_START: usize = 19;
+    const FIELD_SEGMENT_ORIGINAL_DATA_BASE: usize = 19;
+    const FIELD_PROMPT_FRAME_LOCALS: usize = 20;
+    const FIELD_PROMPT_FRAME_TRAILING: usize = 21;
+    const FIELD_PROMPT_FRAME_SIZE: usize = 22;
+    const FIELD_CAPTURED_CALLEE_SAVED_START: usize = 23;
     const NUM_CAPTURED_CALLEE_SAVED: usize = 10;
 
     pub fn from_tagged(tagged: usize) -> Option<Self> {
@@ -3956,7 +4202,11 @@ impl ContinuationObject {
         self.heap_obj.get_field(Self::FIELD_SEGMENT_PTR)
     }
 
-    /// Returns the offset of the GC frame chain top within the segment data.
+    /// Returns the offset of the innermost frame pointer within the captured segment data.
+    pub fn segment_frame_pointer_offset(&self) -> usize {
+        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_SEGMENT_FRAME_POINTER_OFFSET))
+    }
+
     pub fn segment_gc_frame_offset(&self) -> usize {
         BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_SEGMENT_GC_FRAME_OFFSET))
     }
@@ -3979,61 +4229,139 @@ impl ContinuationObject {
         );
     }
 
-    /// Returns (segment_data_base, segment_data_top, gc_frame_top) for this continuation's
-    /// captured segment. Returns None if segment_ptr is null.
-    /// If the segment has been moved by compacting GC, this also relocates interior
-    /// frame chain pointers to the new location.
-    pub fn segment_info(&self) -> Option<(usize, usize, usize)> {
+    pub fn prompt_frame_locals_ptr(&self) -> usize {
+        self.heap_obj.get_field(Self::FIELD_PROMPT_FRAME_LOCALS)
+    }
+
+    pub fn prompt_frame_trailing_ptr(&self) -> usize {
+        self.heap_obj.get_field(Self::FIELD_PROMPT_FRAME_TRAILING)
+    }
+
+    pub fn prompt_frame_size(&self) -> usize {
+        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_PROMPT_FRAME_SIZE))
+    }
+
+    pub fn set_prompt_frame_snapshot(
+        &mut self,
+        locals_ptr: usize,
+        trailing_ptr: usize,
+        frame_size: usize,
+    ) {
+        self.heap_obj
+            .write_field(Self::FIELD_PROMPT_FRAME_LOCALS as i32, locals_ptr);
+        self.heap_obj
+            .write_field(Self::FIELD_PROMPT_FRAME_TRAILING as i32, trailing_ptr);
+        self.heap_obj.write_field(
+            Self::FIELD_PROMPT_FRAME_SIZE as i32,
+            BuiltInTypes::Int.tag(frame_size as isize) as usize,
+        );
+    }
+
+    pub fn set_segment_ptr_with_barrier(&mut self, runtime: &mut Runtime, segment_ptr: usize) {
+        runtime.set_field_with_barrier(self.tagged_ptr(), Self::FIELD_SEGMENT_PTR, segment_ptr);
+    }
+
+    pub fn set_prompt_frame_snapshot_with_barrier(
+        &mut self,
+        runtime: &mut Runtime,
+        locals_ptr: usize,
+        trailing_ptr: usize,
+        frame_size: usize,
+    ) {
+        runtime.set_field_with_barrier(self.tagged_ptr(), Self::FIELD_PROMPT_FRAME_LOCALS, locals_ptr);
+        runtime.set_field_with_barrier(
+            self.tagged_ptr(),
+            Self::FIELD_PROMPT_FRAME_TRAILING,
+            trailing_ptr,
+        );
+        self.heap_obj.write_field(
+            Self::FIELD_PROMPT_FRAME_SIZE as i32,
+            BuiltInTypes::Int.tag(frame_size as isize) as usize,
+        );
+    }
+
+    pub fn restore_prompt_frame_snapshot(&self, target_fp: usize) {
+        let locals_ptr = self.prompt_frame_locals_ptr();
+        if let Some(locals_obj) = HeapObject::try_from_tagged(locals_ptr) {
+            let num_locals = locals_obj.fields_size() / 8;
+            for i in 0..num_locals {
+                let slot_addr = target_fp.wrapping_sub(24).wrapping_sub(i * 8);
+                let slot_value = locals_obj.get_field(i);
+                unsafe { *(slot_addr as *mut usize) = slot_value };
+            }
+        }
+
+        let trailing_ptr = self.prompt_frame_trailing_ptr();
+        if let Some(trailing_obj) = HeapObject::try_from_tagged(trailing_ptr) {
+            let frame_size = self.prompt_frame_size();
+            let frame_bottom = target_fp
+                .checked_add(16)
+                .and_then(|v| v.checked_sub(frame_size))
+                .expect("Prompt frame restore underflow computing frame_bottom");
+            let trailing_bytes = trailing_obj.get_opaque_bytes();
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    trailing_bytes.as_ptr(),
+                    frame_bottom as *mut u8,
+                    trailing_bytes.len(),
+                );
+            }
+        }
+    }
+
+    fn normalized_segment_base(&self) -> Option<(usize, usize)> {
         let seg_tagged = self.segment_ptr();
-        if seg_tagged == 0 || seg_tagged == BuiltInTypes::null_value() as usize {
+        if seg_tagged == 0
+            || seg_tagged == BuiltInTypes::null_value() as usize
+            || !BuiltInTypes::is_heap_pointer(seg_tagged)
+        {
             return None;
         }
         let seg_obj = HeapObject::from_tagged(seg_tagged);
         let data_base = seg_obj.untagged() + seg_obj.header_size();
         let size = self.segment_size();
-        let gc_offset = self.segment_gc_frame_offset();
         let original_base = self.segment_original_data_base();
+        if size == 0 {
+            return None;
+        }
 
-        // If the segment moved (compacting GC), relocate interior frame chain
-        // pointers (FP chain and GC prev links) to the new location.
-        if original_base != 0 && original_base != data_base {
-            let delta = data_base as isize - original_base as isize;
-            let mut header_addr = data_base + gc_offset;
-            while header_addr >= data_base && header_addr < data_base + size && header_addr != 0 {
-                // Relocate prev pointer at [header_addr - 8]
-                let prev_slot = (header_addr - 8) as *mut usize;
-                let prev_val = unsafe { *prev_slot };
-                if prev_val >= original_base && prev_val < original_base + size {
-                    unsafe { *prev_slot = (prev_val as isize + delta) as usize; }
-                } else {
-                    break;
-                }
-
-                // Relocate FP at the frame (caller FP stored at the frame's data)
-                // FP is stored above the header: at header_addr + 8 is the frame pointer location
-                // Actually, we need to walk via the frame layout:
-                // [FP + 0] = saved caller FP, [FP - 8] = header, [FP - 16] = prev
-                // So FP = header_addr + 8. The saved caller FP is at *(FP) = *(header_addr + 8)
-                let fp = header_addr + 8;
-                let caller_fp_slot = fp as *mut usize;
-                let caller_fp = unsafe { *caller_fp_slot };
-                if caller_fp >= original_base && caller_fp < original_base + size {
-                    unsafe { *caller_fp_slot = (caller_fp as isize + delta) as usize; }
-                }
-
-                let new_prev = unsafe { *prev_slot };
-                if new_prev == 0 || new_prev < data_base || new_prev >= data_base + size {
-                    break;
-                }
-                header_addr = new_prev;
-            }
-
-            // Update the stored original base to the current base so we don't
-            // relocate again on the next call.
+        let fp_offset = self.segment_frame_pointer_offset();
+        let gc_offset = self.segment_gc_frame_offset();
+        let caller_moved = fp_offset < size
+            && relocate_segment_caller_fp_links(data_base, size, fp_offset, original_base)
+                != original_base;
+        if fp_offset < size {
+            let _ = rebuild_segment_gc_prev_links_from_caller_chain(data_base, size, fp_offset, 0);
+        } else if gc_offset < size {
+            let _ = relocate_segment_gc_prev_links(data_base, size, gc_offset, original_base);
+        }
+        if caller_moved {
             self.heap_obj.write_field(
                 Self::FIELD_SEGMENT_ORIGINAL_DATA_BASE as i32,
                 BuiltInTypes::Int.tag(data_base as isize) as usize,
             );
+        }
+
+        Some((data_base, size))
+    }
+
+    /// Returns (segment_data_base, segment_data_top, innermost_fp) for this continuation's
+    /// captured segment. Returns None if the continuation has no captured segment.
+    pub fn segment_frame_info(&self) -> Option<(usize, usize, usize)> {
+        let (data_base, size) = self.normalized_segment_base()?;
+        let fp_offset = self.segment_frame_pointer_offset();
+        if fp_offset >= size {
+            return None;
+        }
+
+        Some((data_base, data_base + size, data_base + fp_offset))
+    }
+
+    pub fn segment_gc_frame_info(&self) -> Option<(usize, usize, usize)> {
+        let (data_base, size) = self.normalized_segment_base()?;
+        let gc_offset = self.segment_gc_frame_offset();
+        if gc_offset >= size {
+            return None;
         }
 
         Some((data_base, data_base + size, data_base + gc_offset))
@@ -4098,6 +4426,7 @@ impl ContinuationObject {
         result_local: isize,
         prompt: &PromptHandler,
         segment_ptr: usize,
+        segment_frame_pointer_offset: usize,
         segment_gc_frame_offset: usize,
         segment_size: usize,
         captured_callee_saved_regs: &[usize; Self::NUM_CAPTURED_CALLEE_SAVED],
@@ -4170,6 +4499,10 @@ impl ContinuationObject {
             segment_ptr,
         );
         heap_obj.write_field(
+            Self::FIELD_SEGMENT_FRAME_POINTER_OFFSET as i32,
+            BuiltInTypes::Int.tag(segment_frame_pointer_offset as isize) as usize,
+        );
+        heap_obj.write_field(
             Self::FIELD_SEGMENT_GC_FRAME_OFFSET as i32,
             BuiltInTypes::Int.tag(segment_gc_frame_offset as isize) as usize,
         );
@@ -4180,6 +4513,18 @@ impl ContinuationObject {
         // Store 0 initially — will be set after we know the data base address
         heap_obj.write_field(
             Self::FIELD_SEGMENT_ORIGINAL_DATA_BASE as i32,
+            BuiltInTypes::Int.tag(0) as usize,
+        );
+        heap_obj.write_field(
+            Self::FIELD_PROMPT_FRAME_LOCALS as i32,
+            BuiltInTypes::null_value() as usize,
+        );
+        heap_obj.write_field(
+            Self::FIELD_PROMPT_FRAME_TRAILING as i32,
+            BuiltInTypes::null_value() as usize,
+        );
+        heap_obj.write_field(
+            Self::FIELD_PROMPT_FRAME_SIZE as i32,
             BuiltInTypes::Int.tag(0) as usize,
         );
         for (i, reg) in captured_callee_saved_regs.iter().enumerate() {
@@ -4208,6 +4553,8 @@ pub struct PerThreadData {
 
     pub return_from_shift_via_pop_prompt: bool,
     pub is_handler_return: bool,
+    /// Temporary roots for ContinuationObjects that are mid-construction during
+    /// capture/allocation. This is not runtime control-flow state.
     pub saved_continuation_ptrs: Vec<usize>,
     pub thread_exception_handler_fn: Option<usize>,
     pub native_scratch_stack: Vec<u8>,
@@ -4228,12 +4575,10 @@ pub struct PerThreadData {
     /// Segment handles detached during capture before the continuation object exists.
     pub pending_captured_segment_handles: Vec<usize>,
     /// Heap-allocated segment objects pending attachment to a ContinuationObject.
-    /// Each entry is (tagged_heap_ptr, gc_frame_offset, segment_size) so GC can
-    /// walk interior heap pointers during the brief window between segment allocation
-    /// and ContinuationObject creation.
-    pub pending_heap_segments: Vec<(usize, usize, usize)>,
-    /// Prompt-frame snapshots keyed by captured segment handle ID.
-    pub captured_prompt_frames: std::collections::HashMap<usize, SuspendedFrame>,
+    /// Each entry is (tagged_heap_ptr, gc_frame_offset, segment_size, original_data_base).
+    /// The original_data_base preserves the capture-time frame-link base if GC moves
+    /// the segment before a ContinuationObject exists to own that metadata.
+    pub pending_heap_segments: Vec<(usize, usize, usize, usize)>,
     /// Suspended caller frames preserved across segmented invoke/return.
     pub suspended_frames: std::collections::HashMap<usize, SuspendedFrame>,
     pub suspended_frame_id_counter: usize,
@@ -4262,7 +4607,6 @@ impl PerThreadData {
             captured_segments: std::collections::HashMap::new(),
             prompt_captured_segments: std::collections::HashMap::new(),
             pending_captured_segment_handles: Vec::new(),
-            captured_prompt_frames: std::collections::HashMap::new(),
             suspended_frames: std::collections::HashMap::new(),
             suspended_frame_id_counter: 1,
         }
@@ -4329,14 +4673,6 @@ impl PerThreadData {
         self.suspended_frame_id_counter += 1;
         self.suspended_frames.insert(id, frame);
         id
-    }
-
-    pub fn store_captured_prompt_frame(&mut self, segment_handle_id: usize, frame: SuspendedFrame) {
-        self.captured_prompt_frames.insert(segment_handle_id, frame);
-    }
-
-    pub fn captured_prompt_frame(&self, segment_handle_id: usize) -> Option<&SuspendedFrame> {
-        self.captured_prompt_frames.get(&segment_handle_id)
     }
 
     pub fn mark_pending_captured_segment(&mut self, segment_handle_id: usize) {
@@ -4735,11 +5071,6 @@ pub fn recycle_unreachable_captured_segments(
                 retain_continuation_handle(&mut live_handles, slot);
             }
         }
-        for frame in ptd.captured_prompt_frames.values() {
-            for slot in frame.locals.iter().copied() {
-                retain_continuation_handle(&mut live_handles, slot);
-            }
-        }
         live_handles.extend(ptd.pending_captured_segment_handles.iter().copied());
 
         let stale_segment_ids: Vec<usize> = ptd
@@ -4753,7 +5084,6 @@ pub fn recycle_unreachable_captured_segments(
             if let Some((segment, _gc_top)) = ptd.captured_segments.remove(&segment_id) {
                 ptd.recycle_segment(segment);
             }
-            ptd.captured_prompt_frames.remove(&segment_id);
         }
 
         ptd.prompt_captured_segments.retain(|_, segment_ids| {
@@ -5119,6 +5449,35 @@ impl Runtime {
         let pointer = self.allocate(total_words, stack_pointer, BuiltInTypes::HeapObject)?;
         let pointer = self.memory.allocate_string(bytes, pointer)?;
         Ok(pointer)
+    }
+
+    pub fn allocate_opaque_bytes_from_bytes(
+        &mut self,
+        stack_pointer: usize,
+        bytes: &[u8],
+    ) -> Result<Tagged, Box<dyn Error>> {
+        let words = bytes.len().div_ceil(8);
+        let pointer = self.allocate(words, stack_pointer, BuiltInTypes::HeapObject)?;
+        let mut heap_object = HeapObject::from_tagged(pointer);
+        let is_large = words > Header::MAX_INLINE_SIZE;
+        heap_object.writer_header_direct(Header {
+            type_id: 0,
+            type_data: bytes.len() as u32,
+            size: if is_large { 0xFFFF } else { words as u16 },
+            opaque: true,
+            marked: false,
+            large: is_large,
+            type_flags: 0,
+        });
+        if is_large {
+            let size_ptr = (heap_object.untagged() + 8) as *mut usize;
+            unsafe { *size_ptr = words };
+        }
+        let data_len = words * 8;
+        let mut data = vec![0u8; data_len];
+        data[..bytes.len()].copy_from_slice(bytes);
+        heap_object.write_fields(&data);
+        Ok(BuiltInTypes::HeapObject.tagged(pointer))
     }
 
     /// Allocate a string slice: a lightweight view into a parent string.
@@ -9009,6 +9368,11 @@ impl Runtime {
             *((stack_pointer - 8) as *mut usize) = global_block_ptr;
         }
         trampoline(stack_pointer as u64, fn_ptr as u64) as usize
+    }
+
+    #[cfg(test)]
+    pub(crate) fn heap_for_testing(&mut self) -> &mut crate::Alloc {
+        &mut self.memory.heap
     }
 
     /// Return a tagged string literal for a single ASCII byte.

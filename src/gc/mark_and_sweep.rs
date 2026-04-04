@@ -275,6 +275,10 @@ impl FreeList {
             self.next_fit_index = self.ranges.len() - 1;
         }
     }
+
+    fn total_free_bytes(&self) -> usize {
+        self.ranges.iter().map(|range| range.size).sum()
+    }
 }
 
 pub struct MarkAndSweep {
@@ -339,24 +343,27 @@ impl MarkAndSweep {
         let Some(cont) = ContinuationObject::from_heap_object(object) else {
             return;
         };
-        let Some((segment_base, segment_top, gc_frame_top)) = cont.segment_info() else {
+        let Some((segment_base, segment_top, gc_frame_top)) = cont.segment_gc_frame_info() else {
             return;
         };
-        StackWalker::walk_segment_gc_roots(
-            gc_frame_top,
-            segment_base,
-            segment_top,
-            |slot_addr, pointer| {
-                let untagged = BuiltInTypes::untag(pointer);
-                if untagged != 0 && untagged.is_multiple_of(8) {
-                    to_mark.push(PendingMark {
-                        object_ptr: pointer,
-                        source_addr: slot_addr,
-                        source_kind: "captured-segment-root",
-                    });
-                }
-            },
-        );
+        let mut push_slot = |slot_addr, pointer| {
+            let untagged = BuiltInTypes::untag(pointer);
+            if untagged != 0 && untagged.is_multiple_of(8) {
+                to_mark.push(PendingMark {
+                    object_ptr: pointer,
+                    source_addr: slot_addr,
+                    source_kind: "captured-segment-root",
+                });
+            }
+        };
+        if gc_frame_top >= segment_base && gc_frame_top < segment_top {
+            StackWalker::walk_segment_gc_roots(
+                gc_frame_top,
+                segment_base,
+                segment_top,
+                &mut push_slot,
+            );
+        }
     }
 
     /// Check if a pointer is within this allocator's space
@@ -372,6 +379,10 @@ impl MarkAndSweep {
     /// Get the size of this heap space in bytes
     pub fn heap_size(&self) -> usize {
         self.space.byte_count()
+    }
+
+    pub fn free_bytes(&self) -> usize {
+        self.free_list.total_free_bytes()
     }
 
     fn shrink_highmark_if_tail_is_free(&mut self) {
@@ -443,37 +454,14 @@ impl MarkAndSweep {
         // TODO: I could amortize this by copying lazily and coalescing
         // the copies together if they are continuous
 
-        // Read the header from the data to determine if it's a large object.
-        // Large objects have 16-byte headers, small objects have 8-byte headers.
-        let header_value = usize::from_ne_bytes(data[0..8].try_into().unwrap());
-        let header_size = if Header::is_large_object_bit_set(header_value) {
-            16
-        } else {
-            8
-        };
-
-        let pointer = self
-            .allocate_inner(
-                Word::from_bytes(data.len() - header_size),
-                Some(data),
-                crate::types::BuiltInTypes::HeapObject,
-            )
-            .unwrap();
-
-        if let AllocateAction::Allocated(pointer) = pointer {
-            pointer
-        } else {
-            #[cfg(feature = "debug-gc")]
-            eprintln!(
-                "[GC DEBUG] copy_data_to_offset: allocation failed, data.len={}, header_size={}, space.page_count={}, space.byte_count={}",
-                data.len(),
-                header_size,
-                self.space.page_count,
-                self.space.byte_count()
-            );
+        let Some(offset) = self.free_list.allocate(data.len()) else {
             self.grow();
-            self.copy_data_to_offset(data)
-        }
+            return self.copy_data_to_offset(data);
+        };
+        self.space.update_highmark(offset);
+        let pointer = self.space.copy_data_to_offset(offset, data) as *const u8;
+        assert!(self.space.contains(pointer));
+        pointer
     }
 
     fn mark_from_chain(&self, gc_frame_top: usize) {
@@ -501,28 +489,29 @@ impl MarkAndSweep {
             let runtime = crate::get_runtime().get();
             let registry = runtime.per_thread_registry.lock().unwrap();
             for ptd_ptr in registry.iter() {
-                let ptd = unsafe { &*ptd_ptr.0 };
+                let ptd = unsafe { &mut *ptd_ptr.0 };
                 // Scan heap-allocated pending segment objects that haven't been
                 // attached to a ContinuationObject yet. These contain captured stack
                 // frames whose interior heap pointers must be traced.
-                for &(seg_tagged, gc_frame_offset, seg_size) in ptd.pending_heap_segments.iter() {
-                    if BuiltInTypes::is_heap_pointer(seg_tagged) && seg_size > 0 {
-                        let seg_obj = HeapObject::from_tagged(seg_tagged);
+                for (seg_tagged, _gc_frame_offset, seg_size, _original_data_base) in
+                    ptd.pending_heap_segments.iter_mut()
+                {
+                    if BuiltInTypes::is_heap_pointer(*seg_tagged) && *seg_size > 0 {
+                        let seg_obj = HeapObject::from_tagged(*seg_tagged);
                         let data_base = seg_obj.untagged() + seg_obj.header_size();
-                        let gc_frame_top = data_base + gc_frame_offset;
-                        StackWalker::walk_segment_gc_roots(
-                            gc_frame_top,
-                            data_base,
-                            data_base + seg_size,
-                            |slot_addr, pointer| {
+                        let scan_size = *seg_size & !0x7;
+                        for word_offset in (0..scan_size).step_by(8) {
+                            let slot_addr = data_base + word_offset;
+                            let pointer = unsafe { *(slot_addr as *const usize) };
+                            if HeapObject::try_from_tagged(pointer).is_some() {
                                 push_root(
                                     &mut to_mark,
                                     pointer,
                                     slot_addr,
                                     "pending-heap-segment-root",
                                 );
-                            },
-                        );
+                            }
+                        }
                     }
                 }
                 // Also scan old-style pending segments if any remain
@@ -551,11 +540,6 @@ impl MarkAndSweep {
                 for frame in ptd.suspended_frames.values() {
                     for slot in frame.locals.iter().copied() {
                         push_root(&mut to_mark, slot, 0, "suspended-frame-local");
-                    }
-                }
-                for frame in ptd.captured_prompt_frames.values() {
-                    for slot in frame.locals.iter().copied() {
-                        push_root(&mut to_mark, slot, 0, "captured-prompt-local");
                     }
                 }
                 if let Some(ctx) = ptd.safe_return_context.as_ref() {
@@ -871,8 +855,8 @@ impl MarkAndSweep {
 
             if !heap_object.is_opaque_object() {
                 for field in heap_object.get_fields_mut().iter_mut() {
-                    if BuiltInTypes::is_heap_pointer(*field) {
-                        let field_untagged = BuiltInTypes::untag(*field);
+                    if let Some(field_obj) = HeapObject::try_from_tagged(*field) {
+                        let field_untagged = field_obj.untagged();
                         let field_tag = *field & 7;
                         if self.space.contains(field_untagged as *const u8) {
                             let field_header = unsafe { *(field_untagged as *const usize) };

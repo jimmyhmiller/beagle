@@ -262,7 +262,7 @@ enum IOAction {
 // ============================================================================
 
 enum PendingOp {
-    TcpIO { result_atom, loop_id },
+    TcpIO { op_id, loop_id },
     FileIO { handle, loop_id },
     Timer { marker, loop_id },
     SpawnedTask { future },
@@ -754,7 +754,7 @@ extend BlockingAsyncHandler with effect/Handler(Async) {
                 null
             }
         }
-        resume(result)
+        effect/resume-tail(resume, result)
     }
 }
 
@@ -1882,22 +1882,22 @@ let TCP_WRITE_OK = 7
 let TCP_WRITE_ERR = 8
 
 // Decode a completed TCP result into a Beagle value
-fn decode-tcp-result(result_type, loop_id) {
+fn decode-tcp-result(result_type, loop_id, op_id) {
     if result_type == TCP_CONNECT_OK || result_type == TCP_ACCEPT_OK {
-        let socket_id = core/tcp-result-value(loop_id)
+        let socket_id = core/tcp-result-value-for-op-id(loop_id, op_id)
         TcpSocket { loop_id: loop_id, socket_id: socket_id }
     } else if result_type == TCP_READ_OK {
-        core/tcp-result-data(loop_id)
+        core/tcp-result-data-for-op-id(loop_id, op_id)
     } else if result_type == TCP_WRITE_OK {
-        core/tcp-result-value(loop_id)
+        core/tcp-result-value-for-op-id(loop_id, op_id)
     } else if result_type == TCP_CONNECT_ERR {
-        throw("Connect failed: " ++ core/tcp-result-data(loop_id))
+        throw("Connect failed: " ++ core/tcp-result-data-for-op-id(loop_id, op_id))
     } else if result_type == TCP_ACCEPT_ERR {
-        throw("Accept failed: " ++ core/tcp-result-data(loop_id))
+        throw("Accept failed: " ++ core/tcp-result-data-for-op-id(loop_id, op_id))
     } else if result_type == TCP_READ_ERR {
-        throw("Read failed: " ++ core/tcp-result-data(loop_id))
+        throw("Read failed: " ++ core/tcp-result-data-for-op-id(loop_id, op_id))
     } else if result_type == TCP_WRITE_ERR {
-        throw("Write failed: " ++ core/tcp-result-data(loop_id))
+        throw("Write failed: " ++ core/tcp-result-data-for-op-id(loop_id, op_id))
     } else {
         throw("Unknown TCP result type: " ++ to-string(result_type))
     }
@@ -1967,24 +1967,20 @@ extend CooperativeHandler with effect/Handler(Async) {
 
                     // Asynchronous — submit and stash, do NOT resume
                     IOAction.TcpAccept { listener } => {
-                        let result_atom = atom(null)
-                        core/tcp-accept-async(loop_id, listener.listener_id, result_atom)
-                        stash-task(self.tasks, PendingOp.TcpIO { result_atom: result_atom, loop_id: loop_id }, resume)
+                        let op_id = core/tcp-accept-async(loop_id, listener.listener_id, 0)
+                        stash-task(self.tasks, PendingOp.TcpIO { op_id: op_id, loop_id: loop_id }, resume)
                     },
                     IOAction.TcpRead { socket, n } => {
-                        let result_atom = atom(null)
-                        core/tcp-read-async(loop_id, socket.socket_id, n, result_atom)
-                        stash-task(self.tasks, PendingOp.TcpIO { result_atom: result_atom, loop_id: loop_id }, resume)
+                        let op_id = core/tcp-read-async(loop_id, socket.socket_id, n, 0)
+                        stash-task(self.tasks, PendingOp.TcpIO { op_id: op_id, loop_id: loop_id }, resume)
                     },
                     IOAction.TcpWrite { socket, data } => {
-                        let result_atom = atom(null)
-                        core/tcp-write-async(loop_id, socket.socket_id, data, result_atom)
-                        stash-task(self.tasks, PendingOp.TcpIO { result_atom: result_atom, loop_id: loop_id }, resume)
+                        let op_id = core/tcp-write-async(loop_id, socket.socket_id, data, 0)
+                        stash-task(self.tasks, PendingOp.TcpIO { op_id: op_id, loop_id: loop_id }, resume)
                     },
                     IOAction.TcpConnect { host, port } => {
-                        let result_atom = atom(null)
-                        core/tcp-connect-async(loop_id, host, port, result_atom)
-                        stash-task(self.tasks, PendingOp.TcpIO { result_atom: result_atom, loop_id: loop_id }, resume)
+                        let op_id = core/tcp-connect-async(loop_id, host, port, 0)
+                        stash-task(self.tasks, PendingOp.TcpIO { op_id: op_id, loop_id: loop_id }, resume)
                     }
                 }
             },
@@ -2171,19 +2167,18 @@ fn handle-io-action(action) {
 
         IOAction.TcpConnect { host, port } => {
             let loop_id = get-io-loop()
-            let result_atom = atom(null)
-            core/tcp-connect-async(loop_id, host, port, result_atom)
+            let op_id = core/tcp-connect-async(loop_id, host, port, 0)
 
             // Block until notified (timeout=0 means wait forever)
             // Workers notify immediately when connection result is ready
             loop {
                 core/event-loop-run-once(loop_id, 0)
-                let result_type = core/tcp-result-pop-for-atom(loop_id, result_atom)
+                let result_type = core/tcp-result-pop-for-op-id(loop_id, op_id)
                 if result_type == TCP_CONNECT_OK {
-                    let socket_id = core/tcp-result-value(loop_id)
+                    let socket_id = core/tcp-result-value-for-op-id(loop_id, op_id)
                     break(TcpSocket { loop_id: loop_id, socket_id: socket_id })
                 } else if result_type == TCP_CONNECT_ERR {
-                    let error = core/tcp-result-data(loop_id)
+                    let error = core/tcp-result-data-for-op-id(loop_id, op_id)
                     throw("Connect failed: " ++ error)
                 }
             }
@@ -2194,19 +2189,18 @@ fn handle-io-action(action) {
         // which thread is calling
         IOAction.TcpAccept { listener } => {
             let loop_id = listener.loop_id
-            let result_atom = atom(null)
-            core/tcp-accept-async(loop_id, listener.listener_id, result_atom)
+            let op_id = core/tcp-accept-async(loop_id, listener.listener_id, 0)
 
             // Block until notified (timeout=0 means wait forever)
             // Workers notify immediately when accept result is ready
             loop {
                 core/event-loop-run-once(loop_id, 0)
-                let result_type = core/tcp-result-pop-for-atom(loop_id, result_atom)
+                let result_type = core/tcp-result-pop-for-op-id(loop_id, op_id)
                 if result_type == TCP_ACCEPT_OK {
-                    let socket_id = core/tcp-result-value(loop_id)
+                    let socket_id = core/tcp-result-value-for-op-id(loop_id, op_id)
                     break(TcpSocket { loop_id: loop_id, socket_id: socket_id })
                 } else if result_type == TCP_ACCEPT_ERR {
-                    let error = core/tcp-result-data(loop_id)
+                    let error = core/tcp-result-data-for-op-id(loop_id, op_id)
                     throw("Accept failed: " ++ error)
                 }
             }
@@ -2214,8 +2208,8 @@ fn handle-io-action(action) {
 
         IOAction.TcpRead { socket, n } => {
             let loop_id = socket.loop_id
-            let result_atom = atom(null)
-            let read_result = core/tcp-read-async(loop_id, socket.socket_id, n, result_atom)
+            let op_id = core/tcp-read-async(loop_id, socket.socket_id, n, 0)
+            let read_result = op_id
             if read_result < 0 {
                 throw("Failed to start read operation")
             }
@@ -2224,12 +2218,12 @@ fn handle-io-action(action) {
             // Workers notify immediately when read result is ready
             loop {
                 core/event-loop-run-once(loop_id, 0)
-                let result_type = core/tcp-result-pop-for-atom(loop_id, result_atom)
+                let result_type = core/tcp-result-pop-for-op-id(loop_id, op_id)
                 if result_type == TCP_READ_OK {
-                    let data = core/tcp-result-data(loop_id)
+                    let data = core/tcp-result-data-for-op-id(loop_id, op_id)
                     break(data)
                 } else if result_type == TCP_READ_ERR {
-                    let error = core/tcp-result-data(loop_id)
+                    let error = core/tcp-result-data-for-op-id(loop_id, op_id)
                     throw("Read failed: " ++ error)
                 }
             }
@@ -2237,19 +2231,18 @@ fn handle-io-action(action) {
 
         IOAction.TcpWrite { socket, data } => {
             let loop_id = socket.loop_id
-            let result_atom = atom(null)
-            core/tcp-write-async(loop_id, socket.socket_id, data, result_atom)
+            let op_id = core/tcp-write-async(loop_id, socket.socket_id, data, 0)
 
             // Block until notified (timeout=0 means wait forever)
             // Workers notify immediately when write result is ready
             loop {
                 core/event-loop-run-once(loop_id, 0)
-                let result_type = core/tcp-result-pop-for-atom(loop_id, result_atom)
+                let result_type = core/tcp-result-pop-for-op-id(loop_id, op_id)
                 if result_type == TCP_WRITE_OK {
-                    let bytes_written = core/tcp-result-value(loop_id)
+                    let bytes_written = core/tcp-result-value-for-op-id(loop_id, op_id)
                     break(bytes_written)
                 } else if result_type == TCP_WRITE_ERR {
-                    let error = core/tcp-result-data(loop_id)
+                    let error = core/tcp-result-data-for-op-id(loop_id, op_id)
                     throw("Write failed: " ++ error)
                 }
             }
@@ -2370,7 +2363,7 @@ extend ImplicitAsyncHandler with effect/Handler(Async) {
                 null
             }
         }
-        resume(result)
+        effect/resume-tail(resume, result)
     }
 }
 
@@ -2389,10 +2382,10 @@ fn poll-tasks(tasks, loop_id) {
     let mut remaining = []
     for task in tasks {
         match task.op {
-            PendingOp.TcpIO { result_atom, loop_id: op_loop_id } => {
-                let result_type = core/tcp-result-pop-for-atom(op_loop_id, result_atom)
+            PendingOp.TcpIO { op_id, loop_id: op_loop_id } => {
+                let result_type = core/tcp-result-pop-for-op-id(op_loop_id, op_id)
                 if result_type != 0 {
-                    let result = decode-tcp-result(result_type, op_loop_id)
+                    let result = decode-tcp-result(result_type, op_loop_id, op_id)
                     ready = push(ready, ReadyTask { resume: task.resume, result: result })
                 } else {
                     remaining = push(remaining, task)

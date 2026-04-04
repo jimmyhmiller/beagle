@@ -1,0 +1,32 @@
+namespace tmp_cont_stack_many_writes
+
+use beagle.core as core
+use beagle.socket as socket
+
+fn main() {
+    let port = 29893
+
+    thread(fn() {
+        let server = socket/listen("127.0.0.1", port)
+        let client = socket/accept(server)
+        let mut total = ""
+        let mut reading = true
+        while reading {
+            let data = socket/read(client, 4096)
+            if data == null || data == "" { reading = false }
+            else { total = total ++ data }
+        }
+        socket/close(client)
+    })
+
+    core/sleep(200)
+
+    let conn = socket/connect("127.0.0.1", port)
+    let mut i = 0
+    while i < 200 {
+        socket/write(conn, to-string(i) ++ "\n")
+        i = i + 1
+    }
+    socket/close(conn)
+    println("ok")
+}
