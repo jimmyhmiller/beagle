@@ -1158,7 +1158,12 @@ impl Compiler {
                     StackMapDetails {
                         function_name: function_name.map(|x| x.to_string()),
                         current_stack_size: *value,
-                        number_of_locals: backend.max_locals() as usize,
+                        // Detached continuation scans should only treat the
+                        // semantic Beagle locals as part of the resumed frame
+                        // state. Regalloc spill/save slots live above this
+                        // range in the physical frame, but they are scratch
+                        // stack slots rather than true continuation locals.
+                        number_of_locals: max_locals,
                         max_stack_size: backend.max_stack_size() as usize,
                         num_callee_saved: backend.num_callee_saved(),
                     },

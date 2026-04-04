@@ -1266,6 +1266,7 @@ impl AstCompiler<'_> {
                 let token_map = self.ir_range_to_token_range.pop().unwrap();
                 self.ir.ir_range_to_token_range = token_map.clone();
 
+                let continuation_gc_locals = self.ir.num_locals;
                 let mut backend = self.ir.compile(backend, error_fn_pointer);
                 let token_map = self.ir.ir_range_to_token_range.clone();
 
@@ -1305,7 +1306,7 @@ impl AstCompiler<'_> {
                     .upsert_function(
                         full_function_name.as_deref(),
                         &mut backend,
-                        self.ir.num_locals,
+                        continuation_gc_locals,
                         actual_arity,
                         is_variadic,
                         min_args,
