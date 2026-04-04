@@ -237,7 +237,10 @@ fn segment_frame_pointer_is_valid(frame_pointer: usize, segment_base: usize, seg
     }
 
     let saved_fp = unsafe { *(frame_pointer as *const usize) };
-    if saved_fp != 0 && saved_fp > frame_pointer && (saved_fp < segment_base || saved_fp >= segment_top) {
+    if saved_fp >= segment_base.saturating_add(8)
+        && saved_fp < segment_top
+        && saved_fp <= frame_pointer
+    {
         return false;
     }
 
@@ -257,29 +260,20 @@ fn find_segment_innermost_frame_pointer(
     segment_top: usize,
     gc_frame_top: usize,
     raw_frame_pointer: usize,
-) -> usize {
+) -> Option<usize> {
     let gc_frame_pointer = gc_frame_top.saturating_add(8);
     if gc_frame_top >= stack_pointer
         && gc_frame_top < segment_top
         && segment_frame_pointer_is_valid(gc_frame_pointer, stack_pointer, segment_top)
     {
-        return gc_frame_pointer;
+        return Some(gc_frame_pointer);
     }
 
     if segment_frame_pointer_is_valid(raw_frame_pointer, stack_pointer, segment_top) {
-        return raw_frame_pointer;
+        return Some(raw_frame_pointer);
     }
 
-    let mut header_addr = stack_pointer;
-    while header_addr.saturating_add(16) < segment_top {
-        let candidate_fp = header_addr + 8;
-        if segment_frame_pointer_is_valid(candidate_fp, stack_pointer, segment_top) {
-            return candidate_fp;
-        }
-        header_addr = header_addr.saturating_add(8);
-    }
-
-    0
+    None
 }
 
 /// Called by JIT prologue AFTER arguments have been saved to locals.
@@ -12497,7 +12491,18 @@ unsafe fn capture_continuation_runtime_inner(
         segment.top,
         captured_gc_frame_top,
         frame_pointer,
-    );
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "capture_continuation_runtime could not identify a Beagle frame anchor in the captured segment (prompt_id={} sp={:#x} fp={:#x} gc_top={:#x} seg_base={:#x} seg_top={:#x})",
+            prompt.prompt_id,
+            stack_pointer,
+            frame_pointer,
+            captured_gc_frame_top,
+            segment.base,
+            segment.top,
+        )
+    });
 
     if std::env::var("BEAGLE_DEBUG_CAPTURE_FP").is_ok() {
         let fp_header = if frame_pointer >= stack_pointer + 8 && frame_pointer < segment.top {
@@ -12529,18 +12534,8 @@ unsafe fn capture_continuation_runtime_inner(
     // chain must begin at the header for this same innermost frame; using a
     // separate raw GC_FRAME_TOP-derived offset lets the two anchors drift apart
     // across invoke/capture cycles.
-    let segment_frame_pointer_offset = if captured_frame_pointer != 0 {
-        captured_frame_pointer - stack_pointer
-    } else {
-        stack_size
-    };
-    let segment_gc_frame_offset = if captured_frame_pointer >= stack_pointer + 8
-        && captured_frame_pointer < segment.top
-    {
-        (captured_frame_pointer - 8) - stack_pointer
-    } else {
-        stack_size
-    };
+    let segment_frame_pointer_offset = captured_frame_pointer - stack_pointer;
+    let segment_gc_frame_offset = (captured_frame_pointer - 8) - stack_pointer;
 
     // NOTE: prompt frame capture is deferred until AFTER all heap allocations
     // to avoid the "stale GcHandle after allocation" problem. The prompt frame's
@@ -12638,21 +12633,19 @@ unsafe fn capture_continuation_runtime_inner(
                     }
                 }
 
-                if captured_frame_pointer != 0 {
-                    let fp_offset = captured_frame_pointer - stack_pointer;
-                    crate::runtime::relocate_segment_caller_fp_links(
-                        data_ptr,
-                        stack_size,
-                        fp_offset,
-                        stack_pointer,
-                    );
-                    let _ = crate::runtime::rebuild_segment_gc_prev_links_from_caller_chain(
-                        data_ptr,
-                        stack_size,
-                        fp_offset,
-                        0,
-                    );
-                }
+                let fp_offset = captured_frame_pointer - stack_pointer;
+                crate::runtime::relocate_segment_caller_fp_links(
+                    data_ptr,
+                    stack_size,
+                    fp_offset,
+                    stack_pointer,
+                );
+                let _ = crate::runtime::rebuild_segment_gc_prev_links_from_caller_chain(
+                    data_ptr,
+                    stack_size,
+                    fp_offset,
+                    0,
+                );
 
                 ptr
             }
@@ -13210,10 +13203,13 @@ fn invoke_segmented_continuation(
     // Read the captured segment data from the heap-allocated opaque bytes object.
     let seg_tagged = continuation.segment_ptr();
     let seg_size = continuation.segment_size();
+    let seg_fp_offset = continuation.segment_frame_pointer_offset();
+    let seg_gc_offset = continuation.segment_gc_frame_offset();
+    let seg_original_base = continuation.segment_original_data_base();
     if seg_tagged == 0 || seg_tagged == BuiltInTypes::null_value() as usize || seg_size == 0 {
         panic!(
-            "invoke_segmented_continuation: continuation has no captured segment data (ptr={:#x} size={})",
-            seg_tagged, seg_size
+            "invoke_segmented_continuation: continuation has no captured segment data (ptr={:#x} size={} fp_offset={} gc_offset={} original_base={:#x})",
+            seg_tagged, seg_size, seg_fp_offset, seg_gc_offset, seg_original_base
         );
     }
 
@@ -13222,8 +13218,8 @@ fn invoke_segmented_continuation(
     let (seg_data_base, _seg_data_top, seg_innermost_fp) =
         continuation.segment_frame_info().unwrap_or_else(|| {
         panic!(
-            "invoke_segmented_continuation: continuation has no normalized segment data (ptr={:#x} size={})",
-            seg_tagged, seg_size
+            "invoke_segmented_continuation: continuation has no normalized segment data (ptr={:#x} size={} fp_offset={} gc_offset={} original_base={:#x})",
+            seg_tagged, seg_size, seg_fp_offset, seg_gc_offset, seg_original_base
         );
     });
 
