@@ -45,6 +45,16 @@ fn create-session(id) {
     }
 }
 
+fn rest-or-empty(items) {
+    let tail = rest(items)
+    if tail == null { [] } else { tail }
+}
+
+fn pop-or-empty(items) {
+    let remaining = slice(items, 0, length(items) - 1)
+    if remaining == null { [] } else { remaining }
+}
+
 fn session-eval-loop(queue, running, cancel, resume_stack) {
     while deref(cancel) == false {
         let requests = deref(queue)
@@ -52,7 +62,7 @@ fn session-eval-loop(queue, running, cancel, resume_stack) {
             core/sleep(10)
         } else {
             let request = first-of(requests)
-            let remaining = rest(requests)
+            let remaining = rest-or-empty(requests)
             reset!(queue, remaining)
             reset!(running, true)
             process-eval-request(request, cancel, queue, running, resume_stack)
@@ -68,7 +78,7 @@ fn build-responses(req_id, buf, result) {
         let output = core/trim-right(buf.content)
         responses = push(responses, assoc({:id req_id}, :out, output))
     }
-    let val_str = to-string(result)
+    let val_str = if result == null { "null" } else { to-string(result) }
     responses = push(responses, assoc({:id req_id}, :value, val_str))
     responses = push(responses, assoc({:id req_id}, :status, ["done"]))
     responses
@@ -128,17 +138,13 @@ fn process-eval-request(request, cancel, queue, running, resume_stack) {
 
                     // Pop ourselves from the stack before resuming
                     swap!(resume_stack, fn(stack) {
-                        slice(stack, 0, length(stack) - 1)
+                        pop-or-empty(stack)
                     })
 
                     let resume_buf = core/new-string-buffer()
+                    let value = eval(code)
                     let resumed_result = binding (core/out = resume_buf) {
-                        try {
-                            let value = eval(code)
-                            resume(value)
-                        } catch (resume_e) {
-                            resume_e
-                        }
+                        resume(value)
                     }
 
                     // resumed_result is the value the try body returned after resume
@@ -150,7 +156,7 @@ fn process-eval-request(request, cancel, queue, running, resume_stack) {
                 } else {
                     // abort
                     swap!(resume_stack, fn(stack) {
-                        slice(stack, 0, length(stack) - 1)
+                        pop-or-empty(stack)
                     })
                     let cmd_id = get(cmd, :id)
                     reset!(cmd_result_atom, [assoc({:id cmd_id}, :status, ["done"])])
@@ -163,7 +169,7 @@ fn process-eval-request(request, cancel, queue, running, resume_stack) {
                 let pending = deref(queue)
                 if !empty?(pending) {
                     let fix_request = first-of(pending)
-                    let fix_remaining = rest(pending)
+                    let fix_remaining = rest-or-empty(pending)
                     reset!(queue, fix_remaining)
                     reset!(running, true)
                     process-eval-request(fix_request, cancel, queue, running, resume_stack)
@@ -205,7 +211,7 @@ fn session-eval(session, request_id, code) {
 fn session-resume(session, request_id, code) {
     let result_atom = atom(null)
     let stack = deref(session.resume_stack)
-    if empty?(stack) {
+    if stack == null || empty?(stack) {
         let err_resp = assoc(assoc({:id request_id}, :status, ["error"]), :error, "No suspended exception to resume")
         reset!(result_atom, [err_resp])
     } else {
@@ -218,7 +224,7 @@ fn session-resume(session, request_id, code) {
 fn session-abort(session, request_id) {
     let result_atom = atom(null)
     let stack = deref(session.resume_stack)
-    if empty?(stack) {
+    if stack == null || empty?(stack) {
         let err_resp = assoc(assoc({:id request_id}, :status, ["error"]), :error, "No suspended exception to abort")
         reset!(result_atom, [err_resp])
     } else {
@@ -243,5 +249,6 @@ fn session-busy?(session) {
 }
 
 fn session-suspend-depth(session) {
-    length(deref(session.resume_stack))
+    let stack = deref(session.resume_stack)
+    if stack == null { 0 } else { length(stack) }
 }

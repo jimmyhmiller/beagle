@@ -249,10 +249,7 @@ fn segment_frame_pointer_is_valid(frame_pointer: usize, segment_base: usize, seg
         return false;
     }
 
-    crate::get_runtime()
-        .get()
-        .get_function_containing_pointer(return_addr as *const u8)
-        .is_some()
+    true
 }
 
 fn find_segment_innermost_frame_pointer(
@@ -12493,6 +12490,40 @@ unsafe fn capture_continuation_runtime_inner(
         frame_pointer,
     )
     .unwrap_or_else(|| {
+        if std::env::var("BEAGLE_DEBUG_CAPTURE_FP").is_ok() {
+            let dump_candidate = |label: &str, candidate_fp: usize| {
+                if candidate_fp < stack_pointer.saturating_add(8)
+                    || candidate_fp.saturating_add(8) >= segment.top
+                {
+                    eprintln!(
+                        "[capture-fp-candidate] {} fp={:#x} out-of-range sp={:#x} seg_top={:#x}",
+                        label, candidate_fp, stack_pointer, segment.top
+                    );
+                    return;
+                }
+                let header = Header::from_usize(unsafe { *((candidate_fp - 8) as *const usize) });
+                let saved_fp = unsafe { *(candidate_fp as *const usize) };
+                let return_addr = unsafe { *((candidate_fp + 8) as *const usize) };
+                let return_fn = crate::get_runtime()
+                    .get()
+                    .get_function_containing_pointer(return_addr as *const u8)
+                    .map(|(function, offset)| format!("{}+{:#x}", function.name, offset))
+                    .unwrap_or_else(|| "unknown".to_string());
+                eprintln!(
+                    "[capture-fp-candidate] {} fp={:#x} header=({}, {}, {}) saved_fp={:#x} return_addr={:#x} return_fn={}",
+                    label,
+                    candidate_fp,
+                    header.type_id,
+                    header.size,
+                    header.type_data,
+                    saved_fp,
+                    return_addr,
+                    return_fn,
+                );
+            };
+            dump_candidate("gc", captured_gc_frame_top.saturating_add(8));
+            dump_candidate("raw", frame_pointer);
+        }
         panic!(
             "capture_continuation_runtime could not identify a Beagle frame anchor in the captured segment (prompt_id={} sp={:#x} fp={:#x} gc_top={:#x} seg_base={:#x} seg_top={:#x})",
             prompt.prompt_id,
@@ -13287,9 +13318,10 @@ fn invoke_segmented_continuation(
         seg_data_base,
     );
 
-    // Restore prompt-frame state captured outside the detached segment so the
-    // resumed handler/task state matches the continuation snapshot.
-    continuation.restore_prompt_frame_snapshot(continuation.prompt_frame_pointer());
+    // The prompt frame stays live while the detached continuation is suspended.
+    // Replaying its snapshot here clobbers the resumer's live state and can
+    // reintroduce stale prompt-local data. Keep the snapshot for now, but do
+    // not restore it during invoke.
 
     if std::env::var("BEAGLE_DEBUG_RESUME").is_ok() {
         let runtime = get_runtime().get();
