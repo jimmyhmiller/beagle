@@ -78,6 +78,7 @@ jobs:
           fi
 
       - name: Run Beagle test suite
+        if: always()
         run: |
           if [ "${{ matrix.build-mode }}" = "release" ]; then
             cargo run --features ${{ matrix.gc-features }},${{ matrix.backend }} --release -- test --ctrf ctrf-report.json resources/
