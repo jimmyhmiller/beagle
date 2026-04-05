@@ -388,9 +388,17 @@ impl GenerationalGC {
                                 let owner_fn = crate::get_runtime()
                                     .get()
                                     .get_function_containing_pointer(owner_ret as *const u8)
-                                    .map(|(function, offset)| format!("{}+{:#x}", function.name, offset))
+                                    .map(|(function, offset)| {
+                                        format!("{}+{:#x}", function.name, offset)
+                                    })
                                     .unwrap_or_else(|| "unknown".to_string());
-                                owner_frame = Some((header_cursor, slot_index, owner_slots, owner_ret, owner_fn));
+                                owner_frame = Some((
+                                    header_cursor,
+                                    slot_index,
+                                    owner_slots,
+                                    owner_ret,
+                                    owner_fn,
+                                ));
                                 break;
                             }
                             let prev = unsafe { *((header_cursor - 8) as *const usize) };
@@ -1397,12 +1405,15 @@ impl GenerationalGC {
                     continuation_count += 1;
                     continuation_segment_bytes += cont.segment_size();
                     continuation_prompt_frame_bytes += cont.prompt_frame_size();
-                    max_prompt_frame_bytes =
-                        max_prompt_frame_bytes.max(cont.prompt_frame_size());
-                    if let Some(locals_obj) = HeapObject::try_from_tagged(cont.prompt_frame_locals_ptr()) {
+                    max_prompt_frame_bytes = max_prompt_frame_bytes.max(cont.prompt_frame_size());
+                    if let Some(locals_obj) =
+                        HeapObject::try_from_tagged(cont.prompt_frame_locals_ptr())
+                    {
                         continuation_prompt_snapshot_heap_bytes += locals_obj.full_size();
                     }
-                    if let Some(trailing_obj) = HeapObject::try_from_tagged(cont.prompt_frame_trailing_ptr()) {
+                    if let Some(trailing_obj) =
+                        HeapObject::try_from_tagged(cont.prompt_frame_trailing_ptr())
+                    {
                         continuation_prompt_snapshot_heap_bytes += trailing_obj.full_size();
                     }
                 }
@@ -1442,7 +1453,9 @@ mod tests {
             let heap_obj = HeapObject::from_untagged(ptr);
             let full_size = heap_obj.full_size();
             let object = HeapObject::from_untagged(ptr);
-            if !object.is_zero_size() && let Some(cont) = ContinuationObject::from_heap_object(object) {
+            if !object.is_zero_size()
+                && let Some(cont) = ContinuationObject::from_heap_object(object)
+            {
                 segment_ptrs.push(cont.segment_ptr());
             }
             offset += full_size;
@@ -1512,10 +1525,8 @@ fn main() {
         ));
         std::fs::write(&probe_path, probe_source).expect("failed to write continuation probe");
 
-        let args = crate::CommandLineArguments::for_run(
-            probe_path.to_string_lossy().into_owned(),
-            vec![],
-        );
+        let args =
+            crate::CommandLineArguments::for_run(probe_path.to_string_lossy().into_owned(), vec![]);
         crate::main_inner(args).expect("probe program should run");
 
         {

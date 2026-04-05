@@ -27,10 +27,7 @@ impl StackWalker {
         let frame_pointer = header_addr + 8;
         let return_addr = unsafe { *((frame_pointer + 8) as *const usize) };
         let max_slots = header.size as usize;
-        let stack_map = &crate::get_runtime()
-            .get()
-            .memory
-            .stack_map;
+        let stack_map = &crate::get_runtime().get().memory.stack_map;
         let details = stack_map.find_stack_data(return_addr);
         let live_slots = details
             .map(|details| (details.number_of_locals + details.current_stack_size).min(max_slots))

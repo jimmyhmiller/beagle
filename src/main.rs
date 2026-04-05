@@ -1379,9 +1379,7 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
             offset: 0,
             src: R11,
         });
-        lang.instructions.push(X86Asm::Label {
-            index: skip_write,
-        });
+        lang.instructions.push(X86Asm::Label { index: skip_write });
         // Set RAX = value so builtin-thrown errors resume with correct return value
         lang.instructions.push(X86Asm::MovRR {
             dest: RAX,
@@ -2128,8 +2126,12 @@ fn cmd_test(test_args: TestArgs) -> Result<(), Box<dyn Error>> {
             passed += 1;
         } else {
             println!("  FAIL  {}", file_str);
-            let failure =
-                format_test_process_failure(file_str, output.status, &output.stdout, &output.stderr);
+            let failure = format_test_process_failure(
+                file_str,
+                output.status,
+                &output.stdout,
+                &output.stderr,
+            );
             for line in failure.lines() {
                 println!("        {}", line);
             }
@@ -2211,11 +2213,7 @@ fn format_test_process_failure(
     stdout: &[u8],
     stderr: &[u8],
 ) -> String {
-    let mut message = format!(
-        "Test failed: {} ({})",
-        path,
-        describe_exit_status(status)
-    );
+    let mut message = format!("Test failed: {} ({})", path, describe_exit_status(status));
 
     let stderr_str = String::from_utf8_lossy(stderr);
     let stdout_str = String::from_utf8_lossy(stdout);
@@ -2290,7 +2288,8 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
                 if let Ok(contents) = std::fs::read_to_string(&status_path) {
                     for line in contents.lines() {
                         if let Some(val) = line.strip_prefix("VmRSS:") {
-                            if let Ok(kb) = val.trim().trim_end_matches(" kB").trim().parse::<u64>() {
+                            if let Ok(kb) = val.trim().trim_end_matches(" kB").trim().parse::<u64>()
+                            {
                                 peak_rss_clone.fetch_max(kb, std::sync::atomic::Ordering::Relaxed);
                             }
                         }
@@ -2334,10 +2333,20 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         let rss = peak_rss_kb.load(std::sync::atomic::Ordering::Relaxed);
 
         if !output_status.success() {
-            eprintln!("[test] FAIL {} ({:.2}s, peak_rss={}KB)", path, elapsed.as_secs_f64(), rss);
+            eprintln!(
+                "[test] FAIL {} ({:.2}s, peak_rss={}KB)",
+                path,
+                elapsed.as_secs_f64(),
+                rss
+            );
             return Err(format_test_process_failure(path, output_status, &stdout, &stderr).into());
         }
-        eprintln!("[test] PASS {} ({:.2}s, peak_rss={}KB)", path, elapsed.as_secs_f64(), rss);
+        eprintln!(
+            "[test] PASS {} ({:.2}s, peak_rss={}KB)",
+            path,
+            elapsed.as_secs_f64(),
+            rss
+        );
     }
     Ok(())
 }

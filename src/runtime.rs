@@ -33,9 +33,9 @@ use crate::{
 
 use crate::collections::{
     GcHandle, HandleScope, PersistentMap, PersistentVec, TYPE_ID_ATOM, TYPE_ID_CONS_STRING,
-    TYPE_ID_CONTINUATION, TYPE_ID_FUNCTION_OBJECT, TYPE_ID_KEYWORD, TYPE_ID_MULTI_ARITY_FUNCTION,
-    TYPE_ID_FRAME, TYPE_ID_PERSISTENT_MAP, TYPE_ID_PERSISTENT_SET, TYPE_ID_PERSISTENT_VEC,
-    TYPE_ID_RAW_ARRAY, TYPE_ID_STRING, TYPE_ID_STRING_SLICE,
+    TYPE_ID_CONTINUATION, TYPE_ID_FRAME, TYPE_ID_FUNCTION_OBJECT, TYPE_ID_KEYWORD,
+    TYPE_ID_MULTI_ARITY_FUNCTION, TYPE_ID_PERSISTENT_MAP, TYPE_ID_PERSISTENT_SET,
+    TYPE_ID_PERSISTENT_VEC, TYPE_ID_RAW_ARRAY, TYPE_ID_STRING, TYPE_ID_STRING_SLICE,
 };
 
 use std::cell::{Cell, RefCell};
@@ -123,7 +123,9 @@ impl GlobalObjectBlock {
         let heap_obj = HeapObject::from_tagged(self.ptr);
         let next_ptr = next.map_or(GLOBAL_BLOCK_FREE_SLOT, |b| b.ptr);
         heap_obj.write_field(0, next_ptr);
-        crate::get_runtime().get_mut().write_barrier(self.ptr, next_ptr);
+        crate::get_runtime()
+            .get_mut()
+            .write_barrier(self.ptr, next_ptr);
     }
 
     /// Get the count of active entries (note: doesn't account for freed slots)
@@ -163,7 +165,9 @@ impl GlobalObjectBlock {
             );
         }
         heap_obj.write_field((GLOBAL_BLOCK_HEADER_FIELDS + index) as i32, value);
-        crate::get_runtime().get_mut().write_barrier(self.ptr, value);
+        crate::get_runtime()
+            .get_mut()
+            .write_barrier(self.ptr, value);
     }
 
     /// Check if a slot is free
@@ -3954,7 +3958,9 @@ pub fn relocate_segment_caller_fp_links(
             let caller_fp = unsafe { *caller_fp_slot };
             let next_fp = if caller_fp >= original_base && caller_fp < original_base + size {
                 let relocated = (caller_fp as isize + delta) as usize;
-                unsafe { *caller_fp_slot = relocated; }
+                unsafe {
+                    *caller_fp_slot = relocated;
+                }
                 relocated
             } else {
                 caller_fp
@@ -3995,7 +4001,9 @@ pub fn relocate_segment_gc_prev_links(
         let prev_val = unsafe { *prev_slot };
         let next_header = if prev_val >= original_base && prev_val < original_base + size {
             let relocated = (prev_val as isize + delta) as usize;
-            unsafe { *prev_slot = relocated; }
+            unsafe {
+                *prev_slot = relocated;
+            }
             relocated
         } else {
             prev_val
@@ -4071,7 +4079,9 @@ pub fn patch_segment_gc_prev_outer_anchor(
         let prev_slot = (header_addr - 8) as *mut usize;
         let prev_val = unsafe { *prev_slot };
         if prev_val == 0 || prev_val < data_base || prev_val >= data_base + size {
-            unsafe { *prev_slot = outer_prev; }
+            unsafe {
+                *prev_slot = outer_prev;
+            }
             break;
         }
         header_addr = prev_val;
@@ -4204,7 +4214,10 @@ impl ContinuationObject {
 
     /// Returns the offset of the innermost frame pointer within the captured segment data.
     pub fn segment_frame_pointer_offset(&self) -> usize {
-        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_SEGMENT_FRAME_POINTER_OFFSET))
+        BuiltInTypes::untag(
+            self.heap_obj
+                .get_field(Self::FIELD_SEGMENT_FRAME_POINTER_OFFSET),
+        )
     }
 
     pub fn segment_gc_frame_offset(&self) -> usize {
@@ -4218,7 +4231,10 @@ impl ContinuationObject {
 
     /// Returns the data base address at the time the segment was captured.
     pub fn segment_original_data_base(&self) -> usize {
-        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_SEGMENT_ORIGINAL_DATA_BASE))
+        BuiltInTypes::untag(
+            self.heap_obj
+                .get_field(Self::FIELD_SEGMENT_ORIGINAL_DATA_BASE),
+        )
     }
 
     /// Sets the original data base address for compacting GC relocation detection.
@@ -4268,7 +4284,11 @@ impl ContinuationObject {
         trailing_ptr: usize,
         frame_size: usize,
     ) {
-        runtime.set_field_with_barrier(self.tagged_ptr(), Self::FIELD_PROMPT_FRAME_LOCALS, locals_ptr);
+        runtime.set_field_with_barrier(
+            self.tagged_ptr(),
+            Self::FIELD_PROMPT_FRAME_LOCALS,
+            locals_ptr,
+        );
         runtime.set_field_with_barrier(
             self.tagged_ptr(),
             Self::FIELD_PROMPT_FRAME_TRAILING,
@@ -4372,7 +4392,10 @@ impl ContinuationObject {
         // During migration: if segment_ptr is a heap pointer, return 0 (new path)
         // If it's a tagged int, return the untagged value (old path — should not happen after migration)
         let val = self.heap_obj.get_field(Self::FIELD_SEGMENT_PTR);
-        if BuiltInTypes::is_heap_pointer(val) || val == 0 || val == BuiltInTypes::null_value() as usize {
+        if BuiltInTypes::is_heap_pointer(val)
+            || val == 0
+            || val == BuiltInTypes::null_value() as usize
+        {
             0
         } else {
             BuiltInTypes::untag(val)
@@ -4494,10 +4517,7 @@ impl ContinuationObject {
             BuiltInTypes::Int.tag(0) as usize,
         );
         // segment_ptr is already a tagged heap pointer — store directly
-        heap_obj.write_field(
-            Self::FIELD_SEGMENT_PTR as i32,
-            segment_ptr,
-        );
+        heap_obj.write_field(Self::FIELD_SEGMENT_PTR as i32, segment_ptr);
         heap_obj.write_field(
             Self::FIELD_SEGMENT_FRAME_POINTER_OFFSET as i32,
             BuiltInTypes::Int.tag(segment_frame_pointer_offset as isize) as usize,
