@@ -1319,50 +1319,52 @@ impl AstCompiler<'_> {
 
                 let _ = backend.share_label_info_debug(function_pointer);
 
-                debugger(Message {
-                    kind: "ir".to_string(),
-                    data: Data::Ir {
-                        function_pointer,
-                        file_name: self.file_name.clone(),
-                        instructions: self
-                            .ir
-                            .instructions
-                            .iter()
-                            .map(|x| x.pretty_print())
-                            .collect(),
-                        token_range_to_ir_range: token_map
-                            .iter()
-                            .map(|(token_range, ir_range)| {
-                                (
-                                    (token_range.start, token_range.end),
-                                    (ir_range.start, ir_range.end),
-                                )
-                            })
-                            .collect(),
-                    },
-                });
+                crate::debug_flag_only! {
+                    debugger(Message {
+                        kind: "ir".to_string(),
+                        data: Data::Ir {
+                            function_pointer,
+                            file_name: self.file_name.clone(),
+                            instructions: self
+                                .ir
+                                .instructions
+                                .iter()
+                                .map(|x| x.pretty_print())
+                                .collect(),
+                            token_range_to_ir_range: token_map
+                                .iter()
+                                .map(|(token_range, ir_range)| {
+                                    (
+                                        (token_range.start, token_range.end),
+                                        (ir_range.start, ir_range.end),
+                                    )
+                                })
+                                .collect(),
+                        },
+                    });
 
-                let pretty_arm_instructions = backend
-                    .instructions_mut()
-                    .iter()
-                    .map(|x| x.pretty_print())
-                    .collect();
-                let ir_to_machine_code_range = self
-                    .ir
-                    .ir_to_machine_code_range
-                    .iter()
-                    .map(|(ir, machine_range)| (*ir, (machine_range.start, machine_range.end)))
-                    .collect();
+                    let pretty_arm_instructions: Vec<String> = backend
+                        .instructions_mut()
+                        .iter()
+                        .map(|x| x.pretty_print())
+                        .collect();
+                    let ir_to_machine_code_range = self
+                        .ir
+                        .ir_to_machine_code_range
+                        .iter()
+                        .map(|(ir, machine_range)| (*ir, (machine_range.start, machine_range.end)))
+                        .collect();
 
-                debugger(crate::Message {
-                    kind: "asm".to_string(),
-                    data: Data::Arm {
-                        function_pointer,
-                        file_name: self.file_name.clone(),
-                        instructions: pretty_arm_instructions,
-                        ir_to_machine_code_range,
-                    },
-                });
+                    debugger(crate::Message {
+                        kind: "asm".to_string(),
+                        data: Data::Arm {
+                            function_pointer,
+                            file_name: self.file_name.clone(),
+                            instructions: pretty_arm_instructions,
+                            ir_to_machine_code_range,
+                        },
+                    });
+                }
 
                 self.ir = old_ir;
 

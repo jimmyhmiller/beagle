@@ -1192,18 +1192,20 @@ impl Parser {
         // TODO: It is probably better not to parse all at once
         let (tokens, token_line_column_map) = tokenizer.parse_all(input_bytes)?;
 
-        debugger(crate::Message {
-            kind: "tokens".to_string(),
-            data: Data::Tokens {
-                file_name: file_name.clone(),
-                tokens: tokens
-                    .clone()
-                    .iter()
-                    .filter_map(|x| x.literal(input_bytes).ok())
-                    .collect(),
-                token_line_column_map: token_line_column_map.clone(),
-            },
-        });
+        crate::debug_flag_only! {
+            debugger(crate::Message {
+                kind: "tokens".to_string(),
+                data: Data::Tokens {
+                    file_name: file_name.clone(),
+                    tokens: tokens
+                        .clone()
+                        .iter()
+                        .filter_map(|x| x.literal(input_bytes).ok())
+                        .collect(),
+                    token_line_column_map: token_line_column_map.clone(),
+                },
+            });
+        }
 
         Ok(Parser {
             file_name,

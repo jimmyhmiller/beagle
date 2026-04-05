@@ -26,7 +26,7 @@ macro_rules! debug_only {
 macro_rules! debug_flag_only {
     ($($code:tt)*) => {
         {
-            let runtime = get_runtime().get();
+            let runtime = $crate::get_runtime().get();
             if runtime.get_command_line_args().debug {
                 $($code)*
             }
