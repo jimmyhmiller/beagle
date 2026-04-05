@@ -64,14 +64,10 @@ jobs:
             build-mode: "release"
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Run Rust tests with features (${{ matrix.build-mode }})
         run: |
@@ -80,3 +76,19 @@ jobs:
           else
             BEAGLE_DEBUG_INVOKE=1 BEAGLE_TRACE=test RUST_BACKTRACE=1 cargo test --features ${{ matrix.gc-features }},${{ matrix.backend }},trace -- --test-threads=1
           fi
+
+      - name: Run Beagle test suite
+        run: |
+          if [ "${{ matrix.build-mode }}" = "release" ]; then
+            cargo run --features ${{ matrix.gc-features }},${{ matrix.backend }} --release -- test --ctrf ctrf-report.json resources/
+          else
+            cargo run --features ${{ matrix.gc-features }},${{ matrix.backend }} -- test --ctrf ctrf-report.json resources/
+          fi
+
+      - name: Publish test results
+        uses: ctrf-io/github-test-reporter@v1
+        with:
+          report-path: ctrf-report.json
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1797,6 +1797,9 @@ struct TestArgs {
     /// Update snapshot expectations to match actual output
     #[clap(long)]
     update_snapshots: bool,
+    /// Write CTRF (Common Test Report Format) JSON to this path
+    #[clap(long)]
+    ctrf: Option<String>,
 }
 
 impl CommandLineArguments {
@@ -2084,6 +2087,21 @@ fn cmd_test(test_args: TestArgs) -> Result<(), Box<dyn Error>> {
     let mut failed = 0;
     let mut skipped = 0;
 
+    let run_start = std::time::SystemTime::now();
+    let run_start_ms = run_start
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+
+    struct CtrfTest {
+        name: String,
+        status: &'static str,
+        duration_ms: u64,
+        file_path: String,
+        message: Option<String>,
+    }
+    let mut ctrf_tests: Vec<CtrfTest> = Vec::new();
+
     for test_file in &test_files {
         let file_str = test_file.to_str().unwrap();
         let source = std::fs::read_to_string(test_file)?;
@@ -2100,6 +2118,13 @@ fn cmd_test(test_args: TestArgs) -> Result<(), Box<dyn Error>> {
                 skip_reason.map_or(String::new(), |r| format!(" ({})", r))
             );
             skipped += 1;
+            ctrf_tests.push(CtrfTest {
+                name: file_str.to_string(),
+                status: "skipped",
+                duration_ms: 0,
+                file_path: file_str.to_string(),
+                message: None,
+            });
             continue;
         }
 
@@ -2119,11 +2144,20 @@ fn cmd_test(test_args: TestArgs) -> Result<(), Box<dyn Error>> {
             cmd.arg("--update-snapshots");
         }
 
+        let test_start = std::time::Instant::now();
         let output = cmd.output()?;
+        let duration_ms = test_start.elapsed().as_millis() as u64;
 
         if output.status.success() {
             println!("  pass  {}", file_str);
             passed += 1;
+            ctrf_tests.push(CtrfTest {
+                name: file_str.to_string(),
+                status: "passed",
+                duration_ms,
+                file_path: file_str.to_string(),
+                message: None,
+            });
         } else {
             println!("  FAIL  {}", file_str);
             let failure = format_test_process_failure(
@@ -2136,6 +2170,13 @@ fn cmd_test(test_args: TestArgs) -> Result<(), Box<dyn Error>> {
                 println!("        {}", line);
             }
             failed += 1;
+            ctrf_tests.push(CtrfTest {
+                name: file_str.to_string(),
+                status: "failed",
+                duration_ms,
+                file_path: file_str.to_string(),
+                message: Some(failure),
+            });
         }
     }
 
@@ -2147,6 +2188,49 @@ fn cmd_test(test_args: TestArgs) -> Result<(), Box<dyn Error>> {
         skipped,
         test_files.len()
     );
+
+    if let Some(ref ctrf_path) = test_args.ctrf {
+        let run_stop_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        let tests_json: Vec<String> = ctrf_tests
+            .iter()
+            .map(|t| {
+                let message_field = match &t.message {
+                    Some(msg) => {
+                        let escaped = msg
+                            .replace('\\', "\\\\")
+                            .replace('"', "\\\"")
+                            .replace('\n', "\\n")
+                            .replace('\r', "\\r")
+                            .replace('\t', "\\t");
+                        format!(", \"message\": \"{}\"", escaped)
+                    }
+                    None => String::new(),
+                };
+                format!(
+                    "{{\"name\": \"{}\", \"status\": \"{}\", \"duration\": {}, \"filePath\": \"{}\"{}}}",
+                    t.name, t.status, t.duration_ms, t.file_path, message_field
+                )
+            })
+            .collect();
+
+        let ctrf_json = format!(
+            r#"{{"reportFormat": "CTRF", "specVersion": "0.0.0", "results": {{"tool": {{"name": "beagle"}}, "summary": {{"tests": {}, "passed": {}, "failed": {}, "skipped": {}, "pending": 0, "other": 0, "start": {}, "stop": {}}}, "tests": [{}]}}}}"#,
+            test_files.len(),
+            passed,
+            failed,
+            skipped,
+            run_start_ms,
+            run_stop_ms,
+            tests_json.join(", ")
+        );
+
+        std::fs::write(ctrf_path, &ctrf_json)?;
+        println!("CTRF report written to {}", ctrf_path);
+    }
 
     if failed > 0 {
         std::process::exit(1);
