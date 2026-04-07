@@ -106,6 +106,11 @@ impl LinearScan {
     //     location[i] <- new stack location
 
     pub fn allocate(&mut self) {
+        // Assign root slots first — every virtual register gets a frame slot
+        // with reuse for non-overlapping lifetimes. Spills and call saves
+        // use these slots instead of allocating fresh ones.
+        self.assign_root_slots();
+
         let mut intervals = self
             .lifetimes
             .iter()
@@ -144,6 +149,8 @@ impl LinearScan {
         self.replace_spilled_registers_with_spill();
         self.replace_virtual_with_allocated();
         self.replace_calls_with_call_with_save();
+        // Frame size is determined by root slots — all spills and saves use root slot indices
+        self.stack_slot = self.next_root_slot;
     }
 
     fn expire_old_intervals(
@@ -177,9 +184,10 @@ impl LinearScan {
             // so the new interval steals the physical register and the old one gets spilled.
             let physical_register = *self.allocated_registers.get(&spill.2).unwrap();
             self.allocated_registers.insert(register, physical_register);
-            let stack_location = self.new_stack_location();
+            // Use the spilled register's root slot as its frame location
+            let root_slot = *self.root_slots.get(&spill.2).unwrap();
             assert!(!self.location.contains_key(&spill.2));
-            self.location.insert(spill.2, stack_location);
+            self.location.insert(spill.2, root_slot);
             active.retain(|x| *x != spill);
             // NOTE: Do NOT free the physical_register here - it's now in use by `register`.
             // The register will be freed when the new interval expires.
@@ -188,8 +196,8 @@ impl LinearScan {
         } else {
             // The new interval ends later, so it should be spilled directly.
             assert!(!self.location.contains_key(&register));
-            let stack_location = self.new_stack_location();
-            self.location.insert(register, stack_location);
+            let root_slot = *self.root_slots.get(&register).unwrap();
+            self.location.insert(register, root_slot);
         }
     }
 
@@ -303,7 +311,7 @@ impl LinearScan {
                         }
                         saves.push(SavedValue {
                             source: Value::Register(*register),
-                            local: self.new_stack_location(),
+                            local: *self.root_slots.get(&original_register).unwrap(),
                         });
                     }
                 }
@@ -328,7 +336,7 @@ impl LinearScan {
                         }
                         saves.push(SavedValue {
                             source: Value::Register(*register),
-                            local: self.new_stack_location(),
+                            local: *self.root_slots.get(&original_register).unwrap(),
                         });
                     }
                 }
@@ -359,7 +367,7 @@ impl LinearScan {
                         let register = self.allocated_registers.get(&original_register).unwrap();
                         saves.push(SavedValue {
                             source: Value::Register(*register),
-                            local: self.new_stack_location(),
+                            local: *self.root_slots.get(&original_register).unwrap(),
                         });
                     }
                 }
@@ -475,7 +483,10 @@ fn test_overlapping_locals_get_separate_root_slots() {
     let slot_r0 = *ls.root_slots.get(&r0).unwrap();
     let slot_r1 = *ls.root_slots.get(&r1).unwrap();
 
-    assert_ne!(slot_r0, slot_r1, "overlapping lifetimes must get separate root slots");
+    assert_ne!(
+        slot_r0, slot_r1,
+        "overlapping lifetimes must get separate root slots"
+    );
 }
 
 #[test]
@@ -651,7 +662,10 @@ fn test_five_chain_reuses_two_slots() {
     assert_eq!(slot_r1, slot_r3, "r1 and r3 should share a slot");
 
     // The two groups use different slots
-    assert_ne!(slot_r0, slot_r1, "the two alternating groups use different slots");
+    assert_ne!(
+        slot_r0, slot_r1,
+        "the two alternating groups use different slots"
+    );
 }
 
 #[test]
@@ -751,7 +765,8 @@ fn test_extreme_long_sequential_chain_max_reuse() {
         let slot = *ls.root_slots.get(reg).unwrap();
         let expected = if i % 2 == 0 { slot_a } else { slot_b };
         assert_eq!(
-            slot, expected,
+            slot,
+            expected,
             "r{} should be in slot {} ({}), got {}",
             i,
             if i % 2 == 0 { "A" } else { "B" },
@@ -919,8 +934,166 @@ fn test_extreme_interleaved_lifetimes() {
 
     // Verify reuse: 9 vregs compressed into at most 3 slots
     assert!(
-        ls.root_slots.values().collect::<std::collections::HashSet<_>>().len() <= 3,
+        ls.root_slots
+            .values()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            <= 3,
         "9 vregs should fit in at most 3 distinct root slots"
+    );
+}
+
+// ============================================================
+// Root slot integration tests — verifying that allocate() uses
+// root slots for spills and call saves, reducing frame size
+// ============================================================
+
+#[test]
+fn test_call_saves_reuse_root_slots() {
+    // A register live across multiple calls should use the SAME root slot
+    // for all saves, not a fresh slot per call site.
+    //
+    // Old behavior: 3 calls × 1 live register = 3 save slots
+    // New behavior: 1 root slot reused across all 3 calls
+    //
+    //   0: Assign(r0, 42)           — r0 live [0, 7]
+    //   1: Assign(func, 99)         — func register for calls
+    //   2: Call(c0, func, [])       — r0 live, saved to root slot
+    //   3: Call(c1, func, [])       — r0 live, saved to SAME root slot
+    //   4: Call(c2, func, [])       — r0 live, saved to SAME root slot
+    //   5: AddInt(result, r0, c2)   — r0 finally consumed
+    //   6: Ret(result)
+    use crate::ir::Ir;
+
+    let mut ir = Ir::new(0);
+    let r0 = ir.assign_new(42);
+    let func = ir.assign_new(99);
+    let _c0 = ir.call(Value::Register(func), vec![]);
+    let _c1 = ir.call(Value::Register(func), vec![]);
+    let c2 = ir.call(Value::Register(func), vec![]);
+    let result = ir.add_int(r0, c2);
+    ir.ret(result);
+
+    let mut ls = LinearScan::new(ir.instructions.clone(), 0);
+    ls.allocate();
+
+    // With root slots: each register gets one slot, reused across all call saves.
+    // r0, func, c0, c1, c2, result — but not all live simultaneously.
+    // The key metric: stack_slot should be much less than
+    // what 3 calls × 2 live registers (r0 + func) = 6 separate save slots would need.
+    //
+    // Count the actual SavedValue locals in the WithSaves instructions to verify reuse.
+    let mut save_locals: Vec<usize> = Vec::new();
+    for inst in &ls.instructions {
+        if let Instruction::CallWithSaves(_, _, _, _, saves) = inst {
+            for save in saves {
+                save_locals.push(save.local);
+            }
+        }
+    }
+
+    // Multiple calls should reuse the same locals (root slots)
+    let unique_locals: std::collections::HashSet<usize> = save_locals.iter().copied().collect();
+    assert!(
+        unique_locals.len() < save_locals.len(),
+        "root slots should be reused across calls: {} unique locals for {} total saves",
+        unique_locals.len(),
+        save_locals.len()
+    );
+}
+
+#[test]
+fn test_many_calls_same_live_set_constant_slots() {
+    // 10 calls with the same 2 registers live across all of them.
+    // Old: 10 calls × 2 saves = 20 save slots
+    // New: 2 root slots reused across all 10 calls
+    use crate::ir::Ir;
+
+    let mut ir = Ir::new(0);
+    let r0 = ir.assign_new(42);
+    let r1 = ir.assign_new(99);
+    let func = ir.assign_new_force(Value::TaggedConstant(1));
+    for _ in 0..10 {
+        let _ = ir.call(Value::Register(func), vec![]);
+    }
+    let sum = ir.add_int(r0, r1);
+    ir.ret(sum);
+
+    let mut ls = LinearScan::new(ir.instructions.clone(), 0);
+    ls.allocate();
+
+    // Collect all save locals across all WithSaves instructions
+    let mut all_save_locals: Vec<usize> = Vec::new();
+    for inst in &ls.instructions {
+        if let Instruction::CallWithSaves(_, _, _, _, saves) = inst {
+            for save in saves {
+                all_save_locals.push(save.local);
+            }
+        }
+    }
+
+    let unique_locals: std::collections::HashSet<usize> = all_save_locals.iter().copied().collect();
+
+    // Old behavior would have ~20 unique locals (one per save per call).
+    // New behavior: only as many unique locals as there are simultaneously-live registers.
+    assert!(
+        unique_locals.len() <= 5,
+        "10 calls with same live set should reuse a small number of root slots, got {} unique (from {} total saves)",
+        unique_locals.len(),
+        all_save_locals.len()
+    );
+
+    // Total saves should be much larger than unique slots (proving reuse)
+    assert!(
+        all_save_locals.len() > unique_locals.len() * 2,
+        "should have many total saves ({}) reusing few slots ({})",
+        all_save_locals.len(),
+        unique_locals.len()
+    );
+}
+
+#[test]
+fn test_stack_slot_smaller_with_root_slots() {
+    // Directly verify that stack_slot (frame size) is smaller than it would be
+    // without root slot reuse. We do this by counting how many new_stack_location()
+    // calls the old approach would have made.
+    //
+    // Setup: 3 registers live across 5 calls.
+    // Old: 5 calls × 3 saves = 15 save slots → stack_slot >= 15
+    // New: 3 root slots → stack_slot = max simultaneously live ≈ 6-8
+    use crate::ir::Ir;
+
+    let mut ir = Ir::new(0);
+    let r0 = ir.assign_new(1);
+    let r1 = ir.assign_new(2);
+    let r2 = ir.assign_new(3);
+    let func = ir.assign_new_force(Value::TaggedConstant(0));
+    for _ in 0..5 {
+        let _ = ir.call(Value::Register(func), vec![]);
+    }
+    let s1 = ir.add_int(r0, r1);
+    let s2 = ir.add_int(s1, r2);
+    ir.ret(s2);
+
+    let mut ls = LinearScan::new(ir.instructions.clone(), 0);
+    ls.allocate();
+
+    // Count what the old approach would have allocated:
+    // each call saves ~3-4 live registers, 5 calls = 15-20 save slots
+    let mut total_saves = 0;
+    for inst in &ls.instructions {
+        if let Instruction::CallWithSaves(_, _, _, _, saves) = inst {
+            total_saves += saves.len();
+        }
+    }
+
+    // stack_slot should be much less than total_saves
+    // (root slots reuse means we only need max-simultaneous-live slots)
+    assert!(
+        ls.stack_slot < total_saves,
+        "frame size ({}) should be less than total saves without reuse ({})",
+        ls.stack_slot,
+        total_saves,
     );
 }
 
