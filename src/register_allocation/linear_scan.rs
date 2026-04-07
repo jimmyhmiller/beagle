@@ -392,7 +392,10 @@ impl LinearScan {
                         {
                             continue;
                         }
-                        saves.push(Value::Register(*register));
+                        saves.push(SavedValue {
+                            source: Value::Register(*register),
+                            local: *self.root_slots.get(original_register).unwrap(),
+                        });
                     }
                 }
                 self.instructions[i] = Instruction::RecurseWithSaves(*dest, args.clone(), saves);

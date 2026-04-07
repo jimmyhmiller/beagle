@@ -123,7 +123,7 @@ pub enum Instruction {
     Modulo(Value, Value, Value),
     Assign(Value, Value),
     Recurse(Value, Vec<Value>),
-    RecurseWithSaves(Value, Vec<Value>, Vec<Value>),
+    RecurseWithSaves(Value, Vec<Value>, Vec<SavedValue>),
     TailRecurse(Value, Vec<Value>),
     JumpIf(Label, Condition, Value, Value),
     Jump(Label),
@@ -387,7 +387,7 @@ impl Instruction {
                 let mut result: Vec<VirtualRegister> =
                     args.iter().filter_map(|arg| get_registers!(arg)).collect();
                 for save in saves {
-                    if let Ok(register) = save.try_into() {
+                    if let Ok(register) = (&save.source).try_into() {
                         result.push(register);
                     }
                 }
@@ -687,7 +687,7 @@ impl Instruction {
                     replace_register!(value, old_register, new_register);
                 }
                 for save in saves {
-                    replace_register!(save, old_register, new_register);
+                    replace_register!(&mut save.source, old_register, new_register);
                 }
             }
             Instruction::TailRecurse(value, vec) => {
@@ -2197,13 +2197,13 @@ impl Ir {
                     self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::RecurseWithSaves(dest, args, saves) => {
-                    // Save registers using RBP-relative push_to_stack
+                    // Save registers to their root slots (frame locals)
                     for save in saves.iter() {
-                        let save = self.value_to_register(save, backend);
-                        backend.push_to_stack(save);
+                        let save_reg = self.value_to_register(&save.source, backend);
+                        backend.store_local(save_reg, save.local as i32);
                     }
 
-                    // Set up arguments - no adjustment for saves since they don't change RSP
+                    // Set up arguments
                     let num_arg_regs = backend.num_arg_registers();
                     for (arg_index, arg) in args.iter().enumerate().rev() {
                         let arg = self.value_to_register(arg, backend);
@@ -2228,10 +2228,10 @@ impl Ir {
                     backend.mov_reg(dest, backend.ret_reg());
                     self.store_spill(dest, dest_spill, backend);
 
-                    // Restore saved registers (in reverse order)
+                    // Restore saved registers from their root slots
                     for save in saves.iter().rev() {
-                        let save = self.value_to_register(save, backend);
-                        backend.pop_from_stack(save);
+                        let save_reg = self.value_to_register(&save.source, backend);
+                        backend.load_local(save_reg, save.local as i32);
                     }
                 }
                 Instruction::TailRecurse(dest, args) => {
