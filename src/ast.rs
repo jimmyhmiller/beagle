@@ -868,7 +868,7 @@ pub struct FreeVariable {
 
 #[derive(Debug, Clone)]
 pub struct Environment {
-    pub local_variables: Vec<String>,
+    pub local_variables: Vec<(String, usize)>,
     pub variables: HashMap<String, VariableLocation>,
     pub free_variables: Vec<FreeVariable>,
     pub argument_locations: HashMap<usize, VariableLocation>,
@@ -1797,7 +1797,7 @@ impl AstCompiler<'_> {
 
                     let free_var_ptr = self.ir.get_current_stack_position();
                     let cont_ptr_for_closure = self.ir.load_local(cont_ptr_local);
-                    self.ir.push_to_stack(cont_ptr_for_closure);
+                    self.ir.push_to_eval_stack(cont_ptr_for_closure);
 
                     let make_closure_fn = self
                         .compiler
@@ -2693,12 +2693,13 @@ impl AstCompiler<'_> {
                 let vector_pointer = self.call("beagle.collections/vec", vec![])?;
 
                 let vector_register = self.ir.assign_new(vector_pointer);
-                // the elements are on the stack in reverse, so I need to grab them by index in reverse
-                // and then shift the stack pointer
-                let stack_pointer = self.ir.get_current_stack_position();
-                for i in (0..elements.len()).rev() {
-                    let value = self.ir.load_from_memory(stack_pointer, (i as i32) + 1);
-                    // Use self.call() to properly handle sp/fp for the builtin
+                // Elements were pushed to locals; retrieve their local indices
+                let local_indices: Vec<usize> = self.ir.local_stack_indices()
+                    [self.ir.local_stack_indices().len() - elements.len()..]
+                    .to_vec();
+                // Elements were pushed in forward order, iterate forward
+                for local in local_indices.iter() {
+                    let value = self.ir.load_local(*local);
                     let push_result = self.call(
                         "beagle.collections/vec-push",
                         vec![vector_register.into(), value],
@@ -2706,8 +2707,6 @@ impl AstCompiler<'_> {
                     self.ir.assign(vector_register, push_result);
                 }
                 for _ in 0..elements.len() {
-                    // TODO: Hacky since we aren't using this. I think it is an efficiency waste
-                    // I should probably do something better
                     self.ir.pop_from_stack();
                 }
 
@@ -2762,22 +2761,16 @@ impl AstCompiler<'_> {
                 let map_pointer = self.call("beagle.collections/map", vec![])?;
                 let map_register = self.ir.assign_new(map_pointer);
 
-                // Load pairs from stack and assoc them
-                let stack_pointer = self.ir.get_current_stack_position();
+                // Load pairs from locals and assoc them
+                // Locals were pushed as [key0, val0, key1, val1, ...]
+                let num_pair_locals = pairs.len() * 2;
+                let pair_locals: Vec<usize> = self.ir.local_stack_indices()
+                    [self.ir.local_stack_indices().len() - num_pair_locals..]
+                    .to_vec();
                 for i in 0..pairs.len() {
-                    // Stack layout: [key0, val0, key1, val1, key2, val2, ...]
-                    // Pair i (0-indexed):
-                    // - key is at stack offset (2*i + 1)
-                    // - value is at stack offset (2*i + 2)
-                    let key_offset = (2 * i + 1) as i32;
-                    let val_offset = (2 * i + 2) as i32;
+                    let key = self.ir.load_local(pair_locals[2 * i]);
+                    let value = self.ir.load_local(pair_locals[2 * i + 1]);
 
-                    // Note: val_offset is actually where the key is stored, key_offset has the value
-                    // This is because of how the stack grows
-                    let key = self.ir.load_from_memory(stack_pointer, val_offset);
-                    let value = self.ir.load_from_memory(stack_pointer, key_offset);
-
-                    // Use self.call() to properly handle sp/fp for the builtin
                     let assoc_result = self.call(
                         "beagle.collections/map-assoc",
                         vec![map_register.into(), key, value],
@@ -2785,8 +2778,8 @@ impl AstCompiler<'_> {
                     self.ir.assign(map_register, assoc_result);
                 }
 
-                // Clean up stack
-                for _ in 0..(pairs.len() * 2) {
+                // Clean up local stack
+                for _ in 0..num_pair_locals {
                     self.ir.pop_from_stack();
                 }
 
@@ -2836,16 +2829,13 @@ impl AstCompiler<'_> {
                 let set_pointer = self.call("beagle.collections/set", vec![])?;
                 let set_register = self.ir.assign_new(set_pointer);
 
-                // Load elements from stack and add them
-                let stack_pointer = self.ir.get_current_stack_position();
-                for i in 0..elements.len() {
-                    // Stack layout: [elem0, elem1, elem2, ...]
-                    // Element i is at stack offset (i + 1)
-                    let elem_offset = (i + 1) as i32;
+                // Load elements from locals and add them
+                let elem_locals: Vec<usize> = self.ir.local_stack_indices()
+                    [self.ir.local_stack_indices().len() - elements.len()..]
+                    .to_vec();
+                for local in elem_locals.iter() {
+                    let element = self.ir.load_local(*local);
 
-                    let element = self.ir.load_from_memory(stack_pointer, elem_offset);
-
-                    // Use self.call() to properly handle sp/fp for the builtin
                     let add_result = self.call(
                         "beagle.collections/set-add",
                         vec![set_register.into(), element],
@@ -2853,7 +2843,7 @@ impl AstCompiler<'_> {
                     self.ir.assign(set_register, add_result);
                 }
 
-                // Clean up stack
+                // Clean up local stack
                 for _ in 0..elements.len() {
                     self.ir.pop_from_stack();
                 }
@@ -4136,9 +4126,10 @@ impl AstCompiler<'_> {
                 // This matches the pattern in compile_closure
                 let free_var_ptr = self.ir.get_current_stack_position();
 
-                // Push the continuation pointer onto the stack as a captured variable
+                // Push the continuation pointer onto the eval stack as a captured variable
+                // (make_closure reads free vars by pointer from contiguous stack memory)
                 let cont_ptr_for_closure = self.ir.load_local(cont_ptr_local);
-                self.ir.push_to_stack(cont_ptr_for_closure);
+                self.ir.push_to_eval_stack(cont_ptr_for_closure);
 
                 // Call make_closure to create the continuation closure
                 let make_closure = self
@@ -5028,27 +5019,27 @@ impl AstCompiler<'_> {
 
             match variable {
                 VariableLocation::Register(reg) => {
-                    self.ir.push_to_stack(reg.into());
+                    self.ir.push_to_eval_stack(reg.into());
                 }
                 VariableLocation::Local(index)
                 | VariableLocation::MutableLocal(index)
                 | VariableLocation::BoxedMutableLocal(index) => {
                     let reg = self.ir.load_local(index);
-                    self.ir.push_to_stack(reg);
+                    self.ir.push_to_eval_stack(reg);
                 }
                 VariableLocation::NamespaceVariable(namespace, slot) => {
                     let val = self
                         .resolve_variable(&VariableLocation::NamespaceVariable(namespace, slot))
                         .unwrap();
                     let reg = self.ir.assign_new(val);
-                    self.ir.push_to_stack(reg.into());
+                    self.ir.push_to_eval_stack(reg.into());
                 }
                 VariableLocation::DynamicVariable(namespace_id, slot) => {
                     let val = self
                         .resolve_variable(&VariableLocation::DynamicVariable(namespace_id, slot))
                         .unwrap();
                     let reg = self.ir.assign_new(val);
-                    self.ir.push_to_stack(reg.into());
+                    self.ir.push_to_eval_stack(reg.into());
                 }
                 VariableLocation::FreeVariable(_)
                 | VariableLocation::BoxedFreeVariable(_)
@@ -5056,7 +5047,7 @@ impl AstCompiler<'_> {
                     // The parent has this as a free variable - load it from the parent's closure
                     let val = self.resolve_variable(&variable).unwrap();
                     let reg = self.ir.assign_new(val);
-                    self.ir.push_to_stack(reg.into());
+                    self.ir.push_to_eval_stack(reg.into());
                 }
             }
         }
@@ -5092,12 +5083,12 @@ impl AstCompiler<'_> {
             ],
         );
 
-        // Clean up: pop free variables from the stack. make_closure has already
+        // Clean up: pop free variables from the eval stack. make_closure has already
         // copied them into the heap-allocated closure object, so they're no longer
         // needed. Without this, the leftover stack entries corrupt offset-based
         // reads in map/set literals and other stack-sensitive contexts.
         for _ in 0..num_free_count {
-            self.ir.pop_from_stack();
+            self.ir.pop_from_eval_stack();
         }
 
         Ok(result)
@@ -5105,11 +5096,15 @@ impl AstCompiler<'_> {
 
     fn find_or_insert_local(&mut self, name: &str) -> usize {
         let current_env = self.environment_stack.last_mut().unwrap();
-        if let Some(index) = current_env.local_variables.iter().position(|n| n == name) {
-            index
+        if let Some((_, index)) = current_env.local_variables.iter().find(|(n, _)| n == name) {
+            *index
         } else {
-            current_env.local_variables.push(name.to_string());
-            current_env.local_variables.len() - 1
+            // Use ir.num_locals as the index to avoid collisions with locals
+            // allocated by push_to_stack (which also bumps ir.num_locals).
+            let index = self.ir.num_locals;
+            self.ir.num_locals = index + 1;
+            current_env.local_variables.push((name.to_string(), index));
+            index
         }
     }
 

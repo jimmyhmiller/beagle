@@ -820,6 +820,9 @@ pub struct Ir {
     num_arg_registers: usize,
     /// If this function uses `binding`, the local index of the mark pointer.
     pub mark_local_index: Option<usize>,
+    /// Stack of local indices used by push_to_stack/pop_from_stack.
+    /// Values are stored in root-slotted locals instead of the eval stack.
+    local_stack: Vec<usize>,
 }
 
 impl Ir {
@@ -850,6 +853,7 @@ impl Ir {
             ir_range_to_token_range: vec![],
             num_arg_registers,
             mark_local_index: None,
+            local_stack: vec![],
         };
 
         me.insert_label("after_return", me.after_return);
@@ -3270,10 +3274,37 @@ impl Ir {
     }
 
     pub fn push_to_stack(&mut self, reg: Value) {
-        self.instructions.push(Instruction::PushStack(reg));
+        let local = self.num_locals;
+        self.num_locals += 1;
+        self.local_stack.push(local);
+        self.instructions
+            .push(Instruction::StoreLocal(Value::Local(local), reg));
     }
 
     pub fn pop_from_stack(&mut self) -> Value {
+        let local = self
+            .local_stack
+            .pop()
+            .expect("pop_from_stack: empty local stack");
+        let reg = self.volatile_register();
+        self.instructions
+            .push(Instruction::LoadLocal(reg.into(), Value::Local(local)));
+        reg.into()
+    }
+
+    /// Returns the local indices currently on the local stack (most recent push last).
+    pub fn local_stack_indices(&self) -> &[usize] {
+        &self.local_stack
+    }
+
+    /// Push to the real eval stack (not a local). Used only for closure free variables
+    /// where `make_closure` needs a contiguous memory region accessed by pointer.
+    pub fn push_to_eval_stack(&mut self, reg: Value) {
+        self.instructions.push(Instruction::PushStack(reg));
+    }
+
+    /// Pop from the real eval stack. Pairs with `push_to_eval_stack`.
+    pub fn pop_from_eval_stack(&mut self) -> Value {
         let reg = self.volatile_register().into();
         self.instructions.push(Instruction::PopStack(reg));
         reg
