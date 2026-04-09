@@ -401,6 +401,11 @@ impl LinearScan {
                 self.instructions[i] = Instruction::RecurseWithSaves(*dest, args.clone(), saves);
             }
         }
+
+        // Note: ReloadRootSlots at resume points is handled in compile_instructions
+        // (ir.rs) by looking up the resume label from CaptureContinuationWithSaves
+        // and PerformEffectWithSaves instructions. We don't insert instructions here
+        // because that would invalidate label_locations indices.
     }
 }
 

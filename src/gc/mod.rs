@@ -1,8 +1,5 @@
 use std::{error::Error, thread::ThreadId};
 
-use bincode::{Decode, Encode};
-use nanoserde::SerJson;
-
 use crate::{CommandLineArguments, types::BuiltInTypes};
 
 // Re-export get_page_size from mmap_utils for backward compatibility
@@ -17,63 +14,7 @@ pub mod mutex_allocator;
 pub mod stack_walker;
 pub mod usdt_probes;
 
-#[derive(Debug, Encode, Decode, SerJson, Clone)]
-pub struct StackMapDetails {
-    pub function_name: Option<String>,
-    pub number_of_locals: usize,
-    pub current_stack_size: usize,
-    pub max_stack_size: usize,
-    pub num_callee_saved: usize,
-}
-
 pub const STACK_SIZE: usize = 1024 * 1024 * 128;
-
-#[derive(Debug, Clone)]
-pub struct StackMap {
-    details: Vec<(usize, StackMapDetails)>,
-}
-
-impl Default for StackMap {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl StackMap {
-    pub fn new() -> Self {
-        Self { details: vec![] }
-    }
-
-    pub fn find_stack_data(&self, pointer: usize) -> Option<&StackMapDetails> {
-        // Stack map now stores the exact return address (recorded after the call instruction)
-        // No adjustment needed - just match the pointer directly
-        for (key, value) in self.details.iter() {
-            if *key == pointer {
-                return Some(value);
-            }
-        }
-        None
-    }
-
-    pub fn extend(&mut self, translated_stack_map: Vec<(usize, StackMapDetails)>) {
-        self.details.extend(translated_stack_map);
-    }
-
-    /// Find stack data without debug output (for heap dump)
-    pub fn find_stack_data_no_debug(&self, pointer: usize) -> Option<&StackMapDetails> {
-        for (key, value) in self.details.iter() {
-            if *key == pointer {
-                return Some(value);
-            }
-        }
-        None
-    }
-
-    /// Get all stack map details (for heap dump)
-    pub fn details(&self) -> &[(usize, StackMapDetails)] {
-        &self.details
-    }
-}
 
 #[derive(Debug, Clone, Copy)]
 pub struct AllocatorOptions {

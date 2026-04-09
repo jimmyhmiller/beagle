@@ -29,7 +29,6 @@ pub struct LowLevelX86 {
     pub stack_size: i32,
     pub max_stack_size: i32,
     pub max_locals: i32,
-    pub stack_map: HashMap<usize, usize>,
     free_temporary_registers: Vec<X86Register>,
     allocated_temporary_registers: Vec<X86Register>,
     canonical_temporary_registers: Vec<X86Register>,
@@ -88,7 +87,6 @@ impl LowLevelX86 {
             stack_size: 0,
             max_stack_size: 0,
             max_locals: 0,
-            stack_map: HashMap::new(),
             current_function_name: None,
             used_callee_saved_registers: 0,
             num_callee_saved: 0,
@@ -536,12 +534,9 @@ impl LowLevelX86 {
 
     pub fn call(&mut self, register: X86Register) {
         self.instructions.push(X86Asm::CallR { target: register });
-        // Record safepoint after the call - this is the return address
-        self.record_gc_safepoint();
     }
 
     pub fn call_builtin(&mut self, register: X86Register) {
-        // Just use regular call - it records the safepoint
         self.call(register);
     }
 
@@ -549,8 +544,6 @@ impl LowLevelX86 {
         self.instructions.push(X86Asm::CallRel {
             label_index: label.index,
         });
-        // Record safepoint after the call - this is the return address
-        self.record_gc_safepoint();
     }
 
     // === Memory operations ===
@@ -1287,9 +1280,9 @@ impl LowLevelX86 {
 
             // Write frame header at [RBP-8]. This is a heap-object-style header
             // that lets GC know how many traced slots this frame has.
-            // Only locals and eval stack slots are traced. Saved callee-saved
-            // registers live below that region and are not part of the root set.
-            let num_slots = (self.max_locals + self.max_stack_size) as usize;
+            // Only root slots (max_locals) are traced. Eval stack slots are NOT
+            // included — they're protected by register_temporary_root instead.
+            let num_slots = self.max_locals as usize;
             let frame_header = Header {
                 type_id: crate::collections::TYPE_ID_FRAME,
                 type_data: (num_slots as u32) << 16,
@@ -1355,9 +1348,9 @@ impl LowLevelX86 {
             inserted_instructions.push(X86Asm::Pop { reg: RSI });
             inserted_instructions.push(X86Asm::Pop { reg: RDI });
 
-            // Zero out the traced frame payload so GC never sees uninitialized
-            // garbage in locals or eval stack before they are written.
-            let slots_to_zero = self.max_locals + self.max_stack_size;
+            // Zero out root slots so GC never sees uninitialized garbage.
+            // Only max_locals needs zeroing — eval stack slots are not scanned.
+            let slots_to_zero = self.max_locals;
             if slots_to_zero > 0 {
                 let null_value = BuiltInTypes::null_value() as i32;
 
@@ -1404,19 +1397,6 @@ impl LowLevelX86 {
                         *location += num_inserted;
                     }
                 }
-
-                // Shift stack_map byte offsets that come after the insertion point
-                self.stack_map = self
-                    .stack_map
-                    .drain()
-                    .map(|(k, v)| {
-                        if k >= byte_offset_at_insert {
-                            (k + byte_delta, v)
-                        } else {
-                            (k, v)
-                        }
-                    })
-                    .collect();
             }
         }
 
@@ -1486,53 +1466,8 @@ impl LowLevelX86 {
                         *location += num_epilogue_inserted;
                     }
                 }
-
-                // Shift stack_map byte offsets that come after the insertion point
-                self.stack_map = self
-                    .stack_map
-                    .drain()
-                    .map(|(k, v)| {
-                        if k >= byte_offset_at_insert {
-                            (k + byte_delta, v)
-                        } else {
-                            (k, v)
-                        }
-                    })
-                    .collect();
             }
         }
-    }
-
-    /// Translate stack map for GC
-    /// Stack map keys are already byte offsets
-    pub fn translate_stack_map(&self, base_pointer: usize) -> Vec<(usize, usize)> {
-        let mut result = Vec::new();
-        for (byte_offset, size) in &self.stack_map {
-            result.push((base_pointer + byte_offset, *size));
-        }
-        result
-    }
-
-    /// Get the current byte offset in the generated code.
-    /// x86-64 instructions are variable length, so we sum all sizes.
-    pub fn current_byte_offset(&self) -> usize {
-        self.instructions.iter().map(|i| i.size()).sum()
-    }
-
-    /// Record a GC safepoint at the current position.
-    pub fn record_gc_safepoint(&mut self) {
-        let byte_offset = self.current_byte_offset();
-        let stack_size = self.stack_size as usize;
-        self.stack_map.insert(byte_offset, stack_size);
-    }
-
-    /// Get the adjustment for return address lookup.
-    /// x86-64 CALL reg instruction is typically 2-3 bytes.
-    pub fn return_address_adjustment() -> usize {
-        // CALL reg (FF /2) with REX prefix is 3 bytes
-        // Without REX prefix it's 2 bytes
-        // We use 3 to be safe since most of our calls use 64-bit registers
-        3
     }
 
     /// Store a pair of registers (emulated for x86)

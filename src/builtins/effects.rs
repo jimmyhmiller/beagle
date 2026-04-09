@@ -275,15 +275,18 @@ pub extern "C" fn call_handler_builtin(
     result
 }
 
-pub unsafe extern "C" fn perform_effect_runtime(
+pub unsafe extern "C" fn perform_effect_runtime_with_saved_regs(
     stack_pointer: usize,
     frame_pointer: usize,
     enum_type_ptr: usize,
     op_value: usize,
     resume_address: usize,
     result_local_offset_raw: usize,
+    _saved_regs_ptr: *const usize,
 ) -> usize {
-    let captured_callee_saved_regs = capture_current_callee_saved_regs();
+    // saved_regs_ptr is no longer used — callee-saved register values are
+    // stored in root slots by the codegen save loop and restored at the
+    // resume point via ReloadRootSlots.
     unsafe {
         perform_effect_runtime_inner(
             stack_pointer,
@@ -292,64 +295,8 @@ pub unsafe extern "C" fn perform_effect_runtime(
             op_value,
             resume_address,
             result_local_offset_raw,
-            captured_callee_saved_regs,
-            [usize::MAX; 10],
-            None,
         )
     }
-}
-
-pub unsafe extern "C" fn perform_effect_runtime_with_saved_regs(
-    stack_pointer: usize,
-    frame_pointer: usize,
-    enum_type_ptr: usize,
-    op_value: usize,
-    resume_address: usize,
-    result_local_offset_raw: usize,
-    saved_regs_ptr: *const usize,
-) -> usize {
-    let mut captured_callee_saved_regs = [0usize; 10];
-    let mut captured_callee_saved_root_ids = [usize::MAX; 10];
-    let mut saved_regs_stack_offset = None;
-    if !saved_regs_ptr.is_null() {
-        for (i, reg) in captured_callee_saved_regs.iter_mut().enumerate() {
-            *reg = unsafe { *saved_regs_ptr.add(i) };
-        }
-        let ptr = saved_regs_ptr as usize;
-        if ptr >= stack_pointer {
-            saved_regs_stack_offset = Some(ptr - stack_pointer);
-        }
-    }
-    {
-        let runtime = get_runtime().get_mut();
-        for (i, reg) in captured_callee_saved_regs.iter().copied().enumerate() {
-            if BuiltInTypes::is_heap_pointer(reg) {
-                captured_callee_saved_root_ids[i] = runtime.register_temporary_root(reg);
-            }
-        }
-    }
-    let result = unsafe {
-        perform_effect_runtime_inner(
-            stack_pointer,
-            frame_pointer,
-            enum_type_ptr,
-            op_value,
-            resume_address,
-            result_local_offset_raw,
-            captured_callee_saved_regs,
-            captured_callee_saved_root_ids,
-            saved_regs_stack_offset,
-        )
-    };
-    {
-        let runtime = get_runtime().get_mut();
-        for root_id in captured_callee_saved_root_ids {
-            if root_id != usize::MAX {
-                runtime.unregister_temporary_root(root_id);
-            }
-        }
-    }
-    result
 }
 
 pub unsafe fn perform_effect_runtime_inner(
@@ -359,9 +306,6 @@ pub unsafe fn perform_effect_runtime_inner(
     op_value: usize,
     resume_address: usize,
     result_local_offset_raw: usize,
-    captured_callee_saved_regs: [usize; 10],
-    captured_callee_saved_root_ids: [usize; 10],
-    saved_regs_stack_offset: Option<usize>,
 ) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let result_local_offset = result_local_offset_raw as isize;
@@ -406,9 +350,6 @@ pub unsafe fn perform_effect_runtime_inner(
             frame_pointer,
             resume_address,
             result_local_offset,
-            captured_callee_saved_regs,
-            captured_callee_saved_root_ids,
-            saved_regs_stack_offset,
         )
     };
 

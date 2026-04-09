@@ -16,7 +16,7 @@ cfg_if::cfg_if! {
 use bincode::config::standard;
 use bincode::{Decode, Encode};
 use clap::Parser as ClapParser;
-use gc::{Allocator, StackMapDetails, get_allocate_options};
+use gc::{Allocator, get_allocate_options};
 #[allow(unused)]
 use gc::{
     compacting::CompactingHeap, generational::GenerationalGC, mark_and_sweep::MarkAndSweep,
@@ -451,42 +451,8 @@ fn compile_arm_continuation_return_stub(runtime: &mut Runtime) {
         function.is_builtin = true;
     }
 
-    // ========================================================================
-    // ARM64 save-callee-regs trampoline: saves x19-x28 to [X0]
-    // ========================================================================
-    {
-        use crate::machine_code::arm_codegen::{ArmAsm, StrImmGenSelector, X0};
-        let mut lang = arm::LowLevelArm::new();
-        let callee_regs = [X19, X20, X21, X22, X23, X24, X25, X26, X27, X28];
-        for (i, reg) in callee_regs.iter().enumerate() {
-            lang.instructions.push(ArmAsm::StrImmGen {
-                size: 0b11,
-                imm9: 0,
-                imm12: i as i32,
-                rn: X0,
-                rt: *reg,
-                class_selector: StrImmGenSelector::UnsignedOffset,
-            });
-        }
-        lang.ret();
-        let code: Vec<u8> = lang
-            .instructions
-            .iter()
-            .flat_map(|instr| instr.encode().to_le_bytes())
-            .collect();
-        runtime
-            .add_function_mark_executable(
-                "beagle.builtin/save-callee-regs".to_string(),
-                &code,
-                0,
-                1,
-            )
-            .unwrap();
-        let function = runtime
-            .get_function_by_name_mut("beagle.builtin/save-callee-regs")
-            .unwrap();
-        function.is_builtin = true;
-    }
+    // save-callee-regs trampoline removed — callee-saved register values are
+    // now stored in root slots by the codegen save loop.
 }
 
 // TODO: This should really live on the debugger side of things
@@ -514,11 +480,6 @@ enum Data {
         function_pointer: usize,
         label_index: usize,
         label_location: usize,
-    },
-    StackMap {
-        pc: usize,
-        name: String,
-        stack_map: Vec<(usize, StackMapDetails)>,
     },
     Allocate {
         bytes: usize,
@@ -1161,7 +1122,13 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
             offset: 8,
         });
 
-        // Restore callee-saved registers from the array
+        // Restore callee-saved registers from the array (skip if R8 is null)
+        let skip_callee_restore = lang.get_label_index();
+        lang.instructions.push(X86Asm::TestRR { a: R8, b: R8 });
+        lang.instructions.push(X86Asm::Jcc {
+            label_index: skip_callee_restore,
+            cond: crate::machine_code::x86_codegen::Condition::E,
+        });
         lang.instructions.push(X86Asm::MovRM {
             dest: RBX,
             base: R8,
@@ -1186,6 +1153,9 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
             dest: R15,
             base: R8,
             offset: 32,
+        });
+        lang.instructions.push(X86Asm::Label {
+            index: skip_callee_restore,
         });
 
         // Restore stack state
@@ -1332,9 +1302,14 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
             offset: 8, // 7th argument
         });
 
-        // Restore callee-saved registers from the array pointed to by RDI.
-        // These registers may hold heap pointers that were updated by GC
-        // since the continuation was captured.
+        // Restore callee-saved registers from the array pointed to by RDI
+        // (skip if RDI is null).
+        let skip_callee_restore = lang.get_label_index();
+        lang.instructions.push(X86Asm::TestRR { a: RDI, b: RDI });
+        lang.instructions.push(X86Asm::Jcc {
+            label_index: skip_callee_restore,
+            cond: crate::machine_code::x86_codegen::Condition::E,
+        });
         lang.instructions.push(X86Asm::MovRM {
             dest: RBX,
             base: RDI,
@@ -1359,6 +1334,9 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
             dest: R15,
             base: RDI,
             offset: 32,
+        });
+        lang.instructions.push(X86Asm::Label {
+            index: skip_callee_restore,
         });
 
         // Set RSP = new_sp (RCX), RBP = new_fp (R8)
@@ -1560,51 +1538,8 @@ fn compile_continuation_trampolines(runtime: &mut Runtime) {
         function.is_builtin = true;
     }
 
-    // ========================================================================
-    // x86-64 save-callee-regs trampoline: saves RBX, R12-R15 to [RDI]
-    // ========================================================================
-    {
-        let mut lang = x86::LowLevelX86::new();
-        lang.instructions.push(X86Asm::MovMR {
-            base: RDI,
-            offset: 0,
-            src: RBX,
-        });
-        lang.instructions.push(X86Asm::MovMR {
-            base: RDI,
-            offset: 8,
-            src: R12,
-        });
-        lang.instructions.push(X86Asm::MovMR {
-            base: RDI,
-            offset: 16,
-            src: R13,
-        });
-        lang.instructions.push(X86Asm::MovMR {
-            base: RDI,
-            offset: 24,
-            src: R14,
-        });
-        lang.instructions.push(X86Asm::MovMR {
-            base: RDI,
-            offset: 32,
-            src: R15,
-        });
-        lang.instructions.push(X86Asm::Ret);
-        let code = lang.compile_to_bytes();
-        runtime
-            .add_function_mark_executable(
-                "beagle.builtin/save-callee-regs".to_string(),
-                &code,
-                0,
-                1,
-            )
-            .unwrap();
-        let function = runtime
-            .get_function_by_name_mut("beagle.builtin/save-callee-regs")
-            .unwrap();
-        function.is_builtin = true;
-    }
+    // x86-64 save-callee-regs trampoline removed — callee-saved register values
+    // are now stored in root slots by the codegen save loop.
 }
 
 #[derive(Debug, Clone)]

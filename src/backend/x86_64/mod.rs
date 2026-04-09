@@ -449,24 +449,6 @@ impl CodegenBackend for X86_64Backend {
         self.inner.mark_callee_saved_register_used(index);
     }
 
-    // === Stack map for GC ===
-
-    fn translate_stack_map(&self, base_pointer: usize) -> Vec<(usize, usize)> {
-        self.inner.translate_stack_map(base_pointer)
-    }
-
-    fn current_byte_offset(&self) -> usize {
-        self.inner.current_byte_offset()
-    }
-
-    fn record_gc_safepoint(&mut self) {
-        self.inner.record_gc_safepoint();
-    }
-
-    fn return_address_adjustment() -> usize {
-        LowLevelX86::return_address_adjustment()
-    }
-
     // === Debugging ===
 
     fn breakpoint(&mut self) {
@@ -519,18 +501,6 @@ impl CodegenBackend for X86_64Backend {
 
     fn max_locals(&self) -> i32 {
         self.inner.max_locals
-    }
-
-    fn max_stack_size(&self) -> i32 {
-        self.inner.max_stack_size
-    }
-
-    fn stack_size(&self) -> i32 {
-        self.inner.stack_size
-    }
-
-    fn num_callee_saved(&self) -> usize {
-        self.inner.num_callee_saved
     }
 
     // === Pair operations ===

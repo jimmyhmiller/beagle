@@ -532,11 +532,8 @@ impl MarkAndSweep {
                         );
                     }
                 }
-                for return_point in ptd.invocation_return_points.iter() {
-                    for reg in return_point.callee_saved_regs.iter().copied() {
-                        push_root(&mut to_mark, reg, 0, "invocation-return-reg");
-                    }
-                }
+                // callee_saved_regs removed — values are in root slots in the frame
+                let _ = &ptd.invocation_return_points;
                 for frame in ptd.suspended_frames.values() {
                     for slot in frame.locals.iter().copied() {
                         push_root(&mut to_mark, slot, 0, "suspended-frame-local");
@@ -544,9 +541,6 @@ impl MarkAndSweep {
                 }
                 if let Some(ctx) = ptd.safe_return_context.as_ref() {
                     push_root(&mut to_mark, ctx.value, 0, "safe-return-value");
-                    for reg in ctx.return_point.callee_saved_regs.iter().copied() {
-                        push_root(&mut to_mark, reg, 0, "safe-return-reg");
-                    }
                 }
                 if let Some(ctx) = ptd.safe_perform_context.as_ref() {
                     push_root(&mut to_mark, ctx.handler, 0, "safe-perform-handler");

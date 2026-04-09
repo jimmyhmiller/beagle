@@ -3,9 +3,7 @@ use crate::{
     ast::{Ast, Pattern, TokenRange},
     backend::{Backend, CodegenBackend},
     code_memory::CodeAllocator,
-    debug_only,
-    gc::{StackMap, StackMapDetails},
-    get_runtime,
+    debug_only, get_runtime,
     ir::{StringValue, Value},
     parser::Parser,
     runtime::{Enum, Function, ProtocolMethodInfo, Struct},
@@ -332,7 +330,6 @@ struct DeferredFunctionUpdate {
     pointer: *const u8,
     code_size: usize,
     max_locals: usize,
-    stack_map: Vec<(usize, StackMapDetails)>,
     number_of_args: usize,
     is_variadic: bool,
     min_args: usize,
@@ -346,7 +343,6 @@ pub struct Compiler {
     pub code_allocator: CodeAllocator,
     pub property_look_up_cache: MmapMut,
     pub command_line_arguments: CommandLineArguments,
-    pub stack_map: StackMap,
     pub pause_atom_ptr: Option<usize>,
     pub property_look_up_cache_offset: usize,
     pub compiled_file_cache: HashSet<String>,
@@ -1149,27 +1145,6 @@ impl Compiler {
         );
         let code = backend.compile_to_bytes();
         let pointer = self.add_code(&code)?;
-        let stack_map = backend
-            .translate_stack_map(pointer as usize)
-            .iter()
-            .map(|(key, value)| {
-                (
-                    *key,
-                    StackMapDetails {
-                        function_name: function_name.map(|x| x.to_string()),
-                        current_stack_size: *value,
-                        // Detached continuation scans should only treat the
-                        // semantic Beagle locals as part of the resumed frame
-                        // state. Regalloc spill/save slots live above this
-                        // range in the physical frame, but they are scratch
-                        // stack slots rather than true continuation locals.
-                        number_of_locals: max_locals,
-                        max_stack_size: backend.max_stack_size() as usize,
-                        num_callee_saved: backend.num_callee_saved(),
-                    },
-                )
-            })
-            .collect();
 
         if self.defer_function_installs {
             // Batch mode: compile code but defer the jump table update.
@@ -1181,7 +1156,6 @@ impl Compiler {
                 pointer,
                 code_size: code.len(),
                 max_locals,
-                stack_map,
                 number_of_args,
                 is_variadic,
                 min_args,
@@ -1206,7 +1180,6 @@ impl Compiler {
                 pointer,
                 code.len(),
                 max_locals,
-                stack_map,
                 number_of_args,
                 is_variadic,
                 min_args,
@@ -1237,7 +1210,6 @@ impl Compiler {
                 update.pointer,
                 update.code_size,
                 update.max_locals,
-                update.stack_map,
                 update.number_of_args,
                 update.is_variadic,
                 update.min_args,
@@ -1261,13 +1233,11 @@ impl Compiler {
         let pointer = self.add_code(&code)?;
         self.code_allocator.make_executable();
         let runtime = get_runtime().get_mut();
-        let stack_map = vec![];
         runtime.upsert_function(
             function_name,
             pointer,
             code.len(),
             max_locals,
-            stack_map,
             number_of_args,
             is_variadic,
             min_args,
@@ -1616,7 +1586,6 @@ impl CompilerThread {
                     })?,
                 protocol_dispatch_cache_offset: 0,
                 command_line_arguments: command_line_arguments.clone(),
-                stack_map: StackMap::new(),
                 pause_atom_ptr: None,
                 compiled_file_cache: HashSet::new(),
                 diagnostic_store,

@@ -541,13 +541,8 @@ impl CompactingHeap {
                 }
             }
 
-            for return_point in ptd.invocation_return_points.iter_mut() {
-                for reg in return_point.callee_saved_regs.iter_mut() {
-                    if BuiltInTypes::is_heap_pointer(*reg) {
-                        *reg = self.copy_using_cheneys_algorithm(*reg);
-                    }
-                }
-            }
+            // callee_saved_regs removed — values are in root slots in the frame
+            let _ = &ptd.invocation_return_points;
 
             for frame in ptd.suspended_frames.values_mut() {
                 for slot in frame.locals.iter_mut() {
@@ -560,11 +555,6 @@ impl CompactingHeap {
             if let Some(ctx) = ptd.safe_return_context.as_mut() {
                 if BuiltInTypes::is_heap_pointer(ctx.value) {
                     ctx.value = self.copy_using_cheneys_algorithm(ctx.value);
-                }
-                for reg in ctx.return_point.callee_saved_regs.iter_mut() {
-                    if BuiltInTypes::is_heap_pointer(*reg) {
-                        *reg = self.copy_using_cheneys_algorithm(*reg);
-                    }
                 }
             }
 

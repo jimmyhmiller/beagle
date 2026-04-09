@@ -255,25 +255,6 @@ pub trait CodegenBackend: Sized {
     /// callee-saved registers are used and need to be saved in the prologue.
     fn mark_callee_saved_register_used(&mut self, index: usize);
 
-    // === Stack map for GC ===
-
-    fn translate_stack_map(&self, base_pointer: usize) -> Vec<(usize, usize)>;
-
-    /// Get the current byte offset in the generated code.
-    /// ARM64: instruction_count * 4 (fixed 4-byte instructions)
-    /// x86-64: sum of all instruction byte sizes (variable length)
-    fn current_byte_offset(&self) -> usize;
-
-    /// Record a GC safepoint at the current position.
-    /// Called before emitting call instructions to builtins.
-    /// The safepoint records the byte offset and current stack size.
-    fn record_gc_safepoint(&mut self);
-
-    /// Get the adjustment needed when looking up return addresses in the stack map.
-    /// ARM64: 4 (instruction size)
-    /// x86-64: depends on call instruction size (typically 2-3 for indirect call)
-    fn return_address_adjustment() -> usize;
-
     // === Debugging ===
 
     fn breakpoint(&mut self);
@@ -306,9 +287,6 @@ pub trait CodegenBackend: Sized {
     // === Public field accessors ===
 
     fn max_locals(&self) -> i32;
-    fn max_stack_size(&self) -> i32;
-    fn stack_size(&self) -> i32;
-    fn num_callee_saved(&self) -> usize;
 
     // === Pair operations (ARM64-specific but abstracted) ===
 

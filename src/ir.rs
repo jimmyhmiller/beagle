@@ -199,6 +199,7 @@ pub enum Instruction {
     PerformEffectWithSaves(Value, Value, Value, Label, usize, usize, Vec<SavedValue>), // handler, enum_type, op_value, resume_label, result_local_index, builtin_fn_ptr, saved live roots
     ReturnFromShift(Value, Value, usize), // value, cont_ptr, builtin_fn_ptr - calls return_from_shift with current SP/FP
     RecordGcSafepoint, // Record a GC safepoint at the current position (for continuation resume points)
+    ReloadRootSlots(Vec<SavedValue>), // Reload live registers from root slots at continuation resume points
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -591,6 +592,10 @@ impl Instruction {
             Instruction::ReturnFromShift(value, cont_ptr, _) => {
                 get_registers!(value, cont_ptr)
             }
+            Instruction::ReloadRootSlots(saves) => saves
+                .iter()
+                .filter_map(|save| (&save.source).try_into().ok())
+                .collect(),
         }
     }
 
@@ -720,6 +725,15 @@ impl Instruction {
             }
 
             Instruction::Jump(_) | Instruction::Breakpoint | Instruction::RecordGcSafepoint => {}
+            Instruction::ReloadRootSlots(saves) => {
+                for save in saves {
+                    if let Value::Register(register) = save.source
+                        && register == old_register
+                    {
+                        save.source = new_register;
+                    }
+                }
+            }
             Instruction::PushExceptionHandler(_, value, _) => {
                 replace_register!(value, old_register, new_register);
             }
@@ -1654,70 +1668,6 @@ impl Ir {
         }
     }
 
-    fn continuation_saved_reg_slot(register: VirtualRegister) -> Option<usize> {
-        cfg_if::cfg_if! {
-            if #[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))] {
-                match register.index {
-                    16 => Some(0), // RBX
-                    12 => Some(1), // R12
-                    13 => Some(2), // R13
-                    14 => Some(3), // R14
-                    15 => Some(4), // R15
-                    _ => None,
-                }
-            } else {
-                if (19..=28).contains(&register.index) {
-                    Some(register.index - 19)
-                } else {
-                    None
-                }
-            }
-        }
-    }
-
-    fn emit_continuation_saved_regs_arg<B: CodegenBackend>(
-        &self,
-        backend: &mut B,
-        saves: &[SavedValue],
-        total_args: usize,
-        saved_regs_arg_index: usize,
-    ) {
-        const NUM_CAPTURED_CALLEE_SAVED: usize = 10;
-
-        let num_stack_args = total_args.saturating_sub(backend.num_arg_registers());
-        let buffer_base_offset = num_stack_args as i32;
-
-        let null_reg = backend.temporary_register();
-        backend.mov_64(null_reg, BuiltInTypes::null_value());
-        for slot in 0..NUM_CAPTURED_CALLEE_SAVED {
-            backend.push_to_end_of_stack(null_reg, buffer_base_offset + slot as i32);
-        }
-        backend.free_temporary_register(null_reg);
-
-        for save in saves {
-            let Value::Register(register) = save.source else {
-                continue;
-            };
-            let Some(slot) = Self::continuation_saved_reg_slot(register) else {
-                continue;
-            };
-            let save_reg = self.value_to_register(&save.source, backend);
-            backend.push_to_end_of_stack(save_reg, buffer_base_offset + slot as i32);
-        }
-
-        let saved_regs_ptr = backend.temporary_register();
-        backend.get_stack_pointer_imm(saved_regs_ptr, (buffer_base_offset as isize) * 8);
-        if saved_regs_arg_index < backend.num_arg_registers() {
-            backend.mov_reg(backend.arg(saved_regs_arg_index as u8), saved_regs_ptr);
-        } else {
-            backend.push_to_end_of_stack(
-                saved_regs_ptr,
-                (saved_regs_arg_index - backend.num_arg_registers()) as i32,
-            );
-        }
-        backend.free_temporary_register(saved_regs_ptr);
-    }
-
     fn compile_instructions<B: CodegenBackend>(
         &mut self,
         backend: &mut B,
@@ -1733,11 +1683,40 @@ impl Ir {
             ir_label_to_lang_label.insert(**label, new_label);
         }
 
+        // Build a map from resume labels to their saved registers. When we
+        // encounter these labels during codegen, we emit reload instructions
+        // so that registers are restored from root slots after continuation resume.
+        let mut resume_label_saves: HashMap<Label, Vec<SavedValue>> = HashMap::new();
+        for instruction in self.instructions.iter() {
+            match instruction {
+                Instruction::CaptureContinuationWithSaves(_, label, _, _, saves)
+                    if !saves.is_empty() =>
+                {
+                    resume_label_saves.insert(*label, saves.clone());
+                }
+                Instruction::PerformEffectWithSaves(_, _, _, label, _, _, saves)
+                    if !saves.is_empty() =>
+                {
+                    resume_label_saves.insert(*label, saves.clone());
+                }
+                _ => {}
+            }
+        }
+
         for (index, instruction) in self.instructions.iter().enumerate() {
             let start_machine_code = backend.current_position();
             let label = self.label_locations.get(&index);
             if let Some(label) = label {
                 backend.write_label(ir_label_to_lang_label[&self.labels[*label]]);
+                // At continuation resume labels, reload live registers from
+                // their root slots. The stack segment was restored with
+                // GC-updated values in the root slots.
+                if let Some(saves) = resume_label_saves.get(&self.labels[*label]) {
+                    for save in saves.iter().rev() {
+                        let save_reg = self.value_to_register(&save.source, backend);
+                        backend.load_local(save_reg, save.local as i32);
+                    }
+                }
             }
             backend.clear_temporary_registers();
             // println!("instruction {:?}", instruction);
@@ -1746,7 +1725,14 @@ impl Ir {
                     backend.breakpoint();
                 }
                 Instruction::RecordGcSafepoint => {
-                    backend.record_gc_safepoint();
+                    // No-op: stack maps have been removed; GC scans all root
+                    // slots in the frame header instead.
+                }
+                Instruction::ReloadRootSlots(_) => {
+                    // Reloads are emitted at the label site (above) rather than
+                    // here, because the label write happens before the instruction
+                    // match. This arm is a no-op — the instruction exists only to
+                    // satisfy exhaustive matching.
                 }
                 Instruction::Label(_) => {}
                 Instruction::ExtendLifeTime(_) => {}
@@ -2867,6 +2853,13 @@ impl Ir {
                     builtin_fn,
                     saves,
                 ) => {
+                    // Save registers to their root slots (frame locals) so they
+                    // survive GC and are part of the captured stack segment.
+                    for save in saves.iter() {
+                        let save_reg = self.value_to_register(&save.source, backend);
+                        backend.store_local(save_reg, save.local as i32);
+                    }
+
                     // Arguments: (stack_pointer, frame_pointer, resume_address, result_local_offset)
 
                     // Pass the real machine stack pointer. Continuation resume
@@ -2885,7 +2878,12 @@ impl Ir {
                     let local_offset = backend.get_local_byte_offset(*result_local_index);
                     backend.mov_64(backend.arg(3), local_offset);
 
-                    self.emit_continuation_saved_regs_arg(backend, saves, 5, 4);
+                    // Pass null for saved_regs_ptr — registers are already
+                    // stored in root slots by the save loop above.
+                    let saved_regs_ptr = backend.temporary_register();
+                    backend.mov_64(saved_regs_ptr, 0);
+                    backend.mov_reg(backend.arg(4), saved_regs_ptr);
+                    backend.free_temporary_register(saved_regs_ptr);
 
                     // Call the builtin
                     let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
@@ -2902,6 +2900,14 @@ impl Ir {
                     self.store_spill(dest_reg, dest_spill, backend);
                     if matches!(dest, Value::Spill(_, _)) {
                         backend.free_temporary_register(dest_reg);
+                    }
+
+                    // Restore saved registers from their root slots.
+                    // On the initial capture path, GC may have moved objects
+                    // during the builtin call — root slots were updated by GC.
+                    for save in saves.iter().rev() {
+                        let save_reg = self.value_to_register(&save.source, backend);
+                        backend.load_local(save_reg, save.local as i32);
                     }
                 }
                 Instruction::PerformEffect(
@@ -2950,6 +2956,13 @@ impl Ir {
                     builtin_fn,
                     saves,
                 ) => {
+                    // Save registers to their root slots (frame locals) so they
+                    // survive GC and are part of the captured stack segment.
+                    for save in saves.iter() {
+                        let save_reg = self.value_to_register(&save.source, backend);
+                        backend.store_local(save_reg, save.local as i32);
+                    }
+
                     backend.get_stack_pointer_imm(backend.arg(0), 0);
                     backend.mov_reg(backend.arg(1), backend.frame_pointer());
 
@@ -2967,7 +2980,16 @@ impl Ir {
                     let local_offset = backend.get_local_byte_offset(*result_local_index);
                     backend.mov_64(backend.arg(5), local_offset);
 
-                    self.emit_continuation_saved_regs_arg(backend, saves, 7, 6);
+                    // Pass null for saved_regs_ptr — registers are already
+                    // stored in root slots by the save loop above.
+                    let saved_regs_ptr = backend.temporary_register();
+                    backend.mov_64(saved_regs_ptr, 0);
+                    if backend.num_arg_registers() > 6 {
+                        backend.mov_reg(backend.arg(6), saved_regs_ptr);
+                    } else {
+                        backend.push_to_end_of_stack(saved_regs_ptr, 0);
+                    }
+                    backend.free_temporary_register(saved_regs_ptr);
 
                     let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
                     backend.call_builtin(fn_ptr);

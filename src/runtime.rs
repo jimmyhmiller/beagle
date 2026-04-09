@@ -23,10 +23,7 @@ use crate::{
     compiler::{
         BlockingSender, CompilerMessage, CompilerResponse, CompilerThread, blocking_channel,
     },
-    gc::{
-        AllocateAction, Allocator, AllocatorOptions, STACK_SIZE, StackMap, StackMapDetails,
-        usdt_probes,
-    },
+    gc::{AllocateAction, Allocator, AllocatorOptions, STACK_SIZE, usdt_probes},
     ir::StringValue,
     types::{BuiltInTypes, Header, HeapObject, Tagged},
 };
@@ -3242,7 +3239,6 @@ pub struct Memory {
     stacks: Mutex<Vec<(ThreadId, MmapMut)>>,
     pub join_handles: Vec<JoinHandle<u64>>,
     pub threads: Vec<Thread>,
-    pub stack_map: StackMap,
     /// Per-thread GlobalObject management (now owned by Memory, not GC)
     /// Protected by Mutex for thread-safe access from multiple threads.
     /// Box<ThreadGlobal> provides stable addresses so thread_locals can cache raw pointers.
@@ -3411,7 +3407,7 @@ impl Memory {
         NATIVE_ARGUMENTS.with(|memory| memory.borrow_mut().clear());
     }
 
-    /// Convenience method for Runtime to trigger GC using Memory's own stack_map and thread_globals.
+    /// Convenience method for Runtime to trigger GC using Memory's own thread_globals.
     /// Collects shadow stack roots and head_block roots from all threads and passes them to the GC.
     /// namespace_roots: Additional GC roots from namespace bindings (passed from Runtime)
     /// Returns updated namespace root values after GC (for copying collectors)
@@ -3662,14 +3658,6 @@ impl NamespaceManager {
     }
 }
 
-#[allow(unused)]
-#[derive(Debug)]
-pub struct StackValue {
-    function: Option<String>,
-    details: StackMapDetails,
-    stack: Vec<usize>,
-}
-
 #[derive(Debug, Clone)]
 pub struct ProtocolMethodInfo {
     pub method_name: String,
@@ -3794,9 +3782,6 @@ pub struct InvocationReturnPoint {
     pub frame_pointer: usize,
     /// Address to return to after continuation body completes
     pub return_address: usize,
-    /// Callee-saved registers (x19-x28 on ARM64) that must be preserved
-    /// These are saved when k() is called and restored when returning
-    pub callee_saved_regs: [usize; 10],
     /// Saved suspended caller frame stored in per-thread suspended_frames, or 0.
     pub suspended_frame_id: usize,
     /// Unique ID of the prompt handler that this return point belongs to.
@@ -4116,9 +4101,6 @@ impl ContinuationObject {
     const FIELD_PROMPT_FRAME_LOCALS: usize = 20;
     const FIELD_PROMPT_FRAME_TRAILING: usize = 21;
     const FIELD_PROMPT_FRAME_SIZE: usize = 22;
-    const FIELD_CAPTURED_CALLEE_SAVED_START: usize = 23;
-    const NUM_CAPTURED_CALLEE_SAVED: usize = 10;
-
     pub fn from_tagged(tagged: usize) -> Option<Self> {
         let heap_obj = HeapObject::try_from_tagged(tagged)?;
         Self::from_heap_object(heap_obj)
@@ -4402,16 +4384,6 @@ impl ContinuationObject {
         }
     }
 
-    pub fn captured_callee_saved_regs(&self) -> [usize; Self::NUM_CAPTURED_CALLEE_SAVED] {
-        let mut regs = [0usize; Self::NUM_CAPTURED_CALLEE_SAVED];
-        for (i, reg) in regs.iter_mut().enumerate() {
-            *reg = self
-                .heap_obj
-                .get_field(Self::FIELD_CAPTURED_CALLEE_SAVED_START + i);
-        }
-        regs
-    }
-
     pub fn set_exc_handler_info(
         &mut self,
         handler_address: usize,
@@ -4452,7 +4424,6 @@ impl ContinuationObject {
         segment_frame_pointer_offset: usize,
         segment_gc_frame_offset: usize,
         segment_size: usize,
-        captured_callee_saved_regs: &[usize; Self::NUM_CAPTURED_CALLEE_SAVED],
     ) {
         heap_obj.write_type_id(TYPE_ID_CONTINUATION as usize);
         heap_obj.write_field(
@@ -4547,9 +4518,6 @@ impl ContinuationObject {
             Self::FIELD_PROMPT_FRAME_SIZE as i32,
             BuiltInTypes::Int.tag(0) as usize,
         );
-        for (i, reg) in captured_callee_saved_regs.iter().enumerate() {
-            heap_obj.write_field((Self::FIELD_CAPTURED_CALLEE_SAVED_START + i) as i32, *reg);
-        }
     }
 }
 
@@ -5148,7 +5116,6 @@ impl Runtime {
                 join_handles: vec![],
                 threads: vec![std::thread::current()],
                 command_line_arguments,
-                stack_map: StackMap::new(),
                 thread_globals: Mutex::new(HashMap::new()),
                 namespace_root_storage: Vec::new(),
             },
@@ -6035,41 +6002,6 @@ impl Runtime {
             let end = start + f.size;
             pc >= start && pc < end
         })
-    }
-
-    #[allow(unused)]
-    pub fn parse_stack_frames(&self, stack_pointer: usize) -> Vec<StackValue> {
-        let stack_base = self.get_stack_base();
-        let stack = unsafe {
-            Self::buffer_between(
-                (stack_pointer as *const usize).sub(1),
-                stack_base as *const usize,
-            )
-        };
-        println!("Stack: {:?}", stack);
-        let mut stack_frames = vec![];
-        let mut i = 0;
-        while i < stack.len() {
-            let value = stack[i];
-            if let Some(details) = self.memory.stack_map.find_stack_data(value) {
-                let mut frame_size = details.max_stack_size + details.number_of_locals;
-                if frame_size % 2 != 0 {
-                    frame_size += 1
-                }
-                let current_frame = &stack[i..i + frame_size + 1];
-                let stack_value = StackValue {
-                    function: self.find_function_for_pc(value).map(|f| f.name.clone()),
-                    details: details.clone(),
-                    stack: current_frame.to_vec(),
-                };
-                println!("Stack value: {:#?}", stack_value);
-                stack_frames.push(stack_value);
-                i += details.current_stack_size + details.number_of_locals + 1;
-                continue;
-            }
-            i += 1;
-        }
-        stack_frames
     }
 
     // Exception handling methods
@@ -8892,23 +8824,6 @@ impl Runtime {
         Ok(self.functions.len() - 1)
     }
 
-    pub fn update_stack_map_information(
-        &mut self,
-        stack_map: Vec<(usize, StackMapDetails)>,
-        function_pointer: usize,
-        name: Option<&str>,
-    ) {
-        debugger(Message {
-            kind: "stack_map".to_string(),
-            data: Data::StackMap {
-                pc: function_pointer,
-                name: name.unwrap_or("<Anonymous>").to_string(),
-                stack_map: stack_map.clone(),
-            },
-        });
-        self.memory.stack_map.extend(stack_map);
-    }
-
     pub fn replace_function_binding(
         &mut self,
         name: String,
@@ -8935,7 +8850,6 @@ impl Runtime {
         pointer: *const u8,
         size: usize,
         number_of_locals: usize,
-        stack_map: Vec<(usize, StackMapDetails)>,
         number_of_args: usize,
         is_variadic: bool,
         min_args: usize,
@@ -9004,8 +8918,6 @@ impl Runtime {
             )?;
         }
         assert!(function_pointer != 0);
-
-        self.update_stack_map_information(stack_map, function_pointer, name);
 
         debugger(Message {
             kind: "user_function".to_string(),

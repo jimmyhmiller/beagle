@@ -535,16 +535,8 @@ impl GenerationalGC {
                 }
             }
 
-            for return_point in ptd.invocation_return_points.iter_mut() {
-                for reg in return_point.callee_saved_regs.iter_mut() {
-                    if BuiltInTypes::is_heap_pointer(*reg) {
-                        let untagged = BuiltInTypes::untag(*reg);
-                        if self.young.contains(untagged as *const u8) {
-                            *reg = self.copy(*reg);
-                        }
-                    }
-                }
-            }
+            // callee_saved_regs removed — values are in root slots in the frame
+            let _ = &ptd.invocation_return_points;
 
             for frame in ptd.suspended_frames.values_mut() {
                 for slot in frame.locals.iter_mut() {
@@ -564,14 +556,7 @@ impl GenerationalGC {
                         ctx.value = self.copy(ctx.value);
                     }
                 }
-                for reg in ctx.return_point.callee_saved_regs.iter_mut() {
-                    if BuiltInTypes::is_heap_pointer(*reg) {
-                        let untagged = BuiltInTypes::untag(*reg);
-                        if self.young.contains(untagged as *const u8) {
-                            *reg = self.copy(*reg);
-                        }
-                    }
-                }
+                // callee_saved_regs removed — values are in root slots
             }
 
             if let Some(ctx) = ptd.safe_perform_context.as_mut() {

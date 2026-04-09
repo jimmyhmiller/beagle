@@ -524,7 +524,6 @@ pub struct LowLevelArm {
     // the locations based on that pc
     // This means, we should be able to walk the stack
     // and figure out where to look for potential roots
-    pub stack_map: HashMap<usize, usize>,
     free_temporary_registers: Vec<Register>,
     allocated_temporary_registers: Vec<Register>,
     canonical_temporary_registers: Vec<Register>,
@@ -565,7 +564,6 @@ impl LowLevelArm {
             stack_size: 0,
             max_stack_size: 0,
             max_locals: 0,
-            stack_map: HashMap::new(),
             used_callee_saved_registers: 0,
             num_callee_saved: 0,
             mark_local_index: None,
@@ -1083,48 +1081,16 @@ impl LowLevelArm {
             .collect()
     }
 
-    pub fn translate_stack_map(&self, pc: usize) -> Vec<(usize, usize)> {
-        // Stack map keys are already byte offsets
-        self.stack_map
-            .iter()
-            .map(|(byte_offset, value)| (*byte_offset + pc, *value))
-            .collect()
-    }
-
-    /// Get the current byte offset in the generated code.
-    /// ARM64 instructions are fixed 4 bytes each.
-    pub fn current_byte_offset(&self) -> usize {
-        self.instructions.len() * 4
-    }
-
-    /// Record a GC safepoint at the current position.
-    pub fn record_gc_safepoint(&mut self) {
-        let byte_offset = self.current_byte_offset();
-        let stack_size = self.stack_size as usize;
-        self.stack_map.insert(byte_offset, stack_size);
-    }
-
-    /// Get the adjustment for return address lookup.
-    /// ARM64 BLR instruction is 4 bytes.
-    pub fn return_address_adjustment() -> usize {
-        4
-    }
-
     pub fn call(&mut self, register: Register) {
         self.instructions.push(branch_with_link_register(register));
-        // Record safepoint after the call - this is the return address
-        self.record_gc_safepoint();
     }
 
     pub fn call_builtin(&mut self, register: Register) {
-        // Just use regular call - it records the safepoint
         self.call(register);
     }
 
     pub fn recurse(&mut self, label: Label) {
         self.instructions.push(branch_with_link(label.index as i32));
-        // Record safepoint after the call - this is the return address
-        self.record_gc_safepoint();
     }
 
     pub fn patch_labels(&mut self) {
@@ -1534,7 +1500,9 @@ impl LowLevelArm {
             // NOTE: STUR has a 9-bit signed immediate (-256 to 255), so for large stack
             // frames we need a different approach. We use X10 as a pointer that we decrement.
             let null_value = crate::types::BuiltInTypes::null_value() as i32;
-            let slots_to_zero = (self.max_locals + self.max_stack_size) as i32;
+            // Only zero root slots (max_locals). Eval stack slots above them are
+            // not scanned by GC and don't need zeroing.
+            let slots_to_zero = self.max_locals;
 
             #[cfg(feature = "debug-gc")]
             eprintln!(
@@ -1545,10 +1513,10 @@ impl LowLevelArm {
             // Write frame header at [X29-8]. This is a heap-object-style header
             // that lets GC know how many traced slots this frame has.
             {
-                // Only scan locals + eval stack — these are Beagle-managed tagged values.
-                // Callee-saved register spill slots are NOT included because they can
-                // hold arbitrary non-tagged values.
-                let num_slots = (self.max_locals + self.max_stack_size) as usize;
+                // Only scan root slots (max_locals). Eval stack slots are NOT
+                // included — they're not root slots and are protected by
+                // register_temporary_root in the runtime instead.
+                let num_slots = self.max_locals as usize;
                 // Encode mark local index in lower 16 bits of type_data if present.
                 // Upper 16 bits = num_slots (for GC/captured frame).
                 // Lower 16 bits = mark local index (for get_dynamic_var frame walk).
@@ -1766,21 +1734,6 @@ impl LowLevelArm {
                         *location = (*location as isize + delta) as usize;
                     }
                 }
-                // Also shift stack_map entries that come after the insertion point
-                // Note: stack_map keys are byte offsets, not instruction indices
-                let byte_index = index * 4;
-                let byte_delta = delta * 4;
-                self.stack_map = self
-                    .stack_map
-                    .drain()
-                    .map(|(k, v)| {
-                        if k > byte_index {
-                            ((k as isize + byte_delta) as usize, v)
-                        } else {
-                            (k, v)
-                        }
-                    })
-                    .collect();
             }
         } else {
             unreachable!("Expected to find SUB placeholder instruction for stack allocation");
@@ -1864,21 +1817,6 @@ impl LowLevelArm {
                         *location = (*location as isize + delta) as usize;
                     }
                 }
-                // Also shift stack_map entries for epilogue splice
-                // Note: stack_map keys are byte offsets, not instruction indices
-                let byte_index = index * 4;
-                let byte_delta = delta * 4;
-                self.stack_map = self
-                    .stack_map
-                    .drain()
-                    .map(|(k, v)| {
-                        if k > byte_index {
-                            ((k as isize + byte_delta) as usize, v)
-                        } else {
-                            (k, v)
-                        }
-                    })
-                    .collect();
             }
         } else {
             unreachable!("Expected to find ADD placeholder instruction for stack deallocation");

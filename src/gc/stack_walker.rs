@@ -23,44 +23,8 @@ use std::collections::HashSet;
 pub struct StackWalker;
 
 impl StackWalker {
-    fn detached_frame_live_slots(header_addr: usize, header: Header) -> usize {
-        let frame_pointer = header_addr + 8;
-        let return_addr = unsafe { *((frame_pointer + 8) as *const usize) };
-        let max_slots = header.size as usize;
-        let stack_map = &crate::get_runtime().get().memory.stack_map;
-        let details = stack_map.find_stack_data(return_addr);
-        let live_slots = details
-            .map(|details| (details.number_of_locals + details.current_stack_size).min(max_slots))
-            .unwrap_or(max_slots);
-
-        if std::env::var("BEAGLE_DEBUG_DETACHED_GC").is_ok() {
-            let fn_name = crate::get_runtime()
-                .get()
-                .get_function_containing_pointer(return_addr as *const u8)
-                .map(|(function, offset)| format!("{}+{:#x}", function.name, offset))
-                .unwrap_or_else(|| "unknown".to_string());
-            eprintln!(
-                "[detached-gc-frame] header={:#x} fp={:#x} ret={:#x} fn={} max_slots={} live_slots={} traced_slots={} stack_map={}",
-                header_addr,
-                frame_pointer,
-                return_addr,
-                fn_name,
-                max_slots,
-                live_slots,
-                (header.type_data >> 16) as usize,
-                details
-                    .map(|details| format!(
-                        "locals={} current_stack={} max_stack={} callee_saved={}",
-                        details.number_of_locals,
-                        details.current_stack_size,
-                        details.max_stack_size,
-                        details.num_callee_saved
-                    ))
-                    .unwrap_or_else(|| "none".to_string())
-            );
-        }
-
-        live_slots
+    fn detached_frame_live_slots(_header_addr: usize, header: Header) -> usize {
+        header.size as usize
     }
 
     /// Collect all heap pointers from the GC frame chain for a single thread.

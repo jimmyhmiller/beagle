@@ -613,6 +613,13 @@ impl PrettyPrint for Instruction {
                 )
             }
             Instruction::RecordGcSafepoint => "record_gc_safepoint".to_string(),
+            Instruction::ReloadRootSlots(saves) => {
+                let slots: Vec<String> = saves
+                    .iter()
+                    .map(|s| format!("{} <- local[{}]", s.source.pretty_print(), s.local))
+                    .collect();
+                format!("reload_root_slots [{}]", slots.join(", "))
+            }
         }
     }
 }

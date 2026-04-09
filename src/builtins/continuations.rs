@@ -2,19 +2,6 @@ use super::*;
 use crate::save_gc_context;
 use crate::trace;
 
-#[inline(always)]
-pub fn capture_current_callee_saved_regs() -> [usize; 10] {
-    let mut saved_regs = [0usize; 10];
-    let runtime = get_runtime().get();
-    let save_fn = runtime
-        .get_function_by_name("beagle.builtin/save-callee-regs")
-        .expect("save-callee-regs function not found");
-    let save_callee_regs: extern "C" fn(*mut usize) =
-        unsafe { std::mem::transmute::<_, _>(save_fn.pointer) };
-    save_callee_regs(saved_regs.as_mut_ptr());
-    saved_regs
-}
-
 pub fn current_saved_continuation_ptr(fallback: usize) -> usize {
     crate::runtime::per_thread_data()
         .saved_continuation_ptrs
@@ -353,16 +340,12 @@ pub unsafe extern "C" fn capture_continuation_runtime(
     resume_address: usize,
     result_local_offset: isize,
 ) -> usize {
-    let captured_callee_saved_regs = capture_current_callee_saved_regs();
     unsafe {
         capture_continuation_runtime_inner(
             stack_pointer,
             frame_pointer,
             resume_address,
             result_local_offset,
-            captured_callee_saved_regs,
-            [usize::MAX; 10],
-            None,
         )
     }
 }
@@ -372,48 +355,19 @@ pub unsafe extern "C" fn capture_continuation_runtime_with_saved_regs(
     frame_pointer: usize,
     resume_address: usize,
     result_local_offset: isize,
-    saved_regs_ptr: *const usize,
+    _saved_regs_ptr: *const usize,
 ) -> usize {
-    let mut captured_callee_saved_regs = [0usize; 10];
-    let mut captured_callee_saved_root_ids = [usize::MAX; 10];
-    let mut saved_regs_stack_offset = None;
-    if !saved_regs_ptr.is_null() {
-        for (i, reg) in captured_callee_saved_regs.iter_mut().enumerate() {
-            *reg = unsafe { *saved_regs_ptr.add(i) };
-        }
-        let ptr = saved_regs_ptr as usize;
-        if ptr >= stack_pointer {
-            saved_regs_stack_offset = Some(ptr - stack_pointer);
-        }
-    }
-    {
-        let runtime = get_runtime().get_mut();
-        for (i, reg) in captured_callee_saved_regs.iter().copied().enumerate() {
-            if BuiltInTypes::is_heap_pointer(reg) {
-                captured_callee_saved_root_ids[i] = runtime.register_temporary_root(reg);
-            }
-        }
-    }
-    let result = unsafe {
+    // saved_regs_ptr is no longer used — callee-saved register values are
+    // stored in root slots by the codegen save loop and restored at the
+    // resume point via ReloadRootSlots.
+    unsafe {
         capture_continuation_runtime_inner(
             stack_pointer,
             frame_pointer,
             resume_address,
             result_local_offset,
-            captured_callee_saved_regs,
-            captured_callee_saved_root_ids,
-            saved_regs_stack_offset,
         )
-    };
-    {
-        let runtime = get_runtime().get_mut();
-        for root_id in captured_callee_saved_root_ids {
-            if root_id != usize::MAX {
-                runtime.unregister_temporary_root(root_id);
-            }
-        }
     }
-    result
 }
 
 pub unsafe fn capture_continuation_runtime_inner(
@@ -421,9 +375,6 @@ pub unsafe fn capture_continuation_runtime_inner(
     frame_pointer: usize,
     resume_address: usize,
     result_local_offset: isize,
-    mut captured_callee_saved_regs: [usize; 10],
-    captured_callee_saved_root_ids: [usize; 10],
-    saved_regs_stack_offset: Option<usize>,
 ) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "capture_continuation");
@@ -597,12 +548,6 @@ pub unsafe fn capture_continuation_runtime_inner(
         },
     };
 
-    for (i, root_id) in captured_callee_saved_root_ids.iter().copied().enumerate() {
-        if root_id != usize::MAX {
-            captured_callee_saved_regs[i] = runtime.peek_temporary_root(root_id);
-        }
-    }
-
     let mut cont_obj = HeapObject::from_tagged(cont_ptr);
     ContinuationObject::initialize(
         &mut cont_obj,
@@ -615,7 +560,6 @@ pub unsafe fn capture_continuation_runtime_inner(
         0,
         0,
         0,
-        &captured_callee_saved_regs,
     );
 
     // Root the continuation object across segment allocation. If GC runs while
@@ -654,17 +598,6 @@ pub unsafe fn capture_continuation_runtime_inner(
 
                 // The explicit saved-register marshalling buffer is only live
                 // for the builtin call itself. It must not become part of the
-                // captured continuation state, so scrub it from the copied
-                // segment after extracting the register values.
-                if let Some(offset) = saved_regs_stack_offset {
-                    if offset < stack_size {
-                        let scrub_len = std::mem::size_of::<[usize; 10]>().min(stack_size - offset);
-                        unsafe {
-                            std::ptr::write_bytes((data_ptr + offset) as *mut u8, 0, scrub_len);
-                        }
-                    }
-                }
-
                 let fp_offset = captured_frame_pointer - stack_pointer;
                 crate::runtime::relocate_segment_caller_fp_links(
                     data_ptr,
@@ -847,7 +780,6 @@ pub unsafe extern "C" fn continue_return_from_shift_on_safe_stack() -> ! {
     let new_sp = return_point.stack_pointer;
     let new_fp = return_point.frame_pointer;
     let return_address = return_point.return_address;
-    let callee_saved = return_point.callee_saved_regs;
 
     let suspended_frame = {
         let ptd = crate::runtime::per_thread_data();
@@ -883,7 +815,7 @@ pub unsafe extern "C" fn continue_return_from_shift_on_safe_stack() -> ! {
                 unsafe { std::mem::transmute(ptr) };
             crate::runtime::per_thread_data().safe_return_context = None;
             // Pass null for frame_src since we restored the suspended caller frame directly.
-            return_jump_ptr(new_sp, new_fp, value, return_address, callee_saved.as_ptr(), std::ptr::null(), 0);
+            return_jump_ptr(new_sp, new_fp, value, return_address, std::ptr::null(), std::ptr::null(), 0);
         } else {
                 let caller_frame_is_live = !restored_frame && frame_pointer_in_active_segment(new_fp);
                 if let Some(suspended_frame) = suspended_frame.as_ref() {
@@ -910,7 +842,7 @@ pub unsafe extern "C" fn continue_return_from_shift_on_safe_stack() -> ! {
             let ptr: *const u8 = return_jump_fn.pointer.into();
             let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
                 unsafe { std::mem::transmute(ptr) };
-            return_jump(new_sp, new_fp, 0, return_address, callee_saved.as_ptr(), value);
+            return_jump(new_sp, new_fp, 0, return_address, std::ptr::null(), value);
         }
     }
 }
@@ -1107,8 +1039,6 @@ pub unsafe fn return_from_shift_runtime_inner(
             cont_ptr
         );
     };
-    let captured_callee_saved_regs = ContinuationObject::from_tagged(cont_ptr)
-        .map(|continuation| continuation.captured_callee_saved_regs());
     if debug_prompts {
         eprintln!(
             "[return_from_shift] via_prompt from_pop_prompt={} prompt_sp={:#x} prompt_fp={:#x} handler={:#x} prompt_id={}",
@@ -1164,11 +1094,7 @@ pub unsafe fn return_from_shift_runtime_inner(
             let ptr: *const u8 = return_jump_fn.pointer.into();
             let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
                 unsafe { std::mem::transmute(ptr) };
-            if let Some(callee_saved_regs) = captured_callee_saved_regs.as_ref() {
-                return_jump(new_sp, new_fp, new_lr, handler_address, callee_saved_regs.as_ptr(), 0);
-            } else {
-                return_jump(new_sp, new_fp, new_lr, handler_address, std::ptr::null(), 0);
-            }
+            return_jump(new_sp, new_fp, new_lr, handler_address, std::ptr::null(), 0);
         }
     }
 }
@@ -1685,8 +1611,6 @@ pub fn invoke_segmented_continuation(
         );
     }
 
-    let captured_callee_saved_regs = continuation.captured_callee_saved_regs();
-
     cfg_if::cfg_if! {
         if #[cfg(target_arch = "x86_64")] {
             let runtime = get_runtime().get();
@@ -1697,7 +1621,7 @@ pub fn invoke_segmented_continuation(
             let jump_ptr: extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> ! =
                 unsafe { std::mem::transmute(ptr) };
             jump_ptr(
-                captured_callee_saved_regs.as_ptr() as usize,
+                0, // null callee_saved_regs — registers reloaded from root slots at resume point
                 continuation.resume_address(),
                 0,
                 new_sp,
@@ -1713,7 +1637,7 @@ pub fn invoke_segmented_continuation(
             let ptr: *const u8 = return_jump_fn.pointer.into();
             let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
                 unsafe { std::mem::transmute(ptr) };
-            return_jump(new_sp, new_fp, continuation_return_address, resume_address, captured_callee_saved_regs.as_ptr(), value);
+            return_jump(new_sp, new_fp, continuation_return_address, resume_address, std::ptr::null(), value);
         }
     }
 }
@@ -1839,7 +1763,7 @@ pub unsafe extern "C" fn segmented_continuation_return(value: usize) -> ! {
                     return_point.frame_pointer,
                     value,
                     return_point.return_address,
-                    return_point.callee_saved_regs.as_ptr(),
+                    std::ptr::null::<usize>(),
                     std::ptr::null(),
                     0,
                 );
@@ -1851,7 +1775,7 @@ pub unsafe extern "C" fn segmented_continuation_return(value: usize) -> ! {
                 let ptr: *const u8 = return_jump_fn.pointer.into();
                 let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
                     unsafe { std::mem::transmute(ptr) };
-                return_jump(return_point.stack_pointer, return_point.frame_pointer, 0, return_point.return_address, return_point.callee_saved_regs.as_ptr(), value);
+                return_jump(return_point.stack_pointer, return_point.frame_pointer, 0, return_point.return_address, std::ptr::null(), value);
             }
         }
     }
@@ -1904,7 +1828,6 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
     frame_pointer: usize,
     cont_ptr: usize,
     value: usize,
-    callee_saved_regs: [usize; 10],
 ) -> ! {
     save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "invoke_continuation");
@@ -1957,7 +1880,6 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
         invoke_continuation_runtime_with_caller_context(
             cont_ptr,
             value,
-            callee_saved_regs,
             debug_prompts,
             beagle_sp,
             beagle_fp,
@@ -1970,7 +1892,6 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
 pub unsafe fn invoke_continuation_runtime_with_caller_context(
     cont_ptr: usize,
     value: usize,
-    callee_saved_regs: [usize; 10],
     debug_prompts: bool,
     beagle_sp: usize,
     beagle_fp: usize,
@@ -2027,7 +1948,6 @@ pub unsafe fn invoke_continuation_runtime_with_caller_context(
                 stack_pointer: beagle_sp,
                 frame_pointer: beagle_fp,
                 return_address: beagle_return_address,
-                callee_saved_regs,
                 suspended_frame_id,
                 prompt_id,
                 saved_gc_prev,
@@ -2067,19 +1987,6 @@ pub unsafe fn invoke_continuation_runtime_with_caller_context(
 /// and need to get SP/FP ourselves.
 #[allow(unused_variables)]
 pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usize) -> ! {
-    // Save callee-saved registers IMMEDIATELY before any Rust code runs
-    // These are the registers Beagle was using when it called k()
-    let mut saved_regs = [0usize; 10];
-    {
-        let runtime = get_runtime().get();
-        let save_fn = runtime
-            .get_function_by_name("beagle.builtin/save-callee-regs")
-            .expect("save-callee-regs function not found");
-        let save_callee_regs: extern "C" fn(*mut usize) =
-            unsafe { std::mem::transmute::<_, _>(save_fn.pointer) };
-        save_callee_regs(saved_regs.as_mut_ptr());
-    }
-
     // Get current stack pointer and frame pointer via JIT trampolines
     #[cfg(target_arch = "x86_64")]
     let stack_pointer: usize;
@@ -2144,7 +2051,6 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
         invoke_continuation_runtime_with_caller_context(
             cont_ptr,
             value,
-            saved_regs,
             get_runtime().get().get_command_line_args().debug,
             beagle_sp,
             beagle_fp,
@@ -2154,7 +2060,7 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
     }
     #[cfg(not(target_arch = "aarch64"))]
     unsafe {
-        invoke_continuation_runtime(stack_pointer, frame_pointer, cont_ptr, value, saved_regs)
+        invoke_continuation_runtime(stack_pointer, frame_pointer, cont_ptr, value)
     }
 }
 
@@ -2162,16 +2068,11 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
 pub unsafe extern "C" fn continuation_trampoline_with_saved_regs_and_context(
     closure_ptr: usize,
     value: usize,
-    saved_regs_ptr: *const usize,
+    _saved_regs_ptr: *const usize,
     beagle_sp: usize,
     beagle_fp: usize,
     beagle_return_address: usize,
 ) -> ! {
-    let mut saved_regs = [0usize; 10];
-    for (i, reg) in saved_regs.iter_mut().enumerate() {
-        *reg = unsafe { *saved_regs_ptr.add(i) };
-    }
-
     let untagged_closure = BuiltInTypes::untag(closure_ptr);
     let cont_ptr = unsafe { *((untagged_closure + 32) as *const usize) };
     let cont_ptr = cont_ptr;
@@ -2187,7 +2088,6 @@ pub unsafe extern "C" fn continuation_trampoline_with_saved_regs_and_context(
         invoke_continuation_runtime_with_caller_context(
             cont_ptr,
             value,
-            saved_regs,
             get_runtime().get().get_command_line_args().debug,
             beagle_sp,
             beagle_fp,
@@ -2203,17 +2103,6 @@ pub unsafe extern "C" fn resume_tail_runtime(
     resume_closure: usize,
     value: usize,
 ) -> ! {
-    let mut saved_regs = [0usize; 10];
-    {
-        let runtime = get_runtime().get();
-        let save_fn = runtime
-            .get_function_by_name("beagle.builtin/save-callee-regs")
-            .expect("save-callee-regs function not found");
-        let save_callee_regs: extern "C" fn(*mut usize) =
-            unsafe { std::mem::transmute::<_, _>(save_fn.pointer) };
-        save_callee_regs(saved_regs.as_mut_ptr());
-    }
-
     let untagged_closure = BuiltInTypes::untag(resume_closure);
     let cont_ptr = unsafe { *((untagged_closure + 32) as *const usize) };
 
@@ -2229,7 +2118,6 @@ pub unsafe extern "C" fn resume_tail_runtime(
         invoke_continuation_runtime_with_caller_context(
             cont_ptr,
             value,
-            saved_regs,
             get_runtime().get().get_command_line_args().debug,
             beagle_sp,
             beagle_fp,
