@@ -870,12 +870,9 @@ impl HeapObject {
             x if x == TYPE_ID_STRING || x == TYPE_ID_KEYWORD => 0,
             // Frame objects: num_slots encoded in upper 16 bits of type_data
             x if x == TYPE_ID_FRAME => (header.type_data >> 16) as usize,
-            // Continuations own the full resume snapshot, including the
-            // captured callee-saved value registers that will be restored on
-            // invocation. Those register slots contain tagged Beagle values
-            // (or null/integers) and must move with the rest of the
-            // continuation state under GC.
-            x if x == TYPE_ID_CONTINUATION => 33,
+            // Continuations: scan all fields. The callee-saved register
+            // slots were removed — register values are now in root slots.
+            x if x == TYPE_ID_CONTINUATION => size_words,
             // FunctionObject: field 0 is a tagged function pointer, not a heap object
             x if x == TYPE_ID_FUNCTION_OBJECT => 0,
             // Regex: opaque index, not a heap pointer

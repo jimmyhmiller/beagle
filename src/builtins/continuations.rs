@@ -537,7 +537,7 @@ pub unsafe fn capture_continuation_runtime_inner(
     // --- Allocate heap objects for the captured segment and continuation ---
 
     // Allocate the continuation object itself.
-    let cont_ptr = match runtime.allocate(33, prompt_sp, BuiltInTypes::HeapObject) {
+    let cont_ptr = match runtime.allocate(23, prompt_sp, BuiltInTypes::HeapObject) {
         Ok(ptr) => ptr,
         Err(_) => unsafe {
             throw_runtime_error(
