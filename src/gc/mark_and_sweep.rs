@@ -556,6 +556,24 @@ impl MarkAndSweep {
                 for saved_ptr in ptd.saved_continuation_ptrs.iter().copied() {
                     push_root(&mut to_mark, saved_ptr, 0, "saved-continuation");
                 }
+
+                // Pending perform state for Chez-style handle dispatch.
+                if ptd.pending_perform_op != 0 {
+                    push_root(
+                        &mut to_mark,
+                        ptd.pending_perform_op,
+                        0,
+                        "pending-perform-op",
+                    );
+                }
+                if ptd.pending_perform_cont != 0 {
+                    push_root(
+                        &mut to_mark,
+                        ptd.pending_perform_cont,
+                        0,
+                        "pending-perform-cont",
+                    );
+                }
             }
         }
 

@@ -4478,6 +4478,14 @@ pub struct PerThreadData {
     /// Suspended caller frames preserved across segmented invoke/return.
     pub suspended_frames: std::collections::HashMap<usize, SuspendedFrame>,
     pub suspended_frame_id_counter: usize,
+
+    /// Pending perform state for the Chez-style handle dispatch path.
+    /// Set by perform_effect_runtime_v2 before longjmping back to the handle
+    /// call site. Read and cleared by the handle wrapper after its body call
+    /// returns. When set, both fields are populated together; neither is valid
+    /// independently. Zero means "no pending perform".
+    pub pending_perform_op: usize,
+    pub pending_perform_cont: usize,
 }
 
 impl PerThreadData {
@@ -4505,7 +4513,31 @@ impl PerThreadData {
             pending_captured_segment_handles: Vec::new(),
             suspended_frames: std::collections::HashMap::new(),
             suspended_frame_id_counter: 1,
+
+            pending_perform_op: 0,
+            pending_perform_cont: 0,
         }
+    }
+
+    /// Set pending perform state. Called by perform_effect_runtime_v2 before
+    /// longjmping back to the handle call site.
+    pub fn set_pending_perform(&mut self, op: usize, cont: usize) {
+        self.pending_perform_op = op;
+        self.pending_perform_cont = cont;
+    }
+
+    /// Take pending perform state and clear it. Returns (op, cont) if set,
+    /// or None if there is no pending perform. Called by the handle wrapper
+    /// after its body call returns.
+    pub fn take_pending_perform(&mut self) -> Option<(usize, usize)> {
+        if self.pending_perform_op == 0 {
+            return None;
+        }
+        let op = self.pending_perform_op;
+        let cont = self.pending_perform_cont;
+        self.pending_perform_op = 0;
+        self.pending_perform_cont = 0;
+        Some((op, cont))
     }
 
     /// Allocate a segment from the pool, or create a new one.
