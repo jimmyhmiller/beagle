@@ -184,6 +184,53 @@ pub unsafe extern "C" fn push_prompt_runtime_v2(
     stack_pointer
 }
 
+/// The return context of a handle wrapper's frame, as seen by a perform
+/// operation that wants to simulate a normal return from the handle call.
+///
+/// This is read directly from the handle wrapper's stack frame — no fields
+/// need to be snapshotted in the PromptHandler itself.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub struct HandleReturnContext {
+    /// The caller's FP, to restore on return. Read from [handle_fp + 0].
+    pub saved_caller_fp: usize,
+    /// Where to jump to on return. Read from [handle_fp + 8].
+    pub return_address: usize,
+    /// The SP the handle's caller had before calling handle. Computed as
+    /// `handle_fp + 16` — this is the position immediately above the saved
+    /// FP+LR pair, which is where SP was when the handle call's prelude
+    /// executed `stp x29, x30, [sp, #-16]!`.
+    pub sp_after_return: usize,
+}
+
+/// Read the return context from a handle wrapper's stack frame.
+///
+/// Given the FP of a handle wrapper function (the function that called
+/// push_prompt), extract the SP/FP/return-address values needed to longjmp
+/// back to the handle's caller as if the handle function returned normally.
+///
+/// Frame layout (standard AArch64):
+///   [FP+8]  : saved return address
+///   [FP+0]  : saved caller FP
+///   [FP-8]  : frame header
+///   ...
+///
+/// # Safety
+/// `handle_fp` must point to a live stack frame that was set up by Beagle's
+/// function prelude. The caller is responsible for ensuring the frame has
+/// not been unwound or corrupted.
+#[allow(dead_code)]
+pub unsafe fn read_handle_return_context(handle_fp: usize) -> HandleReturnContext {
+    let saved_caller_fp = unsafe { *(handle_fp as *const usize) };
+    let return_address = unsafe { *((handle_fp + 8) as *const usize) };
+    let sp_after_return = handle_fp + 16;
+    HandleReturnContext {
+        saved_caller_fp,
+        return_address,
+        sp_after_return,
+    }
+}
+
 /// Pop the current prompt handler.
 /// If there's an invocation return point (continuation was invoked), returns via
 /// return_from_shift_runtime to enable multi-shot continuations.
