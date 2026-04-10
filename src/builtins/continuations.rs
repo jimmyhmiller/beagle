@@ -537,7 +537,7 @@ pub unsafe fn capture_continuation_runtime_inner(
     // --- Allocate heap objects for the captured segment and continuation ---
 
     // Allocate the continuation object itself.
-    let cont_ptr = match runtime.allocate(23, prompt_sp, BuiltInTypes::HeapObject) {
+    let cont_ptr = match runtime.allocate(21, prompt_sp, BuiltInTypes::HeapObject) {
         Ok(ptr) => ptr,
         Err(_) => unsafe {
             throw_runtime_error(
@@ -551,8 +551,6 @@ pub unsafe fn capture_continuation_runtime_inner(
     let mut cont_obj = HeapObject::from_tagged(cont_ptr);
     ContinuationObject::initialize(
         &mut cont_obj,
-        stack_pointer,
-        captured_frame_pointer,
         resume_address,
         result_local_offset,
         &prompt,
@@ -632,23 +630,12 @@ pub unsafe fn capture_continuation_runtime_inner(
 
     let mut cont = ContinuationObject::from_tagged(cont_ptr).unwrap();
     cont.set_segment_ptr_with_barrier(runtime, segment_heap_ptr);
-    let cont_obj = HeapObject::from_tagged(cont_ptr);
-    cont_obj.write_field(
-        16,
-        BuiltInTypes::Int.tag(segment_frame_pointer_offset as isize) as usize,
-    );
-    cont_obj.write_field(
-        17,
-        BuiltInTypes::Int.tag(segment_gc_frame_offset as isize) as usize,
-    );
-    cont_obj.write_field(18, BuiltInTypes::Int.tag(stack_size as isize) as usize);
+    cont.set_segment_frame_pointer_offset(segment_frame_pointer_offset);
+    cont.set_segment_gc_frame_offset(segment_gc_frame_offset);
+    cont.set_segment_size(stack_size);
 
     // Set the original data base so compacting GC can detect segment moves.
     if segment_heap_ptr != BuiltInTypes::null_value() as usize {
-        let mut cont = ContinuationObject::from_heap_object(HeapObject::from_untagged(
-            cont_obj.untagged() as *const u8,
-        ))
-        .unwrap();
         cont.set_segment_original_data_base(segment_data_base_at_capture);
     }
 
@@ -1179,13 +1166,11 @@ pub fn invoke_segmented_continuation(
 
     if debug_prompts || std::env::var("BEAGLE_DEBUG_INVOKE").is_ok() {
         eprintln!(
-            "[invoke_seg_cont] seg_tagged={:#x} seg_size={} gc_offset={} seg_data_base={:#x} original_sp={:#x} original_fp={:#x} resume={:#x} prompt_id={}",
+            "[invoke_seg_cont] seg_tagged={:#x} seg_size={} gc_offset={} seg_data_base={:#x} resume={:#x} prompt_id={}",
             seg_tagged,
             seg_size,
             continuation.segment_gc_frame_offset(),
             seg_data_base,
-            continuation.original_sp(),
-            continuation.original_fp(),
             continuation.resume_address(),
             prompt_id,
         );
@@ -1210,16 +1195,6 @@ pub fn invoke_segmented_continuation(
         std::ptr::copy_nonoverlapping(seg_data_base as *const u8, exec_base as *mut u8, seg_size);
     }
 
-    // The original SP/FP are absolute addresses from the original mmap segment.
-    // During capture, we stored the original values but the heap copy has pointers
-    // relative to seg_data_base. We need to compute offsets.
-    let original_sp = continuation.original_sp();
-    let original_fp = continuation.original_fp();
-
-    // The capture copied bytes from [original_sp..segment_used_top] into the heap
-    // object starting at seg_data_base. So:
-    //   offset_in_heap = addr - original_sp
-    //   addr_in_exec = exec_base + offset_in_heap
     let sp_offset = 0; // SP was at the start of captured data
     let fp_offset = if seg_innermost_fp >= seg_data_base
         && seg_innermost_fp < seg_data_base + seg_size
@@ -1276,10 +1251,8 @@ pub fn invoke_segmented_continuation(
             );
         } else {
             eprintln!(
-                "[resume] unknown resume={:#x} original_sp={:#x} original_fp={:#x}",
+                "[resume] unknown resume={:#x}",
                 continuation.resume_address(),
-                original_sp,
-                original_fp
             );
         }
 
@@ -1847,10 +1820,9 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
 
     if debug_prompts {
         eprintln!(
-            "[invoke_cont] cont_ptr={:#x} cont_prompt_fp={:#x} cont_original_sp={:#x}",
+            "[invoke_cont] cont_ptr={:#x} cont_prompt_fp={:#x}",
             cont_ptr,
-            continuation.prompt_frame_pointer(),
-            continuation.original_sp()
+            continuation.prompt_frame_pointer()
         );
     }
 
@@ -1859,11 +1831,9 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
         let thread_id = std::thread::current().id();
         let ptd = crate::runtime::per_thread_data();
         eprintln!(
-            "[invoke_cont][{:?}] prompt_id={} original_sp={:#x} original_fp={:#x} rps={}",
+            "[invoke_cont][{:?}] prompt_id={} rps={}",
             thread_id,
             prompt_id,
-            continuation.original_sp(),
-            continuation.original_fp(),
             ptd.invocation_return_points.len()
         );
     }

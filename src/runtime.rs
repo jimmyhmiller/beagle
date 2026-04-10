@@ -4076,31 +4076,29 @@ pub fn patch_segment_gc_prev_outer_anchor(
 }
 
 impl ContinuationObject {
-    const FIELD_ORIGINAL_SP: usize = 0;
-    const FIELD_ORIGINAL_FP: usize = 1;
-    const FIELD_RESUME_ADDRESS: usize = 2;
-    const FIELD_RESULT_LOCAL: usize = 3;
-    const FIELD_HANDLER_ADDRESS: usize = 4;
-    const FIELD_PROMPT_SP: usize = 5;
-    const FIELD_PROMPT_FP: usize = 6;
-    const FIELD_PROMPT_LR: usize = 7;
-    const FIELD_PROMPT_RESULT_LOCAL: usize = 8;
-    const FIELD_PROMPT_ID: usize = 9;
-    const FIELD_EXC_HANDLER_ADDRESS: usize = 10;
-    const FIELD_EXC_RESULT_LOCAL: usize = 11;
-    const FIELD_EXC_RESUME_LOCAL: usize = 12;
-    const FIELD_EXC_HANDLER_ID: usize = 13;
-    const FIELD_EXC_HAS_HANDLER: usize = 14;
-    const FIELD_SEGMENT_PTR: usize = 15;
-    const FIELD_SEGMENT_FRAME_POINTER_OFFSET: usize = 16;
-    const FIELD_SEGMENT_GC_FRAME_OFFSET: usize = 17;
-    const FIELD_SEGMENT_SIZE: usize = 18;
+    const FIELD_RESUME_ADDRESS: usize = 0;
+    const FIELD_RESULT_LOCAL: usize = 1;
+    const FIELD_HANDLER_ADDRESS: usize = 2;
+    const FIELD_PROMPT_SP: usize = 3;
+    const FIELD_PROMPT_FP: usize = 4;
+    const FIELD_PROMPT_LR: usize = 5;
+    const FIELD_PROMPT_RESULT_LOCAL: usize = 6;
+    const FIELD_PROMPT_ID: usize = 7;
+    const FIELD_EXC_HANDLER_ADDRESS: usize = 8;
+    const FIELD_EXC_RESULT_LOCAL: usize = 9;
+    const FIELD_EXC_RESUME_LOCAL: usize = 10;
+    const FIELD_EXC_HANDLER_ID: usize = 11;
+    const FIELD_EXC_HAS_HANDLER: usize = 12;
+    const FIELD_SEGMENT_PTR: usize = 13;
+    const FIELD_SEGMENT_FRAME_POINTER_OFFSET: usize = 14;
+    const FIELD_SEGMENT_GC_FRAME_OFFSET: usize = 15;
+    const FIELD_SEGMENT_SIZE: usize = 16;
     /// The data base address at capture time. Used by compacting GC to compute
     /// the relocation delta when the segment object moves.
-    const FIELD_SEGMENT_ORIGINAL_DATA_BASE: usize = 19;
-    const FIELD_PROMPT_FRAME_LOCALS: usize = 20;
-    const FIELD_PROMPT_FRAME_TRAILING: usize = 21;
-    const FIELD_PROMPT_FRAME_SIZE: usize = 22;
+    const FIELD_SEGMENT_ORIGINAL_DATA_BASE: usize = 17;
+    const FIELD_PROMPT_FRAME_LOCALS: usize = 18;
+    const FIELD_PROMPT_FRAME_TRAILING: usize = 19;
+    const FIELD_PROMPT_FRAME_SIZE: usize = 20;
     pub fn from_tagged(tagged: usize) -> Option<Self> {
         let heap_obj = HeapObject::try_from_tagged(tagged)?;
         Self::from_heap_object(heap_obj)
@@ -4116,14 +4114,6 @@ impl ContinuationObject {
 
     pub fn tagged_ptr(&self) -> usize {
         self.heap_obj.tagged_pointer()
-    }
-
-    pub fn original_sp(&self) -> usize {
-        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_ORIGINAL_SP))
-    }
-
-    pub fn original_fp(&self) -> usize {
-        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_ORIGINAL_FP))
     }
 
     pub fn resume_address(&self) -> usize {
@@ -4209,6 +4199,27 @@ impl ContinuationObject {
     /// Returns the size of the captured segment data in bytes.
     pub fn segment_size(&self) -> usize {
         BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_SEGMENT_SIZE))
+    }
+
+    pub fn set_segment_frame_pointer_offset(&self, offset: usize) {
+        self.heap_obj.write_field(
+            Self::FIELD_SEGMENT_FRAME_POINTER_OFFSET as i32,
+            BuiltInTypes::Int.tag(offset as isize) as usize,
+        );
+    }
+
+    pub fn set_segment_gc_frame_offset(&self, offset: usize) {
+        self.heap_obj.write_field(
+            Self::FIELD_SEGMENT_GC_FRAME_OFFSET as i32,
+            BuiltInTypes::Int.tag(offset as isize) as usize,
+        );
+    }
+
+    pub fn set_segment_size(&self, size: usize) {
+        self.heap_obj.write_field(
+            Self::FIELD_SEGMENT_SIZE as i32,
+            BuiltInTypes::Int.tag(size as isize) as usize,
+        );
     }
 
     /// Returns the data base address at the time the segment was captured.
@@ -4415,8 +4426,6 @@ impl ContinuationObject {
 
     pub fn initialize(
         heap_obj: &mut HeapObject,
-        original_sp: usize,
-        original_fp: usize,
         resume_address: usize,
         result_local: isize,
         prompt: &PromptHandler,
@@ -4426,14 +4435,6 @@ impl ContinuationObject {
         segment_size: usize,
     ) {
         heap_obj.write_type_id(TYPE_ID_CONTINUATION as usize);
-        heap_obj.write_field(
-            Self::FIELD_ORIGINAL_SP as i32,
-            BuiltInTypes::Int.tag(original_sp as isize) as usize,
-        );
-        heap_obj.write_field(
-            Self::FIELD_ORIGINAL_FP as i32,
-            BuiltInTypes::Int.tag(original_fp as isize) as usize,
-        );
         heap_obj.write_field(
             Self::FIELD_RESUME_ADDRESS as i32,
             BuiltInTypes::Int.tag(resume_address as isize) as usize,
