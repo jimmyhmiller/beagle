@@ -4318,9 +4318,14 @@ impl AstCompiler<'_> {
                 let null_reg = self.ir.assign_new(Value::Null);
                 self.ir.store_local(cont_local, null_reg.into());
 
+                let perform_builtin_name = if std::env::var("BEAGLE_CHEZ_HANDLE").is_ok() {
+                    "beagle.builtin/perform-effect-v2"
+                } else {
+                    "beagle.builtin/perform-effect"
+                };
                 let perform_fn = self
                     .compiler
-                    .find_function("beagle.builtin/perform-effect")
+                    .find_function(perform_builtin_name)
                     .expect("perform-effect builtin not found");
                 let perform_fn_ptr = usize::from(perform_fn.pointer);
 
@@ -4398,6 +4403,8 @@ impl AstCompiler<'_> {
                     vec![key_reg.into(), handler_reg.into()],
                 );
 
+                let use_chez_handle = std::env::var("BEAGLE_CHEZ_HANDLE").is_ok();
+
                 // Compile body wrapped in reset for continuation capture
                 // This follows the same pattern as Ast::Reset
                 let after_handle = self.ir.label("after_handle");
@@ -4423,6 +4430,76 @@ impl AstCompiler<'_> {
                 };
                 self.not_tail_position();
                 let body_thunk = self.call_compile(&thunk_fn)?;
+
+                if use_chez_handle {
+                    // Chez-style handle: body runs on the normal stack.
+                    // On normal body return: store body_result, fall through
+                    // to the normal_completion label.
+                    // On perform: perform_effect_runtime_v2 longjmps to
+                    // handle_prompt_handler with pending_perform state set.
+                    //   - We null-out captured_local and fall through.
+                    // Both paths converge at normal_completion, which calls
+                    // handle-completed to check pending state and dispatch.
+                    let push_prompt_v2_fn = self
+                        .compiler
+                        .find_function("beagle.builtin/push-prompt-v2")
+                        .expect("push-prompt-v2 builtin not found");
+                    let push_prompt_v2_ptr = usize::from(push_prompt_v2_fn.pointer);
+
+                    let pop_prompt_v2_fn = self
+                        .compiler
+                        .find_function("beagle.builtin/pop-prompt-v2")
+                        .expect("pop-prompt-v2 builtin not found");
+                    let pop_prompt_v2_ptr = usize::from(pop_prompt_v2_fn.pointer);
+
+                    let normal_completion = self.ir.label("handle_normal_completion");
+
+                    self.ir.push_prompt_handler(
+                        handle_prompt_handler,
+                        Value::Local(captured_local),
+                        push_prompt_v2_ptr,
+                    );
+
+                    // Normal body execution.
+                    self.not_tail_position();
+                    let body_result =
+                        self.compile_closure_call_from_value(body_thunk, vec![]);
+                    self.ir.store_local(captured_local, body_result);
+                    self.ir.jump(normal_completion);
+
+                    // Longjmp target from perform. We don't have a body
+                    // result here; handle-completed will overwrite with the
+                    // handler's result based on pending_perform state.
+                    self.ir.write_label(handle_prompt_handler);
+                    let null_body_result = self.ir.assign_new(Value::Null);
+                    self.ir.store_local(captured_local, null_body_result.into());
+
+                    self.ir.write_label(normal_completion);
+
+                    // Dispatch any pending perform through handle-completed.
+                    let body_result_loaded = self.ir.load_local(captured_local);
+                    let final_result = self.call_builtin(
+                        "beagle.builtin/handle-completed",
+                        vec![body_result_loaded],
+                    )?;
+                    self.ir.store_local(captured_local, final_result);
+                    self.ir.assign(result_reg, final_result);
+
+                    // Pop the prompt marker (no segment bookkeeping in v2).
+                    self.ir
+                        .pop_prompt_handler(result_reg.into(), pop_prompt_v2_ptr);
+
+                    // Pop the effect handler
+                    let key_str2 = self.string_constant(protocol_key.clone());
+                    let key_reg2 = self.ir.assign_new(key_str2);
+                    let _ =
+                        self.call_builtin("beagle.builtin/pop-handler", vec![key_reg2.into()]);
+                    let final_value = self.ir.load_local(captured_local);
+                    self.ir.assign(result_reg, final_value);
+
+                    self.ir.write_label(after_handle);
+                    return Ok(result_reg.into());
+                }
 
                 // Get prompt builtins
                 let push_prompt_fn = self

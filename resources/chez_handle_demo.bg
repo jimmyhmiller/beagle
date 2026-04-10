@@ -1,0 +1,50 @@
+namespace chez_handle_demo
+
+use beagle.effect as effect
+
+// Demo for the Chez-style handle dispatch path. Run with BEAGLE_CHEZ_HANDLE=1.
+// This test does NOT use resume — the handler ignores its resume parameter
+// and returns a value directly. Multi-shot resume is not yet implemented on
+// the v2 path.
+
+enum MyEffect {
+    GetValue,
+    Double { input }
+}
+
+struct Handler {}
+
+extend Handler with effect/Handler(MyEffect) {
+    fn handle(self, op, resume) {
+        match op {
+            MyEffect.GetValue => 42,
+            MyEffect.Double { input } => input * 2,
+            _ => 0
+        }
+    }
+}
+
+fn main() {
+    // Case 1: body completes normally without performing.
+    let no_perform = handle effect/Handler(MyEffect) with Handler {} {
+        println("body (no perform) running")
+        100
+    }
+    println("no perform result:", no_perform)
+
+    // Case 2: body performs, handler returns a value without calling resume.
+    let with_perform = handle effect/Handler(MyEffect) with Handler {} {
+        println("body (with perform) about to perform")
+        perform MyEffect.GetValue
+    }
+    println("with perform result:", with_perform)
+
+    println("done")
+}
+
+// @beagle.core.snapshot
+// body (no perform) running
+// no perform result: 100
+// body (with perform) about to perform
+// with perform result: 42
+// done

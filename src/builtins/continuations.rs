@@ -139,20 +139,16 @@ pub unsafe extern "C" fn push_prompt_runtime(
 }
 
 /// Chez-style prompt push: records the prompt marker without allocating a
-/// separate execution segment. The body runs on the caller's stack. The
-/// frame_pointer argument is the FP of the handle wrapper function — it
-/// identifies where to "return" when a perform happens.
+/// separate execution segment. The body runs on the caller's stack.
 ///
-/// The PromptHandler fields that describe a longjmp target (handler_address,
-/// stack_pointer, link_register, result_local) are recorded as zero on this
-/// path — the v2 perform runtime walks the handle frame to find the real
-/// return-from-handle SP/FP/LR instead of using these fields.
-///
-/// Not wired up yet; left for the handle compilation to switch over to once
-/// the v2 perform and handler dispatch machinery is in place.
+/// Stores handler_address (the post-body code label inside the enclosing
+/// function), stack_pointer, and frame_pointer — these are the values to
+/// restore when perform longjmps back to the post-body code path. Body
+/// runs on the normal stack, so SP/FP at the post-body point equal the
+/// values recorded here at push time.
 #[allow(dead_code)]
 pub unsafe extern "C" fn push_prompt_runtime_v2(
-    _handler_address: usize,
+    handler_address: usize,
     _result_local: isize,
     _link_register: usize,
     stack_pointer: usize,
@@ -166,14 +162,14 @@ pub unsafe extern "C" fn push_prompt_runtime_v2(
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
     let handler = crate::runtime::PromptHandler {
-        // The longjmp-target fields are unused on the v2 path.
-        handler_address: 0,
-        stack_pointer: 0,
+        handler_address,
+        stack_pointer,
+        frame_pointer,
+        // Not used on the v2 path; the post-body code path is reached by
+        // direct jump and the handler result flows through pending_perform
+        // state rather than a dedicated result local.
         link_register: 0,
         result_local: 0,
-        // frame_pointer IS used: it's the FP of the handle wrapper, used by
-        // perform to locate the handle frame and read its return context.
-        frame_pointer,
         prompt_id,
     };
 
@@ -214,9 +210,6 @@ pub unsafe extern "C" fn perform_effect_runtime_v2(
             panic!("perform_effect_runtime_v2 called without an enclosing handle block")
         })
     };
-    let handle_fp = prompt.frame_pointer;
-    let ctx = unsafe { read_handle_return_context(handle_fp) };
-
     // Record pending perform state. The cont is null for now (multi-shot
     // resume not implemented yet on v2). The handle wrapper will pass the
     // op and the (null) cont to the handler method.
@@ -225,10 +218,12 @@ pub unsafe extern "C" fn perform_effect_runtime_v2(
         ptd.set_pending_perform(op_value, BuiltInTypes::null_value() as usize, enum_type_ptr);
     }
 
-    // Longjmp back to the handle's caller via the return-jump trampoline.
-    // From the caller's perspective, the handle function returns normally
-    // (with whatever value happens to be in the return register — the handle
-    // wrapper will overwrite it via handle_completed_runtime).
+    // Longjmp back to the post-body code path in the enclosing function.
+    // prompt.stack_pointer/frame_pointer are the values SP/FP had when
+    // push_prompt was called — since body runs on the normal stack as a
+    // regular function call, these are also the correct values for the
+    // post-body code path (SP/FP are preserved across function call and
+    // return). prompt.handler_address is the post-body code label.
     let runtime = get_runtime().get();
     let return_jump_fn = runtime
         .get_function_by_name("beagle.builtin/return-jump")
@@ -243,10 +238,10 @@ pub unsafe extern "C" fn perform_effect_runtime_v2(
                 usize, usize, usize, usize, *const usize, *const u8, usize,
             ) -> ! = unsafe { std::mem::transmute(ptr) };
             return_jump(
-                ctx.sp_after_return,
-                ctx.saved_caller_fp,
+                prompt.stack_pointer,
+                prompt.frame_pointer,
                 0,
-                ctx.return_address,
+                prompt.handler_address,
                 std::ptr::null(),
                 std::ptr::null(),
                 0,
@@ -258,10 +253,10 @@ pub unsafe extern "C" fn perform_effect_runtime_v2(
                 usize, usize, usize, usize, *const usize, usize,
             ) -> ! = unsafe { std::mem::transmute(ptr) };
             return_jump(
-                ctx.sp_after_return,
-                ctx.saved_caller_fp,
+                prompt.stack_pointer,
+                prompt.frame_pointer,
                 0,
-                ctx.return_address,
+                prompt.handler_address,
                 std::ptr::null(),
                 0,
             );
